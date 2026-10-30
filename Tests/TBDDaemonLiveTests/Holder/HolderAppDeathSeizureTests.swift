@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The **uncooperative** half of the handback: an app that died still holding
 /// a session's pty.
@@ -15,9 +16,12 @@ import Testing
 /// injection able to reach it, and every re-open refused.
 ///
 /// **Only a confirmed death licenses this.** The verdict itself is arbitrated
-/// in `HolderAppLivenessTests` (tier 1, scripted process table); everything
+/// in `HolderAppLivenessTests` (tier 1, scripted process table), and which
+/// app's claims a death selects is `HolderClaimOwnershipTests`'; everything
 /// here starts *after* that verdict and asks what the registry then does with
-/// a real pty, a real job, and a claim nobody is coming back for.
+/// a real pty, a real job, and a claim nobody is coming back for. Every viewer
+/// here is vended to `HandbackFixture.viewerApp`, and that is the app whose
+/// death each test reports.
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real job.
 @Suite(.serialized)
@@ -54,7 +58,7 @@ struct HolderAppDeathSeizureTests {
         // close with the process, and no detach follows.
         viewer.close()
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID])
 
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
@@ -93,13 +97,15 @@ struct HolderAppDeathSeizureTests {
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        await fixture.registry.recordAttachRecipient(
+            HandbackFixture.viewerApp, terminalID: fixture.terminalID, generation: vend.generation)
         let held = try #require(await fixture.registry.reader(for: fixture.terminalID))
         await fixture.registry.cancelPendingAttach(
             terminalID: fixture.terminalID, generation: vend.generation, reason: .unacknowledged)
         #expect(await held.isDraining == false, "an unacknowledged attach leaves its reader suspended")
         Darwin.close(vend.ptyFD)
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID])
 
         let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
@@ -113,6 +119,46 @@ struct HolderAppDeathSeizureTests {
         try await resumed.write(Data("RESUMED-AFTER-DEATH\n".utf8))
         #expect(await pollUntil("the job's answer after the suspended reader resumed") {
             await resumed.renderScreen().contains("GOT:RESUMED-AFTER-DEATH")
+        })
+    }
+
+    /// An attach vended to an app that died before it could acknowledge — the
+    /// case an app killed straight after re-attaching its visible tab leaves.
+    /// The ack will never come now, so the death settles the attach as the
+    /// ready-timeout would and takes it back in the same pass. Left to the
+    /// timeout, it would become a claim after the take-back had finished
+    /// looking, and nothing would be left to clear it.
+    @Test func aDeadAppsUnacknowledgedAttachIsTakenBackWithoutWaitingForItsTimeout() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        await fixture.registry.recordAttachRecipient(
+            HandbackFixture.viewerApp, terminalID: fixture.terminalID, generation: vend.generation)
+        let held = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        // The app dies holding the descriptor, and no ack follows.
+        Darwin.close(vend.ptyFD)
+
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
+        #expect(reclaimed == [fixture.terminalID], """
+            an attach vended to an app confirmed gone was left pending, so its ready-timeout turns \
+            it into a claim nothing will ever clear
+            """)
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(resumed === held, "the take-back opened a second hand-over")
+        #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil)
+
+        // The ready-timeout still fires, late, and finds nothing left to settle.
+        await fixture.registry.cancelPendingAttach(
+            terminalID: fixture.terminalID, generation: vend.generation, reason: .unacknowledged)
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
+            a late ready-timeout claimed a session the dead app's take-back had already returned
+            """)
+
+        try await resumed.write(Data("TAKEN-BACK-UNACKED\n".utf8))
+        #expect(await pollUntil("the job's answer after the unacknowledged attach was taken back") {
+            await resumed.renderScreen().contains("GOT:TAKEN-BACK-UNACKED")
         })
     }
 
@@ -182,7 +228,7 @@ struct HolderAppDeathSeizureTests {
                 sessionID: fixture.terminalID,
                 environment: HolderProcessFixture.environment(home: fixture.process.home)))
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID], """
             the seizure could not take the session back with the rendezvous socket gone, so it \
             still depends on a hand-over from the holder
@@ -194,5 +240,106 @@ struct HolderAppDeathSeizureTests {
         let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
         #expect(resumed === suspended, "the seizure opened a second hand-over")
         #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")
+    }
+
+    // MARK: - One take-back at a time
+
+    /// An app closes a tab and quits straight after: its handback is still
+    /// inside its take-back when the app's death is confirmed, and a seizure
+    /// of the same attach arrives while the claim still stands. The claim is
+    /// held across the resume by design, so the generation check alone would
+    /// let the seizure resume the same reader a second time — the census would
+    /// count the daemon starting to read a pty it already reads, and the job
+    /// would be jiggled twice. The seizure leaves the outcome to the handback.
+    ///
+    /// Parked through the take-back barrier rather than raced: the real window
+    /// is a single `await` on the reader's actor.
+    @Test func aSeizureDuringTheHandbacksTakeBackRunsNoSecondTakeBack() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+        // Only Sendable values cross into the task below.
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+        let row = fixture.terminalRow
+
+        let viewer = try await fixture.attachAViewer()
+        let suspended = try #require(await registry.reader(for: terminalID))
+        let generation = viewer.generation
+        let preamble = viewer.terminal.snapshot()
+        // The tab closes: the app leaves the pty, then says so.
+        viewer.close()
+
+        let barrier = ReentryBarrier()
+        await registry.setTakeBackBarrier(barrier.hook())
+        let handback = Task {
+            try await registry.acceptHandback(
+                terminal: row, generation: generation, preamble: preamble)
+        }
+        #expect(await pollUntil("the handback to reach the take-back barrier") {
+            await barrier.hasParked
+        })
+
+        // The app has quit, and its death is confirmed while the handback is
+        // still putting the reader back.
+        try await registry.seizeFromDeadApp(terminalID: terminalID, generation: generation)
+
+        #expect(await !suspended.isDraining, """
+            the seizure resumed the reader while the app's own handback was still taking the \
+            session back
+            """)
+        #expect(await registry.viewerAttachment(for: terminalID) == generation, """
+            the seizure cleared a claim the handback is holding across its resume
+            """)
+        #expect(await registry.takeBacksCompleted == 0)
+
+        await barrier.release()
+        try await handback.value
+
+        #expect(await registry.takeBacksCompleted == 1, "one attach was taken back twice")
+        #expect(await registry.readerCensusViolations == 0, """
+            a second take-back recorded the daemon as starting to read a pty it was already reading
+            """)
+        #expect(await registry.lastReaderCensusViolation == nil)
+        #expect(await registry.viewerAttachment(for: terminalID) == nil)
+        let resumed = try #require(await registry.reader(for: terminalID))
+        #expect(resumed === suspended, "the take-back opened a second hand-over")
+        #expect(await resumed.isDraining, "the handback did not put the reader back on the pty")
+    }
+}
+
+// MARK: - Forcing an interleave
+
+/// Holds the **first** caller that reaches the seam it is installed on, and
+/// waves through every one after it — the shape `HolderAdoptionTests` and
+/// `HolderAttachHandoffTests` use for their interleavings, for the same reason:
+/// each race is a continuation-ordering accident inside an actor, so
+/// reproducing it by timing would pass by luck. The polling is only how each
+/// side observes a state the other has definitely reached, and it is bounded
+/// through `pollUntil`, so a barrier nobody releases fails its test with a
+/// named diagnostic instead of hanging the suite.
+private actor ReentryBarrier {
+    private var parked = false
+    private var released = false
+
+    /// Whether a caller is being held.
+    var hasParked: Bool { parked }
+
+    /// Lets the parked caller finish.
+    func release() { released = true }
+
+    private var isReleased: Bool { released }
+
+    /// True for the first caller only; every later one is waved through.
+    private func claimPark() -> Bool {
+        guard !parked else { return false }
+        parked = true
+        return true
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in
+            guard await claimPark() else { return }
+            await pollUntil("the test to release the parked take-back") { await self.isReleased }
+        }
     }
 }

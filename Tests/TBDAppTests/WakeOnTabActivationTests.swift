@@ -200,11 +200,9 @@ struct WakeOnTabActivationTests {
 @MainActor
 @Suite("Wake-on-focus decision (resumability filter)")
 struct WakeOnFocusResumabilityTests {
-    private func terminal(_ id: UUID, parked: Bool, claudeSessionID: String? = UUID().uuidString, kind: TerminalKind? = nil, reason: HibernateReason? = nil) -> Terminal {
-        var term = Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-                            claudeSessionID: claudeSessionID, kind: kind, hibernatedAt: parked ? Date() : nil)
-        term.hibernateReason = reason
-        return term
+    private func terminal(_ id: UUID, parked: Bool, claudeSessionID: String? = UUID().uuidString, kind: TerminalKind? = nil) -> Terminal {
+        Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                 claudeSessionID: claudeSessionID, kind: kind, hibernatedAt: parked ? Date() : nil)
     }
 
     /// Branch 1 (existing): the focused terminal is itself parked AND resumable
@@ -269,47 +267,6 @@ struct WakeOnFocusResumabilityTests {
         ]
 
         #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
-    }
-
-
-    /// Parked resumable terminal with hibernateReason == .manual
-    /// → NOT selected (manually-hibernated sessions don't auto-wake on focus).
-    @Test func skipsManuallyParkedOnFocus() {
-        let state = AppState()
-        let wt = UUID()
-        let manual = UUID()
-        let tabID = UUID()
-        state.terminals[wt] = [terminal(manual, parked: true, reason: .manual)]
-        state.tabs[wt] = [Tab(id: tabID, content: .terminal(terminalID: manual), label: nil)]
-        state.activeTabIndices[wt] = 0
-
-        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
-    }
-
-    /// Parked resumable with .auto reason → selected (auto parks auto-wake).
-    @Test func wakesAutoParkedOnFocus() {
-        let state = AppState()
-        let wt = UUID()
-        let auto = UUID()
-        let tabID = UUID()
-        state.terminals[wt] = [terminal(auto, parked: true, reason: .auto)]
-        state.tabs[wt] = [Tab(id: tabID, content: .terminal(terminalID: auto), label: nil)]
-        state.activeTabIndices[wt] = 0
-
-        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == auto)
-    }
-
-    /// Parked resumable with .recovery reason → selected (recovery parks auto-wake).
-    @Test func wakesRecoveryParkedOnFocus() {
-        let state = AppState()
-        let wt = UUID()
-        let recovery = UUID()
-        let tabID = UUID()
-        state.terminals[wt] = [terminal(recovery, parked: true, reason: .recovery)]
-        state.tabs[wt] = [Tab(id: tabID, content: .terminal(terminalID: recovery), label: nil)]
-        state.activeTabIndices[wt] = 0
-
-        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == recovery)
     }
 }
 

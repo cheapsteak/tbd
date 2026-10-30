@@ -4,11 +4,9 @@ import TBDShared
 /// Which transport one spawn is born onto.
 ///
 /// Decided once, from the flag and the registry, and then **carried** through
-/// the routing decision, the spawn and the row rather than re-derived at any of
-/// them: the model proxy asks "is this a holder spawn?" before the command is
-/// composed, and the spawn itself answers it after, so two readings of the flag
-/// could disagree between the two and leave a session on a route its row does
-/// not record.
+/// the spawn and the row rather than re-derived at either: two readings of the
+/// flag could disagree between the two and leave a session on a transport its
+/// row does not record.
 ///
 /// The `.holder` case carries the registry that will run the spawn, so a caller
 /// holding `.holder` provably holds something that can spawn — there is no
@@ -46,7 +44,7 @@ enum TerminalSpawnTransport: Sendable {
         return .holder(registry)
     }
 
-    /// The `isHolderSpawn` the model proxy's routing decision takes.
+    /// Whether this spawn goes onto the pty-holder transport.
     var isHolder: Bool {
         if case .holder = self { return true }
         return false
@@ -66,9 +64,8 @@ extension WorktreeLifecycle {
     /// diverges by transport is the same at all of them and subtle enough that
     /// a second copy is a second thing to get wrong: the holder launch
     /// composition, the row that records the transport and the pids, the stamp
-    /// `ProcessIdentityCheck` later compares, the stream path that has to land
-    /// in the same insert, and the two undo paths for a route nothing will
-    /// ever be started against.
+    /// `ProcessIdentityCheck` later compares, and the cleanup for a spawn
+    /// whose row could not be written.
     ///
     /// The tmux server is the caller's to ensure, and only on the tmux
     /// transport: a holder-backed session needs no server at all, and ensuring
@@ -82,20 +79,23 @@ extension WorktreeLifecycle {
     ///     transports, so it lands after every startup file has run — where
     ///     code reading `TBD_TERMINAL_ID` from a session expects it.
     ///   - sensitiveEnv: the spawned *process* environment — tmux's `-e`, or
-    ///     the holder job's environment directly. The route's base URL rides
-    ///     here and never in `env`.
-    ///   - attachment: what the model proxy did with this spawn, or nil for a
-    ///     spawn that never asked it — a shell or a Codex terminal. There is
-    ///     deliberately no empty `Outcome` to pass instead; see
-    ///     `ModelProxyRouteAttachment.Outcome`.
-    ///   - modelProxySupervisor: the caller's own supervisor, passed rather than
-    ///     read from `self` because the router and the lifecycle are wired
-    ///     independently — `WorktreeLifecycle` is a value type, and a test
-    ///     fixture sets the router's supervisor and registry alone — so the
-    ///     caller's is the authoritative one. The registry travels inside
-    ///     `transport` for the same reason.
+    ///     the holder job's environment directly.
+    ///   - transport: the transport this spawn runs on. The holder registry
+    ///     travels inside it rather than being read from `self`, because the
+    ///     router and the lifecycle are wired independently —
+    ///     `WorktreeLifecycle` is a value type, and a test fixture sets the
+    ///     router's registry alone — so the caller's is the authoritative one.
     ///   - serverName: the declared dev server this tab runs (`server.start`),
     ///     nil for every other spawn.
+    ///   - sessionIncarnationID: the incarnation a Claude spawn made with a
+    ///     session-mod feature on exports (`SessionModSpawnContext`), written
+    ///     into the row so its process's hooks match it. Nil for every other
+    ///     spawn — shells, Codex, dev servers, forks, and Claude with every
+    ///     feature off.
+    ///   - claudeSpawnExtras: a Claude terminal's own plugin folders and
+    ///     settings overlay, written onto the new row so later starts of its
+    ///     session can reapply them. Already applied to `command` by the
+    ///     caller; nil stores nothing.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -110,11 +110,10 @@ extension WorktreeLifecycle {
         claudeSessionID: String?,
         profileID: UUID?,
         kind: TerminalKind?,
-        watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalSpawnTransport,
-        attachment: ModelProxyRouteAttachment.Outcome?,
-        modelProxySupervisor: (any ModelProxyRouting)?,
-        serverName: String? = nil
+        serverName: String? = nil,
+        sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -122,43 +121,16 @@ extension WorktreeLifecycle {
         let holderHandle: HolderHandle?
         switch transport {
         case .holder(let registry):
-            // The route, if there is one, was minted by the caller — before the
-            // command was composed, because the command re-exports the
-            // profile's own routing keys and would otherwise run over it. What
-            // is left here is the spawn itself, and the two undo paths for a
-            // route nothing will ever be started against.
-            do {
-                holderHandle = try await registry.spawn(
-                    terminalID: id,
-                    launch: Self.holderLaunch(
-                        shellCommand: command,
-                        env: env,
-                        // The route's base URL rides `sensitiveEnv` — the job's
-                        // process environment — and never `env`, which
-                        // `holderLaunch` inlines as `export K='v';` in front of
-                        // the command. The token IS in this job's argv all the
-                        // same, because `command` carries an inline
-                        // `export ANTHROPIC_BASE_URL=…` of its own, from
-                        // `Outcome.builderBaseURL` — the export has to run after
-                        // the shell's rc files or a `.zshrc` takes the session
-                        // off its route. See that method for why `ps`
-                        // visibility is not a widening of the trust boundary.
-                        sensitiveEnv: sensitiveEnv,
-                        workingDirectory: workingDirectory,
-                        cols: cols,
-                        rows: rows,
-                        environment: registry.environment))
-            } catch {
-                // Nothing was spawned against this route and nothing ever will
-                // be, so retire it from the failing call itself rather than
-                // leaving a file for the sweep. By the token this attachment
-                // minted, never by terminal id: this row has no other route
-                // today, and a lookup would still be the wrong instruction to
-                // leave behind.
-                await ModelProxyRouteAttachment.retire(
-                    attachment, terminalID: id, supervisor: modelProxySupervisor)
-                throw error
-            }
+            holderHandle = try await registry.spawn(
+                terminalID: id,
+                launch: Self.holderLaunch(
+                    shellCommand: command,
+                    env: env,
+                    sensitiveEnv: sensitiveEnv,
+                    workingDirectory: workingDirectory,
+                    cols: cols,
+                    rows: rows,
+                    environment: registry.environment))
             // A holder session has no tmux coordinate. The columns are NOT NULL
             // from the v1 schema, so they take the empty string — and nothing
             // may read them back: a holder row is discriminated by `transport`
@@ -189,7 +161,6 @@ extension WorktreeLifecycle {
                 claudeSessionID: claudeSessionID,
                 profileID: profileID,
                 kind: kind,
-                watchDeskRole: watchDeskRole,
                 transport: holderHandle == nil ? .tmux : .holder,
                 holderPID: holderHandle?.holderPID,
                 childPID: holderHandle?.childPID,
@@ -202,13 +173,9 @@ extension WorktreeLifecycle {
                 // `ProcessIdentityCheck`, which is exactly the kind of fact a
                 // test has to be able to pin end to end.
                 holderChildStartedAt: holderHandle == nil ? nil : now(),
-                // Stamped IN the insert, not by a follow-up `UPDATE`:
-                // `TerminalReplacementSnapshot` compares this column, so a row
-                // that exists without it for even one suspension can be
-                // snapshotted by a concurrent caller, and a late stamp would
-                // make every replacement that snapshot authorized reject.
-                transcriptStreamPath: attachment?.streamPath,
-                serverName: serverName
+                serverName: serverName,
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource
@@ -218,8 +185,6 @@ extension WorktreeLifecycle {
             // because holder death is deliberately not child death.
             if case .holder(let registry) = transport, let holderHandle {
                 await registry.abandon(terminalID: id, handle: holderHandle)
-                await ModelProxyRouteAttachment.retire(
-                    attachment, terminalID: id, supervisor: modelProxySupervisor)
             } else {
                 try? await tmux.killWindow(server: tmuxServer, windowID: coordinate.windowID)
             }

@@ -1,12 +1,25 @@
 import Foundation
+import GRDB
 import Testing
 import TBDShared
+import TestSupport
 @testable import TBDDaemonLib
 
 @Suite struct CodexHookOverlayTests {
 
     private func invokedIdleActivity(_ invocations: [String]) -> Bool {
         invocations.contains { $0.hasPrefix("terminal-activity idle") }
+    }
+
+    /// Writes Codex's goals database in process, rather than through a
+    /// spawned `sqlite3`. The hook reads it with `sqlite3 -readonly`, so it has
+    /// to be an ordinary rollback-journal file by the time this returns: a
+    /// `DatabaseQueue` (a pool would switch it to WAL), whose connection is
+    /// closed before the hook starts.
+    private func writeGoalsDatabase(at path: String, sql: String) throws {
+        let queue = try DatabaseQueue(path: path)
+        try queue.write { db in try db.execute(sql: sql) }
+        try queue.close()
     }
 
     private func runStopHook(
@@ -16,7 +29,7 @@ import TBDShared
         assistantMessage: String = "done",
         goalTimestampsTie: Bool = false,
         createdAtBreaksUpdateTie: Bool = false
-    ) throws -> [String] {
+    ) async throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -40,8 +53,6 @@ import TBDShared
             ofItemAtPath: tbdPath.path
         )
 
-        let databaseProcess = Process()
-        databaseProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         // Codex 0.147 keys this table by thread_id. Only the history test
         // relaxes that constraint to exercise a possible future schema shape.
         let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
@@ -70,9 +81,9 @@ import TBDShared
         let goalInserts = createdAtBreaksUpdateTie
             ? "\(currentGoalInsert)\n\(priorGoalInsert)"
             : "\(priorGoalInsert)\n\(currentGoalInsert)"
-        databaseProcess.arguments = [
-            directory.appendingPathComponent("goals_1.sqlite").path,
-            """
+        try writeGoalsDatabase(
+            at: directory.appendingPathComponent("goals_1.sqlite").path,
+            sql: """
             CREATE TABLE thread_goals (
                 thread_id TEXT \(threadIDConstraint),
                 goal_id TEXT NOT NULL,
@@ -88,12 +99,7 @@ import TBDShared
             );
             \(goalInserts)
             """
-        ]
-        databaseProcess.standardOutput = Pipe()
-        databaseProcess.standardError = Pipe()
-        try databaseProcess.run()
-        databaseProcess.waitUntilExit()
-        #expect(databaseProcess.terminationStatus == 0)
+        )
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -111,18 +117,13 @@ import TBDShared
         environment["TBD_HOOK_TEST_LOG"] = logPath.path
         process.environment = environment
 
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try process.run()
         let payload = """
         {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"\(assistantMessage)"}
         """
-        input.fileHandleForWriting.write(Data(payload.utf8))
-        try input.fileHandleForWriting.close()
-        process.waitUntilExit()
-        #expect(process.terminationStatus == 0)
+        // Feeds the payload, closes the hook's stdin, and waits without
+        // parking a cooperative-pool thread.
+        let output = try await collectOutput(of: process, stdin: Data(payload.utf8))
+        #expect(output.status == 0)
 
         let log = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
         return log.split(separator: "\n").map(String.init)
@@ -172,7 +173,7 @@ import TBDShared
         #expect(permissionCommands.contains { $0.contains("--read-hook-payload") })
     }
 
-    @Test func sessionStartForwardsTheExactPayloadToBothBridges() throws {
+    @Test func sessionStartForwardsTheExactPayloadToBothBridges() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-session-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -211,16 +212,9 @@ import TBDShared
         environment["TBD_ACTIVITY_STDIN"] = activityInput.path
         environment["TBD_ACTIVITY_ARGS"] = activityArgs.path
         process.environment = environment
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try process.run()
-        input.fileHandleForWriting.write(Data(payload.utf8))
-        try input.fileHandleForWriting.close()
-        process.waitUntilExit()
+        let output = try await collectOutput(of: process, stdin: Data(payload.utf8))
 
-        #expect(process.terminationStatus == 0)
+        #expect(output.status == 0)
         #expect(try String(contentsOf: sessionInput, encoding: .utf8) == payload)
         #expect(try String(contentsOf: activityInput, encoding: .utf8) == payload)
         #expect(try String(contentsOf: activityArgs, encoding: .utf8)
@@ -229,7 +223,7 @@ import TBDShared
             atPath: directory.appendingPathComponent("should-not-run").path))
     }
 
-    @Test func sessionStartFallsBackToPathWhenMatchedCLIIsAbsent() throws {
+    @Test func sessionStartFallsBackToPathWhenMatchedCLIIsAbsent() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-session-hook-fallback-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -248,15 +242,10 @@ import TBDShared
         environment.removeValue(forKey: "TBD_CLI_PATH")
         environment["TBD_FALLBACK_MARKER"] = marker.path
         process.environment = environment
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try process.run()
-        try input.fileHandleForWriting.close()
-        process.waitUntilExit()
+        // An empty stdin: the hook reads end-of-file at once.
+        let output = try await collectOutput(of: process, stdin: Data())
 
-        #expect(process.terminationStatus == 0)
+        #expect(output.status == 0)
         #expect(try String(contentsOf: marker, encoding: .utf8) == "terminal-activity")
     }
 
@@ -277,15 +266,15 @@ import TBDShared
         #expect(stopCommand?.contains("tbd terminal-activity idle") == true)
     }
 
-    @Test func stopHookKeepsWorkingWhileCodexGoalIsActive() throws {
-        let invocations = try runStopHook(goalStatus: "active")
+    @Test func stopHookKeepsWorkingWhileCodexGoalIsActive() async throws {
+        let invocations = try await runStopHook(goalStatus: "active")
 
         #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
         #expect(!invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookReadsSessionIDFromPayloadJSON() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookReadsSessionIDFromPayloadJSON() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "active",
             sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
         )
@@ -293,9 +282,9 @@ import TBDShared
         #expect(!invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookForwardsPayloadToIdleActivityBridge() throws {
+    @Test func stopHookForwardsPayloadToIdleActivityBridge() async throws {
         let sessionID = "c3d4e5f6-0718-49ab-cdef-2345678901bc"
-        let invocations = try runStopHook(goalStatus: "complete", sessionID: sessionID)
+        let invocations = try await runStopHook(goalStatus: "complete", sessionID: sessionID)
 
         #expect(invocations.contains("terminal-activity idle --read-hook-payload"))
         #expect(invocations.contains { line in
@@ -303,8 +292,8 @@ import TBDShared
         })
     }
 
-    @Test func stopHookReadsAssistantMessageFromPayloadJSON() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookReadsAssistantMessageFromPayloadJSON() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "complete",
             assistantMessage: "goal work finished"
         )
@@ -312,8 +301,8 @@ import TBDShared
         #expect(invocations.contains("notify-message=goal work finished"))
     }
 
-    @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "active",
             priorGoalStatus: "complete"
         )
@@ -321,8 +310,8 @@ import TBDShared
         #expect(!invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "complete",
             priorGoalStatus: "active"
         )
@@ -330,8 +319,8 @@ import TBDShared
         #expect(invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "active",
             priorGoalStatus: "complete",
             goalTimestampsTie: true
@@ -340,8 +329,8 @@ import TBDShared
         #expect(!invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "complete",
             priorGoalStatus: "active",
             goalTimestampsTie: true
@@ -350,8 +339,8 @@ import TBDShared
         #expect(invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() throws {
-        let invocations = try runStopHook(
+    @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() async throws {
+        let invocations = try await runStopHook(
             goalStatus: "active",
             priorGoalStatus: "complete",
             createdAtBreaksUpdateTie: true
@@ -360,22 +349,22 @@ import TBDShared
         #expect(!invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() throws {
-        let invocations = try runStopHook(goalStatus: "complete")
+    @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() async throws {
+        let invocations = try await runStopHook(goalStatus: "complete")
 
         #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
         #expect(invokedIdleActivity(invocations))
     }
 
-    @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() throws {
-        let invocations = try runStopHook(goalStatus: "blocked")
+    @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() async throws {
+        let invocations = try await runStopHook(goalStatus: "blocked")
 
         #expect(invokedIdleActivity(invocations))
     }
 
     @Test(arguments: ["paused", "usage_limited", "budget_limited"])
-    func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) throws {
-        let invocations = try runStopHook(goalStatus: status)
+    func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) async throws {
+        let invocations = try await runStopHook(goalStatus: status)
 
         #expect(invokedIdleActivity(invocations))
     }

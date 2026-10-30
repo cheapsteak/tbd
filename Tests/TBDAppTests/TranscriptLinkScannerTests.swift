@@ -24,7 +24,7 @@ struct TranscriptLinkScannerTests {
     }
 
     @Test func relativePathWithSlash_isFound() {
-        #expect(tokens("see docs/nightwatch.md now") == ["docs/nightwatch.md"])
+        #expect(tokens("see docs/guide.md now") == ["docs/guide.md"])
     }
 
     @Test func bareFilenameWithExtension_isFound() {
@@ -36,7 +36,7 @@ struct TranscriptLinkScannerTests {
     }
 
     @Test func trailingSentencePeriod_isExcludedFromToken() {
-        #expect(tokens("the spec lives at docs/nightwatch.md.") == ["docs/nightwatch.md"])
+        #expect(tokens("the spec lives at docs/guide.md.") == ["docs/guide.md"])
     }
 
     // The slash-less version of the same sentence. The shape test runs on the

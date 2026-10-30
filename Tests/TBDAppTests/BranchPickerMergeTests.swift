@@ -33,7 +33,7 @@ struct BranchPickerMergeTests {
     @Test("fork PR appends a new row between local and remote branches")
     func forkPRAppendedBetween() {
         let branches = [local("main"), remote("dev")]
-        let prs = [pr(454, head: "show-weekly-reset", owner: "zionts", fork: true)]
+        let prs = [pr(454, head: "show-weekly-reset", owner: "octocat", fork: true)]
         let items = mergePickerItems(branches: branches, prs: prs)
         #expect(items.count == 3)
         // PR-carrying rows float to the top: fork row first, then plain branches
@@ -49,7 +49,7 @@ struct BranchPickerMergeTests {
         let branches = [local("a"), local("b"), remote("dev")]
         let prs = [
             pr(200, head: "b", title: "b decoration"),
-            pr(454, head: "fork-head", owner: "zionts", fork: true)
+            pr(454, head: "fork-head", owner: "octocat", fork: true)
         ]
         let items = mergePickerItems(branches: branches, prs: prs)
         #expect(items.count == 4)
@@ -125,7 +125,7 @@ struct BranchPickerMergeTests {
     @Test("filter matches branch name, PR number, title word, and owner login")
     func filterMatches() {
         let branches = [local("feature-x")]
-        let prs = [pr(454, head: "show-weekly-reset", owner: "zionts", fork: true,
+        let prs = [pr(454, head: "show-weekly-reset", owner: "octocat", fork: true,
                       title: "Show weekly reset")]
         let items = mergePickerItems(branches: branches, prs: prs)
         let forkRow = items.first { $0.pr?.number == 454 }!
@@ -133,7 +133,7 @@ struct BranchPickerMergeTests {
 
         #expect(matchesFilter(forkRow, query: "454"))
         #expect(matchesFilter(forkRow, query: "weekly"))
-        #expect(matchesFilter(forkRow, query: "zionts"))
+        #expect(matchesFilter(forkRow, query: "octocat"))
         #expect(matchesFilter(branchRow, query: "feature"))
         #expect(!matchesFilter(branchRow, query: "454"))
     }

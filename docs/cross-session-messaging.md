@@ -362,12 +362,12 @@ session — fresh create, resume, wake, or profile swap alike.
 Native peer messages travel session-to-session over Claude Code's own
 sockets and never transit TBD's daemon. They are therefore **outside
 TBD's actuation record, in both directions, by design**. The record
-attests everything sent through TBD's own transport (`tbd terminal send`
-and the supervision paths built on it) and nothing else.
+attests everything sent through TBD's own transport (`tbd terminal send`,
+and the daemon's own rails such as limit resume) and nothing else.
 
 The practical consequence: a peer message is evidenced only by the
 transcripts of the two sessions that exchanged it. If you need an act to
-be in the record — for supervision, audit, or after-the-fact
+be in the record — for oversight, audit, or after-the-fact
 reconstruction — send it through TBD's transport instead.
 
 ## The peer registry

@@ -34,8 +34,8 @@ private final class RecordingKeychain: ClaudeCredentialsKeychainDeleting, @unche
 }
 
 /// Tier 2: real filesystem plus an in-memory database, no `~/tbd` and no real
-/// keychain. The profiles base, the scratchpad base, the clock and the keychain
-/// are all injected; nothing here resolves a production path.
+/// keychain. The profiles base, every other base the sweep walks, the clock and
+/// the keychain are all injected; nothing here resolves a production path.
 @Suite("OrphanGC reclaims orphaned profile dirs")
 struct OrphanGCProfileDirTests: ~Copyable {
     let fm = FileManager.default
@@ -79,8 +79,18 @@ struct OrphanGCProfileDirTests: ~Copyable {
             now: { fixed },
             beforeInterruptedArchiveReap: nil,
             profileDirBase: profileBase,
+            hangStackBase: sandbox.appendingPathComponent("hang-stacks", isDirectory: true),
             credentialsKeychain: keychain,
-            beforeProfileDirReap: beforeProfileDirReap
+            beforeProfileDirReap: beforeProfileDirReap,
+            holdersBase: sandbox.appendingPathComponent("holders", isDirectory: true),
+            attachmentsBase: sandbox.appendingPathComponent("attachments", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": sandbox.path],
+            reposBase: sandbox.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: sandbox.appendingPathComponent("sessions", isDirectory: true),
+            devServersBase: sandbox.appendingPathComponent("dev-servers", isDirectory: true),
+            retainedTranscriptsBase: sandbox.appendingPathComponent("transcripts", isDirectory: true),
+            scratchSpacesBase: sandbox.appendingPathComponent("scratch", isDirectory: true),
+            worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true)
         )
     }
 

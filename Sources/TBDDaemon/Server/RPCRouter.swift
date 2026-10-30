@@ -35,7 +35,6 @@ public final class RPCRouter: Sendable {
     /// Injected for the rate-limit handler's profile suggestion; a seam like
     /// `limitResumeScheduler` so tests can install one after construction.
     public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
-    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
     /// auto-hibernate): it fires when every PR bound to a worktree has resolved.
@@ -43,32 +42,6 @@ public final class RPCRouter: Sendable {
     /// `nil` in mock mode / unit tests, where a poll simply refreshes statuses
     /// and judges nothing.
     public nonisolated(unsafe) var mergeTrigger: AllResolvedMergeTrigger?
-    /// Fleet supervision's single writer of `~/tbd/supervision/` — the
-    /// operator's file, the ledger beside it, and the coverage decisions that
-    /// connect them. Wired post-construction by `Daemon.swift` (mirrors
-    /// `orphanGC`); `nil` in mock mode / unit tests that don't need it, where
-    /// the `supervise.*` handlers refuse with a named condition rather than
-    /// crashing. Never defaulted to a store built on `TBDConstants`: that
-    /// default is the "helper ignores its caller's injected seam" shape, and
-    /// every router a test constructs would share the developer's real
-    /// `~/tbd/supervision`.
-    public nonisolated(unsafe) var supervision: SupervisionStore?
-    /// The out-of-band `status.json` heartbeat. The brake handler publishes an
-    /// edge through it and arms or disarms its timer to match, so the timer's
-    /// lifetime is tied to the brake rather than to daemon boot. Wired
-    /// post-construction by `Daemon.swift` like `supervision`; `nil` in mock
-    /// mode and in tests, where the brake still moves and simply publishes
-    /// nothing.
-    public nonisolated(unsafe) var supervisionHeartbeat: SupervisionHeartbeat?
-    /// The last leg of the brief pipe — the seam briefing delivery plugs into
-    /// in slice 5. Overridable post-construction like `supervision`, but not an
-    /// optional: the shipped deliverer resolves the project's supervisor, finds
-    /// none, and answers `no-live-supervisor`, which is the honest answer today
-    /// and safe in mock mode and in every test that never touches it. A test
-    /// injects its own to reach `transport-failed`, which nothing else can
-    /// produce.
-    public nonisolated(unsafe) var supervisionBriefingDeliverer:
-        any SupervisionBriefingDelivering = SupervisorBriefingDeliverer()
     /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
     /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
     /// The `gc.*` handlers return an error response rather than crashing when
@@ -109,11 +82,12 @@ public final class RPCRouter: Sendable {
     public nonisolated(unsafe) var updateChecker: UpdateChecker?
     /// Delivery acknowledgement (design §12). `terminal.send` hands a
     /// dispatched, verify-armed text send here and this is the only caller —
-    /// see `DeliveryVerificationArming`. `nil` everywhere until the verifier
-    /// lands; a nil verifier means the observation is simply never armed, and
-    /// the act renders `unconfirmed` by `DeliveryRecord.statuses`, which is the
-    /// honest answer rather than a claim. Set post-construction like
-    /// `claudeUsagePoller`.
+    /// see `DeliveryVerificationArming`. Wired by
+    /// `Daemon.wireDeliveryVerification` only when
+    /// `delivery_verification_enabled` is on at startup, and `nil` otherwise,
+    /// in mock mode and in tests that wire none. While it is nil a `--verify`
+    /// send is refused rather than dispatched unobserved. Set
+    /// post-construction like `claudeUsagePoller`.
     nonisolated(unsafe) var deliveryVerifier: (any DeliveryVerificationArming)?
     /// Owner of the prompt parked at worktree creation (design 2026-08-10).
     /// `worktree.setPendingPrompt` routes to it and `terminal.sessionEvent`
@@ -150,6 +124,14 @@ public final class RPCRouter: Sendable {
     /// keychain on profile delete. Injected so tests can record the requested
     /// service name instead of touching the real keychain.
     public let claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting
+    /// Where profile secrets (`<uuid>.token`) are stored and read back: every
+    /// model-profile handler and the profile resolver this router builds go
+    /// through it, never through `ModelProfileKeychain`'s statics. The default
+    /// resolves `TBD_HOME` from the process environment on every call, exactly
+    /// as the statics do; a test injects a store bound to a scratch environment
+    /// so seeding a secret and reading it back never depend on the
+    /// process-global variable holding still.
+    public let modelProfileKeychain: ModelProfileKeychain.Store
     /// Login-completion watching for profile login sessions. Injected so
     /// tests can shrink the watcher's poll timings.
     public let loginSessions: LoginSessionCoordinator
@@ -170,6 +152,15 @@ public final class RPCRouter: Sendable {
     /// How the attach path's "ended" answer reads a recorded child pid's
     /// identity. Tests replace it with a scripted process table.
     nonisolated(unsafe) var holderChildSignaller: any ProcessSignaller = ProductionProcessSignaller()
+    /// Resolves the pid a `holder.reconcileClaims` names to the identity a
+    /// claim's owner is compared with: the read the fd sidecar makes of its
+    /// peer, so the same app reads back the same identity. Nil sweeps nothing.
+    /// It spawns `ps` twice and blocks, so the handler asks it only while
+    /// `holder_claim_reconcile_enabled` is on, and only once the registry
+    /// says there is something to take back. Tests replace it.
+    nonisolated(unsafe) var appIdentityResolver: @Sendable (Int32) -> ProcessIdentity? = { pid in
+        ProcessIdentity.of(pid: pid, signaller: ProductionProcessSignaller())
+    }
     nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
     nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
         CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
@@ -192,14 +183,6 @@ public final class RPCRouter: Sendable {
             title: title)
     }
 
-    /// Runaway-detection counters (design §13): turns appended per session and
-    /// hook events received per session, over one observation window. The
-    /// hook-driven handlers increment it; `session.states` samples it. An actor
-    /// reference held here so the whole daemon keeps one set of books.
-    ///
-    /// It reports numbers and nothing acts on them — see the actor's doc
-    /// comment for why no threshold lives in compiled TBD.
-    let sessionCounters = SessionCountersTracker()
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()
@@ -328,15 +311,23 @@ public final class RPCRouter: Sendable {
     /// requests for one server never both act.
     let devServerClaims = DevServerActionClaims()
 
-    /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
-    /// from the same value the lifecycle and the hibernation coordinator hold.
-    /// Two things read it: `daemon.capabilities`, which reports whether this
-    /// daemon can route at all, and the terminal teardown path, which retires
-    /// the route of a row it is about to delete. `nil` in mock mode and in tests
-    /// that never exercise the proxy — capabilities then answer "unsupported,
-    /// no port, no version", which is the honest reading of a daemon that
-    /// cannot route.
-    nonisolated(unsafe) var modelProxySupervisor: (any ModelProxySupervising)?
+    /// Rewrites the TBD Claude plugin for the session-mod features the fresh
+    /// config turns on, called after a session-mod feature flag changes.
+    /// Wired by `Daemon.swift` before the socket serves; `nil` in tests that
+    /// do not exercise it, where a flag change writes only its column.
+    /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
+    nonisolated(unsafe) var sessionModPluginSync: (@Sendable ([SessionModFeature]) -> Void)?
+
+    /// Answers "may this agent start now?" for the start-admission gate
+    /// (`start_admission_enabled`). Production runs the user's command; tests
+    /// assign a stub verdict. Design:
+    /// docs/specs/2026-10-21-agent-start-admission-design.md.
+    nonisolated(unsafe) var startAdmission: any StartAdmissionEvaluating = StartAdmissionGate()
+
+    /// Holds agent process trees at background priority for a lease
+    /// (`agents.background`). Assigned by the daemon at startup; nil in a router
+    /// built without one, where the method answers that it is unavailable.
+    nonisolated(unsafe) var agentBackground: AgentBackgroundController?
 
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
@@ -430,8 +421,9 @@ public final class RPCRouter: Sendable {
 
     /// How the daemon asks whether Claude owns a pane's foreground process
     /// group. The same seam the limit-resume actuator uses, held here so the
-    /// send path can refuse a pane whose agent has left without any test
-    /// needing a real `ps`. A process-table fact, never screen text.
+    /// send path can refuse a pane whose agent has left, and the tmux in-place
+    /// swap can find the Claude process it signals, without any test needing
+    /// a real `ps`. A process-table fact, never screen text.
     let paneProcessInspector: any PaneProcessInspecting
 
     /// The identity the FD-vending sidecar recorded for its current client.
@@ -449,17 +441,26 @@ public final class RPCRouter: Sendable {
     let recordedAppIdentity: @Sendable () async -> ProcessIdentity?
     /// The one process-fact reader, injected for the same reason `AgentReaper`
     /// and `AppLivenessArbiter` take one: the re-verification must be statable
-    /// in a test without a process to inspect.
+    /// in a test without a process to inspect. Also how the tmux in-place
+    /// swap sends SIGTERM to the session it ends, so a test can see the pid
+    /// it signalled.
     let processSignaller: any ProcessSignaller
 
     /// Behavior seam for send-path settling after an image paste and the
-    /// graceful interrupt before an in-place profile replacement. A
+    /// signal ending's poll before an in-place profile replacement. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
     /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
     /// for the reason every other subsystem here holds one that way — a generic
     /// parameter would infect the `Sendable` conformances the router already
     /// carries.
     let clock: any Clock<Duration>
+
+    /// Root of the per-session directories the session mod and the daemon
+    /// share (`<sessionsDir>/<claudeSessionID>/`). Defaults to
+    /// `TBDConstants.sessionsDir()`, which follows `TBD_HOME`; tests inject a
+    /// scratch directory. Handed to the hibernation coordinator so a wake and
+    /// a swap write under the same root.
+    let sessionsDir: URL
 
     public init(
         db: TBDDatabase,
@@ -491,10 +492,14 @@ public final class RPCRouter: Sendable {
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         actuationLog: ActuationLog,
         remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        modelProfileKeychain: ModelProfileKeychain.Store = ModelProfileKeychain.Store(),
         clock: any Clock<Duration> = ContinuousClock()
     ) {
+        self.sessionsDir = sessionsDir
+        self.modelProfileKeychain = modelProfileKeychain
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
         self.clock = clock
@@ -558,6 +563,7 @@ public final class RPCRouter: Sendable {
             profiles: db.modelProfiles,
             repos: db.repos,
             config: db.config,
+            keychain: { [modelProfileKeychain] id in try modelProfileKeychain.load(id: id) },
             candidateSource: resolvedCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
@@ -568,15 +574,14 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         // The daemon passes the store its holder readers feed and starts its
         // run loop, in mock mode too; a router built without one (tests) gets
-        // its own, gated by the shipped default until
-        // `config.setProgramStatusEnabled`.
+        // its own.
         let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
-            db: db, subscriptions: subscriptions,
-            enabled: Config.programStatusEnabledDefault, now: now)
+            db: db, subscriptions: subscriptions, now: now)
         self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
+            sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus
         )
@@ -868,6 +873,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePaneDetach(request.paramsData)
             case RPCMethod.paneResize:
                 return try await handlePaneResize(request.paramsData)
+            case RPCMethod.holderReconcileClaims:
+                return try await handleHolderReconcileClaims(request.paramsData)
             case RPCMethod.daemonCapabilities:
                 return try await handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
@@ -912,20 +919,9 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalProgramStatusReport(request.paramsData)
             case RPCMethod.terminalProgramStatusList:
                 return try await handleTerminalProgramStatusList()
-            case RPCMethod.promptNote:
-                return try await handlePromptNote(request.paramsData)
-            case RPCMethod.promptRegister:
-                return try await handlePromptRegister(request.paramsData)
             case RPCMethod.promptAnswer:
                 return try await handlePromptAnswer(
                     request.paramsData, actor: request.actor, connection: connection)
-            case RPCMethod.promptAck:
-                return try await handlePromptAck(request.paramsData)
-            case RPCMethod.promptAwait:
-                // A long-poll parks a waiter, and only the socket can see the
-                // connection close that releases it. `SocketServer` serves it
-                // around the limiter; every other caller (HTTP) is refused.
-                return RPCResponse(error: Self.promptAwaitSocketOnlyRefusal)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:
@@ -1029,20 +1025,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchRenamePrompt(request.paramsData)
             case RPCMethod.configSetScratchProfileOverride:
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
-            case RPCMethod.nightwatchSetMode:
-                return try await handleSetNightwatchMode(request.paramsData)
-            case RPCMethod.nightwatchLeaseStatus:
-                return try await handleNightwatchLeaseStatus(request.paramsData)
-            case RPCMethod.nightwatchLeaseAcquire:
-                return try await handleNightwatchLeaseAcquire(request.paramsData)
-            case RPCMethod.nightwatchLeaseValidate:
-                return try await handleNightwatchLeaseValidate(request.paramsData)
-            case RPCMethod.nightwatchLeaseRenew:
-                return try await handleNightwatchLeaseRenew(request.paramsData)
-            case RPCMethod.nightwatchLeaseTransfer:
-                return try await handleNightwatchLeaseTransfer(request.paramsData)
-            case RPCMethod.nightwatchLeaseRelease:
-                return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalWake:
@@ -1053,8 +1035,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoHibernate(request.paramsData)
             case RPCMethod.configSetControlMode:
                 return try await handleConfigSetControlMode(request.paramsData)
-            case RPCMethod.configSetHibernateInputVeto:
-                return try await handleConfigSetHibernateInputVeto(request.paramsData)
             case RPCMethod.configSetDeliveryVerification:
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
@@ -1087,16 +1067,24 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
-            case RPCMethod.configSetProgramStatusEnabled:
-                return try await handleConfigSetProgramStatusEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptPromptAnswerEnabled:
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
+            case RPCMethod.configSetComposerDraftEnabled:
+                return try await handleConfigSetComposerDraftEnabled(request.paramsData)
+            case RPCMethod.agentsBackground:
+                return try await handleAgentsBackground(request.paramsData)
+            case RPCMethod.configSetStartAdmissionEnabled:
+                return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
+            case RPCMethod.configSetHolderClaimReconcileEnabled:
+                return try await handleConfigSetHolderClaimReconcileEnabled(request.paramsData)
+            case RPCMethod.configSetAgentBackgroundEnabled:
+                return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
+            case RPCMethod.configSetSessionModUsageEnabled:
+                return try await handleConfigSetSessionModUsageEnabled(request.paramsData)
             case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
                 return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetCloneCheckoutEnabled:
                 return try await handleConfigSetCloneCheckoutEnabled(request.paramsData)
-            case RPCMethod.configSetSupervisionEnabled:
-                return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
                 return try await handleRemoteProviders()
             case RPCMethod.remoteSessions:
@@ -1150,8 +1138,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
-            case RPCMethod.configSetModelProxyEnabled:
-                return try await handleConfigSetModelProxyEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
                 return try await handleConfigSetTranscriptStreamingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
@@ -1162,30 +1148,6 @@ public final class RPCRouter: Sendable {
                 return try await handleGCRestore(request.paramsData)
             case RPCMethod.gcSweepNow:
                 return try await handleGCSweepNow(request.paramsData)
-            case RPCMethod.superviseStatus:
-                return try await handleSuperviseStatus()
-            case RPCMethod.superviseSetProjectMark:
-                return try await handleSuperviseSetProjectMark(request.paramsData)
-            case RPCMethod.superviseSetMode:
-                return try await handleSuperviseSetMode(request.paramsData)
-            case RPCMethod.superviseProjectList:
-                return try await handleSuperviseProjectList()
-            case RPCMethod.superviseProjectCreate:
-                return try await handleSuperviseProjectCreate(request.paramsData)
-            case RPCMethod.superviseProjectDelete:
-                return try await handleSuperviseProjectDelete(request.paramsData)
-            case RPCMethod.superviseProjectMove:
-                return try await handleSuperviseProjectMove(request.paramsData)
-            case RPCMethod.supervisePlaybook:
-                return try await handleSupervisePlaybook(request.paramsData)
-            case RPCMethod.supervisePlaybookCustomize:
-                return try await handleSupervisePlaybookCustomize(request.paramsData)
-            case RPCMethod.superviseReadout:
-                return try await handleSuperviseReadout(request.paramsData)
-            case RPCMethod.superviseLedger:
-                return try await handleSuperviseLedger(request.paramsData)
-            case RPCMethod.superviseBrief:
-                return try await handleSuperviseBrief(request.paramsData)
             case RPCMethod.panelGet:
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:
@@ -1224,7 +1186,6 @@ public final class RPCRouter: Sendable {
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
-            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
             deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,
@@ -1247,33 +1208,19 @@ public final class RPCRouter: Sendable {
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces
         // "unable to type-check this expression in reasonable time" — so the
-        // model-proxy fields are set after construction instead.
-        result.modelProxyEnabled = config.modelProxyEnabled
-        // The conjunction, not the raw column: a hand-edited row holding
-        // streaming on with the proxy off streams nothing, and the app should
-        // not have to re-derive that.
-        result.transcriptStreamingEnabled = config.transcriptStreamingEffective
-        // One actor hop for all three, so a port and a version cannot come
-        // from either side of a proxy replacement. With no supervisor wired
-        // they keep their initializer defaults — false, nil, nil — which is the
-        // honest answer for a daemon that cannot route a session, and what
-        // Settings greys the toggle out on.
-        let proxy = await modelProxySupervisor?.capabilitySnapshot()
-            ?? ModelProxyCapabilitySnapshot.none
-        result.modelProxySupported = proxy.supported
-        result.modelProxyPort = proxy.port
-        result.modelProxyVersion = proxy.version
-        // Assigned rather than passed, for the same budget reason. The
-        // watch-mode controls need all three holder terms to reach the verdict
-        // the daemon's own refusal will, and this is the one neither the flag
-        // nor `ptyHolderSupported` implies.
-        result.ptyHolderSessionsLive = try await db.terminals.hasLiveHolderSession()
-        // Assigned rather than passed, for the same budget reason as the
-        // model-proxy fields above: the load-balancing soak gate.
+        // newer fields are set after construction instead.
+        result.transcriptStreamingEnabled = config.transcriptStreamingEnabled
+        // Assigned rather than passed, for the same budget reason: the
+        // load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
-        result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
+        result.composerDraftEnabled = config.composerDraftEnabled
+        result.composerDraftRequiredByAutoPark = config.composerDraftRequiredByAutoPark
+        result.agentBackgroundEnabled = config.agentBackgroundEnabled
+        result.startAdmissionEnabled = config.startAdmissionEnabled
+        result.holderClaimReconcileEnabled = config.holderClaimReconcileEnabled
+        result.sessionModUsageEnabled = config.sessionModUsageEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled

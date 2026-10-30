@@ -2,7 +2,7 @@ import Foundation
 import TestSupport
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 /// The holder's own suite. It is here now to hold the target open for the
 /// holder itself; the one thing worth asserting about a placeholder binary is
@@ -49,8 +49,7 @@ struct HolderBinaryTests {
     /// calling thread until the child is done, and in a synchronous test body
     /// that thread belongs to the cooperative pool CI's runner has three of
     /// (`Tests/CLAUDE.md`, "Thread-blocking gates run off the cooperative
-    /// pool"). This target holds two such waits and `TBDModelProxyTests` a
-    /// third, which is as many as the pool is wide.
+    /// pool"). This target holds two such waits, against a pool three wide.
     @Test func aBadInvocationExitsTwoWithAUsageDiagnostic() async throws {
         let executable = try #require(Self.locateExecutable())
         let process = Process()

@@ -246,7 +246,6 @@ import TBDShared
             path: "/tmp/wt1-\(UUID())", tmuxServer: "srv1"
         )
 
-        // Archive them at different times
         try await db.worktrees.archive(id: wt1.id)
 
         // Create another active, then archive it
@@ -255,6 +254,11 @@ import TBDShared
             path: "/tmp/wt2-\(UUID())", tmuxServer: "srv2"
         )
         try await db.worktrees.archive(id: wt2.id)
+
+        // Two archives in a row can tie on the stored millisecond, so give
+        // them explicit, distinct stamps: wt2 archived later.
+        try await stampArchivedAt(db: db, id: wt1.id, seconds: 1)
+        try await stampArchivedAt(db: db, id: wt2.id, seconds: 2)
 
         // List archived should have wt2 first (archived most recently)
         let archived = try await db.worktrees.list(repoID: repo.id, status: .archived)
@@ -265,7 +269,9 @@ import TBDShared
         let db = try makeDB()
         let repo = try await createRepo(db: db)
 
-        // Create and archive 5 worktrees
+        // Create and archive 5 worktrees, each stamped a second after the
+        // last: consecutive archives can tie on the stored millisecond, which
+        // would make the page boundaries the clock's rather than the query's.
         var worktreeIDs: [UUID] = []
         for i in 1...5 {
             let wt = try await db.worktrees.create(
@@ -273,6 +279,7 @@ import TBDShared
                 path: "/tmp/wt\(i)-\(UUID())", tmuxServer: "srv\(i)"
             )
             try await db.worktrees.archive(id: wt.id)
+            try await stampArchivedAt(db: db, id: wt.id, seconds: i)
             worktreeIDs.append(wt.id)
         }
 

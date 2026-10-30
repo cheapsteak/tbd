@@ -258,10 +258,10 @@ jobs:
     outputs:
       # The packaged attempt's sums, which publish checks the artifact against.
       sums: ${{ steps.package.outputs.sums }}
-    # §9: builds (15 warm, 22 cold), the baseline (10), two 60-minute sessions,
+    # §9: two full builds (22 each), the baseline (10), two 60-minute sessions,
     # two verifier runs of 24 each, and 20 for checkouts, ending the
-    # session's processes, and the artifacts.  Worst case 235.
-    timeout-minutes: 240
+    # session's processes, and the artifacts.  Worst case 242.
+    timeout-minutes: 247
     # Serialized by the run's attempt lock (top of file), which also covers
     # this run's `publish`.
     # Read scopes only, and no id-token: the session's GITHUB_TOKEN cannot
@@ -386,6 +386,14 @@ jobs:
 
       # RESTORE-ONLY, as in the nightly: this job benefits from the cache and
       # never reshapes it.
+      #
+      # What it benefits from is the dependency checkouts. `test.yml` compiles
+      # its entries with less debug information than SwiftPM's default (that
+      # job's CI_SWIFTPM_FLAGS, which its key carries after the dependency hash,
+      # so the prefix below still matches). This tree builds with the default,
+      # because the session's own `scripts/test.sh` runs do, and every compile
+      # command names those flags, so the build below compiles the whole
+      # package however recent the restored entry is.
       - name: Restore SwiftPM build cache (read-only)
         if: steps.pick.outputs.attempted == 'true'
         uses: actions/cache/restore@v4
@@ -401,9 +409,11 @@ jobs:
         if: steps.pick.outputs.attempted == 'true'
         run: bash scripts/repair-spm-workspace.sh
 
-      - name: Build the session tree (warm)
+      # 22, the cold build's bound below: with the restored entry compiled
+      # under other flags (see the restore step), this is a full compile too.
+      - name: Build the session tree
         if: steps.pick.outputs.attempted == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 22
         run: scripts/swift-safe build --build-tests
 
       - name: Build the verification tree (cold)

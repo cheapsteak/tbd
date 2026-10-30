@@ -11,7 +11,7 @@ A macOS app that manages long-running terminal sessions needs to survive its own
 ## The technique
 
 Split into three processes:
-- **Daemon (`tbdd`):** Long-running headless process that owns all state (database, tmux servers, git operations, hooks). Communicates via Unix socket and HTTP.
+- **Daemon (`tbdd`):** Long-running headless process that owns all state (database, tmux servers, git operations, hooks). Communicates via a Unix socket.
 - **App (`TBD.app`):** SwiftUI client that subscribes to the daemon's state stream. Owns only window layout. Stateless — can be killed and restarted without data loss.
 - **CLI (`tbd`):** Stateless tool that sends a command to the daemon socket, prints the response, exits. Auto-resolves repo and worktree from `$PWD`.
 

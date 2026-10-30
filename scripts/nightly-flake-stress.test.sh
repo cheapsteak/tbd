@@ -26,13 +26,21 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/stress-test.XXXXXX"; }
 mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
 # A copy of the script with one guard deliberately weakened. Echoes its path.
+#
+# Only this shell may delete MUTANT_DIR. A child that bash forks for `sleep 30 &`
+# keeps a copy of this trap until it execs `sleep`, and bash runs the EXIT trap
+# when a signal kills it in that window. The kill-discipline cases below kill
+# their sleeps microseconds after spawning them. Without the check, the child
+# deleted the directory and every later `mutant_of` wrote into one that no longer
+# existed. `${BASHPID:-$$}` because bash 3.2 has no BASHPID; the comment above
+# test_only_the_harness_shell_deletes_the_mutant_dir says why that is safe.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
-trap 'rm -rf "$MUTANT_DIR"' EXIT
+MUTANT_DIR_OWNER="${BASHPID:-$$}"
+trap '[[ "${BASHPID:-$$}" == "$MUTANT_DIR_OWNER" ]] && rm -rf "$MUTANT_DIR"' EXIT
 mutant_of() {
   local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this in a command substitution.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   echo "$out"
 }
@@ -229,6 +237,67 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
   kill -9 "$stubborn" 2>/dev/null
   wait "$stubborn" 2>/dev/null
   SPINNER_PIDS=()
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. The two cases above kill their
+# sleeps microseconds after spawning them. A child that bash forks for
+# `sleep 30 &` keeps a copy of every trap until it execs `sleep`, so a SIGTERM in
+# that window ran this harness's EXIT trap in the CHILD. The child deleted
+# MUTANT_DIR, and the mutation cases that sort after these failed now and then
+# on CI with "mutant.1.sh: No such file or directory". No case can win that race
+# on demand, so this one runs the trap's own code in a subshell, which is a
+# forked child exactly as `sleep 30 &` is until its exec.
+#
+# The guard needs BASHPID, which bash 3.2 lacks. On bash 3.2 it always passes,
+# and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
+# in a child that had not exec'd yet. It dropped the signal instead.
+#
+# The script's own `trap cleanup EXIT INT TERM` gets no such guard, on purpose.
+# The flake bot runs it under bash 3.2, where the guard could not tell a child
+# from its parent and no pre-exec child runs a trap anyway. It signals its
+# spinners and deadline commands long after they exec. And the bash 3.2 lint
+# (scripts/flake-bash32.test.sh) forbids BASHPID in it. Here, a pre-exec child
+# that runs `cleanup` finds no spinners in its copy of SPINNER_PIDS and exits.
+
+dir_state() { if [[ -d "$1" ]]; then echo present; else echo gone; fi; }
+
+# Run trap command $1 in this shell with MUTANT_DIR aimed at directory $2, so no
+# case can delete the real one. Wrap the call in ( ) to run it the way a forked
+# child would.
+run_trap_aimed_at() {
+  local MUTANT_DIR="$2"
+  eval "$1"
+}
+
+test_only_the_harness_shell_deletes_the_mutant_dir() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap guard is not checked here"
+    return 0
+  fi
+  local spec body unguarded decoy
+  spec="$(trap -p EXIT)"
+  eval "set -- $spec"
+  body="${3:-}"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_contains "the EXIT trap removes the mutant dir" "$body" 'rm -rf "$MUTANT_DIR"'
+
+  # A guard that never deletes anything would pass the child check below, so
+  # first the owner has to get through.
+  decoy="$(mktmpd)"
+  run_trap_aimed_at "$body" "$decoy"
+  assert_eq "the harness shell itself deletes it" "gone" "$(dir_state "$decoy")"
+
+  decoy="$(mktmpd)"
+  ( run_trap_aimed_at "$body" "$decoy" )
+  assert_eq "a forked child running the trap leaves the directory alone" "present" "$(dir_state "$decoy")"
+
+  # MUTATION: the trap as it was before the guard, run by the same child.
+  unguarded="${body#*&& }"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_eq "the mutant really is the bare rm" 'rm -rf "$MUTANT_DIR"' "$unguarded"
+  ( run_trap_aimed_at "$unguarded" "$decoy" )
+  assert_eq "mutation: without the guard, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
+  rm -rf "$decoy"
 }
 
 test_run_with_deadline_kills_an_overrunning_command() {
@@ -594,7 +663,7 @@ test_pass_of_maps_each_target_to_its_ci_pass() {
     'TBDDaemonTests.ArchiveTests/x()|Pass-fast-pass-daemon-a|1200'
     'TBDDaemonTests.OrphanGCTests/a()|Pass-fast-pass-daemon-a|1200'
     'TBDDaemonTests.PRStatusTests/x()|Pass-fast-pass-daemon-b|1500'
-    'TBDDaemonTests.SupervisionBrakeRPCTests/a()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonTests.SessionStatesRPCTests/a()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/a()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonTests/nilPreferredKeepsOrder()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonLiveTests.GitManagerTimeoutTests/a()|Pass-quiet-pass|35'
@@ -641,12 +710,12 @@ test_pass_of_ranges_are_code_point_ranges() {
 }
 
 test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
-  # MUTATION: widen 1a to every letter. SupervisionBrakeRPCTests is then run by
+  # MUTATION: widen 1a to every letter. SessionStatesRPCTests is then run by
   # 1a AND 1b, and the harness must refuse rather than pick one.
   local mutant out rc=0
   mutant="$(mutant_of 's/^(  "fast-pass-daemon-a.*)\[A-O\]/\1[A-Z]/')"
   assert_contains "the mutant really widened 1a" "$(grep fast-pass-daemon-a "$mutant" | head -1)" "[A-Z]"
-  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SupervisionBrakeRPCTests/a()'" 2>&1)" || rc=$?
+  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SessionStatesRPCTests/a()'" 2>&1)" || rc=$?
   assert_eq "mutation: a 1a widened to [A-Z] no longer maps the P-Z suite" "1" "$rc"
   assert_contains "and says it is run by two passes" "$out" "two CI passes"
   # MUTATION: drop the quiet pass. A live test then lands in no pass.
@@ -673,6 +742,194 @@ test_the_pass_table_matches_test_yml() {
   assert_eq "a changed parallelism flag is caught" "1" "$(check_pass_table "$d/par.yml" >/dev/null 2>&1; echo $?)"
   : > "$d/empty.yml"
   assert_eq "a workflow with no invocations is caught" "1" "$(check_pass_table "$d/empty.yml" >/dev/null 2>&1; echo $?)"
+  rm -rf "$d"
+}
+
+# CI builds once, in a step of its own, and every pass runs with `--skip-build`.
+# This harness builds before its first iteration and must never inherit the
+# flag: carried into CI_PASSES it would test whatever bundle the tree last
+# built. So the parser drops it, and the mutation proves the drop is what keeps
+# the real test.yml in agreement rather than the flag being absent.
+test_the_pass_table_drops_skip_build() {
+  local wf="$HERE/../.github/workflows/test.yml" mutant rc
+  assert_eq "every CI pass in test.yml carries --skip-build" "4" \
+    "$(grep -c -e '-- --fingerprint --skip-build ' "$wf")"
+  assert_eq "no parsed pass carries it" "0" \
+    "$(pass_table_from_workflow "$wf" | grep -c -e '--skip-build')"
+  assert_eq "and none of CI_PASSES does" "0" \
+    "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -e '--skip-build')"
+  # MUTATION: stop dropping --skip-build. The real test.yml then disagrees.
+  mutant="$(mutant_of 's/--fingerprint\|--skip-build\|/--fingerprint|/')"
+  assert_contains "the mutant really stopped dropping it" \
+    "$(grep -e '--fingerprint|' "$mutant" | head -1)" "--fingerprint|--experimental"
+  rc=0
+  bash -c "source '$mutant'; check_pass_table '$wf'" >/dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
+}
+
+# The other half of that flag, and the dangerous one. A pass with `--skip-build`
+# runs whatever test bundle `.build/` holds, so after a failed or killed build it
+# would test the cache's bundle instead of the commit — and could go green. Every
+# step that forwards the flag must therefore name the build step's success in its
+# own `if:`. It lives here because this harness already reads test.yml's pass
+# invocations and owns the drop above, and the `script-harnesses` job runs it.
+#
+# One line per step that forwards `--skip-build` as an argument: `gated <name>`
+# or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
+# does not count as forwarding it, and the first `if:` of the step is the one
+# judged.
+skip_build_gates() {
+  awk -v gate="steps.build.outcome == 'success'" '
+    function flush() {
+      if (name != "" && skip) print (index(cond, gate) ? "gated" : "UNGATED"), name
+      name = ""; cond = ""; skip = 0
+    }
+    /^      - / { flush(); name = $0; sub(/^      - (name: )?/, "", name); next }
+    /^[^ #]/ || /^  [^ #]/ { flush(); next }
+    name == "" || /^[ \t]*#/ { next }
+    /^        if:/ { if (cond == "") cond = $0; next }
+    { for (i = 1; i <= NF; i++) if ($i == "--skip-build") skip = 1 }
+    END { flush() }
+  ' "$1"
+}
+
+test_every_skip_build_pass_is_gated_on_the_build() {
+  local wf="$HERE/../.github/workflows/test.yml" d
+  assert_eq "four steps in test.yml forward --skip-build" "4" \
+    "$(skip_build_gates "$wf" | grep -c .)"
+  assert_eq "every one names the build step's success in its if:" "" \
+    "$(skip_build_gates "$wf" | grep '^UNGATED')"
+  d="$(mktmpd)"
+  # MUTATION: drop the build clause from the passes that run after a red 1a.
+  # Their `!cancelled()` would then run them after a failed build too.
+  sed "s/steps\.build\.outcome == 'success' && //" "$wf" > "$d/later.yml"
+  assert_eq "mutation: 1b, 2 and the quiet pass without the clause are caught" "3" \
+    "$(skip_build_gates "$d/later.yml" | grep -c '^UNGATED')"
+  # MUTATION: 1a gated on `!cancelled()` alone, which would run it after a
+  # failed build.
+  sed "s/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/if: \${{ !cancelled() }}/" "$wf" > "$d/first.yml"
+  assert_contains "mutation: 1a without the clause is caught" \
+    "$(skip_build_gates "$d/first.yml" | grep '^UNGATED')" "pass 1a"
+  # MUTATION: 1a with no `if:` at all.
+  sed "/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/d" "$wf" > "$d/none.yml"
+  assert_contains "mutation: 1a with no if: is caught" \
+    "$(skip_build_gates "$d/none.yml" | grep '^UNGATED')" "pass 1a"
+  rm -rf "$d"
+}
+
+# CI's build flags are the other word every pass carries that this harness must
+# never inherit: CI compiles with less debug information than SwiftPM's default,
+# this script builds with the default, and its iterations run without
+# `--skip-build`, so an iteration carrying the flags would compile the whole
+# package again. The parser drops the word, and the mutation proves the drop is
+# what keeps the real test.yml in agreement rather than the word being absent.
+test_the_pass_table_drops_the_ci_build_flags() {
+  local wf="$HERE/../.github/workflows/test.yml" mutant rc
+  assert_eq "every CI pass in test.yml carries the flags right after --skip-build" "4" \
+    "$(grep -c -F -e "-- --fingerprint --skip-build $CI_SWIFTPM_FLAGS_WORD " "$wf")"
+  assert_eq "no parsed pass carries them" "0" \
+    "$(pass_table_from_workflow "$wf" | grep -c -F -e "$CI_SWIFTPM_FLAGS_WORD")"
+  assert_eq "and none of CI_PASSES does" "0" \
+    "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -F -e 'swiftpm_flags')"
+  # MUTATION: stop dropping the flags word. The real test.yml then disagrees.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of '/^ *"\$CI_SWIFTPM_FLAGS_WORD"\) ;;$/d')"
+  # shellcheck disable=SC2016 # the script's own text, matched literally
+  assert_eq "the mutant really stopped dropping them" "0" \
+    "$(grep -c -F -e '"$CI_SWIFTPM_FLAGS_WORD") ;;' "$mutant")"
+  rc=0
+  bash -c "source '$mutant'; check_pass_table '$wf'" >/dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
+}
+
+# The CI build flags are defined once, as the `test` job's CI_SWIFTPM_FLAGS, and
+# must reach every command in that job that reaches SwiftPM: the build and every
+# pass, which re-plans the build graph from its own command line. A step that
+# leaves them out builds or plans with SwiftPM's defaults, and nothing red says
+# so. This lives here for the reason `skip_build_gates` does: this harness
+# already reads test.yml's pass invocations and owns the drop above, and the
+# `script-harnesses` job runs it.
+#
+# One line per command in the `test` job that runs `scripts/swift-safe`,
+# `scripts/test.sh` or `scripts/ci/watched-test-pass.sh`, continuation lines
+# joined: `carries <step>` when the step has read the variable into
+# `swiftpm_flags` with the `:?` guard before that command and the command
+# expands the array, `DROPS <step>` otherwise. Expanding the array without the
+# read would pass nothing, which is why the read is required too. Comment lines
+# are ignored, so prose that names a script does not count as running it.
+swiftpm_flag_carriers() {
+  awk -v word="$CI_SWIFTPM_FLAGS_WORD" -v sq="'" '
+    function new_step() { reads = 0; acc = "" }
+    /^  [^ #]/ { job = $1; sub(/:.*$/, "", job); name = ""; new_step(); next }
+    /^[^ #]/ { job = ""; name = ""; new_step(); next }
+    /^      - / { name = $0; sub(/^      - (name: )?/, "", name); new_step(); next }
+    job != "test" || name == "" || /^[ \t]*#/ { next }
+    {
+      line = $0
+      cont = sub(/\\[ \t]*$/, "", line)
+      acc = acc " " line
+      if (cont) next
+      if (index(acc, "read -r -a swiftpm_flags <<< \"${CI_SWIFTPM_FLAGS:?")) reads = 1
+      n = split(acc, w, /[ \t]+/)
+      runs = 0; carries = 0
+      for (i = 1; i <= n; i++) {
+        if (w[i] == word) carries = 1
+        t = w[i]; gsub(/"/, "", t); gsub(sq, "", t)
+        if (t ~ /(^|\/)scripts\/(swift-safe|test\.sh|ci\/watched-test-pass\.sh)$/) runs = 1
+      }
+      acc = ""
+      if (runs) print ((reads && carries) ? "carries" : "DROPS"), name
+    }
+  ' "$1"
+}
+
+# The `CI_SWIFTPM_FLAGS:` lines of the `test` job's env block whose value is
+# quoted and non-blank.
+ci_flags_definitions() {
+  awk '/^  [^ #]/ { job = $1 } job == "test:" && /^      CI_SWIFTPM_FLAGS: "[^" ]/' "$1"
+}
+
+test_every_swiftpm_command_in_the_test_job_carries_the_ci_build_flags() {
+  local wf="$HERE/../.github/workflows/test.yml" d
+  assert_eq "the test job defines CI_SWIFTPM_FLAGS, non-empty" "1" \
+    "$(ci_flags_definitions "$wf" | grep -c .)"
+  assert_eq "five commands in the test job reach SwiftPM: the build and four passes" "5" \
+    "$(swiftpm_flag_carriers "$wf" | grep -c .)"
+  assert_eq "every one carries the flags" "" "$(swiftpm_flag_carriers "$wf" | grep '^DROPS')"
+  assert_contains "the build step is one of them" "$(swiftpm_flag_carriers "$wf")" "carries Build ("
+  d="$(mktmpd)"
+  # MUTATION: the definition emptied. Every step's `:?` would then fail it at
+  # run time; this says so before a run.
+  sed 's/^      CI_SWIFTPM_FLAGS: ".*"$/      CI_SWIFTPM_FLAGS: ""/' "$wf" > "$d/empty.yml"
+  assert_eq "mutation: an empty definition is caught" "0" \
+    "$(ci_flags_definitions "$d/empty.yml" | grep -c .)"
+  # MUTATION: no command expands the array.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  sed 's/ "\${swiftpm_flags\[@\]}"//' "$wf" > "$d/unexpanded.yml"
+  assert_eq "mutation: every command without the expansion is caught" "5" \
+    "$(swiftpm_flag_carriers "$d/unexpanded.yml" | grep -c '^DROPS')"
+  # MUTATION: the build alone loses them, which would leave every pass planning
+  # flags the build never compiled with.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  sed 's/-j "\$TBD_SWIFT_JOBS" "\${swiftpm_flags\[@\]}"/-j "$TBD_SWIFT_JOBS"/' "$wf" > "$d/build.yml"
+  assert_contains "mutation: the build step without them is caught" \
+    "$(swiftpm_flag_carriers "$d/build.yml" | grep '^DROPS')" "DROPS Build ("
+  # MUTATION: the array expanded but never read — it would expand to nothing.
+  sed '/read -r -a swiftpm_flags/d' "$wf" > "$d/unread.yml"
+  assert_eq "mutation: expanding an array no step read is caught" "5" \
+    "$(swiftpm_flag_carriers "$d/unread.yml" | grep -c '^DROPS')"
+  # MUTATION: a retry step added after the passes, copied without the flags.
+  { cat "$wf"
+    cat <<'RETRY'
+      - name: Retry the quiet pass
+        run: |
+          scripts/ci/watched-test-pass.sh \
+            --name quiet-retry --budget-seconds 720 --floor 35 --floor-message 'x' \
+            -- --fingerprint --skip-build --filter '^TBDDaemonLiveTests\.' --no-parallel
+RETRY
+  } > "$d/retry.yml"
+  assert_eq "mutation: a retry without the flags is caught" "DROPS Retry the quiet pass" \
+    "$(swiftpm_flag_carriers "$d/retry.yml" | grep '^DROPS')"
   rm -rf "$d"
 }
 

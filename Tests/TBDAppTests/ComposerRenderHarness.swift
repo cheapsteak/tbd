@@ -1,3 +1,4 @@
+#if TBD_HARNESSES
 import AppKit
 import Foundation
 import SwiftUI
@@ -16,11 +17,16 @@ import TBDShared
 /// of these caught exactly that class of defect (#829, the completion list
 /// covering the words being typed) before it shipped.
 ///
-/// Inert during a normal run: every test early-returns unless
-/// `TBD_COMPOSER_SHOTS_DIR` names a directory to write into.
+/// Compiled only when the `TBD_HARNESSES` condition is set (see
+/// `Tests/CLAUDE.md`), so a normal run neither builds nor schedules it, and
+/// even then every test early-returns unless `TBD_COMPOSER_SHOTS_DIR` names a
+/// directory to write into.
 ///
 ///     TBD_COMPOSER_SHOTS_DIR=/tmp/composer-shots scripts/test.sh \
-///         --filter ComposerRenderHarness
+///         -Xswiftc -DTBD_HARNESSES --filter ComposerRenderHarness
+///
+/// Nothing in CI compiles this file, so a refactor elsewhere can leave it
+/// failing to build; fix it when you next enable it.
 ///
 /// **Each shot asserts it is not blank.** A view that was never laid out renders
 /// as a large, perfectly plausible white rectangle, and a harness that wrote one
@@ -213,3 +219,4 @@ struct ComposerRenderHarness {
         return data
     }
 }
+#endif

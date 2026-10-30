@@ -62,6 +62,30 @@ extension RPCRouter {
             .scratchCreate, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
 
+        // Start admission: the spawn below launches the primary agent. A hold
+        // takes back the folder and row created above, so a held create
+        // leaves nothing behind (unlike a failed spawn, which keeps them).
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor,
+            agent: StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue),
+            worktreeID: wt.id) {
+            var leftovers: [String] = []
+            do {
+                try await db.worktrees.delete(id: wt.id)
+            } catch {
+                scratchLogger.error("scratch.create: held create left worktree row \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("worktree row \(wt.id.uuidString)")
+            }
+            do {
+                try fm.removeItem(at: dir)
+            } catch {
+                scratchLogger.error("scratch.create: held create left folder \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("folder \(dir.path)")
+            }
+            return Self.heldResponse(held.error ?? "", leftovers: leftovers)
+        }
+
         // Spawn the default primary agent terminal (Claude/Codex/shell per the
         // global primary-agent preference), mirroring what repo worktrees get on
         // creation. Best-effort: a spawn failure must not fail scratch creation —
@@ -102,9 +126,18 @@ extension RPCRouter {
     /// `keepsHistory` is true for archive, which leaves the worktree's Closed
     /// Terminals history in place, and false for delete, which hard-deletes it
     /// right afterwards — an entry written there would be wiped unread.
-    func closeScratchTerminals(_ wt: Worktree, keepsHistory: Bool) async throws {
+    ///
+    /// Returns the terminals sorted by whether their session has a process
+    /// left (`WorktreeLifecycle.sessionHasEnded`), which archive hands to
+    /// `removeSessionDirectories`.
+    @discardableResult
+    func closeScratchTerminals(
+        _ wt: Worktree, keepsHistory: Bool
+    ) async throws -> WorktreeLifecycle.SessionTeardownTally {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
+        var sessions = WorktreeLifecycle.SessionTeardownTally()
         for t in terminals {
+            var stopped = false
             // The rows go away below either way, so a holder row must be
             // reclaimed here rather than refused: `tmuxWindowID` is the empty
             // string by construction, so the kill in the else-branch addresses
@@ -123,6 +156,8 @@ extension RPCRouter {
                 if let failure = await disposeHolder(for: t) {
                     scratchLogger.warning(
                         "scratch teardown left a holder running: \(failure, privacy: .public)")
+                } else {
+                    stopped = true
                 }
             } else {
                 // Refuse to kill a window whose pane belongs to a DIFFERENT
@@ -133,7 +168,19 @@ extension RPCRouter {
                 let ownership = await tmux.paneOwnership(
                     terminalID: t.id, server: wt.tmuxServer, paneID: t.tmuxPaneID)
                 if ownership.permitsTeardown {
-                    try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+                    // The lifecycle's kill waits for the pane's process to
+                    // exit and escalates a wedged one. When the login shell
+                    // execs Claude, as zsh does for the spawn command's `-c`,
+                    // that process is Claude and nothing writes to the
+                    // session's directory after archive removes it; otherwise
+                    // a late `session.end` write can recreate it, and
+                    // `OrphanGC`'s session-directory arm reclaims it after
+                    // `gcGraceSeconds`. A failed kill of a pane whose process
+                    // could not be read may have left it running, so that
+                    // session keeps its directory.
+                    stopped = await lifecycle.tearDownWindow(
+                        server: wt.tmuxServer, windowID: t.tmuxWindowID, paneID: t.tmuxPaneID
+                    ).stoppedPane
                 } else {
                     scratchLogger.warning("""
                         scratch teardown: leaving window \(t.tmuxWindowID, privacy: .public) \
@@ -142,6 +189,7 @@ extension RPCRouter {
                         """)
                 }
             }
+            sessions.record(t, teardownStoppedIt: stopped)
         }
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
         await lifecycle.sessionTitles.forget(worktreeID: wt.id)
@@ -151,6 +199,7 @@ extension RPCRouter {
             await broadcastPendingPrompts(terminalID: t.id)
             ClaudeHookOverlay.removePerSessionOverlay(sessionKey: t.id.uuidString)
         }
+        return sessions
     }
 
     func handleScratchDelete(
@@ -172,7 +221,9 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .scratchDelete, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) {
+        // Delete leaves the session directories to `OrphanGC`: once the row is
+        // gone, nothing names them.
+        _ = try await actuating(actuationID) {
             try await closeScratchTerminals(wt.worktree, keepsHistory: false)
         }
         await finishActuation(actuationID, .dispatched)
@@ -231,9 +282,7 @@ extension RPCRouter {
     /// branch (`handleWorktreeArchive`). Extracted rather than duplicated so
     /// the two RPC doors share one implementation: the repo-worktree archive
     /// path must never run against a scratch space, because its phase 2
-    /// removes the directory. (`DeskSessionManager.closeDeskSession` still
-    /// carries a third, drifted copy of this teardown; folding it in is
-    /// tracked separately.)
+    /// removes the directory.
     ///
     /// `surface` is the door the request came through, so the actuation row
     /// records the method the caller actually called. Both surfaces carry the
@@ -249,20 +298,6 @@ extension RPCRouter {
             return RPCResponse(error: "Not a scratch space: \(worktreeID)")
         }
 
-        // The Watch Desk is a scratch row (`isNightwatchDesk` is `isScratch`
-        // plus its display name), so the routing above reaches it. Its teardown
-        // is not this one: `DeskSessionManager.closeDeskSession` also clears the
-        // in-memory desk pointer and is paired with `releaseJudgeLease`, which
-        // drops the lease row and unlinks the lease credential file. Neither
-        // resource has a reconciler, so retiring the desk through the generic
-        // body would leak both with nothing to reclaim them. Refused rather
-        // than half-torn-down.
-        guard !wt.isNightwatchDesk else {
-            return RPCResponse(
-                error: "This is the Nightwatch Watch Desk; it is retired by the desk's own "
-                    + "teardown, not by archiving. Stop the desk instead.")
-        }
-
         // Idempotent on an already-archived row, and deliberately not a
         // re-archive: `WorktreeStore.archive` re-stamps `archivedAt`
         // unconditionally, and that timestamp is the GC grace clock
@@ -276,7 +311,7 @@ extension RPCRouter {
         // window where two calls overlap in flight; the durable fix is a status
         // check inside `WorktreeStore.archive`'s write block beside the
         // `.main`/`.creating` refusals, which would cover the repo path and the
-        // direct callers (reconcile, the Watch Desk) at the same time.
+        // direct callers (reconcile) at the same time.
         guard wt.status != .archived else {
             scratchLogger.info(
                 "\(surface.method, privacy: .public): \(wt.id, privacy: .public) is already archived; no-op")
@@ -292,13 +327,15 @@ extension RPCRouter {
         // child rendering nowhere until reconcile nulls the pointer.
         //
         // Unconditional, and deliberately NOT gated on the caller's `force`:
-        // `handleWorktreeArchive` does not forward `force` to
-        // `beginArchiveWorktree` either, so this assertion always runs for a
-        // repo worktree arriving through the same door. `force` bypasses it
-        // only for the in-process cascade flows that call the lifecycle
-        // directly (`repo.remove`), and no cascade reaches a repo-less row.
-        // Honouring `force` here would have made one flag mean opposite things
-        // on the two branches of one RPC.
+        // on the repo branch, `handleWorktreeArchive` passes `force` into
+        // `beginArchiveWorktree`'s `discardUncommittedChanges`, which lifts
+        // the uncommitted-changes guard, and never into that function's own
+        // `force`, so this assertion always runs for a repo worktree arriving
+        // through the same door. `force` bypasses it only for the in-process
+        // cascade flows that call the lifecycle directly (`repo.remove`), and
+        // no cascade reaches a repo-less row. Honouring `force` here would
+        // have made one flag mean opposite things on the two branches of one
+        // RPC.
         try await db.worktrees.assertArchivable(id: worktreeID)
 
         // Same teardown as `scratch.delete`, so the same row: one per call,
@@ -306,10 +343,14 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             surface, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        try await actuating(actuationID) {
+        let sessions = try await actuating(actuationID) {
             try await closeScratchTerminals(wt.worktree, keepsHistory: true)
         }
         await finishActuation(actuationID, .dispatched)
+        // Each ended session's directory goes, draft included, once the
+        // teardown above has run, unless another row naming the same session
+        // may still be running.
+        lifecycle.removeSessionDirectories(for: sessions)
         try await db.worktrees.archive(id: wt.id)
 
         // Same delta `scratch.delete` broadcasts — deliberate: from the
@@ -357,23 +398,6 @@ extension RPCRouter {
         }
         guard wt.isScratch else {
             return .refused("Not a scratch space: \(worktreeID)")
-        }
-        // The mirror of the archive guard, and the reason it has to exist
-        // separately: `DeskSessionManager.closeDeskSession` archives the desk's
-        // row through `db.worktrees.archive` directly, changing neither
-        // `repoID` nor the display name, so the archived row still satisfies
-        // `isNightwatchDesk` and passes every other guard below. Reviving it
-        // here would flip it `.active` and broadcast a revive while the desk
-        // actor's in-memory pointer, judge lease row, lease credential file and
-        // terminals stay gone: an active desk with nothing behind it.
-        //
-        // Refusing costs nothing, because nothing legitimately revives a desk
-        // row. `ensureDeskSession`'s recovery path excludes archived worktrees
-        // deliberately, so the desk mints a fresh session instead.
-        guard !wt.isNightwatchDesk else {
-            return .refused(
-                "This is the Nightwatch Watch Desk; it is not revived by hand. The desk opens a "
-                    + "fresh session itself when it next runs.")
         }
         guard wt.status == .archived else {
             return .refused("Scratch space is already active: \(wt.id)")

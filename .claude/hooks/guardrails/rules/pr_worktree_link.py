@@ -71,6 +71,12 @@ an unusual construction fails **closed** — `FOO=bar gh pr create` and
 For an INFO-only nudge a miss costs nothing, and staying byte-for-byte in step
 with the detector that *does* carry consequences is worth more than the extra
 coverage.
+
+**A PR opened through the GitHub MCP server needs none of that.** Its
+`create_pull_request` call (`MCP_CREATE_PR_TOOL`) carries the body as a plain
+`body` field, so the rule reads it directly and judges it the same way, under
+the same TBD gate. This module also holds the MCP helpers the other PR rules
+import alongside the tokenizer.
 """
 
 from __future__ import annotations
@@ -80,6 +86,13 @@ import re
 import stat
 
 from guardrails.lib.rule import Decision, Rule
+
+# The GitHub MCP server's PR-creation tool, as it reaches hooks under a server
+# registered as `github` — the name the cloud environment uses. Its input
+# carries `owner`, `repo`, `title`, `body`, `head` and `base` as plain fields.
+# The dispatcher matches tool names exactly, so a server registered under any
+# other name reaches no PR rule.
+MCP_CREATE_PR_TOOL = "mcp__github__create_pull_request"
 
 # Shell metacharacters that end one command and begin the next. Runs of them
 # collapse on their own, so `&&`, `||` and `|` need no special case.
@@ -153,6 +166,21 @@ _MESSAGE = (
     "`tbd://…` URL as unclickable text, so `tbd link`'s own output is not enough. "
     "If `tbd link` fails, skip it silently. (This is informational — nothing is blocked.)"
 )
+
+
+def _is_mcp_create(ctx: dict) -> bool:
+    """True when the call is the MCP create tool rather than a Bash command.
+
+    A ctx without `tool_name` reads as Bash: the dispatcher always sets it, and
+    the PR rules matched only Bash before the MCP route was added.
+    """
+    return ctx.get("tool_name") == MCP_CREATE_PR_TOOL
+
+
+def _mcp_text(tool_input: dict, field: str) -> str:
+    """One string field of an MCP create call, or "" when absent or not a string."""
+    value = tool_input.get(field)
+    return value if isinstance(value, str) else ""
 
 
 def _heredoc_openers(line: str) -> list:
@@ -578,17 +606,27 @@ def _every_body_has_link(segments: list, heredoc_text: str) -> bool:
 class PRWorktreeLinkRule(Rule):
     id = "pr-worktree-link"
     description = "Nudge toward a TBD worktree deep-link in the body of a new PR."
-    tools = {"Bash"}
+    tools = {"Bash", MCP_CREATE_PR_TOOL}
 
     def check(self, tool_input: dict, ctx: dict) -> "Decision | None":
+        if _is_mcp_create(ctx):
+            return self._judge(ctx, lambda: _text_has_link(_mcp_text(tool_input, "body")))
         command = tool_input.get("command", "") or ""
         command_text, heredoc_text = _split_heredoc_bodies(command)
         segments = _forge_create_segments(command_text)
         if not segments:
             return None
+        return self._judge(ctx, lambda: _every_body_has_link(segments, heredoc_text))
+
+    def _judge(self, ctx: dict, body_has_link) -> "Decision | None":
+        """The verdict both tools share, once a create has been found.
+
+        `body_has_link` is a callable so the TBD gate runs first: outside TBD no
+        body file is ever opened.
+        """
         if not self._under_tbd(ctx):
             return None
-        if _every_body_has_link(segments, heredoc_text):
+        if body_has_link():
             return None
         return Decision.info(_MESSAGE)
 

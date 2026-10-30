@@ -400,21 +400,22 @@ struct SessionTranscriptView: View {
     /// One resolution memo per pane. See `TableTranscriptPaneView.linkCache`.
     @State private var historyLinkCache = TranscriptLinkResolverCache()
 
-    /// Session History never shows the model-proxy stream's provisional row.
+    /// Session History never shows the session mod's provisional rows.
     ///
     /// It reads the same `AppState.sessionTranscripts` store the live pane
     /// publishes into, and a session listed here can be the very one a live
     /// pane is streaming — the history list enumerates the worktree's JSONL
     /// files, the current session's included, and `selectSession` deliberately
     /// reuses whatever the store already holds rather than refetching. So the
-    /// row is excluded here rather than merely absent by construction: this is
-    /// a record of what the session *was*, and an unconfirmed row that may
+    /// rows are excluded here rather than merely absent by construction: this
+    /// is a record of what the session *was*, and an unconfirmed row that may
     /// still be withdrawn does not belong in it.
     ///
     /// The transcript overlay needs no equivalent: it resolves an item by the
-    /// id a row handed it, and an assistant chat bubble has no overlay
-    /// affordance at all (see `TableTranscriptView.bubbleView`), so no gesture
-    /// can name a provisional row.
+    /// id a row handed it, and neither an assistant chat bubble nor a
+    /// provisional thinking row offers the overlay (see
+    /// `TableTranscriptView.bubbleView` and `ActivityRowFormatter`), so no
+    /// gesture can name a provisional row.
     private var messages: [TranscriptItem] {
         ProvisionalRowComposer.settledOnly(appState.sessionTranscripts[sessionId] ?? [])
     }
@@ -527,7 +528,8 @@ struct SessionTranscriptView: View {
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
                         linkRoot: linkRoot,
-                        nodesProvider: { presentation.nodes }
+                        nodesProvider: { presentation.nodes },
+                        promptRail: .rail(earlier: nil)
                     )
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {

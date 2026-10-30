@@ -1,10 +1,16 @@
 import Foundation
 
 /// Determines whether a decoded JSONL line is a real user-authored message
-/// vs. a tool result, system reminder, or other system-generated content.
+/// vs. a tool result, system reminder, compaction summary, or other
+/// system-generated content.
 ///
 /// This is the single place to update detection heuristics. The fixture at
 /// Tests/Fixtures/sample-session.jsonl documents the classification decisions.
+///
+/// A compaction summary is recognized by the structured `isCompactSummary`
+/// flag Claude Code sets on its line, never by its text. Only the
+/// dictionary-shaped entry points can see that flag; the `text:` entry points
+/// serve `queued_command` attachments, which never carry it.
 public enum UserMessageClassifier {
 
     /// Prefixes that mark system-generated content in the user role.
@@ -28,12 +34,17 @@ public enum UserMessageClassifier {
     ]
 
     /// Returns true if the parsed JSONL object is a real user message.
+    ///
+    /// A compaction summary is not: Claude Code writes it into the user role,
+    /// but nobody typed it.
     public static func isRealUserMessage(_ line: [String: Any]) -> Bool {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
             message["role"] as? String == "user"
         else { return false }
+
+        if isCompactSummary(line) { return false }
 
         if let content = message["content"] as? String {
             return isRealUserMessage(text: content)
@@ -109,12 +120,18 @@ public enum UserMessageClassifier {
     /// Returns the typed system kind for a user-role JSONL line if it's a
     /// system-injected envelope rather than a real user prompt; returns nil
     /// for real user messages.
+    ///
+    /// A compaction summary is `.compactSummary`, decided by the line's
+    /// `isCompactSummary` flag before any of the text-based rules run: its
+    /// body is ordinary prose that no text rule would catch.
     public static func classify(_ line: [String: Any]) -> SystemKind? {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
             message["role"] as? String == "user"
         else { return nil }
+
+        if isCompactSummary(line) { return .compactSummary }
 
         let text: String
         if let s = message["content"] as? String {
@@ -179,6 +196,49 @@ public enum UserMessageClassifier {
         }
 
         return nil
+    }
+
+    /// True when a user-role prompt body was not typed by a person but is still
+    /// a real user row: an image-attachment meta line, an interrupt marker, or
+    /// the continuation preamble Claude Code writes after running out of
+    /// context. Blank text counts too. Used only by the transcript prompt rail;
+    /// transcript rendering does not call it.
+    ///
+    /// Markers are recognised only in their structural position (every line is
+    /// an image marker, or the text begins with the marker), so a typed prompt
+    /// that merely mentions one stays a typed prompt.
+    ///
+    /// The rail asks this of every prompt it has not seen before, so it reads
+    /// as little as it can: it copies nothing, a typed prompt is told apart by
+    /// the start of its first non-blank line, and only text that opens with an
+    /// image marker is read to its end.
+    public static func isUntypedPromptMarker(_ text: String) -> Bool {
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return true }
+        let body = text[start...]
+        if body.hasPrefix("[Request interrupted by user") { return true }
+        if body.hasPrefix("This session is being continued from a previous conversation") {
+            return true
+        }
+        // Every non-blank line must be an image marker, so the first must be.
+        guard body.hasPrefix(imageMarkerPrefix) else { return false }
+        return body.split(whereSeparator: \.isNewline).allSatisfy { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty
+                || (trimmed.hasPrefix(imageMarkerPrefix)
+                    && trimmed.hasSuffix("]")
+                    && trimmed.count > imageMarkerPrefix.count + 1)
+        }
+    }
+
+    /// How an image-attachment meta line begins: `[Image: source: <path>]`.
+    private static let imageMarkerPrefix = "[Image: source: "
+
+    /// True for the line Claude Code writes when it compacts a conversation
+    /// (`/compact` or auto-compact): a `type:"user"` line carrying the summary
+    /// of everything before it, flagged `"isCompactSummary": true`. Other
+    /// lines may carry the key as `null`, which reads as false.
+    private static func isCompactSummary(_ line: [String: Any]) -> Bool {
+        line["isCompactSummary"] as? Bool == true
     }
 
     private static func hasSystemPrefix(_ text: String) -> Bool {

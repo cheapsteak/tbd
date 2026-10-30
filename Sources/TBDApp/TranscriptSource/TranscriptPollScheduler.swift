@@ -65,10 +65,9 @@ actor TranscriptPollScheduler {
 
     private struct Registration {
         var path: String
-        /// The terminal's model-proxy stream file, when the pane declared one.
-        /// Nil is the ordinary case — transcript streaming off, a session that
-        /// was never routed through the proxy, or a pre-streaming daemon — and
-        /// means this registration never touches a second file.
+        /// The session mod's `transcript-stream.json` for this session, when the
+        /// pane declared one. Nil is the ordinary case — transcript streaming
+        /// off — and means this registration never touches a second file.
         var streamPath: String?
         /// Every pane holding this session open right now, and the tier each
         /// one declared. Held inside the entry, so it is dropped whole when the
@@ -106,29 +105,14 @@ actor TranscriptPollScheduler {
     /// torn-down pane's closure alive.
     private var onChange: (@Sendable (String) async -> Void)?
     private let source: TranscriptSource
-    /// The instant a stream refresh stamps its lines with.
+    /// The instant a stream refresh measures the mod's heartbeat against.
     ///
-    /// A date seam rather than the clock seam beside it, because what this
-    /// produces is *data*: `TranscriptSource` stores it and the provisional
-    /// row's retire deadlines are later measured against it. `Duration` is
-    /// behavior, `Date` is data — see the repo's clock-and-date-seam rule.
+    /// A date seam rather than the clock seam beside it, because what it is
+    /// compared with is *data*: the `heartbeatAtMs` the mod wrote into
+    /// `alive.json`. `Duration` is behavior, `Date` is data — see the repo's
+    /// clock-and-date-seam rule.
     private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
-
-    /// The app's one provisional-row retire timer, created with this scheduler
-    /// and on its clock.
-    ///
-    /// It lives here because its lifetime is the *registration's*, not any
-    /// pane's. An alarm is armed by a publish, and every publish in the app
-    /// runs through the single ``onChange`` slot above; a pane that mounts,
-    /// remounts, or is restarted by a Settings flip must therefore find the
-    /// same instance the previous one armed into, or a session's live alarm
-    /// ends up in one instance while the pane that would cancel it holds
-    /// another — and the orphan then fires after ``deregister`` has already
-    /// forgotten the session, publishing an empty transcript for it.
-    /// `nonisolated` because it is an immutable `Sendable` actor reference:
-    /// `publish` can take it without a hop through this actor.
-    nonisolated let provisionalRetire: ProvisionalRetireTimer
 
     init(
         source: TranscriptSource,
@@ -138,7 +122,6 @@ actor TranscriptPollScheduler {
         self.source = source
         self.now = now
         self.clock = clock
-        self.provisionalRetire = ProvisionalRetireTimer(clock: clock)
     }
 
     var registeredSessionIDs: Set<String> { Set(registrations.keys) }
@@ -161,8 +144,8 @@ actor TranscriptPollScheduler {
         registrations[sessionID]?.holders.count ?? 0
     }
 
-    /// The model-proxy stream file `sessionID` is registered to tail, or nil
-    /// when it has none (or is not registered at all).
+    /// The stream file `sessionID` is registered to read, or nil when it has
+    /// none (or is not registered at all).
     ///
     /// Read-only, and here so a test can pin what a registration actually
     /// carries rather than infer it from a tick's side effects. Nothing in the
@@ -185,36 +168,13 @@ actor TranscriptPollScheduler {
     ///
     /// Deliberately not a plain setter. Panes call this on every mount and the
     /// closures are interchangeable — none of them carries anything belonging
-    /// to the pane that built it — so re-seating one buys nothing, and the
-    /// habit of re-seating it is what let a per-pane object ride into this slot
-    /// and split one session's alarms across two instances. Keeping the first
-    /// closure is safe: it holds `AppState` weakly, plus the same source and
-    /// retire timer this scheduler already owns, and no view.
+    /// to the pane that built it — so re-seating one buys nothing, and a
+    /// per-pane object riding into this slot would outlive its pane. Keeping
+    /// the first closure is safe: it holds `AppState` weakly, plus the same
+    /// source this scheduler already owns, and no view.
     func setOnChangeIfUnset(_ handler: @escaping @Sendable (String) async -> Void) {
         guard onChange == nil else { return }
         onChange = handler
-    }
-
-    /// Cancels the provisional retire alarm for `sessionID` — unless a pane is
-    /// still holding that session registered.
-    ///
-    /// The guard is the whole point. The viewer-slot LRU permits two panes onto
-    /// one session, and a deadline rule is announced by nothing: cancelling an
-    /// alarm a surviving pane's row still depends on strands that row on screen
-    /// until the pane closes. So the gesture belongs to the *last* holder
-    /// leaving, and a departing pane that is not the last one asks for it in
-    /// vain.
-    ///
-    /// ``deregister`` makes this call itself, after dropping the registration
-    /// and **before** `TranscriptSource.forget` — the ordering is load-bearing.
-    /// An alarm that survives into the forget wakes up, publishes what the
-    /// source no longer has, and writes an empty transcript into
-    /// `AppState.sessionTranscripts`, where `AppState+History.selectSession`
-    /// reads `[]` as a cached answer and never refetches from disk. Session
-    /// History for that session would then read empty for good.
-    func disarmProvisional(sessionID: String) async {
-        guard registrations[sessionID] == nil else { return }
-        await provisionalRetire.disarm(sessionID: sessionID)
     }
 
     /// Adds `token`'s hold on `sessionID`, at the tier that pane declares.
@@ -223,7 +183,7 @@ actor TranscriptPollScheduler {
     /// rather than taking a second one, which is what makes the holder set
     /// bounded by "panes currently open", not by "tier changes ever made".
     ///
-    /// `streamPath` is the model-proxy stream file this pane wants tailed
+    /// `streamPath` is the session mod's stream file this pane wants read
     /// alongside the transcript, or nil for none. It defaults to nil so a
     /// caller with no interest in streaming — every caller before this feature
     /// — reads the same as it always did.
@@ -299,11 +259,6 @@ actor TranscriptPollScheduler {
     /// Making the teardown conditional on the holder set emptying settles the
     /// two-panes-on-one-session case by the same stroke: either may leave, and
     /// the session keeps polling for whoever is left.
-    ///
-    /// The provisional retire alarm is cancelled here too, on the same
-    /// last-holder branch and ahead of the forget — the only place that knows
-    /// both that nobody is watching any more and that the source is about to
-    /// drop what the alarm would republish. See ``disarmProvisional``.
     func deregister(sessionID: String, token: TranscriptPaneToken) async {
         guard var registration = registrations[sessionID] else { return }
         guard registration.holders.removeValue(forKey: token) != nil else { return }
@@ -317,8 +272,6 @@ actor TranscriptPollScheduler {
         }
         registration.task?.cancel()
         registrations.removeValue(forKey: sessionID)
-        // Before the forget, never after it: see `disarmProvisional`.
-        await disarmProvisional(sessionID: sessionID)
         await source.forget(sessionID: sessionID)
     }
 
@@ -368,7 +321,7 @@ actor TranscriptPollScheduler {
     /// again in `finishTick`, which is where the interesting case lives.
     ///
     /// A registration that names a stream file refreshes it in the same tick,
-    /// at the same cadence: the provisional message is the same pane's content
+    /// at the same cadence: the provisional blocks are the same pane's content
     /// as the transcript rows, and giving it a timer of its own would be a
     /// second cadence policy to keep in step with this one. Either file
     /// changing is news — the two are folded into one `hasNews` so a stream
@@ -382,7 +335,7 @@ actor TranscriptPollScheduler {
         var hasNews = !(change?.isEmpty ?? true)
         if let streamPath {
             // Not folded into the expression above: `||` short-circuits, and a
-            // transcript change must not skip the stream refresh — the tail
+            // transcript change must not skip the stream refresh — the snapshot
             // would fall behind exactly when the session is busiest.
             let streamChanged = await source.refreshStream(
                 sessionID: sessionID, path: streamPath, now: now())

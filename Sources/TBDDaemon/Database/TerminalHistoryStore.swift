@@ -18,6 +18,8 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
     var lineCount: Int
     var serverName: String?
     var exitCode: Int32?
+    /// JSON-encoded `ClaudeSpawnExtras` copied from the closing terminal row.
+    var claudeSpawnExtras: String?
 
     init(from entry: TerminalHistoryEntry) {
         self.id = entry.id.uuidString
@@ -29,6 +31,7 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
         self.lineCount = entry.lineCount
         self.serverName = entry.serverName
         self.exitCode = entry.exitCode
+        self.claudeSpawnExtras = ClaudeSpawnExtrasColumn.encode(entry.claudeSpawnExtras)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -51,7 +54,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
             claudeSessionID: claudeSessionID,
             lineCount: lineCount,
             serverName: serverName,
-            exitCode: exitCode
+            exitCode: exitCode,
+            claudeSpawnExtras: ClaudeSpawnExtrasColumn.decode(
+                claudeSpawnExtras, table: Self.databaseTableName, rowID: id)
         )
     }
 }
@@ -182,7 +187,11 @@ public struct TerminalHistoryStore: Sendable {
                 claudeSessionID: terminal.claudeSessionID,
                 lineCount: text.map {
                     $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
-                } ?? 0
+                } ?? 0,
+                // A Claude tab's values only. A failed pre-session hook's
+                // shell row keeps the create's values while its tab lives,
+                // and a reopen of a shell entry has no use for them.
+                claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil
             )
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID
@@ -246,6 +255,21 @@ public struct TerminalHistoryStore: Sendable {
             }
         } catch {
             logger.warning("failed to stamp dev server output for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Claude session IDs of closed-terminal history rows whose worktree is not
+    /// archived: sessions a person can still resume through
+    /// `terminalHistory.revive`. Raw columns, so a row whose other columns fail
+    /// to decode still counts; `OrphanGC`'s session-directory arm reclaims
+    /// whatever is NOT referenced.
+    public func claudeSessionReferencesInUnarchivedWorktrees() async throws -> Set<String> {
+        try await writer.read { db in
+            Set(try String.fetchAll(db, sql: """
+                SELECT h.claudeSessionID FROM terminal_history h
+                JOIN worktree w ON w.id = h.worktreeID
+                WHERE h.claudeSessionID IS NOT NULL AND w.status != ?
+                """, arguments: [WorktreeStatus.archived.rawValue]))
         }
     }
 

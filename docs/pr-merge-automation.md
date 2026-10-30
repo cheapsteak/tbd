@@ -1,6 +1,6 @@
 # PR merge automation
 
-This doc records how TBD should automate PR merging, and why it does not ship a merge gate of its own. TBD once had one: a compiled `MergeGate` in `Sources/TBDDaemon/Nightwatch/`, backed by a `clearance` ledger and an `audit_log` table, hung off a `PRStatusManager` callback that fired on every PR-status refresh. It was deleted — not because it was disconnected, but because it was **redundant**. Every invariant it tried to hold is already held, better, by the forge. (It was also inert: it built its input from hardcoded placeholders — `headSHA: "unknown"`, `hasApprovedReview: false` — so in production it could only ever escalate, writing audit rows that recorded that one decision over and over and that nobody read.)
+This doc records how TBD should automate PR merging, and why it does not ship a merge gate of its own. TBD once had one: a compiled `MergeGate`, backed by a `clearance` ledger and an `audit_log` table, hung off a `PRStatusManager` callback that fired on every PR-status refresh. It was deleted — not because it was disconnected, but because it was **redundant**. Every invariant it tried to hold is already held, better, by the forge. (It was also inert: it built its input from hardcoded placeholders — `headSHA: "unknown"`, `hasApprovedReview: false` — so in production it could only ever escalate, writing audit rows that recorded that one decision over and over and that nobody read.)
 
 Read this before building anything that decides whether a PR may merge.
 
@@ -17,7 +17,7 @@ The invariant the deleted gate existed to protect was: *an approval must not sur
 - **Required status checks** — `test`, `Lint`, and `claude-review` (see [`docs/pr-review-gate.md`](pr-review-gate.md)).
 - **Block force-push** (and deletion) on the protected branch — otherwise the history a review examined can be rewritten under it.
 
-**CODEOWNERS** covers what the original Nightwatch design called an "impact map": a path glob maps to a required reviewer, so a PR touching a consequential directory cannot merge without that reviewer's approval. It is a checked-in file, edited by a PR, enforced by the forge.
+**CODEOWNERS** is the "impact map" a merge gate would otherwise carry: a path glob maps to a required reviewer, so a PR touching a consequential directory cannot merge without that reviewer's approval. It is a checked-in file, edited by a PR, enforced by the forge.
 
 ### Auto-merge is the mechanism
 
@@ -37,7 +37,7 @@ A **merge queue** closes the remaining stale-base window: it re-tests each PR ag
 
 **TBD ships no policy.** It carries the operator's text to the agent and stops there.
 
-The one agent that acts on PRs autonomously today is the Watch Desk (`DaywatchRunner` / `DeskSessionManager`) — a Claude session in a tmux pane driving `gh`, `tbd`, and tmux. It is governed entirely by prompt text. That is fine precisely because of the next section.
+An agent that acts on PRs autonomously — a Claude session driving `gh` and `tbd` — is governed entirely by prompt text. That is fine precisely because of the next section.
 
 ### Why this is architecturally superior, not merely cheaper
 
@@ -47,7 +47,7 @@ Forge-side enforcement sits *outside the trust boundary of the machine running t
 
 The consequence worth naming: **local policy can add caution but can never widen what protections permit.** It is monotonic by construction. A buggy, stale, or absent local check degrades to "the forge decides" — never to "anything merges."
 
-This is exactly the two-layer contract the original Nightwatch design specified — the requester must never merge, the executor must never trust the requester's view of PR state (§16, [`docs/specs/2026-07-03-nightwatch-daywatch-design.md:796-800`](specs/2026-07-03-nightwatch-daywatch-design.md)) — and never built. GitHub already implements it.
+This is the two-layer contract merge automation needs — the requester must never merge, the executor must never trust the requester's view of PR state — and GitHub already implements it.
 
 **Merge authorization is out of scope for TBD; it is delegated to the forge.**
 

@@ -2,14 +2,15 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("Sidebar group reveal")
 struct SidebarGroupRevealTests {
     private func withState(_ body: (AppState, UUID) -> Void) {
-        let suite = "SidebarGroupRevealTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarGroupRevealTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]
@@ -114,7 +115,9 @@ struct SidebarGroupRevealTests {
             let initial = state.sidebarSelectionReveal
             let remote = SidebarGroupID(owner: .repository(repo), kind: .remote)
             let exited = SidebarGroupID(owner: .repository(repo), kind: .exited)
-            #expect(initial.groups == [remote])
+            let childRemote = SidebarGroupID(owner: .parent(root.id), kind: .remote)
+            let childExited = SidebarGroupID(owner: .parent(root.id), kind: .exited)
+            #expect(initial.groups == [remote, childRemote, childExited])
             state.revealSidebarGroups(initial, grouped: true)
             state.repos[0].expanded = false
 
@@ -129,7 +132,7 @@ struct SidebarGroupRevealTests {
             state.remoteSessions[2] = SidebarGroupFixtures.session("sibling", state: .exited, repoID: repo)
             let moved = state.sidebarSelectionReveal
             #expect(moved.generation == initial.generation)
-            #expect(moved.groups == [remote, exited])
+            #expect(moved.groups == [remote, exited, childRemote, childExited])
             state.revealSidebarGroups(moved, previous: initial, grouped: true)
             #expect(state.expandedSidebarGroups.contains(exited))
             #expect(!state.repos[0].expanded)

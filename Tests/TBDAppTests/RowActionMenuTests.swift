@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // MARK: - Helpers
 
@@ -304,6 +305,38 @@ struct RowActionMenuRemoteArchiveTests {
                                         provider: "acme",
                                         providerCapabilities: ["stop"],
                                         isGone: false)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
+        #expect(archive?.isEnabled == false)
+    }
+
+    /// A lane whose provider is retired (no longer configured) takes the same
+    /// exemption as `gone`: the daemon files it row-only, so the menu must not
+    /// disable the gesture.
+    @Test func archiveEnabledForALaneWhoseProviderIsRetired() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: [],
+                                        isGone: false,
+                                        providerRetired: true)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+        #expect(archive?.disabledHelp == nil)
+    }
+
+    /// The other branch: a configured provider that does not declare `archive`
+    /// and has not lost the session is not retired and stays disabled.
+    @Test func archiveStaysDisabledForAConfiguredProviderWithoutArchive() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["stop"],
+                                        isGone: false,
+                                        providerRetired: false)
         let archive = RowActionMenu.items(context: ctx)
             .compactMap(\.action).first { $0.kind == .archive }
         #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
@@ -722,16 +755,6 @@ struct RowActionMenuPinTests {
         let items = RowActionMenu.items(context: .init(isScratch: true, isPinned: false))
         #expect(kinds(items).contains(.pin))
     }
-
-    @Test("the Watch Desk offers neither Pin nor Unpin")
-    func deskOffersNeither() {
-        // The desk is a scratch row, so this must be suppressed in the scratch
-        // branch — not only the regular one.
-        let items = RowActionMenu.items(
-            context: .init(isScratch: true, isPinned: false, isNightwatchDesk: true))
-        #expect(!kinds(items).contains(.pin))
-        #expect(!kinds(items).contains(.unpin))
-    }
 }
 
 // MARK: - The real call site
@@ -751,9 +774,9 @@ struct RowActionMenuPinTests {
 struct RowActionMenuCallSiteTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RowActionMenuCallSite.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RowActionMenuCallSite")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -870,16 +893,12 @@ struct RowActionMenuCallSiteTests {
             transport: .holder)
     }
 
-    /// A holder-backed session whose panel currently owns the pty is not
-    /// offered a park by the row menu either.
-    ///
-    /// This is the call-site half of `ManualParkAffordance`: the pure model is
-    /// exercised in `TabParkMenuModelTests`, and what this pins is that the row
-    /// menu asks the same question of the same registry. The daemon would
-    /// refuse such a park — its pending-input rail cannot read a screen it no
-    /// longer has — so an item offered here is one that always errors.
-    @Test("a holder session whose panel holds the pty is not offered a park")
-    func attachedHolderSessionIsNotOfferedAPark() {
+    /// A holder-backed session whose panel currently owns the pty is offered
+    /// a park by the row menu: a park ends Claude by signal and reads the
+    /// screen for nothing but its snapshot, so the panel holding the pty
+    /// stands in no park's way.
+    @Test("a holder session whose panel holds the pty is offered a park")
+    func attachedHolderSessionIsOfferedAPark() {
         withState { state in
             let worktree = localWorktree()
             let terminal = holderTerminal(worktreeID: worktree.id)
@@ -890,18 +909,14 @@ struct RowActionMenuCallSiteTests {
             let registration = state.terminalInjections.register(
                 terminalID: terminal.id) { _, _ in true }
 
-            #expect(!actions(state, worktree).context().hasHibernatableClaude)
+            #expect(actions(state, worktree).context().hasHibernatableClaude)
 
-            // The discriminating half: release the claim and the same row and
-            // the same terminal offer the park.
             state.terminalInjections.unregister(registration)
             #expect(actions(state, worktree).context().hasHibernatableClaude)
         }
     }
 
-    /// The same claim on a tmux session changes nothing — the daemon reads a
-    /// pane's screen with `capture-pane` whoever is looking at it — so the test
-    /// above is about the transport, not about an attached panel alone.
+    /// The same claim on a tmux session changes nothing either.
     @Test("a tmux session with an attached panel is still offered a park")
     func attachedTmuxSessionIsStillOfferedAPark() {
         withState { state in

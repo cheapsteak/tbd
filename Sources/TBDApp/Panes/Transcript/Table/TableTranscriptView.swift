@@ -59,6 +59,11 @@ struct TableTranscriptView: NSViewRepresentable {
     /// transition of that answer, whether a scroll or an update caused it. Nil
     /// where nobody loads earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
+    /// The prompt rail to mount. `makeNSView` fixes the container's gutter
+    /// from it for the life of the view and installs the rail and its card;
+    /// each `updateNSView` hands the card the mount's earlier-history state.
+    /// `.none` (the default) mounts no rail and no gutter.
+    var promptRail: PromptRailMount = .none
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -66,7 +71,7 @@ struct TableTranscriptView: NSViewRepresentable {
         Coordinator(context: context)
     }
 
-    func makeNSView(context ctx: Context) -> NSScrollView {
+    func makeNSView(context ctx: Context) -> TranscriptContainerView {
         // OPEN-PATH BOUNDARY TIMING (#129 freeze hunt). Permanent-but-off: emitted
         // at `.debug` so it is silent + free by default; re-enable with:
         //   log stream --level debug --predicate
@@ -116,6 +121,13 @@ struct TableTranscriptView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
+
+        // The view SwiftUI holds: the scroll view right of a leading gutter that
+        // is fixed from here on, so the table's column width never changes on the
+        // rail's account (a width change discards every cached row height).
+        let container = TranscriptContainerView(
+            scrollView: scrollView, leadingGutter: promptRail.containerGutter)
+        container.coordinator = coordinator
 
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
@@ -185,11 +197,30 @@ struct TableTranscriptView: NSViewRepresentable {
         let makeNSViewMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
         Self.log.debug(
             "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
+        attachPromptRail(to: coordinator, container: container)
         onTableReady?(tableView)
-        return scrollView
+        return container
     }
 
-    func updateNSView(_ nsView: NSScrollView, context ctx: Context) {
+    /// Installs the mounted rail and connects it to the coordinator: a rail
+    /// view in the gutter and a card view above everything, sharing one hover
+    /// model, whose jumps go to this table. The rail becomes the presenter and
+    /// the container hands its outline on to the card. Attaching the presenter
+    /// pushes it the current outline and active prompt at once. With no rail
+    /// mounted, this does nothing.
+    private func attachPromptRail(to coordinator: Coordinator, container: TranscriptContainerView) {
+        guard case .rail(let earlier) = promptRail else { return }
+        let onJump: @MainActor (String) -> Void = { [weak coordinator] id in
+            coordinator?.jump(toNodeID: id)
+        }
+        let hover = PromptRailHoverModel()
+        let rail = PromptRailNSView(hover: hover, onJump: onJump)
+        let card = PromptRailCardNSView(hover: hover, onJump: onJump)
+        container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
+        coordinator.promptRailPresenter = rail
+    }
+
+    func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
         let coordinator = ctx.coordinator
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken
@@ -208,12 +239,17 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.lastScrollItemToken = request.token
             coordinator.scrollToRow(withNodeID: request.itemID)
         }
+        // The Remote pane's earlier-history state changes as pages load; the
+        // card's Load row follows it.
+        if case .rail(let earlier) = promptRail {
+            container.promptRailEarlier = earlier
+        }
     }
 
     // MARK: - Coordinator
 
     @MainActor
-    class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, TranscriptTableLayoutObserver {
         static let columnID = NSUserInterfaceItemIdentifier("transcript")
         private static let cellID = NSUserInterfaceItemIdentifier("transcriptCell")
         private static let bubbleCellID = NSUserInterfaceItemIdentifier("bubbleCell")
@@ -221,7 +257,11 @@ struct TableTranscriptView: NSViewRepresentable {
         private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
         let context: TranscriptCardContext
-        weak var tableView: NSTableView?
+        /// The table. A `TranscriptBubbleTableView` reports its layout passes
+        /// here (`tableLayoutWillBegin()` / `tableLayoutDidEnd()`).
+        weak var tableView: NSTableView? {
+            didSet { (tableView as? TranscriptBubbleTableView)?.layoutObserver = self }
+        }
         weak var scrollView: NSScrollView?
 
         var nodes: [TranscriptRenderNode] = []
@@ -263,15 +303,132 @@ struct TableTranscriptView: NSViewRepresentable {
             let offset: CGFloat
             let gapToBottom: CGFloat
         }
-        /// The anchor of the last prepend, held until the reader scrolls, the
-        /// width changes, or an update changes the rows again. While held, a realize-time height correction of
-        /// a row ABOVE the anchor (an estimated row realizing in AppKit's overdraw
-        /// region) re-pins the anchor, so heights settling above the reader never
-        /// drag the rows they are reading.
-        private(set) var pendingPrependAnchor: PrependAnchor?
-        /// Set while the coordinator itself moves the clip to restore an anchor,
-        /// so the bounds observer can tell that scroll from the reader's.
-        private var isRestoringAnchor = false
+        /// The anchor of the last prepend. While held, a realize-time height
+        /// correction of a row ABOVE the anchor (an estimated row realizing in
+        /// AppKit's overdraw region) re-pins the anchor, so heights settling
+        /// above the reader never drag the rows they are reading. The end of
+        /// each table layout pass re-pins it too (`tableLayoutDidEnd()`).
+        ///
+        /// Released by a reader scroll — a move of the clip's origin that
+        /// neither the coordinator nor the table's layout made; a change to the
+        /// clip's size alone keeps it — by a width change, by an update that
+        /// changes the rows again, by the tail-follow (`followTail()`), and by
+        /// a jump to a prompt, which moves the reader. The setter is internal
+        /// for that last one: `jump(toNodeID:)` lives in
+        /// TableTranscriptView+PromptRail.swift.
+        var pendingPrependAnchor: PrependAnchor?
+        /// The anchor of the last jump to a prompt (`jump(toNodeID:)`): the target
+        /// row and where it landed in the viewport. Re-pinned exactly as
+        /// `pendingPrependAnchor` is. A reader scroll, a width change, a rebuild
+        /// or a prepend releases it together with `heldJumpTargetID`; the
+        /// tail-follow releases it alone (see `followTail()`). Appends, tail
+        /// re-renders and `.noop`s add or change rows below it and keep it. Set
+        /// only by the jump; the setter is internal for the same reason as
+        /// `pendingPrependAnchor`'s.
+        var pendingJumpAnchor: PrependAnchor?
+        /// Set while the coordinator itself moves the clip — restoring an anchor,
+        /// jumping or following the tail — so the bounds observer can tell that
+        /// scroll from the reader's.
+        var isRestoringAnchor = false
+        /// What last ended a jump's pin or hold, kept for diagnostics; tests
+        /// name it when a hold ends early. Cleared by each jump.
+        var lastJumpRelease: JumpRelease?
+        #if DEBUG
+        /// The last clip origin move the bounds observer counted as the
+        /// reader's while a jump's pin, a jump's hold or a prepend anchor was
+        /// held, and so released: where the origin went and the stack that
+        /// posted the bounds change. DEBUG builds only, for diagnostics; the
+        /// jump and prepend tests print it when a hold ends early, so the
+        /// failure names what moved the clip. Cleared by each jump.
+        var lastHeldReaderMove: HeldReaderMove?
+
+        /// One origin move recorded in `lastHeldReaderMove`.
+        struct HeldReaderMove: CustomStringConvertible {
+            /// Frames of the posting stack kept: enough to reach past
+            /// AppKit's notification frames to whatever moved the clip.
+            static let stackDepth = 40
+
+            /// The origin at the previous bounds change, nil before the first.
+            let from: CGFloat?
+            /// The origin this bounds change reported.
+            let to: CGFloat?
+            /// What was held when the move landed.
+            let held: [String]
+            /// The first `stackDepth` frames of `Thread.callStackSymbols`.
+            let stack: [String]
+
+            var description: String {
+                let from = self.from.map { "\($0)" } ?? "nil"
+                let to = self.to.map { "\($0)" } ?? "nil"
+                return "reader move while holding \(held.joined(separator: ", ")): clip origin "
+                    + "\(from) → \(to); stack:\n" + stack.joined(separator: "\n")
+            }
+        }
+        #endif
+
+        /// Counts the scrolls that supersede a queued tail-follow: every jump
+        /// and every reader scroll (`supersedeQueuedTailFollow()`). `update`
+        /// decides to follow the tail from where the clip is when the update
+        /// lands, but the follow runs a main-queue turn later; a jump or a
+        /// reader scroll in between makes that decision stale, and following
+        /// the tail then would undo it. A queued follow captures the count and
+        /// skips its scroll if it has moved.
+        private(set) var scrollGeneration = 0
+        /// The `scrollGeneration` the last queued tail-follow was decided
+        /// against, until it runs; nil when none is queued.
+        private var queuedTailFollowGeneration: Int?
+        /// Whether a tail-follow is queued and still current: content landed
+        /// at the bottom and grew the document, and the clip has not followed
+        /// it yet. `refreshActivePrompt()` waits for the follow meanwhile,
+        /// because the bottom rule would fail for that turn and hand the last
+        /// prompt's notch to the one before it.
+        var isAwaitingTailFollow: Bool { queuedTailFollowGeneration == scrollGeneration }
+
+        /// The clip's origin at the last clip-bounds change, so the observer
+        /// can tell a move of the origin from a change to the clip's size.
+        private var lastClipOriginY: CGFloat?
+        /// How many table layout passes are in progress: `layout()` or
+        /// `tile()` of a `TranscriptBubbleTableView`. A clip move made during
+        /// one is NSTableView keeping its visible rows in place as heights
+        /// change, not the reader.
+        private var tableLayoutDepth = 0
+        /// How far the origin must move for a bounds change to count as a move.
+        private static let clipMoveTolerance: CGFloat = 0.25
+
+        // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
+
+        /// Receives the prompt outline, the work counts and the active
+        /// prompt. Attaching one pushes all three current values to it at once.
+        weak var promptRailPresenter: PromptRailPresenter? {
+            didSet {
+                guard let promptRailPresenter else { return }
+                promptRailPresenter.promptRail(entriesDidChange: promptEntries)
+                promptRailPresenter.promptRail(workCountsDidChange: promptWorkCounts)
+                promptRailPresenter.promptRail(activeIndexDidChange: activePromptIndex)
+            }
+        }
+        /// The prompts and peer messages in `nodes`, kept by
+        /// `refreshPromptOutline()`. Written only there; the setter is internal
+        /// because `private(set)` does not reach an extension in another file.
+        var promptEntries: [PromptOutlineEntry] = []
+        /// The work each entry's turn did, parallel to `promptEntries`, kept by
+        /// `refreshPromptWorkCounts()` and written only there; internal for the
+        /// same reason as `promptEntries`.
+        var promptWorkCounts: [Int] = []
+        /// Each prompt's projection into the outline, by `(id, contentVersion)`,
+        /// so a rebuild reads only the prompts that are new or changed. Used
+        /// only by `refreshPromptOutline()`; internal for the same reason as
+        /// `promptEntries`.
+        var promptOutlineCache = PromptOutlineCache()
+        /// Index into `promptEntries` of the active prompt, kept by
+        /// `refreshActivePrompt()` and written only there. Nil with no entries.
+        var activePromptIndex: Int?
+        /// Node id of a jump target that stays active until the reader scrolls
+        /// or a new prompt arrives after it. Set by `jump(toNodeID:)`. Released
+        /// with `pendingJumpAnchor` by the events that release both, and alone
+        /// by `refreshPromptOutline()` when the outline gains an entry after it.
+        /// The tail-follow keeps it.
+        var heldJumpTargetID: String?
 
         /// The worktree root the entries in `composedCache` were composed
         /// against. Optional so "never set" is distinguishable from the empty
@@ -387,8 +544,7 @@ struct TableTranscriptView: NSViewRepresentable {
             let key = ComposedKey(id: node.id, version: node.contentVersion)
             if let cached = composedCache[key] { return cached }
             let composed = TranscriptBubbleGeometry.composedBlocks(
-                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver,
-                isProvisional: node.isProvisional)
+                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver)
             composedCache[key] = composed
             return composed
         }
@@ -681,10 +837,14 @@ struct TableTranscriptView: NSViewRepresentable {
                 ctx.duration = 0
                 tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
             }
-            // A row above a held prepend anchor just changed height, which moved
-            // the anchor by the same amount: re-pin it. Rows at or below the
-            // anchor cannot move it, and outside a prepend nothing is held.
+            // A row above a held prepend or jump anchor just changed height,
+            // which moved the anchor by the same amount: re-pin it. Rows at or
+            // below the anchor cannot move it, and outside a prepend or a jump
+            // nothing is held.
             if let anchor = pendingPrependAnchor, row < anchorRowIndex(anchor) {
+                restorePrependAnchor(anchor)
+            }
+            if let anchor = pendingJumpAnchor, row < anchorRowIndex(anchor) {
                 restorePrependAnchor(anchor)
             }
         }
@@ -1066,6 +1226,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 return activityRowHeight(style: .chrome)
             case .subagentSummary:
                 return activityRowHeight(style: .plainSummary)
+            case .thinking:
+                return activityRowHeight(style: .chrome)
             case .toolCall(_, let name, let inputJSON, _, _, _):
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is
@@ -1966,6 +2128,11 @@ struct TableTranscriptView: NSViewRepresentable {
             // `onNearTop` — leaves it held so heights still settling above the
             // reader keep re-pinning it.
             if step != .noop || isPrepend { pendingPrependAnchor = nil }
+            // A jump anchor is held by row identity, so appended rows and a
+            // re-rendered tail, which only add or change rows below it, keep it.
+            // A rebuild re-lays the rows around it, and a prepend brings its own
+            // anchor for where the reader is looking.
+            if step == .rebuild || isPrepend { releaseJumpAnchor(isPrepend ? .prepend : .rebuild) }
 
             // Worktree-root change: the composed blocks carry the `.link` ranges
             // the link pass baked in, and `composedCache` is keyed by
@@ -1990,6 +2157,7 @@ struct TableTranscriptView: NSViewRepresentable {
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 pendingPrependAnchor = nil
+                releaseJumpAnchor(.widthChange)
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
@@ -1998,6 +2166,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 previousNodes = newNodes
                 precomputeBottomWindow()
                 tableView.reloadData()
+                refreshPromptOutline()
                 recomputeAtBottom(atBottom)
                 return
             }
@@ -2008,10 +2177,23 @@ struct TableTranscriptView: NSViewRepresentable {
                 // Nothing about the content moved, but a root change means every
                 // realized cell holds prose composed against the old root.
                 if rootChanged { tableView.reloadData() }
+                // A prepend token on an unchanged array still released a held
+                // jump target above, so the rule picks the active prompt again.
+                if isPrepend { refreshActivePrompt() }
                 return
             }
 
             let wasAtBottom = isAtBottom()
+            // Follow the tail only for content the SESSION produced. A user-driven
+            // disclosure toggle keeps the viewport exactly where it is, so the row
+            // that was clicked stays under the pointer and only the content below
+            // it moves. (Everything above the clicked row keeps its cached exact
+            // height across the rebuild, so its rows do not re-lay either.)
+            let followsTail = wasAtBottom && !isActivityToggle
+            // From here until the follow runs, the active prompt waits for it
+            // (`isAwaitingTailFollow`): the table ops below grow the document
+            // past a clip that has not followed yet.
+            if followsTail { queuedTailFollowGeneration = scrollGeneration }
             // Capture BEFORE `nodes` is replaced: the visible rows are read off
             // the old geometry and the old node array.
             let prependAnchor = isPrepend && !wasAtBottom ? capturePrependAnchor() : nil
@@ -2098,14 +2280,31 @@ struct TableTranscriptView: NSViewRepresentable {
                 }
             }
 
-            // Follow the tail only for content the SESSION produced. A user-driven
-            // disclosure toggle keeps the viewport exactly where it is, so the row
-            // that was clicked stays under the pointer and only the content below
-            // it moves. (Everything above the clicked row keeps its cached exact
-            // height across the rebuild, so its rows do not re-lay either.)
-            if wasAtBottom && !isActivityToggle {
+            // The tail-follow is decided against the clip as this update's own
+            // table ops left it: a clamp they caused is not a later scroll that
+            // supersedes the follow, so the generation is read again here.
+            let tailFollowGeneration = scrollGeneration
+            if followsTail { queuedTailFollowGeneration = tailFollowGeneration }
+
+            // After the table ops and any anchor restore, so the active prompt
+            // is read off the rows and clip the reader will see. A streaming
+            // tick re-renders only the last row: unless that row is or was a
+            // prompt, the outline cannot have changed, so skip rebuilding it,
+            // recount the work — a tool call joining a collapsed group arrives
+            // this way — and re-read the active prompt against the grown
+            // document. With a tail-follow queued, the follow re-reads the
+            // active prompt itself once the clip has followed; the entries and
+            // counts are delivered now.
+            if step == .updateLast, !updateLastCanChangeOutline() {
+                refreshPromptWorkCounts()
+                refreshActivePrompt()
+            } else {
+                refreshPromptOutline()
+            }
+
+            if followsTail {
                 DispatchQueue.main.async { [weak self] in
-                    self?.scrollToEnd(animated: false)
+                    self?.runQueuedTailFollow(decidedAt: tailFollowGeneration)
                     self?.recomputeAtBottom(atBottom)
                 }
             } else {
@@ -2197,22 +2396,96 @@ struct TableTranscriptView: NSViewRepresentable {
                 name: NSView.boundsDidChangeNotification,
                 object: clip
             )
+            lastClipOriginY = clip.bounds.minY
         }
 
         @objc private func clipBoundsDidChange() {
-            // The reader moved the viewport: a held prepend anchor no longer
-            // describes where they are looking, so stop re-pinning it. The
-            // coordinator's own restore scroll is the one move that keeps it.
-            if !isRestoringAnchor { pendingPrependAnchor = nil }
-            reportNearTopIfChanged()
-            guard let binding = atBottomBinding else { return }
-            let value = isViewportAtBottomForButton()
-            // Only write on a transition so a scroll gesture flips the flag at
-            // most twice (entering/leaving the bottom), not once per frame.
-            if binding.wrappedValue != value {
-                binding.wrappedValue = value
+            #if DEBUG
+            let originBefore = lastClipOriginY
+            #endif
+            if clipOriginMovedByReader() {
+                #if DEBUG
+                recordHeldReaderMove(from: originBefore)
+                #endif
+                // The reader moved the viewport: a held prepend or jump anchor
+                // no longer describes where they are looking, so stop re-pinning
+                // it, and a jump target stops overriding the active-prompt rule.
+                // A tail-follow queued before the scroll would pull them back.
+                pendingPrependAnchor = nil
+                releaseJumpAnchor(.readerScroll)
+                supersedeQueuedTailFollow()
             }
+            reportNearTopIfChanged()
+            if let binding = atBottomBinding {
+                let value = isViewportAtBottomForButton()
+                // Only write on a transition so a scroll gesture flips the flag at
+                // most twice (entering/leaving the bottom), not once per frame.
+                if binding.wrappedValue != value {
+                    binding.wrappedValue = value
+                }
+            }
+            refreshActivePrompt()
         }
+
+        /// Whether this bounds change is a reader scroll: the clip's origin
+        /// moved, and neither the coordinator (`isRestoringAnchor`) nor the
+        /// table's own layout pass (`tableLayoutDepth`) moved it. A change to
+        /// the clip's size that leaves the origin where it was — the pane
+        /// resizing, the autohiding scroller claiming its width — is not one,
+        /// and neither is a bounds change AppKit posts when only the document's
+        /// frame changed. Records the origin for the next change either way.
+        ///
+        /// The table's layout moves the clip when row heights have changed, to
+        /// keep its own choice of visible row in place; `tableLayoutDidEnd()`
+        /// then puts any held anchor back. AppKit's own row-height estimation,
+        /// which would move the origin as it swapped its guesses for real
+        /// heights, is off for the whole process
+        /// (`applicationWillFinishLaunching`). What else moves the origin
+        /// without the coordinator is the clip clamping to a document that got
+        /// shorter than the viewport's reach, and that counts as the reader's:
+        /// nothing tells it apart, and it is rare.
+        private func clipOriginMovedByReader() -> Bool {
+            let origin = scrollView?.contentView.bounds.minY
+            defer { lastClipOriginY = origin }
+            guard !isRestoringAnchor, tableLayoutDepth == 0 else { return false }
+            guard let origin, let last = lastClipOriginY else { return true }
+            return abs(origin - last) > Self.clipMoveTolerance
+        }
+
+        // MARK: Table layout passes (TranscriptTableLayoutObserver)
+
+        func tableLayoutWillBegin() {
+            tableLayoutDepth += 1
+        }
+
+        /// At the end of the outermost pass, puts a held prepend or jump anchor
+        /// back where it says its row belongs. The pass may have moved the clip
+        /// to keep a different row in place, and this lands the anchored row
+        /// before anything is drawn.
+        func tableLayoutDidEnd() {
+            tableLayoutDepth = max(0, tableLayoutDepth - 1)
+            guard tableLayoutDepth == 0 else { return }
+            if let anchor = pendingPrependAnchor { restorePrependAnchor(anchor) }
+            if let anchor = pendingJumpAnchor { restorePrependAnchor(anchor) }
+        }
+
+        #if DEBUG
+        /// Records a reader move in `lastHeldReaderMove` when it is about to
+        /// release something held; a move with nothing held records nothing.
+        /// Call before the release, so what was held can still be read.
+        private func recordHeldReaderMove(from origin: CGFloat?) {
+            var held: [String] = []
+            if pendingJumpAnchor != nil { held.append("jump pin") }
+            if heldJumpTargetID != nil { held.append("jump hold") }
+            if pendingPrependAnchor != nil { held.append("prepend anchor") }
+            guard !held.isEmpty else { return }
+            lastHeldReaderMove = HeldReaderMove(
+                from: origin,
+                to: scrollView?.contentView.bounds.minY,
+                held: held,
+                stack: Array(Thread.callStackSymbols.prefix(HeldReaderMove.stackDepth)))
+        }
+        #endif
 
         // MARK: Prepend anchor / near top
 
@@ -2261,7 +2534,8 @@ struct TableTranscriptView: NSViewRepresentable {
         /// so the viewport keeps its recorded distance from the bottom. Reads
         /// `rect(ofRow:)` NOW, so it accounts for whatever heights (exact or
         /// estimated) the rows above currently have; calling it again after any
-        /// of them changes is what keeps the anchor pinned. Idempotent.
+        /// of them changes is what keeps the anchor pinned. Idempotent. A jump
+        /// anchor (`pendingJumpAnchor`) is restored the same way.
         func restorePrependAnchor(_ anchor: PrependAnchor) {
             guard !isRestoringAnchor, let tableView, let scrollView else { return }
             let clip = scrollView.contentView
@@ -2307,7 +2581,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Vertical gap between the viewport's bottom edge and the document
         /// bottom, in points (≤0 when the last content is flush with or above the
         /// viewport bottom).
-        private func viewportGapToBottom() -> CGFloat {
+        func viewportGapToBottom() -> CGFloat {
             guard let scrollView, let documentView = scrollView.documentView else { return 0 }
             let clip = scrollView.contentView
             let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
@@ -2368,6 +2642,37 @@ struct TableTranscriptView: NSViewRepresentable {
             }
         }
 
+        /// Follows the tail after content the session produced. This is the
+        /// coordinator's own scroll, not the reader's, so it runs under
+        /// `isRestoringAnchor` and a held jump target stays active. It ends any
+        /// held pin first, since an anchor holding a row still and the tail
+        /// pulling the clip to the end would fight over it.
+        private func followTail() {
+            pendingPrependAnchor = nil
+            if pendingJumpAnchor != nil { lastJumpRelease = .tailFollow }
+            pendingJumpAnchor = nil
+            isRestoringAnchor = true
+            defer { isRestoringAnchor = false }
+            scrollToEnd(animated: false)
+        }
+
+        /// Runs a tail-follow `update` queued against `generation`: follows the
+        /// tail unless a jump or a reader scroll has superseded it since, then
+        /// re-derives the active prompt, which waited for the follow. The
+        /// explicit refresh covers a clip already at the end, whose scroll
+        /// posts no bounds change.
+        private func runQueuedTailFollow(decidedAt generation: Int) {
+            if queuedTailFollowGeneration == generation { queuedTailFollowGeneration = nil }
+            if generation == scrollGeneration { followTail() }
+            refreshActivePrompt()
+        }
+
+        /// A jump or a reader scroll: a tail-follow queued before it is stale
+        /// and must not undo it. See `scrollGeneration`.
+        func supersedeQueuedTailFollow() {
+            scrollGeneration &+= 1
+        }
+
         private func recomputeAtBottom(_ atBottom: Binding<Bool>) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -2388,8 +2693,19 @@ struct TableTranscriptView: NSViewRepresentable {
 /// accept our `TranscriptBubbleTextView` lets the text view take the mouse on the
 /// first click, so click-drag selection and copy work. `selectionHighlightStyle =
 /// .none` does NOT bypass this gate, which is why selection failed before.
+///
+/// It also tells `layoutObserver` when it lays itself out. When row heights
+/// change (`noteHeightOfRows`), NSTableView's layout keeps its visible rows in
+/// place by moving the clip itself (`NSTableRowData` updating its visible row
+/// entries scrolls the `NSClipView`). That move is AppKit's, not the
+/// reader's, and the coordinator needs to know a pass is in progress to tell
+/// the two apart.
 @MainActor
 final class TranscriptBubbleTableView: NSTableView {
+    /// Told when a layout pass begins and ends. The coordinator sets itself
+    /// here when it is given the table.
+    weak var layoutObserver: TranscriptTableLayoutObserver?
+
     override func validateProposedFirstResponder(
         _ responder: NSResponder,
         for event: NSEvent?
@@ -2399,6 +2715,28 @@ final class TranscriptBubbleTableView: NSTableView {
         if responder is TranscriptBubbleTextView { return true }
         return super.validateProposedFirstResponder(responder, for: event)
     }
+
+    override func layout() {
+        layoutObserver?.tableLayoutWillBegin()
+        super.layout()
+        layoutObserver?.tableLayoutDidEnd()
+    }
+
+    /// `tile()` lays out the same row geometry and is also called directly,
+    /// outside a layout pass, so it is bracketed the same way.
+    override func tile() {
+        layoutObserver?.tableLayoutWillBegin()
+        super.tile()
+        layoutObserver?.tableLayoutDidEnd()
+    }
+}
+
+/// Learns when `TranscriptBubbleTableView` lays itself out. Passes can nest:
+/// `layout()` may call `tile()`.
+@MainActor
+protocol TranscriptTableLayoutObserver: AnyObject {
+    func tableLayoutWillBegin()
+    func tableLayoutDidEnd()
 }
 
 // MARK: - Hosting cell

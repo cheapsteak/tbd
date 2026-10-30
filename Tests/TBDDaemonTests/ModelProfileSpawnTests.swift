@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -95,14 +96,26 @@ struct ModelProfileSpawnTests {
         }
     }
 
+    /// `panePID` is what the dry-run tmux answers for every pane's pid (its
+    /// own default is "0"); the inspector and signaller are the router's
+    /// process-table seams, production by default as in the router itself.
     private func makeFixture(
-        respawnWindowError: (@Sendable (String) -> Error?)? = nil
+        respawnWindowError: (@Sendable (String) -> Error?)? = nil,
+        sessionsDir: URL? = nil,
+        panePID: String? = nil,
+        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        processSignaller: any ProcessSignaller = ProductionProcessSignaller()
     ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
+        var panePIDAnswer: (@Sendable (String, String) throws -> String)?
+        if let panePID {
+            panePIDAnswer = { _, _ in panePID }
+        }
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { args in recorder.record(args) },
-            dryRunRespawnWindowError: respawnWindowError)
+            dryRunRespawnWindowError: respawnWindowError,
+            dryRunPanePID: panePIDAnswer)
         let db = try! TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
@@ -114,6 +127,9 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: paneProcessInspector,
+            processSignaller: processSignaller,
+            sessionsDir: sessionsDir ?? TBDConstants.sessionsDir(),
             actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder)
@@ -1328,6 +1344,149 @@ struct ModelProfileSpawnTests {
                 "in-place swap must NOT fork the session; got: \(joined)")
     }
 
+    /// The tmux in-place swap launches its replacement under the incarnation
+    /// `prepareProfileAgentRespawn` committed. With the flag on that launch
+    /// carries the session mod in its process environment and its spawn
+    /// record names that incarnation; with the flag off, neither.
+    @Test("in-place swap: the replacement carries the session mod only with the flag on",
+          arguments: [true, false])
+    func tmuxInPlaceSwapExportsTheMod(flagOn: Bool) async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let (router, db, recorder) = makeFixture(sessionsDir: sessionsDir)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        // Set after the create, so the swap's launch is the only spawn the
+        // flag can reach.
+        try await db.config.setComposerDraftEnabled(flagOn)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success)
+
+        let swapped = try #require(try await db.terminals.get(id: oldTerm.id))
+        let incarnation = try #require(swapped.sessionIncarnationID)
+        let sessionID = try #require(swapped.claudeSessionID)
+        let launch = try #require(
+            Array(recorder.calls.dropFirst(beforeSwap)).last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        if flagOn {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
+            let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
+            #expect(spawn.sessionId == sessionID)
+            #expect(spawn.incarnationId == incarnation.uuidString)
+            #expect(spawn.features == ["composer-draft"])
+        } else {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+        }
+    }
+
+    /// The pane's own pid — its login-shell wrapper — and the Claude process
+    /// beneath it, for the swap's signal ending. Both sit above macOS's
+    /// PID_MAX (99999), so a regression into a raw `kill` of either cannot
+    /// reach a real process; the Claude pid only ever reaches the fake
+    /// signaller.
+    private static let swapShellPID: Int32 = 900_011
+    private static let swapClaudePID: Int32 = 900_012
+
+    /// The tmux in-place swap of a session spawned with the composer-draft
+    /// feature types nothing into the pane — a Ctrl+C would clear its box —
+    /// and sends SIGTERM to the Claude pid under the pane's shell before the
+    /// respawn.
+    @Test("in-place swap of a composer-draft session: SIGTERM to Claude, no keys")
+    func featureTmuxSwapSendsNoKeys() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let signaller = FakeProcessSignaller()
+        let (router, db, recorder) = makeFixture(
+            sessionsDir: sessionsDir,
+            panePID: String(Self.swapShellPID),
+            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
+            processSignaller: signaller)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        // On before the create, so the session is spawned with the feature:
+        // the create writes the spawn record for the incarnation it persists.
+        try await db.config.setComposerDraftEnabled(true)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        let row = try #require(try await db.terminals.get(id: oldTerm.id))
+        let incarnation = try #require(row.sessionIncarnationID)
+        let sessionID = try #require(row.claudeSessionID)
+        let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
+        #expect(UUID(uuidString: spawn.incarnationId) == incarnation)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
+        let keys = postSwap.filter { $0.contains("send-keys") }
+        #expect(keys.isEmpty, "the swap typed into a feature session: \(keys)")
+        #expect(postSwap.contains { $0.contains("respawn-window") })
+        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
+        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
+    }
+
+    /// The same swap of a session spawned without the feature — flag off, no
+    /// spawn record — types nothing either and ends by the same SIGTERM. A
+    /// typed `/exit` would submit whatever draft the box holds; no Escape,
+    /// Ctrl+C or `/exit` reaches the pane, and the only signal is the one to
+    /// the Claude pid under the pane's shell.
+    @Test("in-place swap of a legacy session: SIGTERM to Claude, no keys")
+    func legacyTmuxSwapSendsNoKeys() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let signaller = FakeProcessSignaller()
+        let (router, db, recorder) = makeFixture(
+            sessionsDir: sessionsDir,
+            panePID: String(Self.swapShellPID),
+            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
+            processSignaller: signaller)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        // Legacy by construction: the flag was never turned on, so the create
+        // wrote no spawn record and the session reads as spawned without the
+        // feature.
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID) == nil)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
+        let keys = postSwap.filter { $0.contains("send-keys") }
+        #expect(keys.isEmpty, "the swap typed into a legacy session: \(keys)")
+        #expect(postSwap.contains { $0.contains("respawn-window") })
+        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
+        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
+    }
+
     /// Give `term`'s session a BLANK transcript on disk: the file exists and
     /// carries only a metadata line, so the scanner answers `.blank` (not
     /// `.missing`) and a fork plans a fresh spawn rather than being refused.
@@ -2050,31 +2209,16 @@ struct ModelProfileSpawnTests {
             deltas: deltas, configDirManager: configDirManager)
     }
 
-    /// Poll until `condition` is true or `timeout` elapses.
-    ///
-    /// The deadline is the shared saturated-pass budget, not a literal: what it
-    /// waits for is produced by the coordinator's own detached watcher task,
-    /// which runs on the cooperative pool behind the whole fast pass regardless
-    /// of how the test was started (`gateHoldingTask` in
-    /// `Tests/TestSupport/BoundedGateSupport.swift`). Five seconds is far below
-    /// that pass's healthy per-test latency.
-    private func waitFor(
-        _ condition: @Sendable () -> Bool,
-        timeout: Duration = TestDeadlines.saturatedPass
-    ) async -> Bool {
-        var elapsed: Duration = .zero
-        let step: Duration = .milliseconds(10)
-        while elapsed < timeout {
-            if condition() { return true }
-            try? await Task.sleep(for: step)
-            // `try?` swallows the CancellationError, and a cancelled sleep
-            // returns instantly — so without this the loop would spin through
-            // every remaining step at full speed instead of ending. Report
-            // whatever the condition says at the moment of cancellation.
-            if Task.isCancelled { return condition() }
-            elapsed += step
+    /// Carries the observed count on the primary failure line
+    /// (assertion-hygiene rule 4 in `Tests/CLAUDE.md`).
+    private struct BadgeRefreshTimeout: Error, CustomStringConvertible {
+        let baseline: Int
+        let observed: Int
+        let timeout: Duration
+        var description: String {
+            "no .modelProfilesChanged broadcast after the credential appeared — "
+                + "observed \(observed) against a baseline of \(baseline) after polling up to \(timeout)"
         }
-        return condition()
     }
 
     /// REGRESSION (profile env clobbered by shell rc files): the profile's
@@ -2252,10 +2396,16 @@ struct ModelProfileSpawnTests {
         // virtual clock because nothing on the spawn path now sleeps for a
         // test to advance past — a clock-driven window would only cover a
         // restored pump that happened to sleep on the same clock.
-        #expect(!(await waitFor({
+        //
+        // `pollUntilTrue` bounds the window by reading `ContinuousClock`, so
+        // it lasts three seconds of wall time however late each poll sleep
+        // resumes under load. A cancelled wait still read the condition
+        // fresh, so only `.satisfied` means the pane was touched.
+        let touched = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
             fixture.captures.count > 0
                 || fixture.tmux.calls.contains { $0.contains("send-keys") || $0.contains("paste-buffer") }
-        }, timeout: .seconds(3))))
+        }
+        #expect(touched != .satisfied, "the login pane was read or typed into: \(fixture.tmux.calls)")
         #expect(fixture.captures.count == 0, "the login pane was read")
         #expect(
             !fixture.tmux.calls.contains { $0.contains("send-keys") },
@@ -2293,7 +2443,21 @@ struct ModelProfileSpawnTests {
         let claudeJSON = #"{"oauthAccount":{"emailAddress":"person@acme.example"}}"#
         try Data(claudeJSON.utf8).write(to: configDir.appendingPathComponent(".claude.json"))
 
-        #expect(await waitFor({ fixture.deltas.profilesChangedCount > baseline }))
+        // The deadline is the shared saturated-pass budget, not a literal: the
+        // broadcast comes from the coordinator's own detached watcher task,
+        // which runs on the cooperative pool behind the whole fast pass
+        // (`gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`).
+        let refreshed = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(10)
+        ) {
+            fixture.deltas.profilesChangedCount > baseline
+        }
+        if refreshed == .timedOut {
+            Issue.record(BadgeRefreshTimeout(
+                baseline: baseline,
+                observed: fixture.deltas.profilesChangedCount,
+                timeout: TestDeadlines.saturatedPass))
+        }
     }
 }
 }

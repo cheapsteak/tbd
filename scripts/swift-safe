@@ -381,10 +381,7 @@ def _shares_the_module_cache(subcommand: str, swiftpm_arguments: list[str]) -> b
 
     * a subcommand that compiles nothing has no build plan to place;
     * under ``CI`` the runners are ephemeral — one worktree per VM — so a
-      shared cache saves nothing, and ``.github/workflows/test.yml`` ends its
-      job with a build that does not come through here at all, so flagging
-      only the steps that do would make CI alternate against its own
-      ``actions/cache``d ``.build`` on every run;
+      shared cache saves nothing;
     * ``TBD_SWIFT_SHARED_MODULE_CACHE=0`` is the opt-out back to SwiftPM's
       per-worktree default;
     * a caller that passed its own path has chosen, and a second

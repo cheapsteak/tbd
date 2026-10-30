@@ -667,72 +667,14 @@ enum ProfileUsagePresentation {
         }
     }
 
-    // MARK: - Per-session tooltips
-    //
-    // NOTE: `sessionTooltip` / `worktreeAccountsTooltip` are the flat-string
-    // form. The UI now renders these two sites as structured `HoverCardModel`s
-    // (see `AccountHoverCards`); the string form is kept as the plain-text
-    // fallback/composition reference.
+    // MARK: - Spawn time
 
-    /// "2026-07-03 14:05" — fixed format so tooltips are locale-stable.
+    /// "2026-07-03 14:05" — fixed format so the tab hover card's spawn time is
+    /// locale-stable.
     static func spawnTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         formatter.timeZone = timeZone
         return formatter.string(from: date)
-    }
-
-    /// Human account descriptor for a Claude terminal, resolved against the
-    /// current profile list: "email (Profile)" for pinned + logged-in,
-    /// "Profile (not logged in)" for pinned pre-login, "ambient (terminal
-    /// login)" for NULL-profile legacy sessions, and a removed-profile note
-    /// when the id no longer resolves.
-    static func accountDescriptor(profileID: UUID?,
-                                  profiles: [ModelProfileWithUsage]) -> String {
-        guard let profileID else { return "ambient (terminal login)" }
-        guard let entry = profiles.first(where: { $0.profile.id == profileID }) else {
-            return "profile removed — session keeps its spawn account"
-        }
-        if let identity = ProfileLoginPresentation.normalizedIdentity(entry.loginIdentity) {
-            return "\(identity) (\(entry.profile.name))"
-        }
-        return "\(entry.profile.name) (not logged in)"
-    }
-
-    /// Hover tooltip for a terminal tab. nil for non-Claude terminals (shells,
-    /// Codex — no account concept). Multi-line: account, drift note (ambient
-    /// only), current usage numbers (when the pinned account has a snapshot),
-    /// spawn time. Sessions are pinned to their spawn account for life, so
-    /// this reflects what the session is actually consuming.
-    static func sessionTooltip(terminal: Terminal,
-                               profiles: [ModelProfileWithUsage],
-                               timeZone: TimeZone = .current) -> String? {
-        guard terminal.kind == .claude || terminal.isClaudeResumable else { return nil }
-        var lines = ["Account: \(accountDescriptor(profileID: terminal.profileID, profiles: profiles))"]
-        if terminal.profileID == nil {
-            lines.append("May drift to a different account on token refresh")
-        } else if let entry = profiles.first(where: { $0.profile.id == terminal.profileID }),
-                  let summary = usageSummary(for: entry.usageSnapshot, timeZone: timeZone) {
-            lines.append("Usage: \(summary)")
-        }
-        lines.append("Spawned: \(spawnTimeText(terminal.createdAt, timeZone: timeZone))")
-        return lines.joined(separator: "\n")
-    }
-
-    /// Sidebar worktree-row tooltip aggregating the accounts of its Claude
-    /// sessions, deduped in tab order: "Claude accounts: a@b.co (Work),
-    /// ambient (terminal login)". nil when the worktree has no Claude sessions.
-    static func worktreeAccountsTooltip(terminals: [Terminal],
-                                        profiles: [ModelProfileWithUsage]) -> String? {
-        var seen = Set<String>()
-        var descriptors: [String] = []
-        for terminal in terminals where terminal.kind == .claude || terminal.isClaudeResumable {
-            let descriptor = accountDescriptor(profileID: terminal.profileID, profiles: profiles)
-            if seen.insert(descriptor).inserted {
-                descriptors.append(descriptor)
-            }
-        }
-        guard !descriptors.isEmpty else { return nil }
-        return "Claude accounts: " + descriptors.joined(separator: ", ")
     }
 }

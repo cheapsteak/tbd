@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TBDShared
 
-@Suite("Worktree pinnedAt and desk identity")
+@Suite("Worktree pinnedAt")
 struct WorktreePinnedAtTests {
     private func makeWorktree(displayName: String = "wt",
                               repoID: UUID? = UUID(),
@@ -34,19 +34,5 @@ struct WorktreePinnedAtTests {
         """
         let decoded = try JSONDecoder().decode(Worktree.self, from: Data(json.utf8))
         #expect(decoded.pinnedAt == nil)
-    }
-
-    @Test("isNightwatchDesk requires both scratch and the exact display name")
-    func deskIdentity() {
-        let desk = makeWorktree(displayName: NightwatchDeskPrompts.deskDisplayName, repoID: nil)
-        #expect(desk.isNightwatchDesk)
-
-        // Right name, but has a repo → not the desk.
-        let repoBacked = makeWorktree(displayName: NightwatchDeskPrompts.deskDisplayName)
-        #expect(!repoBacked.isNightwatchDesk)
-
-        // Scratch, but a different name → not the desk.
-        let otherScratch = makeWorktree(displayName: "Scratch", repoID: nil)
-        #expect(!otherScratch.isNightwatchDesk)
     }
 }

@@ -2,20 +2,21 @@ import Testing
 import Foundation
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 /// Per-suite UserDefaults so tests don't clobber the developer's real TBDApp.plist.
 /// See CLAUDE.md → "Tests must not touch ~/tbd".
 @MainActor
-private func makeIsolatedAppState() -> (AppState, String) {
-    let suiteName = "com.tbd.tests.notificationclick.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
+private func makeIsolatedAppState() -> (AppState, TestDefaultsSuite) {
+    let suite = TestDefaultsSuite("com.tbd.tests.notificationclick")
+    let defaults = suite.defaults
     let state = AppState(userDefaults: defaults)
-    return (state, suiteName)
+    return (state, suite)
 }
 
 @MainActor
-private func tearDown(_ suiteName: String) {
-    UserDefaults().removePersistentDomain(forName: suiteName)
+private func tearDown(_ suite: TestDefaultsSuite) {
+    suite.tearDown()
 }
 
 @MainActor
@@ -103,7 +104,7 @@ private func makeAppStateWithTabs(
     worktreeID: UUID,
     repoID: UUID,
     terminalID: UUID
-) -> (AppState, String) {
+) -> (AppState, TestDefaultsSuite) {
     let (state, suite) = makeIsolatedAppState()
     state.isInitialStateLoaded = true
     state.worktrees = [

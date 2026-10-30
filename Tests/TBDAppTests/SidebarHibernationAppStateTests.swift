@@ -2,14 +2,15 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("Sidebar hibernation integration")
 struct SidebarHibernationAppStateTests {
     private func withState(_ body: (AppState, UUID) -> Void) {
-        let suite = "SidebarHibernationAppStateTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarHibernationAppStateTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]
@@ -96,6 +97,28 @@ struct SidebarHibernationAppStateTests {
             #expect(state.selectedWorktreeIDs.isEmpty)
             #expect(state.terminals[scratch.id]?.first?.isParked == true)
             #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+        }
+    }
+
+    @Test func scratchMembershipChangePreservesCollapsedSectionUntilNavigation() {
+        withState { state, _ in
+            let scratch = Worktree(repoID: nil, name: "scratch", displayName: "Scratch task",
+                                   branch: "", path: "/tmp/acme-scratch", tmuxServer: "acme")
+            state.scratchWorktrees = [scratch]
+            state.selectedWorktreeIDs = [scratch.id]
+            let initial = state.sidebarSelectionReveal
+            state.userDefaults.set(false, forKey: AppState.scratchSectionExpandedKey)
+
+            park(scratch, in: state)
+            let parked = state.sidebarSelectionReveal
+            #expect(parked.groups == [.init(owner: .scratch, kind: .hibernated)])
+            state.revealSidebarGroups(parked, previous: initial, grouped: true)
+            #expect(!state.userDefaults.bool(forKey: AppState.scratchSectionExpandedKey))
+            #expect(state.expandedSidebarGroups.contains(.init(owner: .scratch, kind: .hibernated)))
+
+            state.selectedWorktreeIDs = [scratch.id]
+            state.revealSidebarGroups(state.sidebarSelectionReveal, previous: parked, grouped: true)
+            #expect(state.userDefaults.bool(forKey: AppState.scratchSectionExpandedKey))
         }
     }
 

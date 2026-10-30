@@ -41,6 +41,67 @@ Design and rationale: [`docs/specs/2026-08-19-migration-identifier-scheme-design
 Adding a migration touches one file no other branch has, so two branches can
 neither pick the same identifier nor edit the same text.
 
+## Retiring a column
+
+Removing a column is not a migration. It takes two steps:
+
+- **Retire** – a pull request that deletes every read and write of the column,
+  lists it in `RetiredColumns.all` (`RetiredColumns.swift`) with the current
+  schema epoch, and bumps that epoch.
+- **Drop** – no pull request. `RetiredColumnReconciler` runs
+  `ALTER TABLE … DROP COLUMN` at daemon startup, after migrations, once the app
+  bundle `tbd update` keeps for rollback (`~/tbd/updates/previous/TBD.app`)
+  records a schema epoch at or past the column's, or when there is no kept
+  bundle.
+
+The wait is for that bundle. A GRDB record writes every property it declares,
+so a build that still declares a column fails every insert and update into its
+table once the column is gone, and the kept bundle is what a failed update
+restores. A bundle built from a tree that had already retired the column never
+names it.
+
+The checklist. Review is the enforcement; no lint or test checks it.
+
+1. Delete every read and write of the column: the GRDB record's property, its
+   `CodingKeys`, any hand-written SQL that names it, and the shared model field
+   it fed.
+2. Confirm the column is nullable or has a default, so inserts that no longer
+   name it still succeed. Confirm it is not part of a key, constraint, index,
+   view or trigger: SQLite refuses to drop such a column, so it cannot be
+   retired this way.
+3. Increment `SchemaEpoch.current` in `Sources/TBDShared/SchemaEpoch.swift`.
+4. Append `(table, column, epoch)` to `RetiredColumns.all`, with the new epoch.
+5. Make all four changes in one commit.
+
+The list is permanent, like migration history. A fresh install still creates
+every retired column through the frozen migration that added it, and relies on
+the reconciler to drop it again, so removing an entry would leave that column
+on every later fresh install. Drops happen only in the reconciler: the `.sql`
+allowlist above refuses `DROP COLUMN`, because a migration cannot see the kept
+bundle.
+
+Two branches that each retire a column can both bump the epoch from N to N+1,
+and Git merges that without a conflict. The merged result is correct; a build
+from either branch alone claims N+1 while still using the other branch's
+column, which matters only if a developer makes that build the kept bundle.
+
+Before its first drop in a run, the reconciler copies the database to
+`~/tbd/state.db.pre-column-drop.<UTC-timestamp>` with `VACUUM INTO`, the way
+back for data someone still needed. A run whose snapshot fails drops nothing,
+and a drop that fails is logged at error level and skipped without stopping
+startup. A run that wrote a copy and then dropped nothing, because every due
+drop failed, deletes that copy and no other file, since the database still
+holds everything in it; so a drop that fails at every start leaves a copy
+only from a run in which some other column dropped. Every run in which
+nothing failed, whether or not it wrote a copy, ends with
+`DatabaseSnapshotPruner` keeping the newest three `pre-column-drop` copies and
+deleting older ones, never the one the run just wrote. A run with
+any failure prunes nothing, so it never pushes out the copy that still holds a
+column an earlier run dropped, and a run that drops some columns and fails on
+others keeps its own copy too.
+
+Design and rationale: [`docs/specs/2026-10-24-column-retirement-design.md`](../../../docs/specs/2026-10-24-column-retirement-design.md).
+
 ## What a `.sql` file may contain
 
 Every statement must lead with one of these forms; `scripts/lint-migrations.py`
@@ -192,7 +253,11 @@ instead of failing. The loader instead searches an ordered candidate list — th
 executable's own directory, the directory of the bundle owning a marker type,
 and that directory's parent, which is where the resource bundle sits under the
 test harness — and throws an error naming every path it searched when the list
-is exhausted.
+is exhausted. In each candidate it accepts both bundle layouts SwiftPM emits:
+the native build system's flat `TBD_TBDDaemonLib.bundle/Migrations` and the
+`swiftbuild` backend's macOS-style
+`TBD_TBDDaemonLib.bundle/Contents/Resources/Migrations`. Neither backend is
+pinned, so the loader has to tolerate whichever one built it.
 
 Refusal has two gates, and only the first of them refuses.
 
@@ -251,5 +316,11 @@ disagreement means one side's framing code drifted, not that SQLite changed.
 `~/tbd/state.db.pre-migration.<UTC-timestamp>` (e.g.
 `state.db.pre-migration.20260513T143055Z`) via `VACUUM INTO` whenever migration
 work is pending AND the database file already existed. Failures log at error
-level but do not block the migration — best effort only. Safe to delete the
-snapshot once the upgrade looks clean.
+level but do not block the migration — best effort only. Once migrations
+succeed, at every start, `DatabaseSnapshotPruner` keeps the newest three
+`pre-migration` copies (counted apart from the `pre-column-drop` ones) and
+deletes older ones, never the copy this start just wrote. A start whose
+migration fails prunes nothing, so a daemon relaunched into the same failure
+cannot push out the clean copy taken before the upgrade. Only whole names of
+the exact form above match; other files beside the database are never touched.
+Safe to delete a copy yourself once the upgrade looks clean.

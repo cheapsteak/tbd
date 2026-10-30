@@ -43,10 +43,12 @@ files carry the run's population, which is why a green run downloads them too:
 the verdict a caller reads is `Test run with N tests`, and N has to come from
 somewhere that cannot make it up.
 
-A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds four jobs
-with no `needs:` between them — lint, the committed-plans guard, the review-script
-tests and the test job — plus a `swift build` step after the results are uploaded,
-and nine fallible setup steps before the first `scripts/test.sh`; and
+A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds jobs the
+test job does not wait on — lint, the committed-plans guard, the review-script
+tests among them; it waits only on the Swift suite gate, which on a dispatched
+run always lets it run — plus cache bookkeeping steps that can fail without
+stopping the tests, and ten fallible setup and build steps before the first
+`scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
 path, for both subcommands.
@@ -869,13 +871,13 @@ def verdict_from_results(results: Report | None) -> int:
       a claim that nothing failed.
     - **A stated population and nothing failing** — `EXIT_REFUSED`: no verdict.
       Every pass that reported ran tests and none of them failed, so whatever
-      made the run red is not a test. `test.yml` holds four jobs with no
-      `needs:` between them and a `swift build` step after the results upload,
-      and `scripts/test.sh` runs none of that locally — so reporting red here
-      would fail a lane for a SwiftLint violation or a committed plan file it
-      cannot even see, and reporting green would adopt a pass the run never
-      gave. 78 sends the lane back to the local queue, where it gets an answer
-      to its own question. Inventing red is precisely what `verdict_for` refuses
+      made the run red is not a test. `test.yml` holds jobs the test job does
+      not wait on, and cache bookkeeping steps that can fail without stopping
+      the tests, and `scripts/test.sh` runs none of that locally — so reporting
+      red here would fail a lane for a SwiftLint violation or a committed plan
+      file it cannot even see, and reporting green would adopt a pass the run
+      never gave. 78 sends the lane back to the local queue, where it gets an
+      answer to its own question. Inventing red is precisely what `verdict_for` refuses
       to do for a cancelled run, on the same reasoning.
     - **Readable results that state no population** — `EXIT_FAILED`. Files
       arrived, they record nothing failing, and they will not say how many tests
@@ -895,19 +897,19 @@ def verdict_from_results(results: Report | None) -> int:
       one that failed. Only `actions/upload-artifact`'s `if-no-files-found: warn`
       keeps the second shape off the wire today, by publishing no artifact when
       nothing matches; that is a third party's behavior, not a guard of ours.
-      `test.yml`'s test job runs nine fallible setup steps before it reaches
-      the first `scripts/test.sh` — checkout, the cache-save decision, mtime
+      `test.yml`'s test job runs ten fallible steps before it reaches the
+      first `scripts/test.sh` — checkout, the cache-save decision, mtime
       restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
-      restore, workspace repair, force rebuild — and any one of them failing
-      means zero tests ran, no xUnit file was written and no artifact was
-      uploaded. `brew install` flaking on a hosted runner is ordinary weather,
-      and reporting that as a red
-      suite tells a caller its tests failed when they never started, with no
-      local fallback to correct it. Every case that lands here is answered
-      correctly by 78: setup failed (nothing ran); the compile failed (the local
-      re-run reproduces the error properly); the tests really did fail but the
-      upload broke (the local re-run finds the real failures); cancelled (already
-      78, via `verdict_for`). The cost is one local re-run when a genuinely red
+      restore, workspace repair, force rebuild, the build — and any one of
+      them failing means zero tests ran, no xUnit file was written and no
+      artifact was uploaded. `brew install` flaking on a hosted runner is
+      ordinary weather, and reporting that as a red suite tells a caller its
+      tests failed when they never started, with no local fallback to correct
+      it. Every case that lands here is answered correctly by 78: setup failed
+      (nothing ran); the compile failed (the local re-run reproduces the error
+      properly); the tests really did fail but the upload broke (the local
+      re-run finds the real failures); cancelled (already 78, via
+      `verdict_for`). The cost is one local re-run when a genuinely red
       run loses its artifact, which is the trade every other refusal here makes,
       and `unreadable` above still covers "a file exists and cannot be believed".
 

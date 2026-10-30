@@ -2,12 +2,13 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 import TestSupport
 
 /// Tier 2: a real rendezvous directory with real unix sockets plus an in-memory
-/// database. The holders base, the profiles base, the scratchpad base and the
-/// clock are all injected; nothing here resolves a production path and no
-/// process is spawned.
+/// database. The holders base, every other base the sweep walks and the clock
+/// are all injected; nothing here resolves a production path and no process is
+/// spawned.
 ///
 /// Rooted under `TBD_TEST_SCRATCH_ROOT` — itself a short path directly under
 /// `/tmp`, so the socket paths fit darwin's 104-byte `sun_path` — which is what
@@ -59,7 +60,16 @@ struct OrphanGCHolderRendezvousTests: ~Copyable {
             scratchpadBase: sandbox.appendingPathComponent("s", isDirectory: true),
             now: { fixed },
             profileDirBase: sandbox.appendingPathComponent("p", isDirectory: true),
-            holdersBase: holdersBase
+            hangStackBase: sandbox.appendingPathComponent("hs", isDirectory: true),
+            holdersBase: holdersBase,
+            attachmentsBase: sandbox.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": sandbox.path],
+            reposBase: sandbox.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: sandbox.appendingPathComponent("se", isDirectory: true),
+            devServersBase: sandbox.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: sandbox.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: sandbox.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: sandbox.appendingPathComponent("wt", isDirectory: true)
         )
     }
 

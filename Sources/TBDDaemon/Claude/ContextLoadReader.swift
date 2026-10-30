@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Reads one session's `ContextLoad` — how full its context window is — from
-/// the two machine sources that can speak to it.
+/// the machine sources that can speak to it.
 ///
 /// **There is no compiled model→window table here, and there must never be
 /// one.** The effective window is a session fact, not a model fact: Claude Code
@@ -15,32 +15,29 @@ import TBDShared
 /// exactly where being wrong costs a session. Where nothing observed the
 /// window, this reader says `unknown` and says why.
 ///
-/// Two paths, in preference order:
+/// Claude Code tells a third party the window it resolved through
+/// `$.session.usage()` and `session.measure`, which the session mod's `usage`
+/// feature records to `usage.json`. Whether a session has that file is decided
+/// at spawn, so the reader asks the spawn:
 ///
-/// 1. **The statusline tee fired.** Prefer the captured JSON's own paired
-///    reading — Claude Code computed numerator, denominator and percentage at
-///    one instant from one source, and taking both halves from it is the only
-///    way to report a fraction that was ever simultaneously true.
-/// 2. **It did not** — every non-desk session, and a desk whose statusline has
-///    not run yet. The numerator comes from the transcript tail; the
-///    denominator is `unknown`, with a `why` naming which case it is.
+/// 1. **Spawned with `usage`, and the mod is confirmed running.** Take the
+///    file's window, and its tokens when it carries them — measured together,
+///    so the reading is paired. The file must name the live incarnation: the
+///    new process's heartbeat can land before its first usage write, and a
+///    file an earlier process left behind describes that process.
+/// 2. **Spawned with `usage`, but the mod is not confirmed — a stale
+///    heartbeat included — or its file is missing, torn, another
+///    incarnation's or carries no valid window.** The numerator comes from the
+///    transcript tail and the window is `unknown`.
+/// 3. **Parked, and its last spawn ran `usage`** (`readParked`). Parking
+///    replaces the agent with an inert shell, so no process is reporting a
+///    window, and the session's shared `spawn.json` cannot say which earlier
+///    process a usage file on disk belongs to. The window is `unknown` and
+///    the numerator comes from the transcript tail.
+/// 4. **Spawned without `usage`.** Nothing reports the session's window. The
+///    numerator comes from the transcript tail and the window is `unknown`,
+///    with a `why` that says so.
 struct ContextLoadReader {
-    /// Whether this session has a statusline tee — and when it does not, why
-    /// not. Three shapes, because the `why` of an unknown window has to tell
-    /// them apart and two of them are easy to conflate.
-    enum TeeStatus: Sendable, Equatable {
-        /// A Claude desk session: the tee is installed and may simply not have
-        /// fired yet.
-        case installed
-        /// A desk session whose agent is not the one the tee installs on. The
-        /// tee lives in the Claude spawn path, so a desk created on a
-        /// Codex-preferring install is branded a desk and runs without one —
-        /// reporting "installed but has not fired yet" for it would be false.
-        case deskWithoutTee
-        /// An ordinary session. The tee installs on desk sessions only.
-        case notADesk
-    }
-
     /// How much of the transcript's tail to read. The same 64 KiB window
     /// `DeliveryVerifier` tails with: large enough to span several assistant
     /// records, small enough that a multi-megabyte transcript costs one seek.
@@ -55,72 +52,110 @@ struct ContextLoadReader {
     /// Read the load for a session.
     ///
     /// - Parameters:
-    ///   - capturePath: the statusline tee's capture file for this session.
-    ///     Passed explicitly rather than derived so the reader is hermetic.
+    ///   - usagePath: the session mod's `usage.json` for this session, when the
+    ///     session has a directory. Read only when `usageLiveness` is
+    ///     `.confirmed`.
+    ///   - usageIncarnationID: the session's live incarnation. When given, a
+    ///     usage file naming any other incarnation — or none — was written by
+    ///     an earlier process of the same Claude session and is not read. A nil
+    ///     live incarnation is unknown, so no file is accepted.
+    ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
+    ///     — a spawn made without the feature, and the default — means nothing
+    ///     reports the window; any other answer means the spawn chose to record
+    ///     it through the mod's file.
     ///   - transcriptPath: the session's transcript JSONL, when TBD knows one.
-    ///   - tee: whether the statusline tee was installed for this session, and
-    ///     if not, why not. Only used to word the `why` of an unknown window —
-    ///     a desk whose statusline has not run yet is a different situation
-    ///     from a desk that will never have one and from a fleet session that
-    ///     was never going to, and a reader deserves to be told which.
     func read(
-        capturePath: String,
-        transcriptPath: String?,
-        tee: TeeStatus
+        usagePath: String? = nil,
+        usageIncarnationID: UUID? = nil,
+        usageLiveness: SessionModLiveness = .legacy,
+        transcriptPath: String?
     ) -> ContextLoad {
-        guard let capture = readCapture(atPath: capturePath) else {
+        switch usageLiveness {
+        case .legacy:
             return ContextLoad(
                 used: transcriptUsed(transcriptPath: transcriptPath),
-                window: .unknown(why: unknownWindowReason(tee))
-            )
-        }
-        guard let size = capture.contextWindowSize else {
-            // The tee fired but this Claude Code build reported no
-            // `context_window_size`. Nothing observed the denominator, so it is
-            // unknown — the numerator the payload does carry is still better
-            // than nothing, and still labeled with where it came from.
-            return ContextLoad(
-                used: capture.usedTokens.map {
-                    ObservedFact(value: $0, source: .statuslineTee, observedAt: capture.observedAt)
-                } ?? transcriptUsed(transcriptPath: transcriptPath),
                 window: .unknown(
-                    why: "the statusline tee fired for this session but its payload carried no "
-                        + "context_window.context_window_size")
-            )
-        }
-        let window = ContextWindow.observed(
-            ObservedFact(value: size, source: .statuslineTee, observedAt: capture.observedAt))
-        if let used = capture.usedTokens {
+                    why: "this session was spawned without the session mod's usage feature, so "
+                        + "nothing reports its resolved context window"))
+        case .unknown(let reason):
             return ContextLoad(
-                used: ObservedFact(value: used, source: .statuslineTee, observedAt: capture.observedAt),
-                window: window
-            )
+                used: transcriptUsed(transcriptPath: transcriptPath),
+                window: .unknown(
+                    why: "this session was spawned to record its usage through the session mod, "
+                        + "but the mod is not confirmed running in it (\(reason.rawValue)), so "
+                        + "nothing has reported its resolved context window"))
+        case .confirmed:
+            return readFromUsage(
+                usagePath: usagePath, liveIncarnationID: usageIncarnationID,
+                transcriptPath: transcriptPath)
         }
-        // `current_usage` is null before the session's first API call and again
-        // after a `/compact` until the next one, and `used_percentage` can be
-        // null early for the same reason. The denominator is still good, so the
-        // numerator falls back to the transcript tail.
-        //
-        // A numerator and a denominator observed at different moments must not
-        // be silently presented as one coherent fraction. Nothing here hides
-        // that: the two halves carry their own sources and observed-ats, and
-        // `ContextLoad.isPairedReading` is false for exactly this result, so a
-        // consumer composing a percentage can say so.
-        return ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: window)
     }
 
-    /// Why no denominator was observed, in the caller's own terms.
-    private func unknownWindowReason(_ tee: TeeStatus) -> String {
-        switch tee {
-        case .installed:
-            return "the statusline tee is installed for this desk session but has not fired yet"
-        case .deskWithoutTee:
-            return "this desk session does not run the agent the statusline tee installs on, so "
-                + "nothing will report its resolved context window"
-        case .notADesk:
-            return "the statusline tee installs on desk sessions only, so nothing has reported "
-                + "this session's resolved context window"
+    /// A parked session whose last spawn ran `usage` — case 3 above. No
+    /// process is reporting its window, so the window is `unknown` and the
+    /// numerator comes from the transcript tail; the usage file is not read.
+    func readParked(transcriptPath: String?) -> ContextLoad {
+        ContextLoad(
+            used: transcriptUsed(transcriptPath: transcriptPath),
+            window: .unknown(
+                why: "this session is parked, so no process is reporting its context window"))
+    }
+
+    // MARK: - The session mod's usage file
+
+    /// A confirmed session's `usage.json`. Every way the file can fail to
+    /// carry a window — missing, torn mid-write (`$.fs` has no rename),
+    /// malformed, or a window that is zero, negative or a boolean — reads as
+    /// "not observed", never as zero: the window is `unknown` with a `why`
+    /// naming the file, and the numerator falls back to the transcript tail.
+    /// So does a file from another incarnation: liveness confirms the mod is
+    /// running in this process, not that this process has written yet.
+    private func readFromUsage(
+        usagePath: String?, liveIncarnationID: UUID?, transcriptPath: String?
+    ) -> ContextLoad {
+        func unobserved(_ why: String) -> ContextLoad {
+            ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: .unknown(why: why))
         }
+        guard let usagePath, !usagePath.isEmpty else {
+            return unobserved("the session mod is recording this session's usage, but TBD has no "
+                + "session directory to read its usage file from")
+        }
+        let record: SessionModFiles.UsageRecord
+        switch SessionModFiles.read(SessionModFiles.UsageRecord.self, at: URL(fileURLWithPath: usagePath)) {
+        case .missing:
+            return unobserved("the session mod is recording this session's usage, but its usage "
+                + "file has not been written yet")
+        case .unreadable:
+            return unobserved("the session mod's usage file for this session is unreadable — torn "
+                + "mid-write or malformed — so it reports no context window")
+        case .record(let decoded):
+            record = decoded
+        }
+        // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
+        // the UUID's case does not matter.
+        // A missing live incarnation reads as unknown, never as a match.
+        guard let live = liveIncarnationID,
+              record.incarnationID.flatMap(UUID.init(uuidString:)) == live else {
+            return unobserved("the session mod's usage file for this session is from an earlier "
+                + "process of it, and this process has not written its own yet")
+        }
+        guard let size = record.validWindow else {
+            return unobserved("the session mod's usage file for this session carries no valid "
+                + "context.window")
+        }
+        let observedAt = Date(timeIntervalSince1970: Double(record.measuredAt) / 1000)
+        let window = ContextWindow.observed(
+            ObservedFact(value: size, source: .sessionMod, observedAt: observedAt))
+        // `tokens` is absent at the `session.start` baseline, before any
+        // response reported a fill. The window is still good, so the numerator
+        // falls back to the transcript tail — an unpaired reading, which
+        // `ContextLoad.isPairedReading` reports as such.
+        guard let tokens = record.context.tokens, tokens >= 0 else {
+            return ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: window)
+        }
+        return ContextLoad(
+            used: ObservedFact(value: tokens, source: .sessionMod, observedAt: observedAt),
+            window: window)
     }
 
     // MARK: - The transcript tail
@@ -220,88 +255,6 @@ struct ContextLoadReader {
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: text)
     }
-
-    // MARK: - The statusline capture
-
-    /// What one captured statusline payload says about context.
-    struct Capture: Equatable {
-        /// `context_window.context_window_size`, when present.
-        let contextWindowSize: Int?
-        /// Tokens in the window from `context_window.current_usage`, when that
-        /// object is present. Null before the first API call and again after a
-        /// `/compact`, which is why it is optional here.
-        let usedTokens: Int?
-        /// The capture file's modification time — when the tee published this
-        /// payload, which is when Claude Code observed it. Not the time TBD
-        /// read the file: aging a fact by the read would make a stale reading
-        /// look fresh on every poll.
-        let observedAt: Date
-    }
-
-    /// Read one capture, payload and stamp from the **same open file**.
-    ///
-    /// `contents(atPath:)` followed by `attributesOfItem(atPath:)` is two
-    /// lookups of the same name, and the tee publishes by `mv -f` — an atomic
-    /// rename that can land between them. The pair would then stamp one
-    /// payload with a different file's modification time, producing an
-    /// `ObservedFact` whose observed-at is newer than the value it labels,
-    /// which is the one thing this file's opening comment forbids. Opening once
-    /// and asking the descriptor pins both halves to one inode: a rename can
-    /// still swap the name, but never what this handle is holding.
-    func readCapture(atPath path: String) -> Capture? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? handle.close() }
-        guard let data = try? handle.readToEnd() ?? Data(),
-              let modified = handle.modificationDate() else {
-            return nil
-        }
-        return Self.parseCapture(data: data, observedAt: modified)
-    }
-
-    /// Parse a captured payload. Every field is treated as absent-able —
-    /// `current_usage`, `used_percentage` and `remaining_percentage` are all
-    /// documented as nullable, and a payload TBD cannot read at all is nil
-    /// rather than a zero.
-    static func parseCapture(data: Data, observedAt: Date) -> Capture? {
-        guard let object = try? JSONSerialization.jsonObject(with: data),
-              let root = object as? [String: Any],
-              let contextWindow = root["context_window"] as? [String: Any] else {
-            return nil
-        }
-        let size = positiveInt(contextWindow["context_window_size"])
-        var used: Int?
-        if let current = contextWindow["current_usage"] as? [String: Any],
-           let input = current["input_tokens"] as? Int {
-            // Same formula as the transcript tail, for the same reason: output
-            // tokens are not in the next request's window.
-            used = input
-                + (current["cache_creation_input_tokens"] as? Int ?? 0)
-                + (current["cache_read_input_tokens"] as? Int ?? 0)
-        }
-        return Capture(contextWindowSize: size, usedTokens: used, observedAt: observedAt)
-    }
-
-    /// A strictly-positive integer out of a JSON value, or nil.
-    ///
-    /// `as? Int` alone is not that test, and the gap is not theoretical: JSON
-    /// `true` arrives from `JSONSerialization` as an `NSNumber` that casts
-    /// cleanly to `1`, which would be reported as a one-token context window and
-    /// turn every percentage built on it into an absurdity. Zero and negatives
-    /// are refused for the same reason — a denominator that cannot divide is not
-    /// an observation, and `unknown` with a reason is the honest answer.
-    ///
-    /// This mirrors, field for field, the guard the Nightwatch reader applies to
-    /// the same payload (`isinstance(size, bool) or not isinstance(size, int) or
-    /// size <= 0`). The two read one file and must not disagree about whether it
-    /// carries a window.
-    private static func positiveInt(_ value: Any?) -> Int? {
-        guard let number = value as? NSNumber else { return nil }
-        guard CFGetTypeID(number as CFTypeRef) != CFBooleanGetTypeID() else { return nil }
-        // `NSNumber as? Int` is exact: a fractional or out-of-range value is nil
-        // rather than a truncation.
-        guard let intValue = number as? Int, intValue > 0 else { return nil }
-        return intValue
-    }
 }
 
 // MARK: - Stamping a payload with its own file's time
@@ -310,10 +263,10 @@ extension FileHandle {
     /// The modification time of the file this handle already has open.
     ///
     /// `fstat` on the descriptor, deliberately, rather than a second lookup by
-    /// path: a path can be re-pointed by a rename between two calls — which is
-    /// precisely how the statusline tee publishes — and a stamp taken from the
-    /// new file would label the old file's bytes. A descriptor names an inode,
-    /// so the answer belongs to the payload the caller is holding.
+    /// path: a path can be re-pointed by a rename between two calls, and a
+    /// stamp taken from the new file would label the old file's bytes. A
+    /// descriptor names an inode, so the answer belongs to the payload the
+    /// caller is holding.
     func modificationDate() -> Date? {
         var info = stat()
         guard fstat(fileDescriptor, &info) == 0 else { return nil }

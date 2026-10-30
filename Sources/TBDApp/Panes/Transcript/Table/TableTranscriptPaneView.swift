@@ -121,7 +121,7 @@ struct TableTranscriptPaneView: View {
             retryToken: retryToken,
             transcriptPath: terminal?.transcriptPath,
             streamingEnabled: appState.transcriptStreamingEnabled,
-            terminalStreamPath: terminal?.transcriptStreamPath)
+            terminalExited: terminal.map(Self.hasExited) ?? true)
     }
 
     private var messages: [TranscriptItem] {
@@ -294,12 +294,14 @@ struct TableTranscriptPaneView: View {
                     onTableReady: { [appState, terminalID, registeredTable] table in
                         registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
-                    }
+                    },
+                    promptRail: .rail(earlier: nil)
                 )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
                 // Coordinator, re-resolving from a clean baseline rather than persisting
-                // the prior session's drilled-in subagent thread. (#129)
+                // the prior session's drilled-in subagent thread. (#129) The prompt
+                // rail lives inside the table's view, so the rebuild takes it too.
                 .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
                 .overlay(alignment: .bottomLeading) {
                     jumpToBottomButton
@@ -328,7 +330,7 @@ struct TableTranscriptPaneView: View {
                         // on top rather than left to stacking order.
                         //
                         // This lifts the WHOLE composer subtree, so an open menu
-                        // also paints over the table's own bottom-leading
+                        // also paints over the transcript's own bottom-leading
                         // `jumpToBottomButton` overlay when the transcript is
                         // scrolled up. That is intended: the menu is a transient
                         // popup and, while it is open, it owns the pane. Escape
@@ -411,6 +413,9 @@ struct TableTranscriptPaneView: View {
             }
             .buttonStyle(.plain)
             .padding(16)
+            // The overlay spans the prompt rail's leading gutter too; keep the
+            // button clear of the rail.
+            .padding(.leading, PromptRailLayout.width)
             .transition(.scale(scale: 0.5).combined(with: .opacity))
             .help("Scroll to bottom")
         }
@@ -465,8 +470,8 @@ struct TableTranscriptPaneView: View {
     /// read that store already, so nothing downstream changes.
     ///
     /// What each publish writes is composed by `publish` below: JSONL items,
-    /// then the daemon's pending `AskUserQuestion` captures, then the
-    /// model-proxy stream's provisional assistant row last.
+    /// then the daemon's pending `AskUserQuestion` captures, then the session
+    /// mod's provisional blocks last.
     ///
     /// `path` is the already-resolved, non-empty transcript path chosen by
     /// `TranscriptPaneTransport.resolve` — passed in rather than re-read here so
@@ -477,9 +482,7 @@ struct TableTranscriptPaneView: View {
     /// derives one.
     ///
     /// `clock` drives this loop's own tier re-declaration wait; the repo's
-    /// clock seam, last parameter, defaulted. The provisional row's retire
-    /// alarm sleeps on the *scheduler's* clock instead, because the timer it
-    /// arms into belongs to the scheduler and outlives every pane.
+    /// clock seam, last parameter, defaulted.
     private func appSideLoop(path: String, clock: any Clock<Duration> = ContinuousClock()) async {
         // Every input this run reads *once* is read here, before the first
         // `await`: `taskKey` is a computed property over `AppState`, so
@@ -492,33 +495,18 @@ struct TableTranscriptPaneView: View {
         let source = appState.transcriptSource
         let state = appState
 
-        // The app's one retire timer, taken from the scheduler rather than
-        // built here. It backs the two retire rules no file change can
-        // announce; see `ProvisionalRetireTimer`. A pane must not own one: the
-        // closure below goes into the scheduler's single app-wide slot, so a
-        // second pane mounting — or a Settings flip restarting every streaming
-        // pane at once — would move the arming into a fresh instance while the
-        // first pane still held the only one its teardown could reach. The
-        // orphaned alarm then fires after the session has been forgotten and
-        // publishes an empty transcript for it.
-        let retireTimer = scheduler.provisionalRetire
-
         // Installed once for the whole app, not re-seated per mount: the
         // closure carries nothing of this pane's (see
         // `TranscriptPollScheduler.onChange`).
         await scheduler.setOnChangeIfUnset { [weak state] sessionID in
             guard let state else { return }
-            await Self.publish(
-                sessionID: sessionID, state: state, source: source, retireTimer: retireTimer)
+            await Self.publish(sessionID: sessionID, state: state, source: source)
         }
-        // The model-proxy stream file this session's terminal was spawned with,
-        // when the daemon reports streaming as effective. Taken from the
-        // `TaskKey` captured above, so the value this loop registers is the same
-        // value its `.task(id:)` was keyed on: the path itself is stamped at
-        // spawn and never changes, but the *flag* in front of it can be flipped
-        // in Settings at any moment, and a flip restarts this loop rather than
-        // being noticed mid-run. Re-reading it on every tier change would only
-        // risk minting a generation for no reason.
+        // The session mod's stream file for this session, when the daemon
+        // reports streaming on. Taken from the `TaskKey` captured above, so the
+        // value this loop registers is the same value its `.task(id:)` was
+        // keyed on: the flag can be flipped in Settings at any moment, and a
+        // flip restarts this loop rather than being noticed mid-run.
         let streamPath = key.streamPath
 
         // One token per run of this task, so the hold belongs to *this* pane.
@@ -534,8 +522,7 @@ struct TableTranscriptPaneView: View {
 
         // Publish once immediately so the pane is not blank until the first tick.
         await source.refresh(sessionID: sid, path: path)
-        let items = await Self.publish(
-            sessionID: sid, state: state, source: source, retireTimer: retireTimer)
+        let items = await Self.publish(sessionID: sid, state: state, source: source)
         if !items.isEmpty { hasShownInitialMessages = true }
 
         // Hold the task open so `.task(id:)` teardown deregisters on disappear,
@@ -564,24 +551,12 @@ struct TableTranscriptPaneView: View {
                 sessionID: sid, path: path, streamPath: streamPath,
                 tier: tier, token: token)
         }
-        // Releasing this pane's hold also cancels the session's retire alarm,
-        // but only when this was the last holder and only ahead of the
-        // source's forget — `deregister` is the one place that knows both.
         await scheduler.deregister(sessionID: sid, token: token)
-        // And the pane says so itself, for the case `deregister` returns early
-        // from: a token whose hold was already released while the registration
-        // has since gone away entirely. Never a blanket disarm — the timer
-        // holds alarms for every session, and the scheduler refuses this one
-        // while any pane still has the session registered, because a deadline
-        // rule is announced by nothing and cancelling a live pane's alarm
-        // would strand its row on screen.
-        await scheduler.disarmProvisional(sessionID: sid)
     }
 
     /// One publish: read what the source has for `sessionID`, merge the
-    /// daemon's pending `AskUserQuestion` captures, append the model-proxy
-    /// stream's provisional row, write the result into `AppState`, and arm or
-    /// disarm the one-shot that retires a completed-but-unconfirmed row.
+    /// daemon's pending `AskUserQuestion` captures, append the session mod's
+    /// provisional blocks, and write the result into `AppState`.
     ///
     /// Returns what it published, for the one caller that needs it — the
     /// initial publish, which latches `hasShownInitialMessages`.
@@ -589,90 +564,67 @@ struct TableTranscriptPaneView: View {
     /// `nonisolated static` for the same reason `mergePendingQuestions` is:
     /// it runs from the scheduler's `@Sendable` on-change closure, and `View`'s
     /// `@MainActor` would otherwise drag the merge's index build onto main.
-    /// Only the store write needs main, and it says so.
+    /// Only the `AppState` reads and the store write need main, and they say so.
     ///
-    /// **Why the streaming flag is read here rather than captured from the
-    /// pane's `TaskKey`.** The scheduler holds exactly one on-change closure
-    /// for the whole app, whichever pane registered last, and it is passed the
-    /// session that changed — the closures have to stay interchangeable between
-    /// panes (see `TranscriptPollScheduler.onChange`). A closure carrying one
-    /// pane's resolved flag would decide for sessions belonging to other panes,
-    /// and a pane with no stream file of its own never restarts on a flag flip,
-    /// so the value it captured could be arbitrarily stale. The flag is
-    /// app-wide (`DaemonCapabilities`), so reading it fresh on the main actor
-    /// is both correct and race-free; what is per-pane is the *stream path*,
-    /// and that stays in the `TaskKey`.
+    /// **Why the streaming flag and the terminal's state are read here rather
+    /// than captured from the pane's `TaskKey`.** The scheduler holds exactly
+    /// one on-change closure for the whole app, whichever pane registered
+    /// first, and it is passed the session that changed — the closures have to
+    /// stay interchangeable between panes (see
+    /// `TranscriptPollScheduler.onChange`). A closure carrying one pane's
+    /// resolved values would decide for sessions belonging to other panes, so
+    /// both are read fresh on the main actor for the session being published.
     @discardableResult
     nonisolated static func publish(
         sessionID: String,
         state: AppState,
-        source: TranscriptSource,
-        retireTimer: ProvisionalRetireTimer,
-        now: @escaping @Sendable () -> Date = { Date() }
+        source: TranscriptSource
     ) async -> [TranscriptItem] {
-        // One hop onto the source for all three facts: the items, the
-        // provisional message and whether the JSONL has caught up with it. Read
-        // separately, a `refresh` landing between two of the awaits could hand
-        // this publish a transcript from before the settled assistant message
-        // and a confirmation from after it — and it would then show neither the
-        // provisional row nor the settled one.
+        // One hop onto the source for the items, the stream snapshot and which
+        // of its blocks the JSONL has confirmed. Read separately, a `refresh`
+        // landing between two of the awaits could hand this publish a
+        // transcript from before a block's row and a confirmation from after
+        // it — and it would then show neither.
         let snapshot = await source.snapshot(sessionID: sessionID)
         let merged = await mergePendingQuestions(
             sessionID: sessionID, raw: snapshot.items, state: state)
-        let provisional = snapshot.provisional
 
-        // The one id that can matter: the row is retired the moment the JSONL
-        // delivers the line carrying that message's text, and no other message
-        // id is a candidate for a row. Text-bearing rather than id-bearing
-        // because Claude Code writes one line per content block under a shared
-        // id — see `TranscriptSource.hasAssistantText`.
-        var confirmedIDs: Set<String> = []
-        if let provisional, snapshot.confirmed {
-            confirmedIDs = [provisional.messageID]
+        let (streamingEnabled, terminalExited) = await MainActor.run {
+            (state.transcriptStreamingEnabled,
+             Self.terminalHasExited(claudeSessionID: sessionID, terminals: state.terminals))
         }
-
-        let streamingEnabled = await MainActor.run { state.transcriptStreamingEnabled }
-        let at = now()
         let items = ProvisionalRowComposer.compose(
             items: merged,
-            provisional: provisional,
-            confirmed: { confirmedIDs.contains($0) },
-            now: at,
+            stream: snapshot.stream,
+            confirmedUUIDs: snapshot.confirmedUUIDs,
+            sessionEnded: terminalExited || snapshot.heartbeatStale,
             streamingEnabled: streamingEnabled)
 
         await MainActor.run {
             state.sessionTranscripts[sessionID] = items
             state.touchSessionTranscript(sessionID)
         }
-
-        // Arm the deadline only for a row that actually got published and has
-        // one. `compose` has already applied every other retire rule, so a
-        // provisional row that survived it is either a completed message
-        // nobody has confirmed or a stream that has gone quiet — the two cases
-        // nothing else will ever announce. Everything else — including a row
-        // that was just withdrawn — disarms.
-        //
-        // Both gestures name `sessionID`, and that is load-bearing rather than
-        // decorative: the scheduler's one timer instance serves every session
-        // that publishes through its single on-change slot, so an unkeyed
-        // disarm here would let ordinary transcript news for one session cancel
-        // another session's pending retire alarm.
-        if let provisional,
-           items.last.map({ ProvisionalRowComposer.isProvisional(itemID: $0.id) }) == true,
-           let deadline = ProvisionalRowComposer.retireDeadline(for: provisional),
-           let delay = ProvisionalRowComposer.retireDelay(for: provisional, now: at) {
-            await retireTimer.arm(
-                sessionID: sessionID, messageID: provisional.messageID,
-                deadline: deadline, after: delay
-            ) {
-                _ = await publish(
-                    sessionID: sessionID, state: state, source: source,
-                    retireTimer: retireTimer, now: now)
-            }
-        } else {
-            await retireTimer.disarm(sessionID: sessionID)
-        }
         return items
+    }
+
+    /// Whether a terminal's process is gone: parked, by any reason (a park
+    /// stamps `hibernatedAt`, an exit included), or suspended.
+    nonisolated static func hasExited(_ terminal: Terminal) -> Bool {
+        terminal.hibernatedAt != nil || terminal.suspendedAt != nil
+    }
+
+    /// Whether the terminal running Claude session `claudeSessionID` has
+    /// exited, or no terminal runs it any more. Either way its provisional
+    /// blocks can never be confirmed by a live process.
+    nonisolated static func terminalHasExited(
+        claudeSessionID: String, terminals: [UUID: [Terminal]]
+    ) -> Bool {
+        for list in terminals.values {
+            if let terminal = list.first(where: { $0.claudeSessionID == claudeSessionID }) {
+                return hasExited(terminal)
+            }
+        }
+        return true
     }
 
     /// This pane's cadence tier right now: foreground while its worktree is on
@@ -833,12 +785,16 @@ struct TableTranscriptPaneView: View {
 /// and only an unrelated remount repairs the pane.
 ///
 /// `streamPath` is here for exactly that reason: `appSideLoop` resolves the
-/// model-proxy stream file once, at the top, and flipping the Settings toggle
-/// changes what that resolution yields. Without it in the key, turning
-/// "Stream assistant text into the transcript" on would do nothing for a pane
-/// already on screen — which is the direction the soak depends on. Restarting
-/// is cheap and safe here: `TranscriptPollScheduler.register` is idempotent per
-/// token, and it already mints a fresh generation when a path changes.
+/// session mod's stream file once, at the top, and flipping the Settings toggle
+/// changes what that resolution yields. Without it in the key, turning "Stream
+/// assistant text into the transcript" on would do nothing for a pane already
+/// on screen. Restarting is cheap and safe here:
+/// `TranscriptPollScheduler.register` is idempotent per token, and it already
+/// mints a fresh generation when a path changes.
+///
+/// `terminalExited` is here because a terminal exiting retires every
+/// provisional block, and it changes no file the scheduler watches: the restart
+/// publishes once at once, and that publish drops the rows.
 ///
 /// Internal, not private, so the resolution can be asserted directly rather
 /// than only through a SwiftUI view tree — the same shape, and for the same
@@ -849,24 +805,39 @@ struct TaskKey: Equatable {
     let retryToken: Int
     let hasTranscriptPath: Bool
     /// The stream file this run of the loop will register, or nil when the
-    /// daemon reports streaming off or the terminal was spawned without one.
+    /// daemon reports streaming off or the session has no usable id.
     let streamPath: String?
+    let terminalExited: Bool
 
+    /// - Parameter sessionsDir: where session-mod directories live; the
+    ///   production `TBDConstants.sessionsDir()` unless a test passes its own.
     static func resolve(
         terminalID: UUID,
         sessionID: String?,
         retryToken: Int,
         transcriptPath: String?,
         streamingEnabled: Bool,
-        terminalStreamPath: String?
+        terminalExited: Bool,
+        sessionsDir: URL = TBDConstants.sessionsDir()
     ) -> TaskKey {
-        let stream = terminalStreamPath ?? ""
-        return TaskKey(
+        TaskKey(
             terminalID: terminalID,
             sessionID: sessionID,
             retryToken: retryToken,
             hasTranscriptPath: !(transcriptPath ?? "").isEmpty,
-            streamPath: streamingEnabled && !stream.isEmpty ? stream : nil)
+            streamPath: streamingEnabled
+                ? streamPath(sessionID: sessionID, sessionsDir: sessionsDir) : nil,
+            terminalExited: terminalExited)
+    }
+
+    /// `<sessionsDir>/<sessionID>/transcript-stream.json`, or nil for a
+    /// missing session id or one that is not safe to use as a path. A `/clear`
+    /// gives the session a new id, and with it a new path.
+    static func streamPath(sessionID: String?, sessionsDir: URL) -> String? {
+        guard let sessionID,
+              let dir = SessionModSessionFiles.directory(
+                sessionsDir: sessionsDir, claudeSessionID: sessionID) else { return nil }
+        return dir.appendingPathComponent(SessionModSessionFiles.transcriptStreamFileName).path
     }
 }
 

@@ -264,6 +264,62 @@ struct UserMessageClassifierClassifyTests {
         #expect(UserMessageClassifier.isRealUserMessage(text: "<task-notification>x") == false)
     }
 
+    // MARK: - compaction summary
+    //
+    // When Claude Code compacts a conversation it writes the summary into the
+    // user role and marks the line `isCompactSummary`. The flag decides, never
+    // the text: the summary's body is ordinary prose.
+
+    private static let compactSummaryText = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent: refactor the acme widget loader."
+
+    /// A user-role line shaped like Claude Code's compaction line. Pass `nil`
+    /// for `isCompactSummary` to leave the key out entirely.
+    private func compactLine(content: Any, isCompactSummary: Any? = true) -> [String: Any] {
+        let message: [String: Any] = ["role": "user", "content": content]
+        var line: [String: Any] = [
+            "type": "user",
+            "message": message,
+            "isVisibleInTranscriptOnly": true,
+        ]
+        if let isCompactSummary { line["isCompactSummary"] = isCompactSummary }
+        return line
+    }
+
+    @Test func compact_summary_line_is_compactSummary_and_not_a_real_message() {
+        let line = compactLine(content: Self.compactSummaryText)
+        #expect(UserMessageClassifier.classify(line) == .compactSummary)
+        #expect(UserMessageClassifier.isRealUserMessage(line) == false)
+    }
+
+    @Test func compact_summary_with_text_block_content_is_compactSummary() {
+        let blocks: [[String: Any]] = [["type": "text", "text": Self.compactSummaryText]]
+        let line = compactLine(content: blocks)
+        #expect(UserMessageClassifier.classify(line) == .compactSummary)
+        #expect(UserMessageClassifier.isRealUserMessage(line) == false)
+    }
+
+    /// The other branch: the same text on a line without the flag is a prompt
+    /// someone typed (or pasted), and stays one.
+    @Test func the_same_text_without_the_flag_is_still_a_real_message() {
+        // Absent, explicitly false, and JSON `null` (which real lines carry).
+        let flags: [Any?] = [nil, false, NSNull()]
+        for flag in flags {
+            let line = compactLine(content: Self.compactSummaryText, isCompactSummary: flag)
+            #expect(UserMessageClassifier.classify(line) == nil,
+                    "isCompactSummary=\(String(describing: flag)) must not classify as a summary")
+            #expect(UserMessageClassifier.isRealUserMessage(line) == true,
+                    "isCompactSummary=\(String(describing: flag)) must stay a real message")
+            #expect(UserMessageClassifier.extractText(line) == Self.compactSummaryText)
+        }
+    }
+
+    /// The flag is checked before the text rules, so it wins even over text
+    /// that one of them would otherwise claim.
+    @Test func the_flag_wins_over_the_text_rules() {
+        let line = compactLine(content: "<system-reminder>summary body</system-reminder>")
+        #expect(UserMessageClassifier.classify(line) == .compactSummary)
+    }
+
     /// The multi-text-block join is the same rule for a `type:"user"` content
     /// array and a queued prompt's content-block array.
     @Test func joinTextBlocks_joins_text_and_skips_everything_else() {
@@ -275,5 +331,22 @@ struct UserMessageClassifierClassifyTests {
         #expect(UserMessageClassifier.joinTextBlocks(blocks) == "first\nsecond")
         #expect(UserMessageClassifier.joinTextBlocks([["type": "image"]]) == nil)
         #expect(UserMessageClassifier.joinTextBlocks([]) == nil)
+    }
+
+    @Test func untypedMarkers() {
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Image: source: /tmp/a/1.png]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Image: source: /tmp/a/1.png]\n[Image: source: /tmp/a/2.png]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Request interrupted by user]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Request interrupted by user for tool use]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker(
+            "This session is being continued from a previous conversation that ran out of context. …"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("  \n "))
+    }
+
+    @Test func typedPromptsThatMentionMarkers() {
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("why did I see [Request interrupted by user] there?"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("[Image #1] what is this?"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("look: [Image: source: /tmp/a/1.png] and fix it"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("/review 1174"))
     }
 }

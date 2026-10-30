@@ -19,7 +19,6 @@ public final class TBDDatabase: Sendable {
     public let modelProfileUsage: ModelProfileUsageStore
     public let oauthUsageSnapshots: OAuthUsageSnapshotStore
     public let config: ConfigStore
-    public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
     public let scheduledResumes: ScheduledResumeStore
@@ -27,7 +26,6 @@ public final class TBDDatabase: Sendable {
     public let terminalHistory: TerminalHistoryStore
     public let panelSurface: PanelSurfaceStore
     public let remoteSessions: RemoteSessionStore
-    public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
     public let claudeCloudSessions: ClaudeCloudSessionStore
     /// The shadow-peer whitelist `ShadowPeerReconciler` reclaims against
@@ -71,7 +69,6 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: pool)
         self.config = ConfigStore(writer: pool)
-        self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
@@ -79,7 +76,6 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: pool)
         self.remoteSessions = RemoteSessionStore(writer: pool)
-        self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: pool)
@@ -91,15 +87,29 @@ public final class TBDDatabase: Sendable {
         // `grdb_migrations` holds timestamp identifiers while the bundle
         // yielded no `.sql` files at all.
         try pool.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
+        var snapshotPath: String?
         if fileExisted {
             let hasPending = try pool.read { db in
                 try !migrator.hasCompletedMigrations(db)
             }
             if hasPending {
-                Self.takePreMigrationSnapshot(pool: pool, path: path)
+                snapshotPath = Self.takePreMigrationSnapshot(pool: pool, path: path)
             }
         }
         try migrator.migrate(pool)
+        // Only once migrations succeed. A migration that keeps failing gets
+        // the daemon relaunched again and again, each start writing another
+        // copy of the half-migrated database; pruning then would push out the
+        // clean copy taken before the upgrade. Every start that gets here
+        // prunes, so a backlog clears at once. The copy just written is never
+        // deleted, even when the clock runs behind an older stamp. Never
+        // throws.
+        if fileExisted {
+            DatabaseSnapshotPruner.prune(
+                databasePath: path,
+                kinds: [.preMigration],
+                protecting: Set([snapshotPath].compactMap { $0 }))
+        }
     }
 
     /// Create an in-memory database for testing using DatabaseQueue.
@@ -120,7 +130,6 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: queue)
         self.config = ConfigStore(writer: queue)
-        self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)
@@ -128,7 +137,6 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: queue)
         self.remoteSessions = RemoteSessionStore(writer: queue)
-        self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)
@@ -155,13 +163,10 @@ public final class TBDDatabase: Sendable {
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.
-    internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        let stamp = formatter.string(from: Date())
-        let snapshotPath = "\(path).pre-migration.\(stamp)"
+    /// - Returns: the path of the copy written, or nil when it failed.
+    @discardableResult
+    internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) -> String? {
+        let snapshotPath = "\(path).pre-migration.\(snapshotTimestamp(for: Date()))"
         do {
             // VACUUM INTO requires autocommit mode — it cannot run inside a
             // transaction. `pool.write` wraps the closure in a deferred
@@ -172,11 +177,33 @@ public final class TBDDatabase: Sendable {
                 try db.execute(sql: "VACUUM INTO ?", arguments: [snapshotPath])
             }
             logger.info("Pre-migration snapshot written to \(snapshotPath, privacy: .public)")
+            return snapshotPath
         } catch {
             logger.error(
                 "Pre-migration snapshot failed at \(snapshotPath, privacy: .public): \(String(describing: error), privacy: .public)"
             )
+            return nil
         }
+    }
+
+    /// The UTC suffix every database snapshot carries, e.g.
+    /// `20260513T143055Z` in `state.db.pre-migration.20260513T143055Z`.
+    internal static func snapshotTimestamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: date)
+    }
+
+    /// Drop the retired columns the kept rollback bundle no longer uses. Runs
+    /// once per daemon start, after migrations and before anything else
+    /// touches the database; see `RetiredColumnReconciler`.
+    @discardableResult
+    func reconcileRetiredColumns(
+        _ reconciler: RetiredColumnReconciler, at date: Date = Date()
+    ) async -> RetiredColumnReconciler.Report {
+        await reconciler.run(writer: writer, at: date)
     }
 
     /// Test-only accessor: allows migration tests to run migrations up to a

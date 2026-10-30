@@ -12,15 +12,14 @@ import Foundation
 /// `token` identifies the calling pane on both branches, so the guarded one
 /// releases that pane's own hold and nobody else's — see `TranscriptPaneToken`.
 ///
-/// `streamPath` rides along on the registering branch: the model-proxy stream
-/// file is optional in a way the transcript path is not — a pane with no stream
-/// file still registers and still polls — so it never influences the branch, it
-/// is only carried. The transcript path remains the sole gate, and a pane with
-/// a stream file but no transcript path deregisters like any other.
+/// `streamPath` rides along on the registering branch: the session mod's
+/// stream file is optional in a way the transcript path is not — a pane with
+/// no stream file still registers and still polls — so it never influences the
+/// branch, it is only carried. The transcript path remains the sole gate, and a
+/// pane with a stream file but no transcript path deregisters like any other.
 ///
 /// An empty `streamPath` means the same thing as nil and is normalised to it
-/// here, the way the transcript path's own guard treats `""` as "no path":
-/// `Terminal.transcriptStreamPath` reaches the app as a decoded string, and a
+/// here, the way the transcript path's own guard treats `""` as "no path": a
 /// registration carrying `""` would have the scheduler stat the pane's working
 /// directory on every tick forever.
 enum TranscriptPaneRegistration {

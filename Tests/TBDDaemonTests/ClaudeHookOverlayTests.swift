@@ -40,7 +40,7 @@ extension TBDHomeSerialized {
         #expect(allStopCommands.contains(where: { $0.contains("stop-rename-check") }))
     }
 
-    @Test func sessionStartUsesQuotedMatchedCLIAndFallsBackToPath() throws {
+    @Test func sessionStartUsesQuotedMatchedCLIAndFallsBackToPath() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-claude-session-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -55,7 +55,10 @@ extension TBDHomeSerialized {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: matched.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fallback.path)
 
-        func run(matchedPath: String?) throws -> String {
+        // Waits through `collectOutput(of:)`, which installs and drains its
+        // own stdout and stderr pipes, so no cooperative-pool thread is parked
+        // on the hook.
+        func run(matchedPath: String?) async throws -> String {
             try? FileManager.default.removeItem(at: marker)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -66,16 +69,13 @@ extension TBDHomeSerialized {
             environment["TBD_CLI_PATH"] = matchedPath
             process.environment = environment
             process.standardInput = Pipe()
-            process.standardOutput = Pipe()
-            process.standardError = Pipe()
-            try process.run()
-            process.waitUntilExit()
-            #expect(process.terminationStatus == 0)
+            let output = try await collectOutput(of: process)
+            #expect(output.status == 0)
             return try String(contentsOf: marker, encoding: .utf8)
         }
 
-        #expect(try run(matchedPath: matched.path) == "matched:session-event\nmatched:terminal-activity\n")
-        #expect(try run(matchedPath: nil) == "fallback:session-event\nfallback:terminal-activity\n")
+        #expect(try await run(matchedPath: matched.path) == "matched:session-event\nmatched:terminal-activity\n")
+        #expect(try await run(matchedPath: nil) == "fallback:session-event\nfallback:terminal-activity\n")
     }
 
     @Test func postToolUseBashHookBindsPRsAndKeepsAskUserQuestion() throws {
@@ -118,7 +118,11 @@ extension TBDHomeSerialized {
     /// The payload is the hook's own JSON envelope rather than a bare command
     /// string, because that is what `$(cat)` holds and JSON escaping is part of
     /// what the pattern has to survive.
-    private func prefilterAdmits(_ command: String) throws -> Bool {
+    ///
+    /// Runs grep through `collectOutput(of:stdin:)`, which feeds the payload,
+    /// closes grep's input and waits without parking a cooperative-pool
+    /// thread; grep's (empty) output is captured and ignored.
+    private func prefilterAdmits(_ command: String) async throws -> Bool {
         let payload = try #require(
             String(data: try JSONSerialization.data(withJSONObject: [
                 "tool_name": "Bash",
@@ -128,15 +132,8 @@ extension TBDHomeSerialized {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
         process.arguments = ["-qE", ClaudeHookOverlay.prBindGrepPattern]
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        input.fileHandleForWriting.write(Data(payload.utf8))
-        try input.fileHandleForWriting.close()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
+        let output = try await collectOutput(of: process, stdin: Data(payload.utf8))
+        return output.status == 0
     }
 
     /// The prefilter is a COST OPTIMIZATION, not a gate — so it may never
@@ -159,7 +156,7 @@ extension TBDHomeSerialized {
     /// Tier 2: spawns a real, bounded `grep`. Asserting against a Swift regex
     /// engine instead would test a different matcher than the one that ships.
     @Test("the grep prefilter admits every form the tokenizer can bind")
-    func prefilterAdmitsEveryBindableCreateForm() throws {
+    func prefilterAdmitsEveryBindableCreateForm() async throws {
         let bindable = [
             "gh pr create --fill",
             "gh -R acme/acme-prod pr create",
@@ -192,7 +189,7 @@ extension TBDHomeSerialized {
         for command in bindable {
             #expect(PRBindingExtractor.isPRCreateCommand(command),
                     "the tokenizer must accept this form: \(command)")
-            #expect(try prefilterAdmits(command),
+            #expect(try await prefilterAdmits(command),
                     "the prefilter silently dropped a bindable create: \(command)")
         }
         // Two tokenizer-accepted shapes are deliberately absent, and the
@@ -209,12 +206,12 @@ extension TBDHomeSerialized {
     /// payload merely mentioning "pr create" spawns one short-lived process
     /// that then declines to bind, which is far cheaper than a lost binding.
     @Test("the grep prefilter still rejects unrelated Bash calls")
-    func prefilterRejectsUnrelatedCommands() throws {
-        #expect(try prefilterAdmits("ls -la /tmp") == false)
-        #expect(try prefilterAdmits("git status --short") == false)
-        #expect(try prefilterAdmits("gh pr view 12 --json state") == false)
-        #expect(try prefilterAdmits("glab mr view 12") == false)
-        #expect(try prefilterAdmits("glab mr list") == false)
+    func prefilterRejectsUnrelatedCommands() async throws {
+        #expect(try await prefilterAdmits("ls -la /tmp") == false)
+        #expect(try await prefilterAdmits("git status --short") == false)
+        #expect(try await prefilterAdmits("gh pr view 12 --json state") == false)
+        #expect(try await prefilterAdmits("glab mr view 12") == false)
+        #expect(try await prefilterAdmits("glab mr list") == false)
     }
 
     @Test func registersStopFailureNotifyHook() throws {
@@ -507,7 +504,7 @@ extension TBDHomeSerialized {
         let path = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: nil,
             sessionKey: key,
-            extraSettingsJSON: #"{"skillOverrides":{"longeye-code-review":"off"}}"#
+            extraSettingsJSON: #"{"skillOverrides":{"acme-code-review":"off"}}"#
         )
         // Per-session file (not the shared global overlay).
         #expect(path != ClaudeHookOverlay.overlayPath)
@@ -519,7 +516,7 @@ extension TBDHomeSerialized {
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(parsed?["hooks"] != nil)
         let overrides = parsed?["skillOverrides"] as? [String: Any]
-        #expect(overrides?["longeye-code-review"] as? String == "off")
+        #expect(overrides?["acme-code-review"] as? String == "off")
     }
 
     @Test func resolveOverlayPathWithMalformedExtraSettingsDoesNotThrowAndKeepsHooks() throws {
@@ -637,6 +634,94 @@ extension TBDHomeSerialized {
         #expect(parsed?["hooks"] != nil)
         let overrides = parsed?["skillOverrides"] as? [String: Any]
         #expect(overrides?["heavy-skill"] as? String == "off")
+    }
+
+    private func mergedOverlay(repo: String? = nil, extra: String? = nil, fallbackModels: [String]? = nil) throws -> [String: Any] {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        let priorTBDHome = setTBDHome(tmp.path)
+        defer {
+            restoreTBDHome(priorTBDHome)
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: fallbackModels,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: repo,
+            extraSettingsJSON: extra
+        )
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test func repoFragmentPreToolUseJoinsTBDHooks() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"guard"}]}]}}"#
+        )
+        let pre = try #require((parsed["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        #expect(pre.count == 2)
+        #expect(pre.first?["matcher"] as? String == "AskUserQuestion")
+        #expect(pre.last?["matcher"] as? String == "Bash")
+        let cmd = (pre.last?["hooks"] as? [[String: Any]])?.first?["command"] as? String
+        #expect(cmd == "guard")
+    }
+
+    @Test func perSpawnPostToolUseKeepsTBDEntries() throws {
+        let parsed = try mergedOverlay(
+            extra: #"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"fmt"}]}]}}"#
+        )
+        let post = try #require((parsed["hooks"] as? [String: Any])?["PostToolUse"] as? [[String: Any]])
+        let matchers = post.compactMap { $0["matcher"] as? String }
+        #expect(matchers.contains("AskUserQuestion"))
+        #expect(matchers.contains("Bash"))
+        #expect(matchers.last == "Edit")
+        #expect(post.count == 3)
+    }
+
+    @Test func denyListsJoinAcrossFragments() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["WebFetch"]}}"#,
+            extra: #"{"permissions":{"deny":["Bash(curl:*)"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["WebFetch", "Bash(curl:*)"])
+    }
+
+    @Test func duplicateListEntriesDropped() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["WebFetch"]}}"#,
+            extra: #"{"permissions":{"deny":["WebFetch"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["WebFetch"])
+    }
+
+    @Test func duplicatesWithinEarlierListAreDropped() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["A","A","B"]}}"#,
+            extra: #"{"permissions":{"deny":["C","B","C"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["A", "B", "C"])
+    }
+
+    @Test func threeLayersOfPreToolUseJoinInOrder() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"repo"}]}]}}"#,
+            extra: #"{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"spawn"}]}]}}"#
+        )
+        let pre = try #require((parsed["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        #expect(pre.compactMap { $0["matcher"] as? String } == ["AskUserQuestion", "Bash", "Edit"])
+    }
+
+    @Test func scalarStillReplaced() throws {
+        let parsed = try mergedOverlay(repo: #"{"model":"a"}"#, extra: #"{"model":"b"}"#)
+        #expect(parsed["model"] as? String == "b")
+    }
+
+    @Test func fallbackModelListJoins() throws {
+        let parsed = try mergedOverlay(extra: #"{"fallbackModel":["m2"]}"#, fallbackModels: ["m1"])
+        #expect(parsed["fallbackModel"] as? [String] == ["m1", "m2"])
     }
 
     @Test func repoAndPerSpawnFragmentsMergeWithPerSpawnWinningCollisions() throws {

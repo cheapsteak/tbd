@@ -186,9 +186,10 @@ struct ShouldBoldNameTests {
     }
 }
 
-/// The three OSC 7501 suffix inputs — needs sign-in, a failed turn and a
-/// finished session — and where they rank. Each defaults to false, so the
-/// suites above double as the "flags off reproduce today" proof.
+/// The two OSC 7501 suffix inputs — needs sign-in and a failed turn — and
+/// where they rank. Each defaults to false, so the suites above double as the
+/// "flags off reproduce today" proof. An OSC `done` has no input: it shows
+/// like idle (see `ProgramStatusRowPresentationTests`).
 @Suite("RowStatusIndicator.suffix: program status")
 struct ProgramStatusSuffixTests {
     @Test func needsAuthAlone() {
@@ -199,11 +200,6 @@ struct ProgramStatusSuffixTests {
     @Test func turnFailedAlone() {
         #expect(RowStatusIndicator.suffix(
             notification: nil, isWorking: false, isSuspended: false, turnFailed: true) == .turnFailed)
-    }
-
-    @Test func turnFinishedAlone() {
-        #expect(RowStatusIndicator.suffix(
-            notification: nil, isWorking: false, isSuspended: false, turnFinished: true) == .finished)
     }
 
     @Test func errorNotificationBeatsNeedsAuth() {
@@ -228,32 +224,20 @@ struct ProgramStatusSuffixTests {
             notification: nil, isWorking: true, isSuspended: false, turnFailed: true) == .turnFailed)
     }
 
-    @Test func workingBeatsFinished() {
-        #expect(RowStatusIndicator.suffix(
-            notification: nil, isWorking: true, isSuspended: false, turnFinished: true) == .working)
-    }
-
-    @Test func finishedBeatsHibernated() {
+    @Test func bothOffReproduceTodaysResults() {
         #expect(RowStatusIndicator.suffix(
             notification: nil, isWorking: false, isSuspended: false,
-            isHibernated: true, turnFinished: true) == .finished)
-    }
-
-    @Test func allThreeOffReproduceTodaysResults() {
-        #expect(RowStatusIndicator.suffix(
-            notification: nil, isWorking: false, isSuspended: false,
-            needsAuth: false, turnFailed: false, turnFinished: false) == nil)
+            needsAuth: false, turnFailed: false) == nil)
         #expect(RowStatusIndicator.suffix(
             notification: nil, isWorking: true, isSuspended: false,
-            needsAuth: false, turnFailed: false, turnFinished: false) == .working)
+            needsAuth: false, turnFailed: false) == .working)
         #expect(RowStatusIndicator.suffix(
             notification: nil, isWorking: false, isSuspended: false, isHibernated: true,
-            needsAuth: false, turnFailed: false, turnFinished: false) == .hibernated)
+            needsAuth: false, turnFailed: false) == .hibernated)
     }
 
     @Test func glyphMapping() {
         #expect(SuffixRowIndicator.needsAuth.systemImage == "person.crop.circle.badge.exclamationmark")
         #expect(SuffixRowIndicator.turnFailed.systemImage == "exclamationmark.triangle.fill")
-        #expect(SuffixRowIndicator.finished.systemImage == "checkmark.circle")
     }
 }

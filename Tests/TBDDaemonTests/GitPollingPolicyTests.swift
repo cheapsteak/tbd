@@ -8,20 +8,14 @@ import Foundation
 @Suite("GitPollCadence Tests")
 struct GitPollCadenceTests {
 
-    @Test func statusIntervalForegroundIsFast() {
-        #expect(GitPollCadence.statusInterval(isForeground: true) == .seconds(10))
-    }
-
-    @Test func statusIntervalBackgroundIsSlow() {
-        #expect(GitPollCadence.statusInterval(isForeground: false) == .seconds(60))
-    }
-
-    @Test func fetchIntervalForegroundIsFast() {
-        #expect(GitPollCadence.fetchInterval(isForeground: true) == .seconds(60))
-    }
-
-    @Test func fetchIntervalBackgroundIsSlow() {
-        #expect(GitPollCadence.fetchInterval(isForeground: false) == .seconds(300))
+    /// Both arms of the foreground gate, without pinning the numbers: a watched
+    /// app polls faster than an unwatched one, for the status sweep and the
+    /// fetch alike.
+    @Test func foregroundPollsFasterThanBackground() {
+        #expect(GitPollCadence.statusInterval(isForeground: true)
+            < GitPollCadence.statusInterval(isForeground: false))
+        #expect(GitPollCadence.fetchInterval(isForeground: true)
+            < GitPollCadence.fetchInterval(isForeground: false))
     }
 
     @Test func effectiveForegroundRequiresReportAndClient() {

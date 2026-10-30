@@ -110,7 +110,7 @@ extension AppState {
     /// Load GC config from the daemon with one `config.get`: the four
     /// collector mirrors, and the hang-stack write-time cap. Called on launch
     /// and whenever a config-change delta arrives — the same two call sites as
-    /// `loadSupervisionConfig()`. Every `config.setGC…Enabled` handler
+    /// `loadHibernationConfig()`. Every `config.setGC…Enabled` handler
     /// broadcasts that delta, so a toggle flipped here or from the CLI reaches
     /// both. Silent on failure: the toggles keep their last value, and the cap
     /// stays at whatever it was, which on launch is OFF — the keep-biased

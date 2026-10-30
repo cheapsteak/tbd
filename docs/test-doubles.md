@@ -27,7 +27,7 @@ real SwiftUI views where a test can measure and photograph them.
   JSON files in a temp directory: no network, no auth. Register it in
   `~/tbd/agent-providers.json` and hand-edit a session file to drive the
   remote-backend UI through states a real provider would take hours to reach.
-- **tmux executable fixture** — `Tests/TestSupport/TmuxExecutableTestFixture.swift`.
+- **tmux executable fixture** — `Tests/DaemonTestSupport/TmuxExecutableTestFixture.swift`.
   Fakes the `tmux` binary itself for Swift tests: a stub executable that
   reports a known version and logs each invocation, plus a resolver pinned to
   it. Reach for it when a test's behavior turns on the tmux version and must
@@ -59,13 +59,14 @@ real SwiftUI views where a test can measure and photograph them.
     every suite that would be misled by it, is nested under the serialized
     `AccessibilityBridgeSerialized`.
 - **Composer render harness** — `Tests/TBDAppTests/ComposerRenderHarness.swift`.
-  Env-gated on `TBD_COMPOSER_SHOTS_DIR`: inert during a normal run, and with the
-  variable set it writes `1-menu.png`, `2-attachment.png`, `3-not-running.png`
-  and `4-blocked.png` at 2x into that directory, one per state the composer can
-  be in.
+  Compiled only under the `TBD_HARNESSES` condition (see `Tests/CLAUDE.md`) and
+  env-gated on `TBD_COMPOSER_SHOTS_DIR`: absent from a normal run, and with both
+  set it writes `1-menu.png`, `2-attachment.png`, `3-not-running.png` and
+  `4-blocked.png` at 2x into that directory, one per state the composer can be
+  in.
 
         TBD_COMPOSER_SHOTS_DIR=/tmp/composer-shots scripts/test.sh \
-            --filter ComposerRenderHarness
+            -Xswiftc -DTBD_HARNESSES --filter ComposerRenderHarness
 
   Reach for it for the half of a UI assertions are bad at — a banner colliding
   with its message, a thumbnail off the baseline. Its predecessor caught the

@@ -50,8 +50,8 @@ import Foundation
         let env = ["TBD_HOME": "/tmp/tbd-derived"]
         #expect(TBDConstants.databasePath(environment: env) == "/tmp/tbd-derived/state.db")
         #expect(TBDConstants.pidFilePath(environment: env) == "/tmp/tbd-derived/tbdd.pid")
-        #expect(TBDConstants.portFilePath(environment: env) == "/tmp/tbd-derived/port")
         #expect(TBDConstants.reposDir(environment: env).path == "/tmp/tbd-derived/repos")
+        #expect(TBDConstants.holdersDir(environment: env).path == "/tmp/tbd-derived/holders")
         #expect(TBDConstants.socketPath(environment: env) == "/tmp/tbd-derived/sock")
         #expect(TBDConstants.actuationLogPath(environment: env) == "/tmp/tbd-derived/actuations.jsonl")
     }
@@ -74,6 +74,14 @@ import Foundation
         #expect(TBDConstants.socketPath(environment: env) == "/tmp/lone.sock")
         // Other paths still resolve to ~/tbd.
         #expect(TBDConstants.databasePath(environment: env).hasSuffix("/tbd/state.db"))
+    }
+
+    @Test func keptAppBundleFollowsTBDHome() {
+        let env = ["TBD_HOME": "/tmp/tbd-kept"]
+        #expect(TBDConstants.keptAppBundle(environment: env).path
+            == "/tmp/tbd-kept/updates/previous/TBD.app")
+        #expect(TBDConstants.keptAppBundleIdentityFile(environment: env).path
+            == "/tmp/tbd-kept/updates/previous/TBD.app/Contents/TBDBuildIdentity.json")
     }
 
     @Test func scratchDirFollowsTBDHome() {
@@ -104,7 +112,8 @@ import Foundation
     }
 
     /// The host Claude store's single resolution point. `TBDApp` reads it too
-    /// (`LegacyHookSettingsPath`), so it lives here rather than in the daemon.
+    /// (`LegacyHookSettingsPath`), so `TBDConstants` forwards it from
+    /// `KernelPaths` rather than the daemon owning it.
     @Test func claudeHostHomeHonorsOverride() {
         let url = TBDConstants.claudeHostHome(
             environment: ["TBD_CLAUDE_HOST_HOME": "/tmp/acme-claude-host"]
@@ -145,10 +154,6 @@ import Foundation
 
     @Test func pidFilePathSuffix() {
         #expect(TBDConstants.pidFilePath.hasSuffix("/tbdd.pid"))
-    }
-
-    @Test func portFilePathSuffix() {
-        #expect(TBDConstants.portFilePath.hasSuffix("/port"))
     }
 
     @Test func reposDirSuffix() {

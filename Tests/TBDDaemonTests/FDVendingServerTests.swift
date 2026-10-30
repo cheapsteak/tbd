@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// `.clockDriven` bounds the classic virtual-time hang (a test-clock sleep
 /// nobody advances); `.serialized` keeps the retry-window tests out of each
@@ -18,6 +20,14 @@ struct FDVendingServerTests {
     /// `Tests/CLAUDE.md` — "exhaustion" below means exhausting the injected
     /// budget, and each test's name says what it actually crosses.
     private static let interval: Duration = .milliseconds(50)
+
+    /// A peer every identity read names at once, for the tests below that are
+    /// about which connection is current rather than about who is on it.
+    private static let peer = ProcessIdentity(
+        pid: 7, startedAt: Date(timeIntervalSince1970: 7), commandLine: "/opt/acme/TBDApp")
+    private static let identifiedPeer: @Sendable (Int32) -> ProcessIdentity? = { _ in
+        FDVendingServerTests.peer
+    }
 
     /// Waits until a `send` is either parked on its next retry wait or has
     /// finished, for the "still retrying" reads below. `advance` resumes a due
@@ -466,4 +476,289 @@ struct FDVendingServerTests {
 
         await server.stop()
     }
+
+    // MARK: peer identity at adopt
+
+    /// Whether the daemon-side end of a socket pair has been closed, read from
+    /// the client end without blocking: end of file once it has, `EAGAIN`
+    /// while it is still open.
+    private func peerHasClosed(_ clientSideFD: Int32) -> Bool {
+        _ = fcntl(clientSideFD, F_SETFL, fcntl(clientSideFD, F_GETFL) | O_NONBLOCK)
+        var byte: UInt8 = 0
+        return Darwin.read(clientSideFD, &byte, 1) == 0
+    }
+
+    /// A frame with no descriptor, for proving a connection is adopted:
+    /// `sendFrame` refuses with `.notConnected` when none is.
+    private static let probeFrame = SidecarFrameCodec.encode(type: .screenRequest, payload: Data())
+
+    @Test("an identity read that fails once is retried, and the connection is adopted identified")
+    func identityReadIsRetriedAfterATransientFailure() async throws {
+        // A read fails for reasons that say nothing about the peer — a `ps`
+        // spawn refused under load — and a connection adopted unidentified
+        // turns every descriptor vended over it into a claim no app's death
+        // can take back.
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+        let reads = ScriptedIdentityReads(failing: 1, then: Self.peer)
+        let server = FDVendingServer(peerIdentity: { _ in reads.read() })
+
+        await server.adoptConnection(fd: serverSideFD)
+
+        #expect(await server.currentClientIdentity() == Self.peer, """
+            a connection whose first identity read failed was adopted unidentified, so a dead \
+            app's sessions vended over it can never be taken back
+            """)
+        #expect(reads.count == 2)
+
+        await server.stop()
+    }
+
+    @Test("an identity no read answers is given up on after three attempts, and the connection is still adopted")
+    func identityReadGivesUpAfterItsAttempts() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+        // The read after the last attempt would answer, so a server that read
+        // once too often would adopt an identity here rather than nil.
+        let attempts = FDVendingServer.identityAttempts
+        let reads = ScriptedIdentityReads(failing: attempts, then: Self.peer)
+        let server = FDVendingServer(peerIdentity: { _ in reads.read() })
+
+        await server.adoptConnection(fd: serverSideFD)
+
+        #expect(attempts == 3, "the bound on reads held on the actor moved")
+        #expect(await server.currentClientIdentity() == nil)
+        #expect(reads.count == attempts, "the identity was read more or fewer times than its attempts")
+        // Unidentified is still adopted: the app's tabs work, and only the
+        // take-back on its death is lost.
+        _ = try await server.sendFrame(Self.probeFrame)
+
+        await server.stop()
+    }
+
+    @Test("adoption is one actor turn: a frame sent in the same turn goes out on the new connection")
+    func adoptionIsOneActorTurn() async throws {
+        // Nothing may run between a connection reaching the actor and its
+        // installation. A vend that ran in between would go onto the socket
+        // being replaced — about to be shut down, so its ack never comes —
+        // while naming the replaced app, still alive, as the descriptor's
+        // holder. `adoptAndSendFrame` is synchronous and isolated to the
+        // server, so it compiles only while adoption has no suspension point;
+        // the reads below check what that turn leaves behind.
+        let (oldServerFD, oldClientFD) = try makeSocketPair()
+        let (newServerFD, newClientFD) = try makeSocketPair()
+        defer { Darwin.close(oldClientFD); Darwin.close(newClientFD) }
+        let replacedApp = ProcessIdentity(
+            pid: 8, startedAt: Date(timeIntervalSince1970: 8), commandLine: "/opt/acme/TBDApp")
+        let server = FDVendingServer(peerIdentity: { $0 == oldServerFD ? replacedApp : Self.peer })
+        await server.adoptConnection(fd: oldServerFD)
+
+        let recipient = try await Self.adoptAndSendFrame(Self.probeFrame, adopting: newServerFD, on: server)
+
+        #expect(recipient == Self.peer, """
+            a frame sent in the adoption's own turn was recorded as going to the app being replaced
+            """)
+        // Already written by the time the turn ended, so a non-blocking read
+        // finds it; a frame that went elsewhere fails here instead of hanging.
+        _ = fcntl(newClientFD, F_SETFL, fcntl(newClientFD, F_GETFL) | O_NONBLOCK)
+        let received = try FDChannel.receiveMessage(from: newClientFD, capacity: 1024)
+        #expect(received.data == Self.probeFrame, "the new connection's peer did not receive the frame")
+        // The replaced socket was shut down with nothing written on it: its
+        // peer reads end of file, not a frame.
+        #expect(peerHasClosed(oldClientFD), "the replaced connection was left open or written to")
+
+        await server.stop()
+    }
+
+    /// Adopts `fd` and sends `frame` in one synchronous stretch on `server`'s
+    /// actor, answering who the frame was recorded as going to. Synchronous on
+    /// purpose: it compiles only while `adoptConnection(fd:stamp:)` — the entry
+    /// the accept thread uses — is, which is what `adoptionIsOneActorTurn`
+    /// pins.
+    private static func adoptAndSendFrame(
+        _ frame: Data, adopting fd: Int32, on server: isolated FDVendingServer
+    ) throws -> ProcessIdentity? {
+        server.adoptConnection(fd: fd, stamp: server.stampConnection())
+        try server.sendFrame(frame)
+        return server.currentClientIdentity()
+    }
+
+    @Test("an older connection whose adoption reaches the server after a newer one's is refused, and reports nothing")
+    func anOlderConnectionAdoptedAfterANewerOneIsRefused() async throws {
+        // The accept thread starts one task per connection, and those tasks
+        // reach the actor in no fixed order. Installing the older connection
+        // second would take the sidecar from the newer one — the socket its
+        // peer is using — and, with a different app on each, report the live
+        // app on the newer one as departed.
+        let (olderServerFD, olderClientFD) = try makeSocketPair()
+        let (newerServerFD, newerClientFD) = try makeSocketPair()
+        defer { Darwin.close(olderClientFD); Darwin.close(newerClientFD) }
+        let olderApp = ProcessIdentity(
+            pid: 8, startedAt: Date(timeIntervalSince1970: 8), commandLine: "/opt/acme/TBDApp")
+        let olderReads = ScriptedIdentityReads(failing: 0, then: olderApp)
+        let departures = ReportedDepartures()
+        let server = FDVendingServer(
+            peerIdentity: { $0 == olderServerFD ? olderReads.read() : Self.peer })
+        await server.setOnClientDisconnect { departures.record($0) }
+
+        // Accepted in this order...
+        let older = server.stampConnection()
+        let newer = server.stampConnection()
+        // ...and reaching the actor in the other.
+        await server.adoptConnection(fd: newerServerFD, stamp: newer)
+        await server.adoptConnection(fd: olderServerFD, stamp: older)
+
+        #expect(await server.currentClientIdentity() == Self.peer, """
+            an older connection whose adoption arrived late took the sidecar from the newer \
+            connection its peer is using
+            """)
+        #expect(departures.count == 0, """
+            refusing an older connection reported a departure — the live app on the newer \
+            connection would be arbitrated as gone
+            """)
+        #expect(peerHasClosed(olderClientFD), "the refused connection's socket was left open")
+        #expect(!peerHasClosed(newerClientFD), "the newer connection was torn down")
+        #expect(olderReads.count == 0, "a connection refused on arrival was identified first")
+
+        await server.stop()
+    }
+
+    @Test("no adoption installs after a stop, including one accepted before it")
+    func adoptionsAfterAStopAreRefused() async throws {
+        // A task the accept thread queued before `stop` can reach the actor
+        // after it, and so can any caller that adopts later. A stopped server
+        // installs neither.
+        let (earlyServerFD, earlyClientFD) = try makeSocketPair()
+        let (lateServerFD, lateClientFD) = try makeSocketPair()
+        defer { Darwin.close(earlyClientFD); Darwin.close(lateClientFD) }
+        let departures = ReportedDepartures()
+        let server = FDVendingServer(peerIdentity: Self.identifiedPeer)
+        await server.setOnClientDisconnect { departures.record($0) }
+
+        let acceptedBeforeTheStop = server.stampConnection()
+        await server.stop()
+        await server.adoptConnection(fd: earlyServerFD, stamp: acceptedBeforeTheStop)
+        await server.adoptConnection(fd: lateServerFD)
+
+        #expect(await server.currentClientIdentity() == nil, "a stopped server adopted a connection")
+        await #expect(throws: FDVendingServerError.notConnected) {
+            try await server.sendFrame(Self.probeFrame)
+        }
+        #expect(peerHasClosed(earlyClientFD), """
+            a connection accepted before the stop, adopted after it, was left open
+            """)
+        #expect(peerHasClosed(lateClientFD), "a connection adopted after the stop was left open")
+        #expect(departures.count == 0)
+    }
+
+    @Test("a listen after a stop adopts connections accepted from then on, and none accepted before it")
+    func aListenAfterAStopStartsAFreshLifetime() async throws {
+        // `stop` refuses every later adoption, and a server that listens again
+        // must take that back — or it binds a socket and closes every
+        // connection made to it. What it must not take back is the refusal of a
+        // connection accepted before the listen, whose task can still reach the
+        // actor afterwards.
+        let root = fencedScratchRoot(prefix: "tbd-fdv")
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let socketPath = "\(root)/vend.sock"
+        let (earlyServerFD, earlyClientFD) = try makeSocketPair()
+        let (lateServerFD, lateClientFD) = try makeSocketPair()
+        defer { Darwin.close(earlyClientFD); Darwin.close(lateClientFD) }
+        let server = FDVendingServer(peerIdentity: Self.identifiedPeer)
+
+        try await server.listen(on: socketPath)
+        await server.stop()
+        let acceptedBeforeTheListen = server.stampConnection()
+        try await server.listen(on: socketPath)
+
+        // Adopted first, so only the listen's floor can refuse it: no
+        // connection accepted after it has been installed yet.
+        await server.adoptConnection(fd: earlyServerFD, stamp: acceptedBeforeTheListen)
+        #expect(peerHasClosed(earlyClientFD), """
+            a connection accepted before the server listened again was installed in the new \
+            lifetime
+            """)
+        #expect(await server.currentClientIdentity() == nil)
+
+        await server.adoptConnection(fd: lateServerFD)
+        #expect(await server.currentClientIdentity() == Self.peer, """
+            a server that listened again after a stop refused a connection accepted after the \
+            listen
+            """)
+        #expect(!peerHasClosed(lateClientFD), "the connection accepted after the listen was torn down")
+        _ = try await server.sendFrame(Self.probeFrame)
+
+        await server.stop()
+    }
+
+    @Test("a stop leaves in place a socket file a successor has bound at the same path")
+    func aStopLeavesASuccessorsSocketInPlace() async throws {
+        // A daemon still stopping when its successor has already started — a
+        // restart that does not wait for the old process — shares one path
+        // with it. The successor's `listen` unlinks the old file and binds its
+        // own; the old server's `stop` must then leave that file alone, or
+        // every later attach fails against a successor nobody can reach.
+        let root = fencedScratchRoot(prefix: "tbd-fdv")
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let socketPath = "\(root)/vend.sock"
+        let dying = FDVendingServer(peerIdentity: Self.identifiedPeer)
+        let successor = FDVendingServer(peerIdentity: Self.identifiedPeer)
+
+        try await dying.listen(on: socketPath)
+        let dyingFile = try #require(SocketFileIdentity(path: socketPath))
+        try await successor.listen(on: socketPath)
+        let successorFile = try #require(SocketFileIdentity(path: socketPath))
+        #expect(successorFile != dyingFile, "the successor's listen reused the old socket file")
+
+        await dying.stop()
+
+        #expect(SocketFileIdentity(path: socketPath) == successorFile, """
+            stopping the old server removed the socket its successor had bound, so no app can \
+            reach the successor's sidecar
+            """)
+
+        // The positive control: a server does remove the file it bound.
+        await successor.stop()
+        #expect(SocketFileIdentity(path: socketPath) == nil,
+                "a stopped server left its own socket file behind")
+    }
+}
+
+/// Answers identity reads from a script: nil for the first `failing` reads,
+/// then `identity` for every read after. Lock-guarded: the server reads on its
+/// actor while the test reads the count from its own task.
+private final class ScriptedIdentityReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private let failing: Int
+    private let identity: ProcessIdentity?
+    private var reads = 0
+
+    init(failing: Int, then identity: ProcessIdentity?) {
+        self.failing = failing
+        self.identity = identity
+    }
+
+    func read() -> ProcessIdentity? {
+        lock.withLock {
+            reads += 1
+            return reads > failing ? identity : nil
+        }
+    }
+
+    var count: Int { lock.withLock { reads } }
+}
+
+/// The departures a server reported through `onClientDisconnect`.
+/// Lock-guarded: reported from the server's actor, read from the test's task.
+private final class ReportedDepartures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reported: [ProcessIdentity?] = []
+
+    func record(_ identity: ProcessIdentity?) {
+        lock.withLock { reported.append(identity) }
+    }
+
+    var count: Int { lock.withLock { reported.count } }
 }

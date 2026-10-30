@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses,
 // no `~/tbd`. Every `AppState` here is built against a throwaway
@@ -42,9 +43,9 @@ private func referenceChildren(_ state: AppState, of parentID: UUID) -> [Worktre
 
 @MainActor
 private func withState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.AppStateDerivedCache.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let suite = TestDefaultsSuite("TBDAppTests.AppStateDerivedCache")
+    let defaults = suite.defaults
+    defer { suite.tearDown() }
     body(AppState(userDefaults: defaults))
 }
 
@@ -320,9 +321,12 @@ struct SelectionOrderWriteCoalescingTests {
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
 
     private func withCountingState(_ body: (AppState, WriteCountingUserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.SelectionOrderWrites.\(UUID().uuidString)"
+        // A subclass has to construct itself, so this site pairs the helper's
+        // two primitives instead of using `TestDefaultsSuite`.
+        let suiteName = TestDefaults.makeSuiteName(label: "TBDAppTests.SelectionOrderWrites")
+        // swiftlint:disable:next no_raw_userdefaults_suite - a write-counting subclass; named and torn down by TestDefaults
         let defaults = WriteCountingUserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestDefaults.tearDown(suiteName: suiteName, defaults: defaults) }
         let state = AppState(userDefaults: defaults)
         // `persistSelectionOrder` is gated on this; startup must not clobber a
         // saved value before the restore has run.

@@ -1,8 +1,9 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 // Scaffolding for the holder's live-process tests.
 //
@@ -43,19 +44,81 @@ enum TestHolderError: LocalizedError {
 }
 
 /// Poll until `condition` holds or the deadline passes.
+///
+/// Suspends between probes rather than sleeping the thread: these suites run
+/// in the fast parallel pass, where a thread parked in `usleep` is one of the
+/// three the whole process shares. The verdict comes from `pollUntilTrue`'s
+/// fresh read after the deadline, so a resumption that lands late under load
+/// still reports a condition that has since come true.
+///
+/// The deadline defaults to `TestDeadlines.saturatedPassSeconds`, per
+/// `Tests/CLAUDE.md`: what these waits watch is a real holder process, which
+/// that pass's load slows as much as anything else in it, and a green run
+/// never pays for the budget. `description` is read only on a timeout, so a
+/// diagnostic that interpolates the holder's log reports the log as it stood
+/// when the wait gave up.
 @discardableResult
 func waitUntil(
+    _ description: @autoclosure () -> String,
+    timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: () -> Bool
+) async -> Bool {
+    let started = ContinuousClock.now
+    let outcome = await pollUntilTrue(
+        timeout: .seconds(timeout), pollInterval: .milliseconds(20)
+    ) {
+        condition()
+    }
+    switch outcome {
+    case .satisfied:
+        return true
+    case .cancelled:
+        // The harness ended the test; attribution belongs to it, not here.
+        return false
+    case .timedOut:
+        Issue.record(
+            HolderWaitTimedOut(
+                what: description(), budget: timeout, elapsed: ContinuousClock.now - started),
+            sourceLocation: sourceLocation)
+        return false
+    }
+}
+
+/// The blocking form of `waitUntil`, for the one caller that cannot suspend:
+/// `HolderFixture.tearDown`, which runs from a `defer`. It follows a SIGKILL,
+/// so it normally ends on its first probe or two. Its bound stays short on
+/// purpose, unlike `waitUntil`'s: this one parks a cooperative-pool thread for
+/// as long as it runs, and a leaked holder is what it reports, not a slow one.
+@discardableResult
+private func blockingWaitUntil(
     _ description: String,
-    timeout: TimeInterval = 10.0,
-    _ condition: () throws -> Bool
-) rethrows -> Bool {
+    timeout: TimeInterval,
+    _ condition: () -> Bool
+) -> Bool {
+    let started = ContinuousClock.now
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-        if try condition() { return true }
+        if condition() { return true }
         usleep(20_000)
     }
-    Issue.record("timed out after \(timeout)s waiting for \(description)")
+    if condition() { return true }
+    Issue.record(
+        HolderWaitTimedOut(what: description, budget: timeout, elapsed: ContinuousClock.now - started))
     return false
+}
+
+/// A bounded wait in this target expired. An `Error` rather than a string, so
+/// its text lands on the primary failure line a CI summary keeps
+/// (`Tests/CLAUDE.md`, "Assertion hygiene" rule 4).
+struct HolderWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    let budget: TimeInterval
+    let elapsed: Duration
+
+    var description: String {
+        "gave up after \(elapsed) (budget \(budget)s) waiting for \(what)"
+    }
 }
 
 func processIsAlive(_ pid: Int32) -> Bool {
@@ -137,17 +200,8 @@ final class HolderFixture {
     ///
     /// Exposed so a test can name paths inside it — a marker file the job
     /// writes — while building the launch request, before the fixture exists.
-    ///
-    /// This duplicates `fencedScratchRoot(prefix:)` in `TestSupport` rather
-    /// than calling it: `TestSupport` pulls in `TBDDaemonLib`, and this target
-    /// deliberately links only the holder and `TBDShared`. Keep the two reading
-    /// the same variable, empty-value fallback included — an empty
-    /// `TBD_TEST_SCRATCH_ROOT` is no more a fence than a missing one, and taken
-    /// literally it would mint the root in the root of the volume.
     static func scratchHome() -> String {
-        let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
-        let root = fenced.isEmpty ? "/tmp" : fenced
-        return "\(root)/tbdh-\(UUID().uuidString.prefix(8).lowercased())"
+        fencedScratchRoot(prefix: "tbdh")
     }
 
     /// The descriptor number `strayDescriptorProbe` plants a leaked fd on.
@@ -167,11 +221,11 @@ final class HolderFixture {
         /// Must match the root any marker paths inside `launch` were built
         /// from; defaults to a fresh one.
         home: String = HolderFixture.scratchHome()
-    ) throws -> HolderFixture {
+    ) async throws -> HolderFixture {
         let executable = try #require(locateExecutable(), "TBDHolder must be built beside the test bundle")
         let environment = ["TBD_HOME": home]
         try FileManager.default.createDirectory(
-            atPath: TBDConstants.holdersDir(environment: environment).path,
+            atPath: KernelPaths.holdersDir(environment: environment).path,
             withIntermediateDirectories: true)
 
         let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)
@@ -220,12 +274,20 @@ final class HolderFixture {
 
         // `dup2(fd, fd)` succeeds WITHOUT clearing FD_CLOEXEC, so a lock that
         // already sits on the target number would be closed at exec and the
-        // holder would refuse to start. `dup` hands back the lowest free
-        // number, which cannot be the one still occupied by the original.
+        // holder would refuse to start. `F_DUPFD_CLOEXEC` hands back the lowest
+        // free number at or above 10, past the target, and keeps the duplicate
+        // close-on-exec, as `HolderSpawner` and `HolderLockTests` do. A plain
+        // `dup` would clear FD_CLOEXEC, and the copy stays open here until this
+        // function returns: every test target links into one process, so a
+        // sibling suite's spawn in that window would inherit the lock and hold
+        // it after the holder died, and `theJobDoesNotInheritTheCreationLock`
+        // would fail with `.alreadyHeld` about somebody else's child. With a
+        // plain `dup` here, that failure measured about 6 runs in 1,000; it can
+        // arise only when the lock lands on 9, the one case that relocates.
         var lockSource = lock.fileDescriptor
         var relocated: Int32 = -1
         if lockSource == 9 {
-            relocated = dup(lockSource)
+            relocated = fcntl(lockSource, F_DUPFD_CLOEXEC, 10)
             try #require(relocated >= 0, "could not move the lock off the target descriptor")
             lockSource = relocated
         }
@@ -234,10 +296,11 @@ final class HolderFixture {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
-        // File actions run IN ORDER. The stdio dup2s come first and the lock's
-        // dup2 last, so that if the log or /dev/null descriptor happens to land
-        // on 9 it has already been copied to its final home by the time the
-        // lock overwrites it. There are deliberately NO trailing closes: a
+        // File actions run IN ORDER. The stdio dup2s come first, then the
+        // lock's, then the probe's below, so a source that sits on a LATER
+        // action's target — the log or /dev/null on 9 or 11, the lock on 11 —
+        // has already been copied to its final home by the time that target is
+        // overwritten. There are deliberately NO trailing closes: a
         // close scheduled after the lock's dup2 would destroy the descriptor it
         // just placed, and O_CLOEXEC already retires the originals at exec.
         posix_spawn_file_actions_adddup2(&actions, nullFD, 0)
@@ -254,10 +317,19 @@ final class HolderFixture {
         if strayDescriptorProbe {
             strayFD = open(home + "/stray.probe", O_WRONLY | O_CREAT | O_CLOEXEC, 0o600)
             try #require(strayFD >= 0, "could not open the stray-descriptor probe")
-            // Same `dup2(fd, fd)` hazard as the lock, same remedy.
+            // Moved above every target whenever it sits on one, not only on
+            // its own. On 11 it meets the lock's `dup2(fd, fd)` hazard. On 0,
+            // 1, 2 or 9 an earlier action would overwrite it before its own
+            // dup2 runs: on 9, which is free whenever the lock is not there,
+            // the lock's dup2 would land first and the probe's dup2 would then
+            // copy the LOCK onto 11, so `theJobDoesNotInheritStrayDescriptors`
+            // would pass however the holder treated 11. At 12 or above the
+            // source is no action's target, so nothing can overwrite it before
+            // it is copied, whatever order the actions run in.
+            let fileActionTargets: Set<Int32> = [0, 1, 2, 9, strayDescriptorNumber]
             var straySource = strayFD
-            if straySource == strayDescriptorNumber {
-                strayRelocated = dup(straySource)
+            if fileActionTargets.contains(straySource) {
+                strayRelocated = fcntl(straySource, F_DUPFD_CLOEXEC, strayDescriptorNumber + 1)
                 try #require(strayRelocated >= 0, "could not move the probe off the target descriptor")
                 straySource = strayRelocated
             }
@@ -277,7 +349,20 @@ final class HolderFixture {
             for entry in argv { free(entry) }
             for entry in envp { free(entry) }
         }
-        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, nil, &argv, &envp)
+
+        // CLOEXEC_DEFAULT, as `HolderSpawner` asks for: the shell, and the
+        // holder it backgrounds, get the descriptors named by a file action
+        // above (0, 1, 2, the lock on 9, and the probe on 11 when asked for)
+        // and nothing else. The launch request on 3 is opened by the shell's
+        // own redirect after exec. Without the flag, every test holder would
+        // inherit whatever any concurrent suite in this process had open
+        // without FD_CLOEXEC, and keep it for the holder's whole life.
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, &attributes, &argv, &envp)
         guard spawned == 0 else { throw TestHolderError.spawnFailed(spawned) }
 
         // The holder now owns the lock through its own copy of the open file
@@ -288,7 +373,7 @@ final class HolderFixture {
 
         var raw: Int32 = 0
         var reaped = false
-        waitUntil("the bootstrap shell to exit", timeout: 10.0) {
+        await waitUntil("the bootstrap shell to exit") {
             if waitpid(shellPID, &raw, WNOHANG) == shellPID { reaped = true }
             return reaped
         }
@@ -299,7 +384,7 @@ final class HolderFixture {
         let exitStatus: Int32? = reaped ? ((raw >> 8) & 0xff) : nil
 
         var holderPID: Int32 = 0
-        let reported = waitUntil("the bootstrap shell to report a holder pid", timeout: 10.0) {
+        let reported = await waitUntil("the bootstrap shell to report a holder pid") {
             guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8) else { return false }
             holderPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             return holderPID > 0
@@ -337,8 +422,8 @@ final class HolderFixture {
         self.spawnerExitStatus = spawnerExitStatus
     }
 
-    func waitForSocket(timeout: TimeInterval = 10.0) {
-        waitUntil("the holder socket at \(socketPath)\n\(diagnostics())", timeout: timeout) {
+    func waitForSocket(timeout: TimeInterval = TestDeadlines.saturatedPassSeconds) async {
+        await waitUntil("the holder socket at \(socketPath)\n\(diagnostics())", timeout: timeout) {
             FileManager.default.fileExists(atPath: socketPath)
         }
     }
@@ -379,7 +464,7 @@ final class HolderFixture {
         // Neither is our child, so nothing here can `waitpid`; the kernel
         // reparents and reaps them. Confirm they are gone so a leak fails the
         // test that caused it rather than the next run.
-        waitUntil("the holder and its job to disappear", timeout: 5.0) {
+        blockingWaitUntil("the holder and its job to disappear", timeout: 5.0) {
             !processIsAlive(holderPID) && !processIsAlive(trackedChildPID)
         }
         try? FileManager.default.removeItem(atPath: home)
@@ -425,11 +510,7 @@ final class TestHolderClient {
             throw TestHolderError.connectFailed(path: socketPath, errno: saved)
         }
 
-        let whole = Int(receiveTimeout)
-        var timeout = timeval(
-            tv_sec: whole,
-            tv_usec: suseconds_t((receiveTimeout - TimeInterval(whole)) * 1_000_000))
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setReceiveTimeout(receiveTimeout)
         // A holder that has already reported an exit closes as soon as it has,
         // so a write can legitimately land on a socket whose peer is gone.
         // Without this that write raises SIGPIPE, whose default disposition
@@ -437,6 +518,16 @@ final class TestHolderClient {
         // failure attributed to anything.
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    /// Re-arms `SO_RCVTIMEO`, so one connection can wait out a short silence
+    /// probe and then give the answer to a real request the ordinary budget.
+    func setReceiveTimeout(_ seconds: TimeInterval) {
+        let whole = Int(seconds)
+        var timeout = timeval(
+            tv_sec: whole,
+            tv_usec: suseconds_t((seconds - TimeInterval(whole)) * 1_000_000))
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }
 
     /// Sends one `describe` and then reads until the holder reports a status

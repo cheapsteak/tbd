@@ -4,9 +4,7 @@ import TBDShared
 /// Structured hover-card content for the Claude tab hover site: account + live
 /// usage + spawn time. Pure `HoverCardModel` composition on top of
 /// `ProfileUsagePresentation`'s formatting fragments — unit-testable without
-/// any panel/AppKit machinery. The flat-string
-/// `ProfileUsagePresentation.sessionTooltip` helper remains as the plain-text
-/// form; this structured card supersedes it in the UI.
+/// any panel/AppKit machinery.
 ///
 /// NOTE: The sidebar worktree ROW carries no account hover card — per-session
 /// account facts and switching live in the tab bar (this card + the tab's

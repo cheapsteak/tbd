@@ -3,6 +3,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The attribution stamp and the agent frame it rides in
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "Trust").

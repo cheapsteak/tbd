@@ -39,13 +39,15 @@ struct OrphanGCDevServerFileTests: ~Copyable {
             hangStackBase: home.appendingPathComponent("hs", isDirectory: true),
             processSnapshotProvider: { [] },
             holdersBase: home.appendingPathComponent("h", isDirectory: true),
-            modelProxyBase: home.appendingPathComponent("mp", isDirectory: true),
-            streamsBase: home.appendingPathComponent("st", isDirectory: true),
             attachmentsBase: home.appendingPathComponent("a", isDirectory: true),
             remoteTranscriptsEnvironment: environment,
             reposBase: TBDConstants.reposDir(environment: environment),
+            sessionsBase: TBDConstants.sessionsDir(environment: environment),
             devServersBase: filesDir,
-            devServerProbe: probe)
+            devServerProbe: probe,
+            retainedTranscriptsBase: TBDConstants.retainedTranscriptsDir(environment: environment),
+            scratchSpacesBase: TBDConstants.scratchDir(environment: environment),
+            worktreesBase: TBDConstants.worktreesDir(environment: environment))
     }
 
     private func writeFile(_ name: String, pid: Int32, age: TimeInterval, body: String? = nil) throws -> String {

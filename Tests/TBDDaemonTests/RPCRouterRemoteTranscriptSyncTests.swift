@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `remote.transcriptSync` and `remote.sendMessage` through the router: every
@@ -638,9 +639,11 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
             describeDeclaring(["send", RemoteCapability.sendSubmit]),
             providerOK(#"{"sessions": [{"id": "s-1", "state": "running"}]}"#),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
         ])
         let m = await manager(invoker)
         let config = RemoteProviderConfig(name: "agentbox", exec: "/nonexistent")
+        await m.pollOnce(provider: config)
         await m.pollOnce(provider: config)
         await m.pollOnce(provider: config)
         let r = router(m)

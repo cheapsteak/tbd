@@ -238,16 +238,4 @@ struct ProgramStatusParserTests {
         let decoded = try JSONDecoder().decode([ProgramStatusBlockKind].self, from: data)
         #expect(decoded == values)
     }
-
-    // MARK: - Gate
-
-    @Test func gateSetAndRead() {
-        let gate = ProgramStatusGate()
-        #expect(gate.isEnabled == false)
-        gate.set(true)
-        #expect(gate.isEnabled == true)
-        gate.set(false)
-        #expect(gate.isEnabled == false)
-        #expect(ProgramStatusGate(enabled: true).isEnabled == true)
-    }
 }

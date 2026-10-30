@@ -14,9 +14,11 @@ struct ProviderRunnerTimeoutTests {
         try "#!/bin/bash\nsleep 60\n".write(to: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
         let config = RemoteProviderConfig(name: "hang", exec: path.path)
+        // The provider sleeps for a minute, so any deadline under that proves
+        // the kill; a tenth of a second keeps the test from paying for it.
         await #expect(throws: ProviderRunError.self) {
             _ = try await ProviderRunner().run(
-                config, verb: ["list"], stdin: nil, timeout: 1, contractVersion: 1)
+                config, verb: ["list"], stdin: nil, timeout: 0.1, contractVersion: 1)
         }
     }
 }

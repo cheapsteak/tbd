@@ -194,6 +194,8 @@ struct GitManagerGCTests {
 
     /// Runs a raw git command and returns trimmed stdout — used only to assert
     /// on plumbing state (`ls-tree`) that GitManager itself doesn't expose.
+    /// Waits through `collectOutput(of:)`, so no cooperative-pool thread is
+    /// parked on the child.
     private func runGit(_ arguments: [String], at dir: URL) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -205,12 +207,7 @@ struct GitManagerGCTests {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null",
         ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(data: data, encoding: .utf8) ?? ""
+        let output = try await collectOutput(of: process)
+        return String(data: output.stdout, encoding: .utf8) ?? ""
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 /// Regression coverage for the UserDefaults-isolation invariant that PR #133
 /// established and this PR completes: when `AppState` is constructed with a
@@ -15,9 +16,9 @@ import TBDShared
 @Suite("AppState UserDefaults isolation")
 struct AppStateUserDefaultsIsolationTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.AppStateIsolation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.AppStateIsolation")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(defaults)
     }
 

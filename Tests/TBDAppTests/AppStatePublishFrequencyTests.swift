@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses, no
 // `~/tbd`. Every `AppState` is built through `withEmissionState`, against a
@@ -563,11 +564,11 @@ struct DeltaIngestionTests {
 /// notification — response completions, errors, focus pushes — so its cadence
 /// tracks agent output across the whole fleet.
 ///
-/// Both tests keep the delta's worktree VISIBLE (selected), which makes the
-/// handler return at `AppState.swift:2335` before it reaches
-/// `macNotificationManager`. That
-/// is deliberate: driving the full path in a unit test would play a sound and
-/// post a system notification on the developer's machine.
+/// Both tests keep the delta's worktree ATTENDED (selected, with the app
+/// reported active through `isAppActive`), which makes the handler return
+/// before it updates `unreadByWorktree` or reaches `postNotificationBanner`.
+/// That is deliberate: these count the bold alone, and driving the full path
+/// would publish the summary too.
 @MainActor
 @Suite("Notification arrivals")
 struct NotificationDeltaTests {
@@ -580,6 +581,7 @@ struct NotificationDeltaTests {
             let worktreeID = UUID()
             state.worktrees = [repoID: [makeWorktree(id: worktreeID, repoID: repoID)]]
             state.selectedWorktreeIDs = [worktreeID]
+            state.isAppActive = { true }
             let backgroundTerminal = UUID()
 
             let count = countEmissions(of: state) {
@@ -606,6 +608,7 @@ struct NotificationDeltaTests {
             let worktreeID = UUID()
             state.worktrees = [repoID: [makeWorktree(id: worktreeID, repoID: repoID)]]
             state.selectedWorktreeIDs = [worktreeID]
+            state.isAppActive = { true }
             let backgroundTerminal = UUID()
             let delta = NotificationDelta(
                 notificationID: UUID(),
@@ -650,9 +653,9 @@ struct RemoteRefreshTests {
 
     @Test("a refresh that returns exactly what is already published")
     func idempotentRemoteRefresh() async {
-        let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.AppStateEmissions")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
         state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }

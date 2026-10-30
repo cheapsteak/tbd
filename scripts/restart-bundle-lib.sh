@@ -38,9 +38,9 @@ BUILD_IDENTITY_PATHSPECS=(
 
 # Every product a running installation needs. scripts/restart.sh and
 # scripts/update.sh both build exactly this list, so a product added here
-# reaches both paths. TBDCLI, TBDHolder, TBDPeerHelper and TBDModelProxy are
-# each found by a SIBLING lookup beside the daemon binary, and a sibling that
-# was never built fails in the field rather than in the build:
+# reaches both paths. TBDCLI, TBDHolder and TBDPeerHelper are each found by a
+# SIBLING lookup beside the daemon binary, and a sibling that was never built
+# fails in the field rather than in the build:
 #
 #   TBDDaemon      launched in place from .build/<config>.
 #   TBDApp         hard-linked into the .app bundle by assemble_app_bundle.
@@ -58,11 +58,6 @@ BUILD_IDENTITY_PATHSPECS=(
 #   TBDPeerHelper  the shadow-peer helper for remote peer messaging
 #                  (ShadowPeerHelperProcessSpawner). Missing, a remote lane
 #                  fails to arm with executableMissing.
-#   TBDModelProxy  the loopback model proxy the daemon spawns once per TBD home
-#                  (ModelProxySupervisor). Missing, the daemon reports the
-#                  model-proxy capability unsupported: sessions spawn unproxied
-#                  and transcript streaming silently never starts, which is the
-#                  same never-built-helper failure the holder had.
 #
 # Every product here is all-or-nothing: a helper that fails to compile stops
 # the restart or update the same way a daemon that fails to compile does. That
@@ -70,8 +65,8 @@ BUILD_IDENTITY_PATHSPECS=(
 # and that graceful path is exactly how a never-built helper went unnoticed;
 # building it as a warning would put the same silent degradation one scroll
 # above the "Daemon ready" line. The holder and peer helper depend on
-# TBDShared and nothing else, the model proxy on TBDShared plus SwiftNIO, and
-# the CLI on TBDShared plus packages the daemon also links, so a helper that
+# TBDKernel and nothing else, and the CLI on TBDShared, TBDKernel and packages
+# the daemon also links, so a helper that
 # fails while the daemon builds is a broken tree, and a broken tree is what a
 # restart should refuse.
 #
@@ -79,7 +74,7 @@ BUILD_IDENTITY_PATHSPECS=(
 # target in Package.swift, so a rename or typo fails there and not on the next
 # restart.
 # shellcheck disable=SC2034 # consumed by the two scripts that source this file
-RUNTIME_PRODUCTS=(TBDDaemon TBDApp TBDCLI TBDHolder TBDPeerHelper TBDModelProxy)
+RUNTIME_PRODUCTS=(TBDDaemon TBDApp TBDCLI TBDHolder TBDPeerHelper)
 
 # MARK: - Build identity
 
@@ -89,6 +84,38 @@ RUNTIME_PRODUCTS=(TBDDaemon TBDApp TBDCLI TBDHolder TBDPeerHelper TBDModelProxy)
 # control-character escaping is not needed here.
 json_escape_string() {
     printf '%s' "${1-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# The source file whose SchemaEpoch.current a build records, relative to the
+# repo root.
+SCHEMA_EPOCH_SOURCE="Sources/TBDShared/SchemaEpoch.swift"
+
+# Print the schema epoch the tree at <repo_root> carries: the integer in the
+# one `public static let current = <N>` line of SchemaEpoch.swift.
+#
+#   read_schema_epoch <repo_root>
+#
+# Strict on purpose. The daemon drops a retired column only once the bundle
+# kept for rollback records an epoch at or past the column's, so a bundle
+# stamped without one holds every drop until the next update replaces it.
+# Fails, naming the file, when the file is missing or the line is not exactly
+# one plain decimal declaration.
+read_schema_epoch() {
+    local repo_root="${1-}"
+    local file="$repo_root/$SCHEMA_EPOCH_SOURCE"
+    local values count
+
+    if [ ! -f "$file" ]; then
+        echo "error: $file is missing — cannot record the schema epoch in the build identity" >&2
+        return 1
+    fi
+    values="$(sed -n -E 's/^[[:space:]]*public static let current = (0|[1-9][0-9]*)[[:space:]]*$/\1/p' "$file")"
+    count="$(printf '%s' "$values" | grep -c '^' || true)"
+    if [ "$count" != 1 ]; then
+        echo "error: $file has no single 'public static let current = <integer>' line — cannot record the schema epoch in the build identity" >&2
+        return 1
+    fi
+    printf '%s\n' "$values"
 }
 
 # Write TBDBuildIdentity.json into a build directory, describing the tree
@@ -107,19 +134,24 @@ json_escape_string() {
 # mismatch there would misdescribe that clone indefinitely, with no later
 # write to correct it until the clone's next successful build.
 #
-# Returns non-zero without writing anything in two cases. When <repo_root> is
+# The sidecar also records the tree's schema epoch (read_schema_epoch above),
+# which the daemon compares against each retired column before dropping it.
+#
+# Returns non-zero without writing anything in three cases. When <repo_root> is
 # not a git checkout, a build that cannot be described gets no sidecar rather
-# than a wrong one, and the loader falls back as the design says. When
-# <build_dir> does not exist yet — a tree that has never been built — the
-# stamp is DEFERRED rather than forced: SwiftPM creates `.build/<config>` as a
-# symlink to `.build/<triple>/<config>` and skips that step when a real
-# directory already occupies the path, so creating one here would send the
-# binaries somewhere the installer never looks. Callers stamp again after the
-# build for that case.
+# than a wrong one, and the loader falls back as the design says. When the
+# tree's schema epoch cannot be read, the error names the file: a bundle
+# without an epoch holds every column drop, so a missing one has to be loud
+# rather than silently stamped. When <build_dir> does not exist yet — a tree
+# that has never been built — the stamp is DEFERRED rather than forced:
+# SwiftPM creates `.build/<config>` as a symlink to `.build/<triple>/<config>`
+# and skips that step when a real directory already occupies the path, so
+# creating one here would send the binaries somewhere the installer never
+# looks. Callers stamp again after the build for that case.
 write_build_identity() {
     local repo_root="${1-}"
     local build_dir="${2-}"
-    local commit short_commit branch dirty_output dirty built_at sidecar
+    local commit short_commit branch dirty_output dirty built_at sidecar schema_epoch
 
     if [ -z "$repo_root" ] || [ -z "$build_dir" ]; then
         echo "error: write_build_identity needs a repo root and a build dir" >&2
@@ -128,6 +160,10 @@ write_build_identity() {
 
     if ! commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || [ -z "$commit" ]; then
         echo "warning: $repo_root has no git HEAD — skipping build identity" >&2
+        return 1
+    fi
+    if ! schema_epoch="$(read_schema_epoch "$repo_root")"; then
+        echo "error: no build identity stamped for $repo_root" >&2
         return 1
     fi
     short_commit="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf '%s' "${commit:0:7}")"
@@ -157,7 +193,8 @@ write_build_identity() {
   "branch": "$(json_escape_string "$branch")",
   "builtAt": "$(json_escape_string "$built_at")",
   "sourceWorktree": "$(json_escape_string "$repo_root")",
-  "dirty": $dirty
+  "dirty": $dirty,
+  "schemaEpoch": $schema_epoch
 }
 EOF
 }
@@ -336,10 +373,13 @@ sign_app_bundle() {
 #
 # /Applications is the only path macOS 15 accepts for requestAuthorization;
 # bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
-# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). All TBD
-# worktrees share CFBundleIdentifier=com.github.cheapsteak.tbd, so whichever
-# tree most recently installed "wins" /Applications — the same
-# last-install-wins behavior already documented for tbd:// URL routing.
+# `cp -cR` uses APFS clonefile (copy-on-write, ~zero disk cost). It is
+# `/bin/cp` by absolute path because -c is BSD-only: a dev shell that puts GNU
+# coreutils first on PATH (nix, direnv, Homebrew's gnubin) resolves a bare `cp`
+# to one that rejects the flag, and the install fails. All TBD worktrees share
+# CFBundleIdentifier=com.github.cheapsteak.tbd, so whichever tree most recently
+# installed "wins" /Applications — the same last-install-wins behavior already
+# documented for tbd:// URL routing.
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
@@ -350,7 +390,7 @@ install_app_bundle() {
     fi
 
     rm -rf "$installed_bundle"
-    cp -cR "$bundle_dir" "$installed_bundle" || return 1
+    /bin/cp -cR "$bundle_dir" "$installed_bundle" || return 1
     register_app_bundle "$installed_bundle"
 }
 
@@ -397,13 +437,597 @@ escape_exec_pattern() {
         | sed -e 's/[\\.+*?(){}^$|]/\\&/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
 }
 
-# Kill the app process whose command line is exactly <pattern>, if it is
-# running. Always succeeds: nothing to kill is a normal outcome.
+# Stop the app process whose command line is exactly <pattern>, and wait until
+# nothing matching it is left.
+#
+#   stop_app_process <pattern> [grace_seconds] [kill_wait_seconds]
+#
+# SIGTERM (pkill's default) first, then up to <grace_seconds> (default 5) for
+# it to exit, then SIGKILL and up to <kill_wait_seconds> (default 3) more.
+# The wait is the point. An app that is still on its way out can reconnect to
+# a daemon the caller has just started and re-attach a session, leaving that
+# daemon holding a claim for a viewer about to die; and `open` on a bundle
+# whose process is still running activates that process instead of launching
+# a new one, so the relaunch is lost when it finishes exiting.
+#
+# Both waits are whole numbers of seconds (see _wait_for_no_match), and a
+# wait of 0 still checks once.
+#
+# Prints one word saying how it ended, for the caller to report:
+#   none      nothing matched, so nothing was signalled
+#   stopped   nothing matching was left within the grace period after SIGTERM
+#   killed    something matching outlived the grace period and was gone after
+#             SIGKILL
+#   survived  something matching is still running after SIGKILL
+#   unknown   pgrep failed at the end of the wait after SIGKILL instead of
+#             answering, so whether anything matching is still running cannot
+#             be told
+# Returns non-zero for `survived` and `unknown`: either way the app may still
+# be running.
 stop_app_process() {
     local pattern="${1-}"
-    [ -n "$pattern" ] || return 0
-    pkill -f "^${pattern}\$" 2>/dev/null && sleep 0.3
+    local grace="${2:-5}"
+    local kill_wait="${3:-3}"
+    local status=0
+
+    if [ -z "$pattern" ]; then
+        printf 'none\n'
+        return 0
+    fi
+
+    # A failed pkill is not by itself "nothing running". pkill exits 1 when
+    # nothing matched, but also when every match refused the signal, since a
+    # process it could not signal does not count as a match; and it exits 2
+    # or 3 on an error that says nothing either way. Read as `none`, any of
+    # those hands the caller a running app as absent, and an update then hands
+    # the daemon over with it alive and owes it no relaunch. So pgrep decides,
+    # and only its own "no match" is `none`. Everything else goes on to the
+    # wait and the SIGKILL like an app that took the signal. An app pgrep
+    # still finds may never have received the SIGTERM, and the escalation is
+    # what finds out whether anything can stop it. A pgrep that errors instead
+    # of answering leaves the app possibly there, and stopping here would never
+    # signal one that is; going on costs nothing when it is not, since an app
+    # that is gone simply matches nothing. That case can end `stopped` or
+    # `killed` with nothing ever running, which the callers treat as an app
+    # that was: at worst a relaunch nobody needed, where `none` would risk
+    # never bringing back an app that was open. Only a wait that still gets
+    # no answer after SIGKILL is `unknown`.
+    pkill -f "^${pattern}\$" 2>/dev/null || status=$?
+    if [ "$status" -ne 0 ]; then
+        status=0
+        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
+        if [ "$status" -eq 1 ]; then
+            printf 'none\n'
+            return 0
+        fi
+    fi
+
+    status=0
+    _wait_for_no_match "$pattern" "$grace" || status=$?
+    if [ "$status" -eq 0 ]; then
+        printf 'stopped\n'
+        return 0
+    fi
+
+    # Still matching, or pgrep could not say: SIGKILL either way, since an
+    # app that has already gone simply matches nothing.
+    pkill -KILL -f "^${pattern}\$" 2>/dev/null || true
+    status=0
+    _wait_for_no_match "$pattern" "$kill_wait" || status=$?
+    case "$status" in
+        0)
+            printf 'killed\n'
+            return 0
+            ;;
+        1)
+            printf 'survived\n'
+            return 1
+            ;;
+        *)
+            printf 'unknown\n'
+            return 1
+            ;;
+    esac
+}
+
+# The line that reports how a stop_app_process call ended, for the caller to
+# print or log. One wording for every script that stops the app, so the same
+# outcome reads the same in a restart's output and an update's log.
+#
+#   describe_app_stop <outcome> <grace_seconds> <app>
+#
+# <grace_seconds> is the grace the stop was given, so the `killed` line states
+# the wait that actually ran. <app> names where the app runs from, a bundle or
+# an executable path, for the lines that need it to be actionable. An
+# outcome stop_app_process never prints gets a line of its own rather than
+# borrowing another outcome's wording.
+describe_app_stop() {
+    local outcome="${1-}"
+    local grace="${2-}"
+    local app="${3-}"
+    case "$outcome" in
+        none) printf 'no app running from %s to stop\n' "$app" ;;
+        stopped) printf 'the app exited\n' ;;
+        killed) printf 'the app ignored SIGTERM for %ss and exited on SIGKILL\n' "$grace" ;;
+        survived) printf 'WARNING: the app running from %s is still running after SIGKILL\n' "$app" ;;
+        unknown) printf 'WARNING: could not tell whether an app is still running from %s: pgrep failed\n' \
+            "$app" ;;
+        *) printf 'WARNING: stopping the app running from %s ended in an unrecognised way: [%s]\n' \
+            "$app" "$outcome" ;;
+    esac
+}
+
+# Wait up to <seconds> for no process's command line to be exactly <pattern>.
+#
+#   _wait_for_no_match <pattern> <seconds>
+#
+# <seconds> is a whole number: it is multiplied in bash arithmetic, which has
+# no fractions. Polled in tenths of a second: the app usually exits within the
+# first one, and a whole-second poll would add that second to every restart.
+# The first poll comes before any sleep, so a wait of 0 still asks pgrep once
+# and answers from what it says rather than from no poll at all.
+#
+# Returns 0 once pgrep finds nothing, 1 if something still matched at the last
+# poll, and 2 if the last poll was a pgrep error. Only pgrep's own "no match"
+# (exit 1) counts as gone: an error (2 or 3) is no answer at all, and read as
+# one it reports a running app as stopped.
+_wait_for_no_match() {
+    local pattern="$1"
+    local ticks=$(($2 * 10))
+    local status
+    while :; do
+        status=0
+        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
+        if [ "$status" -eq 1 ]; then
+            return 0
+        fi
+        [ "$ticks" -gt 0 ] || break
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
+    if [ "$status" -eq 0 ]; then
+        return 1
+    fi
+    return 2
+}
+
+# MARK: - Daemon process control
+
+# True when <value> is a whole number written the way bash arithmetic reads
+# it: digits only, at least one, and no leading zero unless it is 0 itself,
+# because arithmetic reads a leading zero as octal (08 is an error, 010 is
+# eight). Every budget below is checked with it before anything is signalled:
+# a budget like 0.5 would otherwise fail mid-wait, after a SIGTERM had gone
+# out.
+_is_whole_number() {
+    case "${1-}" in
+        '' | *[!0-9]* | 0?*) return 1 ;;
+    esac
+}
+
+# True when <value> is a pid: a whole number above zero.
+_is_pid() {
+    _is_whole_number "${1-}" && [ "$1" -gt 0 ]
+}
+
+# True when <value> is a number of seconds above zero that sleep accepts:
+# digits with at most one decimal point, not all of them zeros. A poll
+# interval of 0 would spin.
+_is_positive_interval() {
+    case "${1-}" in
+        '' | . | *[!0-9.]* | *.*.*) return 1 ;;
+    esac
+    [ -n "${1//[0.]/}" ]
+}
+
+# Print "<state> <name>" for the process running as <pid>, from one `ps`, or
+# nothing when no process runs as <pid>. The name is the kernel's accounting
+# name (`ucomm`): the file the process executed, which neither its arguments
+# nor its argv[0] can change.
+_process_state_and_name() {
+    _is_pid "${1-}" || return 1
+    ps -o stat= -o ucomm= -p "$1" 2>/dev/null
+}
+
+# True while a process runs as <pid>. A zombie, exited but not yet reaped by
+# its parent, does not count: it holds no socket and serves nothing, and
+# `kill -0` alone would call it alive until its parent got round to it.
+#
+#   process_is_running <pid>
+process_is_running() {
+    local state
+    read -r state _ <<< "$(_process_state_and_name "${1-}")"
+    case "$state" in
+        '' | Z*) return 1 ;;
+    esac
     return 0
+}
+
+# True while <pid> is a running TBD daemon: a running process, not a zombie,
+# whose executable is named TBDDaemon. The shell's counterpart of
+# ProcessLiveness.isLiveNamedProcess, which the daemon's own single-instance
+# gate and handover use.
+#
+#   daemon_process_is_running <pid>
+#
+# The name is what makes a pid read out of the pid file safe to wait on or to
+# signal: after a crash or a reboot the file can name a pid the system has
+# since handed to something unrelated, which no wait should hang on and no
+# SIGKILL should reach. Only the executable counts: a debugger or an editor
+# with a TBDDaemon path among its arguments is not a daemon. A zombie keeps
+# its name, so the state is checked too.
+daemon_process_is_running() {
+    local state name
+    read -r state name <<< "$(_process_state_and_name "${1-}")"
+    case "$state" in
+        '' | Z*) return 1 ;;
+    esac
+    [ "$name" = TBDDaemon ]
+}
+
+# Wait up to <seconds> for <pid> to stop being a running daemon.
+#
+#   wait_for_daemon_exit <pid> <seconds>
+#
+# <seconds> is a whole number. Polled in tenths of a second, the first poll
+# before any sleep, as _wait_for_no_match is: a wait of 0 still looks once.
+# Returns 0 once it is gone, 1 if it was still running at the last poll, and 2
+# for a budget that is not a whole number.
+wait_for_daemon_exit() {
+    local pid="${1-}" seconds="${2-}" ticks
+    _is_whole_number "$seconds" || return 2
+    ticks=$((seconds * 10))
+    while daemon_process_is_running "$pid"; do
+        [ "$ticks" -gt 0 ] || return 1
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
+    return 0
+}
+
+# Stop the daemon running as <pid>, and wait until it has exited.
+#
+#   stop_daemon_process <pid> [grace_seconds] [kill_wait_seconds]
+#
+# SIGTERM first, then up to <grace_seconds> (default 30) for the daemon to
+# finish its shutdown, then SIGKILL and up to <kill_wait_seconds> (default 5)
+# more. The defaults are the budgets a successor daemon gives its predecessor
+# in a handover (DaemonHandover.termBudget and killBudget): stop() is a
+# sequence of awaits that releases every holder reader and stops both servers,
+# and takes seconds. Both budgets are whole numbers, checked before anything
+# is signalled.
+#
+# Signals only a pid daemon_process_is_running vouches for, so a stale pid
+# cannot get an unrelated process killed.
+#
+# Prints one word saying how it ended, for the caller to report:
+#   none      no daemon is running as <pid>, so nothing was signalled
+#   stopped   it exited within the grace period after SIGTERM
+#   killed    it outlived the grace period and exited after SIGKILL
+#   survived  it is still running after SIGKILL
+#   invalid   a budget was not a whole number, so nothing was signalled
+# Returns 1 for `survived` and 2 for `invalid`.
+stop_daemon_process() {
+    local pid="${1-}"
+    local grace="${2:-30}"
+    local kill_wait="${3:-5}"
+
+    if ! _is_whole_number "$grace" || ! _is_whole_number "$kill_wait"; then
+        printf 'invalid\n'
+        return 2
+    fi
+    if ! daemon_process_is_running "$pid"; then
+        printf 'none\n'
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    if wait_for_daemon_exit "$pid" "$grace"; then
+        printf 'stopped\n'
+        return 0
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+    if wait_for_daemon_exit "$pid" "$kill_wait"; then
+        printf 'killed\n'
+        return 0
+    fi
+    printf 'survived\n'
+    return 1
+}
+
+# Run <command> for at most <seconds>, a whole number above zero, and return
+# its own status: 124, as timeout(1) returns, when it ran out of time and was
+# stopped (SIGTERM, then SIGKILL a second later), and 125 for a malformed
+# call. macOS has no timeout(1).
+#
+#   run_with_time_limit <seconds> <command> [args...]
+#
+# <command> must be an executable, not a shell function: the process stopped
+# is the one `&` started, and a function's own children would outlive it. It
+# is watched with `kill -0`, which is safe on a child of this shell: its pid
+# stays its own until this shell reaps it in the `wait` below.
+run_with_time_limit() {
+    local limit="${1-}" pid ticks
+    if [ "$#" -lt 2 ] || ! _is_pid "$limit"; then
+        return 125
+    fi
+    shift
+    "$@" &
+    pid=$!
+    ticks=$((limit * 10))
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$ticks" -le 0 ]; then
+            kill -TERM "$pid" 2>/dev/null
+            ticks=10
+            while kill -0 "$pid" 2>/dev/null && [ "$ticks" -gt 0 ]; do
+                sleep 0.1
+                ticks=$((ticks - 1))
+            done
+            kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            return 124
+        fi
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
+    wait "$pid"
+}
+
+# MARK: - Handing the daemon over
+#
+# scripts/update.sh and scripts/restart.sh replace the running daemon the same
+# way. They start the new daemon with TBD_HANDOVER_FROM_PID naming the old one,
+# and the new daemon does the rest: it writes its own pid over the pid file,
+# retires the old daemon, and binds its sockets only once the old one has
+# exited. With the new daemon's pid in the pid file from the first instant,
+# the app's watchdog finds a live daemon there and starts no rescue daemon of
+# its own. The scripts only wait, in two phases under one deadline. A deadline
+# is a value of bash's SECONDS, which a subshell shares with its parent.
+#
+# Until the old daemon has exited, a reply on the socket can be the old
+# daemon's. It goes on answering for the whole of its shutdown, after it has
+# let go of every session, and a local build runs both daemons from the same
+# file, so not even the executable path tells them apart. Once it is gone, a
+# reply can only be the new daemon's. Hence the order: the old daemon's exit,
+# then a reply.
+
+# The pid a handover replaces: the one in the pid file under <tbd_home>
+# (default $TBD_HOME, else ~/tbd, where the daemon and the CLI look too), or
+# 0 when there is no file or no pid in it, which is a cold start. Whether that
+# pid is still a daemon is for the new daemon to decide and for
+# wait_for_predecessor_exit to watch.
+#
+#   handover_from_pid [tbd_home]
+handover_from_pid() {
+    local home="${1:-${TBD_HOME:-$HOME/tbd}}" pid
+    pid="$(head -1 "$home/tbdd.pid" 2>/dev/null | tr -dc '0-9')"
+    # A leading zero would read as octal later. The daemon never writes one.
+    while [ "${pid#0}" != "$pid" ]; do
+        pid="${pid#0}"
+    done
+    printf '%s\n' "${pid:-0}"
+}
+
+# Wait for the daemon a handover replaces to exit, giving up early if the new
+# daemon dies first: a new daemon that dies never signals the old one, which
+# would otherwise be waited on to the deadline.
+#
+#   wait_for_predecessor_exit <old_pid> <new_pid> <deadline>
+#
+# Polled every tenth of a second, and cheaply: both daemons are looked at with
+# `kill -0`, a builtin that starts no process, and with the `ps` checks once a
+# second, on the first look and every tenth one after. Those confirm the old
+# daemon is still a daemon, not a zombie or a pid handed on, and catch a new
+# one that has exited but is not yet reaped. `kill -0` fails on another user's
+# process, but both daemons are this user's own. Prints one word:
+#   none              <old_pid> named no running daemon at the first look: a
+#                     cold start (<old_pid> 0), or a stale pid file
+#   exited            it was running, and has exited
+#   successor-exited  <new_pid> stopped running while the old daemon still ran
+#   timeout           the old daemon was still running at <deadline>
+#   invalid           <deadline> is not a whole number, or <new_pid> no pid
+# Returns 0 for `none` and `exited`, 1 for the failures and 2 for `invalid`.
+wait_for_predecessor_exit() {
+    local old_pid="${1-}" new_pid="${2-}" deadline="${3-}" seen=false ticks=0
+    if ! _is_whole_number "$deadline" || ! _is_pid "$new_pid"; then
+        printf 'invalid\n'
+        return 2
+    fi
+    while :; do
+        if [ $((ticks % 10)) -eq 0 ]; then
+            daemon_process_is_running "$old_pid" || break
+        else
+            kill -0 "$old_pid" 2>/dev/null || break
+        fi
+        seen=true
+        if ! kill -0 "$new_pid" 2>/dev/null ||
+            { [ $((ticks % 10)) -eq 0 ] && ! process_is_running "$new_pid"; }; then
+            printf 'successor-exited\n'
+            return 1
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            printf 'timeout\n'
+            return 1
+        fi
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    if [ "$seen" = true ]; then
+        printf 'exited\n'
+    else
+        printf 'none\n'
+    fi
+}
+
+# Wait until <command>, the caller's test that the new daemon answers,
+# succeeds, giving up early if the new daemon dies. <command> runs with its
+# output discarded, at least once even past <deadline>, then every
+# <poll_seconds> (a number above zero; fractions allowed). Each run is cut off
+# after <probe_seconds> (run_with_time_limit), so a daemon that accepts a
+# connection and never replies cannot hold the wait past its deadline by more
+# than one probe. <command> is therefore an executable, not a shell function.
+#
+#   wait_until_daemon_ready <new_pid> <deadline> <poll_seconds> <probe_seconds> <command> [args...]
+#
+# Prints one word:
+#   ready             <command> succeeded
+#   successor-exited  <new_pid> stopped running first
+#   timeout           <command> had not succeeded by <deadline>
+#   invalid           a malformed argument, or no <command>
+# Returns 0 for `ready`, 1 for the failures and 2 for `invalid`.
+wait_until_daemon_ready() {
+    local new_pid="${1-}" deadline="${2-}" poll="${3-}" probe="${4-}"
+    if [ "$#" -lt 5 ] || ! _is_pid "$new_pid" || ! _is_whole_number "$deadline" ||
+        ! _is_positive_interval "$poll" || ! _is_pid "$probe"; then
+        printf 'invalid\n'
+        return 2
+    fi
+    shift 4
+    while :; do
+        if run_with_time_limit "$probe" "$@" > /dev/null 2>&1; then
+            printf 'ready\n'
+            return 0
+        fi
+        if ! process_is_running "$new_pid"; then
+            printf 'successor-exited\n'
+            return 1
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            printf 'timeout\n'
+            return 1
+        fi
+        sleep "$poll"
+    done
+}
+
+# Both phases of a handover under one <timeout> in whole seconds: the old
+# daemon's exit, then <command>, which runs only once the old daemon is gone.
+#
+#   wait_for_daemon_handover <old_pid> <new_pid> <timeout> <poll_seconds> <probe_seconds> <command> [args...]
+#
+# Prints the two phases' words on one line, wait_for_predecessor_exit's then
+# wait_until_daemon_ready's, with `skipped` for a second phase that never ran:
+# `exited ready`, `none ready`, `timeout skipped`, `exited successor-exited`
+# and so on, or `invalid skipped` for a malformed call. Returns 0 only when it
+# ends `ready`.
+wait_for_daemon_handover() {
+    local old_pid="${1-}" new_pid="${2-}" timeout="${3-}" poll="${4-}" probe="${5-}"
+    local deadline predecessor ready=skipped
+    if [ "$#" -lt 6 ] || ! _is_whole_number "$timeout"; then
+        printf 'invalid skipped\n'
+        return 2
+    fi
+    shift 5
+    deadline=$((SECONDS + timeout))
+    predecessor="$(wait_for_predecessor_exit "$old_pid" "$new_pid" "$deadline")"
+    case "$predecessor" in
+        exited | none)
+            ready="$(wait_until_daemon_ready "$new_pid" "$deadline" "$poll" "$probe" "$@")"
+            ;;
+    esac
+    printf '%s %s\n' "$predecessor" "$ready"
+    [ "$ready" = ready ]
+}
+
+# What a restart does with wait_for_daemon_handover's answer: print the line
+# that reports it, and return 0 to go on to the app or 1 to stop.
+#
+#   describe_daemon_handover <outcome> <old_pid> <new_pid> <timeout> <log_path>
+#
+# Going on is right only once the old daemon is gone, because until then an
+# app reaches the old daemon on its way out, and only while the new daemon
+# still runs. A new daemon that runs but has not answered yet is a warning,
+# not a stop: the app retries until it does. Everything else stops, an outcome
+# this does not recognise included, so a malformed answer can never pass for a
+# good one.
+describe_daemon_handover() {
+    local outcome="${1-}" old_pid="${2-}" new_pid="${3-}" timeout="${4-}" log_path="${5-}"
+    case "$outcome" in
+        'exited ready' | 'none ready')
+            printf 'Daemon ready (PID %s)\n' "$new_pid"
+            return 0
+            ;;
+        'exited timeout' | 'none timeout')
+            printf 'WARNING: the daemon (PID %s) is running but did not answer within %ss — see %s\n' \
+                "$new_pid" "$timeout" "$log_path"
+            return 0
+            ;;
+        'successor-exited skipped')
+            printf 'ERROR: the new daemon (PID %s) exited while the old one (PID %s) was still running — see %s\n' \
+                "$new_pid" "$old_pid" "$log_path"
+            return 1
+            ;;
+        'exited successor-exited' | 'none successor-exited')
+            printf 'ERROR: the new daemon (PID %s) exited before it answered — see %s\n' \
+                "$new_pid" "$log_path"
+            return 1
+            ;;
+        'timeout skipped')
+            printf 'ERROR: the old daemon (PID %s) was still running after %ss — see %s\n' \
+                "$old_pid" "$timeout" "$log_path"
+            return 1
+            ;;
+        *)
+            printf 'ERROR: the daemon handover ended in an unrecognised way: [%s] — see %s\n' \
+                "$outcome" "$log_path"
+            return 1
+            ;;
+    esac
+}
+
+# Replace the running daemon with <daemon_bin> by a handover, the whole of
+# scripts/restart.sh's daemon step, and say how it went.
+#
+#   restart_daemon_by_handover <tbd_home> <daemon_bin> <log_path> <timeout> <probe_seconds> <ready_command> [args...]
+#
+# The daemon replaced is the one <tbd_home>'s pid file names
+# (handover_from_pid), and <ready_command> is the test that the new daemon
+# answers, run once the old one is gone (wait_for_daemon_handover), every 0.2
+# seconds and cut off after <probe_seconds> each time. The previous log at
+# <log_path> is kept as <log_path>.1: the daemon does not persist os.Logger
+# output, so that file is the only record of a crash before the restart.
+#
+# Progress goes to stdout and a failure to stderr. Returns 0 when the caller
+# may go on to the app (describe_daemon_handover) and 1 when it must stop. A
+# stop first stops the new daemon if it is still running, so a refused or
+# abandoned handover does not leave it behind, waiting on the old daemon or
+# serving beside it.
+restart_daemon_by_handover() {
+    local tbd_home="${1-}" daemon_bin="${2-}" log_path="${3-}" timeout="${4-}" probe="${5-}"
+    local old_pid new_pid outcome report stop
+    if [ "$#" -lt 6 ]; then
+        printf 'ERROR: restart_daemon_by_handover needs a TBD home, a daemon, a log, a budget, a probe limit and a readiness test\n' >&2
+        return 1
+    fi
+    shift 5
+    old_pid="$(handover_from_pid "$tbd_home")"
+    if [ -f "$log_path" ]; then
+        mv "$log_path" "$log_path.1"
+    fi
+    if [ "$old_pid" = 0 ]; then
+        printf 'Starting daemon...\n'
+    else
+        printf 'Starting daemon, handing over from PID %s...\n' "$old_pid"
+    fi
+    TBD_HANDOVER_FROM_PID="$old_pid" "$daemon_bin" > "$log_path" 2>&1 &
+    new_pid=$!
+
+    outcome="$(wait_for_daemon_handover "$old_pid" "$new_pid" "$timeout" 0.2 "$probe" "$@")"
+    if report="$(describe_daemon_handover "$outcome" "$old_pid" "$new_pid" "$timeout" "$log_path")"; then
+        printf '  %s\n' "$report"
+        return 0
+    fi
+    printf '  %s\n' "$report" >&2
+    stop="$(stop_daemon_process "$new_pid" 5 3)"
+    case "$stop" in
+        none) ;;
+        stopped | killed)
+            printf '  Stopped the new daemon (PID %s): %s\n' "$new_pid" "$stop" >&2
+            ;;
+        *)
+            printf '  WARNING: could not stop the new daemon (PID %s): %s\n' "$new_pid" "$stop" >&2
+            ;;
+    esac
+    return 1
 }
 
 # Launch a bundle through LaunchServices with an explicit PATH.

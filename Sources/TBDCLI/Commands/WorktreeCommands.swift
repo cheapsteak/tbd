@@ -59,6 +59,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for the primary terminal when it is Codex, passed as -c model=<id>. Ignored for Claude and shell primaries.")
     var codexModel: String?
 
+    @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) for the primary Claude terminal to load on every start. Repeatable. Relative paths resolve against the current folder. Ignored when the primary is Codex.")
+    var pluginDirs: [String] = []
+
     @Option(
         name: .customLong("position"),
         help: ArgumentHelp(
@@ -81,11 +84,21 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Flag(name: .long, help: "Auto-archive this worktree when its PR merges (arms the per-worktree override; overrides the global default off).")
     var archiveOnMerge = false
 
+    /// The `pluginDirs` param this invocation sends: each `--plugin-dir` made
+    /// absolute against `cwd`, or none when the flag was not given.
+    func pluginDirsParam(cwd: String) -> [String]? {
+        pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd)
+    }
+
     mutating func validate() throws {
         if let codexModel,
            codexModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ValidationError("--codex-model must not be empty.")
         }
+        // No agent check: the primary's agent is settled by the daemon (a
+        // configured preference may make it Codex), which ignores plugin
+        // folders for a Codex primary.
+        try CLIPluginDirs.validateNotBlank(pluginDirs)
         if let folder = folder {
             if folder.isEmpty {
                 throw ValidationError("Folder name must not be empty.")
@@ -141,7 +154,8 @@ struct WorktreeCreate: AsyncParsableCommand {
                 suppressAutoParent: parentingFields.suppressAutoParent,
                 claudeSettingsOverlay: claudeSettings,
                 autoArchiveOnMerge: archiveOnMerge ? true : nil,
-                codexModel: codexModel
+                codexModel: codexModel,
+                pluginDirs: pluginDirsParam(cwd: FileManager.default.currentDirectoryPath)
             ),
             resultType: Worktree.self
         )
@@ -409,7 +423,7 @@ struct WorktreeArchive: AsyncParsableCommand {
     @Argument(help: "Worktree name or ID")
     var nameOrID: String
 
-    @Flag(name: .long, help: "Force archive even with uncommitted changes")
+    @Flag(name: .long, help: "Force archive even with uncommitted changes, or past a remote lane's safety checks")
     var force = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -419,16 +433,53 @@ struct WorktreeArchive: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
 
-        try client.callVoid(
+        let response = try client.send(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: worktreeID, force: force)
-        )
+        ))
+        if let refusal = Self.guardedRefusalMessage(for: response) {
+            throw CLIError.rpcError(refusal)
+        }
+        try SocketClient.requireSuccess(response)
 
         if json {
             printJSON(["status": "archived", "id": worktreeID.uuidString])
         } else {
             print("Worktree archived.")
         }
+    }
+
+    /// The remedy this surface names for a remote lane's guard refusal.
+    static let forceHint = "Re-run with --force to retire it anyway."
+
+    /// The remedy this surface names for a local worktree's uncommitted-changes
+    /// refusal.
+    static let uncommittedForceHint = "Pass --force to archive anyway."
+
+    /// The message for an archive refused by a guard `--force` lifts, with
+    /// the flag that gets past it appended to the daemon's sentence, which
+    /// states the fact alone:
+    ///
+    /// - `remoteLaneArchiveGuarded` – a remote lane with a working agent, a
+    ///   provider-reported dirty checkout or a stale inventory.
+    /// - `worktreeArchiveUncommitted` – a local worktree whose folder holds
+    ///   uncommitted changes, or whose `git status` could not be read. The
+    ///   daemon checks this for every client, so the CLI runs no check of its
+    ///   own.
+    ///
+    /// `nil` for a success and for every other refusal, which keeps its plain
+    /// error. Branches on the code, never the prose.
+    static func guardedRefusalMessage(for response: RPCResponse) -> String? {
+        guard !response.success else { return nil }
+        let hint: String
+        if response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue {
+            hint = forceHint
+        } else if response.errorCode == RPCErrorCode.worktreeArchiveUncommitted.rawValue {
+            hint = uncommittedForceHint
+        } else {
+            return nil
+        }
+        return "\(response.error ?? "The archive was refused.") \(hint)"
     }
 }
 

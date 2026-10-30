@@ -4,14 +4,20 @@ import Foundation
 
 @Suite("Model Profile Models")
 struct ModelProfileModelTests {
-    @Test func decodeModelProfile() throws {
+    /// The minimal profile, as persisted rows and JSON from before `baseURL`,
+    /// `model` and `fallbackModels` existed: it must still decode, with every
+    /// later field nil.
+    @Test func decodeMinimalModelProfile() throws {
         let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
-        let tok = try dec.decode(ModelProfile.self, from: json)
-        #expect(tok.name == "Personal")
-        #expect(tok.kind == .oauth)
-        #expect(tok.lastUsedAt == nil)
+        let profile = try dec.decode(ModelProfile.self, from: json)
+        #expect(profile.name == "Personal")
+        #expect(profile.kind == .oauth)
+        #expect(profile.lastUsedAt == nil)
+        #expect(profile.baseURL == nil)
+        #expect(profile.model == nil)
+        #expect(profile.fallbackModels == nil)
     }
 
     @Test func decodeCredentialKindApiKey() throws {
@@ -44,30 +50,12 @@ struct ModelProfileModelTests {
         #expect(p.model == "gpt-5-codex")
     }
 
-    @Test func decodeModelProfileWithoutBaseURLOrModel() throws {
-        let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        let p = try dec.decode(ModelProfile.self, from: json)
-        #expect(p.baseURL == nil)
-        #expect(p.model == nil)
-    }
-
     @Test func decodeModelProfileWithFallbackModels() throws {
         let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","fallbackModels":["claude-haiku-4-5-20251001","claude-sonnet-4-5"],"createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         let p = try dec.decode(ModelProfile.self, from: json)
         #expect(p.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
-    }
-
-    @Test func decodeModelProfileWithoutFallbackModels() throws {
-        // Existing persisted rows/JSON (pre-fallbackModels) must still decode.
-        let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        let p = try dec.decode(ModelProfile.self, from: json)
-        #expect(p.fallbackModels == nil)
     }
 
     @Test func repoDecodesWithoutOverride() throws {

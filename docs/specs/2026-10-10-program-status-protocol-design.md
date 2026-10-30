@@ -1,6 +1,6 @@
 # Program Status Protocol (OSC 7501) for holder sessions
 
-Status: design, default-off behind `program_status_enabled`.
+Status: design. On for every pty-holder session; there is no flag.
 
 ## Summary
 
@@ -69,18 +69,19 @@ and sends a bare `state=clear` on exit and when restoring terminal modes.
 
 - Show permission and question blocks the moment they happen, and clear them
   the moment they resolve.
-- Distinguish a finished turn (`done`) from a never-started or stopped one
+- Tell a finished turn (`done`) apart from a never-started or stopped one
   (`idle`), and show failed turns (`error`) and lapsed sign-ins (`needsAuth`)
   as their own states.
 - Keep a session whose main turn ended visibly working while its background
   tasks run, and visibly blocked when one of them waits on the user.
-- Show the reported `title`, `msg` and `progress` on hover.
+- Show the reported `title`, `msg` and `progress` when hovering a status
+  badge.
 
 ## Non-goals
 
 - The tmux transport, in either attach mode.
 - A ticker or history of messages. Only the latest values are kept; a ticker
-  can be designed separately once the soak shows how often `msg` changes.
+  can be designed separately once field use shows how often `msg` changes.
 - Persisting any of this across a daemon restart.
 - Acting on reports. They drive display and resolution only; nothing kills,
   wakes or sends input because of one.
@@ -116,8 +117,8 @@ data.
 
 ### Answering the probe
 
-When `program_status_enabled` resolves true, whichever reader owns the holder
-pty answers a `?` query with `ESC ] 7501 ; ? BEL`:
+Whichever reader owns a holder session's pty answers a `?` query with
+`ESC ] 7501 ; ? BEL`. A tmux panel never answers.
 
 The reply must be written synchronously, while SwiftTerm parses the probe.
 Claude Code writes the probe before its DA1 query and treats DA1's reply as
@@ -137,18 +138,12 @@ preempt), never from the asynchronous `observeOscEvents` stream.
 Both readers must answer identically, because Claude Code asks once at
 startup: a probe answered only by the app would make the feature depend on
 whether the app happened to be attached when Claude launched. Both therefore
-answer for any holder session while the flag is on, whatever its agent;
-ingestion, not the probe, filters to Claude, and a panel created before the
-daemon's capabilities reach the app does not answer, so a Claude started in
-that window runs without the protocol (an accepted gap).
+answer for any holder session, whatever its agent; ingestion, not the probe,
+filters to Claude.
 
 A snapshot replay must never answer a probe or ingest a report. Reports are
 read from `observeOscEvents`, which is already suspended during replay; the
 probe handler checks the same replay state and stays silent while it is up.
-
-When the flag resolves false, neither reader answers, Claude Code never
-enables the protocol, and behavior is identical to a build without this
-feature. Turning the flag on affects only Claude processes started afterwards.
 
 ### Delivering reports to the daemon
 
@@ -168,7 +163,6 @@ the last state it accepted, and Claude Code's next change corrects it.
 The store accepts a report only when all of these hold; otherwise it drops
 it with a debug log:
 
-- the flag resolves true;
 - the terminal is a live holder session whose recorded agent is Claude;
 - the report's incarnation matches the terminal's current incarnation, so a
   late report from a previous process cannot overwrite its successor;
@@ -184,12 +178,12 @@ accepted: reports drive display only.
 Claude Code sends `clear` when it exits cleanly, but a SIGKILLed process sends
 nothing. The store therefore drops a terminal's entries — main and tasks —
 when the holder session's child exits, when the terminal is hibernated or
-parked, when its incarnation changes, and when the flag is turned off.
+parked, and when its incarnation changes.
 
-A child exit, a park, or the flag turning off is an unconditional end, so its
-drop also records a per-terminal watermark: a report observed at or before it
-is refused, and so is a report whose validation was suspended on the terminal
-lookup while the drop ran. Otherwise a backlog already in flight — the
+A child exit or a park is an unconditional end, so its drop also records a
+per-terminal watermark: a report observed at or before it is refused, and so
+is a report whose validation was suspended on the terminal lookup while the
+drop ran. Otherwise a backlog already in flight — the
 daemon's inbox, or the app's forwarder — would land after the drop and hold an
 entry nothing ever clears. A wake drops only entries whose incarnation differs
 from the terminal's current one, because by the time it runs the replacement
@@ -254,7 +248,8 @@ matches:
 2. Any task entry is `blocked` → `.awaitingInput`, labelled with that task's
    title.
 3. The main entry is `working`, or any task entry is `working` → `.working`,
-   with a count of working task entries.
+   with a count of working task entries carried in the resolution (the row
+   does not draw it).
 4. Otherwise → the main entry's `.done` or `.idle`.
 
 Rule 3 closes the gap that
@@ -265,13 +260,24 @@ rail is not consulted.
 
 ### UI
 
-For OSC-authoritative terminals only, with the flag on:
+For OSC-authoritative terminals only:
 
-- **Worktree row** – `.done` shows a quiet "finished" badge distinct from
-  idle; `.error` and `.needsAuth` get badges of their own; a working session
-  with running task entries shows a small background count. The existing
-  working, idle and awaiting-input badges are unchanged.
-- **Tooltip** – hovering the worktree row lists, per OSC-authoritative
+- **Worktree row** – `.error` and `.needsAuth` get badges of their own.
+  The existing working, idle and awaiting-input badges are unchanged. A
+  running task entry keeps the row on the working badge even after the main
+  entry stops working (rule 3); the row draws no count of running tasks,
+  since a number beside the working dots crowds them and the tooltip
+  already lists every task entry with its state.
+- **Done shows as idle** – `.done` has no badge. Claude Code reports `done`
+  after every turn and keeps it until the next one, so a badge for it would
+  sit on nearly every waiting session. The row already marks the case that
+  matters: a bold worktree name means a turn finished with a response the
+  user has not read, and it clears when the user selects the worktree.
+  Like an idle row, a row whose only OSC-authoritative terminal is done has
+  no badge and so no tooltip. `.done` stays a distinct resolved state: it
+  appears in the tooltip when another terminal's badge carries one, and it
+  is there for any later consumer.
+- **Tooltip** – hovering the row's status badge lists, per OSC-authoritative
   terminal in the worktree, the main entry's state, `title`, `msg` and
   `progress`, then one line per task entry with its title, state and `msg`.
 
@@ -284,21 +290,10 @@ Terminals that are not OSC-authoritative look exactly as they do today.
 
 ## Flag
 
-`program_status_enabled` is a `config` column added with no SQL default, so
-NULL means nobody chose. The shipped default lives in
-`Config.programStatusEnabledDefault = false` and is applied in
-`ConfigRecord.toModel()`. A Settings toggle sets it.
-
-The flag gates every piece: answering the probe in both readers, accepting
-reports, resolution, and UI. Off means neither reader answers, so Claude Code
-never emits anything.
-
-- **Soak** – enable the toggle on a development machine running holder
-  sessions, and compare the sidebar against what the sessions are visibly
-  doing, especially permission prompts and sessions with background agents.
-- **Graduation** – flip the default constant. Users who never touched the
-  toggle follow it; explicit opt-outs are preserved. Delete the flag once the
-  default has held.
+None. Both readers answer the probe on every holder session, and the store
+accepts every report that passes "Trust"; no setting turns the protocol off.
+See [`2026-10-30-osc-only-agent-status-design.md`](2026-10-30-osc-only-agent-status-design.md),
+"Flag".
 
 ## Reconciler
 
@@ -311,15 +306,13 @@ orphan.
 - **Parser** – every key; base64 decode and the byte caps on a UTF-8
   boundary; malformed and empty payloads; unknown `state` and `kind`; the
   probe form; missing `state`.
-- **Probe reply** – answered with the flag on and silent with it off, in both
-  the app observer and the daemon emulator; silent during snapshot replay.
-- **Store** – trust checks (flag, agent, incarnation, `app`); task add,
+- **Probe reply** – answered on a holder session by both the app observer and
+  the daemon emulator; silent on a tmux panel and during snapshot replay.
+- **Store** – trust checks (agent, incarnation, `app`); task add,
   `clear:id`, and the 32-entry cap; the liveness drops.
 - **Resolution** – each roll-up rule in order; OSC precedence over hook state;
   fall-back after a main `clear`; `.parked`, `.gone` and `.rateLimited`
   outranking OSC.
-- **Flag column** – a pre-migration row reads NULL rather than `0`; NULL
-  follows the default constant; an explicit `false` survives a change to it.
 - **`SessionStateValue`** – the three new tags round-trip, and a decoder that
   lacks them reads `.unknown`.
 

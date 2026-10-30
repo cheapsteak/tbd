@@ -108,6 +108,27 @@ After the next `scripts/restart.sh`, the first folder prompt is the last one:
 click **Don't Allow** (Claude only probes those folders; TBD worktrees live under
 `~/tbd/`, which isn't protected), and it stays denied silently from then on.
 
+## Microphone access
+
+Some privacy services require the responsible app to declare why it wants
+access before macOS will even ask. The microphone is one of them: without an
+`NSMicrophoneUsageDescription` key in the responsible app's `Info.plist`, macOS
+denies the request silently, shows no prompt, and never lists the app under
+**System Settings > Privacy & Security > Microphone**. Because TBD is the
+responsible app for every program running in its terminals, a voice-input
+feature in a coding agent would fail with no visible cause.
+
+`Resources/TBDApp.Info.plist` therefore carries `NSMicrophoneUsageDescription`.
+The bundle is not signed with the hardened runtime, so no entitlement is needed
+alongside it. After `scripts/restart.sh` assembles a bundle with the key, the
+first microphone request from a terminal program prompts under TBD's name. To
+grant access after declining, enable TBD under **System Settings > Privacy &
+Security > Microphone**. To clear the decision and be prompted again:
+
+```bash
+tccutil reset Microphone com.github.cheapsteak.tbd
+```
+
 ## Security note
 
 `TBD Dev Signing` is a self-signed, locally-generated dev key with `-A`

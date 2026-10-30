@@ -5,8 +5,8 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The filing sync — Task 7 of `docs/plans/2026-08-16-remote-lane-archive.md`,
-/// spec §"The filing decision travels back".
+/// The filing sync — `docs/specs/2026-08-16-remote-lane-archive-design.md`,
+/// "The filing decision travels back".
 ///
 /// Tier 1: in-memory GRDB, a fake provider invoker, and a real actuation log
 /// in a temp directory. No subprocesses, no network, no `TBD_HOME`.

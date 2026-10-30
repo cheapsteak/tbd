@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "peerRoster")
@@ -490,8 +491,7 @@ public struct RosterScanReport: Sendable, Equatable {
 ///    in the tree is in `TBDApp`, which the daemon does not link; it is
 ///    single-*file*, holds an fd per watched path, and re-opens itself after
 ///    every atomic save. Per-record watching would mean dozens of fds
-///    continuously re-armed by other people's renames. `SupervisionStore`
-///    rejected a watcher for a daemon-side file store on the same grounds and
+///    continuously re-armed by other people's renames.
 ///    `BranchTrackingCache` records that no daemon-side watcher exists.
 /// 4. **A scan is cheap.** One `readdir` and one small-JSON decode per entry,
 ///    over a directory that held 84 records on a heavily-used machine. There

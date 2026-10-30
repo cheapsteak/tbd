@@ -29,12 +29,14 @@ The decisions a human made, in order:
   every holder born before it cannot answer, and a new hand-over seam through
   the viewer. The blink buys all of that back for no new binary.
 - **The swap interrupts regardless, matching tmux.** The holder park has
-  refusal rails the tmux swap does not: typed-but-unsent composer text, a
-  transcript tail that is mid-write, and a screen that is not a trustworthy
-  daemon-rendered projection. The swap bypasses all three. The tmux arm has
-  never honoured any of them, and a "Switch account" that refuses after a
-  daemon restart until the re-adopted screen is observed again was judged
-  worse than a swap that drops typed text.
+  refusal rails the tmux swap does not: a session mid-turn or at a permission
+  prompt, and a transcript tail that is mid-write. The swap bypasses them,
+  and like every profile swap it goes ahead whatever the session mod knows
+  about an unsent draft
+  ([`2026-10-24-mod-only-park-guard-design.md`](2026-10-24-mod-only-park-guard-design.md),
+  "Which parks go ahead"). The tmux arm has never honoured any of them, and a
+  "Switch account" that refuses was judged worse than a swap that drops
+  typed text.
 - **No new flag.** The holder transport is itself gated by
   `pty_holder_enabled`, the action needs a user gesture, and every failure
   point lands the row in a state an existing path owns (see "Failure
@@ -53,20 +55,24 @@ gains a holder arm beside the tmux one. In order:
 
 1. **Park**, through `performHolderHibernate` with a new eligibility policy,
    `HibernateEligibilityPolicy.profileSwap`. Under it the park skips the
-   typed-input rail and the screen-trust rails, and skips the transcript-tail
-   rail. It still reads the screen once, as a display capture only: a readable
-   daemon-rendered frame becomes the row's `suspendedSnapshot`, the tab's
-   backdrop, as it does for every park. An unreadable one captures nothing:
-   the park's delta carries no snapshot and the row's column keeps whatever an
-   earlier park stored, as every park does when it has no capture. Neither
-   what the frame shows nor whether it can be read refuses the park.
-   Everything else is the park as it stands: park intent is written before the
-   process is touched, then the ending ladder — polite `/exit`, poll,
-   `SIGTERM` to the identity-verified child, abandon the holder — and the same
-   "child survived the escalation" outcome, which rolls the park intent back
-   and leaves the row awake. The row parks with reason `.auto`, so a daemon
-   that dies between the halves leaves a row the next focus-wake heals, not
-   one that needs a manual wake.
+   rails that refuse a session mid-turn or at a permission prompt, and skips
+   the transcript-tail rail; the session mod's draft gate lets it through, as
+   it does a manual park. It still reads the screen once, as a display capture
+   only: a readable daemon-rendered frame becomes the row's
+   `suspendedSnapshot`, the tab's backdrop, as it does for every park. An
+   unreadable one captures nothing: the park's delta carries no snapshot and
+   the row's column keeps whatever an earlier park stored, as every park does
+   when it has no capture. Neither what the frame shows nor whether it can be
+   read refuses the park. Everything else is the park as it stands: park
+   intent is written before the process is touched, then the ending ladder —
+   `SIGTERM` to the identity-verified child, poll, abandon the holder — and the
+   same "child survived the escalation" outcome, which rolls the park intent
+   back and leaves the row awake. Like every park, it types nothing into the
+   session, so a draft in the composer is never submitted (see
+   [`2026-10-24-mod-only-park-guard-design.md`](2026-10-24-mod-only-park-guard-design.md)).
+   The row parks with reason `.auto`, so a daemon that dies between the
+   halves leaves a row the next focus-wake heals, not one that needs a manual
+   wake.
 2. **Re-home**, which is the existing cold-swap block: set the parked row's
    `profile_id` to the destination profile and broadcast
    `terminalProfileChanged`. The transcript carry already happened upstream.
@@ -178,8 +184,7 @@ holder row is no longer a category error at that branch.
 - An `.inPlace` swap of a row that is **already parked** takes the cold path,
   on either transport: re-home without waking.
 - `.fork` keeps its holder path.
-- `swapDeskRole` and the trust seed run unchanged; the row and its watch-desk
-  role survive the swap.
+- The trust seed runs unchanged.
 - The `.manual`, `.merge` and `.automatic` policies keep every rail they have.
   `.profileSwap` is a fourth policy, not a switch on the others.
 
@@ -199,11 +204,9 @@ reconciliation.
 
 Daemon unit tests, fast pass, no live processes:
 
-- **Both branches of the new policy.** A park with typed-but-unsent text on
-  the screen, a park over a transcript whose tail is mid-write, and a park
-  over a re-adopted screen whose content is unobserved each **proceed** under
-  `.profileSwap` and each still **refuse** under `.manual`, with the refusal
-  text each rail emits today.
+- **Both branches of the new policy.** A park over a transcript whose tail is
+  mid-write **proceeds** under `.profileSwap` and still **refuses** under
+  `.manual`, with the refusal text the rail emits today.
 - **The holder arm**, driven with the fakes the holder wake tests use. A
   refused park and a park answered by another park already in flight each
   leave the row awake on the old profile with nothing else changed, both
@@ -281,10 +284,9 @@ re-adopted row after a daemon restart.
   it would leave the tmux transport with a capability the holder never gains
   while the tmux transport is on its way out.
 - **Obeying the park's rails, in full or the transcript rail alone.** The
-  tmux arm has never obeyed them, and the screen-trust rail would make the
-  swap refuse on every re-adopted row after a daemon restart until its screen
-  was observed again — the case a user reaching for "Switch account" after a
-  restart is most likely to be in.
+  tmux arm has never obeyed them, and in full they would refuse every swap of
+  a working session — the case "Switch account" already lets through on
+  either transport with its mid-turn warning.
 - **A dedicated `holder_in_place_swap_enabled` column and toggle.** A
   migration, a toggle and a later graduation for an action the tmux arm has
   never gated, on a transport that is itself behind a soak flag.

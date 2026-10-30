@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// "Switch account" on a holder-backed tab, as the pane sees it: the daemon
 /// parks the row, re-homes it and wakes it, and the pane must ride those flips
@@ -18,9 +19,9 @@ import TBDShared
 struct SwitchingAccountPaneTests {
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let name = "tbd-switching-account-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-switching-account")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 
@@ -115,7 +116,8 @@ struct SwitchingAccountPaneTests {
                 let cached = state.terminals[row.worktreeID]!.first!
                 return TerminalPanePresentation.identity(
                     for: cached, switching: state.switchingAccountTerminals[row.id],
-                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
             }
             let before = identity()
             state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
@@ -148,7 +150,8 @@ struct SwitchingAccountPaneTests {
                 let cached = state.terminals[row.worktreeID]!.first!
                 return TerminalPanePresentation.identity(
                     for: cached, switching: state.switchingAccountTerminals[row.id],
-                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
             }
             let before = identity()
             var duringRPC: String?
@@ -213,12 +216,12 @@ struct SwitchingAccountPaneTests {
         let switching = SwitchingAccount(profileName: "Acme")
 
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0)
-                == TerminalPanePresentation.identity(for: parked, switching: switching, attachEpoch: 0))
+            TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0)
+                == TerminalPanePresentation.identity(for: parked, switching: switching, attachEpoch: 0, attachRetry: 0))
         // Setting the record on an awake row is not a flip either.
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0)
-                == TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0))
+            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0)
+                == TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0))
     }
 
     /// And the other branch: an ordinary pane still rebuilds on every flip,
@@ -230,8 +233,8 @@ struct SwitchingAccountPaneTests {
         parked.hibernatedAt = Date()
 
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0)
-                != TerminalPanePresentation.identity(for: parked, switching: nil, attachEpoch: 0))
+            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0)
+                != TerminalPanePresentation.identity(for: parked, switching: nil, attachEpoch: 0, attachRetry: 0))
     }
 
     /// The one rebuild a switch does get: the swap's wake advances the epoch,
@@ -298,6 +301,46 @@ struct SwitchingAccountPaneTests {
             await state.swapTerminalProfile(terminalID: failedWake.id, newProfileID: nil)
             #expect(state.terminalAttachEpochs[failedWake.id] == nil)
             #expect(state.terminals[worktreeID]?.last?.isParked == true)
+        }
+    }
+
+    /// The attach-failed placard's Retry rebuilds the pane through a count of
+    /// its own. Were it to advance the attach epoch instead, a Retry landing
+    /// mid-switch would look to the swap like the rebuild it still owes, and
+    /// the pane would stay on the dead holder's attach after the switch.
+    @Test("a Retry during a switch leaves the switch its own rebuild")
+    func retryMidSwitchLeavesTheSwitchItsRebuild() async {
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            let worktreeID = row.worktreeID
+            state.terminals[worktreeID] = [row]
+            // `@MainActor`: a function local to this closure is not isolated
+            // with it, and everything it reads is the main actor's.
+            @MainActor func identity() -> String {
+                let current = state.terminals[worktreeID]!.first { $0.id == row.id }!
+                return TerminalPanePresentation.identity(
+                    for: current, switching: state.switchingAccountTerminals[row.id],
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+            }
+            var afterRetry: String?
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: row.id, worktreeID: worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                state.retryTerminalAttach(terminalID: row.id)
+                #expect(state.terminalAttachEpochs[row.id] == nil,
+                        "Retry must not touch the epoch the switch reads")
+                afterRetry = identity()
+                return row
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(state.terminalAttachRetries[row.id] == 1)
+            #expect(state.terminalAttachEpochs[row.id] == 1, "the switch must still rebuild the pane once")
+            #expect(identity() != afterRetry,
+                    "the switch's rebuild was swallowed by the Retry that preceded it")
         }
     }
 

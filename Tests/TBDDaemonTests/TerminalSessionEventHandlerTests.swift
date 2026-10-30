@@ -3,6 +3,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 @Suite("terminal.sessionEvent handler")
@@ -39,6 +40,22 @@ struct TerminalSessionEventHandlerTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             now: now,
+            actuationLog: makeTestActuationLog()
+        )
+    }
+
+    private func makeRouter(sessionsDir: URL) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            ),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog()
         )
     }
@@ -176,6 +193,83 @@ struct TerminalSessionEventHandlerTests {
             return
         }
         #expect(session.sessionIncarnationID == incarnation)
+    }
+
+    // MARK: - Session mod: `/clear` carry-forward
+
+    /// A Claude row whose process carries a durable incarnation, plus a spawn
+    /// record for its current session naming that incarnation — the state a
+    /// spawn made with a session-mod feature on leaves behind.
+    private func makeModSpawnedTerminal(
+        sessionID: String, sessionsDir: URL
+    ) async throws -> (Terminal, UUID) {
+        let (terminal, _) = try await makeTerminal(initialSession: sessionID, kind: .claude)
+        // Rotating the tmux ids gives the row a durable incarnation token.
+        try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: "@7", paneID: "%7")
+        let incarnation = try #require(
+            try await db.terminals.get(id: terminal.id)?.sessionIncarnationID)
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        return (terminal, incarnation)
+    }
+
+    /// `/clear` keeps the process and moves it to a new session ID, and the
+    /// mod's writes follow it there. The new ID gets a spawn record naming
+    /// the same live incarnation, so the park reads the mod as confirmed
+    /// rather than falling back to legacy.
+    @Test("SessionStart with a new session ID carries the live spawn record forward")
+    func sessionStartWithANewIDCarriesSpawnRecordForward() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let modRouter = makeRouter(sessionsDir: sessionsDir)
+        let (terminal, incarnation) = try await makeModSpawnedTerminal(
+            sessionID: "before-clear", sessionsDir: sessionsDir)
+
+        let response = await modRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "after-clear",
+                transcriptPath: nil,
+                source: "clear",
+                sessionIncarnationID: incarnation)))
+        #expect(response.success)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == "after-clear")
+        let carried = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "after-clear"))
+        #expect(carried.sessionId == "after-clear")
+        #expect(carried.incarnationId == incarnation.uuidString)
+        #expect(carried.features == ["composer-draft"])
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "before-clear")?.spawnedAtMs == 1,
+                "the carry rewrote the source session's record")
+    }
+
+    /// A SessionStart that keeps the session ID — a resume, `/compact`, or a
+    /// wake's own process reporting in — writes nothing: the record the spawn
+    /// wrote already names the right session.
+    @Test("SessionStart with the same session ID writes no spawn record")
+    func sessionStartWithTheSameIDWritesNothing() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let modRouter = makeRouter(sessionsDir: sessionsDir)
+        let (terminal, incarnation) = try await makeModSpawnedTerminal(
+            sessionID: "same-id", sessionsDir: sessionsDir)
+
+        let response = await modRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "same-id",
+                transcriptPath: nil,
+                source: "compact",
+                sessionIncarnationID: incarnation)))
+        #expect(response.success)
+
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "same-id")?.spawnedAtMs == 1,
+                "a SessionStart that kept the session ID rewrote its spawn record")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path) == ["same-id"])
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")
@@ -844,12 +938,9 @@ struct TerminalSessionEventHandlerTests {
             sessionID: "live-session",
             transcriptPath: transcript.path,
             observedAt: Date(timeIntervalSinceReferenceDate: 10)))
-        _ = await isolatedRouter.sessionCounters.sample(
-            terminalID: terminal.id,
-            worktreeID: worktree.id,
-            transcriptPath: transcript.path,
-            commitsUnchangedSince: nil,
-            at: Date(timeIntervalSinceReferenceDate: 11))
+        // The activity ledger is stamped right after the handler's terminal
+        // fetch, so it is how this test sees the handler get that far.
+        await isolatedRouter.activityLedger.setEnabled(true)
 
         let updateGate = BlockingTerminalUpdateTrigger()
         let pauseUpdate = DatabaseFunction(
@@ -906,8 +997,7 @@ struct TerminalSessionEventHandlerTests {
         let handlerTask = gateHoldingTask { await isolatedRouter.handle(request) }
         let passedTerminalFetch = await waitForHookEvent(
             router: isolatedRouter,
-            terminal: terminal,
-            transcriptPath: transcript.path)
+            terminal: terminal)
         #expect(passedTerminalFetch,
                 "SessionStart never passed its terminal fetch while recreation was paused")
 
@@ -939,18 +1029,12 @@ struct TerminalSessionEventHandlerTests {
 
     private func waitForHookEvent(
         router: RPCRouter,
-        terminal: Terminal,
-        transcriptPath: String
+        terminal: Terminal
     ) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: ciSafeDeadline)
         while true {
-            let counters = await router.sessionCounters.sample(
-                terminalID: terminal.id,
-                worktreeID: terminal.worktreeID,
-                transcriptPath: transcriptPath,
-                commitsUnchangedSince: nil)
-            if counters?.hookEventsInWindow == 1 { return true }
+            if await router.activityLedger.snapshot().hooks[terminal.id] != nil { return true }
             guard clock.now < deadline else { return false }
             await Task.yield()
         }

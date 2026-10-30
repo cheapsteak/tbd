@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -519,7 +520,7 @@ import Testing
         }
         #expect(Set(columns) == Set([
             "id", "worktreeID", "label", "kind", "closedAt", "claudeSessionID", "lineCount",
-            "serverName", "exitCode"
+            "serverName", "exitCode", "claudeSpawnExtras"
         ]))
     }
 }

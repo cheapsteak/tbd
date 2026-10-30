@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Park and wake against a **real** holder and a **real** job.
 ///
@@ -21,17 +23,14 @@ import Testing
 @Suite(.serialized)
 struct HolderHibernationLiveTests {
 
-    /// The park's whole point, against a job that cannot cooperate — and the
-    /// middle rung of the ladder, proved by the job's own hand.
+    /// The park's whole point, against a real job — and the rung the ladder
+    /// starts at, proved by the job's own hand.
     ///
-    /// The job never reads its terminal, so the polite `/exit` cannot possibly
-    /// work and something further down has to end it. That is deliberately the
-    /// harder half: a test whose job exited on `/exit` would pass without any
-    /// escalation ever running. What ends it here is the `SIGTERM` rung, and
-    /// the marker file is what says so rather than leaving it to be inferred
-    /// from a dead pid — a `SIGKILL` cannot run a handler, so a park that
-    /// skipped the `SIGTERM` rung and went straight to the forced one would
-    /// leave that file absent while every other assertion below still passed.
+    /// Every park starts at `SIGTERM`, and that is what ends this job. The
+    /// marker file is what says so rather than leaving it to be inferred from
+    /// a dead pid — a `SIGKILL` cannot run a handler, so a park that skipped
+    /// the `SIGTERM` rung and went straight to the forced one would leave that
+    /// file absent while every other assertion below still passed.
     @Test func parkEndsTheJobAndClearsTheRow() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -39,11 +38,12 @@ struct HolderHibernationLiveTests {
         let childPID = try #require(terminal.childPID)
         let holderPID = try #require(terminal.holderPID)
 
-        // The rail's own precondition, asked of the registry this park will
-        // ask. `.daemon` is the only source the park may act on, and it is a
-        // fact about a real adopted reader draining a real pty — the scripted
-        // suites can state the other sources, but only a live holder can prove
-        // this one is what an ordinary detached session actually answers.
+        // The snapshot's own precondition, asked of the registry this park
+        // will ask. `.daemon` is the only source the park freezes as its
+        // snapshot, and it is a fact about a real adopted reader draining a
+        // real pty — the scripted suites can state the other sources, but only
+        // a live holder can prove this one is what an ordinary detached
+        // session actually answers.
         let reader = try #require(await fixture.registry.reader(for: terminal.id))
         let observed = try await reader.screen(
             maxLines: HibernationCoordinator.holderScreenLines)
@@ -82,20 +82,19 @@ struct HolderHibernationLiveTests {
         #expect(await fixture.registry.reader(for: terminal.id) == nil,
                 "the registry still holds a reader for a parked session")
         // WHICH rung ended it. The job wrote this from its own `SIGTERM`
-        // handler, so its existence is the one fact that separates the polite
-        // rung's successor from the forced teardown after it.
+        // handler, so its existence is the one fact that separates the
+        // `SIGTERM` rung from the forced teardown after it.
         #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
-                "the job never caught a SIGTERM, so the park skipped the rung between /exit and the forced teardown")
+                "the job never caught a SIGTERM, so the park skipped the SIGTERM rung for the forced teardown")
     }
 
     /// The rung after that one, on a job that declines `SIGTERM`.
     ///
     /// `trap '' TERM` is what makes this a test of the forced teardown rather
-    /// than of the ladder generally: the polite `/exit` is unread, the
-    /// `SIGTERM` is ignored, and the only thing left that can end this process
-    /// is the `SIGKILL` `HolderRegistry.abandon` sends to its group. A park
-    /// that stopped at the middle rung would report the child survived and roll
-    /// itself back.
+    /// than of the ladder generally: the `SIGTERM` is ignored, and the only
+    /// thing left that can end this process is the `SIGKILL`
+    /// `HolderRegistry.abandon` sends to its group. A park that stopped at the
+    /// `SIGTERM` rung would report the child survived and roll itself back.
     @Test func parkEscalatesToTheForcedRungWhenTheJobIgnoresSIGTERM() async throws {
         // Three attempts rather than the fixture default: this poll is
         // guaranteed to fail every time, so its budget is pure wall time.
@@ -118,6 +117,184 @@ struct HolderHibernationLiveTests {
         #expect(!holderProcessIsAlive(holderPID), "the holder outlived the park")
         #expect(!FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
                 "this job has no SIGTERM handler, so a marker here means the fixture wrote it")
+    }
+
+    /// A session spawned with the composer-draft feature is ended by signal
+    /// and never typed into, asked of the job's own stdin rather than of the
+    /// ladder's code path.
+    ///
+    /// The session's files say what a live mod and a confirmed, restorable
+    /// draft say, so the park proceeds. A typed `/exit` would land at the end
+    /// of that draft, and Enter would send it to the model; the job records
+    /// every byte its terminal delivers, so an empty record and a caught
+    /// `SIGTERM` together say the park signalled and typed nothing.
+    /// `theStdinRecorderSeesInputWithNoLineTerminator` proves the recorder
+    /// sees bytes no Enter follows, a bare `/exit` among them, which is what
+    /// makes the empty record here mean something.
+    @Test func parkOfAFeatureSessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let incarnation = UUID()
+        try fixture.seedComposerDraftSession(incarnation: incarnation)
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath),
+            sessionIncarnationID: incarnation)
+        let childPID = try #require(terminal.childPID)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        let signalled = kill(childPID, 0)
+        let signalErrno = errno
+        #expect(signalled == -1 && signalErrno == ESRCH,
+                "the job survived a park that reported .ok (kill returned \(signalled), errno \(signalErrno))")
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(!typed.contains("/exit"),
+                "the park typed into a session spawned with the feature: \(typed.debugDescription)")
+        #expect(typed.isEmpty,
+                "the park wrote to the terminal of a session spawned with the feature: \(typed.debugDescription)")
+    }
+
+    /// The same recording job in a session spawned without the feature: a
+    /// manual park of it ends by signal and types nothing, exactly as a park
+    /// of a confirmed session does. Nothing saved its draft, so an unsent
+    /// draft is lost, but it is never typed into or sent.
+    @Test func parkOfALegacySessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(typed.isEmpty,
+                "the park wrote to a legacy session's terminal: \(typed.debugDescription)")
+    }
+
+    /// A session spawned with the feature whose mod has not confirmed it — a
+    /// spawn record and no heartbeat — is parked by hand without asking, by
+    /// signal, and typed into no more than any other.
+    @Test func manualParkOfAnUnconfirmedSessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let incarnation = UUID()
+        try fixture.seedUnconfirmedComposerDraftSession(incarnation: incarnation)
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath),
+            sessionIncarnationID: incarnation)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(typed.isEmpty,
+                "the park wrote to an unconfirmed session's terminal: \(typed.debugDescription)")
+    }
+
+    /// The control for input no Enter follows: `/exit` without Enter, an
+    /// Escape and a Ctrl+C, written through the session's reader, the
+    /// descriptor `terminal.send` writes to. A canonical-mode terminal would
+    /// hold all of it back from the job, so a park that typed any of it would
+    /// leave an empty record and the "types nothing" tests above green; this
+    /// shows the recorder sees each byte as it arrives.
+    @Test func theStdinRecorderSeesInputWithNoLineTerminator() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        let childPID = try #require(terminal.childPID)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let partial = "/exit\u{1B}\u{03}"
+        let reader = try #require(await fixture.registry.reader(for: terminal.id))
+        try await reader.write(Data(partial.utf8))
+
+        var recorded = ""
+        let seen = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            recorded = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+            return recorded.contains(partial)
+        }
+        // No park ends this job, and the teardown kills only the pids the row
+        // names, so the job is ended by `SIGTERM`: its handler takes `cat`
+        // down with it.
+        if holderProcessIsAlive(childPID) {
+            kill(childPID, SIGTERM)
+            #expect(await pollUntil("the job to catch the SIGTERM") {
+                FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath)
+            })
+        }
+        switch seen {
+        case .satisfied:
+            break
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(
+                what: "the job's stdin to record \(partial.debugDescription), which no Enter follows",
+                observed: recorded.debugDescription, deadline: TestDeadlines.saturatedPass)
+        }
+    }
+
+    /// A profile swap's park of a session spawned without the feature ends by
+    /// signal and types nothing too: a typed `/exit` would land after whatever
+    /// the box holds and submit it to the model.
+    ///
+    /// No session-mod files are seeded, so the session reads legacy; the
+    /// recording job is the one `theStdinRecorderSeesInputWithNoLineTerminator`
+    /// shows seeing a bare `/exit`, which is what makes the empty record here
+    /// mean the swap's ladder started at SIGTERM.
+    @Test func profileSwapParkOfALegacySessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.parkForProfileSwap(terminalID: terminal.id)
+        #expect(result == .ok, "swap park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(parked.childPID == nil)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the swap park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(!typed.contains("/exit"),
+                "the swap park typed /exit into a legacy session: \(typed.debugDescription)")
+        #expect(typed.isEmpty,
+                "the swap park wrote to a legacy session's terminal: \(typed.debugDescription)")
     }
 
     /// Wake after that park: a fresh holder, a fresh job, and a row that names
@@ -431,6 +608,114 @@ struct HolderHibernationLiveTests {
                 "the wake spawned a second holder instead of adopting the live one")
     }
 
+    /// The guard's other leg, with a holder on the other end: the row is
+    /// parked over a holder and a job that are both running, and this daemon
+    /// holds no reader for them — what a startup adoption that failed leaves.
+    ///
+    /// The wake must adopt the holder before it un-parks the row. Un-parked
+    /// without a reader, the session is awake and nobody drains it: its job
+    /// cannot finish exiting, no park can end it, and only an attach would
+    /// ever adopt it.
+    ///
+    /// The reader is released rather than never built, because a release is
+    /// the one way to take this daemon off a session while leaving its holder
+    /// and job untouched — exactly the state the leg exists for.
+    @Test func wakeAdoptsTheHolderOfARowParkedWithNoReader() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let childPID = try #require(terminal.childPID)
+
+        await fixture.registry.release(terminalID: terminal.id)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "the fixture kept its reader, so this test would exercise the other leg")
+        #expect(holderProcessIsAlive(childPID))
+
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
+        #expect(result == .ok(sessionIncarnationID: nil),
+                "the wake did not stop at the live holder: \(result)")
+
+        let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!woken.isParked)
+        let reader = try #require(
+            await fixture.registry.reader(for: terminal.id),
+            "the wake un-parked the row without adopting its holder, so nothing drains the session")
+        #expect(await reader.isDraining)
+        #expect(await fixture.registry.adoptedProcess(for: terminal.id)?.childPID == childPID,
+                "the wake adopted something other than the session's own job")
+        #expect(woken.childPID == childPID)
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
+                "the wake spawned a second holder instead of adopting the live one")
+    }
+
+    /// The wake's adoption waiting behind a release when a teardown lands.
+    ///
+    /// The row is parked over a live holder whose reader is on its way out,
+    /// held mid-release. The wake finds no reader, verifies the child, and its
+    /// adoption waits for the release. A delete's teardown arrives during that
+    /// wait — `abandon` marks the session let go and queues behind the same
+    /// release. When the release lands, the wake's adoption must see the
+    /// teardown on its next pass rather than open a fresh hand-over against a
+    /// holder being told to forget its session; a publish there would also
+    /// have erased the mark and let the wake un-park a torn-down row.
+    @Test func aTeardownWhileTheWakeWaitsOnAReleaseKeepsTheRowParked() async throws {
+        // A budget far past the test, so the wait the test controls is the
+        // only thing that ends the wake's adoption.
+        let fixture = try await HibernationFixture.make(attachAdoptionBudget: .seconds(600))
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        let loopsBefore = await fixture.registry.drainLoopsStarted
+        // The concurrent work below captures the two actors and the row, never
+        // the fixture: it is a non-Sendable class, and a task closure must be.
+        let registry = fixture.registry
+        let coordinator = fixture.coordinator
+
+        let hold = ReleaseHold()
+        await registry.setReleaseBarrier(hold.hook())
+        let releasing = Task { await registry.release(terminalID: terminal.id) }
+        let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await hold.parked == 1
+        }
+        let waking = Task { await coordinator.wake(terminalID: terminal.id) }
+        // The wake's adoption is the registry's first `adopt`; once it has
+        // consulted the slot it is waiting on the release.
+        let waiting = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await fixture.registry.adoptionCallsEntered == 1
+        }
+        let tearingDown = Task { await registry.abandon(terminal: terminal) }
+        let marked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await fixture.registry.letGo(for: terminal.id)?.reason == .teardown
+        }
+        await hold.release()
+        await releasing.value
+        _ = await tearingDown.value
+        let result = await waking.value
+
+        guard parked == .satisfied, waiting == .satisfied, marked == .satisfied else {
+            Issue.record(BoundedWaitTimeout(
+                what: "the release to park, the wake to wait on it, and the teardown to mark it",
+                observed: "parked \(parked), waiting \(waiting), marked \(marked); wake \(result)",
+                deadline: TestDeadlines.saturatedPass))
+            return
+        }
+        guard case .respawnFailed = result else {
+            Issue.record("the wake un-parked a row torn down while it waited: \(result)")
+            return
+        }
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "the wake un-parked a row a teardown let go")
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "a reader was published for a holder being told to forget its session")
+        #expect(await fixture.registry.drainLoopsStarted == loopsBefore,
+                "the wake's adoption opened a fresh hand-over after the teardown")
+        #expect(await fixture.registry.letGo(for: terminal.id)?.reason == .teardown,
+                "the teardown's let-go was erased")
+    }
+
     /// Teardown's second pass, against the branch where the first one has
     /// nothing to read.
     ///
@@ -502,6 +787,30 @@ struct HolderHibernationLiveTests {
 /// "the escalation ran" into an untestable claim — and a `SIGTERM` rung that
 /// went through here must land nowhere, or the job would die and the branch
 /// under test would never be reached.
+/// Holds every release that reaches the registry's release seam until the
+/// test lets it through. Suspends rather than blocking a thread.
+private actor ReleaseHold {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var parked = 0
+
+    func park() async {
+        if released { return }
+        parked += 1
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in await self.park() }
+    }
+}
+
 private struct AlwaysAliveSignaller: ProcessSignaller {
     func isAlive(_ pid: Int32) -> Bool { true }
     func terminate(_ pid: Int32) {}
@@ -553,14 +862,13 @@ private final class HibernationFixture {
     /// real Claude: the pinned shell ignores the argv it is handed.
     static let sessionID = "sess-holder-hibernation"
 
-    /// The default job: deaf to `/exit`, and honest about `SIGTERM`.
+    /// The default job: it never reads its terminal, and it is honest about
+    /// `SIGTERM`.
     ///
-    /// It never reads its terminal, so the polite rung cannot possibly work and
-    /// something further down the ladder has to end it. What it *does* do is
-    /// catch `SIGTERM` and leave a mark before exiting — which is what makes
-    /// "the SIGTERM rung ended this job" an observable claim rather than an
-    /// inference from a dead pid: a `SIGKILL` cannot run a handler, so the
-    /// marker exists if and only if the middle rung is what worked.
+    /// It catches `SIGTERM` and leaves a mark before exiting — which is what
+    /// makes "the SIGTERM rung ended this job" an observable claim rather than
+    /// an inference from a dead pid: a `SIGKILL` cannot run a handler, so the
+    /// marker exists if and only if the `SIGTERM` rung is what worked.
     ///
     /// The loop sleeps in fifths of a second because a POSIX shell runs a trap
     /// only after the foreground command it was waiting on completes; a
@@ -573,6 +881,30 @@ private final class HibernationFixture {
     /// A job that ignores `SIGTERM` outright, so only the forced rung — the
     /// holder let go of, the process group `SIGKILL`ed — can end it.
     static let signalDeafJob = "trap '' TERM; while :; do sleep 0.2; done"
+
+    /// `termAwareJob`, plus a record of every byte its terminal delivers.
+    ///
+    /// The terminal is saved on descriptor 3 first because a non-interactive
+    /// shell gives a background command `/dev/null` for stdin, and only an
+    /// explicit redirection overrides that. `cat` copies what it reads into
+    /// `inputPath` as it reads it. The `SIGTERM` handler ends `cat` too, so
+    /// the job leaves no process behind that the row does not name.
+    ///
+    /// The holder never sets termios, so the pty starts in canonical mode,
+    /// where the line discipline holds input back until a newline arrives:
+    /// `cat` would never see `/exit` typed without Enter, or a bare Escape.
+    /// `stty -icanon` hands `cat` every byte as it arrives, and `-isig` makes
+    /// a typed Ctrl+C a recorded byte rather than a `SIGINT`. A failed `stty`
+    /// leaves `stty-failed` in the record, ahead of anything `cat` appends, so
+    /// a test that expects an empty record fails instead of passing on a
+    /// recorder that could not see what it was there to catch.
+    static func stdinRecordingJob(markerPath: String, inputPath: String) -> String {
+        "exec 3<&0; "
+            + "stty -icanon -isig min 1 time 0 <&3 || printf stty-failed > \"\(inputPath)\"; "
+            + "cat <&3 >> \"\(inputPath)\" & reader=$!; "
+            + "trap 'printf term > \"\(markerPath)\"; kill $reader 2>/dev/null; exit 0' TERM; "
+            + "while :; do sleep 0.2; done"
+    }
 
     /// A job that ignores `SIGHUP` and nothing else.
     ///
@@ -598,6 +930,16 @@ private final class HibernationFixture {
     /// Where `termAwareJob` records that it caught a `SIGTERM`. Absent until
     /// one is actually delivered and handled.
     var jobTermMarkerPath: String { "\(home)/job-caught-term" }
+
+    /// Where `stdinRecordingJob` copies what its terminal delivers.
+    var jobInputPath: String { "\(home)/job-stdin" }
+
+    /// The sessions root the coordinator reads session-mod files from, inside
+    /// this fixture's scratch root. Empty unless a test seeds it, so every
+    /// session reads as spawned without the feature by default.
+    var sessionsDir: URL {
+        URL(fileURLWithPath: home).appendingPathComponent("sessions", isDirectory: true)
+    }
 
     private let home: String
     private let tempDir: URL
@@ -703,7 +1045,8 @@ private final class HibernationFixture {
     static func make(
         holderTerminateAttempts: Int = 25,
         holderEscalationAttempts: Int = 100,
-        signaller: any ProcessSignaller = ProductionProcessSignaller()
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        attachAdoptionBudget: Duration = HolderRegistry.defaultAttachAdoptionBudget
     ) async throws -> HibernationFixture {
         let home = scratchHome()
         let shell = try writeGateShell(in: home)
@@ -723,7 +1066,8 @@ private final class HibernationFixture {
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: environment,
             listTerminals: { [] },
-            spawner: HolderSpawner(executableURL: executable))
+            spawner: HolderSpawner(executableURL: executable),
+            attachAdoptionBudget: attachAdoptionBudget)
 
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         let repo = try await db.repos.create(
@@ -747,19 +1091,20 @@ private final class HibernationFixture {
                     .appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: URL(fileURLWithPath: home)
                     .appendingPathComponent("claude", isDirectory: true)),
-            // Two attempts at 100 ms is the polite window; the job cannot use
-            // it, so the run pays 200 ms to reach the escalation rather than
-            // the shipped three seconds. The escalation budget is generous by
-            // default — it is a real `SIGKILL` leaving a real process table on
-            // a machine that may be loaded, and a short budget there would fail
-            // this test for scheduling rather than for behaviour. A caller that
-            // has arranged for that poll to fail every time overrides it, since
-            // there the generosity is pure wall time.
+            // 100 ms paces every poll of the holder ladder. The `SIGTERM` and
+            // escalation budgets are generous by default — they wait on a real
+            // process table on a machine that may be loaded, and a short budget
+            // there would fail this test for scheduling rather than for
+            // behaviour. A caller that has arranged for a poll to fail every
+            // time overrides its budget, since there the generosity is pure
+            // wall time. `exitPollAttempts` paces only the tmux park, which no
+            // holder row reaches.
             exitPollAttempts: 2,
             exitPollInterval: .milliseconds(100),
             holderTerminateAttempts: holderTerminateAttempts,
             holderEscalationAttempts: holderEscalationAttempts,
             signaller: signaller,
+            sessionsDir: URL(fileURLWithPath: home).appendingPathComponent("sessions", isDirectory: true),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
@@ -785,7 +1130,9 @@ private final class HibernationFixture {
     /// A real holder supervising a real job, plus the row that names both —
     /// created in the order `WorktreeLifecycle+Create` creates them, so the
     /// registry has adopted the session before anything reads its screen.
-    func spawnHolderRow(job: String? = nil) async throws -> Terminal {
+    /// `sessionIncarnationID` is the incarnation a spawn made with a
+    /// session-mod feature writes into its row.
+    func spawnHolderRow(job: String? = nil, sessionIncarnationID: UUID? = nil) async throws -> Terminal {
         let terminalID = UUID()
         let handle = try await registry.spawn(
             terminalID: terminalID,
@@ -808,8 +1155,41 @@ private final class HibernationFixture {
             transport: .holder,
             holderPID: handle.holderPID,
             childPID: handle.childPID,
-            holderChildStartedAt: Date())
+            holderChildStartedAt: Date(),
+            sessionIncarnationID: sessionIncarnationID)
         return try #require(try await db.terminals.get(id: terminalID))
+    }
+
+    /// Writes the daemon's spawn record for a spawn made with the
+    /// composer-draft feature, naming `incarnation`, and nothing from the mod.
+    /// The park then reads the feature as unknown (`no-alive-file`).
+    func seedUnconfirmedComposerDraftSession(incarnation: UUID) throws {
+        let nowMs = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: nowMs, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+    }
+
+    /// Writes the session's files as a spawn made with the composer-draft
+    /// feature and a live mod leave them: the daemon's spawn record naming
+    /// `incarnation`, a heartbeat from now, and a saved draft marked
+    /// restorable. The park then reads the feature as confirmed.
+    func seedComposerDraftSession(incarnation: UUID) throws {
+        let nowMs = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: nowMs, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        let directory = sessionsDir.appendingPathComponent(Self.sessionID, isDirectory: true)
+        try JSONEncoder().encode(SessionModFiles.AliveRecord(
+            sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+            features: ["composer-draft"], heartbeatAtMs: nowMs))
+            .write(to: directory.appendingPathComponent(SessionModFiles.aliveFileName))
+        try JSONEncoder().encode(SessionModFiles.ComposerDraftRecord(
+            sessionId: Self.sessionID, hasDraft: true, text: "half-written prompt", cursor: 19,
+            restorable: true, savedAtMs: nowMs))
+            .write(to: directory.appendingPathComponent(SessionModFiles.composerDraftFileName))
     }
 
     /// Records the pair this spawn produced, and names it in the run log.

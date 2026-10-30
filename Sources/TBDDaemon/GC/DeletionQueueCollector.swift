@@ -35,9 +35,10 @@ public struct InterruptedArchive: Sendable, Equatable {
 }
 
 public enum DeletionQueueDecision: Sendable, Equatable {
-    /// `reason` is one of `"locked"`, `"grace"`, `"not-tbd-prefix"`,
-    /// `"not-linked"`, `"no-repo"`, `"live-cwd"`. Each is a spec invariant
-    /// with its own test.
+    /// `reason` is one of `"locked"`, `"grace"`, `"recreated"`,
+    /// `"not-tbd-prefix"`, `"not-linked"`, `"no-repo"`, `"live-cwd"`,
+    /// `"dirty"`, `"status-unknown"`. Each is a spec invariant with its own
+    /// test.
     case keep(reason: String)
     case reap
 }
@@ -135,8 +136,8 @@ public struct DeletionQueueCollector: Sendable {
     /// Gates a candidate in order: locked, then grace (the archive that owns
     /// this row may still be running), then namespace (`allowedPrefixes`),
     /// then linkage (proof the directory is really this repo's worktree),
-    /// then live-cwd. Each check short-circuits the rest, and every
-    /// direction favors keeping.
+    /// then live-cwd, then uncommitted work. Each check short-circuits the
+    /// rest, and every direction favors keeping.
     ///
     /// `locked` and `grace` come first because they are pure row/listing data
     /// and answer "is this directory anyone else's business right now?" — no
@@ -166,6 +167,22 @@ public struct DeletionQueueCollector: Sendable {
         if let archivedAt = candidate.archivedAt,
            now().timeIntervalSince(archivedAt) < Double(graceSeconds) {
             return .keep(reason: "grace")
+        }
+
+        // A cheap early check for the common re-created tree. An interrupted
+        // archive left behind the directory it was archiving, so that
+        // directory is older than the archive; one created AFTER the row was
+        // archived is a new worktree reusing the path (typically made with
+        // `git worktree add` by whoever was still working in the old one).
+        // This is a heuristic, not identity: a worktree restored or moved
+        // into the path keeps an older creation date and passes it. The
+        // dirty gate below is what protects uncommitted work regardless of
+        // timestamps. An unreadable creation date proves nothing either way
+        // and falls through to the gates below.
+        if let archivedAt = candidate.archivedAt,
+           let created = Self.creationDate(of: candidate.path),
+           created > archivedAt {
+            return .keep(reason: "recreated")
         }
 
         guard candidate.allowedPrefixes.contains(where: { isUnder(candidate.path, prefix: $0) })
@@ -207,6 +224,25 @@ public struct DeletionQueueCollector: Sendable {
             return .keep(reason: "live-cwd")
         }
 
+        // Last gate before the destructive step: uncommitted work. This is
+        // the one thing the reap cannot give back. The reap renames the
+        // directory into the deletion queue and prunes the worktree
+        // registration, but leaves the branch ref alone, so committed work
+        // survives it, pushed or not. Only files the working tree alone holds
+        // (modified, staged, or untracked and not ignored) are lost, so that
+        // is what is checked, and unpushed commits are deliberately not.
+        // Ignored files do not count: build output is not work. If status
+        // cannot run, nothing was proven clean, so keep.
+        let status: String
+        do {
+            status = try await git.uncommittedStatus(worktreePath: candidate.path)
+        } catch {
+            return .keep(reason: "status-unknown")
+        }
+        if !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .keep(reason: "dirty")
+        }
+
         return .reap
     }
 
@@ -238,6 +274,12 @@ public struct DeletionQueueCollector: Sendable {
     }
 
     // MARK: - Helpers
+
+    /// The directory's own creation time (APFS birth time), or `nil` when the
+    /// filesystem does not report one.
+    static func creationDate(of path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.creationDate] as? Date
+    }
 
     /// True when `path` is the prefix itself or sits beneath it. Compares
     /// resolved paths so a trailing slash, `..`, or a `/var` -> `/private/var`

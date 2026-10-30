@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The app has never passed `terminal.wake`'s `prompt`, though the CLI, the RPC
 /// params, the handler, the coordinator and the spawn builder all carry it. This
@@ -31,9 +32,9 @@ struct WakePromptTests {
 
     /// The app-level seam: `wakeTerminal` hands the prompt to the client.
     @Test func appStateForwardsThePrompt() async throws {
-        let suiteName = "WakePromptTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
-        let state = AppState(userDefaults: UserDefaults(suiteName: suiteName)!)
+        let suite = TestDefaultsSuite("WakePromptTests")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
 
         let recorded = Recorder()
         state.terminalWakeSender = { _, _, _, _, prompt in

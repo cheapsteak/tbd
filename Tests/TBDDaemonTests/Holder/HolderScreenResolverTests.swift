@@ -233,7 +233,7 @@ struct HolderScreenResolverTests {
 
     /// The honest re-read. A viewer that detached while the pull was in flight
     /// has left the daemon draining again, and calling that `staleDaemon`
-    /// would make the hibernation rail refuse a park it could safely take.
+    /// would have `terminal.output` label a live screen stale.
     ///
     /// Discriminating by construction: the reader answers `staleDaemon` the
     /// first time and `daemon` the second, so a resolver that cached the first
@@ -260,7 +260,7 @@ struct HolderScreenResolverTests {
 
         let screen = try #require(try await answer.value)
         #expect(screen.source == .daemon,
-                "the reader resumed, and labelling a live emulator stale refuses a safe park")
+                "the reader resumed, and terminal.output must not label a live screen stale")
         #expect(screen.lines == ["draining again"])
     }
 

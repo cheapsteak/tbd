@@ -3,6 +3,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // Several race regressions intentionally block a synchronous date provider.
@@ -704,30 +705,7 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
     }
 
-    @Test("user interrupt is not counted as an agent hook event")
-    func userInterruptDoesNotIncrementHookCounter() async throws {
-        let terminal = try await makeTerminal()
-        let transcript = FileManager.default.temporaryDirectory
-            .appendingPathComponent("terminal-activity-\(UUID().uuidString).jsonl")
-        try Data().write(to: transcript)
-        defer { try? FileManager.default.removeItem(at: transcript) }
-        let request = RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"idle","origin":"user_interrupt"}"#
-        )
-
-        #expect((await router.handle(request)).success)
-
-        let counters = try #require(await router.sessionCounters.sample(
-            terminalID: terminal.id,
-            worktreeID: terminal.worktreeID,
-            transcriptPath: transcript.path,
-            commitsUnchangedSince: nil
-        ))
-        #expect(counters.hookEventsInWindow == 0)
-    }
-
-    @Test("user interrupt origin rejects a non-idle state without mutation or hook count")
+    @Test("user interrupt origin rejects a non-idle state without mutation")
     func userInterruptRejectsNonIdleState() async throws {
         let terminal = try await makeTerminal()
         let originalObservedAt = Date(timeIntervalSince1970: 1_700_000_000)
@@ -737,10 +715,6 @@ struct TerminalActivityEventHandlerTests {
             source: .hookEvent(RPCMethod.terminalActivityEvent),
             observedAt: originalObservedAt
         )
-        let transcript = FileManager.default.temporaryDirectory
-            .appendingPathComponent("invalid-terminal-activity-\(UUID().uuidString).jsonl")
-        try Data().write(to: transcript)
-        defer { try? FileManager.default.removeItem(at: transcript) }
         let request = RPCRequest(
             method: RPCMethod.terminalActivityEvent,
             params: #"{"terminalID":"\#(terminal.id.uuidString)","activityState":"working","origin":"user_interrupt"}"#
@@ -754,13 +728,6 @@ struct TerminalActivityEventHandlerTests {
         #expect(updated.activityState == .idle)
         #expect(updated.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
         #expect(updated.activityStateObservedAt == originalObservedAt)
-        let counters = try #require(await router.sessionCounters.sample(
-            terminalID: terminal.id,
-            worktreeID: terminal.worktreeID,
-            transcriptPath: transcript.path,
-            commitsUnchangedSince: nil
-        ))
-        #expect(counters.hookEventsInWindow == 0)
     }
 
     @Test("an earlier idle hook cannot erase a later explicit interrupt")

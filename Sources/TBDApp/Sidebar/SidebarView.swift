@@ -6,7 +6,6 @@ struct SidebarView: View {
     @Environment(AppState.self) var appState
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     /// See `AppState.sidebarWorkflowGroupsKey`. Handed to every
     /// `revealSidebarGroups` call as `grouped`, which is the reveal's gate.
     /// Off, the selection reveal is not even computed.
@@ -18,6 +17,7 @@ struct SidebarView: View {
     /// geometry would feed its height back into its own input.
     @State private var sidebarHeight: CGFloat = 0
     @State private var hasRevealedInitialSelection = false
+    @State private var showingClone = false
 
     /// The `previous` handed to `revealSidebarGroups` for a selection-reveal
     /// change. Nil — reveal as navigation, expanding a collapsed owning
@@ -109,39 +109,39 @@ struct SidebarView: View {
             let dockRemoteRows = PinnedDockContent.remoteRows(
                 allRemoteSessions: appState.remoteSessions
             )
-            let desk = PinnedDockContent.deskRow(
-                allWorktrees: appState.allWorktrees,
-                mode: appState.nightwatchMode,
-                experimentalEnabled: nightwatchExperimental
-            )
             VStack(spacing: 0) {
                 // ONE divider, at the very top of the footer group. Verified
                 // live: a second Divider() below the dock made it read as part
                 // of the scrolling list above instead of part of the footer.
-                // Dock, desk slot, mode toggle and Add Repository share this
-                // VStack's `.background(.bar)` as a single visual group.
+                // Dock and Add Repository share this VStack's
+                // `.background(.bar)` as a single visual group.
                 Divider()
                 PinnedDockView(rows: dockRows, remoteRows: dockRemoteRows,
                                availableHeight: sidebarHeight)
-                PinnedDockDeskSlot(desk: desk)
-                if nightwatchExperimental {
-                    NightwatchModeToggle()
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-                        .padding(.bottom, 6)
-                }
                 HStack(spacing: 4) {
-                    Button(action: addRepo) {
+                    // A split button: a click on the label opens the folder
+                    // picker, as it always has; the arrow offers cloning too.
+                    Menu {
+                        Button("Local Folder…", action: addRepo)
+                        Button("Clone from URL…") { showingClone = true }
+                    } label: {
                         Label("Add Repository", systemImage: "plus.rectangle")
                             .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } primaryAction: {
+                        addRepo()
                     }
-                    .buttonStyle(.plain)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                     .foregroundStyle(.secondary)
                     Spacer()
                     filterMenu
                 }
+                .sheet(isPresented: $showingClone) {
+                    CloneRepositorySheet()
+                }
                 .padding(.horizontal, 12)
-                .padding(.top, nightwatchExperimental ? 0 : 8)
+                .padding(.top, 8)
                 .padding(.bottom, 8)
             }
             .background(.bar)

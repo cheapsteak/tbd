@@ -38,9 +38,7 @@ struct GeneralSettingsTab: View {
     @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
-    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
@@ -177,7 +175,7 @@ struct GeneralSettingsTab: View {
                     .help("Off: each project's expand/collapse chevron trails its name, appearing on hover alongside the row's +, so its position shifts with the length of each name. On: the chevron leads the name in the same column on every row, always visible, and the sidebar's titles and rows shift right to clear that column.")
 
                 Toggle("Group hibernated, remote and exited worktrees", isOn: $sidebarWorkflowGroups)
-                    .help("Off: every worktree and remote session stays in its usual place in the sidebar. On: remote and exited work files under a collapsible Remote group, and wholly parked worktrees under a Hibernated group, in each project and in Scratch. Groups you expand stay expanded across restarts.")
+                    .help("Off: every worktree and remote session stays in its usual place in the sidebar. On: remote and exited work files under a collapsible Remote group, and wholly parked worktrees under a Hibernated group, in each project and in Scratch, and remote workers nested under a worktree file under a Remote group beneath it. Groups you expand stay expanded across restarts.")
 
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
@@ -264,27 +262,16 @@ struct GeneralSettingsTab: View {
                 ) { await appState.setGlobalEnvOverrides($0) }
             }
 
-            Section("Fleet Automation") {
-                Toggle("Nightwatch / Daywatch", isOn: $nightwatchExperimental)
-                    .help(AppState.nightwatchSettingsHelp)
-                Text(NightwatchHolderGate.deprecationNotice)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Section("Experimental") {
-                Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
-                    .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
-                modelProxyToggle
+                holderClaimReconcileToggle
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
-                hibernateInputVetoToggle
+                composerDraftToggle
+                sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
-                supervisionEnabledToggle
-                programStatusToggle
                 updateModePicker
             }
         }
@@ -319,11 +306,11 @@ struct GeneralSettingsTab: View {
 
     /// Pty-holder transport opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Interactive whenever either direction would do something, which
-    /// `AppState.ptyHolderToggleIsInteractive` decides and documents; the
-    /// caption explaining a missing `TBDHolder` helper shows independently of
-    /// that, because it is a fact about the daemon rather than about the
-    /// control.
+    /// Interactive only when the daemon can start a holder, in either position
+    /// of the flag, as `AppState.ptyHolderToggleIsInteractive` decides and
+    /// documents. When it cannot, the toggle is greyed and the caption names
+    /// the missing `TBDHolder` helper; when it can, the row for moving existing
+    /// sessions sits beneath it instead.
     @ViewBuilder
     private var ptyHolderToggle: some View {
         let capabilities = appState.daemonCapabilities
@@ -334,26 +321,32 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
         ))
         .help(AppState.ptyHolderHelp)
-        .disabled(!AppState.ptyHolderToggleIsInteractive(supported: supported, flagOn: enabled))
-        if !supported {
+        .disabled(!AppState.ptyHolderToggleIsInteractive(capabilities))
+        if supported {
+            transportMigrationRow
+        } else {
             Text(AppState.ptyHolderUnsupportedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        // Hidden while a watch mode forbids the move, which the daemon refuses
-        // outright: the caption below is what explains it, and it renders in
-        // exactly that state.
-        if supported, !TransportMigrationMenu.isBlockedByWatchMode(appState.nightwatchMode) {
-            transportMigrationRow
-        }
-        if supported && !enabled && appState.nightwatchMode != .off {
-            Text(nightwatchExperimental
-                ? NightwatchHolderGate.holderRefusal
-                : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
+
+    /// Holder viewer-claim reconcile. Reads `daemon.capabilities`, writes
+    /// `config.setHolderClaimReconcileEnabled`. Off by default (soaking). The
+    /// app sweeps on every poll tick in either position; the flag decides
+    /// whether the daemon takes back what a sweep finds or only logs it.
+    @ViewBuilder
+    private var holderClaimReconcileToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Reclaim sessions after a lost handback", isOn: Binding(
+            get: { capabilities?.holderClaimReconcileEnabled ?? Config.holderClaimReconcileEnabledDefault },
+            set: { newValue in Task { await appState.setHolderClaimReconcileEnabled(newValue) } }
+        ))
+        .help(Self.holderClaimReconcileHelp)
+    }
+
+    static let holderClaimReconcileHelp = "Lets the daemon take back a session the app has stopped showing "
+        + "when the handback to the daemon was lost, and is off by default while it soaks."
 
     /// Moves the sessions that already exist onto the holder. Sits beside the
     /// toggle because that is where someone who just turned it on looks for what
@@ -399,42 +392,18 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Model-proxy opt-in. Reads the persisted flag from `daemon.capabilities`
-    /// and writes via `config.setModelProxyEnabled`. Stays enabled even when
-    /// the daemon reports `modelProxySupported == false`: turning the flag OFF
-    /// has to remain possible on a daemon that cannot start the proxy, which is
-    /// exactly the daemon an operator most wants to stop routing through.
-    @ViewBuilder
-    private var modelProxyToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Route new sessions through the TBD model proxy", isOn: Binding(
-            get: { capabilities?.modelProxyEnabled ?? false },
-            set: { newValue in Task { await appState.setModelProxyEnabled(newValue) } }
-        ))
-        .help(AppState.modelProxyHelp)
-    }
-
-    /// Transcript-streaming opt-in, sitting under the proxy it depends on.
-    /// Reads the persisted flag from `daemon.capabilities` and writes via
-    /// `config.setTranscriptStreamingEnabled` — one write: turning this on also
-    /// turns the proxy on, and the daemon owns that coupling. Disabled with an
-    /// explanation when the daemon could not start a proxy, since the stream
-    /// file this renders is written by nothing else.
+    /// Transcript-streaming opt-in. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setTranscriptStreamingEnabled`.
+    /// The stream comes from the session mod's `transcript-stream` feature, on
+    /// both terminal transports.
     @ViewBuilder
     private var transcriptStreamingToggle: some View {
         let capabilities = appState.daemonCapabilities
-        let supported = capabilities?.modelProxySupported ?? false
         Toggle("Stream assistant text into the transcript", isOn: Binding(
             get: { capabilities?.transcriptStreamingEnabled ?? false },
             set: { newValue in Task { await appState.setTranscriptStreamingEnabled(newValue) } }
         ))
         .help(AppState.transcriptStreamingHelp)
-        .disabled(!supported)
-        if !supported {
-            Text(AppState.transcriptStreamingUnsupportedCaption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 
     /// Ask for a first message when creating a worktree. Reads the persisted
@@ -448,26 +417,6 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setQueuedPromptEnabled(newValue) } }
         ))
         .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
-    }
-
-    /// Supervision's fleet-wide authority switch (design 2026-07-26 §3, §7).
-    /// Reads/writes straight from `Config` via `loadSupervisionConfig()`/
-    /// `getConfig()`, not `daemon.capabilities` — the one soak flag here that
-    /// isn't mirrored there yet. Off by default. The toggle's sense matches
-    /// `Config.supervisionEnabled` directly (on == enabled == the fleet brake
-    /// released) rather than reading as the brake itself, so it can't invert
-    /// against the underlying boolean the way a "brake" label switched ON
-    /// would. Turning it on has no visible effect by itself yet: nothing in
-    /// the daemon acts on this column yet, since the rest of supervision
-    /// (which projects are on, what conduct they run) is shipping in the
-    /// same series of changes as this switch.
-    @ViewBuilder
-    private var supervisionEnabledToggle: some View {
-        Toggle("Supervision enabled", isOn: Binding(
-            get: { appState.supervisionEnabled },
-            set: { newValue in Task { await appState.setSupervisionEnabled(newValue) } }
-        ))
-        .help("The fleet-wide switch for supervision. On releases TBD's autonomous processes to act on sessions it supervises; off engages the fleet brake and pauses that authority, leaving every per-project mark untouched. Off by default. Turning it on has no visible effect by itself yet — the rest of supervision (turning projects on, choosing their conduct) is shipping in the same series of changes, and nothing acts on this column until that lands.")
     }
 
     /// How TBD updates itself. Reads the persisted mode from
@@ -538,6 +487,55 @@ struct GeneralSettingsTab: View {
         + "transcript. The terminal dialog stays live, and whichever answers first wins. Applies to sessions "
         + "started after you turn it on."
 
+    /// Save and restore the unsent text in a Claude session's prompt box.
+    /// Reads `daemon.capabilities`, writes `config.setComposerDraftEnabled`.
+    /// Off by default (soaking). New sessions pick it up. While automatic
+    /// parking is on the daemon holds the feature on, so the toggle reads on,
+    /// is greyed, and says why; what the person stored comes back once
+    /// automatic parking is off.
+    @ViewBuilder
+    private var composerDraftToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let requiredByAutoPark = appState.composerDraftRequiredByAutoPark
+        Toggle("Save and restore composer drafts", isOn: Binding(
+            get: {
+                requiredByAutoPark
+                    || (capabilities?.composerDraftEnabled ?? Config.composerDraftDefault)
+            },
+            set: { newValue in Task { await appState.setComposerDraftEnabled(newValue) } }
+        ))
+        .help(Self.composerDraftHelp)
+        .disabled(requiredByAutoPark)
+        if requiredByAutoPark {
+            Text(AppState.composerDraftRequiredByAutoParkCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    static let composerDraftHelp = "Saves what you type in a Claude session's prompt box and puts it back "
+        + "when a hibernated session wakes. It is the only thing that keeps hibernating from losing unsent "
+        + "text, so it stays on while auto-hibernation is on. If TBD can't confirm a draft is saved, such "
+        + "as one holding a large paste, automatic hibernation skips the session; hibernating it yourself "
+        + "goes ahead. Applies to sessions started after you turn it on."
+
+    /// Record each Claude session's context window, rate limits and cost
+    /// through the session mod. Reads `daemon.capabilities`, writes
+    /// `config.setSessionModUsageEnabled`. Off by default (soaking). New
+    /// sessions pick it up.
+    @ViewBuilder
+    private var sessionModUsageToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Record session usage", isOn: Binding(
+            get: { capabilities?.sessionModUsageEnabled ?? Config.sessionModUsageDefault },
+            set: { newValue in Task { await appState.setSessionModUsageEnabled(newValue) } }
+        ))
+        .help(Self.sessionModUsageHelp)
+    }
+
+    static let sessionModUsageHelp =
+        "Saves each Claude session's context window, rate limits and cost to its session folder."
+
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
     /// which the daemon applies at once. Off by default (soaking).
@@ -554,36 +552,6 @@ struct GeneralSettingsTab: View {
     static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
         + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
         + "while TBD is in front, and every 5 minutes otherwise."
-
-    /// Program Status Protocol (OSC 7501) on pty-holder sessions. Reads the
-    /// persisted flag from `daemon.capabilities` and writes via
-    /// `config.setProgramStatusEnabled`. Off by default (soaking).
-    @ViewBuilder
-    private var programStatusToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Read Claude's own session status (holder sessions)", isOn: Binding(
-            get: { capabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault },
-            set: { newValue in Task { await appState.setProgramStatusEnabled(newValue) } }
-        ))
-        .help(Self.programStatusHelp)
-    }
-
-    static let programStatusHelp = "Lets Claude Code report its state to TBD over the terminal on "
-        + "pty-holder sessions: permission prompts, finished and failed turns, sign-in problems and "
-        + "background tasks. Applies to Claude sessions started after you turn it on."
-
-    /// Pending-input veto for auto-hibernate. Reads the persisted flag from
-    /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.
-    /// Off by default (soaking).
-    @ViewBuilder
-    private var hibernateInputVetoToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Pending-input veto for auto-hibernate", isOn: Binding(
-            get: { capabilities?.hibernateInputVetoEnabled ?? false },
-            set: { newValue in Task { await appState.setHibernateInputVetoEnabled(newValue) } }
-        ))
-        .help("Guard that prevents hibernation of sessions with typed-but-unsent input (machine-interface input detector). Off by default (soaking). Independent of the auto-hibernate idle sweep, which is also off by default.")
-    }
 
     /// Auto-close the setup-hook tab after a clean run. Reads the persisted
     /// flag from `daemon.capabilities` and writes via

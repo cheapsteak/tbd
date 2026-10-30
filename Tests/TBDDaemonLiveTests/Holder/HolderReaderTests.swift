@@ -4,6 +4,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The daemon as default reader, driven against real holders and real jobs.
 ///

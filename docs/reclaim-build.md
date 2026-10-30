@@ -36,7 +36,7 @@ Both scripts write to the same log (`~/Library/Logs/tbd-reclaim-build.log`) and 
 
 ### SwiftPM builds (`scripts/reclaim-build.sh`)
 
-Only acts on worktrees containing a `Package.swift` (SwiftPM packages) for `.build` tiers — `tbd worktree list` spans every repo TBD manages, including non-Swift ones (e.g. longeye-app, longeye-docs, agent-channels), which are skipped for Swift-only tiers.
+Only acts on worktrees containing a `Package.swift` (SwiftPM packages) for `.build` tiers — `tbd worktree list` spans every repo TBD manages, including non-Swift ones (e.g. acme-app, acme-docs, agent-channels), which are skipped for Swift-only tiers.
 
 **The reaper never targets a repo root itself** — though not because the root is absent from its input. `tbd worktree list --json` does return the repo root, as a `status: "main"` row (`WorktreeStore.createMain` inserts it; `list()` excludes only `archived`). What keeps it out of the tier logic is `list_worktrees_tsv`'s `select(.status == "active")` filter, which drops `main` rows. The other enumeration source, the `<root>/.claude/worktrees/*/` glob, sits beneath the root rather than at it. So a repo root's own `.build` is outside the reaper's reach no matter how stale. Worth stating because the opposite is a natural guess: issue #677 attributed a partially-deleted `.build/checkouts` entry in a repo root to a disk-reclaim sweep, when the reaper had never once targeted that path (zero occurrences across the full `~/Library/Logs/tbd-reclaim-build.log`) and the real cause was SwiftPM's own non-atomic checkout removal.
 
@@ -251,10 +251,7 @@ Notes:
   default. A caller that passes its own `-module-cache-path` is left alone —
   a second, differently-spelled copy would itself be a third plan variant.
 - **CI opts out.** When `CI` is set the wrapper adds nothing. Runners are
-  ephemeral (one worktree per VM), so a shared cache saves nothing there, and
-  `.github/workflows/test.yml` ends its job with a build that does not route
-  through the wrapper at all — flagging only the steps that do would make CI
-  alternate against its own `actions/cache`d `.build` on every run.
+  ephemeral (one worktree per VM), so a shared cache saves nothing there.
 - **Why not `Package.swift` `swiftSettings`?** Measured dead end:
   `.unsafeFlags(["-module-cache-path", …])` on every root target still left
   a 591 MB local ModuleCache — manifest settings don't apply to dependency

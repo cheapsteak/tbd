@@ -25,15 +25,6 @@ import Testing
 
     // MARK: - Schema
 
-    @Test func theMarkerColumnExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let columns = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(worktree)")
-                .compactMap { $0["name"] as String? }
-            #expect(columns.contains("remote_parent_assigned"))
-        }
-    }
-
     /// Rows written before the column survive, and the backfill decides what
     /// they say: every remote row is marked, parented or not, because a build
     /// that predates the column recorded nothing when `move()` un-nested a

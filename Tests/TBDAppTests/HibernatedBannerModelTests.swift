@@ -192,4 +192,56 @@ struct HibernatedBannerModelTests {
     @Test func nilTerminalGetsNoWakeOverlay() {
         #expect(!ParkedPaneWakeModel.showsWakeOverlay(for: nil))
     }
+
+    // MARK: - Held automatic wake (start admission)
+
+    /// 1970-01-01 09:12 UTC.
+    private static let nineTwelveUTC = Date(timeIntervalSince1970: 33_120)
+
+    private func heldMessage(_ terminal: Terminal) -> String {
+        HibernatedBannerModel.message(
+            for: terminal,
+            timeZone: TimeZone(identifier: "UTC") ?? .gmt,
+            locale: Locale(identifier: "en_US"))
+    }
+
+    @Test func aHeldWakeAppendsTheReasonAndTime() {
+        var held = terminal(hibernatedAt: Date(), hibernateReason: .manual)
+        held.startHeldReason = "camera in use"
+        held.startHeldAt = Self.nineTwelveUTC
+        // The clock's own spacing before "AM" varies by OS, so pin the parts
+        // around it rather than the whole string.
+        let message = heldMessage(held)
+        #expect(message.hasPrefix(
+            "Hibernated — click anywhere in the pane to resume · Automatic wake held at 9:12"))
+        #expect(message.hasSuffix("M: camera in use"))
+    }
+
+    @Test func aHoldWithoutATimeStillSaysWhy() {
+        var held = terminal(hibernatedAt: Date(), hibernateReason: .auto)
+        held.startHeldReason = "camera in use"
+        #expect(heldMessage(held)
+            == "Hibernated while idle — click anywhere in the pane to resume"
+            + " · Automatic wake held: camera in use")
+    }
+
+    @Test func noHoldLeavesTheMessageUnchanged() {
+        let parked = terminal(hibernatedAt: Date(), hibernateReason: .recovery)
+        #expect(heldMessage(parked) == HibernatedBannerModel.message(for: .recovery))
+        var empty = parked
+        empty.startHeldReason = ""
+        #expect(heldMessage(empty) == HibernatedBannerModel.message(for: .recovery))
+    }
+
+    @Test func theParkedBannerCarriesTheHold() {
+        var held = terminal(hibernatedAt: Date(), hibernateReason: .manual)
+        held.startHeldReason = "camera in use"
+        held.startHeldAt = Date()
+        guard case .hibernatedOverlay(let message)? = HibernatedBannerModel.banner(for: held) else {
+            Issue.record("a parked terminal must get the hibernated overlay")
+            return
+        }
+        #expect(message.contains("Automatic wake held at"))
+        #expect(message.hasSuffix(": camera in use"))
+    }
 }

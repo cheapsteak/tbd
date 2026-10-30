@@ -33,19 +33,6 @@ extension AppState {
 
     // MARK: - Daemon Status
 
-    /// Get daemon status info.
-    func fetchDaemonStatus() async -> DaemonStatusResult? {
-        do {
-            let status = try await daemonClient.daemonStatus()
-            isConnected = true
-            return status
-        } catch {
-            logger.error("Failed to get daemon status: \(error)")
-            handleConnectionError(error)
-            return nil
-        }
-    }
-
     /// Compare the daemon's reported executable path against the daemon
     /// builds this app could legitimately be paired with, and publish a
     /// banner message on mismatch (see `DaemonBuildSkew`). Called on every
@@ -62,7 +49,9 @@ extension AppState {
         let message = DaemonBuildSkew.warningMessage(
             daemonExecutablePath: status.executablePath,
             appSiblingDaemonPath: siblingDaemonPath,
-            sourceWorktreePath: sourceWorktreePath
+            sourceWorktreePath: sourceWorktreePath,
+            appIdentity: StatusBarView.buildIdentity,
+            daemonIdentity: status.buildIdentity
         )
         // Same response, second reading: what commit the daemon was built from
         // and what it last saw on the remote. Carried on `daemon.status` rather

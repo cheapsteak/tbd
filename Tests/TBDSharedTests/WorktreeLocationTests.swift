@@ -71,9 +71,7 @@ import Foundation
             autoHibernateOnMerge: false,
             promotedToRepoID: UUID(),
             prStatus: PRStatus(number: 42, url: "https://example.invalid/pr/42",
-                               state: .mergeable, reason: "why", files: ["a.swift"],
-                               commits: 3, authorWorktreeID: UUID(),
-                               mergeQueuePosition: 1),
+                               state: .mergeable, reason: "why", mergeQueuePosition: 1),
             prNumber: 42,
             foreignHead: true,
             pinnedAt: Date(timeIntervalSince1970: 1_700_000_200),
@@ -84,7 +82,11 @@ import Foundation
             prObservation: PRObservation(
                 outcome: .undetermined(cause: "network unreachable"),
                 observedAt: Date(timeIntervalSince1970: 1_700_000_400)),
-            remoteParentAssigned: true
+            remoteParentAssigned: true,
+            archivedClaudeSpawnExtras: [
+                "sess-a": ClaudeSpawnExtras(
+                    claudeSettingsOverlay: "{\"model\":\"x\"}", pluginDirs: ["/tmp/plug"]),
+            ]
         )
         let decoded = try JSONDecoder().decode(Worktree.self, from: JSONEncoder().encode(wt))
         #expect(decoded == wt)

@@ -15,12 +15,45 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the global park-on-merge default. Park-on-merge is automatic
+    /// parking, which holds the composer-draft feature on, so the write
+    /// re-syncs the plugin when it changes the features on.
     func handleConfigSetAutoHibernateDefault(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetAutoHibernateDefaultParams.self, from: paramsData)
-        try await db.config.setAutoHibernateOnMergeDefault(params.enabled)
+        try await writeAffectingAutomaticParking {
+            try await db.config.setAutoHibernateOnMergeDefault(params.enabled)
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
+    }
+
+    /// Runs a write that can turn automatic parking on or off — the idle
+    /// sweep, the global park-on-merge default, a worktree's park-on-merge
+    /// override — and with it the composer-draft feature, which automatic
+    /// parking holds on (`ConfigRecord.toModel`). Re-syncs the plugin when the
+    /// session-mod features the config turns on differ after the write, and
+    /// leaves the plugin alone when they do not. A config that cannot be read
+    /// before the write counts as a change.
+    ///
+    /// - Returns: whether the composer-draft state Settings shows changed: the
+    ///   effective value, or whether automatic parking holds it on.
+    /// Design: docs/specs/2026-10-24-mod-only-park-guard-design.md.
+    @discardableResult
+    func writeAffectingAutomaticParking(
+        _ write: () async throws -> Void
+    ) async throws -> Bool {
+        let before = try? await db.config.get()
+        try await write()
+        let after = try await db.config.get()
+        let features = SessionModFeature.enabled(in: after)
+        if let sessionModPluginSync,
+           before.map({ SessionModFeature.enabled(in: $0) }) != features {
+            sessionModPluginSync(features)
+        }
+        guard let before else { return true }
+        return before.composerDraftEnabled != after.composerDraftEnabled
+            || before.composerDraftRequiredByAutoPark != after.composerDraftRequiredByAutoPark
     }
 
     /// Persist the session-limit auto-resume gate. Turning it OFF cancels only
@@ -93,18 +126,6 @@ extension RPCRouter {
         let params = try decoder.decode(ConfigSetControlModeParams.self, from: paramsData)
         try await db.config.setControlModeEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// The hibernation sweep re-reads the flag per cycle, so this applies on
-    /// the next sweep immediately — existing hibernated sessions are unaffected.
-    func handleConfigSetHibernateInputVeto(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetHibernateInputVetoParams.self, from: paramsData)
-        try await db.config.setHibernateInputVeto(enabled: params.enabled)
-        // Broadcast so the app reloads daemon capabilities.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
@@ -288,55 +309,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
-    /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
-    /// daemon reads this column to gate an actuation yet, because the acting
-    /// half of supervision (the sweep, deliveries, actuation preconditions)
-    /// lands in later slices. What the column already does is decide what
-    /// `supervise.status` reports and what the heartbeat publishes.
-    ///
-    /// The change is recorded in the supervision ledger, and **the line carries
-    /// no project and no mode**: the brake is one bit over the whole fleet, so
-    /// naming a project on its line would be a lie. That holds by construction
-    /// — the factories behind `applyBrakeChange` take no project.
-    ///
-    /// The column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after. The *ledger*
-    /// line is written only when the resolved brake actually moved: sending
-    /// `false` while the brake already stands engaged is a gesture on the
-    /// column but no change to what the brake means, and a gesture that changes
-    /// nothing is not a decision.
-    func handleConfigSetSupervisionEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetSupervisionEnabledParams.self, from: paramsData)
-        // One serialized region per transition: the store holds a gate across
-        // the commit *and* the line it justifies, so two overlapping toggles
-        // cannot commit in one order and reach the record in the other. The
-        // transaction inside `commit` makes the column atomic; the gate is what
-        // keeps the record's order from contradicting it.
-        let commit: @Sendable () async throws -> Bool = { [db] in
-            try await db.config.setSupervisionEnabled(enabled: params.enabled)
-        }
-        if let supervision {
-            // The transition's ordering token travels with the edge, so the
-            // heartbeat can discard a toggle that lost its race in the gate.
-            // Notifying from out here rather than from inside the gate is
-            // deliberate: publishing performs a file write, and every brake
-            // gesture would otherwise pay for it inside the serialized region.
-            let transition = try await supervision.applyBrakeChange(
-                released: params.enabled, commit: commit)
-            await supervisionHeartbeat?.applyBrake(
-                released: params.enabled, sequence: transition.sequence)
-        } else {
-            // Nothing to keep in step with, so the column moves on its own. The
-            // brake is a daemon-wide switch and must not depend on supervision
-            // being wired — see `brakeWorksWithoutAStore`.
-            _ = try await commit()
-        }
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the remote-backends master switch. Takes effect for polling
     /// on the NEXT daemon start — the manager is constructed at boot only
     /// when the flag was already on (see `Daemon.swift`), so flipping this
@@ -365,115 +337,38 @@ extension RPCRouter {
     ///
     /// The column is written on every call, because writing either value is the
     /// explicit gesture that lifts it out of NULL forever after.
-    ///
-    /// Turning the flag on while a Nightwatch watch mode is active is refused
-    /// rather than accepted: a watch mode and the pty-holder transport are
-    /// never both on
-    /// (docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md).
-    /// The refusal writes nothing and broadcasts nothing; turning the flag
-    /// off is never refused.
     func handleConfigSetPtyHolderEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetPtyHolderEnabledParams.self, from: paramsData)
-        let config = try await db.config.get()
-        if NightwatchHolderGate.refusesHolder(enabling: params.enabled, currentMode: config.nightwatchMode) {
-            return RPCResponse(error: NightwatchHolderGate.holderRefusal)
-        }
         try await db.config.setPtyHolderEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
 
-    /// Persist the model-proxy gate — the default-off soak switch for routing a
-    /// pty-holder session's Messages API traffic through the loopback proxy.
-    /// This is how the soak is turned on: the flag is the feature's only opt-in,
-    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
-    /// the sole way to enable it behind a database the project's own rules say
-    /// not to go into.
-    ///
-    /// **It applies to sessions created after the call, and to no others.** A
-    /// session's `ANTHROPIC_BASE_URL` is fixed in its environment at spawn, so
-    /// flipping this on never re-routes a running session and flipping it off
-    /// never un-routes one.
-    ///
-    /// The coupling — turning the proxy off also writes streaming off, in one
-    /// transaction — lives in `ConfigStore.setModelProxyEnabled`, not here, so
-    /// every caller of the store gets it, not only this RPC.
-    ///
-    /// **The supervisor follows the flag on the daemon already running**, which
-    /// is the half a column write cannot do: the boot path starts a supervisor
-    /// only when the flag was already on, so without this a user who turned the
-    /// proxy on would get routes minted against nothing until the next restart.
-    /// On the way off the supervisor starts **draining** rather than retiring
-    /// the proxy where it stands — see `beginDraining`. The sessions already
-    /// routed through it carry its port in their environment for the rest of
-    /// their lives, so cutting the proxy would break them mid-task rather than
-    /// merely un-routing them, and the help text above promises otherwise.
-    ///
-    /// Acted on the *written* value rather than on a flip computed from a
-    /// preceding read: both calls are idempotent (`startIfEnabled` returns
-    /// early on a supervisor already started, `beginDraining` on one that never
-    /// started), so a second call in the same direction changes nothing, and no
-    /// window opens between reading the old value and writing the new one.
-    ///
-    /// Both are awaited before this RPC answers, which is what makes the
-    /// Settings checkbox's response wait on them. Milliseconds normally, and
-    /// bounded in the worst case by the control client's 2-second probe plus
-    /// the spawner's 10-second bind budget — and, when a session is still
-    /// routed against the persisted port and something transient holds it, by
-    /// the supervisor's port wait of up to 30 seconds
-    /// (`ModelProxySupervisor.defaultPortRetryAttempts` ×
-    /// `defaultPortRetryInterval`), paid only in the case where minting a fresh
-    /// port would strand that session. Answering early would be worse than
-    /// the wait: the reply is what the app reloads its capabilities on, and a
-    /// reply that landed before the supervisor had a port would render the
-    /// toggle's own state wrong.
-    func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetModelProxyEnabledParams.self, from: paramsData)
-        try await db.config.setModelProxyEnabled(params.enabled)
-        if params.enabled {
-            await modelProxySupervisor?.startIfEnabled()
-        } else {
-            await modelProxySupervisor?.beginDraining()
-        }
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the transcript-streaming gate — the default-off soak switch for
-    /// the transcript's provisional assistant row, read from the file the proxy
-    /// writes.
+    /// the session mod's `transcript-stream` feature and the provisional rows
+    /// the transcript pane reads from it.
     ///
-    /// **It applies to sessions created after the call**, for the same reason
-    /// the proxy gate does: only a session spawned with a route has a stream
-    /// file to read.
+    /// **It applies to sessions created after the call**: the feature list is
+    /// fixed in a session's environment at spawn.
     ///
-    /// The coupling — turning streaming on also writes the proxy on, in one
-    /// transaction — lives in `ConfigStore.setTranscriptStreamingEnabled`. What
-    /// readers act on is `Config.transcriptStreamingEffective`, the conjunction
-    /// of the two columns, because a hand-edited row can hold a combination no
-    /// gesture here can produce.
-    ///
-    /// Because turning streaming on turns the proxy on, this is also a way to
-    /// arm the supervisor, and it starts one for the same reason
-    /// `setModelProxyEnabled` does: a user who asked for the provisional row
-    /// and got no proxy would see a stream file that never appears. Turning
-    /// streaming **off** retires nothing — the proxy column is untouched by
-    /// that direction, and a route still routes.
+    /// The `tbd` plugin on disk is brought in line with the new feature set,
+    /// as the composer-draft gate does: the session mod is present while any
+    /// feature's flag is on.
+    /// Design: docs/specs/2026-10-20-transcript-stream-mod-design.md.
     func handleConfigSetTranscriptStreamingEnabled(
         _ paramsData: Data
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetTranscriptStreamingParams.self, from: paramsData)
         try await db.config.setTranscriptStreamingEnabled(params.enabled)
-        if params.enabled {
-            await modelProxySupervisor?.startIfEnabled()
-        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 
@@ -571,23 +466,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the Program Status Protocol gate (default OFF, soaking) — whether
-    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
-    /// accepts its status reports. Applies to Claude processes started after
-    /// the change. The column is written on every call, because writing either
-    /// value is the explicit gesture that lifts it out of NULL forever after.
-    /// Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-    func handleConfigSetProgramStatusEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetProgramStatusEnabledParams.self, from: paramsData)
-        try await db.config.setProgramStatusEnabled(params.enabled)
-        // Turning it off also drops every terminal's entries and retracts them.
-        await programStatus.setEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the transcript prompt-answer gate (default OFF while it soaks).
     /// Hook changes reach a session on its next start; the answer RPCs read the
     /// column on every call, so they follow the toggle at once.
@@ -595,6 +473,12 @@ extension RPCRouter {
         let params = try decoder.decode(ConfigSetPromptAnswerParams.self, from: paramsData)
         try await db.config.setTranscriptPromptAnswerEnabled(params.enabled)
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        // Add or remove the session mod's prompt-answer feature in the plugin;
+        // the features come from the fresh config, as for the composer draft.
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 
@@ -613,6 +497,79 @@ extension RPCRouter {
         }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the the start admission gate flag (default OFF). Read on every use, so a
+    /// change takes effect at the next request.
+    func handleConfigSetStartAdmissionEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetStartAdmissionEnabledParams.self, from: paramsData)
+        try await db.config.setStartAdmissionEnabled(params.enabled)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the holder viewer-claim reconcile gate (default OFF, soaking).
+    /// `holder.reconcileClaims` reads it on every sweep, so a change takes
+    /// effect at the app's next poll tick. Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    func handleConfigSetHolderClaimReconcileEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetHolderClaimReconcileParams.self, from: paramsData)
+        try await db.config.setHolderClaimReconcileEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the the agent background priority command flag (default OFF). Read on every use, so a
+    /// change takes effect at the next request. Turning it off also ends a live lease and restores
+    /// what it lowered, so the flag is an off switch and not only a gate on `on`.
+    func handleConfigSetAgentBackgroundEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAgentBackgroundEnabledParams.self, from: paramsData)
+        try await db.config.setAgentBackgroundEnabled(params.enabled)
+        if !params.enabled { await agentBackground?.off() }
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the composer draft gate (default OFF, soaking). Sessions pick the
+    /// feature up when they next start. Automatic parking holds the feature on
+    /// whatever this stores, so while it is on, an off written here takes
+    /// effect only once automatic parking is off.
+    /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md.
+    func handleConfigSetComposerDraftEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetComposerDraftEnabledParams.self, from: paramsData)
+        try await db.config.setComposerDraftEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        // Add or remove the session mod in the plugin. The features come from
+        // the fresh config rather than this one flag, so the mod stays while
+        // any feature's flag is still on.
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
+        return .ok()
+    }
+
+    /// Persist the session usage gate (default OFF, soaking). Sessions pick the
+    /// feature up when they next start.
+    /// Design: docs/specs/2026-10-20-session-usage-mod-feature-design.md.
+    func handleConfigSetSessionModUsageEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetSessionModUsageEnabledParams.self, from: paramsData)
+        try await db.config.setSessionModUsageEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        // Add or remove the session mod in the plugin. The features come from
+        // the fresh config rather than this one flag, so the mod stays while
+        // any feature's flag is still on.
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 

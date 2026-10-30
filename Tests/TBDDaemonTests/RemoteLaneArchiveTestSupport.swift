@@ -29,6 +29,12 @@ struct RemoteLaneFixture {
     let repo: Repo
     private let dir: URL
 
+    /// Overwrites the registry file the manager reads, e.g. to corrupt it.
+    func writeRegistry(_ contents: String) throws {
+        try contents.write(
+            to: dir.appendingPathComponent("agent-providers.json"), atomically: true, encoding: .utf8)
+    }
+
     /// - Parameters:
     ///   - capabilities: what the provider's `describe` declares.
     ///   - verbs: canned results for the verb calls that follow `describe`,
@@ -110,19 +116,22 @@ struct RemoteLaneFixture {
         agentState: RemoteAgentState = .idle,
         meta: [String: String]? = nil,
         archived: Bool? = nil,
-        gone: Bool = false
+        gone: Bool = false,
+        provider: String = "fake",
+        withMirrorRow: Bool = true
     ) async throws -> Worktree {
         let worktree = try await db.worktrees.createRemote(
             repoID: repo.id, name: name, branch: "acme-branch",
-            provider: "fake", sessionID: sessionID, status: status)
+            provider: provider, sessionID: sessionID, status: status)
+        guard withMirrorRow else { return worktree }
         _ = try await db.remoteSessions.upsertOne(
-            provider: "fake",
+            provider: provider,
             session: RemoteSessionPayload(
                 id: sessionID, state: state, agentState: agentState,
                 meta: meta, archived: archived),
             now: Date())
         if gone {
-            try await db.remoteSessions.markGone(provider: "fake", sessionID: sessionID)
+            try await db.remoteSessions.markGone(provider: provider, sessionID: sessionID)
         }
         return worktree
     }
@@ -135,6 +144,28 @@ struct RemoteLaneFixture {
             .map { line in
                 try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
             }
+    }
+
+    /// The record a refusal leaves: exactly one request row, and the one
+    /// outcome confirming it `refused` with the reason `not-eligible`. Returned
+    /// as a pair so each caller checks what names its own request — the RPC
+    /// method, or the merge rail's daemon actor — and the refusal sentence on
+    /// the outcome.
+    func refusalRecord(
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws -> (request: [String: Any], outcome: [String: Any]) {
+        let rows = try actuationRows()
+        try #require(
+            rows.count == 2,
+            "a refusal writes its request row and one outcome, got \(rows.count)",
+            sourceLocation: sourceLocation)
+        let request = rows[0]
+        let outcome = rows[1]
+        #expect(outcome["confirms"] as? String == request["id"] as? String,
+                "the outcome does not confirm the request", sourceLocation: sourceLocation)
+        #expect(outcome["result"] as? String == "refused", sourceLocation: sourceLocation)
+        #expect(outcome["reason"] as? String == "not-eligible", sourceLocation: sourceLocation)
+        return (request, outcome)
     }
 
     func status(of worktree: Worktree) async throws -> WorktreeStatus? {

@@ -6,6 +6,7 @@ import TestSupport
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The local roster — the outbound half of remote peer messaging
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "The local

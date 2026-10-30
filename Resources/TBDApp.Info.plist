@@ -33,5 +33,7 @@
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Programs running in TBD terminals, such as voice input in coding agents, use the microphone.</string>
 </dict>
 </plist>
