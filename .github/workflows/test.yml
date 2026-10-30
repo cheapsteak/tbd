@@ -184,19 +184,20 @@ jobs:
       - name: Test the flake fixer's macOS steps under bash 3.2
         run: /bin/bash scripts/flake-bash32.test.sh
 
-      # The daemon link check (docs/specs/2026-10-30-daemon-layer-order-design.md).
-      # It fails on a link between two folders under Sources/TBDDaemon that
-      # scripts/daemon-links.txt does not list, and on a listed link no code
-      # makes any more. Like the migration lint it is build-free Python, about
-      # 1 s, so a PR learns about a new link without waiting on a build. Its
-      # harness needs only bash and Python and runs in `script-harnesses`.
+      # The daemon layer check (docs/specs/2026-10-30-daemon-layer-order-design.md).
+      # It fails when a folder under Sources/TBDDaemon uses one in its own
+      # layer or a higher one of scripts/daemon-layers.txt, and when a folder
+      # has no layer. Like the migration lint it is build-free Python, about
+      # 1 s, so a PR learns about a reference against the order without
+      # waiting on a build. Its harness needs only bash and Python and runs in
+      # `script-harnesses`.
       # `!cancelled()` so that an earlier red guard in this job, such as
       # SwiftLint, does not cost this one its verdict; and here, among the
-      # job's other `!cancelled()` steps, so that a red link check does not
+      # job's other `!cancelled()` steps, so that a red layer check does not
       # cost the `success()` steps above their verdicts either.
       # `/usr/bin/python3` is macOS's 3.9, the `python3` the pre-push hook
       # finds on a Mac without Homebrew, so syntax newer than 3.9 fails here.
-      - name: Check links between the daemon's folders
+      - name: Check the daemon's layer order
         if: ${{ !cancelled() }}
         run: /usr/bin/python3 scripts/lint-daemon-layers.py
 
@@ -389,11 +390,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/diag/terminal-latency-report.py --self-test
 
-      # The harness for the daemon link check that the `lint` job runs. Its
+      # The harness for the daemon layer check that the `lint` job runs. Its
       # fixtures are small sample trees of Swift that is scanned, never
       # compiled. It runs here under bash 5 and this runner's python3; the
       # `lint` job holds the check itself to macOS's Python 3.9.
-      - name: Test the daemon link check
+      - name: Test the daemon layer check
         if: ${{ !cancelled() }}
         run: bash scripts/lint-daemon-layers.test.sh
 

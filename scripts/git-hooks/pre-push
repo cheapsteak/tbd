@@ -67,11 +67,11 @@ fi
 echo "[pre-push] Linting SQL migrations..."
 python3 scripts/lint-migrations.py --base "$base"
 
-# The links between the daemon's folders, checked against
-# scripts/daemon-links.txt. About 1 s, reading the working tree as the
+# The daemon's folders, checked against the layer order in
+# scripts/daemon-layers.txt. About 1 s, reading the working tree as the
 # migration lint does, and likewise NOT skipped by TBD_SKIP_PREPUSH_TESTS: a
-# new link is cheapest to answer before the push, while the change that made
-# it is still fresh.
+# reference against the order is cheapest to answer before the push, while
+# the change that made it is still fresh.
 #
 # Only where the tree being pushed from has the check. scripts/install-hooks.sh
 # symlinks this hook from the main checkout, and every worktree runs the main
@@ -79,10 +79,10 @@ python3 scripts/lint-migrations.py --base "$base"
 # worktree on a branch from before the check would otherwise fail every push
 # over a script it does not have.
 if [ -f scripts/lint-daemon-layers.py ]; then
-  echo "[pre-push] Checking links between the daemon's folders..."
+  echo "[pre-push] Checking the daemon's layer order..."
   python3 scripts/lint-daemon-layers.py
 else
-  echo "[pre-push] This branch predates scripts/lint-daemon-layers.py; skipping the daemon link check."
+  echo "[pre-push] This branch predates scripts/lint-daemon-layers.py; skipping the daemon layer check."
 fi
 
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
