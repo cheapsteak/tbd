@@ -1360,6 +1360,16 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the panel tabs gate (default OFF, soaking): the side panel with
+    /// tabs, the app's tab sync and agent panel control. The daemon reads it
+    /// on every panel call, so it applies at once; no restart.
+    func setPanelTabsEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPanelTabsEnabled,
+            params: ConfigSetPanelTabsParams(enabled: enabled)
+        )
+    }
+
     /// Persist the transcript-streaming gate (default OFF), which decides
     /// whether the transcript renders a provisional assistant row while the
     /// model streams. Applies to sessions started after the call.
@@ -1805,13 +1815,28 @@ actor DaemonClient {
         )
     }
 
-    /// One-time legacy-tab import into the daemon-owned panel surface.
-    /// The daemon returns a "not implemented" error until Task 11 lands.
-    func panelImportLegacy(_ params: PanelImportParams) async throws -> PanelImportResult {
+    /// Apply one panel operation to a tab's daemon-owned surface. The reply
+    /// carries the tab's full surface after the operation; `replayed` is true
+    /// when the daemon had already committed this operation ID. Refused while
+    /// `panel_tabs_enabled` is off.
+    func panelApply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
         try await callAsync(
-            method: RPCMethod.panelImportLegacy,
+            method: RPCMethod.panelApply,
+            params: PanelApplyParams(envelope: envelope),
+            resultType: PanelApplyResult.self
+        )
+    }
+
+    /// Send every workspace tab of one worktree, in tab-bar order. The daemon
+    /// imports a listed tab that has no surface, updates order, labels and
+    /// primaries, and deletes the surface of any tab not listed — so callers
+    /// must send only a worktree whose tab list is loaded. Refused while
+    /// `panel_tabs_enabled` is off.
+    func panelSyncTabs(_ params: PanelSyncTabsParams) async throws -> PanelSyncTabsResult {
+        try await callAsync(
+            method: RPCMethod.panelSyncTabs,
             params: params,
-            resultType: PanelImportResult.self
+            resultType: PanelSyncTabsResult.self
         )
     }
 

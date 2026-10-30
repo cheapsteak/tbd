@@ -10,9 +10,6 @@ private let tmuxResolutionLogger = Logger(
     subsystem: "com.tbd.app",
     category: "tmux"
 )
-/// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
-/// it can be streamed/filtered independently of the rest of AppState.
-private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -1997,6 +1994,10 @@ final class AppState {
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
+    /// How `setPanelTabsEnabled` persists the panel tabs soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var panelTabsFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setPanelTabsEnabled(enabled) }
     /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
     /// the same reason as `controlModeSetter`, so the sweep's cadence and its
     /// answers are testable without a daemon.
@@ -2330,20 +2331,22 @@ final class AppState {
     /// the sequence of responses without a daemon.
     @ObservationIgnored lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
         { [daemonClient] worktreeID in try await daemonClient.listTabs(worktreeID: worktreeID) }
-    /// How the one-shot legacy panel import fires its RPC — injectable for the
-    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
-    /// no protocol), so trigger tests can record calls without a real daemon.
-    @ObservationIgnored lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
-        { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
-    /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
-    /// imported surface — injectable for the same reason as `panelImportTrigger`.
+    /// How the app fetches a worktree's daemon-owned panel surfaces
+    /// (`panel.get`, every tab) — injectable for the same reason as
+    /// `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no protocol),
+    /// so tests can drive the replies without a real daemon.
     @ObservationIgnored lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
         { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
-    /// Guards the one-shot legacy panel import to at most once per launch.
-    /// Deliberately NOT persisted — the daemon's create-if-absent import guard
-    /// (spec C §11.2) is the real idempotence boundary; this only avoids
-    /// redundant RPC fan-out as `loadTabStates` runs per worktree.
-    @ObservationIgnored private var hasAttemptedPanelImport = false
+    /// How the app sends one panel operation (`panel.apply`) — injectable for
+    /// the same reason as `panelGetFetcher`, so tests can record envelopes and
+    /// script replies or failures.
+    @ObservationIgnored lazy var panelApplyTrigger: @MainActor (PanelOperationEnvelope) async throws -> PanelApplyResult =
+        { [daemonClient] envelope in try await daemonClient.panelApply(envelope) }
+    /// How the app sends a worktree's workspace tabs to the daemon
+    /// (`panel.syncTabs`) — injectable for the same reason as
+    /// `panelGetFetcher`, so tests can count syncs without a real daemon.
+    @ObservationIgnored lazy var panelSyncTrigger: @MainActor (PanelSyncTabsParams) async throws -> PanelSyncTabsResult =
+        { [daemonClient] params in try await daemonClient.panelSyncTabs(params) }
     /// How `refreshRepos()` fetches the repo list — injectable for the same
     /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
     /// prunes no remembered sidebar group.
@@ -2868,19 +2871,26 @@ final class AppState {
         }
     }
 
-    // MARK: - Legacy panel import (spec C §11.2)
+    // MARK: - Panel tab sync payload
 
-    /// Builds the legacy-import payload for one worktree from AppState's
-    /// current in-memory tab/layout/history state. Grid-layout entries — the
-    /// persisted `layouts` blob's stale worktree-keyed rows from pre-#478
-    /// installs — are excluded BY CONSTRUCTION: only `layouts[tab.id]` is
-    /// ever consulted, never `layouts.values` (spec §11.2.2, "grid state is
-    /// not imported"). `paneHistories` is filtered to pane IDs that actually
-    /// appear in the included tabs' layouts, absorbing the #477
-    /// over-retention concern at the import boundary rather than trusting
-    /// the caller.
-    func buildPanelImportParams(worktreeID: UUID) -> PanelImportParams {
-        let wtTabs = tabs[worktreeID] ?? []
+    /// Builds the `panel.syncTabs` payload for one worktree from AppState's
+    /// current in-memory tab/layout/history state: every workspace tab in
+    /// tab-bar order (the order `tabs[worktreeID]` holds after
+    /// `applyStoredOrder`), each with its label, content and legacy layout.
+    ///
+    /// Returns nil when the worktree's tab list has not been loaded. A sync
+    /// deletes the surface of every tab it does not list, so "not loaded yet"
+    /// must never be sent as an empty list; a loaded but empty list is sent
+    /// as `tabs: []`.
+    ///
+    /// Grid-layout entries — the persisted `layouts` blob's stale
+    /// worktree-keyed rows from pre-#478 installs — are excluded BY
+    /// CONSTRUCTION: only `layouts[tab.id]` is ever consulted, never
+    /// `layouts.values`. `paneHistories` is filtered to pane IDs that actually
+    /// appear in the included tabs, absorbing the #477 over-retention concern
+    /// at the sync boundary rather than trusting the caller.
+    func buildPanelSyncParams(worktreeID: UUID) -> PanelSyncTabsParams? {
+        guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
         let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
             let layout = layouts[tab.id]
@@ -2888,78 +2898,12 @@ final class AppState {
             if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
             return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
         }
-        let tabOrder = worktreeTabOrders[worktreeID] ?? wtTabs.map(\.id)
-        let activeTabID: UUID? = activeTabIndices[worktreeID].flatMap { idx in
-            wtTabs.indices.contains(idx) ? wtTabs[idx].id : nil
-        }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
-        return PanelImportParams(
+        return PanelSyncTabsParams(
             worktreeID: worktreeID,
             tabs: legacyTabs,
-            tabOrder: tabOrder,
-            activeTabID: activeTabID,
             paneHistories: includedPaneHistories
         )
-    }
-
-    /// Fires the one-shot legacy panel import once per launch, once the
-    /// daemon confirms panel-surface ownership is enabled (default OFF while
-    /// the feature soaks — this whole path is inert until then). Called from
-    /// the tail of `loadTabStates` for every worktree; imports every worktree
-    /// whose tabs are already loaded at that point. Failures are logged and
-    /// non-fatal — the daemon's create-if-absent guard means a skipped
-    /// worktree simply retries on the next launch.
-    func triggerPanelImportIfNeeded() {
-        guard !hasAttemptedPanelImport, daemonCapabilities?.panelSurfaceEnabled == true else { return }
-        hasAttemptedPanelImport = true
-        let worktreeIDs = Array(tabs.keys)
-        Task {
-            for worktreeID in worktreeIDs {
-                let params = buildPanelImportParams(worktreeID: worktreeID)
-                do {
-                    _ = try await panelImportTrigger(params)
-                } catch {
-                    logger.error("panelImportLegacy failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-                    continue
-                }
-                // Spec C §11.3 — shadow compare runs once, right after this
-                // worktree's import call succeeds (whether it imported just
-                // now or the daemon already had a surface from a prior
-                // launch). Diagnostics only; never blocks/gates the import
-                // above, which has already completed by this point.
-                await runPanelShadowCompare(worktreeID: worktreeID)
-            }
-        }
-    }
-
-    /// Spec C §11.3 — migration-validation shadow compare. Log-only: never
-    /// mutates state, never surfaces to the user, never throws in a way that
-    /// affects the caller (all failures are logged and swallowed here).
-    /// Re-converts the CURRENT live legacy state (not the params already sent
-    /// to `panelImportTrigger` — state may have moved on since) via the same
-    /// `LegacySurfaceImporter.convert` the daemon's import path used, fetches
-    /// the daemon's imported surface, and logs any divergence.
-    private func runPanelShadowCompare(worktreeID: UUID) async {
-        let params = buildPanelImportParams(worktreeID: worktreeID)
-        let local = LegacySurfaceImporter.convert(
-            worktreeID: worktreeID, tabs: params.tabs, tabOrder: params.tabOrder,
-            paneHistories: params.paneHistories)
-        let daemon: PanelGetResult
-        do {
-            daemon = try await panelGetFetcher(worktreeID)
-        } catch {
-            shadowCompareLogger.error("panel.get failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-            return
-        }
-        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
-        guard !mismatches.isEmpty else {
-            shadowCompareLogger.debug("\(worktreeID, privacy: .public): no divergence")
-            return
-        }
-        for mismatch in mismatches {
-            shadowCompareLogger.error("\(worktreeID, privacy: .public): \(mismatch, privacy: .public)")
-        }
-        shadowCompareLogger.info("\(worktreeID, privacy: .public): \(mismatches.count, privacy: .public) mismatch(es)")
     }
 
     // MARK: - Selection Persistence

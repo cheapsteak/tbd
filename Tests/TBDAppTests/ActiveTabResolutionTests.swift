@@ -13,7 +13,7 @@ import TBDShared
 //
 // The one RPC these paths make (`listTabs`) is driven through the
 // `tabStatesFetcher` injectable-closure seam other AppState tests already use
-// (`daemonCapabilitiesFetcher`, `panelImportTrigger`, ...), so nothing touches
+// (`daemonCapabilitiesFetcher`, `panelGetFetcher`, ...), so nothing touches
 // the network or `~/tbd`.
 //
 // Regression coverage for "a new worktree opens on its Notes tab": the daemon
