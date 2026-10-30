@@ -768,12 +768,14 @@ extension RPCRouter {
         // matching `isManuallyHibernatable`'s rails.
         //
         // Qualified on the session actually being ALIVE. `activityState` is
-        // hook-fed and carries no timestamp, so a session that died mid-turn
-        // (crash, OOM, killed pane) stays `.working` forever. An unqualified
-        // rail would then refuse forever on exactly the wedged terminal a
-        // caller most needs to close — turning the safety rail into a trap for
-        // this command's primary cleanup use case. A dead session cannot be
-        // mid-turn, so it stays closeable without --force.
+        // the agent's last report, and an agent that dies mid-turn (crash,
+        // OOM, killed pane) reports nothing more: until its exit is observed —
+        // and, on a path that misses the exit, for good — the row keeps
+        // reading `.working`. An unqualified rail would then refuse forever on
+        // exactly the wedged terminal a caller most needs to close — turning
+        // the safety rail into a trap for this command's primary cleanup use
+        // case. A dead session cannot be mid-turn, so it stays closeable
+        // without --force.
         //
         // The qualifier is asked of the row's OWN transport — see
         // `sessionLivenessForActivityRails`. Asking tmux for every row is how

@@ -3457,9 +3457,9 @@ final class AppState {
 
     /// Mirror the daemon's awaiting-input columns onto the cached terminal.
     ///
-    /// Deliberately writes ONLY those two fields: a recorded wait reason says
-    /// nothing about `activityState`, and the daemon does not assert one from
-    /// the `Notification` hook either. The sidebar reads this instead of the
+    /// Deliberately writes ONLY those two fields: the program status store
+    /// writes the reason and `activityState` together, but announces the state
+    /// with its own activity delta. The sidebar reads this instead of the
     /// `.attentionNeeded` notification because notifications are unread mail —
     /// they are marked read as soon as the worktree is selected, so the row
     /// the user is looking at is exactly the one that would lose the signal.
@@ -3473,8 +3473,8 @@ final class AppState {
         terminal.awaitingInputObservedAt = delta.observedAt
         // One write-back through the tracked dictionary, not two: each
         // assignment is a full copy-on-write plus a notification to every view
-        // that read `terminals`, and this delta arrives on every
-        // `Notification` hook of every class.
+        // that read `terminals`, and this delta arrives with every change of
+        // wait an agent reports.
         terminals[delta.worktreeID]?[idx] = terminal
     }
 

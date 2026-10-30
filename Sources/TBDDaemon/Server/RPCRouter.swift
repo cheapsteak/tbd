@@ -1284,8 +1284,9 @@ public final class RPCRouter: Sendable {
     /// active row, whether it is active, whether it has a branch discovery can
     /// match on, and its live bindings with their stored states.
     ///
-    /// Activity comes from the hook-fed session rows and the ledger's
-    /// in-memory stamps only — never from terminal text. The ledger is pruned
+    /// Activity comes from the session rows' activity column, which the agents'
+    /// own OSC 7501 reports write, and the ledger's in-memory stamps only —
+    /// never from terminal text. The ledger is pruned
     /// to the live terminals and rows here, so stamps for sessions and rows
     /// that left the fleet do not accumulate.
     ///

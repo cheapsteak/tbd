@@ -49,9 +49,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var activityStateSource: String?
     var activityStateObservedAt: Date?
     var activityStateOrderObservedAt: Date?
-    /// JSON-encoded `AwaitingInputReason`, carried verbatim from the
-    /// `Notification` hook. nil when the session is not waiting, or when the
-    /// wait carried no structured reason.
+    /// JSON-encoded `AwaitingInputReason`: the block the agent reported over
+    /// OSC 7501, written by `applyProgramStatusActivity` with no message text.
+    /// nil when the session is not waiting.
     var awaitingInputReason: String?
     var awaitingInputObservedAt: Date?
     /// `TerminalTransport` raw value. NULL on every row written before
@@ -1584,12 +1584,11 @@ public struct TerminalStore: Sendable {
             record.activityStateSource = FactColumnJSON.encode(source)
             record.activityStateObservedAt = observedAt
             record.activityStateOrderObservedAt = observedAt
-            // Unconditional, including the nil case: this IS the superseding
-            // rail. A caller that observes a new activity state without naming
-            // a reason clears the old one, so a "needs your permission"
-            // recorded by a `Notification` hook cannot outlive the prompt it
-            // described. Making this write conditional on a non-nil reason
-            // would leave stale waits pinned to the row forever.
+            // Unconditional, including the nil case: a reason belongs to the
+            // state written beside it, so a write that names none clears the
+            // old one rather than leaving a wait standing under a state that
+            // no longer has it. Making this write conditional on a non-nil
+            // reason would leave stale waits pinned to the row forever.
             record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
             record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
             try record.update(db)

@@ -785,9 +785,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// confirms the same semantic state, so it must not be used as an
     /// at-rest-since timestamp.
     public var activityStateOrderObservedAt: Date?
-    /// The structured reason this session is waiting, carried verbatim from
-    /// Claude Code's `Notification` hook. Superseded by the next activity
-    /// observation, so it describes the *current* wait or nothing at all.
+    /// The structured reason this session is waiting: the block the agent
+    /// reported over OSC 7501, written by `ProgramStatusStore` beside
+    /// `activityState` and carrying no message text. Rewritten with every
+    /// value the store writes, so it describes the *current* wait or nothing
+    /// at all.
     public var awaitingInputReason: AwaitingInputReason?
     /// When `awaitingInputReason` was observed.
     public var awaitingInputObservedAt: Date?

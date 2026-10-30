@@ -349,13 +349,10 @@ public struct TerminalActivityDelta: Codable, Sendable {
 /// was retracted — the app mirrors the columns rather than deriving them, so
 /// there is exactly one place that decides what the record says.
 ///
-/// **What it promises is narrower than "every write":** a reason is pushed when
-/// it installs a prompt-on-screen or displaces one, and every retraction is
-/// pushed. The `Notification` hook carries no matcher, so it also records
-/// classes that cannot change whether a prompt is up — an `agent_completed`
-/// per finished subagent, an `idle_prompt` per idle minute — and pushing those
-/// would republish every subscriber's terminal collection for no visible
-/// change. A consumer that needs the other classes must read `terminal.list`.
+/// `ProgramStatusStore` pushes it whenever the reason it writes changes: a
+/// wait the agent reported, a wait of a different block kind, or a
+/// retraction. A park clears the reason too, and the app clears its cached
+/// one on the park's own `terminalHibernationChanged` delta.
 ///
 /// This is a *recorded reason*, not a claim about activity: nothing here
 /// asserts `activityState`, and the app must not write one from it.
