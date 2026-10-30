@@ -71,9 +71,11 @@ trap cleanup EXIT
 mkrepo() {
   local d; d="$(mktmpd)"
   echo "$d" >> "$FIXTURE_LIST"
-  mkdir -p "$d/Sources/TBDShared" "$d/Sources/TBDDaemon/Server" \
+  mkdir -p "$d/Sources/TBDKernel" "$d/Sources/TBDShared" \
+           "$d/Sources/TBDDaemon/Server" \
            "$d/Sources/TBDTerminalSerialization" "$d/Sources/TBDApp" \
            "$d/Tests/TBDDaemonTests"
+  echo "public enum Kernel {}"        > "$d/Sources/TBDKernel/Kernel.swift"
   echo "public struct Shared {}"      > "$d/Sources/TBDShared/Shared.swift"
   echo "struct Router {}"             > "$d/Sources/TBDDaemon/Server/Router.swift"
   echo "struct Frame {}"              > "$d/Sources/TBDTerminalSerialization/Frame.swift"
@@ -200,6 +202,17 @@ test_tbdshared_change_wipes() {
   run_decider "$repo"
   assert_eq "a TBDShared change wipes" "wipe" "$RUN_OUT"
   assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDShared"
+}
+
+# TBDKernel, the library TBDShared depends on: a symbol added to it is the
+# change #7715 breaks on, so a change confined to it wipes like a TBDShared one.
+test_tbdkernel_change_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  commit_change "$repo" "Sources/TBDKernel/Kernel.swift"
+  run_decider "$repo"
+  assert_eq "a TBDKernel change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDKernel"
 }
 
 # TBDDaemonLib's sources, which live under `Sources/TBDDaemon` — the case that
@@ -330,7 +343,7 @@ test_record_writes_every_compared_path() {
   local repo lines; repo="$(mkrepo)"
   record_marker "$repo"
   lines="$(grep -c -v '^#' "$repo/marker" | tr -d ' ')"
-  assert_eq "the marker carries one line per compared path" "5" "$lines"
+  assert_eq "the marker carries one line per compared path" "6" "$lines"
   assert_contains "the marker names TBDDaemonLib's source directory" \
     "$(cat "$repo/marker")" "Sources/TBDDaemon "
 }
@@ -379,6 +392,7 @@ test_compared_paths_resolve_in_this_repository() {
   assert_eq "recording against this checkout exits 0" "0" "$rc"
   assert_contains "every compared path resolves in this repository" "$out" \
     "Recorded the first-party source fingerprint"
+  assert_contains "TBDKernel resolves here" "$out" "Sources/TBDKernel "
   assert_contains "TBDShared resolves here" "$out" "Sources/TBDShared "
   assert_contains "TBDDaemonLib's source directory resolves here" "$out" "Sources/TBDDaemon "
 }
