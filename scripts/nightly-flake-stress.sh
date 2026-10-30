@@ -58,8 +58,6 @@
 #     grandchild swift-frontend / test bundle under scripts/test.sh
 #   - post-cleanup verification is `ps -p <captured pid>`, never `pgrep -x yes`
 #   - trap on INT/TERM as well as EXIT, so an externally killed run still cleans up
-#   - cleanup stops spinners only in the shell that installed the trap, never in
-#     a child forked from it before that child has exec'd
 
 set -uo pipefail
 
@@ -428,19 +426,9 @@ stop_spinners() {
   SPINNER_PIDS=()
 }
 
-# Only the shell that installed the trap stops spinners. A child that bash forks
-# (for `yes &` above, or for the command run_with_deadline starts) keeps a copy
-# of this trap until it execs, and bash runs the trap if a signal lands in that
-# window. Without the check, that CHILD would stop spinners from its own stale
-# copy of SPINNER_PIDS. The `exit` stays unconditional: a child that returned
-# from the handler would go on to exec its command. `${BASHPID:-$$}` because
-# bash 3.2 has no BASHPID. There the check always passes, which is safe, because
-# bash 3.2 runs no trap in a child that has not exec'd yet (measured: it drops
-# the signal instead).
-TRAP_OWNER_PID="${BASHPID:-$$}"
 cleanup() {
   local rc=$?
-  [[ "${BASHPID:-$$}" == "$TRAP_OWNER_PID" ]] && stop_spinners
+  stop_spinners
   exit "$rc"
 }
 trap cleanup EXIT INT TERM

@@ -245,12 +245,19 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
 # that window ran this harness's EXIT trap in the CHILD. The child deleted
 # MUTANT_DIR, and the mutation cases that sort after these failed now and then
 # on CI with "mutant.1.sh: No such file or directory". No case can win that race
-# on demand, so these run each trap's own code in a subshell, which is a forked
-# child exactly as `sleep 30 &` is until its exec.
+# on demand, so this one runs the trap's own code in a subshell, which is a
+# forked child exactly as `sleep 30 &` is until its exec.
 #
-# Both need BASHPID, which bash 3.2 lacks. On bash 3.2 the guards always pass,
+# The guard needs BASHPID, which bash 3.2 lacks. On bash 3.2 it always passes,
 # and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
 # in a child that had not exec'd yet. It dropped the signal instead.
+#
+# The script's own `trap cleanup EXIT INT TERM` gets no such guard, on purpose.
+# The flake bot runs it under bash 3.2, where the guard could not tell a child
+# from its parent and no pre-exec child runs a trap anyway. It signals its
+# spinners and deadline commands long after they exec. And the bash 3.2 lint
+# (scripts/flake-bash32.test.sh) forbids BASHPID in it. Here, a pre-exec child
+# that runs `cleanup` finds no spinners in its copy of SPINNER_PIDS and exits.
 
 dir_state() { if [[ -d "$1" ]]; then echo present; else echo gone; fi; }
 
@@ -291,35 +298,6 @@ test_only_the_harness_shell_deletes_the_mutant_dir() {
   ( run_trap_aimed_at "$unguarded" "$decoy" )
   assert_eq "mutation: without the guard, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
   rm -rf "$decoy"
-}
-
-# The script's own trap has the same hazard: a forked child running `cleanup`
-# would stop spinners from its own stale copy of SPINNER_PIDS. Sources script $1
-# in a fresh shell, has a subshell call `cleanup`, then lets the shell exit, and
-# prints one line for each shell that reached stop_spinners: "child" for the
-# subshell, "owner" for the shell that sourced the script, which gets there
-# through its EXIT trap.
-who_reaches_stop_spinners() {
-  # shellcheck disable=SC2016 # expanded by the inner shell
-  "$BASH" -c '
-    source "$1"
-    stop_spinners() { echo "$who"; }
-    who=child; ( cleanup )
-    who=owner
-  ' _ "$1"
-}
-
-test_only_the_shell_that_sourced_the_script_stops_its_spinners() {
-  if [[ -z "${BASHPID:-}" ]]; then
-    echo "ok   - bash $BASH_VERSION has no BASHPID, so the cleanup guard is not checked here"
-    return 0
-  fi
-  assert_eq "only the owner stops spinners, on its way out" "owner" "$(who_reaches_stop_spinners "$SCRIPT")"
-  local mutant
-  mutant="$(mutant_of 's/^  \[\[ .* \]\] && stop_spinners$/  stop_spinners/')"
-  assert_eq "the mutant really dropped the guard" "0" "$(grep -cF 'TRAP_OWNER_PID" ]] && stop_spinners' "$mutant")"
-  assert_eq "mutation: without the guard, a forked child stops them too" $'child\nowner' \
-    "$(who_reaches_stop_spinners "$mutant")"
 }
 
 test_run_with_deadline_kills_an_overrunning_command() {
