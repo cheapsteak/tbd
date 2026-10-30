@@ -141,9 +141,11 @@ caller.
 ### Answering the probe
 
 The app's `TBDTerminalView` and the daemon's `HolderEmulator` answer the probe
-on every holder session. The gate plumbing — the capability the daemon sent the
-app, the config RPC, and the per-view toggle — is deleted. A tmux panel still
-never answers, and a snapshot replay still answers nothing and ingests nothing.
+on every holder session. Nothing configures whether they answer: there is no
+capability the daemon sends the app and no config RPC. Each `TBDTerminalView`
+keeps a per-view switch set only from its panel's transport — on for holder,
+off for tmux — so a tmux panel never answers, and a snapshot replay still
+answers nothing and ingests nothing.
 
 ### Resolution
 
