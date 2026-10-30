@@ -39,7 +39,6 @@
 (root) -> Tmux
 (root) -> Update
 Actuation -> Database
-Actuation -> Lifecycle
 AskUserQuestion -> Server
 Claude -> Actuation
 Claude -> Database
@@ -88,7 +87,6 @@ Lifecycle -> Git
 Lifecycle -> Holder
 Lifecycle -> Hooks
 Lifecycle -> ModelProfile
-Lifecycle -> PR
 Lifecycle -> Process
 Lifecycle -> ProgramStatus
 Lifecycle -> Server
