@@ -50,7 +50,7 @@ struct PaneActionsLegacyTests {
             path: "/tmp/acme-wt", tmuxServer: "test-server")))
         let box = LayoutBox(layout)
         let actions = PaneActions.legacy(
-            layout: box.binding, appState: state, worktree: worktree, tabID: nil)
+            layout: box.binding, appState: state, worktree: worktree)
         try body(LegacyFixture(state: state, box: box, worktree: worktree, actions: actions))
     }
 

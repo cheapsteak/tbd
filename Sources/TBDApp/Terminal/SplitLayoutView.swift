@@ -17,7 +17,7 @@ struct SplitLayoutView: View {
                 content: content,
                 worktree: worktree,
                 tabID: tabID,
-                actions: .legacy(layout: $layout, appState: appState, worktree: worktree, tabID: tabID)
+                actions: .legacy(layout: $layout, appState: appState, worktree: worktree)
             )
         case .split(let id, let direction, let children, let ratios):
             SplitContainer(

@@ -63,14 +63,12 @@ extension PaneActions {
     /// keep `AppState`'s pane bookkeeping (slot histories, tabs, notes) in
     /// step. This is the whole of the legacy split layout's behaviour for a
     /// leaf, and so the rollback path while the panel tabs flag is off.
-    ///
-    /// `tabID` is not read: closing the last pane finds its tab by pane ID.
+    /// Closing the last pane finds its tab by pane ID.
     @MainActor
     static func legacy(
         layout: Binding<LayoutNode>,
         appState: AppState,
-        worktree: LocalWorktree,
-        tabID: UUID?
+        worktree: LocalWorktree
     ) -> PaneActions {
         PaneActions(
             historyStep: { content, step in

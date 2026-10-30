@@ -761,7 +761,7 @@ private struct MultiWorktreeCell: View {
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
                 tabID: tabID,
-                actions: .legacy(layout: layoutBinding, appState: appState, worktree: worktree, tabID: tabID)
+                actions: .legacy(layout: layoutBinding, appState: appState, worktree: worktree)
             )
         } else {
             ZStack {
