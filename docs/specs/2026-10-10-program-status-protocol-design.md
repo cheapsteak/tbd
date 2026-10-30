@@ -213,17 +213,15 @@ it with a debug log:
   before the terminal is looked up, and a known `app` on the other agent's
   terminal, on a `clear` as on any other report, after it.
 
-In a genuine agent session the agent itself writes these reports. Claude
-Code and Codex run their tools with the output captured rather than on the
-terminal, and draw that output through their own renderers, which do not pass
-a tool's raw escape sequences on to the terminal: a `cat` of a file that
-contains the sequence reaches the pty as text, not as a report. A process
-that writes to the terminal device directly — one that opens `/dev/tty` —
-goes around the renderer and can still forge a report. A forged report does
+In a genuine agent session the agent writes these reports, but the store
+cannot tell them from the same bytes written by anything else that reaches
+the pty — a tool whose output the agent passes through unfiltered, or a
+process that writes to the terminal device directly. A forged report does
 more than change what is shown: reports write the activity column that the
 idle sweep, the send gate and the resume paths act on, so a forged `idle`
 could let the idle sweep park a turn that is still running, and a forged
-block could refuse a gated send. That residual risk is accepted.
+block could refuse a gated send. The agent's next change overwrites a forged
+value. That residual risk is accepted.
 
 ### Liveness
 
