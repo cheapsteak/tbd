@@ -30,7 +30,7 @@ struct PanelSurfaceMigrationTests {
             repoID: repo.id, name: "w", branch: "b",
             path: "/tmp/v56-wt-\(UUID())", tmuxServer: "srv"
         )
-        let isEmpty = try await db.panelSurface.isEmpty(worktreeID: wt.id)
+        let isEmpty = try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty
         #expect(isEmpty)
     }
 
