@@ -515,7 +515,8 @@ import TestSupport
         let notifications = try await h.attentionNotifications()
         #expect(notifications.count == 1)
         #expect(notifications.first?.message == "Claude needs your permission")
-        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+        let message = notifications.first?.message ?? ""
+        #expect(!message.contains(Self.secret))
     }
 
     @Test func bannerTextFollowsTheAgent() async throws {
@@ -526,7 +527,8 @@ import TestSupport
         let notifications = try await h.attentionNotifications()
         #expect(notifications.count == 1)
         #expect(notifications.first?.message == "Codex has a question")
-        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+        let message = notifications.first?.message ?? ""
+        #expect(!message.contains(Self.secret))
     }
 
     /// A sign-in block maps to idle and raises nothing. A blocked task entry
@@ -547,7 +549,8 @@ import TestSupport
         let notifications = try await h.attentionNotifications()
         #expect(notifications.count == 1)
         #expect(notifications.first?.message == "Claude needs your input")
-        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+        let message = notifications.first?.message ?? ""
+        #expect(!message.contains(Self.secret))
     }
 
     /// After a daemon restart the store's memory is empty, but the row still
