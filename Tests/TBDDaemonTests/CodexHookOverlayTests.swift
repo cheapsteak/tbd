@@ -94,7 +94,7 @@ import TestSupport
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let hooks = try #require(parsed?["hooks"] as? [String: Any])
         #expect(hooks.keys.sorted() == ["SessionStart", "Stop"])
-        let body = String(decoding: data, as: UTF8.self)
+        let body = try #require(String(data: data, encoding: .utf8))
         #expect(!body.contains("terminal-activity"))
         #expect(!body.contains("sqlite3"))
     }

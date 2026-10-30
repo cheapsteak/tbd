@@ -93,7 +93,7 @@ import Testing
 
     let decoded = try JSONDecoder().decode(Terminal.self, from: json)
     #expect(decoded.activityState == .idle)
-    let reencoded = String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self)
+    let reencoded = try #require(String(data: try JSONEncoder().encode(decoded), encoding: .utf8))
     #expect(!reencoded.contains("presentationActivity"))
 }
 

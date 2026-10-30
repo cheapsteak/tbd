@@ -870,7 +870,7 @@ extension TBDHomeSerialized {
             fallbackModels: ["claude-haiku-4-5-20251001"],
             extraSettings: ["skillOverrides": ["x": "off"]])
         for body in [plain, merged] {
-            #expect(!String(decoding: body, as: UTF8.self).contains("terminal-activity"))
+            #expect(!(try #require(String(data: body, encoding: .utf8))).contains("terminal-activity"))
         }
     }
 
