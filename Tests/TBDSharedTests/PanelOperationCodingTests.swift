@@ -6,16 +6,19 @@ import Testing
 struct PanelOperationCodingTests {
     @Test(arguments: [
         PanelOperation.open(
-            content: .file(FileReference(path: "a.md", presentation: .rendered)),
-            placement: .automatic),
-        .open(content: .web(URL(string: "https://example.com/pr/1")!),
-              placement: .beside(target: .primary, edge: .right, share: 0.35)),
-        .close(panelID: UUID()),
-        .move(panelID: UUID(), placement: .beside(target: .panel(UUID()), edge: .below, share: nil)),
-        .resize(splitID: UUID(), ratios: [0.25, 0.75]),
-        .navigate(panelID: UUID(), destination: .transcript(terminalID: UUID())),
+            content: .file(FileReference(path: "a.md", presentation: .rendered)), newPanel: false),
+        .open(content: .web(URL(string: "https://example.com/pr/1")!), newPanel: true),
+        .open(content: .note(noteID: UUID()), newPanel: false),
+        .open(content: .transcript(terminalID: UUID()), newPanel: false),
+        .navigate(panelID: UUID(), destination: .file(FileReference(path: "b.md"))),
+        .history(panelID: UUID(), action: .back),
+        .history(panelID: UUID(), action: .forward),
         .history(panelID: UUID(), action: .jump(index: 3)),
-        .selectTab(tabID: UUID()),
+        .select(panelID: UUID()),
+        .close(panelID: UUID()),
+        .setCollapsed(true),
+        .setCollapsed(false),
+        .resize(width: 0.35),
     ])
     func operationsRoundTrip(op: PanelOperation) throws {
         let envelope = PanelOperationEnvelope(

@@ -1,42 +1,30 @@
 import Foundation
 
-// Spec C §7.3 — wire vocabulary uses user-facing edges; split direction is
-// derived by the reducer.
-public enum PanelEdge: String, Codable, Sendable {
-    case left, right, above, below
-}
-
-public enum PanelAnchor: Codable, Sendable, Equatable {
-    case primary
-    case panel(PanelID)
-}
-
-/// Placement intent. `.automatic` contract: the pure reducer resolves it
-/// deterministically (first viewer panel in pre-order → replace; otherwise
-/// split right of the primary anchor at the default share). Recency-based
-/// reuse (§6.1 rule 1) is the coordinator's job — it rewrites `.automatic`
-/// to `.replace(panelID:)` from `panel_history.updated_at` BEFORE invoking
-/// the reducer, keeping the reducer clock-free and pure.
-public enum PanelPlacement: Codable, Sendable, Equatable {
-    case automatic
-    case replace(panelID: PanelID)
-    case beside(target: PanelAnchor, edge: PanelEdge, share: Double?)
-}
-
 public enum PanelHistoryAction: Codable, Sendable, Equatable {
     case back
     case forward
     case jump(index: Int)
 }
 
+/// The operations on one workspace tab's side region (panel tabs spec,
+/// "Operations"). The envelope names the tab; every case acts inside it.
 public enum PanelOperation: Codable, Sendable, Equatable {
-    case open(content: PanelContent, placement: PanelPlacement)
-    case close(panelID: PanelID)
-    case move(panelID: PanelID, placement: PanelPlacement)
-    case resize(splitID: SplitID, ratios: [Double])
+    /// The one entry point for command-clicks, transcript links and
+    /// `tbd panel open`: selects a panel already showing `content`, else
+    /// reuses a same-kind panel (file, web, note) unless `newPanel`, else
+    /// adds a panel after the active one.
+    case open(content: PanelContent, newPanel: Bool)
+    /// Points one panel at new content of its own kind, committing history.
     case navigate(panelID: PanelID, destination: PanelContent)
+    /// Moves one panel's history cursor.
     case history(panelID: PanelID, action: PanelHistoryAction)
-    case selectTab(tabID: WorkspaceTabID)
+    /// Brings a panel to the front.
+    case select(panelID: PanelID)
+    case close(panelID: PanelID)
+    /// Hides or shows the region, keeping its panels.
+    case setCollapsed(Bool)
+    /// Sets the region's share of the workspace tab's width.
+    case resize(width: Double)
 }
 
 /// Not a security credential — supports feature gating and diagnostics (§7.2).
