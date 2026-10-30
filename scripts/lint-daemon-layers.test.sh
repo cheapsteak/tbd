@@ -409,6 +409,52 @@ test_malformed_list_cannot_check() {
 }
 
 # ---------------------------------------------------------------------------
+# The cycle report
+# ---------------------------------------------------------------------------
+
+test_two_unit_cycle_reported() {
+  local d; d="$(mkfix)"
+  put "$d" Base/Back.swift 'let g = Gadget()'
+  put "$d" Top/User.swift $'struct Gadget {}\nlet w = Widget()'
+  list "$d" 'Base -> Top' 'Top -> Base'
+  run_check "$d"
+  assert_rc "a listed cycle passes" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is counted" "$RUN_OUT" "cycles among the listed links: 1 group"
+  assert_contains "and named" "$RUN_OUT" "    2 units, 2 links: Base, Top"
+}
+
+test_no_cycle_reported_as_none() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift $'struct Gadget {}\nlet w = Widget()'
+  list "$d" 'Top -> Base'
+  run_check "$d"
+  assert_rc "a list with no cycle passes" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and says so" "$RUN_OUT" "cycles among the listed links: none"
+}
+
+# Leaf hangs off the cycle without being in it.
+test_three_unit_cycle_excludes_tail() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift $'struct Topper {}\nlet m = Middle()'
+  put "$d" Mid/User.swift $'struct Middle {}\nlet w = Widget()'
+  put "$d" Base/Back.swift $'let t = Topper()\nlet l = Leafy()'
+  put "$d" Leaf/Leafy.swift 'struct Leafy {}'
+  list "$d" 'Base -> Leaf' 'Base -> Top' 'Mid -> Base' 'Top -> Mid'
+  run_check "$d"
+  assert_rc "a listed three-unit cycle passes" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" $'\n    3 units, 3 links: Base, Mid, Top'
+  assert_lacks "without its tail" "$RUN_OUT" "Leaf"
+}
+
+test_cycles_not_printed_on_failure() {
+  local d; d="$(mkfix)"
+  list "$d" 'Top -> Base'
+  run_check "$d"
+  assert_rc "a stale link fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_lacks "and the cycle report waits for a pass" "$RUN_OUT" "cycles among"
+}
+
+# ---------------------------------------------------------------------------
 # Units
 # ---------------------------------------------------------------------------
 

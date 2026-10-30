@@ -28,7 +28,9 @@ comment that never closes, bytes that are not UTF-8 -- stops it with exit 2,
 rather than let it report a link set that is silently wrong.
 
 Exit codes: 0 every link is listed and every listed link is made; 1 a new or
-stale link; 2 the tree or the list cannot be read.
+stale link; 2 the tree or the list cannot be read. A pass also reports the
+cycles among the listed links. That report is information, not a failure: it
+measures how far the folders are from taking a layer order.
 
 Usage:
   scripts/lint-daemon-layers.py [--repo-root DIR]
@@ -41,6 +43,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Iterable
 
 # --------------------------------------------------------------------------
 # Where things live, relative to the repository root
@@ -702,6 +705,62 @@ def link_text(link: Link) -> str:
     return f"{link[0]} -> {link[1]}"
 
 
+def cycle_groups(links: Iterable[Link]) -> list[list[str]]:
+    """The strongly connected groups of two or more units: within a group,
+    every unit reaches every other by following links. Each group is sorted,
+    and the groups run largest first, then by first unit."""
+    graph: dict[str, set[str]] = {}
+    for source, target in links:
+        graph.setdefault(source, set()).add(target)
+        graph.setdefault(target, set())
+
+    # Tarjan's algorithm. Recursion is safe at this size: one frame per unit.
+    order: dict[str, int] = {}
+    low: dict[str, int] = {}
+    path: list[str] = []
+    on_path: set[str] = set()
+    groups: list[list[str]] = []
+
+    def visit(unit: str) -> None:
+        order[unit] = low[unit] = len(order)
+        path.append(unit)
+        on_path.add(unit)
+        for target in sorted(graph[unit]):
+            if target not in order:
+                visit(target)
+                low[unit] = min(low[unit], low[target])
+            elif target in on_path:
+                low[unit] = min(low[unit], order[target])
+        if low[unit] == order[unit]:
+            group: list[str] = []
+            while True:
+                member = path.pop()
+                on_path.discard(member)
+                group.append(member)
+                if member == unit:
+                    break
+            if len(group) > 1:
+                groups.append(sorted(group))
+
+    for unit in sorted(graph):
+        if unit not in order:
+            visit(unit)
+    return sorted(groups, key=lambda group: (-len(group), group[0]))
+
+
+def format_cycles(listed: Iterable[Link]) -> str:
+    links = list(listed)
+    groups = cycle_groups(links)
+    if not groups:
+        return "cycles among the listed links: none"
+    lines = [f"cycles among the listed links: {plural(len(groups), 'group')}"]
+    for group in groups:
+        members = set(group)
+        inside = sum(1 for source, target in links if source in members and target in members)
+        lines.append(f"    {plural(len(group), 'unit')}, {plural(inside, 'link')}: {', '.join(group)}")
+    return "\n".join(lines)
+
+
 def failure_report(new: dict[Link, list[Reference]], stale: dict[Link, int], units: set[str]) -> str:
     lines: list[str] = []
     references = sorted(
@@ -770,6 +829,9 @@ def main(argv: list[str]) -> int:
         f"lint-daemon-layers: OK, {plural(len(links), 'link')} among "
         f"{plural(len(scan.units), 'unit')}, each listed in {LINKS_FILE}."
     )
+    # Information, not a verdict: the cycles still to break before the
+    # folders can take a layer order.
+    print(format_cycles(listed))
     return 0
 
 
