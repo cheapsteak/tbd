@@ -64,6 +64,10 @@ extension AppState {
             selectedWorktreeIDs.remove(id)
         }
         forgetDevServerState(worktreeID: id)
+        // Nothing here removes the worktree's `tabs` entry, so the panel
+        // surface copy is dropped explicitly rather than by the `tabs`
+        // observer.
+        forgetPanelSurfaces(worktreeID: id)
         let removedTerminalIDs = terminals.removeValue(forKey: id)?.map(\.id) ?? []
         for terminalID in removedTerminalIDs {
             recordTerminalRemoval(terminalID: terminalID)

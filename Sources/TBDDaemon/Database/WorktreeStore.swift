@@ -739,6 +739,11 @@ public struct WorktreeStore: Sendable {
                 record.archivedHeadSHA = sha
             }
             try record.update(db)
+            // The row stays, so its FK cascade never clears the panel
+            // surfaces, their histories or their receipts: this is what
+            // reclaims them, for every archive path. A revive needs nothing
+            // back — the next tab sync re-imports from the legacy layout.
+            try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
         }
     }
 

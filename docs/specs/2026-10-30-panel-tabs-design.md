@@ -269,6 +269,11 @@ tab is created, closed, reordered or relabelled. In one transaction the daemon:
 
 It broadcasts one `panelSurfaceChanged` for whatever changed. The worktree's
 existing cascade still removes every surface when the worktree row is deleted.
+Archiving keeps the row, so the cascade never fires: `WorktreeStore.archive`,
+which every archive path goes through, deletes the worktree's surfaces, their
+histories and its operation receipts in the same transaction, and the app drops
+the worktree from its copy. A revive needs nothing back, because the next sync
+re-imports its tabs from the legacy layout.
 
 The sync does not carry the selected tab. The app already records it in
 `worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or

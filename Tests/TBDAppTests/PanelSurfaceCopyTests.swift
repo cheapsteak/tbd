@@ -270,6 +270,55 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    // MARK: - A worktree going away
+
+    @Test("a worktree that leaves tabs drops out of the copy; others stay")
+    func worktreeLeavingTabsDropsItsCopyEntry() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let goneID = UUID()
+            let keptID = UUID()
+            let goneTab = Fixture.terminalTab(label: "gone")
+            let keptTab = Fixture.terminalTab(label: "kept")
+            let kept = Fixture.surface(tabID: keptTab.id, worktreeID: keptID, revision: 1)
+            state.tabs = [goneID: [goneTab], keptID: [keptTab]]
+            state.panelSurfaces = [
+                goneID: [goneTab.id: Fixture.surface(tabID: goneTab.id, worktreeID: goneID, revision: 4)],
+                keptID: [keptTab.id: kept],
+            ]
+
+            state.tabs.removeValue(forKey: goneID)
+
+            #expect(state.panelSurfaces[goneID] == nil)
+            #expect(state.panelSurface(worktreeID: keptID, tabID: keptTab.id) == kept)
+            await Fixture.drainMainActor()
+        }
+    }
+
+    @Test("an archived worktree drops out of the copy, though it keeps its tabs entry")
+    func archivedWorktreeDropsItsCopyEntry() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let archivedID = UUID()
+            let keptID = UUID()
+            let archivedTab = Fixture.terminalTab(label: "archived")
+            let keptTab = Fixture.terminalTab(label: "kept")
+            let kept = Fixture.surface(tabID: keptTab.id, worktreeID: keptID, revision: 1)
+            state.tabs = [archivedID: [archivedTab], keptID: [keptTab]]
+            state.panelSurfaces = [
+                archivedID: [archivedTab.id: Fixture.surface(
+                    tabID: archivedTab.id, worktreeID: archivedID, revision: 4)],
+                keptID: [keptTab.id: kept],
+            ]
+
+            state.removeArchivedWorktreeFromState(id: archivedID)
+
+            #expect(state.tabs[archivedID] != nil, "precondition: archive leaves the tabs entry")
+            #expect(state.panelSurfaces[archivedID] == nil,
+                    "the daemon deleted its surfaces; held revisions would refuse a revive's re-imports")
+            #expect(state.panelSurface(worktreeID: keptID, tabID: keptTab.id) == kept)
+            await Fixture.drainMainActor()
+        }
+    }
+
     // MARK: - Resubscribe
 
     @Test("a resubscribe clears the copy and refetches, adopting a lower revision")

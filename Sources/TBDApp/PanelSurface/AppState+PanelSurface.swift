@@ -290,6 +290,8 @@ extension AppState {
     /// created, closed, reordered, relabelled and re-pointed from many places
     /// (terminal and note reconciliation, notes, the PR tab, the file viewer,
     /// terminal revival). Free while the flag is off.
+    ///
+    /// A worktree that leaves `tabs` also leaves the copy.
     func notePanelTabsChanged(old: [UUID: [TBDShared.Tab]], new: [UUID: [TBDShared.Tab]]) {
         guard panelTabsActive else { return }
         var dirty = Set<UUID>()
@@ -298,8 +300,20 @@ extension AppState {
         }
         for worktreeID in old.keys where new[worktreeID] == nil {
             dirty.insert(worktreeID)
+            forgetPanelSurfaces(worktreeID: worktreeID)
         }
         markPanelSyncDirty(dirty)
+    }
+
+    /// Drops one worktree from the copy: it left `tabs`, or it was archived.
+    /// Archiving deletes its surfaces on the daemon (`WorktreeStore.archive`)
+    /// without a delta, so an entry kept here would never be corrected — and
+    /// after a revive, its old revisions would make the guard refuse the
+    /// re-imported ones.
+    func forgetPanelSurfaces(worktreeID: UUID) {
+        if panelSurfaces[worktreeID] != nil {
+            panelSurfaces.removeValue(forKey: worktreeID)
+        }
     }
 
     /// The observer on `layouts`, for the one tab whose legacy layout still

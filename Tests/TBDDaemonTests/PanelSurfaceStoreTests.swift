@@ -679,4 +679,46 @@ struct PanelSurfaceStoreTests {
             #expect(historyCount == 0)
         }
     }
+
+    // MARK: - Archive
+
+    private func receiptCount(_ db: TBDDatabase, worktreeID: UUID) async throws -> Int {
+        try await db.writerForTests.read { dbc in
+            try Int.fetchOne(
+                dbc, sql: "SELECT COUNT(*) FROM panel_operation_receipt WHERE worktreeID = ?",
+                arguments: [worktreeID.uuidString]) ?? -1
+        }
+    }
+
+    /// An archived worktree keeps its row, so no FK cascade reclaims its
+    /// panel rows; the archive itself must.
+    @Test func archiveDeletesTheWorktreesPanelRowsAndNoOthers() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let archivedID = try await makeWorktree(db, name: "archived")
+        let keptID = try await makeWorktree(db, name: "kept")
+        let archivedTab = makeSurface(worktreeID: archivedID, paths: ["/a.txt", "/b.txt"])
+        let keptTab = makeSurface(worktreeID: keptID, paths: ["/c.txt"])
+        try await seed(db, worktreeID: archivedID, [archivedTab])
+        try await seed(db, worktreeID: keptID, [keptTab])
+        for (tabID, worktreeID) in [(archivedTab.id, archivedID), (keptTab.id, keptID)] {
+            _ = try await db.panelSurface.applyReducing(
+                operationID: UUID(), tabID: tabID, worktreeID: worktreeID, now: Date()
+            ) { current in
+                try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+            }
+        }
+        // Preconditions: each worktree has a surface, histories and a receipt.
+        #expect(try await historyRowCount(db, tabID: archivedTab.id) == 2)
+        #expect(try await receiptCount(db, worktreeID: archivedID) == 1)
+        let keptBefore = try await db.panelSurface.surfaces(worktreeID: keptID)
+
+        try await db.worktrees.archive(id: archivedID)
+
+        #expect(try await db.panelSurface.surfaces(worktreeID: archivedID).isEmpty)
+        #expect(try await historyRowCount(db, tabID: archivedTab.id) == 0)
+        #expect(try await receiptCount(db, worktreeID: archivedID) == 0)
+        #expect(try await db.panelSurface.surfaces(worktreeID: keptID) == keptBefore)
+        #expect(try await historyRowCount(db, tabID: keptTab.id) == 1)
+        #expect(try await receiptCount(db, worktreeID: keptID) == 1)
+    }
 }

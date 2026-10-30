@@ -591,13 +591,21 @@ public struct PanelSurfaceStore: Sendable {
     /// through the surface's FK; receipts reference the worktree directly
     /// (not the surface), so they're deleted explicitly here.
     public func deleteSurfaces(worktreeID: UUID) async throws {
-        _ = try await writer.write { db in
-            try WorkspaceTabSurfaceRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .deleteAll(db)
-            try PanelOperationReceiptRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .deleteAll(db)
+        try await writer.write { db in
+            try Self.deleteSurfaces(worktreeID: worktreeID, in: db)
         }
+    }
+
+    /// `deleteSurfaces(worktreeID:)` inside a caller's write transaction.
+    /// `WorktreeStore.archive` runs it in the transaction that archives the
+    /// worktree: an archived worktree keeps its row, so the cascade from that
+    /// row never fires, and this is what reclaims its panel rows.
+    static func deleteSurfaces(worktreeID: UUID, in db: Database) throws {
+        try WorkspaceTabSurfaceRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .deleteAll(db)
+        try PanelOperationReceiptRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .deleteAll(db)
     }
 }
