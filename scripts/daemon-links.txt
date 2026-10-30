@@ -111,7 +111,6 @@ Remote -> Actuation
 Remote -> Base
 Remote -> Claude
 Remote -> Database
-Remote -> PR
 Remote -> Process
 Server -> Actuation
 Server -> AskUserQuestion
