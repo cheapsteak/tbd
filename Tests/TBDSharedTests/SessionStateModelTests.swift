@@ -235,6 +235,32 @@ import Testing
         #expect(round.programStatusBlock == ProgramStatusBlock(kind: nil, taskID: nil))
     }
 
+    /// A stored reason has no message, so every surface that shows one reads
+    /// `displayMessage`: the agent's text when there is any, otherwise a line
+    /// from the block's kind — never an empty string.
+    @Test func displayMessageFallsBackToTheBlockKind() {
+        func stored(_ kind: ProgramStatusBlockKind?) -> AwaitingInputReason {
+            AwaitingInputReason(
+                message: "", programStatusBlock: ProgramStatusBlock(kind: kind, taskID: nil))
+        }
+        #expect(stored(.permission).displayMessage == "Waiting for a permission decision")
+        #expect(stored(.question).displayMessage == "Waiting for an answer to a question")
+        #expect(stored(.auth).displayMessage == "Waiting for your input")
+        #expect(stored(nil).displayMessage == "Waiting for your input")
+        #expect(stored(.unrecognized("acme")).displayMessage == "Waiting for your input")
+        #expect(AwaitingInputReason(message: "", hookEventName: "Notification")
+            .displayMessage == "Waiting for your input")
+
+        let spoken = AwaitingInputReason(
+            message: "Allow Bash?",
+            programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: nil))
+        #expect(spoken.displayMessage == "Allow Bash?")
+
+        // The composed fact line a `session.states` reader sees ends in the
+        // same text, not in an empty message.
+        #expect(stored(.question).factSummary.hasSuffix(": Waiting for an answer to a question"))
+    }
+
     @Test func aProgramStatusBlockSurvivesARoundTrip() throws {
         let reason = AwaitingInputReason(
             message: "Which file?",

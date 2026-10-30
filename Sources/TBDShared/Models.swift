@@ -751,12 +751,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var pendingSessionIncarnationID: UUID?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
-    /// Activity reconstructed for display from the current agent transcript.
-    /// This is response-derived and is never persisted as hook activity.
-    public var presentationActivityState: TerminalActivityState?
-    /// When the daemon completed the transcript observation that produced
-    /// `presentationActivityState`. Response-derived and never persisted.
-    public var presentationActivityObservedAt: Date?
     /// When set, the terminal is HIBERNATED: its `claude` process was
     /// gracefully terminated to reclaim memory, but the tmux window (and its
     /// shell) is kept alive. `claudeSessionID` still points at the session to
@@ -881,8 +875,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 pendingSessionIncarnationID: UUID? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
-                presentationActivityState: TerminalActivityState? = nil,
-                presentationActivityObservedAt: Date? = nil,
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
@@ -915,8 +907,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.pendingSessionIncarnationID = pendingSessionIncarnationID
         self.kind = kind
         self.activityState = activityState
-        self.presentationActivityState = presentationActivityState
-        self.presentationActivityObservedAt = presentationActivityObservedAt
         self.hibernatedAt = hibernatedAt
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
@@ -938,7 +928,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath
         case sessionOrderObservedAt, codexTranscriptBoundaryOffset, sessionIncarnationID
         case pendingSessionIncarnationID, kind
-        case activityState, presentationActivityState, presentationActivityObservedAt
+        case activityState
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
@@ -972,10 +962,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             UUID.self, forKey: .pendingSessionIncarnationID)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
-        presentationActivityState = try c.decodeIfPresent(
-            TerminalActivityState.self, forKey: .presentationActivityState)
-        presentationActivityObservedAt = try c.decodeIfPresent(
-            Date.self, forKey: .presentationActivityObservedAt)
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false

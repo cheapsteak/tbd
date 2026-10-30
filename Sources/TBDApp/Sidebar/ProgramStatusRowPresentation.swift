@@ -6,8 +6,7 @@ import TBDShared
 /// plain-text tooltip the row's status badge carries.
 ///
 /// A terminal this returns nothing for — not OSC-authoritative, parked, or a
-/// snapshot from another incarnation — keeps today's hook-rail presentation
-/// unchanged.
+/// snapshot from another incarnation — is presented from its activity column.
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`, "UI".
 enum ProgramStatusRowPresentation {
     /// The OSC-authoritative state of `terminal`, or nil unless `snapshot`

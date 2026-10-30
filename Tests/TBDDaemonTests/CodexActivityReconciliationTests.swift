@@ -113,7 +113,8 @@ struct CodexActivityReconciliationTests {
     }
 
     /// The listed row is the stored row: no transcript-derived presentation
-    /// rides on it, even for a Codex rollout with a turn in flight.
+    /// rides on it, even for a Codex rollout with a turn in flight — not in the
+    /// model, and not on the wire.
     @Test("terminal.list publishes no presentation")
     func terminalListPublishesNoPresentation() async throws {
         let terminal = try await makeBoundaryTerminal(tag: "no-presentation")
@@ -133,7 +134,9 @@ struct CodexActivityReconciliationTests {
         #expect(response.success)
         let listed = try #require(
             response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(listed.presentationActivityState == nil)
+        #expect(listed.activityState == .unknown)
+        let wire = try #require(response.result)
+        #expect(!wire.contains("presentationActivity"))
     }
 
     @Test("recreated Codex window attaches its new process's session")

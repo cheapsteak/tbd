@@ -106,6 +106,25 @@ struct ComposerStateTests {
             == .blocked(message: "Allow Bash(rm)?"))
     }
 
+    /// The program status store persists no agent text, so a stored reason
+    /// arrives with an empty message. The composer shows the line its block
+    /// kind names rather than an empty banner.
+    @Test func aStoredProgramStatusBlockShowsItsKindLine() {
+        let stored = AwaitingInputReason(
+            message: "",
+            programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: nil))
+        #expect(resolve(terminal(awaitingInput: stored))
+            == .blocked(message: "Waiting for a permission decision"))
+    }
+
+    @Test func aNonEmptyMessageStillPassesThrough() {
+        let carried = AwaitingInputReason(
+            message: "Allow Bash(rm)?",
+            programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: nil))
+        #expect(resolve(terminal(awaitingInput: carried))
+            == .blocked(message: "Allow Bash(rm)?"))
+    }
+
     // MARK: - Enablement
 
     @Test func onlyBlockedAndHiddenAreDisabled() {

@@ -563,27 +563,18 @@ enum ContinueInCodexMenu {
 /// metadata only to shape the affordance; the daemon repeats every check
 /// before it interrupts the source process.
 enum ContinueInClaudeMenu {
-    static let busyCaption = "Finish the current Codex turn before continuing."
-
     static func isVisible(for terminal: Terminal?) -> Bool {
         terminal?.isCodexTerminal == true
             && terminal?.transport == .tmux
             && terminal?.transcriptPath?.isEmpty == false
     }
 
-    /// Only a positively idle cached state enables an account choice. Unknown
-    /// fails closed alongside active and waiting states.
+    /// Every visible item is enabled. A tmux Codex row carries no agent
+    /// status, so the cached row cannot say whether a turn is open; the
+    /// daemon reads the rollout before it replaces anything and refuses a
+    /// busy turn with `terminalBusy`.
     static func isEnabled(for terminal: Terminal?) -> Bool {
-        guard isVisible(for: terminal),
-              let terminal,
-              terminal.presentationActivityState == .idle,
-              terminal.activityState != .waitingForUser,
-              terminal.activityState != .unknown else { return false }
-        return !WorktreeRowView.isForegroundWorking(terminal)
-    }
-
-    static func caption(for terminal: Terminal?) -> String? {
-        isVisible(for: terminal) && !isEnabled(for: terminal) ? busyCaption : nil
+        isVisible(for: terminal)
     }
 }
 
@@ -941,11 +932,6 @@ private struct TabBarItem: View {
                 }
                 .disabled(!enabled)
             }
-        }
-
-        if let caption = ContinueInClaudeMenu.caption(for: terminal) {
-            Divider()
-            Text(caption).font(.caption)
         }
     }
 

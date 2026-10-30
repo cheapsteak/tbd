@@ -49,8 +49,8 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     /// never matched against a rendered screen.
     case hookEvent(String)
     /// An explicit action taken by the person operating TBD. The associated
-    /// value names the action (`terminal-interrupt`, …), keeping user intent
-    /// distinct from an agent hook that happens to report the same value.
+    /// value names the action, keeping user intent distinct from an agent
+    /// report of the same value. Stored rows carry `terminal-interrupt`.
     case userAction(String)
     /// The session's transcript JSONL, read from the tail.
     case transcriptTail
@@ -157,11 +157,6 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(detail, forKey: .detail)
     }
-}
-
-public extension FactSource {
-    /// Provenance written when the user presses an agent's interrupt key.
-    static let terminalInterrupt = FactSource.userAction("terminal-interrupt")
 }
 
 // MARK: - ObservedFact
@@ -402,13 +397,30 @@ public struct ProgramStatusBlock: Codable, Sendable, Equatable {
     }
 }
 
+extension AwaitingInputReason {
+    /// The text a surface shows for this wait: `message` when there is one,
+    /// otherwise a line from the reported block's kind. A stored reason
+    /// carries no message — the program status store never persists the
+    /// agent's text — so a surface that rendered `message` alone would show an
+    /// empty string. The kind is TBD's own closed vocabulary, never the
+    /// agent's text, so this is not screen-scraping.
+    public var displayMessage: String {
+        guard message.isEmpty else { return message }
+        switch programStatusBlock?.kind {
+        case .permission: return "Waiting for a permission decision"
+        case .question: return "Waiting for an answer to a question"
+        case .auth, .unrecognized, nil: return "Waiting for your input"
+        }
+    }
+}
+
 extension AwaitingInputReason: FactValueSummarizable {
     /// Class and verbatim type first, then the message — so a composed
     /// `ObservedFact.summary` line carries what was asked, how TBD filed it,
     /// where it came from, and when, and a reader can never see the message
     /// without the label TBD put on it.
     public var factSummary: String {
-        "awaiting input [\(classification.rawValue)] type=\(notificationType ?? "none"): \(message)"
+        "awaiting input [\(classification.rawValue)] type=\(notificationType ?? "none"): \(displayMessage)"
     }
 }
 

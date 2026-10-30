@@ -7,16 +7,14 @@ import TBDShared
 struct WorktreeRowActivityTests {
     private func terminal(
         kind: TerminalKind,
-        activityState: TerminalActivityState,
-        presentationActivityState: TerminalActivityState? = nil
-    ) -> Terminal {
-        Terminal(
+        activityState: TerminalActivityState
+    ) -> TBDShared.Terminal {
+        TBDShared.Terminal(
             worktreeID: UUID(),
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
             kind: kind,
-            activityState: activityState,
-            presentationActivityState: presentationActivityState
+            activityState: activityState
         )
     }
 
@@ -34,131 +32,28 @@ struct WorktreeRowActivityTests {
         #expect(!WorktreeRowView.isForegroundWorking(waiting))
     }
 
-    @Test func codexUsesTranscriptWorkingActivity() {
-        let codex = terminal(
-            kind: .codex,
-            activityState: .idle,
-            presentationActivityState: .working
-        )
+    /// Codex reads its column the same way Claude does: the column is the
+    /// agent's own report.
+    @Test func codexWorkingColumnAnimates() {
+        let codex = terminal(kind: .codex, activityState: .working)
 
         #expect(WorktreeRowView.isForegroundWorking(codex))
     }
 
-    @Test func codexPermissionWaitOverridesTranscriptWorkingActivity() {
-        let codex = terminal(
-            kind: .codex,
-            activityState: .waitingForUser,
-            presentationActivityState: .working
-        )
+    @Test func codexNonworkingColumnDoesNotAnimate() {
+        let idle = terminal(kind: .codex, activityState: .idle)
+        let waiting = terminal(kind: .codex, activityState: .waitingForUser)
 
-        #expect(!WorktreeRowView.isForegroundWorking(codex))
+        #expect(!WorktreeRowView.isForegroundWorking(idle))
+        #expect(!WorktreeRowView.isForegroundWorking(waiting))
     }
 
-    @Test func codexExplicitInterruptOverridesTranscriptWorkingActivity() throws {
-        var codex = terminal(
-            kind: .codex,
-            activityState: .idle,
-            presentationActivityState: .working
-        )
-        codex.activityStateSource = try JSONDecoder().decode(
-            FactSource.self,
-            from: Data(#"{"kind":"user-action","detail":"terminal-interrupt"}"#.utf8)
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(codex))
-    }
-
-    @Test func codexTranscriptIdleOverridesStaleRawWorkingActivity() {
-        let codex = terminal(
-            kind: .codex,
-            activityState: .working,
-            presentationActivityState: .idle
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(codex))
-    }
-
-    @Test func codexWithoutTranscriptEvidencePrefersFalseIdle() {
-        let codex = terminal(
-            kind: .codex,
-            activityState: .working,
-            presentationActivityState: nil
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(codex))
-    }
-
-    // MARK: - Claude delegation rail
-    //
-    // Claude ORs the delegation claim with the hook rail; Codex REPLACES its
-    // hook rail with the transcript. Inverting the two is the likely bug.
-
-    @Test func aDelegationClaimLightsTheIndicatorWhileTheHookRailSaysIdle() {
-        let claude = terminal(
-            kind: .claude,
-            activityState: .idle,
-            presentationActivityState: .working
-        )
-
-        #expect(WorktreeRowView.isForegroundWorking(claude))
-    }
-
-    /// The OR direction: the hook rail alone still suffices mid-turn, when no
-    /// delegation claim exists. Inverting to Codex's REPLACE semantics breaks
-    /// this and would darken the indicator for every ordinary working session.
-    @Test func theHookRailAloneStillLightsTheIndicator() {
-        let claude = terminal(
-            kind: .claude,
-            activityState: .working,
-            presentationActivityState: nil
-        )
-
-        #expect(WorktreeRowView.isForegroundWorking(claude))
-    }
-
-    @Test func noClaimAndAnIdleHookRailStaysDark() {
-        let claude = terminal(
-            kind: .claude,
-            activityState: .idle,
-            presentationActivityState: nil
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(claude))
-    }
-
-    @Test func waitingForUserDefeatsADelegationClaim() {
-        let claude = terminal(
-            kind: .claude,
-            activityState: .waitingForUser,
-            presentationActivityState: .working
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(claude))
-    }
-
-    /// Regression guard: Codex ships unflagged today and must keep REPLACE
-    /// semantics — a Codex terminal whose transcript is silent stays dark even
-    /// when its hook rail is latched at working.
-    @Test func codexStillRequiresTranscriptAgreement() {
-        let codex = terminal(
-            kind: .codex,
-            activityState: .working,
-            presentationActivityState: nil
-        )
-
-        #expect(!WorktreeRowView.isForegroundWorking(codex))
-    }
-
-    @Test func terminalCollectionReportsAnyTruthfulForegroundWork() {
-        let staleCodex = terminal(
-            kind: .codex,
-            activityState: .working,
-            presentationActivityState: .idle
-        )
+    @Test func terminalCollectionReportsAnyForegroundWork() {
+        let idleCodex = terminal(kind: .codex, activityState: .idle)
         let workingClaude = terminal(kind: .claude, activityState: .working)
 
-        #expect(WorktreeRowView.hasForegroundWork(in: [staleCodex, workingClaude]))
-        #expect(!WorktreeRowView.hasForegroundWork(in: [staleCodex]))
+        #expect(WorktreeRowView.hasForegroundWork(in: [idleCodex, workingClaude]))
+        #expect(!WorktreeRowView.hasForegroundWork(in: [idleCodex]))
         #expect(!WorktreeRowView.hasForegroundWork(in: []))
     }
 }

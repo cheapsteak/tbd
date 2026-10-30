@@ -106,7 +106,7 @@ struct WorktreeRowView: View {
     // MARK: - Program Status Protocol (OSC 7501)
 
     /// The OSC-authoritative state of each of this row's terminals that has
-    /// one. A terminal absent from the map keeps today's hook-rail reading.
+    /// one. A terminal absent from the map is read from its activity column.
     ///
     /// It walks every terminal of the row, so `body` reads it once and passes
     /// the map to each helper below rather than letting each recompute it.
@@ -173,29 +173,12 @@ struct WorktreeRowView: View {
         terminals.contains { $0.hasPromptOnScreen }
     }
 
-    /// Whether one terminal has trustworthy foreground work to animate in the
-    /// sidebar. Codex's hook state can remain latched after a turn ends, so its
-    /// transcript-derived presentation state is authoritative here unless the
-    /// hook reports that Codex is waiting for the user. Missing transcript
-    /// evidence deliberately renders idle instead of preserving a false
-    /// thinking indicator. Claude instead composes both rails, as described
-    /// below.
+    /// Whether one terminal has foreground work to animate in the sidebar: its
+    /// activity column reads `.working`. The column is the agent's own report,
+    /// written from the OSC 7501 state Claude Code or Codex emits, so the row
+    /// animates exactly while the agent says it is working.
     nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
-        if terminal.isCodexTerminal {
-            return terminal.activityStateSource != .terminalInterrupt
-                && terminal.activityState != .waitingForUser
-                && terminal.presentationActivityState == .working
-        }
-        // Claude composes its two rails by DISJUNCTION, unlike Codex above,
-        // which lets its transcript REPLACE the hook rail. Each Claude rail
-        // speaks about a different interval: the hook rail is authoritative
-        // during a turn, and the delegation rail only after one ends. An
-        // interrupt or a raised prompt defeats the delegation claim, because
-        // neither writes a `turn_duration` that could retract it.
-        if terminal.activityState == .working { return true }
-        return terminal.activityStateSource != .terminalInterrupt
-            && terminal.activityState != .waitingForUser
-            && terminal.presentationActivityState == .working
+        terminal.activityState == .working
     }
 
     /// The collection form used by pure presentation tests. The row composes

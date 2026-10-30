@@ -239,12 +239,6 @@ final class AppState {
     /// changes profile, is removed, or the user dismisses. Used to render the
     /// limit banner.
     var limitHits: [UUID: TerminalLimitHit] = [:]
-    /// Ordering watermark for transcript presentation snapshots whose value
-    /// did not change. Kept outside `Terminal` so a two-second poll confirming
-    /// the same state does not publish a different row solely because its
-    /// response stamp advanced; still rejects an older overlapping response
-    /// that carries a different value.
-    @ObservationIgnored var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
     /// Session identity ordering is independent of the published Terminal row
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
@@ -3379,9 +3373,9 @@ final class AppState {
             return
         }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
-            // Preserve the pre-Codex-reconciliation contract for Claude and
-            // shell: the last arriving session delta wins, and nil path keeps
-            // the current path. Ordering/presentation watermarks are Codex-only.
+            // Claude and shell: the last arriving session delta wins, and nil
+            // path keeps the current path. The session-order watermark is
+            // Codex-only.
             let currentTerminal = terminals[delta.worktreeID]![idx]
             var terminal = currentTerminal
             terminal.claudeSessionID = delta.sessionID
@@ -3389,7 +3383,6 @@ final class AppState {
                 terminal.transcriptPath = transcriptPath
             }
             terminal.sessionOrderObservedAt = nil
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
             if terminal != currentTerminal {
                 terminals[delta.worktreeID]?[idx] = terminal
@@ -3419,19 +3412,6 @@ final class AppState {
         } else if identityChanged {
             terminal.sessionOrderObservedAt = nil
         }
-        // Presentation belongs to one session identity. An ordered delta is
-        // an accepted SessionStart boundary even when Codex reused the same
-        // session/path; an unordered legacy delta is a boundary only when the
-        // effective identity changed.
-        if identityChanged || delta.sessionOrderObservedAt != nil {
-            terminal.presentationActivityState = nil
-            terminal.presentationActivityObservedAt = nil
-            if let incomingOrder = delta.sessionOrderObservedAt {
-                terminalPresentationOrderObservedAt[delta.terminalID] = incomingOrder
-            } else {
-                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
-            }
-        }
         if let incomingOrder = delta.sessionOrderObservedAt {
             terminalSessionOrderObservedAt[delta.terminalID] = incomingOrder
         } else if identityChanged {
@@ -3452,23 +3432,14 @@ final class AppState {
             if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
         }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
-            // Claude and shell activity deltas remain raw last-arrival state;
-            // provenance ordering is part of the Codex presentation fix only.
+            // Claude and shell activity deltas are raw last-arrival state;
+            // provenance ordering applies to Codex rows only.
             terminals[delta.worktreeID]?[idx].activityState = delta.activityState
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
             return
         }
         var terminal = terminals[delta.worktreeID]![idx]
-        let presentationOrderObservedAt = terminal.applyActivityDelta(
-            delta,
-            presentationOrderObservedAt: terminalPresentationOrderObservedAt[delta.terminalID]
-                ?? terminal.presentationActivityObservedAt)
-        if let presentationOrderObservedAt {
-            terminalPresentationOrderObservedAt[delta.terminalID] = presentationOrderObservedAt
-        } else {
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
-        }
+        terminal.applyActivityDelta(delta)
         terminals[delta.worktreeID]?[idx] = terminal
     }
 
