@@ -171,6 +171,12 @@ test_raw_string_interpolation_counts() {
   both_ways "raw interpolation" 1 widgetLimit 'let s = #"\#(widgetLimit)"#' 'let s = #"\(widgetLimit)"#'
 }
 
+# A parenthesis inside an interpolation does not close it.
+test_parentheses_inside_an_interpolation() {
+  both_ways "parentheses in an interpolation" 1 Widget 'let s = "\(max(1, 2) + Widget.count)"' \
+    'let s = "\(max(1, 2) + other.count)"'
+}
+
 test_multiline_interpolation_counts() {
   both_ways "multi-line interpolation" 2 widgetLimit $'let s = """\n\\(widgetLimit)\n"""' $'let s = """\nwidgetLimit\n"""'
 }
@@ -194,6 +200,12 @@ test_raw_identifier_names_nothing() {
 # the name between the slashes.
 test_division_is_not_a_regex() {
   both_ways "division" 1 Widget 'let x = total/Widget.scale/2' 'let x = total/other.scale/2'
+  # At the start of a line a `/` may open a regex, but not one that starts or
+  # ends on a space: each of these is two divisions.
+  both_ways "a regex cannot start with a space" 2 Widget $'let x = total\n    / Widget.scale/2' \
+    $'let x = total\n    / other.scale/2'
+  both_ways "a regex cannot end on a space" 2 Widget $'let x = total\n    /Widget.scale / 2' \
+    $'let x = total\n    /other.scale / 2'
 }
 
 # ---------------------------------------------------------------------------
@@ -216,6 +228,11 @@ test_string_ignored() {
   both_ways "string" 1 Widget 'let s = Widget.make()' 'let s = "Widget.make()"'
 }
 
+# `\"` is an escaped quote, which does not close the string.
+test_escaped_quote_ignored() {
+  both_ways "escaped quote" 1 Widget 'let s = "a"; _ = Widget()' 'let s = "a \" Widget \" b"'
+}
+
 test_raw_string_ignored() {
   both_ways "raw string" 1 Widget 'let s = Widget.make()' 'let s = #"say "Widget" \(Widget)"#'
 }
@@ -229,6 +246,8 @@ test_multiline_string_ignored() {
 test_bare_regex_ignored() {
   both_ways "bare regex" 1 Widget 'let r = Widget.make()' 'let r = /Widget+/'
   passes "a bare regex holding a quote and a brace" 'let r = /\{"Widget"/'
+  both_ways "a bare regex at the start of a line" 2 Widget $'let patterns = [\n    Widget.pattern,\n]' \
+    $'let patterns = [\n    /Widget/,\n]'
 }
 
 test_extended_regex_ignored() {
@@ -267,6 +286,7 @@ test_name_after_a_range_counts() {
 
 test_argument_label_ignored() {
   both_ways "argument label" 1 widgetLimit 'takes(widgetLimit)' 'takes(widgetLimit: 1)'
+  both_ways "argument label after a comma" 1 widgetLimit 'takes(a, widgetLimit)' 'takes(a, widgetLimit: 1)'
 }
 
 # A name before a `:` is a label only directly in parentheses. In brackets it
@@ -279,11 +299,8 @@ test_label_rule_is_for_parentheses() {
 
 # A label is skipped where it stands; it does not make the name the file's own.
 test_label_does_not_hide_a_later_use() {
-  local d; d="$(mkfix)"
-  put "$d" Top/User.swift $'takes(widgetLimit: 1)\nlet n = widgetLimit'
-  run_check "$d"
-  assert_rc "a use after a same-named label still counts" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "on its own line" "$RUN_OUT" "User.swift:2: Top -> Base is a new link: widgetLimit"
+  both_ways "a use after a same-named label" 2 widgetLimit $'takes(widgetLimit: 1)\nlet n = widgetLimit' \
+    $'takes(widgetLimit: 1)\nlet n = 0'
 }
 
 # The blind spot the guide names: a local of the same name shadows the global
@@ -297,6 +314,10 @@ test_parameter_shadows() {
   both_ways "parameter" 1 widgetLimit 'func f(limit: Int) { _ = widgetLimit }' \
     'func f(widgetLimit: Int) { _ = widgetLimit }'
   passes "an external label's internal name shadows too" 'func f(with widgetLimit: Int) { _ = widgetLimit }'
+  # Only a `:` directly in the parameter list follows a parameter's name; one
+  # inside brackets is a dictionary's.
+  both_ways "a dictionary default argument" 1 widgetLimit 'func f(a: [Int: Int] = [widgetLimit: 1]) {}' \
+    'func f(a: [Int: Int] = [limit: 1]) {}'
 }
 
 test_closure_parameter_shadows() {
@@ -306,6 +327,14 @@ test_closure_parameter_shadows() {
 
 test_for_in_shadows() {
   both_ways "for-in" 1 widgetLimit 'for x in xs { _ = widgetLimit }' 'for widgetLimit in xs { _ = widgetLimit }'
+  both_ways "for-in over tuples" 1 widgetLimit 'for (i, limit) in pairs { _ = widgetLimit }' \
+    'for (i, widgetLimit) in pairs { _ = widgetLimit }'
+}
+
+# An enum's case names are its own, the second of a list as much as the first.
+test_enum_case_shadows() {
+  both_ways "enum case" 1 widgetLimit 'enum Mode { case a, b; static let all: [Mode] = [a, widgetLimit] }' \
+    'enum Mode { case a, widgetLimit; static let all: [Mode] = [a, widgetLimit] }'
 }
 
 test_private_top_level_shadows() {
@@ -387,6 +416,32 @@ test_privacy_is_per_declaration() {
   put "$d" Base/More.swift $'let seed = 1\nprivate\nstruct Gizmo {}'
   run_check "$d"
   assert_rc "a private on the line above its keyword is not" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# `private(set)` restricts only the setter, so the name stays indexed.
+test_private_set_is_indexed() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let n = gizmoCount'
+  put "$d" Base/More.swift 'private(set) var gizmoCount = 0'
+  run_check "$d"
+  assert_rc "a private(set) global is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gizmoCount"
+  put "$d" Base/More.swift 'private var gizmoCount = 0'
+  run_check "$d"
+  assert_rc "a private one is not" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# `let (a, b) = ...` at file scope declares both names.
+test_tuple_global_is_indexed() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let h = gizmoHeight'
+  put "$d" Base/More.swift 'let (gizmoWidth, gizmoHeight) = (1, 2)'
+  run_check "$d"
+  assert_rc "a tuple global is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gizmoHeight"
+  put "$d" Base/More.swift 'let (gizmoWidth, gizmoDepth) = (1, 2)'
+  run_check "$d"
+  assert_rc "without the name, the check passes" 0 "$RUN_RC" "$RUN_OUT"
 }
 
 test_private_declarations_not_indexed() {

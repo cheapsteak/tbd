@@ -398,14 +398,6 @@ DECLARATION_KEYWORDS = TYPE_KEYWORDS | NAMED_KEYWORDS | frozenset({
     "case", "init", "deinit", "subscript", "import", "operator", "precedencegroup", "macro",
 })
 
-# `class` followed by one of these is the `class` modifier, as in
-# `class func` or `class override var`, not a class declaration.
-CLASS_AS_MODIFIER = frozenset({
-    "func", "var", "let", "subscript", "init", "deinit", "typealias",
-    "static", "final", "override", "private", "fileprivate", "public",
-    "internal", "open", "package", "nonisolated", "required", "convenience",
-})
-
 
 def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
     """Every declaration in the file, each marked whether it is at file scope.
@@ -459,8 +451,6 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
         if i and tokens[i - 1].text in (".", "import"):
             continue
         following = tokens[i + 1] if i + 1 < count else None
-        if text == "class" and following is not None and following.text in CLASS_AS_MODIFIER:
-            continue
         private, pending_private = pending_private, False
 
         if text in TYPE_KEYWORDS:
