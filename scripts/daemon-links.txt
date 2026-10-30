@@ -148,8 +148,6 @@ Server -> StartAdmission
 Server -> Tmux
 Server -> Update
 SessionMod -> ModChannel
-StartAdmission -> Lifecycle
-StartAdmission -> Server
 StartAdmission -> Tmux
 Tmux -> Claude
 Tmux -> Database
