@@ -198,6 +198,19 @@ struct PanelSurfaceRenderBranchTests {
             == .resize(width: 0.25))
     }
 
+    @Test("a non-finite share sends no resize, though the clamp would turn it into the default width")
+    func nonFiniteRatioSendsNoResize() {
+        for share in [CGFloat.nan, .infinity, -.infinity] {
+            let ratios: [CGFloat] = [0.5, share]
+            #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: ratios, currentWidth: 0.3) == nil,
+                    "share \(share)")
+        }
+        // A finite share at the same `currentWidth` still resizes, so the nil
+        // above is the guard's doing.
+        #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: [0.5, 0.5], currentWidth: 0.3)
+            == .resize(width: SideRegion.defaultWidth))
+    }
+
     @Test("a release that moved nothing, or malformed shares, sends nothing")
     func resizeUnchangedSendsNothing() {
         let unmoved = PanelSurfaceWorkspaceView.ratios(forWidth: 0.4)

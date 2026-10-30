@@ -167,10 +167,12 @@ struct PanelSurfaceWorkspaceView: View {
     }
 
     /// The `resize` a released drag sends: the side's share, clamped. Nil when
-    /// the ratios are malformed or the width did not change, so a click on the
-    /// divider sends nothing.
+    /// the ratios are malformed or not finite, or the width did not change, so
+    /// a click on the divider sends nothing. A non-finite share is no width
+    /// the user chose: `SideRegion.clamp` would turn it into the default, and
+    /// a resize to that would move the divider nobody dragged there.
     static func resizeOperation(ratios: [CGFloat], currentWidth: Double) -> PanelOperation? {
-        guard ratios.count == 2 else { return nil }
+        guard ratios.count == 2, ratios[1].isFinite else { return nil }
         let width = SideRegion.clamp(Double(ratios[1]))
         guard width != currentWidth else { return nil }
         return .resize(width: width)
