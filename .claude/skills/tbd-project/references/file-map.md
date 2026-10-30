@@ -113,7 +113,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture; `Tmux/ClaudeStateDetector.swift` — idle detection + session-id capture
+- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture; `Claude/ClaudeStateDetector.swift` — idle detection + session-id capture
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript

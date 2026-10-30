@@ -146,7 +146,6 @@ Server -> Tmux
 Server -> Update
 SessionMod -> ModChannel
 StartAdmission -> Tmux
-Tmux -> Claude
 Tmux -> Database
 Tmux -> Git
 Tmux -> Lifecycle
