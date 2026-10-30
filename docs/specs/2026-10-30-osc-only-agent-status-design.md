@@ -22,7 +22,7 @@ session's activity state:
 
 Sessions that cannot report — any agent on the tmux transport, Claude Code
 before 2.1.295, Codex before 0.164.0 — still run. Their state is `unknown`,
-the sidebar says why, and the idle sweep no longer parks them.
+the sidebar says why, and the idle sweep leaves them alone.
 
 The protocol, the parser, the store's trust and liveness rules, and the
 roll-up of task entries are specified in
@@ -137,9 +137,8 @@ hook already reports the sign-in failure as an error notification.
 ### PR poll pacing
 
 Every accepted report stamps the worktree activity ledger the PR poll schedule
-reads, as each hook event did. The ledger's recording method is renamed from a
-hook-specific name to an agent-event name, since hooks are no longer its main
-caller.
+reads, as each remaining hook event does. The ledger's recording method carries
+an agent-event name, since agent reports are its main caller.
 
 ### Answering the probe
 
@@ -206,12 +205,11 @@ confirmed, and the PR poll schedule sees no activity from it.
 ### Continue in Claude
 
 Continue in Claude replaces a Codex process with Claude, and runs only on the
-tmux transport, where a Codex row now stays `.unknown`. Its preflight therefore
-no longer requires a persisted `idle`. It relies on the check it already
-treated as authoritative: a bounded re-read of the Codex rollout through
-`CodexTranscriptActivityTracker`, which must report the last turn closed. The
-tracker stays for that reader and for the action's pending recovery; it no
-longer feeds `terminal.list` or the sidebar.
+tmux transport, where a Codex row stays `.unknown`. Its preflight therefore
+requires no persisted `idle`. Its idle check is a bounded re-read of the Codex
+rollout through `CodexTranscriptActivityTracker`, which must report the last
+turn closed. The tracker serves that check and the action's pending recovery,
+and nothing else: it does not feed `terminal.list` or the sidebar.
 
 ### Upgrading
 
@@ -240,11 +238,9 @@ each loses its `tbd terminal-activity` call:
 - **Codex** – `SessionStart` (`tbd session-event`) and `Stop` (rename check,
   response-complete notification).
 
-`UserPromptSubmit` on Claude stays for one job, the session title, through a
-new `tbd hooks session-title` command. That job used to ride on
-`tbd terminal-activity working --session-title`. Likewise the `Stop` hook's
-transcript sync, which rode `tbd terminal-activity idle`, moves to the
-`tbd notify` call the same hook already makes.
+`UserPromptSubmit` on Claude has one job, the session title, which it gets
+from the `tbd hooks session-title` command. The `Stop` hook's transcript sync
+runs inside the `tbd notify` call that hook already makes.
 
 ### What is removed
 
