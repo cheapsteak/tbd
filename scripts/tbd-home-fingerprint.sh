@@ -63,7 +63,7 @@ volatile_dirs=(
 # The one name excluded outright. Finder creates and deletes `.DS_Store`
 # wherever someone happens to browse, which has nothing to do with a test run.
 #
-# `sock`, `vend.sock`, `port` and `tbdd.pid` are deliberately NOT excluded:
+# `sock`, `vend.sock` and `tbdd.pid` are deliberately NOT excluded:
 # a daemon restart recreates them under the same names, so they are stable
 # between two snapshots, and a test that opens a socket in the real config dir
 # is precisely the kind of leak worth failing on.
