@@ -59,6 +59,9 @@ def parse(raw):
     end = rest.find(b"\0")
     exec_path = rest[:end].decode(errors="replace")
     pos = end
+    # The NUL padding after exec_path cannot be told apart from an empty
+    # argv[0], so a process with one parses with argv shifted by one entry.
+    # Nothing prints argv for that reason; only allowlisted env values print.
     while pos < len(rest) and rest[pos] == 0:
         pos += 1
     argv = []
@@ -86,7 +89,7 @@ def describe(pid, names):
     argc, exec_path, argv, env = parse(raw)
     keys = [kv.split("=", 1)[0] for kv in env]
     shown = {k: v for k, v in (kv.split("=", 1) for kv in env if "=" in kv) if k in SHOW_VALUES}
-    print(f"pid {pid}: OK exec={exec_path} argc={argc} argv0={argv[0] if argv else None!r} env_entries={len(env)}")
+    print(f"pid {pid}: OK exec={exec_path} argc={argc} env_entries={len(env)}")
     for k, v in sorted(shown.items()):
         print(f"    {k}={v}")
     if names:
