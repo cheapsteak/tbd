@@ -180,6 +180,16 @@ test_backtick_name_counts() {
   both_ways "backticks" 1 Widget 'let w = `Widget`()' 'let w = `Int`()'
 }
 
+# Anything in backticks but a single name is one raw identifier, and the words
+# in it are not code: a test named for Widget does not use it.
+test_raw_identifier_names_nothing() {
+  # shellcheck disable=SC2016 # the backticks are Swift, not command substitution
+  both_ways "raw identifier" 1 Widget 'func `checks that Widget parses`() { _ = Widget() }' \
+    'func `checks that Widget parses`() {}'
+  # shellcheck disable=SC2016
+  passes "a raw identifier holding a quote" 'func `reads a "quoted" Widget`() {}'
+}
+
 # A `/` between two operands is division; reading it as a regex would hide
 # the name between the slashes.
 test_division_is_not_a_regex() {
@@ -223,6 +233,18 @@ test_bare_regex_ignored() {
 
 test_extended_regex_ignored() {
   both_ways "extended regex" 1 Widget 'let r = Widget.make()' 'let r = #/Widget "x" {/#'
+}
+
+# A bare regex can follow a keyword that an expression follows. Read as
+# division there, a name in its body would count, and a quote in it would open
+# a string that never closes.
+test_bare_regex_after_a_keyword() {
+  local keyword
+  for keyword in return throw try await in case where if guard while switch; do
+    both_ways "regex after $keyword" 1 Widget "_ = { $keyword Widget.pattern }" "_ = { $keyword /Widget/ }"
+  done
+  passes "a quote in a regex after try" '_ = try /"x/.firstMatch(in: s)'
+  passes "a quote in a regex after case" 'switch s { case /"a/: break; default: break }'
 }
 
 # ---------------------------------------------------------------------------

@@ -136,10 +136,16 @@ _SINGLE_LINE_STOPS = re.compile(r'[\\"\n]')
 _MULTI_LINE_STOPS = re.compile(r'[\\"]')
 _BLOCK_COMMENT_MARKS = re.compile(r"/\*|\*/")
 _REGEX_STOPS = re.compile(r"[\\/]")
+_IDENTIFIER = re.compile(r"[^\W\d]\w*")
 
 # A bare `/regex/` can start only where an operand can: after one of these,
-# at the start of a line, or after `return`. Anywhere else a `/` is division.
+# at the start of a line, or after a keyword that an expression follows.
+# Anywhere else a `/` is division. `try?` and `try!` end in punctuation, and a
+# `{` follows `else`, `do` and `repeat`.
 _REGEX_MAY_FOLLOW = frozenset("(,=:[{;!&|?^~")
+_REGEX_MAY_FOLLOW_KEYWORDS = frozenset({
+    "return", "throw", "try", "await", "in", "case", "where", "if", "guard", "while", "switch",
+})
 # ...and never with one of these after the `/`, which make it `/ x`, `//`,
 # `/*` or `/=`.
 _REGEX_MAY_NOT_START_WITH = frozenset(" \t\n/*=")
@@ -206,7 +212,7 @@ def blank_literals_and_comments(source: str, path: str) -> str:
             end = k + 1
             while k >= 0 and (out[k].isalnum() or out[k] == "_"):
                 k -= 1
-            if "".join(out[k + 1:end]) != "return":
+            if "".join(out[k + 1:end]) not in _REGEX_MAY_FOLLOW_KEYWORDS:
                 return None
         position = slash + 1
         while position < size:
@@ -286,8 +292,20 @@ def blank_literals_and_comments(source: str, path: str) -> str:
         i = stop.start()
         char = source[i]
         if char == "`":
-            out[i] = " "
-            i += 1
+            # `Widget` in backticks is the name Widget. Anything else in them is
+            # one raw identifier, such as a test's `checks that Widget parses`,
+            # and names nothing: its words are not code.
+            close = source.find("`", i + 1)
+            newline = source.find("\n", i + 1)
+            if close < 0 or 0 <= newline < close:
+                out[i] = " "  # unpaired; the compiler will say so
+                i += 1
+            elif _IDENTIFIER.fullmatch(source, i + 1, close):
+                out[i] = out[close] = " "
+                i = close + 1
+            else:
+                blank(i, close + 1)
+                i = close + 1
         elif char == "(":
             # Only an interpolation stops at a parenthesis.
             assert isinstance(top, _Interpolation)
