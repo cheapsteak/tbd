@@ -141,10 +141,11 @@ struct PanelTabSyncTests {
             state.tabs[worktreeID] = [tab]
             state.activeTabIndices[worktreeID] = 0
             state.worktreeTabOrders[worktreeID] = [tab.id]
-            state.layouts[tab.id] = .pane(tab.content)
             state.panelSurfaces = [worktreeID: [
                 tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1),
             ]]
+            // After the surface: a surfaceless tab's layout does resync.
+            state.layouts[tab.id] = .pane(tab.content)
             await Fixture.drainMainActor()
 
             #expect(syncs.sent.isEmpty, "observed \(syncs.sent.map(\.worktreeID))")
@@ -164,6 +165,61 @@ struct PanelTabSyncTests {
 
             #expect(syncs.sent.isEmpty)
             #expect(state.panelSyncDirty.isEmpty, "the observer does no work with the flag off")
+        }
+    }
+
+    // MARK: - Legacy layouts
+
+    /// A tab the daemon skipped: its legacy layout holds a second terminal
+    /// beside the primary.
+    private static func skippedTab() -> (tab: TBDShared.Tab, layout: LayoutNode) {
+        let tab = Fixture.terminalTab(label: "agent")
+        let layout = LayoutNode.split(
+            id: UUID(), direction: .horizontal,
+            children: [.pane(tab.content), .pane(.terminal(terminalID: UUID()))],
+            ratios: [0.5, 0.5])
+        return (tab, layout)
+    }
+
+    @Test("a layout change of a tab with no surface sends a sync carrying the new layout")
+    func layoutChangeOfSurfacelessTabSendsSync() async throws {
+        try await Fixture.withState(panelTabs: true) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let (tab, split) = Self.skippedTab()
+            // Not yet in `tabs`, so this marks nothing.
+            state.layouts[tab.id] = split
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+
+            // The user closes the extra terminal: `layouts` changes, `tabs`
+            // does not.
+            let closed = LayoutNode.pane(tab.content)
+            state.layouts[tab.id] = closed
+            await Fixture.drainMainActor()
+
+            let sent = try Fixture.single(syncs.sent)
+            #expect(sent.worktreeID == worktreeID)
+            #expect(sent.tabs.map(\.tabID) == [tab.id])
+            #expect(sent.tabs.first?.layout == closed)
+        }
+    }
+
+    @Test("a layout change of a tab with a surface sends no sync")
+    func layoutChangeOfSurfacedTabSendsNoSync() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let (tab, split) = Self.skippedTab()
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            state.panelSurfaces = [worktreeID: [
+                tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1),
+            ]]
+
+            state.layouts[tab.id] = split
+            state.layouts[tab.id] = .pane(tab.content)
+            state.layouts.removeValue(forKey: tab.id)
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.isEmpty, "its legacy layout is not read: the daemon owns the tab")
+            #expect(!state.panelSyncDirty.contains(worktreeID))
         }
     }
 

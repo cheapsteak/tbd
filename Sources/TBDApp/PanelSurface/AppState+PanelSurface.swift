@@ -292,16 +292,46 @@ extension AppState {
     /// terminal revival). Free while the flag is off.
     func notePanelTabsChanged(old: [UUID: [TBDShared.Tab]], new: [UUID: [TBDShared.Tab]]) {
         guard panelTabsActive else { return }
-        var changed = false
+        var dirty = Set<UUID>()
         for (worktreeID, tabList) in new where old[worktreeID] != tabList {
-            panelSyncDirty.insert(worktreeID)
-            changed = true
+            dirty.insert(worktreeID)
         }
         for worktreeID in old.keys where new[worktreeID] == nil {
-            panelSyncDirty.insert(worktreeID)
-            changed = true
+            dirty.insert(worktreeID)
         }
-        guard changed, !panelSyncDirty.isDisjoint(with: panelSyncReadyWorktrees) else { return }
+        markPanelSyncDirty(dirty)
+    }
+
+    /// The observer on `layouts`, for the one tab whose legacy layout still
+    /// matters while the flag is on: one the daemon skipped, because its
+    /// layout holds a terminal outside the primary. It has no surface and
+    /// renders legacy, and closing that extra terminal edits `layouts`, not
+    /// `tabs`, so without this nothing would offer it to the daemon again.
+    ///
+    /// Marks dirty the worktree of each changed tab that has no surface in
+    /// the copy. A tab with a surface is never marked: the daemon owns what
+    /// is inside it, and its legacy layout is no longer read. Free while the
+    /// flag is off.
+    func notePanelLayoutsChanged(old: [UUID: LayoutNode], new: [UUID: LayoutNode]) {
+        guard panelTabsActive else { return }
+        let changedTabIDs = Set(old.keys).union(new.keys).filter { old[$0] != new[$0] }
+        guard !changedTabIDs.isEmpty else { return }
+        var dirty = Set<UUID>()
+        for (worktreeID, tabList) in tabs {
+            let resyncs = tabList.contains { tab in
+                changedTabIDs.contains(tab.id) && panelSurface(worktreeID: worktreeID, tabID: tab.id) == nil
+            }
+            if resyncs { dirty.insert(worktreeID) }
+        }
+        markPanelSyncDirty(dirty)
+    }
+
+    /// Marks worktrees dirty, and schedules one flush when any dirty worktree
+    /// is ready to sync.
+    private func markPanelSyncDirty(_ worktreeIDs: Set<UUID>) {
+        guard !worktreeIDs.isEmpty else { return }
+        panelSyncDirty.formUnion(worktreeIDs)
+        guard !panelSyncDirty.isDisjoint(with: panelSyncReadyWorktrees) else { return }
         schedulePanelTabSyncFlush()
     }
 

@@ -370,7 +370,11 @@ many places (notes, terminal reconciliation, the setup tab's auto-close, the
 PR tab, terminal revival, the file viewer). So the sync is not hooked at each
 one: a single observer of the app's tab list marks a worktree dirty when its
 tab IDs, order, labels or primaries change, and one sync per dirty worktree is
-sent on the next main-actor turn.
+sent on the next main-actor turn. A second observer, on the legacy layout
+store, marks dirty the worktree of a tab that has no surface when that tab's
+layout changes, so a tab the sync skipped is offered again once its extra
+terminal closes. A tab with a surface is never marked this way: its legacy
+layout is not read.
 
 ### The leaf seam
 

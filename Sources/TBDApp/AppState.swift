@@ -834,7 +834,10 @@ final class AppState {
     @ObservationIgnored private var lastBroadcastRows: Int = 0
     var isConnected: Bool = false
     var layouts: [UUID: LayoutNode] = [:] {
-        didSet { persistLayouts() }
+        didSet {
+            persistLayouts()
+            notePanelLayoutsChanged(old: oldValue, new: layouts)
+        }
     }
     /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
     /// (spec C §3.12): never persisted, never mirrored, never part of the
