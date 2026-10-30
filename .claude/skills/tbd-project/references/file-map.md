@@ -50,6 +50,13 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `Daemon.swift` — top-level orchestrator: initializes subsystems, writes session-instrumentation files, starts servers, reconciles, runs background tasks
 - `PIDFile.swift` — PID file management + stale detection
 
+### Base/
+The bottom folder: code that several daemon folders share and that uses no other daemon folder (rule in `Sources/TBDDaemon/CLAUDE.md`).
+- `StateSubscription.swift` — `StateSubscriptionManager`: `StateDelta` broadcasting to subscribed clients
+- `ShutdownLatch.swift` — runs a server's async shutdown once and lets every caller await that run
+- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
+- `ModChannelToken.swift` — the HMAC token a session mod presents to the daemon's channel socket
+
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
 - `ClaudeProfileConfigDirManager.swift` — isolates a model profile's Claude config dir under `~/tbd/profiles/<id>/claude/`
@@ -69,7 +76,6 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
-- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
@@ -109,7 +115,6 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
 - `SocketServer.swift` — NIO Unix-socket RPC server
-- `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/

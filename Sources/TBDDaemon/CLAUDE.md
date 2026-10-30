@@ -85,6 +85,15 @@ The list holds `PR -> (root)`, but no file in PR names anything the root files d
 - **Pass a closure or a protocol in** from the folder above, so the lower folder stops naming the higher one.
 - **Add the link** to `scripts/daemon-links.txt` if it is right. The failure output prints the exact line to add. Keep the list sorted. This is a design decision, and the reviewer sees it in the diff.
 
+### Base
+
+`Sources/TBDDaemon/Base` is the bottom folder.
+
+- **Nothing in it uses another daemon folder.** Its code may use only `TBDShared`, `TBDKernel`, third-party and system modules.
+- **It holds only code that two or more other folders use.** Code that one folder uses belongs in that folder.
+- **Moving a declaration into `Base`** is the usual way to remove a link to a folder above, when the declaration needs nothing outside `Base`. Its users then link to `Base`, and the change adds those lines to the list.
+- **Never add a `Base -> ` line** to `scripts/daemon-links.txt`. If code in `Base` needs another folder, the code belongs in that folder or above it, or its caller passes a closure or a protocol in.
+
 ### Fixing a stale link
 
 Delete its line from `scripts/daemon-links.txt`. The failure names the line.
