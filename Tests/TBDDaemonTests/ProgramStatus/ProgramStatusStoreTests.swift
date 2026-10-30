@@ -458,4 +458,33 @@ import TestSupport
         }
         #expect(h.publishedSnapshots.map { $0.main?.state } == [.working, .done])
     }
+
+    // MARK: - Batch reads
+
+    /// `snapshots(for:)` is `snapshot(for:)` in one actor hop: each terminal's
+    /// entry equals its single read, and a terminal the single read answers
+    /// nil for — never seen, or dropped — has no key at all.
+    @Test func batchSnapshotsMatchSingleReads() async {
+        let h = Harness()
+        let unseen = holderClaude()
+        let live = holderClaude()
+        let retracted = holderClaude()
+        h.add(live)
+        h.add(retracted)
+        #expect(await h.store.ingest(inbound(live, "state=working:app=claude-code", at: 1)) == .accepted)
+        #expect(await h.store.ingest(inbound(retracted, "state=working:app=claude-code", at: 1)) == .accepted)
+        await h.store.drop(terminalID: retracted.id, reason: .childExited)
+
+        let ids = [unseen.id, live.id, retracted.id]
+        let batch = await h.store.snapshots(for: ids)
+        for id in ids {
+            let single = await h.store.snapshot(for: id)
+            #expect(batch[id] == single)
+            #expect(batch.keys.contains(id) == (single != nil))
+        }
+        // The live terminal is the only one holding anything, so its key is
+        // the only one, and it carries the report.
+        #expect(Set(batch.keys) == [live.id])
+        #expect(batch[live.id]?.main?.state == .working)
+    }
 }
