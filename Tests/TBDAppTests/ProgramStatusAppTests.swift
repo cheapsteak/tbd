@@ -32,12 +32,6 @@ struct ProgramStatusAppTests {
         return (state, { suite.tearDown() })
     }
 
-    private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
-        caps.programStatusEnabled = programStatus
-        return caps
-    }
-
     private func seed(
         _ state: AppState,
         kind: TerminalKind?,
@@ -62,47 +56,31 @@ struct ProgramStatusAppTests {
 
     // MARK: - Eligibility
 
-    @Test("a holder row with the flag on answers the probe")
+    @Test("a holder row answers the probe")
     func holderClaudeAnswers() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .holder)
         #expect(state.answersProgramStatusProbe(terminalID: id))
-        #expect(state.answersProgramStatusProbe(transport: .holder))
-    }
-
-    @Test("the flag off answers nothing, explicitly off or capabilities not loaded")
-    func flagOffAnswersNothing() {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        let id = seed(state, kind: .claude, transport: .holder)
-        state.daemonCapabilities = nil
-        #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .holder))
-        state.daemonCapabilities = capabilities(programStatus: false)
-        #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .holder))
+        #expect(AppState.answersProgramStatusProbe(transport: .holder))
     }
 
     @Test("a tmux-transport panel answers nothing")
     func tmuxRowAnswersNothing() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .tmux)
         #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .tmux))
-        #expect(!state.answersProgramStatusProbe(transport: nil))
+        #expect(!AppState.answersProgramStatusProbe(transport: .tmux))
+        #expect(!AppState.answersProgramStatusProbe(transport: nil))
     }
 
-    /// The probe rule is the daemon reader's: flag and holder transport, blind
-    /// to the agent. Ingestion, not the probe, filters to Claude.
+    /// The probe rule is the daemon reader's: holder transport, blind to the
+    /// agent. Ingestion, not the probe, filters to Claude.
     @Test("a holder row answers whatever its agent: Codex, shell, or no kind")
     func holderRowAnswersRegardlessOfKind() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let codexByKind = seed(state, kind: .codex, transport: .holder)
         let codexByLabel = seed(state, kind: nil, label: TerminalLabel.codex, transport: .holder)
         let shell = seed(state, kind: .shell, transport: .holder)
@@ -116,7 +94,6 @@ struct ProgramStatusAppTests {
     func unknownTerminalAnswersNothing() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         #expect(!state.answersProgramStatusProbe(terminalID: UUID()))
     }
 
@@ -143,7 +120,6 @@ struct ProgramStatusAppTests {
     func forwardsInOrder() async throws {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let incarnation = UUID()
         let id = seed(state, kind: .claude, transport: .holder, incarnation: incarnation)
         let sent = SentParamsBox()
@@ -167,7 +143,7 @@ struct ProgramStatusAppTests {
         #expect(params.allSatisfy { $0.observedAt == observedAt })
     }
 
-    @Test("a report for an ineligible terminal, or with the flag off, is not forwarded")
+    @Test("a report for an ineligible terminal is not forwarded")
     func ineligibleNotForwarded() async {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
@@ -177,9 +153,6 @@ struct ProgramStatusAppTests {
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
 
-        state.daemonCapabilities = capabilities(programStatus: false)
-        state.forwardProgramStatusReport(terminalID: holder, payload: Array("state=idle".utf8), observedAt: Date())
-        state.daemonCapabilities = capabilities(programStatus: true)
         state.forwardProgramStatusReport(terminalID: tmux, payload: Array("state=idle".utf8), observedAt: Date())
         // A Codex holder panel answers the probe but its reports stay local.
         state.forwardProgramStatusReport(terminalID: codex, payload: Array("state=idle".utf8), observedAt: Date())
@@ -192,6 +165,18 @@ struct ProgramStatusAppTests {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         #expect(sent.all.map(\.payload) == ["state=done"])
+    }
+
+    // MARK: - The view's holder-vs-tmux switch
+
+    @Test("the gate starts off, and set turns it on and back off")
+    func gateSetAndRead() {
+        let gate = ProgramStatusGate()
+        #expect(gate.isEnabled == false)
+        gate.set(true)
+        #expect(gate.isEnabled == true)
+        gate.set(false)
+        #expect(gate.isEnabled == false)
     }
 
     // MARK: - The view: probe answer

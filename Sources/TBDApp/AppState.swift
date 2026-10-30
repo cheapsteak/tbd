@@ -1830,7 +1830,7 @@ final class AppState {
     /// keyed by terminal id. Mirrored, never derived: seeded from
     /// `terminal.programStatusList` and kept current by
     /// `.terminalProgramStatusChanged`. Memory only — `title` and `msg` can
-    /// carry content from the user's work. Empty while the flag is off.
+    /// carry content from the user's work.
     var programStatusSnapshots: [UUID: ProgramStatusSnapshot] = [:]
     /// Last `ProgramStatusSnapshot.revision` applied per terminal, so a late
     /// snapshot cannot overwrite a newer one. Bookkeeping, not UI state, so it
@@ -2123,10 +2123,6 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
-    /// How `setProgramStatusEnabled` persists the Program Status Protocol gate
-    /// — injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var programStatusFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setProgramStatus(enabled: enabled) }
     /// Carries OSC 7501 reports an attached panel read off a holder pty to the
     /// daemon, one at a time and in order — see `forwardProgramStatusReport`.
     /// Replaceable for the same reason as `controlModeSetter`, so a test can
@@ -2463,10 +2459,7 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
-            let wasProgramStatusEnabled = daemonCapabilities?.programStatusEnabled
-                ?? Config.programStatusEnabledDefault
             daemonCapabilities = capabilities
-            programStatusCapabilitiesChanged(wasEnabled: wasProgramStatusEnabled)
         }
     }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)

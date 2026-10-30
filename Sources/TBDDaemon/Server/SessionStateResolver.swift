@@ -47,8 +47,8 @@ struct SessionStateFacts: Sendable, Equatable {
     /// resolver's note on `.gone`.
     let liveness: ObservedFact<Bool>?
     /// The terminal's Program Status Protocol (OSC 7501) snapshot from
-    /// `ProgramStatusStore` — memory, not a column. nil when the flag is off or
-    /// the store holds nothing for the terminal. See the resolver's rung 3½.
+    /// `ProgramStatusStore` — memory, not a column. nil when the store holds
+    /// nothing for the terminal. See the resolver's rung 3½.
     let programStatus: ProgramStatusSnapshot?
 
     init(

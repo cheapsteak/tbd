@@ -7,7 +7,6 @@ import SwiftTerm
 // meaning the emulator.
 import struct TBDShared.TerminalModeReading
 import struct TBDShared.TerminalScreen
-import class TBDShared.ProgramStatusGate
 import enum TBDShared.ProgramStatusParser
 import enum TBDShared.ProgramStatusProtocol
 import TBDTerminalSerialization
@@ -182,10 +181,9 @@ actor HolderReader {
     ///   what lets a test hand back `base + .minutes(41)` and assert an exact
     ///   age rather than a tolerance window.
     /// - Parameter programStatus: the Program Status Protocol (OSC 7501) tap.
-    ///   With one, the emulator answers the `?` probe synchronously — while
-    ///   the gate is open — and hands every report's payload to the tap's
-    ///   `deliver`. nil leaves OSC 7501 unhandled, as it was before the
-    ///   protocol existed.
+    ///   With one, the emulator answers the `?` probe synchronously and hands
+    ///   every report's payload to the tap's `deliver`. nil leaves OSC 7501
+    ///   unhandled, as it was before the protocol existed.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -1421,8 +1419,7 @@ private final class HolderEmulator: @unchecked Sendable {
         // terminal, so a strong capture would be a cycle.
         if let programStatus {
             terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak self] data in
-                guard let self else { return }
-                guard programStatus.gate.isEnabled, !self.ingestingPreamble else { return }
+                guard let self, !self.ingestingPreamble else { return }
                 if ProgramStatusParser.isProbe(data) {
                     self.terminal.sendResponse(text: ProgramStatusProtocol.probeReply)
                     return

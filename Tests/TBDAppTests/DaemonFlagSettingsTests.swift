@@ -136,7 +136,6 @@ struct DaemonFlagSettingsTests {
 /// write-then-read-back setter shape. Adding a flag with that shape is a case
 /// here and an arm in each switch, and the three shared tests cover it.
 enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertible {
-    case programStatus
     case prPollSchedule
     case sessionModUsage
     case transcriptPromptAnswer
@@ -149,7 +148,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     @MainActor
     func installSetter(on state: AppState, _ setter: @escaping @MainActor (Bool) async throws -> Void) {
         switch self {
-        case .programStatus: state.programStatusFlagSetter = setter
         case .prPollSchedule: state.prPollScheduleFlagSetter = setter
         case .sessionModUsage: state.sessionModUsageFlagSetter = setter
         case .transcriptPromptAnswer: state.transcriptPromptAnswerFlagSetter = setter
@@ -162,7 +160,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     @MainActor
     func set(_ enabled: Bool, on state: AppState) async {
         switch self {
-        case .programStatus: await state.setProgramStatusEnabled(enabled)
         case .prPollSchedule: await state.setPRPollScheduleEnabled(enabled)
         case .sessionModUsage: await state.setSessionModUsageEnabled(enabled)
         case .transcriptPromptAnswer: await state.setTranscriptPromptAnswerEnabled(enabled)
@@ -175,7 +172,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     func capabilities(reporting enabled: Bool) -> DaemonCapabilitiesResult {
         var result = DaemonCapabilitiesResult(controlModeEnabled: false)
         switch self {
-        case .programStatus: result.programStatusEnabled = enabled
         case .prPollSchedule: result.prPollScheduleEnabled = enabled
         case .sessionModUsage: result.sessionModUsageEnabled = enabled
         case .transcriptPromptAnswer: result.transcriptPromptAnswerEnabled = enabled
@@ -189,7 +185,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     func reported(by capabilities: DaemonCapabilitiesResult?) -> Bool? {
         guard let capabilities else { return nil }
         switch self {
-        case .programStatus: return capabilities.programStatusEnabled
         case .prPollSchedule: return capabilities.prPollScheduleEnabled
         case .sessionModUsage: return capabilities.sessionModUsageEnabled
         case .transcriptPromptAnswer: return capabilities.transcriptPromptAnswerEnabled

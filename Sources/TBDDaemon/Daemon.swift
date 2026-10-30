@@ -1053,17 +1053,11 @@ public final class Daemon: Sendable {
         // The Program Status Protocol (OSC 7501) store, built first because the
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
-        // invisible to `terminal.programStatusList` and the flag's setter would
-        // drive a gate no reader consults. Its gate starts at the persisted
-        // flag, read fresh here; `config.setProgramStatusEnabled` moves it
-        // afterwards. Built in mock mode too — the router always has a store —
-        // where nothing feeds it. Memory only, so it has nothing to reconcile.
+        // invisible to `terminal.programStatusList`. Built in mock mode too —
+        // the router always has a store — where nothing feeds it. Memory only,
+        // so it has nothing to reconcile.
         // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-        let programStatusEnabledAtBoot: Bool =
-            (try? await database.config.get())?.programStatusEnabled
-            ?? Config.programStatusEnabledDefault
-        let programStatusStore = ProgramStatusStore.live(
-            db: database, subscriptions: subs, enabled: programStatusEnabledAtBoot)
+        let programStatusStore = ProgramStatusStore.live(db: database, subscriptions: subs)
         Task { await programStatusStore.run() }
 
         // The holder registry, constructed HERE rather than at step 8e where it

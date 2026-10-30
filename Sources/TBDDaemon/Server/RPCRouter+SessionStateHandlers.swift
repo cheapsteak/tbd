@@ -57,7 +57,8 @@ struct SessionStateFactGatherer {
 
     /// - Parameter programStatus: the terminal's OSC 7501 snapshot, read by
     ///   the caller from `ProgramStatusStore` (an actor, so it cannot be read
-    ///   from this synchronous pass). nil when the flag is off.
+    ///   from this synchronous pass). nil when the store holds nothing for
+    ///   the terminal.
     func facts(
         for terminal: Terminal, programStatus: ProgramStatusSnapshot? = nil
     ) -> SessionStateFacts {
@@ -225,18 +226,15 @@ extension RPCRouter {
         let resolver = SessionStateResolver(now: now)
         let gatherer = SessionStateFactGatherer(now: now)
 
+        // One actor hop for the whole pass rather than one per terminal.
+        let programStatusSnapshots = await programStatus.snapshots(for: terminals.map(\.id))
+
         var reports: [SessionStateReport] = []
         reports.reserveCapacity(terminals.count)
 
         for terminal in terminals {
-            let programStatusSnapshot: ProgramStatusSnapshot?
-            if programStatus.gate.isEnabled {
-                programStatusSnapshot = await programStatus.snapshot(for: terminal.id)
-            } else {
-                programStatusSnapshot = nil
-            }
             let state = resolver.resolve(
-                gatherer.facts(for: terminal, programStatus: programStatusSnapshot))
+                gatherer.facts(for: terminal, programStatus: programStatusSnapshots[terminal.id]))
             let contextLoad = gatherer.contextLoad(for: terminal)
 
             reports.append(SessionStateReport(

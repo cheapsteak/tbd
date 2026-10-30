@@ -9,37 +9,30 @@ private let programStatusLogger = Logger(subsystem: "com.tbd.app", category: "pr
 /// holder pty to `terminal.programStatusReport`.
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
 extension AppState {
-    /// Whether `program_status_enabled` is on, as the daemon's capabilities
-    /// last reported it; the shipped default until they arrive.
-    var programStatusFlagOn: Bool {
-        daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
-    }
-
-    /// Whether a panel on `transport` should answer the OSC 7501 probe: the
-    /// flag is on and the panel is a pty-holder panel. The same rule the
+    /// Whether a panel on `transport` should answer the OSC 7501 probe: only a
+    /// pty-holder panel does, and a tmux panel never does. The same rule the
     /// daemon's headless reader applies, so the answer never depends on which
     /// reader owns the pty when Claude asks. Deliberately blind to the agent
     /// kind: answering for a non-Claude session is harmless, because the
     /// store accepts reports only from Claude sessions.
-    func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
-        programStatusFlagOn && transport == .holder
+    nonisolated static func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
+        transport == .holder
     }
 
     /// `answersProgramStatusProbe(transport:)` for the cached row of
     /// `terminalID`; false for a row the app has not loaded.
     func answersProgramStatusProbe(terminalID: UUID) -> Bool {
-        answersProgramStatusProbe(transport: programStatusTerminal(terminalID)?.transport)
+        Self.answersProgramStatusProbe(transport: programStatusTerminal(terminalID)?.transport)
     }
 
     /// Forward one raw OSC 7501 report (the data after `7501;`) read off this
-    /// terminal's live output, when the flag is on and the cached row is a
-    /// holder Claude session — the store filters to Claude again, so this
-    /// only saves an RPC. Re-checked here because the flag or the row can
-    /// change between the parse and this main-queue turn. The daemon parses
-    /// and validates; the app only carries the bytes, in order.
+    /// terminal's live output, when the cached row is a holder Claude
+    /// session — the store filters to Claude again, so this only saves an
+    /// RPC. Re-checked here because the row can change between the parse and
+    /// this main-queue turn. The daemon parses and validates; the app only
+    /// carries the bytes, in order.
     func forwardProgramStatusReport(terminalID: UUID, payload: [UInt8], observedAt: Date) {
-        guard programStatusFlagOn,
-              let terminal = programStatusTerminal(terminalID),
+        guard let terminal = programStatusTerminal(terminalID),
               Self.isProgramStatusEligible(terminal) else { return }
         guard let text = String(bytes: payload, encoding: .utf8) else {
             programStatusLogger.debug(
@@ -84,34 +77,16 @@ extension AppState {
     }
 
     /// Seed the mirror from `terminal.programStatusList`. Best-effort: a
-    /// failure leaves the mirror to the deltas. Applies nothing when the flag
-    /// is off once the list returns: a capabilities refresh that turned it off
-    /// while the list was in flight has already emptied the mirror, and
-    /// nothing would clear what this re-seeded.
+    /// failure leaves the mirror to the deltas.
     func hydrateProgramStatus() async {
         do {
             let snapshots = try await programStatusListFetcher()
-            guard programStatusFlagOn else { return }
             for snapshot in snapshots {
                 applyProgramStatusSnapshot(snapshot)
             }
         } catch {
             programStatusLogger.debug(
                 "program status list failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    /// Keep the mirror in step with the flag after a capabilities refresh:
-    /// off drops every snapshot (nothing renders them, and `title`/`msg` need
-    /// not linger in memory); a switch from off to on re-seeds from the list.
-    /// Revisions are kept — the daemon never resets them within a run.
-    func programStatusCapabilitiesChanged(wasEnabled: Bool) {
-        if !programStatusFlagOn {
-            if !programStatusSnapshots.isEmpty {
-                programStatusSnapshots.removeAll()
-            }
-        } else if !wasEnabled {
-            Task { [weak self] in await self?.hydrateProgramStatus() }
         }
     }
 }
