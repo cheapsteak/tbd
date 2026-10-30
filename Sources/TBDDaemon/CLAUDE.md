@@ -4,25 +4,28 @@ After changing daemon or shared code (`Sources/TBDDaemon/`, `Sources/TBDShared/`
 
 The app-only restart leaves the daemon running the old binary. New RPC fields will silently decode as nil, causing features to appear broken while the code is correct.
 
-## Links between folders
+## Folder layers
 
-`scripts/lint-daemon-layers.py` checks which daemon folders use which. It needs no build and takes about 1 s. Design and rationale: [`docs/specs/2026-10-30-daemon-layer-order-design.md`](../../docs/specs/2026-10-30-daemon-layer-order-design.md).
+`scripts/lint-daemon-layers.py` holds the daemon's folders to a written layer order. It needs no build and takes about 1 s. Design and rationale: [`docs/specs/2026-10-30-daemon-layer-order-design.md`](../../docs/specs/2026-10-30-daemon-layer-order-design.md).
 
 ### Units
 
-- **A folder** directly under `Sources/TBDDaemon` is one unit, with its subfolders: `PR/Schedule` counts as `PR`.
+- **A folder** directly under `Sources/TBDDaemon` is one unit, with its subfolders: `PR/Schedule` counts as `PR`. A folder that holds no Swift is no unit.
 - **`(root)`** is the unit of the files directly under `Sources/TBDDaemon`.
 - **`main.swift`** belongs to the `TBDDaemon` executable target, not the library, so the check skips it.
 - **Tests** are out of scope. A test may use any folder.
 
-A link `A -> B` means that a Swift file in unit A names a declaration from unit B.
+A unit uses another when one of its Swift files names a declaration from it. That use is a link, written `A -> B`.
 
 ### The rule
 
-- Every link the code makes is listed in `scripts/daemon-links.txt`, one `A -> B` per line, sorted.
-- Every listed link is one the code makes.
+The order lives in `scripts/daemon-layers.txt`: one line per layer, bottom first, each listing its units separated by commas. A blank line or a line that starts with `#` is no layer.
 
-So a new link is added to the list by hand, in the change that makes it, and the reviewer sees it in the diff. A change that removes a link's last reference deletes the link's line in the same change, because a listed link with no reference fails as stale. The list grows only by a hand edit a reviewer sees. The spec describes where the list is headed.
+- **A unit may use only units in a lower layer.** Any lower layer will do, not only the one just below.
+- **Units in the same layer may not use each other.**
+- **Every unit has a layer.** A new folder fails the check until a line lists it.
+
+The bottom layer holds `Base` and the other folders that use none. The top two hold `Server` and then `(root)`, which wire the rest together. Where a unit sits is a design decision, so moving it is an edit to `scripts/daemon-layers.txt` that the reviewer sees in the diff.
 
 ### What counts as a reference
 
@@ -48,7 +51,7 @@ The check matches names, not types. It misses:
 - **a name the file declares for itself**: a local, a name a pattern binds, a parameter, a generic parameter, a member, a nested type, a type or function declared in a body, or a private declaration with the same name as another unit's declaration. The check reads every use of that name in the file as the file's own;
 - **an overloaded top-level function** that the calling folder also declares under the same name.
 
-A missed reference makes no link, so the list can understate how two folders depend on each other. Nothing needs fixing for it.
+A missed reference makes no link, so the check can pass code that uses a unit in its own layer or above. The order is the rule all the same.
 
 ### Links the check can report falsely
 
@@ -59,31 +62,39 @@ A missed reference makes no link, so the list can understate how two folders dep
 - **A statement label after a `case` on its line**, as in `case .a: outer: for x in xs`, reads as a reference. A label that starts its line, or follows `{` or `;`, does not.
 - **An uppercase name a pattern binds**, as in `case let .some(Widget)`. In a pattern the check binds only lowercase names, so that no type in it is taken for a binding.
 
-A false link is a bug in the check. For a bare member, write `self.` before it, or `Self.` before a nested type or a static member; for anything else, fix the check and add the case to `scripts/lint-daemon-layers.test.sh`. Never add a false link to the list: the name that makes it never goes away, so the line can never go stale, and from then on it admits every real reference between the two folders.
+A false link is a bug in the check. For a bare member, write `self.` before it, or `Self.` before a nested type or a static member; for anything else, fix the check and add the case to `scripts/lint-daemon-layers.test.sh`. Never move a unit to let a false link pass: the move would stand for every real reference in that direction too.
 
 ### Reading a failure
 
-A new link names the file, the line, the link and the name:
+A reference against the order names the file, the line, the two units with their layers, and the name:
 
 ```
-Sources/TBDDaemon/Keychain/ModelProfileKeychain.swift:253: Keychain -> Server is a new link: RPCRouter is declared in Server
+Sources/TBDDaemon/Keychain/ModelProfileKeychain.swift:253: Keychain (layer 1) uses Server (layer 9), a higher layer: RPCRouter is declared in Server
 ```
 
-Line 253 of that file names `RPCRouter`, which Server declares, and the list has no `Keychain -> Server`.
-
-A stale link names its line in the list:
+Line 253 of that file names `RPCRouter`, which Server declares, and Server is eight layers above Keychain. A reference within one layer says so:
 
 ```
-scripts/daemon-links.txt:104: PR -> (root) is stale: no file in PR names a declaration from (root)
+Sources/TBDDaemon/Git/GitManager.swift:40: Git (layer 4) uses Tmux (layer 4), its own layer: TmuxManager is declared in Tmux
 ```
 
-The list holds `PR -> (root)`, but no file in PR names anything the root files declare. When a side of the link is not a unit at all, the line says so; the usual cause is a typo or a renamed folder.
+A unit with no layer is named with where it fits, the lowest layer above every unit it uses and below every unit that uses it:
 
-### Fixing a new link
+```
+scripts/daemon-layers.txt: Sandbox has no layer; it fits in layer 4
+```
 
-- **Move the declaration** into the folder that uses it, or into a lower folder that both can use. Every folder is in one module, so moving a whole file with `git mv` changes no code.
-- **Pass a closure or a protocol in** from the folder above, so the lower folder stops naming the higher one.
-- **Add the link** to `scripts/daemon-links.txt` if it is right. The failure output prints the exact line to add. Keep the list sorted. This is a design decision, and the reviewer sees it in the diff.
+When no layer fits, the message says where the unit needs a new line: between two layers, at the top or at the bottom. When no line can hold it either, because it uses a layer that also uses it, the message says that, and a reference has to change first.
+
+### Fixing a reference against the order
+
+- **Move the declaration** into the unit that uses it, or into a lower unit that both can use. Every folder is in one module, so moving a whole file with `git mv` changes no code.
+- **Pass a closure or a protocol in** from the unit above, so the lower unit stops naming the higher one.
+- **Move the using unit up** if the direction is right: take its name off its line and put it on a line above the unit it uses, or on a new line. The check then holds it to its new place, so no unit on its new line may use it, and every unit that uses it must sit above it. This is a design decision, and the reviewer sees it in the diff.
+
+### Giving a unit a layer
+
+Add the unit's name to the line its failure names, or to a new line where the failure says it needs one, in the change that adds the folder.
 
 ### Base
 
@@ -91,39 +102,21 @@ The list holds `PR -> (root)`, but no file in PR names anything the root files d
 
 - **Nothing in it uses another daemon folder.** Its code may use only `TBDShared`, `TBDKernel`, third-party and system modules.
 - **It holds only code that two or more other folders use.** Code that one folder uses belongs in that folder.
-- **Moving a declaration into `Base`** is the usual way to remove a link to a folder above, when the declaration needs nothing outside `Base`. Its users then link to `Base`, and the change adds those lines to the list.
-- **Never add a `Base -> ` line** to `scripts/daemon-links.txt`. If code in `Base` needs another folder, the code belongs in that folder or above it, or its caller passes a closure or a protocol in.
-
-### Fixing a stale link
-
-Delete its line from `scripts/daemon-links.txt`. The failure names the line.
+- **Moving a declaration into `Base`** is the usual way to remove a reference to a unit above, when the declaration needs nothing outside `Base`. Its users then use `Base`, which sits below all of them.
+- **`Base` stays on the bottom line** of `scripts/daemon-layers.txt`, where the check lets it use no other unit. Never move it up. If code in `Base` needs another folder, the code belongs in that folder or above it, or its caller passes a closure or a protocol in.
 
 ### When `main` fails
 
-Branch protection does not require a branch to be up to date with `main` before it merges, so two pull requests that each pass alone can together leave `main` failing. If one removes the last reference behind `A -> B` and deletes its line while the other adds a new reference to it, `main` makes a link the list lacks. If each removes one of the last two references, neither deletes the line, and it goes stale. Every branch then fails on a link its change never touched. The repair is a one-line pull request that adds the line, or deletes it; the failure output names it.
+Branch protection does not require a branch to be up to date with `main` before it merges, so two pull requests that each pass alone can together leave `main` failing. Removing a reference never causes it, because the check asks only that each reference runs downward. Usually it takes a move: one change moves a unit to another line, a declaration to another folder, or every Swift file out of a folder, and the other adds a reference or a file that the old arrangement allowed. Every branch then fails on a reference or a unit its change never touched. The repair is a pull request of its own that fixes what the failure names, in one of the ways above.
 
 ### "cannot scan" and "cannot read"
 
-Exit 2 means the check could not run. It stops rather than report links it may have read wrong.
+Exit 2 means the check could not run. It stops rather than judge references it may have read wrong.
 
 - **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces.
-- **`cannot scan` without a line**: either `Sources/TBDDaemon: not found`, because the check ran against a tree without it (see `--repo-root`), or a file in a folder with a space in its name, whose links the list could not hold.
+- **`cannot scan` without a line**: either `Sources/TBDDaemon: not found`, because the check ran against a tree without it (see `--repo-root`), or a file in a folder with a space in its name, which the layer file could not name.
 - **`cannot read <path>`**: the check could not open that file or list that folder, for the reason that follows.
-- **`cannot read scripts/daemon-links.txt:<line>`**: a line is not `A -> B`, has a space in a unit name, is listed twice, links a unit to itself, is out of order, or holds bytes that are not UTF-8. An out-of-order line is named with the line it sorts before. The links are in byte order, below the comments at the top; sorting the whole file would scramble those comments. This sorts only the link lines:
-
-  ```
-  { grep -E '^(#|$)' scripts/daemon-links.txt; grep -Ev '^(#|$)' scripts/daemon-links.txt | LC_ALL=C sort; } > links.tmp && mv links.tmp scripts/daemon-links.txt
-  ```
-
-### The cycle report
-
-A passing run ends with the cycles among the listed links. The listed links form no loop, so it reports none:
-
-```
-cycles among the listed links: none
-```
-
-If the report names a group instead, some listed links form a loop again: within the group, every unit reaches every other by following links. The check still passes, because the report is information, not a failure. Only a new line in the list can close a loop, so the reviewer reads the group together with that line and decides whether the link belongs.
+- **`cannot read scripts/daemon-layers.txt:<line>`**: a name on that line is no unit, is listed twice, is empty, or has a space in it, or the line holds bytes that are not UTF-8. A name that is no unit is a typo, or a folder renamed or emptied of Swift; a unit listed twice is named with its other line; an empty name is a stray comma, and a name with a space a missing one.
 
 ### Running it
 
