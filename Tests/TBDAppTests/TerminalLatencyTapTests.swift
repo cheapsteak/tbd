@@ -189,7 +189,12 @@ struct TerminalLatencyTapTests {
             emit: { lines.append($0) })
 
         tap.noteChunk(Array("early".utf8)[...], feedAt: 0, feedReturnedAt: 0)
-        DispatchQueue.global().async {
+        // A `Thread` rather than a global dispatch queue: a global-queue block
+        // parks one of the process's ~64 constrained libdispatch workers, and
+        // when other suites hold that pool full the block never starts — which
+        // this test used to report as the recorder below seeing no value in
+        // 90 s, a hang about libdispatch rather than about the tap.
+        let feeder = Thread {
             stampStarted.wait()
             // Fed at 20 ms, which is AFTER the 10 ms stamp: the shape that used
             // to produce a floored zero.
@@ -197,6 +202,8 @@ struct TerminalLatencyTapTests {
             feedReturned.signal()
             feederFinished.record(true)
         }
+        feeder.name = "com.tbd.tests.latency-tap-feeder"
+        feeder.start()
 
         tap.noteDrawWillBegin(isOnScreen: true)
         // Suspends rather than blocks: the feeder's scheduling latency is not
