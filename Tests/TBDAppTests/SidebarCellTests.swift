@@ -79,6 +79,20 @@ struct SidebarCellTests {
         #expect(cell.leadingImageView.contentTintColor == nil, "The bus is full colour, never tinted")
     }
 
+    /// The dev-server dot resolves its green against the appearance it draws
+    /// in, rather than keeping the colour it was first given.
+    @Test func devServerDotFollowsAppearance() throws {
+        let dot = StatusDotView(color: .systemGreen, diameter: 6)
+        dot.appearance = NSAppearance(named: .aqua)
+        dot.updateLayer()
+        let light = try #require(dot.layer?.backgroundColor?.components)
+        dot.appearance = NSAppearance(named: .darkAqua)
+        dot.updateLayer()
+        let dark = try #require(dot.layer?.backgroundColor?.components)
+        #expect(light != dark, "The dot kept its light-mode colour in dark mode")
+        #expect(WorktreeRowCell().devServerDot.color == .systemGreen)
+    }
+
     @Test func reusedCellResetsAlpha() {
         let cell = WorktreeRowCell()
         cell.configure(Self.worktree(name: "pad", dimmed: true))

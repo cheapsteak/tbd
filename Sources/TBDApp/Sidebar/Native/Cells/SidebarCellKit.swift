@@ -181,3 +181,35 @@ final class SuffixSlot {
         return dots
     }
 }
+
+/// A small filled circle in a dynamic colour. The colour is resolved against
+/// the view's own appearance every time the layer updates, rather than
+/// snapshotted into a `CGColor` once, so it follows light and dark.
+final class StatusDotView: NSView {
+    let color: NSColor
+
+    init(color: NSColor, diameter: CGFloat) {
+        self.color = color
+        super.init(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
+        wantsLayer = true
+        layer?.cornerRadius = diameter / 2
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = color.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}

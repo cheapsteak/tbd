@@ -222,6 +222,7 @@ struct SidebarOutlineControllerTests {
         let headerRow = h.row(header)
         try #require(headerRow >= 0 && headerRow + 1 < h.outline.numberOfRows)
         let heightBefore = h.outline.rect(ofRow: headerRow).height
+        let headerView = try #require(h.outline.rowView(atRow: headerRow, makeIfNecessary: true))
         let below = try #require(h.outline.rowView(atRow: headerRow + 1, makeIfNecessary: true))
 
         // An unhealthy provider shows an issue line under its name.
@@ -234,8 +235,12 @@ struct SidebarOutlineControllerTests {
         let heightAfter = h.outline.rect(ofRow: headerRow).height
         #expect(heightAfter == h.controller.rowHeight(for: kind))
         #expect(heightAfter != heightBefore, "The height class change never reached the outline")
-        #expect(h.controller.lastHeightNoteDuration == 0)
-        // Nothing is left animating: the row below is already where it ends up.
+        // Nothing is animating: no animation on either row view's layer, and
+        // the row below is already where it ends up.
+        let headerAnimations = headerView.layer?.animationKeys() ?? []
+        let belowAnimations = below.layer?.animationKeys() ?? []
+        #expect(headerAnimations.isEmpty, "The changed row is animating: \(headerAnimations)")
+        #expect(belowAnimations.isEmpty, "The row below is animating: \(belowAnimations)")
         h.host?.layout()
         #expect(abs(below.frame.minY - h.outline.rect(ofRow: headerRow + 1).minY) < 0.5)
     }
@@ -319,7 +324,9 @@ struct SidebarOutlineControllerTests {
         try #require(h.controller.tree.parent(of: .worktree(parked.id)) == .group(shelf),
                      "The parked row must start on the Hibernated shelf")
         let parkedItem = try #require(h.controller.item(for: .worktree(parked.id)))
-        let before = try #require(h.rowView(.worktree(parked.id), make: true))
+        let before = try #require(h.rowView(.worktree(parked.id), make: true) as? SidebarRowView)
+        // On the shelf: one level of group padding, no worktree ancestor.
+        try #require(before.configuration.tintLevel == 1 && before.configuration.guideCount == 0)
 
         let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == parked.id })
         h.state.worktrees[repo.id]?[index].parentWorktreeID = parent.id
@@ -332,6 +339,10 @@ struct SidebarOutlineControllerTests {
         #expect(h.controller.tree.parent(of: .worktree(parked.id)) == .worktree(parent.id))
         #expect(h.controller.item(for: .worktree(parked.id)) === parkedItem, "The row moved rather than re-created")
         #expect(h.rowView(.worktree(parked.id), make: false) === before)
+        // The row's model is the same at the same depth, but its ancestors
+        // changed: the moved row view's tint and guide line follow them.
+        #expect(before.configuration.tintLevel == 0)
+        #expect(before.configuration.guideCount == 1)
     }
 
     /// The one case a moved row cannot keep its view: nested onto a former
@@ -524,6 +535,7 @@ struct SidebarOutlineControllerTests {
         h.state.selectedWorktreeIDs = [first.id]
         h.mount()
         try #require(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(first.id))))
+        let suppressedBefore = h.controller.suppressedSelectionNotificationCount
 
         // One batch: the selected row goes, and AppState selects another. The
         // outline drops the removed row from its selection mid-apply and says
@@ -533,6 +545,8 @@ struct SidebarOutlineControllerTests {
         h.controller.flushPendingRebuild()
 
         #expect(h.controller.appStateSelectionWriteCount == 0, "The apply wrote the outline's interim selection back")
+        #expect(h.controller.suppressedSelectionNotificationCount > suppressedBefore,
+                "The outline posted no selection change during the apply, so the guard was never tested")
         #expect(h.state.selectedWorktreeIDs == [third.id])
         #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(third.id))))
     }
@@ -688,6 +702,33 @@ struct SidebarOutlineControllerTests {
         h.state.devServerRunningWorktreeIDs = [rows[0].id]
         h.controller.flushPendingRebuild()
         #expect(abs(h.clip.bounds.minY - settled) < 0.5)
+    }
+
+    @Test func pendingScrollDuringHoldReplaysWhenTheHoldEnds() throws {
+        let h = OutlineHarness("pendingScrollHeld")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme", expanded: false)
+        let rows = (0..<60).map { Self.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.mount(size: NSSize(width: 320, height: 200))
+        let header = SidebarNodeID.repoHeader(repo.id)
+
+        h.controller.beginHold(.rename)
+        let target = rows[30]
+        h.state.navigateToActiveWorktree(target.id)
+        h.controller.flushPendingRebuild()
+        #expect(h.shownIDs == [header], "The section's expansion waits for the hold")
+        #expect(h.clip.bounds.minY == 0)
+
+        h.controller.endHold(.rename)
+        let targetRow = h.row(.worktree(target.id))
+        try #require(targetRow >= 0, "The held expansion never landed")
+        let rowMid = h.outline.rect(ofRow: targetRow).midY
+        let clipMid = h.clip.bounds.midY
+        #expect(abs(rowMid - clipMid) <= 1, "The held scroll was dropped: row \(rowMid), clip \(clipMid)")
+        #expect(h.state.pendingScrollToWorktreeID == nil)
     }
 
     @Test func arrowKeyFromRemoteRowMovesSelection() throws {

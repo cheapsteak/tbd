@@ -39,7 +39,7 @@ final class WorktreeRowCell: NSTableCellView {
     private(set) var subtitleFields: [NSTextField] = []
     private(set) lazy var suffix = SuffixSlot(in: self)
     let noStatusImageView = SidebarCellKit.imageView()
-    let devServerDot = NSView(frame: .zero)
+    let devServerDot = StatusDotView(color: .systemGreen, diameter: 6)
     let crossRepoField = SidebarCellKit.label(font: SidebarCellKit.captionFont, color: .secondaryLabelColor)
 
     private(set) var model: WorktreeRowModel?
@@ -54,9 +54,6 @@ final class WorktreeRowCell: NSTableCellView {
         _ = suffix
         noStatusImageView.image = SidebarCellKit.symbol(NoStatusMark.systemImage, size: 10)
         noStatusImageView.contentTintColor = .tertiaryLabelColor
-        devServerDot.wantsLayer = true
-        devServerDot.layer?.cornerRadius = 3
-        devServerDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
     }
 
     @available(*, unavailable)
@@ -89,7 +86,6 @@ final class WorktreeRowCell: NSTableCellView {
         noStatusImageView.isHidden = !model.showsNoStatusMark
         noStatusImageView.setAccessibilityLabel(NoStatusMark.accessibilityLabel)
         devServerDot.isHidden = !model.showsDevServerDot
-        devServerDot.layer?.backgroundColor = NSColor.systemGreen.cgColor
         crossRepoField.stringValue = model.crossRepoLabel ?? ""
         crossRepoField.isHidden = model.crossRepoLabel == nil
 

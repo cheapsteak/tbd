@@ -62,8 +62,6 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// Applies that fell back to `reloadData` because the row count disagreed
     /// with the tree.
     private(set) var fallbackReloadCount = 0
-    /// The animation duration in force when the last height change was noted.
-    private(set) var lastHeightNoteDuration: TimeInterval?
     /// Stands in for `SidebarTreeDiff.update` so a test can apply a wrong
     /// update and watch the fallback catch it.
     var diffForTesting: ((SidebarTree, SidebarTree) -> OutlineUpdate)?
@@ -77,6 +75,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// a fresh item; the objects stay alive here until the update is over,
     /// since the outline does not retain them.
     private var releasedDuringApply: [SidebarItem] = []
+    /// Rows the current update moved. Their row views' guide lines and tint
+    /// follow their ancestors, which a move changes even when the row's own
+    /// model does not, so they are reconfigured after the update.
+    private var movedDuringApply: [SidebarNodeID] = []
     private var holds: Set<HoldReason> = []
     private var hasLoaded = false
     private var rebuildScheduled = false
@@ -96,6 +98,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     private var isApplyingModelSelection = false
     /// Writes the outline made to `AppState.selectedWorktreeIDs`.
     private(set) var appStateSelectionWriteCount = 0
+    /// Selection notifications the guard kept from being written back: what
+    /// a test counts to prove the guard ran.
+    private(set) var suppressedSelectionNotificationCount = 0
 
     /// `SidebarView`'s reveal state, mirrored: the selection reveal's last
     /// value and whether the first one has run, the Ended reveal's last key,
@@ -144,7 +149,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         self.chevronBeforeTitle = SidebarOutlineController.storedChevronBeforeTitle(defaults)
         super.init(nibName: nil, bundle: nil)
         defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: nil
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             SidebarOutlineController.performOnMain { self.defaultsDidChange() }
@@ -357,7 +362,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// the end of every apply put it back where it was, so only its row view
     /// is new.
     private func applyUpdate(to latest: SidebarTree) {
-        defer { releasedDuringApply.removeAll() }
+        defer {
+            releasedDuringApply.removeAll()
+            movedDuringApply.removeAll()
+        }
         let target = isHoldingStructure ? Self.content(of: latest, inStructureOf: tree) : latest
         let update = diffForTesting?(tree, target) ?? SidebarTreeDiff.update(from: tree, to: target)
         let anchor = captureScrollAnchor()
@@ -388,6 +396,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             // The outline has let go of every removed item.
             items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
+            reconfigureRowViews(under: movedDuringApply)
             noteHeights(update.heightChanged)
         }
         isApplyingStructure = false
@@ -430,6 +439,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             outline.insertItems(at: IndexSet(integer: index), inParent: parent.item, withAnimation: [])
         case .move(let fromParent, let fromIndex, let toParent, let toIndex):
             guard let source = resolve(fromParent), let destination = resolve(toParent) else { return }
+            if let moved = outline.child(fromIndex, ofItem: source.item) as? SidebarItem {
+                movedDuringApply.append(moved.id)
+            }
             outline.moveItem(at: fromIndex, inParent: source.item, to: toIndex, inParent: destination.item)
         case .reloadItem(let id):
             guard let item = resolve(id)?.item else { return }
@@ -513,6 +525,24 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
+    /// Reconfigures the row views of `ids` and of every row beneath them: their
+    /// guide lines and tint depend on their ancestors.
+    private func reconfigureRowViews(under ids: [SidebarNodeID]) {
+        guard !ids.isEmpty else { return }
+        var affected: Set<SidebarNodeID> = []
+        var pending = ids.compactMap { tree.node($0) }
+        while let node = pending.popLast() {
+            affected.insert(node.id)
+            pending.append(contentsOf: node.children)
+        }
+        outline.enumerateAvailableRowViews { rowView, row in
+            guard let sidebarRow = rowView as? SidebarRowView,
+                  let item = self.outline.item(atRow: row) as? SidebarItem, affected.contains(item.id),
+                  let node = self.tree.node(item.id) else { return }
+            self.configure(sidebarRow, node: node)
+        }
+    }
+
     /// Tells the outline about rows whose height class changed, inside a
     /// zero-duration animation context so the height does not animate.
     private func noteHeights(_ ids: [SidebarNodeID]) {
@@ -526,7 +556,6 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         NSAnimationContext.beginGrouping()
         NSAnimationContext.current.duration = 0
         NSAnimationContext.current.allowsImplicitAnimation = false
-        lastHeightNoteDuration = NSAnimationContext.current.duration
         outline.noteHeightOfRows(withIndexesChanged: rows)
         NSAnimationContext.endGrouping()
     }
@@ -729,9 +758,11 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     }
 
     /// Centres the pending scroll target in the apply that expanded its
-    /// section. A target with no row by then is dropped, as the `List` drops it.
+    /// section. While structure is held the section may not be shown yet, so
+    /// the target waits for the apply that ends the hold. A target with no
+    /// row by then is dropped, as the `List` drops it.
     private func scrollPendingTargetToCenter() {
-        guard let target = pendingScrollTarget else { return }
+        guard let target = pendingScrollTarget, !isHoldingStructure else { return }
         pendingScrollTarget = nil
         guard let item = items.existing(.worktree(target)) else { return }
         let row = outline.row(forItem: item)
@@ -841,7 +872,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// `List`'s tags would write it, then mirrored straight back, since the
     /// `didSet` may route it — a remote row's ID never rests in that set.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isApplyingModelSelection else { return }
+        guard !isApplyingModelSelection else {
+            suppressedSelectionNotificationCount += 1
+            return
+        }
         let selected = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? SidebarItem)?.id }
         writeSelection(SidebarSelectionBridge.appStateIDs(for: selected))
         isApplyingModelSelection = true
