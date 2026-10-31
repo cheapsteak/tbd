@@ -398,9 +398,11 @@ The daemon, in `WorktreeStore.moveMany`:
 4. Writes each carried row's `parentWorktreeID`, and `sortOrder` 0…n−1 across
    the group in the new order. A carried remote row whose parent changes gets
    `remote_parent_assigned = 1`, exactly as `move` sets it.
-5. Commits, then replies, then broadcasts a `worktreeSiblingsReordered` delta
-   carrying the request's `moveID` and the destination group's full result:
-   every row in it, with its `parentWorktreeID` and new `sortOrder`. The existing `worktreeMoved` delta carries only the moved row,
+5. After the transaction commits, broadcasts a `worktreeSiblingsReordered`
+   delta carrying the request's `moveID` and the destination group's full
+   result, every row in it with its `parentWorktreeID` and new `sortOrder`, and
+   replies. The delta and the reply travel on different sockets, so the app may
+   see either first. The existing `worktreeMoved` delta carries only the moved row,
    so a client applying it holds stale sibling sort orders until its next poll;
    the full-group delta brings a client to the daemon's state in one step. A
    client that predates the delta catches up at its next poll. The
@@ -438,8 +440,9 @@ the sidebar has one commit path.
   becomes that move's fence, and from then on any fetch result numbered below
   the highest fence is discarded, so a fetch that read the daemon before a
   commit is never applied after it. A move leaves the overlay once its RPC has
-  succeeded and either the `worktreeSiblingsReordered` delta carrying its
-  `moveID` has been applied or a fetch numbered at or above its fence has been.
+  succeeded and the app has applied either the `worktreeSiblingsReordered`
+  delta carrying its `moveID`, whether it arrived before or after the reply, or
+  a fetch numbered at or above its fence.
   The `moveID` keeps a move by the CLI or another window from retiring this
   one.
 - **Failure.** At the drop, `AppState` snapshots the carried rows' parents and
