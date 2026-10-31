@@ -39,19 +39,27 @@ extension AppState {
     /// The rows move here first, with the same `SiblingPlacement.place` the
     /// daemon runs, before any message leaves the app. The move then stays in
     /// `pendingWorktreeMoves` while `worktree.moveMany` is in flight. If the
-    /// RPC fails, the carried rows and the groups they left and joined go back
-    /// to how they stood at the drop, every other row keeps whatever changed
-    /// meanwhile, the app refreshes from the daemon, and a toast names the row
-    /// and the reason.
+    /// RPC fails before the move's own delta arrives, the carried rows and the
+    /// groups they left and joined go back to how they stood at the drop,
+    /// every other row keeps whatever changed meanwhile, a toast names the row
+    /// and the reason, and the app refreshes from the daemon.
+    ///
+    /// A parent the app does not list, or one that is `main`, is refused here:
+    /// nothing moves and no RPC is sent.
     @discardableResult
     func moveWorktrees(ids: [UUID], newParentID: UUID?, before: UUID?) -> UUID {
         let moveID = UUID()
         guard !ids.isEmpty else { return moveID }
+        var lists = WorktreeMoveLists(worktrees: worktrees, scratch: scratchWorktrees)
+        if let newParentID, !lists.acceptsParent(newParentID) {
+            logger.warning(
+                "worktree.moveMany refused locally: parent \(newParentID, privacy: .public) is not listed or is main")
+            return moveID
+        }
         let move = PendingWorktreeMove(
             moveID: moveID, worktreeIDs: ids, newParentID: newParentID, before: before,
             fence: nil, rpcSucceeded: false, deltaApplied: false)
 
-        var lists = WorktreeMoveLists(worktrees: worktrees, scratch: scratchWorktrees)
         let snapshot = lists.snapshot(for: move)
         let name = lists.row(ids[0])?.displayName ?? "worktree"
         lists.apply(move)
@@ -85,9 +93,20 @@ extension AppState {
         retireSettledWorktreeMoves()
     }
 
+    /// The RPC threw. If the move's own delta has already arrived, the daemon
+    /// committed it and only the reply was lost, so it settles as a success.
+    /// Otherwise the move's rows are restored and the user is told why before
+    /// the refresh, so a slow daemon never leaves rows snapping back
+    /// unexplained.
     private func worktreeMoveFailed(
         _ moveID: UUID, snapshot: WorktreeMoveSnapshot, name: String, error: any Error
     ) async {
+        if pendingWorktreeMoves.first(where: { $0.moveID == moveID })?.deltaApplied == true {
+            logger.warning(
+                "worktree.moveMany \(moveID, privacy: .public) threw after its delta arrived, so it committed: \(error.localizedDescription, privacy: .public)")
+            worktreeMoveSucceeded(moveID)
+            return
+        }
         logger.error(
             "worktree.moveMany \(moveID, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         pendingWorktreeMoves.removeAll { $0.moveID == moveID }
@@ -98,8 +117,8 @@ extension AppState {
         lists.restore(snapshot)
         for move in pendingWorktreeMoves { lists.apply(move) }
         assignWorktreeLists(lists.result)
-        await refreshWorktrees()
         showTransientToast("Couldn't move \(name): \(error.localizedDescription)", style: .error)
+        await refreshWorktrees()
     }
 
     /// Drops every pending move whose RPC succeeded and whose result the app
@@ -153,12 +172,13 @@ extension AppState {
     /// scratch list is re-sorted by `sortOrder` when a move touched it.
     ///
     /// A move leaves the lists as they are when a carried row is missing, when
-    /// the daemon would refuse it (carrying `main`, nesting a scratch row, a
-    /// parent cycle, top-level rows from different groups), or when the group
-    /// already stands in the move's order with the carried rows in it. That
-    /// last case is a state that already holds the move (its own delta, or a
-    /// fetch made after the commit), and leaving it alone keeps the daemon's
-    /// numbers, which count rows the app does not list.
+    /// the new parent is not listed or is `main`, when the daemon would refuse
+    /// it (carrying `main`, nesting a scratch row, a parent cycle, top-level
+    /// rows from different groups), or when the group already stands in the
+    /// move's order with the carried rows in it. That last case is a state
+    /// that already holds the move (its own delta, or a fetch made after the
+    /// commit), and leaving it alone keeps the daemon's numbers, which count
+    /// rows the app does not list.
     nonisolated static func applyingMoves(
         _ moves: [PendingWorktreeMove],
         worktrees: [UUID: [Worktree]],
@@ -279,14 +299,23 @@ private struct WorktreeMoveLists {
         return members.map(\.id)
     }
 
+    /// Whether rows may be nested under `parentID`: the app lists it, and it
+    /// is not `main`.
+    func acceptsParent(_ parentID: UUID) -> Bool {
+        guard let parent = row(parentID) else { return false }
+        return parent.status != .main
+    }
+
     /// The group `move` places its rows in, or nil when it cannot be applied:
-    /// a carried row is not listed, or the daemon would refuse the move.
+    /// a carried row or the new parent is not listed, or the move is one the
+    /// daemon would refuse.
     private func destination(of move: PendingWorktreeMove) -> WorktreeSiblingGroup? {
         let carried = move.worktreeIDs.compactMap { row($0) }
         guard let first = carried.first, carried.count == move.worktreeIDs.count,
               carried.allSatisfy({ $0.status != .main }) else { return nil }
         if let parentID = move.newParentID {
-            guard carried.allSatisfy({ $0.repoID != nil }),
+            guard acceptsParent(parentID),
+                  carried.allSatisfy({ $0.repoID != nil }),
                   !closesCycle(parentID: parentID, carried: Set(move.worktreeIDs)) else { return nil }
             return .children(of: parentID)
         }

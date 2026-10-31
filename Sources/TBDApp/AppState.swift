@@ -4297,6 +4297,12 @@ final class AppState {
                 logger.debug("Discarding worktree fetch \(fetchNumber, privacy: .public): sent before a move committed (fence \(self.worktreeFetchFence, privacy: .public))")
                 return
             }
+            // A fetch at or above a succeeded move's fence read its commit, so
+            // that move leaves the overlay before the result is applied: the
+            // daemon's state is the truth from here, including any later
+            // writer's move of the same rows, which re-applying the move would
+            // undo.
+            retireSettledWorktreeMoves(appliedFetch: fetchNumber)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
             // Reconcile only on the unscoped path: a scoped allWts omits other repos'
@@ -4394,9 +4400,6 @@ final class AppState {
                     droppedFrom: previousIDs,
                     keeping: Set(grouped.values.joined().map(\.id) + sortedScratch.map(\.id)))
             }
-            // A fetch at or above a succeeded move's fence read its commit, so
-            // that move no longer needs the overlay.
-            retireSettledWorktreeMoves(appliedFetch: fetchNumber)
             // Restored history is computed against these lists; recompute the
             // arrows now that they have loaded (no save — nothing changed).
             if listsChanged {
