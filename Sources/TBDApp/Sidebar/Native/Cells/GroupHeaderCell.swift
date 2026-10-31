@@ -63,11 +63,14 @@ final class GroupHeaderCell: NSTableCellView {
             trailingImageView.image = SidebarCellKit.symbol(
                 isError ? "exclamationmark.octagon.fill" : "hand.raised.fill", size: 13)
             trailingImageView.contentTintColor = isError ? .systemRed : .systemOrange
+            trailingImageView.toolTip = "A remote session needs attention"
         } else if model.hasUncertainty {
             trailingImageView.image = SidebarCellKit.symbol("questionmark.circle", size: 13)
             trailingImageView.contentTintColor = .secondaryLabelColor
+            trailingImageView.toolTip = "Some remote session state is unknown or no longer reported"
         } else {
             trailingImageView.image = nil
+            trailingImageView.toolTip = nil
         }
         trailingImageView.isHidden = trailingImageView.image == nil
 

@@ -41,8 +41,16 @@ final class ScratchPromptCell: NSTableCellView {
         needsLayout = true
     }
 
-    /// The hover hook the pointing-hand cursor hangs from.
+    /// The hover hook, for parity with the other cells. The pointing hand is
+    /// a cursor rectangle instead (`resetCursorRects`), which AppKit keeps
+    /// balanced as the pointer and the rows move.
     func setHovered(_ hovered: Bool) {}
+
+    /// `ScratchSectionView`'s prompt pushes the pointing hand while hovered.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 
     override func layout() {
         super.layout()

@@ -42,6 +42,24 @@ enum SidebarNativeMetrics {
 /// `listRowInsets` do. The native disclosure triangle is hidden; headers draw
 /// the SwiftUI path's chevrons themselves.
 final class SidebarOutlineView: NSOutlineView {
+    /// Kept alive as long as the outline: the tracker owns the outline's one
+    /// tracking area, and a tracking area does not retain its owner.
+    var hoverTracker: SidebarHoverTracker?
+
+    /// The context menu for a row, built when the menu is asked for. Nil
+    /// rows — group headers, provider headers, the scratch prompt — show none.
+    var contextMenuProvider: ((Int) -> NSMenu?)?
+
+    /// The row's menu, shown through `super` so the outline draws its usual
+    /// highlight around the right-clicked row. The outline does not override
+    /// `mouseDown`: rows select and drag natively.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        menu = row >= 0 ? contextMenuProvider?(row) : nil
+        guard menu != nil else { return nil }
+        return super.menu(for: event)
+    }
+
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
         .zero
     }

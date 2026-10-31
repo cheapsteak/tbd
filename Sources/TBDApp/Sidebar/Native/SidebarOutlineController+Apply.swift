@@ -25,6 +25,9 @@ extension SidebarOutlineController {
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
         reconcileVanishedSelection()
+        // Rows may have moved under a still pointer.
+        hoverTracker?.recompute()
+        closePlusMenuIfItsRowLeft()
     }
 
     /// Applies the diff from the shown tree to `latest` (or, while held, to
@@ -176,7 +179,7 @@ extension SidebarOutlineController {
                 self.configure(rowView, node: node)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
-                self.configure(cell, kind: node.kind)
+                self.configure(cell, kind: node.kind, id: node.id)
             }
         }
     }

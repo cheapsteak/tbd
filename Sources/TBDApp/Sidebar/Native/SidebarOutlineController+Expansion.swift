@@ -6,13 +6,21 @@ extension SidebarOutlineController {
     // MARK: Header actions and chevrons
 
     /// The outline's click action: a header runs what the SwiftUI header's tap
-    /// runs. Row clicks select through the outline and need nothing here.
+    /// runs, and a click on a worktree row's PR glyph opens the pull request.
+    /// Row clicks otherwise select through the outline and need nothing here.
     @objc func outlineClicked(_ sender: Any?) {
-        handleClick(row: outline.clickedRow)
+        var point: NSPoint?
+        if let event = NSApp.currentEvent, event.type == .leftMouseUp || event.type == .leftMouseDown {
+            point = outline.convert(event.locationInWindow, from: nil)
+        }
+        handleClick(row: outline.clickedRow, at: point)
     }
 
-    func handleClick(row: Int) {
+    /// - Parameter point: where the click landed, in the outline's
+    ///   coordinates, when it came from the pointer.
+    func handleClick(row: Int, at point: NSPoint? = nil) {
         guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem else { return }
+        if let point, openPullRequestIfClickedGlyph(row: row, at: point) { return }
         switch item.id {
         case .repoHeader(let repoID):
             appState.selectRepo(id: repoID)

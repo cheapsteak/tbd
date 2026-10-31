@@ -122,9 +122,10 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   using the worktree cell and the same update loop.
 - **`SidebarSelectionBridge`** – maps outline selection to `AppState` and back.
 - **`SidebarDropPolicy`** – pure; decides what a drag proposal means.
-- **`NativeSidebarView`** – an `NSViewControllerRepresentable` that mounts the
-  controller. `SidebarView` shows it, with the SwiftUI footer beneath, when the
-  flag is on.
+- **`NativeSidebarView`** – the native path's SwiftUI wrapper: it mounts the
+  controller through an `NSViewControllerRepresentable` and presents the
+  sidebar's sheets. `SidebarView` shows it, with the SwiftUI footer beneath,
+  when the flag is on.
 
 ### Update loop
 
@@ -285,8 +286,15 @@ tint instead of turning white.
 
 Setting `editingWorktreeID` makes the cell replace its name label with the
 existing `InlineTextField`, with the emoji autocomplete panel anchored to the
-field. New-worktree flows set it to start a rename, as today. The focus-race
+field. New-worktree flows set it to start a rename, as today; a request for a
+row that is not shown yet stays pending until the row appears. The focus-race
 handling in `RenameableLabel` carries over.
+
+A new worktree's creating placeholder is replaced by the daemon's row while its
+rename may still be open. When the row under an open edit leaves the model and
+a rename is asked for on another row, the edit moves there: the open editor
+closes without committing, and the new row's editor opens with what was typed,
+which a commit then applies to the real row.
 
 ### Context menus, popovers and sheets
 
@@ -296,9 +304,13 @@ handling in `RenameableLabel` carries over.
   as an `NSAlert` sheet; the scratch header's two items; and the remote session
   row's actions, extracted into a model where they are view-only today. The
   Collapse and Expand items that keyboard users rely on stay.
-- The provider needs-auth popover and the sheets present their existing SwiftUI
-  content through `NSPopover` and `presentAsSheet`, so the SwiftUI path does not
-  change.
+- The provider needs-auth popover presents its existing SwiftUI content through
+  `NSPopover`. Sheets present through SwiftUI's `.sheet(item:)`, attached to the
+  native sidebar's SwiftUI wrapper and driven by a presenter the controller
+  sets from its menus and buttons. They cannot be AppKit sheets:
+  `@Environment(\.dismiss)`, which every one of these sheets closes itself
+  with, has no effect on an `NSHostingController` presented from AppKit. The
+  sheet content is unchanged, and so is the SwiftUI path.
 
 ### Keyboard and accessibility
 
@@ -337,7 +349,10 @@ handling in `RenameableLabel` carries over.
   a drag; a press anywhere else in the row starts one. To keep that true, labels
   are not selectable outside rename, overlay views return nil from `hitTest`,
   the outline does not override `mouseDown`, and the `+` reads ⌥ from
-  `NSEvent.modifierFlags` rather than from the current event.
+  `NSEvent.modifierFlags` rather than from the current event. The PR glyph is
+  not a button: a click on it opens the pull request through the outline's
+  click action, which checks whether the click landed on the glyph, and a press
+  on it can start a drag like any other point in the row.
 
 ### Where it can go
 

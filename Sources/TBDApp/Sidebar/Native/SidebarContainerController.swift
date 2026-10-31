@@ -10,8 +10,10 @@ final class SidebarContainerController: NSViewController {
     let dockSlot = NSView(frame: .zero)
     private(set) var dockHeight: NSLayoutConstraint?
 
-    init(appState: AppState, defaults: UserDefaults) {
-        outlineController = SidebarOutlineController(appState: appState, defaults: defaults)
+    /// - Parameter sheets: the slot `NativeSidebarView` presents the
+    ///   sidebar's sheets from.
+    init(appState: AppState, defaults: UserDefaults, sheets: NativeSidebarSheetPresenter? = nil) {
+        outlineController = SidebarOutlineController(appState: appState, defaults: defaults, sheets: sheets)
         super.init(nibName: nil, bundle: nil)
     }
 
