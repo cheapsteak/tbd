@@ -134,8 +134,11 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
    rebuild-scheduled flag and rebuilds on the next main-loop turn, re-arming the
    tracking as it does. A burst of writes therefore costs one pass. The builder
    never writes to `AppState`, and neither does anything the apply step
-   triggers, or each rebuild would schedule the next. Tests drive the loop
-   through `flushPendingRebuild()`.
+   triggers, or each rebuild would schedule the next. The one exception is a
+   selected row that vanishes: when a selected worktree leaves `AppState`
+   without the selection being pruned, the apply writes the reduced selection
+   once, and the rebuild that write schedules finds nothing left to change.
+   Tests drive the loop through `flushPendingRebuild()`.
 2. The first load is a `reloadData`. After that, the controller diffs the new
    tree against the previous one and applies the result in one
    `beginUpdates`/`endUpdates` block:
@@ -193,10 +196,15 @@ tracking in `layout` and `draw` is not used either: on macOS 15 it needs an
 ### Row heights and indentation
 
 Heights are fixed per kind and variant. They come from the row model, so nothing
-measures: a worktree row is `WorktreeRowView.rowHeight` (the value the dock
-already uses), and a row showing a subtitle ("Creating worktree…", "Running
-setup…", "→ promoted to …") is taller by one subtitle line. Implementation takes
-each value from the SwiftUI path's rendered rows.
+measures. A worktree row is `WorktreeRowView.rowHeight`, 28 pt (the value the
+dock already uses), whether or not it shows a subtitle ("Creating worktree…",
+"Running setup…", "→ promoted to …"): `WorktreeRowView` pins
+`.frame(height: 28)` and stacks the subtitle under the name inside it. A remote
+session row is 28 pt with or without its caption, for the same reason. The rows
+that do grow are headers with a second line — a group header's summary, a
+provider header's issue line — and the row model's height class picks their
+taller variant. Implementation takes each value from the SwiftUI path's
+rendered rows.
 
 Today a section header and the top-level rows beneath it share a leading edge,
 and each nesting level adds 16 pt. In outline terms, a row's visual depth is its

@@ -21,19 +21,10 @@ struct SidebarView: View {
     /// geometry would feed its height back into its own input.
     @State private var sidebarHeight: CGFloat = 0
     @State private var hasRevealedInitialSelection = false
-    @State private var showingClone = false
-
-    /// The `previous` handed to `revealSidebarGroups` for a selection-reveal
-    /// change. Nil — reveal as navigation, expanding a collapsed owning
-    /// section — only on the initial mount. Turning the toggle on mid-session
-    /// moves the observed value from nil to a reveal; that compares the
-    /// reveal against itself, so it opens the selection's groups but never
-    /// overrides a section the user collapsed.
-    static func revealBaseline(
-        previous: SidebarGroupReveal?, reveal: SidebarGroupReveal, hasRevealed: Bool
-    ) -> SidebarGroupReveal? {
-        hasRevealed ? (previous ?? reveal) : nil
-    }
+    /// See `AppState.appKitSidebarKey`. On, the sidebar's list is the native
+    /// `NSOutlineView`; off, the SwiftUI `List` below, unchanged.
+    @AppStorage(AppState.appKitSidebarKey)
+    private var useAppKitSidebar: Bool = AppState.appKitSidebarDefault
 
     /// What re-evaluates the Ended reveal: a new selection event, or the
     /// option itself turning on.
@@ -61,6 +52,30 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        if useAppKitSidebar {
+            nativeSidebar
+        } else {
+            listSidebar
+        }
+    }
+
+    /// The native path: the outline fills the column and the shared footer
+    /// sits beneath it. The outline controller observes `AppState` itself and
+    /// carries its own reveal handling, so none of the `List` path's
+    /// `onChange` handlers apply here.
+    private var nativeSidebar: some View {
+        VStack(spacing: 0) {
+            NativeSidebarView()
+            VStack(spacing: 0) {
+                Divider()
+                SidebarFooter()
+            }
+            .background(.bar)
+        }
+    }
+
+    @ViewBuilder
+    private var listSidebar: some View {
         @Bindable var appState = appState
         ScrollViewReader { proxy in
             List(selection: $appState.selectedWorktreeIDs) {
@@ -94,8 +109,8 @@ struct SidebarView: View {
                 guard let reveal else { return }
                 appState.revealSidebarGroups(
                     reveal,
-                    previous: Self.revealBaseline(previous: previous, reveal: reveal,
-                                                  hasRevealed: hasRevealedInitialSelection),
+                    previous: SidebarReveal.baseline(previous: previous, reveal: reveal,
+                                                     hasRevealed: hasRevealedInitialSelection),
                     grouped: workflowGroups)
             }
             .onChange(of: endedRevealKey, initial: true) { _, key in
@@ -142,76 +157,9 @@ struct SidebarView: View {
                 Divider()
                 PinnedDockView(rows: dockRows, remoteRows: dockRemoteRows,
                                availableHeight: sidebarHeight)
-                HStack(spacing: 4) {
-                    // A split button: a click on the label opens the folder
-                    // picker, as it always has; the arrow offers cloning too.
-                    Menu {
-                        Button("Local Folder…", action: addRepo)
-                        Button("Clone from URL…") { showingClone = true }
-                    } label: {
-                        Label("Add Repository", systemImage: "plus.rectangle")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } primaryAction: {
-                        addRepo()
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .foregroundStyle(.secondary)
-                    Spacer()
-                    filterMenu
-                }
-                .sheet(isPresented: $showingClone) {
-                    CloneRepositorySheet()
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 8)
+                SidebarFooter()
             }
             .background(.bar)
-        }
-    }
-
-    private var hiddenCount: Int {
-        appState.repos.filter { $0.hidden }.count
-    }
-
-    private var filterMenu: some View {
-        Menu {
-            Toggle(isOn: $showHiddenRepos) {
-                if hiddenCount > 0 {
-                    Text("Show hidden repos (\(hiddenCount))")
-                } else {
-                    Text("Show hidden repos")
-                }
-            }
-        } label: {
-            Image(systemName: showHiddenRepos
-                  ? "line.3.horizontal.decrease.circle.fill"
-                  : "line.3.horizontal.decrease.circle")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Filter")
-    }
-
-    private func addRepo() {
-        let panel = NSOpenPanel()
-        panel.title = "Select a Git Repository"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-
-        if panel.runModal() == .OK, let url = panel.url {
-            Task {
-                await appState.addRepo(path: url.path)
-            }
         }
     }
 }
