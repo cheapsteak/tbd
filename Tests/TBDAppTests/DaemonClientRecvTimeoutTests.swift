@@ -161,4 +161,75 @@ struct DaemonClientRecvTimeoutTests {
         #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
         #expect(connects.count == 1)
     }
+
+    /// What the daemon's first line is, for `subscribeAnnouncesOnlyALiveDaemon`.
+    enum FirstLine: String, CaseIterable, Sendable {
+        case errorResponse
+        case acknowledgment
+        case delta
+        case undecodable
+
+        func encoded() throws -> Data {
+            var line: Data
+            switch self {
+            case .errorResponse:
+                line = try JSONEncoder().encode(RPCResponse(error: "acme refused the subscription"))
+            case .acknowledgment:
+                line = try JSONEncoder().encode(RPCResponse.ok())
+            case .delta:
+                line = try JSONEncoder().encode(StateDelta.devServersChanged)
+            case .undecodable:
+                line = Data("not json".utf8)
+            }
+            line.append(0x0A)
+            return line
+        }
+
+        var announcesTheConnect: Bool {
+            switch self {
+            case .acknowledgment, .delta: return true
+            case .errorResponse, .undecodable: return false
+            }
+        }
+    }
+
+    /// The app re-sends its stored program-status reports from `onConnected`,
+    /// so it must mean a live daemon answered the subscription: its
+    /// acknowledgment, or a delta broadcast ahead of it. An error response, or
+    /// a line this build cannot decode, does not.
+    @Test("subscribe() calls onConnected only for an acknowledgment or a delta", arguments: FirstLine.allCases)
+    func subscribeAnnouncesOnlyALiveDaemon(firstLine: FirstLine) async throws {
+        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
+        let listenFd = Self.makeListeningSocket(path: socketPath)
+        defer {
+            close(listenFd)
+            unlink(socketPath)
+        }
+
+        // The one line, then the stream ends.
+        let line = try firstLine.encoded()
+        DispatchQueue.global().async {
+            let clientFd = accept(listenFd, nil, nil)
+            guard clientFd >= 0 else { return }
+            var buf = [UInt8](repeating: 0, count: 4096)
+            _ = recv(clientFd, &buf, buf.count, 0) // read the subscribe bytes
+            line.withUnsafeBytes { bytes in
+                _ = send(clientFd, bytes.baseAddress!, bytes.count, 0)
+            }
+            close(clientFd)
+        }
+
+        let connects = CallCounter()
+        let finished = CallCounter()
+        let client = DaemonClient(socketPath: socketPath)
+        let task = Task {
+            await client.subscribe(onDelta: { _ in }, onConnected: { connects.increment() })
+            finished.increment()
+        }
+        let ended = await pollUntilTrue(timeout: .seconds(5)) { finished.count == 1 }
+        task.cancel()
+
+        #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
+        #expect(connects.count == (firstLine.announcesTheConnect ? 1 : 0))
+    }
 }

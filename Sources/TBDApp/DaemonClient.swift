@@ -1887,9 +1887,10 @@ actor DaemonClient {
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
     ///
-    /// `onConnected` runs once, on the daemon's first line — its
-    /// acknowledgment, or a delta broadcast ahead of it — so an attempt that
-    /// never reaches a live daemon never calls it.
+    /// `onConnected` runs once, on the first line that decodes as the
+    /// daemon's successful acknowledgment or as a delta broadcast ahead of it,
+    /// so an attempt that never reaches a live daemon never calls it, and
+    /// neither does an error response or a line this build cannot decode.
     nonisolated func subscribe(
         onDelta: @escaping DeltaHandler,
         onConnected: @escaping @Sendable () -> Void = {}
@@ -1925,6 +1926,11 @@ actor DaemonClient {
         let decoder = JSONDecoder()
         let probe = RPCVolumeProbe.shared
         var announcedConnect = false
+        func announceConnect() {
+            guard !announcedConnect else { return }
+            announcedConnect = true
+            onConnected()
+        }
 
         while !Task.isCancelled {
             let bytesRead = recv(fd, buffer, bufferSize, 0)
@@ -1945,10 +1951,6 @@ actor DaemonClient {
             while let newlineIndex = accumulated.firstIndex(of: 0x0A) {
                 let lineData = accumulated[accumulated.startIndex..<newlineIndex]
                 accumulated = accumulated[accumulated.index(after: newlineIndex)...]
-                if !announcedConnect {
-                    announcedConnect = true
-                    onConnected()
-                }
 
                 // Measured from here so the recorded cost is the WHOLE frame's
                 // decode, including the ack probe below that fails on every
@@ -1962,6 +1964,7 @@ actor DaemonClient {
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
+                    announceConnect()
                     continue
                 }
 
@@ -1972,6 +1975,7 @@ actor DaemonClient {
                         type: delta.rpcVolumeTypeName,
                         bytes: lineData.count
                     )
+                    announceConnect()
                     onDelta(delta)
                 } else {
                     // Bytes that cost two failed decodes and are then dropped:
