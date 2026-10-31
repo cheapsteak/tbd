@@ -63,22 +63,23 @@ public actor PanelCoordinator {
         self.makeID = makeID
     }
 
-    /// Ungated read. `tabID` present narrows to that one tab; absent returns
-    /// every tab in the worktree plus the worktree's active tab — the
-    /// `worktree.activeTabID` column the app writes through
-    /// `worktree.setActiveTab`. A tab-scoped get leaves `activeTabID` nil: it
-    /// answers about one tab, and the active tab is a worktree-level fact.
+    /// Ungated read. `tabID` present narrows to that one tab, and to none
+    /// when the tab has no surface under this worktree; absent returns every
+    /// tab in the worktree. Either way the result names the worktree's active
+    /// tab — the `worktree.activeTabID` column the app writes through
+    /// `worktree.setActiveTab`, one row to read — so a tab-scoped reply still
+    /// says whether its tab is the one the user is looking at.
     public func get(worktreeID: UUID, tabID: UUID?) async throws -> PanelGetResult {
-        if let tabID {
-            guard let surface = try await db.panelSurface.surface(tabID: tabID),
-                  surface.worktreeID == worktreeID else {
-                return PanelGetResult(tabs: [], activeTabID: nil)
-            }
-            return PanelGetResult(tabs: [surface], activeTabID: nil)
-        }
-        let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
         let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID)
-        return PanelGetResult(tabs: surfaces, activeTabID: activeTabID)
+        guard let tabID else {
+            let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
+            return PanelGetResult(tabs: surfaces, activeTabID: activeTabID)
+        }
+        guard let surface = try await db.panelSurface.surface(tabID: tabID),
+              surface.worktreeID == worktreeID else {
+            return PanelGetResult(tabs: [], activeTabID: activeTabID)
+        }
+        return PanelGetResult(tabs: [surface], activeTabID: activeTabID)
     }
 
     public func apply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {

@@ -47,14 +47,13 @@ struct PanelList: AsyncParsableCommand {
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
         // `panel.get` is ungated, so `list` answers while the flag is off.
-        // Unscoped even with `--tab`: only the unscoped get reports the
-        // worktree's active tab (see `panelListResult`).
-        let all: PanelGetResult = try client.call(
+        // Scoped to `--tab` when given; scoped or not, the reply names the
+        // worktree's active tab, which the listing marks.
+        let result: PanelGetResult = try client.call(
             method: RPCMethod.panelGet,
-            params: PanelGetParams(worktreeID: worktreeID),
+            params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
             resultType: PanelGetResult.self
         )
-        let result = panelListResult(all, tabID: tabID)
 
         if json {
             printJSON(result)
@@ -66,18 +65,9 @@ struct PanelList: AsyncParsableCommand {
     }
 }
 
-/// What `tbd panel list` shows: the worktree's unscoped `panel.get` reply,
-/// narrowed to `tabID` when one is given. A tab-scoped get reports no active
-/// tab, so `list --tab` narrows the unscoped reply instead, which keeps the
-/// worktree's real `activeTabID` and with it the requested tab's `[ACTIVE]`
-/// mark.
-func panelListResult(_ all: PanelGetResult, tabID: UUID?) -> PanelGetResult {
-    guard let tabID else { return all }
-    return PanelGetResult(tabs: all.tabs.filter { $0.id == tabID }, activeTabID: all.activeTabID)
-}
-
-/// The text `tbd panel list` prints for `result`: each tab's lines with a
-/// blank line between tabs, or a note when there is no tab.
+/// The text `tbd panel list` prints for `result`: each tab's lines, the
+/// active tab's marked `[ACTIVE]`, with a blank line between tabs, or a note
+/// when there is no tab.
 func panelListLines(_ result: PanelGetResult) -> [String] {
     guard !result.tabs.isEmpty else { return ["No tabs found."] }
     var lines: [String] = []
@@ -545,9 +535,10 @@ struct PanelTarget {
 /// scoped to the tab it is passed or unscoped for nil.
 ///
 /// With `--tab`, the get is scoped to that tab. Without it, the get is
-/// unscoped: its `activeTabID` names the worktree's active tab (the daemon
-/// reads `worktree.activeTabID`, which the app keeps current), and it carries
-/// every surface of the worktree, that tab's among them when it has one.
+/// unscoped, because the tab is not known yet: its `activeTabID` names the
+/// worktree's active tab (the daemon reads `worktree.activeTabID`, which the
+/// app keeps current), and it carries every surface of the worktree, that
+/// tab's among them when it has one.
 func resolvePanelTarget(
     tab: String?, get: (_ tabID: UUID?) throws -> PanelGetResult
 ) throws -> PanelTarget {

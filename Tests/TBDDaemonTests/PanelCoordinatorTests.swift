@@ -187,15 +187,35 @@ struct PanelCoordinatorTests {
         #expect(whole.tabs.first?.side.panel(id: panelID)?.history == history)
         #expect(whole.activeTabID == tab.id)
 
-        // A tab-scoped get answers about one tab and leaves activeTabID nil.
         let scoped = try await coordinator.get(worktreeID: wtID, tabID: tab.id)
         #expect(scoped.tabs == [tab])
-        #expect(scoped.activeTabID == nil)
+        #expect(scoped.tabs.first?.side.panel(id: panelID)?.history == history)
+    }
+
+    /// A tab-scoped get answers about one tab, and still names the
+    /// worktree's active tab, so `tbd panel list --tab` can mark it.
+    @Test func getScopedReportsActiveTab() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        // Flag never set: get is ungated.
+        let wtID = try await makeWorktree(db)
+        let active = try await seedTab(db, worktreeID: wtID, position: 0)
+        let inactive = try await seedTab(db, worktreeID: wtID, position: 1)
+        try await db.worktrees.setActiveTabID(worktreeID: wtID, tabID: active.id)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
+
+        let onActive = try await coordinator.get(worktreeID: wtID, tabID: active.id)
+        #expect(onActive.tabs == [active])
+        #expect(onActive.activeTabID == active.id)
+
+        let onInactive = try await coordinator.get(worktreeID: wtID, tabID: inactive.id)
+        #expect(onInactive.tabs == [inactive])
+        #expect(onInactive.activeTabID == active.id, "the active tab is the worktree's, whichever tab was asked for")
 
         // A tab under another worktree is not this worktree's tab.
         let otherWtID = try await makeWorktree(db, name: "other")
-        let foreign = try await coordinator.get(worktreeID: otherWtID, tabID: tab.id)
+        let foreign = try await coordinator.get(worktreeID: otherWtID, tabID: active.id)
         #expect(foreign.tabs.isEmpty)
+        #expect(foreign.activeTabID == nil, "the other worktree has no active tab recorded")
     }
 
     // MARK: - Resource existence

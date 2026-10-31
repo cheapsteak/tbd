@@ -471,9 +471,9 @@ struct PanelSideRegionRenderingTests {
     }
 }
 
-/// `tbd panel list`: the unscoped `panel.get` reply, narrowed to `--tab`
-/// when given. Only the unscoped reply names the active tab, so narrowing it
-/// keeps the `[ACTIVE]` mark that a tab-scoped get would lose.
+/// `tbd panel list`: one `panel.get`, scoped to `--tab` when given. Scoped
+/// or not, the daemon's reply names the worktree's active tab, which the
+/// listing marks `[ACTIVE]`.
 @Suite("tbd panel list rendering")
 struct PanelListRenderingTests {
     private let activeTabID = UUID()
@@ -492,20 +492,26 @@ struct PanelListRenderingTests {
             activeTabID: activeTabID)
     }
 
+    /// The daemon's reply to a get scoped to `tabID`: that tab alone, and the
+    /// worktree's active tab.
+    private func scoped(to tabID: UUID) -> PanelGetResult {
+        PanelGetResult(tabs: all.tabs.filter { $0.id == tabID }, activeTabID: activeTabID)
+    }
+
     @Test func tabOptionMarksTheActiveTab() {
-        let lines = panelListLines(panelListResult(all, tabID: activeTabID))
+        let lines = panelListLines(scoped(to: activeTabID))
         #expect(lines.first == "Tab \(activeTabID) [ACTIVE] — Active")
         #expect(!lines.contains(where: { $0.contains("\(otherTabID)") }), "only the requested tab is listed")
     }
 
     @Test func tabOptionOnAnInactiveTabListsItUnmarked() {
-        let lines = panelListLines(panelListResult(all, tabID: otherTabID))
+        let lines = panelListLines(scoped(to: otherTabID))
         #expect(lines.first == "Tab \(otherTabID) — Other")
         #expect(!lines.contains(where: { $0.contains("\(activeTabID)") }))
     }
 
     @Test func noTabOptionListsEveryTabWithABlankLineBetween() {
-        let lines = panelListLines(panelListResult(all, tabID: nil))
+        let lines = panelListLines(all)
         let headers = lines.filter { $0.hasPrefix("Tab ") }
         #expect(headers == ["Tab \(activeTabID) [ACTIVE] — Active", "Tab \(otherTabID) — Other"])
         let second = lines.firstIndex(of: "Tab \(otherTabID) — Other")
@@ -514,6 +520,6 @@ struct PanelListRenderingTests {
     }
 
     @Test func aTabTheWorktreeDoesNotHoldListsNothing() {
-        #expect(panelListLines(panelListResult(all, tabID: UUID())) == ["No tabs found."])
+        #expect(panelListLines(scoped(to: UUID())) == ["No tabs found."])
     }
 }
