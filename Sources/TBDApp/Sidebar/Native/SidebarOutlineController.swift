@@ -356,7 +356,6 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             outline.endUpdates()
             NSAnimationContext.endGrouping()
         }
-        items.retain(only: tree)
 
         let shownRows = outline.numberOfRows
         let expectedRows = tree.visibleRowCount
@@ -364,8 +363,13 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             fallbackReloadCount += 1
             outlineLogger.fault(
                 "Native sidebar diff left \(shownRows, privacy: .public) rows for a tree of \(expectedRows, privacy: .public); reloading")
+            // Nothing is pruned yet: the outline may still show items the new
+            // tree lacks, and the reload has to be able to let go of them.
+            // It prunes once it is done.
             reloadAndExpand()
         } else {
+            // The outline has let go of every removed item.
+            items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
             noteHeights(update.heightChanged)
         }
