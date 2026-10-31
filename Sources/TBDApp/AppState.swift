@@ -3550,8 +3550,8 @@ final class AppState {
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
-    /// `suspendedSnapshot`, `hibernateReason` and, when the delta carries it,
-    /// `sessionIncarnationID` on the row in place so the
+    /// `suspendedSnapshot`, `hibernateReason` and, when the delta carries them,
+    /// `sessionIncarnationID` and the activity columns on the row in place so the
     /// whisper indicator and action menu re-render without a full terminal
     /// refetch. Snapshot and reason must land WITH the `hibernated` flip: the
     /// parked TerminalPanelView materializes the instant `isParked` flips
@@ -3598,6 +3598,12 @@ final class AppState {
         // row's incarnation, and the daemon refuses one it no longer runs.
         if let incarnationID = delta.sessionIncarnationID {
             terminals[delta.worktreeID]?[idx].sessionIncarnationID = incarnationID
+        }
+        // The activity columns the park (`.idle`) or wake (`.unknown`) wrote,
+        // which no activity delta announces. Ordered like one, so a report the
+        // woken agent made after the read-back is not undone by it.
+        if let activity = delta.activity {
+            terminals[delta.worktreeID]?[idx].applyActivityDelta(activity)
         }
         if delta.hibernated {
             // Parked: the delta carries the just-captured snapshot + reason

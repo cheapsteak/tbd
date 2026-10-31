@@ -216,11 +216,25 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// then keeps its cached value. Optional with a nil default so payloads
     /// from older daemons still decode.
     public let sessionIncarnationID: UUID?
+    /// The row's activity columns as the park or wake committed them, read
+    /// back with `sessionIncarnationID`. A park writes `.idle` and a wake
+    /// resets the column to `.unknown` for the incarnation it mints, and no
+    /// `terminalActivityUpdated` announces either, so without this the cached
+    /// row keeps whatever it read before — a woken agent that cannot report
+    /// would keep a stale working or waiting state, and never get the
+    /// no-status mark. The app applies it under the activity ordering stamp,
+    /// as it applies `terminalActivityUpdated`. Nil on a keep-warm
+    /// re-broadcast, when the daemon could not read the row back, and from
+    /// daemons that predate this field: the app then keeps its cached values.
+    /// Optional with a nil default so payloads from older daemons still
+    /// decode.
+    public let activity: TerminalActivityDelta?
     public init(
         terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
         suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        activity: TerminalActivityDelta? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
@@ -231,6 +245,7 @@ public struct TerminalHibernationDelta: Codable, Sendable {
         self.suspendedSnapshot = suspendedSnapshot
         self.hibernateReason = hibernateReason
         self.sessionIncarnationID = sessionIncarnationID
+        self.activity = activity
     }
 }
 
@@ -340,6 +355,18 @@ public struct TerminalActivityDelta: Codable, Sendable {
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
+    }
+
+    /// The activity columns `terminal` holds, as the delta that announces
+    /// them.
+    public init(columnsOf terminal: Terminal) {
+        self.init(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            activityState: terminal.activityState,
+            activityStateSource: terminal.activityStateSource,
+            activityStateObservedAt: terminal.activityStateObservedAt,
+            activityStateOrderObservedAt: terminal.activityStateOrderObservedAt)
     }
 }
 

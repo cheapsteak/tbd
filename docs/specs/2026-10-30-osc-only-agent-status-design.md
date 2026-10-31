@@ -118,7 +118,11 @@ may park.
 
 The store pushes the same `terminalActivityUpdated` and
 `terminalAwaitingInputChanged` deltas the hook handlers pushed, so the app's
-tab bar and sidebar read the same fields as before.
+tab bar and sidebar read the same fields as before. A park's `.idle` and a
+wake's reset to `.unknown` for the incarnation it mints reach the app on the
+park's or wake's own `terminalHibernationChanged` delta, which carries the
+activity columns read back from the row; the app applies them under the same
+ordering stamp.
 
 ### Attention banner
 

@@ -5989,7 +5989,8 @@ extension RPCRouter {
             keepWarm: row.keepWarm,
             suspendedSnapshot: parked ? row.suspendedSnapshot : nil,
             hibernateReason: parked ? row.hibernateReason : nil,
-            sessionIncarnationID: row.sessionIncarnationID
+            sessionIncarnationID: row.sessionIncarnationID,
+            activity: TerminalActivityDelta(columnsOf: row)
         )))
     }
 

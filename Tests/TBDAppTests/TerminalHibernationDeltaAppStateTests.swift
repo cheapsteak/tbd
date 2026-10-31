@@ -123,4 +123,116 @@ struct TerminalHibernationDeltaAppStateTests {
             #expect(row?.suspendedSnapshot == "FROZEN PANE")
         }
     }
+
+    // MARK: - Activity columns
+
+    /// A wake resets the row's activity column to `.unknown` for the
+    /// incarnation it mints, and nothing but the wake's own delta announces
+    /// it: a Claude row cached as working must read `.unknown`, with the
+    /// reset's source and stamps, once that delta lands — so an agent that
+    /// cannot report gets the no-status mark rather than a stale badge.
+    @Test func wakeDelta_appliesTheResetActivityColumns() {
+        withState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let reported = Date(timeIntervalSince1970: 1_800_000_000)
+            let reset = reported.addingTimeInterval(60)
+            state.terminals = [worktreeID: [
+                TBDShared.Terminal(
+                    id: terminalID, worktreeID: worktreeID,
+                    tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+                    activityState: .working, hibernatedAt: reported,
+                    activityStateSource: .programStatus,
+                    activityStateObservedAt: reported,
+                    activityStateOrderObservedAt: reported,
+                    transport: .holder)
+            ]]
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: false, keepWarm: false,
+                activity: TerminalActivityDelta(
+                    terminalID: terminalID, worktreeID: worktreeID,
+                    activityState: .unknown, activityStateSource: .derived,
+                    activityStateObservedAt: reset, activityStateOrderObservedAt: reset)
+            )))
+
+            let row = state.terminals[worktreeID]?[0]
+            #expect(row?.activityState == .unknown)
+            #expect(row?.activityStateSource == .derived)
+            #expect(row?.activityStateObservedAt == reset)
+            #expect(row?.activityStateOrderObservedAt == reset)
+        }
+    }
+
+    /// A park writes `.idle` (TBD's own record) and its delta carries it.
+    @Test func parkDelta_appliesTheParkedActivityColumns() {
+        withState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let reported = Date(timeIntervalSince1970: 1_800_000_000)
+            let parked = reported.addingTimeInterval(60)
+            state.terminals = [worktreeID: [
+                TBDShared.Terminal(
+                    id: terminalID, worktreeID: worktreeID,
+                    tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude,
+                    activityState: .waitingForUser,
+                    activityStateSource: .programStatus,
+                    activityStateObservedAt: reported,
+                    activityStateOrderObservedAt: reported)
+            ]]
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: true, keepWarm: false, hibernateReason: .manual,
+                activity: TerminalActivityDelta(
+                    terminalID: terminalID, worktreeID: worktreeID,
+                    activityState: .idle, activityStateSource: .database,
+                    activityStateObservedAt: parked, activityStateOrderObservedAt: parked)
+            )))
+
+            let row = state.terminals[worktreeID]?[0]
+            #expect(row?.activityState == .idle)
+            #expect(row?.activityStateSource == .database)
+        }
+    }
+
+    /// The carried columns are ordered like an activity delta: a read-back
+    /// older than what the cached row holds — the woken agent reported after
+    /// it — leaves the newer value standing. A delta with no columns (a
+    /// keep-warm re-broadcast, an older daemon) leaves the cached ones alone.
+    @Test func hibernationDelta_doesNotUndoANewerCachedActivity() {
+        withState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let reset = Date(timeIntervalSince1970: 1_800_000_000)
+            let reported = reset.addingTimeInterval(5)
+            state.terminals = [worktreeID: [
+                TBDShared.Terminal(
+                    id: terminalID, worktreeID: worktreeID,
+                    tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+                    activityState: .working, hibernatedAt: reset,
+                    activityStateSource: .programStatus,
+                    activityStateObservedAt: reported,
+                    activityStateOrderObservedAt: reported,
+                    transport: .holder)
+            ]]
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: false, keepWarm: false,
+                activity: TerminalActivityDelta(
+                    terminalID: terminalID, worktreeID: worktreeID,
+                    activityState: .unknown, activityStateSource: .derived,
+                    activityStateObservedAt: reset, activityStateOrderObservedAt: reset)
+            )))
+            #expect(state.terminals[worktreeID]?[0].activityState == .working)
+            #expect(state.terminals[worktreeID]?[0].activityStateSource == .programStatus)
+
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: terminalID, worktreeID: worktreeID,
+                hibernated: false, keepWarm: true)))
+            #expect(state.terminals[worktreeID]?[0].activityState == .working)
+        }
+    }
 }
