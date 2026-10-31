@@ -121,23 +121,29 @@ struct DaemonClientRecvTimeoutTests {
         }
     }
 
-    /// `onConnected` runs once per subscription, on the daemon's first line,
-    /// however many lines follow: the app re-sends its stored program-status
-    /// reports from it, so a second call would re-send them twice.
-    @Test("subscribe() calls onConnected once, on the daemon's first line")
-    func subscribeAnnouncesTheConnectOnce() async throws {
+    /// Subscribe against a fake daemon that accepts one connection, reads the
+    /// subscribe request, writes `lines` and closes, and return how many times
+    /// `onConnected` ran once the stream ended.
+    ///
+    /// `lines` are framed as the daemon frames them: `SocketServer` and
+    /// `StateSubscriptionManager` encode the acknowledgment and every delta
+    /// with a default `JSONEncoder` and end each with a newline.
+    ///
+    /// The wait is a hang guard on the shared saturated-pass deadline, never a
+    /// short literal. `subscribe` reads on a cooperative thread, and the fast
+    /// parallel pass keeps a test suspended behind other runnable ones for tens
+    /// of seconds on a green run (Tests/CLAUDE.md), so a 5-second bound expired
+    /// before `subscribe` had read a byte, and recorded no connect for a daemon
+    /// that answered. The daemon runs on a thread of its own, so it waits for
+    /// no pooled one.
+    private static func connectsAfterServing(_ lines: Data) async -> Int {
         let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
-        let listenFd = Self.makeListeningSocket(path: socketPath)
+        let listenFd = makeListeningSocket(path: socketPath)
         defer {
             close(listenFd)
             unlink(socketPath)
         }
-
-        // The daemon's acknowledgment, twice, then the stream ends.
-        var ackLine = try JSONEncoder().encode(RPCResponse.ok())
-        ackLine.append(0x0A)
-        let lines = ackLine + ackLine
-        DispatchQueue.global().async {
+        let daemon = Thread {
             let clientFd = accept(listenFd, nil, nil)
             guard clientFd >= 0 else { return }
             var buf = [UInt8](repeating: 0, count: 4096)
@@ -147,6 +153,7 @@ struct DaemonClientRecvTimeoutTests {
             }
             close(clientFd)
         }
+        daemon.start()
 
         let connects = CallCounter()
         let finished = CallCounter()
@@ -155,11 +162,30 @@ struct DaemonClientRecvTimeoutTests {
             await client.subscribe(onDelta: { _ in }, onConnected: { connects.increment() })
             finished.increment()
         }
-        let ended = await pollUntilTrue(timeout: .seconds(5)) { finished.count == 1 }
+        let ended = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { finished.count == 1 }
         task.cancel()
 
         #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
-        #expect(connects.count == 1)
+        return connects.count
+    }
+
+    /// One daemon line, framed as the daemon frames it.
+    private static func line(_ encodable: some Encodable) throws -> Data {
+        var line = try JSONEncoder().encode(encodable)
+        line.append(0x0A)
+        return line
+    }
+
+    /// `onConnected` runs once per subscription, however many lines follow:
+    /// the app re-sends its stored program-status reports from it, so a second
+    /// call would re-send them twice.
+    @Test("subscribe() calls onConnected once, on the daemon's first line")
+    func subscribeAnnouncesTheConnectOnce() async throws {
+        let ack = try Self.line(RPCResponse.ok())
+
+        let connects = await Self.connectsAfterServing(ack + ack)
+
+        #expect(connects == 1)
     }
 
     /// What the daemon's first line is, for `subscribeAnnouncesOnlyALiveDaemon`.
@@ -170,19 +196,17 @@ struct DaemonClientRecvTimeoutTests {
         case undecodable
 
         func encoded() throws -> Data {
-            var line: Data
             switch self {
             case .errorResponse:
-                line = try JSONEncoder().encode(RPCResponse(error: "acme refused the subscription"))
+                return try DaemonClientRecvTimeoutTests.line(
+                    RPCResponse(error: "acme refused the subscription"))
             case .acknowledgment:
-                line = try JSONEncoder().encode(RPCResponse.ok())
+                return try DaemonClientRecvTimeoutTests.line(RPCResponse.ok())
             case .delta:
-                line = try JSONEncoder().encode(StateDelta.devServersChanged)
+                return try DaemonClientRecvTimeoutTests.line(StateDelta.devServersChanged)
             case .undecodable:
-                line = Data("not json".utf8)
+                return Data("not json\n".utf8)
             }
-            line.append(0x0A)
-            return line
         }
 
         var announcesTheConnect: Bool {
@@ -199,37 +223,10 @@ struct DaemonClientRecvTimeoutTests {
     /// a line this build cannot decode, does not.
     @Test("subscribe() calls onConnected only for an acknowledgment or a delta", arguments: FirstLine.allCases)
     func subscribeAnnouncesOnlyALiveDaemon(firstLine: FirstLine) async throws {
-        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
-        let listenFd = Self.makeListeningSocket(path: socketPath)
-        defer {
-            close(listenFd)
-            unlink(socketPath)
-        }
-
-        // The one line, then the stream ends.
         let line = try firstLine.encoded()
-        DispatchQueue.global().async {
-            let clientFd = accept(listenFd, nil, nil)
-            guard clientFd >= 0 else { return }
-            var buf = [UInt8](repeating: 0, count: 4096)
-            _ = recv(clientFd, &buf, buf.count, 0) // read the subscribe bytes
-            line.withUnsafeBytes { bytes in
-                _ = send(clientFd, bytes.baseAddress!, bytes.count, 0)
-            }
-            close(clientFd)
-        }
 
-        let connects = CallCounter()
-        let finished = CallCounter()
-        let client = DaemonClient(socketPath: socketPath)
-        let task = Task {
-            await client.subscribe(onDelta: { _ in }, onConnected: { connects.increment() })
-            finished.increment()
-        }
-        let ended = await pollUntilTrue(timeout: .seconds(5)) { finished.count == 1 }
-        task.cancel()
+        let connects = await Self.connectsAfterServing(line)
 
-        #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
-        #expect(connects.count == (firstLine.announcesTheConnect ? 1 : 0))
+        #expect(connects == (firstLine.announcesTheConnect ? 1 : 0))
     }
 }
