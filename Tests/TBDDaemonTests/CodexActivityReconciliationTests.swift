@@ -46,6 +46,25 @@ struct CodexActivityReconciliationTests {
             actuationLog: makeTestActuationLog())
     }
 
+    /// Writes `contents` to `session.jsonl` in a fresh temporary directory and
+    /// returns the file. The caller removes the directory
+    /// (`deletingLastPathComponent()`) in a `defer` registered right after the
+    /// call; a write that fails removes it here, since no caller's `defer` is
+    /// registered yet.
+    private func makeTranscript(_ contents: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("session.jsonl")
+        do {
+            try contents.write(to: path, atomically: true, encoding: .utf8)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        return path
+    }
+
     private func makeBoundaryTerminal(
         tag: String,
         kind: TerminalKind = .codex
@@ -1054,12 +1073,10 @@ struct CodexActivityReconciliationTests {
             path: "/tmp/car-retain-second-\(UUID().uuidString)", tmuxServer: "tbd-car-second")
         let firstPath = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n")
+        defer { try? FileManager.default.removeItem(at: firstPath.deletingLastPathComponent()) }
         let secondPath = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}"# + "\n")
-        defer {
-            try? FileManager.default.removeItem(at: firstPath.deletingLastPathComponent())
-            try? FileManager.default.removeItem(at: secondPath.deletingLastPathComponent())
-        }
+        defer { try? FileManager.default.removeItem(at: secondPath.deletingLastPathComponent()) }
         let first = try await db.terminals.create(
             worktreeID: firstWorktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .codex)
         let second = try await db.terminals.create(
@@ -1102,15 +1119,6 @@ struct CodexActivityReconciliationTests {
 
     /// A second router over the same database, with its `now` pinned.
     ///
-    private func makeTranscript(_ contents: String) throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let path = directory.appendingPathComponent("session.jsonl")
-        try contents.write(to: path, atomically: true, encoding: .utf8)
-        return path
-    }
-
     /// `setActivityState` defaults `observedAt` to a bare `Date()` **at the
     /// store**, so a handler that omits the argument mints a timestamp nothing
     /// outside the store can name. That is not a cosmetic difference: the stamp
