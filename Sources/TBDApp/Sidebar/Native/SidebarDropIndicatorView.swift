@@ -8,24 +8,27 @@ import AppKit
 /// between-rows line, and it indents by raw outline level, a level off this
 /// sidebar's visual depth. So the controller draws the line here, from the
 /// drop policy's answer, at the destination's visual depth: it starts on the
-/// destination parent's guide line, with a small ring, and runs to the
-/// trailing edge. The nest highlight is the row view's own
-/// (`SidebarRowView.Configuration.isNestTarget`).
+/// destination parent's guide line, with a small ring, and stops short of the
+/// trailing edge and of a vertical scroller that shows. The nest highlight is
+/// the row view's own (`SidebarRowView.Configuration.isNestTarget`).
 ///
 /// The view is laid over the outline's scroll view, beside the tooltip
-/// overlay, and never takes a click: `hitTest` returns nil, so a press under
-/// it reaches the row.
+/// overlay, so it does not scroll with the rows: the controller places the
+/// line again whenever the outline scrolls. It never takes a click:
+/// `hitTest` returns nil, so a press under it reaches the row.
 final class SidebarDropIndicatorView: NSView {
-    /// Where the line starts, in the view's own coordinates: the ring's
-    /// centre.
+    /// The line, in the view's own coordinates: the ring's centre at `x`,
+    /// `y`, and the line's trailing end at `endX`.
     struct Line: Equatable {
         var x: CGFloat
         var y: CGFloat
+        var endX: CGFloat
     }
 
     static let ringDiameter: CGFloat = 6
     static let lineWidth: CGFloat = 2
-    /// The line stops this far short of the trailing edge.
+    /// The line stops this far short of the trailing edge, or of the
+    /// scroller.
     static let trailingInset: CGFloat = 4
 
     /// The line shown, or nil when there is none.
@@ -56,7 +59,7 @@ final class SidebarDropIndicatorView: NSView {
         ringPath.lineWidth = 1.5
         ringPath.stroke()
         let start = ring.maxX
-        let width = bounds.maxX - Self.trailingInset - start
+        let width = line.endX - start
         guard width > 0 else { return }
         NSRect(x: start, y: line.y - Self.lineWidth / 2, width: width, height: Self.lineWidth).fill()
     }

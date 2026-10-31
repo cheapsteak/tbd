@@ -157,9 +157,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     // MARK: Drag state (`+Drag`)
 
-    /// Where a drop decision looks up the shown tree. Built once per apply,
-    /// so the drag path, which asks on every pointer move, never builds one.
-    var dropIndex = SidebarDropIndex(tree: SidebarTree())
+    /// `dropIndex` for the shown tree, built on first use and dropped by every
+    /// apply. Written only by `dropIndex` and the apply.
+    var dropIndexCache: SidebarDropIndex?
+    /// The gap the insertion line marks, so the line follows its rows when
+    /// the outline scrolls under a still pointer. Nil when no line shows.
+    var dropLinePosition: SidebarDropPolicy.Retarget?
     /// True from a drag session's `willBeginAt` to its `endedAt`. The outline
     /// then expands nothing, the controller's own `expandItem` included, so
     /// a collapsed section never springs open under a drag.

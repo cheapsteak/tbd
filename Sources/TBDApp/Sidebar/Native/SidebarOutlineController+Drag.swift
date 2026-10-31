@@ -48,6 +48,23 @@ extension SidebarOutlineController {
         // controller draws both indicators from the policy's answer.
         outline.draggingDestinationFeedbackStyle = .none
         outline.onDropFeedbackEnded = { [weak self] in self?.clearDropFeedback() }
+        // The line sits in an overlay that does not scroll: an autoscroll or
+        // a two-finger scroll during the drag places it again.
+        let clip = scrollView.contentView
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clipViewScrolledUnderDrop(_:)),
+            name: NSView.boundsDidChangeNotification, object: clip)
+    }
+
+    /// Where a drop decision looks up the shown tree: built on first use
+    /// after each apply, so a rebuild no drag asks about never builds one,
+    /// and a drag, which asks on every pointer move, builds it once.
+    var dropIndex: SidebarDropIndex {
+        if let dropIndexCache { return dropIndexCache }
+        let index = SidebarDropIndex(tree: tree)
+        dropIndexCache = index
+        return index
     }
 
     // MARK: Source
@@ -283,15 +300,12 @@ extension SidebarOutlineController {
     private func showDropFeedback(_ decision: SidebarDropDecision, at position: SidebarDropPolicy.Retarget) {
         switch decision {
         case .nest(let target):
-            dropIndicator.hide()
+            hideDropLine()
             setNestTarget(.worktree(target))
         case .place:
             setNestTarget(nil)
-            if let line = insertionLine(at: position) {
-                dropIndicator.show(line)
-            } else {
-                dropIndicator.hide()
-            }
+            dropLinePosition = position
+            placeDropLine()
         case .reject:
             clearDropFeedback()
         }
@@ -300,8 +314,31 @@ extension SidebarOutlineController {
     /// Takes down the insertion line and the nest highlight: a rejected
     /// proposal, and a drag that left the outline, concluded or ended.
     func clearDropFeedback() {
-        dropIndicator.hide()
+        hideDropLine()
         setNestTarget(nil)
+    }
+
+    private func hideDropLine() {
+        dropLinePosition = nil
+        dropIndicator.hide()
+    }
+
+    /// Draws the insertion line at `dropLinePosition` as the outline now
+    /// lies.
+    private func placeDropLine() {
+        guard let position = dropLinePosition else { return }
+        if let line = insertionLine(at: position) {
+            dropIndicator.show(line)
+        } else {
+            dropIndicator.hide()
+        }
+    }
+
+    /// The outline scrolled — an autoscroll at the edge during a drag, or a
+    /// two-finger scroll — and its rows slid under the overlay: the line
+    /// follows its gap.
+    @objc func clipViewScrolledUnderDrop(_ notification: Notification) {
+        placeDropLine()
     }
 
     /// Moves the nest highlight. A row view made later takes it from
@@ -342,7 +379,19 @@ extension SidebarOutlineController {
         let x = dropDepthInset + CGFloat(entry.level) * SidebarNativeMetrics.indentation
             - SidebarNativeMetrics.guideLineOffset
         let point = dropIndicator.convert(NSPoint(x: x, y: y), from: outline)
-        return SidebarDropIndicatorView.Line(x: point.x, y: point.y)
+        return SidebarDropIndicatorView.Line(x: point.x, y: point.y, endX: dropLineEndX)
+    }
+
+    /// Where the insertion line stops, in the indicator's coordinates: short
+    /// of the clip view's trailing edge, and of the vertical scroller when
+    /// one shows.
+    var dropLineEndX: CGFloat {
+        var edge = dropIndicator.convert(NSPoint(x: scrollView.contentView.frame.maxX, y: 0), from: scrollView).x
+        if scrollView.hasVerticalScroller, let scroller = scrollView.verticalScroller,
+           !scroller.isHidden, scroller.alphaValue > 0 {
+            edge = min(edge, dropIndicator.convert(scroller.frame.origin, from: scrollView).x)
+        }
+        return edge - SidebarDropIndicatorView.trailingInset
     }
 
     /// The last row the outline shows in `node`'s subtree.

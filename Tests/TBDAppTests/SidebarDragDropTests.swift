@@ -130,6 +130,30 @@ struct SidebarDragDropTests {
         let pressedName = h.outline.canDragRows(with: rows, at: namePoint)
         #expect(pressedName)
         #expect(h.outline.dragOrigin == id)
+
+        // A plain click is no drag: the origin it recorded does not outlive
+        // it, so a later drag never reads a stale one.
+        h.controller.outlineClicked(nil)
+        #expect(h.outline.dragOrigin == nil)
+    }
+
+    @Test func holdingOptionKeepsTheDropAMove() throws {
+        let h = OutlineHarness("drag.modifiers")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        h.mount()
+
+        // Rows move within the app and never leave it…
+        let session = NSDraggingSession()
+        let within = h.outline.draggingSession(session, sourceOperationMaskFor: .withinApplication)
+        let outside = h.outline.draggingSession(session, sourceOperationMaskFor: .outsideApplication)
+        #expect(within == .move)
+        #expect(outside == [])
+        // …and a modifier key held mid-drag — ⌥ above all — does not narrow
+        // that move to an operation the sidebar refuses.
+        let ignoresModifiers = h.outline.ignoreModifierKeys(for: session)
+        #expect(ignoresModifiers)
     }
 
     @Test func multiItemPayloadReadsEveryPasteboardItem() async throws {
@@ -218,32 +242,164 @@ struct SidebarDragDropTests {
         let top = try Self.validate(info, parent: repo, childIndex: belowMain, depth: 0, in: h)
         #expect(top == .move)
         let aTop = h.outline.rect(ofRow: h.row(a)).minY
-        #expect(h.controller.dropIndicator.line == Self.line(x: inset - guide, y: aTop, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset - guide, y: aTop, in: h))
         #expect(h.controller.nestTargetID == nil)
+
+        // The line stops short of the clip view's edge, and of a vertical
+        // scroller when one shows; the overlay never takes a click.
+        let line = try #require(h.controller.dropIndicator.line)
+        let clipEdge = h.controller.dropIndicator.convert(
+            NSPoint(x: h.clip.frame.maxX, y: 0), from: h.controller.scrollView).x
+        #expect(line.endX == h.controller.dropLineEndX)
+        #expect(line.endX <= clipEdge - SidebarDropIndicatorView.trailingInset)
+        #expect(line.endX > line.x)
+        let probe = NSPoint(x: line.x, y: line.y)
+        #expect(h.controller.dropIndicator.hitTest(probe) == nil)
 
         // The gap below `a1`, the end of `a`'s children: the pointer's depth
         // picks the level. One step in, the rows join `a`'s children…
         let a1Bottom = h.outline.rect(ofRow: h.row(.worktree(f.a1.id))).maxY
         let nested = try Self.validate(info, parent: a, childIndex: 1, depth: 1, in: h)
         #expect(nested == .move)
-        #expect(h.controller.dropIndicator.line == Self.line(x: inset + step - guide, y: a1Bottom, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset + step - guide, y: a1Bottom, in: h))
         // …and at depth 0 they land at the top level, between `a`'s subtree
         // and `b`.
         let shallow = try Self.validate(info, parent: a, childIndex: 1, depth: 0, in: h)
         #expect(shallow == .move)
-        #expect(h.controller.dropIndicator.line == Self.line(x: inset - guide, y: a1Bottom, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset - guide, y: a1Bottom, in: h))
+        Self.endSession(in: h)
+        #expect(h.controller.dropIndicator.line == nil)
+    }
 
-        // The drag leaving the outline takes the line down.
+    @Test func retargetsOnlyWhenTheAnswerDiffers() throws {
+        let h = OutlineHarness("drag.retarget")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        h.mount()
+        let info = try Self.startDrag(pressing: .worktree(f.c.id), in: h)
+        defer { info.release() }
+        let repo = SidebarNodeID.repoHeader(f.repo.id)
+        let a = SidebarNodeID.worktree(f.a.id)
+        let b = SidebarNodeID.worktree(f.b.id)
+        let onto = SidebarDropPolicy.dropOnItemIndex
+
+        // Proposals the policy takes as they are: no retarget.
+        let belowMain = try Self.childIndex(of: a, under: repo, in: h)
+        let gap = try Self.validate(info, parent: repo, childIndex: belowMain, depth: 0, in: h)
+        let nested = try Self.validate(info, parent: a, childIndex: 1, depth: 1, in: h)
+        let nest = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        #expect([gap, nested, nest] == [.move, .move, .move])
+        #expect(h.outline.dropRetargetCount == 0)
+
+        // The end of `a`'s children with the pointer at depth 0 means the top
+        // level, between `a`'s subtree and `b`: retargeted there.
+        let shallow = try Self.validate(info, parent: a, childIndex: 1, depth: 0, in: h)
+        #expect(shallow == .move)
+        #expect(h.outline.dropRetargetCount == 1)
+        let aboveB = try Self.childIndex(of: b, under: repo, in: h)
+        #expect(h.outline.lastDropRetarget?.item == repo)
+        #expect(h.outline.lastDropRetarget?.childIndex == aboveB)
+
+        // Onto the main row un-nests directly below it: retargeted there too.
+        let main = SidebarNodeID.worktree(f.main.id)
+        let ontoMain = try Self.validate(info, parent: main, childIndex: onto, in: h)
+        #expect(ontoMain == .move)
+        #expect(h.outline.dropRetargetCount == 2)
+        #expect(h.outline.lastDropRetarget?.item == repo)
+        #expect(h.outline.lastDropRetarget?.childIndex == belowMain)
+
+        // A rejected proposal is not retargeted.
+        let ontoItself = try Self.validate(info, parent: .worktree(f.c.id), childIndex: onto, in: h)
+        #expect(ontoItself == [])
+        #expect(h.outline.dropRetargetCount == 2)
+        Self.endSession(in: h)
+    }
+
+    @Test func dragEndingMessagesClearTheFeedback() throws {
+        let h = OutlineHarness("drag.feedbackEnds")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        h.mount()
+        let info = try Self.startDrag(pressing: .worktree(f.c.id), in: h)
+        defer { info.release() }
+        let repo = SidebarNodeID.repoHeader(f.repo.id)
+        let b = SidebarNodeID.worktree(f.b.id)
+        let aboveB = try Self.childIndex(of: b, under: repo, in: h)
+        let onto = SidebarDropPolicy.dropOnItemIndex
+
+        // Leaving the outline.
+        _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
+        try #require(h.controller.dropIndicator.line != nil)
         h.outline.draggingExited(nil)
         #expect(h.controller.dropIndicator.line == nil)
+        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        try #require(h.controller.nestTargetID == b)
+        h.outline.draggingExited(nil)
+        #expect(h.controller.nestTargetID == nil)
 
-        // A nest highlight clears when the session ends.
-        let onto = try Self.validate(info, parent: a, childIndex: SidebarDropPolicy.dropOnItemIndex, in: h)
-        #expect(onto == .move)
-        #expect(h.controller.nestTargetID == a)
+        // Concluding over it.
+        _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
+        try #require(h.controller.dropIndicator.line != nil)
+        h.outline.concludeDragOperation(nil)
+        #expect(h.controller.dropIndicator.line == nil)
+        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        try #require(h.controller.nestTargetID == b)
+        h.outline.concludeDragOperation(nil)
+        #expect(h.controller.nestTargetID == nil)
+
+        // Ending over it.
+        _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
+        try #require(h.controller.dropIndicator.line != nil)
+        h.outline.draggingEnded(info)
+        #expect(h.controller.dropIndicator.line == nil)
+        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        try #require(h.controller.nestTargetID == b)
+        h.outline.draggingEnded(info)
+        #expect(h.controller.nestTargetID == nil)
+
+        // The session ending clears it too.
+        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        try #require(h.controller.nestTargetID == b)
         Self.endSession(in: h)
         #expect(h.controller.nestTargetID == nil)
         #expect(h.controller.dropIndicator.line == nil)
+    }
+
+    @Test func insertionLineFollowsItsRowsWhenTheOutlineScrolls() throws {
+        let h = OutlineHarness("drag.scroll")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = (0..<40).map { SidebarOutlineControllerTests.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.mount(size: NSSize(width: 320, height: 200))
+        let header = SidebarNodeID.repoHeader(repo.id)
+        let target = SidebarNodeID.worktree(rows[4].id)
+
+        let info = try Self.startDrag(pressing: .worktree(rows[1].id), in: h)
+        defer { info.release() }
+        let gap = try Self.childIndex(of: target, under: header, in: h)
+        let operation = try Self.validate(info, parent: header, childIndex: gap, depth: 0, in: h)
+        #expect(operation == .move)
+        let before = try #require(h.controller.dropIndicator.line)
+        let expectedBefore = Self.point(x: 0, y: h.outline.rect(ofRow: h.row(target)).minY, in: h)
+        #expect(before.y == expectedBefore.y)
+
+        // Two rows scroll under the still pointer, and no proposal arrives.
+        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 2 * WorktreeRowView.rowHeight))
+        h.controller.scrollView.reflectScrolledClipView(h.clip)
+        try #require(h.clip.bounds.minY > 0, "The clip view did not scroll")
+
+        // The line moved with the row boundary it marks.
+        let after = try #require(h.controller.dropIndicator.line)
+        let expectedAfter = Self.point(x: 0, y: h.outline.rect(ofRow: h.row(target)).minY, in: h)
+        #expect(after.y == expectedAfter.y)
+        #expect(after.y < before.y, "The line stayed put while its rows scrolled")
+        #expect(after.x == before.x)
+        Self.endSession(in: h)
     }
 
     @Test func dockPayloadRejectedByMainList() throws {
@@ -308,6 +464,8 @@ struct SidebarDragDropTests {
         #expect(placeOperation == .move)
         let placed = try Self.accept(place, parent: repo, childIndex: aboveB, in: h)
         #expect(placed)
+        // The rows are not in place until the hold ends: no animation to them.
+        #expect(!place.animatesToDestination)
         Self.endSession(in: h)
         let shown = h.shownIDs
         let cRow = try #require(shown.firstIndex(of: c))
@@ -436,6 +594,49 @@ struct SidebarDragDropTests {
         let aRow = try #require(shown.firstIndex(of: a))
         #expect(cRow < aRow)
         #expect(h.controller.fallbackReloadCount == 0)
+    }
+
+    /// The hardest replay a drop makes: the target was a leaf, so the
+    /// outline has no children loaded under it, and the held structure lands
+    /// as a reload of the target plus an `expandItem` the drag's veto would
+    /// refuse if it were still up.
+    @Test func nestOntoLeafLandsWhenTheDragEnds() async throws {
+        let h = OutlineHarness("drag.nestOntoLeaf")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let b = SidebarNodeID.worktree(f.b.id)
+        let c = SidebarNodeID.worktree(f.c.id)
+        let bItem = try #require(h.controller.item(for: b))
+        try #require(!h.outline.isExpandable(bItem), "`b` must start as a leaf")
+        let onto = SidebarDropPolicy.dropOnItemIndex
+
+        let info = try Self.startDrag(pressing: c, in: h)
+        defer { info.release() }
+        let operation = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: b, childIndex: onto, in: h)
+        #expect(accepted)
+        #expect(!info.animatesToDestination)
+        Self.endSession(in: h)
+
+        #expect(h.controller.fallbackReloadCount == 0, h.evidence(f.names))
+        #expect(h.shownIDs == h.freshTree().visibleIDs, h.evidence(f.names))
+        #expect(h.controller.tree.parent(of: c) == b)
+        let shownB = try #require(h.controller.item(for: b))
+        #expect(h.outline.isItemExpanded(shownB), "The former leaf must show its new child")
+        let shownC = try #require(h.controller.item(for: c))
+        let shownParent = (h.outline.parent(forItem: shownC) as? SidebarItem)?.id
+        #expect(shownParent == b)
+
+        await recorder.waitForCount(1)
+        let sent = recorder.sent.first
+        #expect(sent?.worktreeIDs == [f.c.id])
+        #expect(sent?.newParentID == f.b.id)
+        #expect(sent?.beforeWorktreeID == nil)
     }
 
     @Test func collapsedSectionDoesNotExpandDuringDrag() throws {
@@ -597,11 +798,14 @@ struct SidebarDragDropTests {
         return h.outline.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
     }
 
-    /// An insertion line at outline coordinates `x`, `y`, in the indicator's
-    /// coordinates.
-    private static func line(x: CGFloat, y: CGFloat, in h: OutlineHarness) -> SidebarDropIndicatorView.Line {
-        let point = h.controller.dropIndicator.convert(NSPoint(x: x, y: y), from: h.outline)
-        return SidebarDropIndicatorView.Line(x: point.x, y: point.y)
+    /// Outline coordinates `x`, `y`, in the indicator's coordinates.
+    private static func point(x: CGFloat, y: CGFloat, in h: OutlineHarness) -> NSPoint {
+        h.controller.dropIndicator.convert(NSPoint(x: x, y: y), from: h.outline)
+    }
+
+    /// Where the shown insertion line starts: its ring's centre.
+    private static func lineStart(in h: OutlineHarness) -> NSPoint? {
+        h.controller.dropIndicator.line.map { NSPoint(x: $0.x, y: $0.y) }
     }
 }
 

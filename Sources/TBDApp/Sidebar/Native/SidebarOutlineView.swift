@@ -97,6 +97,27 @@ final class SidebarOutlineView: NSOutlineView {
         return rows.count == 1 ? rows.first : nil
     }
 
+    /// Rows only ever move. A modifier key held mid-drag would otherwise
+    /// narrow the drag's `.move` mask — ⌥ to a copy, ⌃ to a link, ⌘ to a
+    /// generic operation — leaving nothing the sidebar accepts, and the drop
+    /// would silently stop working.
+    override func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    /// How many times `setDropItem(_:dropChildIndex:)` ran, and the position
+    /// the last call named: what a test reads to prove a proposal is
+    /// retargeted only when the drop policy's answer differs. AppKit's own
+    /// calls, if any, count too.
+    private(set) var dropRetargetCount = 0
+    private(set) var lastDropRetarget: (item: SidebarNodeID?, childIndex: Int)?
+
+    override func setDropItem(_ item: Any?, dropChildIndex index: Int) {
+        dropRetargetCount += 1
+        lastDropRetarget = (item: (item as? SidebarItem)?.id, childIndex: index)
+        super.setDropItem(item, dropChildIndex: index)
+    }
+
     /// Whether `point`, in the outline's coordinates, lands on a button
     /// inside a row.
     func isOnButton(_ point: NSPoint) -> Bool {

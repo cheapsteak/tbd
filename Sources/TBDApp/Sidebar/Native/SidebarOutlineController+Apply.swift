@@ -21,8 +21,9 @@ extension SidebarOutlineController {
         } else {
             loadFully(latest)
         }
-        // Once per applied tree, so no drop decision builds one.
-        dropIndex = SidebarDropIndex(tree: tree)
+        // The drop index is built again on first use: once per applied tree,
+        // and never for a rebuild no drag asks about.
+        dropIndexCache = nil
         applyModelSelection()
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
