@@ -359,6 +359,7 @@ extension StateDelta {
         case .terminalProgramStatusChanged: return "terminalProgramStatusChanged"
         case .terminalPendingPromptsChanged: return "terminalPendingPromptsChanged"
         case .devServersChanged: return "devServersChanged"
+        case .worktreeSiblingsReordered: return "worktreeSiblingsReordered"
         }
     }
 }

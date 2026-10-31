@@ -168,6 +168,10 @@ public enum RPCMethod {
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
     public static let worktreeMove = "worktree.move"
+    /// Move several worktrees to one destination group in one transaction, all
+    /// or nothing. The sidebar's drop path; `worktree.move` stays for
+    /// `tbd worktree reparent`.
+    public static let worktreeMoveMany = "worktree.moveMany"
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
     /// A distinct method so an older daemon cannot silently ignore the new
@@ -2671,6 +2675,29 @@ public struct WorktreeMoveParams: Codable, Sendable {
         self.worktreeID = worktreeID
         self.newParentID = newParentID
         self.newSortOrder = newSortOrder
+    }
+}
+
+/// Params for `worktree.moveMany`. The request names the destination by IDs
+/// and the daemon computes every `sortOrder` inside its transaction, so the
+/// client never does sort-order arithmetic on values a concurrent write may
+/// have changed.
+public struct WorktreeMoveManyParams: Codable, Sendable {
+    /// Client-generated, echoed in the `worktreeSiblingsReordered` delta so
+    /// the app can tell its own move's echo from another writer's.
+    public let moveID: UUID
+    /// The carried rows, in top-to-bottom order.
+    public let worktreeIDs: [UUID]
+    /// nil = the top level of the rows' own group.
+    public let newParentID: UUID?
+    /// nil = the end of the destination group.
+    public let beforeWorktreeID: UUID?
+
+    public init(moveID: UUID, worktreeIDs: [UUID], newParentID: UUID?, beforeWorktreeID: UUID?) {
+        self.moveID = moveID
+        self.worktreeIDs = worktreeIDs
+        self.newParentID = newParentID
+        self.beforeWorktreeID = beforeWorktreeID
     }
 }
 
