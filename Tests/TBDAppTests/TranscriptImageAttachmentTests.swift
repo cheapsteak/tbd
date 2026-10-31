@@ -293,6 +293,19 @@ struct TranscriptImageAttachmentTests {
         }
     }
 
+    /// Starts the fifo probe on a dedicated thread. Nonisolated so the worker's
+    /// closure carries no main-actor isolation: it runs on a plain thread, where
+    /// a dynamic main-actor check would trap.
+    nonisolated private static func startProbeThread(path: String, into result: ProbeResult) -> Thread {
+        let worker = Thread {
+            result.markStarted()
+            result.finish(TranscriptImageService.shared.metadata(forPath: path).state)
+        }
+        worker.name = "fifo-probe"
+        worker.start()
+        return worker
+    }
+
     /// What the fifo probe's bounded wait observed when it expired. Thrown so the
     /// diagnostic lands on the CI summary's primary failure line.
     private struct FifoProbeDidNotReturn: Error, CustomStringConvertible {
@@ -333,13 +346,8 @@ struct TranscriptImageAttachmentTests {
         defer { unlink(path) }
 
         let result = ProbeResult()
-        let worker = Thread {
-            result.markStarted()
-            result.finish(TranscriptImageService.shared.metadata(forPath: path).state)
-        }
-        worker.name = "fifo-probe"
         let started = ContinuousClock.now
-        worker.start()
+        _ = Self.startProbeThread(path: path, into: result)
 
         let outcome = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
