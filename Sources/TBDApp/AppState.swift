@@ -3451,15 +3451,16 @@ final class AppState {
         if delta.activityState == .working {
             if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
         }
-        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
-            // Claude and shell activity deltas are raw last-arrival state;
-            // provenance ordering applies to Codex rows only.
-            terminals[delta.worktreeID]?[idx].activityState = delta.activityState
-            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
-            return
-        }
+        // Ordered by the stamp on every row, not applied on arrival: the
+        // program status store has two ingest paths — the daemon's own reader
+        // and the reports the app forwards — whose broadcasts can arrive out
+        // of commit order, so a delta older than the cached row's is dropped.
         var terminal = terminals[delta.worktreeID]![idx]
         terminal.applyActivityDelta(delta)
+        if !terminal.isCodexTerminal {
+            // The session-order rail is Codex-only.
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+        }
         terminals[delta.worktreeID]?[idx] = terminal
     }
 

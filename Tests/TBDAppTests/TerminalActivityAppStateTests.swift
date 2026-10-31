@@ -127,44 +127,53 @@ func appState_nonCodexSessionDeltaRetainsLegacyArrivalOrder(kind: TerminalKind) 
     #expect(state.terminalSessionOrderObservedAt[terminalID] == nil)
 }
 
+/// The program status store has two ingest paths — the daemon's own reader
+/// and the reports the app forwards — whose broadcasts can arrive out of
+/// commit order. Every row, not only a Codex one, orders activity deltas by
+/// their stamp: two delivered out of order leave the newer value standing.
 @MainActor
 @Test(
-    "non-Codex activity deltas retain legacy raw last-arrival behavior",
-    arguments: [TerminalKind.claude, .shell]
+    "activity deltas delivered out of order leave the newer value on every row",
+    arguments: [TerminalKind.claude, .shell, .codex]
 )
-func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind) {
+func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     let state = AppState()
     let worktreeID = UUID()
     let terminalID = UUID()
-    let currentAt = Date(timeIntervalSinceReferenceDate: 20)
+    let older = Date(timeIntervalSinceReferenceDate: 10)
+    let newer = Date(timeIntervalSinceReferenceDate: 20)
     state.terminals = [
         worktreeID: [
-            Terminal(
+            TBDShared.Terminal(
                 id: terminalID,
                 worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: kind == .claude ? "Claude" : "shell",
+                tmuxWindowID: "",
+                tmuxPaneID: "",
                 kind: kind,
-                activityState: .working,
-                activityStateSource: .hookEvent("current"),
-                activityStateObservedAt: currentAt,
-                activityStateOrderObservedAt: currentAt)
+                transport: .holder)
         ]
     ]
 
     state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
         terminalID: terminalID,
         worktreeID: worktreeID,
-        activityState: .idle,
+        activityState: .working,
         activityStateSource: .programStatus,
-        activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10),
-        activityStateOrderObservedAt: Date(timeIntervalSinceReferenceDate: 10))))
+        activityStateObservedAt: newer,
+        activityStateOrderObservedAt: newer)))
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID,
+        worktreeID: worktreeID,
+        activityState: .waitingForUser,
+        activityStateSource: .programStatus,
+        activityStateObservedAt: older,
+        activityStateOrderObservedAt: older)))
 
     let adopted = state.terminals[worktreeID]![0]
-    #expect(adopted.activityState == .idle)
-    #expect(adopted.activityStateSource == .hookEvent("current"))
-    #expect(adopted.activityStateObservedAt == currentAt)
+    #expect(adopted.activityState == .working)
+    #expect(adopted.activityStateSource == .programStatus)
+    #expect(adopted.activityStateObservedAt == newer)
+    #expect(adopted.activityStateOrderObservedAt == newer)
 }
 
 @MainActor

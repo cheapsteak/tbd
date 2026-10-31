@@ -118,11 +118,14 @@ may park.
 
 The store pushes the same `terminalActivityUpdated` and
 `terminalAwaitingInputChanged` deltas the hook handlers pushed, so the app's
-tab bar and sidebar read the same fields as before. A park's `.idle` and a
-wake's reset to `.unknown` for the incarnation it mints reach the app on the
-park's or wake's own `terminalHibernationChanged` delta, which carries the
-activity columns read back from the row; the app applies them under the same
-ordering stamp.
+tab bar and sidebar read the same fields as before. The app applies an
+activity delta under its ordering stamp, on every row: the store has two
+ingest paths, the daemon's own reader and the reports the app forwards, whose
+broadcasts can arrive out of commit order, so a delta older than the cached
+row's is dropped. A park's `.idle` and a wake's reset to `.unknown` for the
+incarnation it mints reach the app on the park's or wake's own
+`terminalHibernationChanged` delta, which carries the activity columns read
+back from the row; the app applies them under the same ordering stamp.
 
 ### Attention banner
 
