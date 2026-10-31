@@ -234,7 +234,7 @@ final class AppState {
     var terminals: [UUID: [Terminal]] = [:] {
         didSet {
             sidebarHibernationCache.removeAll()
-            reconcileNoStatusSightings()
+            terminalsDidChangeForNoStatus()
         }
     }
     /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
@@ -1862,6 +1862,10 @@ final class AppState {
     @ObservationIgnored var noStatusGraceTasks: [UUID: Task<Void, Never>] = [:]
     /// Clock for the no-status grace period.
     @ObservationIgnored var noStatusClock: any Clock<Duration> = ContinuousClock()
+    /// How many `coalescingNoStatusReconcile` calls are running, and whether
+    /// `terminals` changed during them — see that method.
+    @ObservationIgnored var noStatusReconcileDepth = 0
+    @ObservationIgnored var noStatusReconcilePending = false
     /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
     /// prompts) by terminal, mirrored from the daemon's store over
     /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
@@ -3105,7 +3109,15 @@ final class AppState {
         subscriptionTask = nil
     }
 
+    /// Apply one delta from the daemon. A delta can write `terminals` several
+    /// times — a wake's flips the parked flag, then the incarnation, then the
+    /// activity columns — so the no-status sightings are reconciled once, after
+    /// the whole delta has applied.
     func handleDelta(_ delta: StateDelta) {
+        coalescingNoStatusReconcile { applyDelta(delta) }
+    }
+
+    private func applyDelta(_ delta: StateDelta) {
         switch delta {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
@@ -4253,12 +4265,15 @@ final class AppState {
             let allTerminals = try await daemonClient.listTerminals()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
-            for wtID in visibleWorktreeIDs {
-                adoptTerminalSnapshot(
-                    terminalsByWorktree[wtID] ?? [],
-                    worktreeID: wtID,
-                    startedAtReplacementGeneration: terminalSnapshotGeneration
-                )
+            // One no-status reconcile for the whole poll, not one per worktree.
+            coalescingNoStatusReconcile {
+                for wtID in visibleWorktreeIDs {
+                    adoptTerminalSnapshot(
+                        terminalsByWorktree[wtID] ?? [],
+                        worktreeID: wtID,
+                        startedAtReplacementGeneration: terminalSnapshotGeneration
+                    )
+                }
             }
 
             // Fetch all notes, group client-side

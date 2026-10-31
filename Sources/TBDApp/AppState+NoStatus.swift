@@ -14,8 +14,9 @@ extension AppState {
     /// terminal that stops being a candidate — it reported, parked, or left
     /// `terminals` — loses its sighting and its timer, and so does one whose
     /// incarnation changed, before it gets a fresh one. `terminals`' `didSet`
-    /// calls this on every mutation, so it writes `noStatusSightings` only to
-    /// add or remove a sighting.
+    /// calls this on every mutation outside `coalescingNoStatusReconcile`, and
+    /// once at the end of one, so it writes `noStatusSightings` only to add or
+    /// remove a sighting.
     func reconcileNoStatusSightings() {
         var candidates: [UUID: UUID?] = [:]
         for rows in terminals.values {
@@ -36,6 +37,35 @@ extension AppState {
                 incarnationID: incarnationID, graceElapsed: false)
             startNoStatusGrace(terminalID: terminalID, incarnationID: incarnationID)
         }
+    }
+
+    /// `terminals`' `didSet`: reconcile now, or, inside
+    /// `coalescingNoStatusReconcile`, once that call ends.
+    func terminalsDidChangeForNoStatus() {
+        if noStatusReconcileDepth > 0 {
+            noStatusReconcilePending = true
+        } else {
+            reconcileNoStatusSightings()
+        }
+    }
+
+    /// Run `body`, which may write `terminals` many times, and reconcile the
+    /// sightings once when it ends rather than after every write. Each
+    /// reconcile scans every terminal, and one run against a state `body`
+    /// leaves only halfway — a woken row un-parked but still carrying its
+    /// parked incarnation — would add a sighting and start a grace timer that
+    /// the next write cancels. Nested calls reconcile once, when the outermost
+    /// ends, and only if `terminals` changed.
+    func coalescingNoStatusReconcile<T>(_ body: () throws -> T) rethrows -> T {
+        noStatusReconcileDepth += 1
+        defer {
+            noStatusReconcileDepth -= 1
+            if noStatusReconcileDepth == 0, noStatusReconcilePending {
+                noStatusReconcilePending = false
+                reconcileNoStatusSightings()
+            }
+        }
+        return try body()
     }
 
     /// Wait out the grace for one sighting, then mark it elapsed. A timer

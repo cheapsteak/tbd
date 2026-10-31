@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -141,6 +142,65 @@ struct NoStatusSightingTests {
 
             state.terminals[row.worktreeID] = nil
             #expect(state.noStatusSightings[row.id] == nil)
+        }
+    }
+
+    /// One delta can write a row several times — a wake's delta un-parks it,
+    /// then gives it its new incarnation — and the sightings are reconciled
+    /// once, against the row the delta leaves. Reconciled after each write,
+    /// the un-parked row still carrying its parked incarnation would get a
+    /// sighting and a grace timer, both thrown away a write later for the
+    /// woken incarnation's: three writes to the sightings and two timers
+    /// where one of each is right.
+    @Test func aDeltaThatWritesARowSeveralTimesStartsOneSighting() async throws {
+        try await withAppState { state, clock in
+            let woken = UUID()
+            var row = agentRow()
+            row.hibernatedAt = Date(timeIntervalSince1970: 1_800_000_000)
+            state.terminals[row.worktreeID] = [row]
+            #expect(state.noStatusSightings.isEmpty)
+
+            let writes = SightingWriteCounter(state)
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: row.id, worktreeID: row.worktreeID,
+                hibernated: false, keepWarm: false, sessionIncarnationID: woken)))
+            writes.stop()
+
+            #expect(writes.count == 1)
+            #expect(state.noStatusSightings[row.id]
+                == NoStatusSighting(incarnationID: woken, graceElapsed: false))
+            try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
+        }
+    }
+}
+
+/// Counts writes to `AppState.noStatusSightings`. Observation's `onChange` is
+/// one-shot, so it re-arms inside the callback, synchronously, to hear every
+/// write of a burst made within one synchronous call.
+@MainActor
+private final class SightingWriteCounter {
+    private let state: AppState
+    private var isLive = true
+    private(set) var count = 0
+
+    init(_ state: AppState) {
+        self.state = state
+        arm()
+    }
+
+    func stop() {
+        isLive = false
+    }
+
+    private func arm() {
+        withObservationTracking {
+            _ = state.noStatusSightings
+        } onChange: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.isLive else { return }
+                self.count += 1
+                self.arm()
+            }
         }
     }
 }
