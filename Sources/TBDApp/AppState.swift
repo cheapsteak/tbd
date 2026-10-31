@@ -3458,17 +3458,18 @@ final class AppState {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        // Clear any limit hit when the terminal transitions to working
-        // (design 2026-09-05 §7.1)
-        if delta.activityState == .working {
-            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
-        }
         // Ordered by the stamp on every row, not applied on arrival: the
         // program status store has two ingest paths — the daemon's own reader
         // and the reports the app forwards — whose broadcasts can arrive out
         // of commit order, so a delta older than the cached row's is dropped.
         var terminal = terminals[delta.worktreeID]![idx]
-        terminal.applyActivityDelta(delta)
+        let applied = terminal.applyActivityDelta(delta)
+        // Clear any limit hit when the terminal transitions to working
+        // (design 2026-09-05 §7.1) — on a delta that was applied: a stale
+        // `working` dropped behind a newer value says nothing about now.
+        if applied, delta.activityState == .working, limitHits[delta.terminalID] != nil {
+            limitHits.removeValue(forKey: delta.terminalID)
+        }
         if !terminal.isCodexTerminal {
             // The session-order rail is Codex-only.
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)

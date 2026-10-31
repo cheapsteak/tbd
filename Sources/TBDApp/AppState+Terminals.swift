@@ -928,7 +928,12 @@ extension Terminal {
     /// rules used for snapshots: a newer delta repeating the state and source
     /// advances only the order watermark, and one that changes either is
     /// applied whole.
-    mutating func applyActivityDelta(_ delta: TerminalActivityDelta) {
+    ///
+    /// Returns false when the delta is dropped as older than the cached row
+    /// (or tied with it and outranked), so a caller acting on the delta's
+    /// state acts only on one that speaks for now.
+    @discardableResult
+    mutating func applyActivityDelta(_ delta: TerminalActivityDelta) -> Bool {
         let incomingIsComplete = delta.activityStateSource != nil
             && delta.activityStateObservedAt != nil
         let currentIsComplete = activityStateSource != nil && activityStateObservedAt != nil
@@ -944,30 +949,31 @@ extension Terminal {
            incomingOrderObservedAt < currentOrderObservedAt
             || (incomingOrderObservedAt == currentOrderObservedAt
                 && preservesActivityAtEqualOrder(over: delta.activityState)) {
-            return
+            return false
         }
 
         if !incomingIsComplete {
             if currentIsComplete, delta.activityState == activityState {
-                return
+                return true
             }
             activityState = delta.activityState
             activityStateSource = nil
             activityStateObservedAt = nil
             activityStateOrderObservedAt = nil
-            return
+            return true
         }
 
         if currentIsComplete, delta.activityState == activityState,
            delta.activityStateSource == activityStateSource {
             activityStateOrderObservedAt = incomingOrderObservedAt
-            return
+            return true
         }
 
         activityState = delta.activityState
         activityStateSource = delta.activityStateSource
         activityStateObservedAt = delta.activityStateObservedAt
         activityStateOrderObservedAt = delta.activityStateOrderObservedAt
+        return true
     }
 }
 

@@ -221,6 +221,33 @@ struct LoadBalancingTests {
         }
     }
 
+    /// Activity deltas are ordered by their stamp, and a `working` older than
+    /// the cached row's value is dropped. Dropped, it says nothing about the
+    /// session now, so the limit hit it would have cleared stays.
+    @Test @MainActor
+    func limitHitsKeptWhenAStaleWorkingDeltaIsDropped() async throws {
+        try await withAppState("limit-keep-stale-working") { appState in
+            let terminalID = UUID()
+            let worktreeID = UUID()
+            let t1 = Date(timeIntervalSince1970: 1_800_000_000)
+            let t2 = t1.addingTimeInterval(10)
+            appState.terminals[worktreeID] = [claudeTerminal(worktreeID: worktreeID, profileID: UUID(), id: terminalID)]
+            seedLimitHit(appState, terminalID: terminalID)
+            appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .idle,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: t2, activityStateOrderObservedAt: t2)))
+
+            appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .working,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: t1, activityStateOrderObservedAt: t1)))
+
+            #expect(appState.terminals[worktreeID]?.first?.activityState == .idle)
+            #expect(appState.limitHits[terminalID] != nil, "a dropped working delta cleared the limit hit")
+        }
+    }
+
     @Test @MainActor
     func limitHitsClearedOnProfileChange() async throws {
         try await withAppState("limit-clear-profile") { appState in
