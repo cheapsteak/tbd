@@ -3,7 +3,7 @@
 #
 # ZERO BUILDS, NO GIT, AND IT NEVER READS THE REAL Sources/TBDDaemon. Every case
 # writes a small sample tree under one scratch directory — a few Swift files
-# under `Sources/TBDDaemon/<unit>/` and a `scripts/daemon-links.txt` — and runs
+# under `Sources/TBDDaemon/<unit>/` and a `scripts/daemon-layers.txt` — and runs
 # the check against it with `--repo-root`. The Swift in these fixtures is
 # scanner input and is never compiled, so it only has to look like Swift to a
 # lexer, not type-check.
@@ -59,13 +59,25 @@ extension String {
     func gadgetName() -> String { self }
 }'
 
-# A fresh sample tree: Base/Widget.swift holding BASE_SWIFT, and a list that
-# holds only a comment, so no link is listed. Echoes the fixture root.
+# A fresh sample tree: Base/Widget.swift holding BASE_SWIFT, and a layer file
+# whose one layer is `Base, Top`, so a reference either way between the two
+# fails. Echoes the fixture root. Top is a unit only once a case writes a
+# Swift file into it, and until then the layer file names no unit: a case
+# that never does writes its own layers.
 mkfix() {
   local d; d="$(mktemp -d "$WORK/fixture.XXXXXX")"
   mkdir -p "$d/$DAEMON_REL/Base" "$d/scripts"
   printf '%s\n' "$BASE_SWIFT" > "$d/$DAEMON_REL/Base/Widget.swift"
-  printf '%s\n' "# fixture" > "$d/scripts/daemon-links.txt"
+  printf '%s\n' "# fixture" "Base, Top" > "$d/scripts/daemon-layers.txt"
+  echo "$d"
+}
+
+# mkfix's tree with its declaring unit named Core, for a case that lists that
+# unit above another: the check holds a unit named Base to the bottom line.
+mkfix_core() {
+  local d; d="$(mkfix)"
+  mv "$d/$DAEMON_REL/Base" "$d/$DAEMON_REL/Core"
+  printf '%s\n' "# fixture" "Core, Top" > "$d/scripts/daemon-layers.txt"
   echo "$d"
 }
 
@@ -75,11 +87,18 @@ put() {
   printf '%s\n' "$3" > "$1/$DAEMON_REL/$2"
 }
 
-# Rewrite the fixture's list as the comment line plus the given links, in the
-# order given. `list <root> [<line>...]`
-list() {
+# Rewrite the fixture's layer file as the comment line plus the given lines,
+# bottom layer first. `layers <root> [<line>...]`
+layers() {
   local d="$1"; shift
-  printf '%s\n' "# fixture" ${@+"$@"} > "$d/scripts/daemon-links.txt"
+  printf '%s\n' "# fixture" ${@+"$@"} > "$d/scripts/daemon-layers.txt"
+}
+
+# The line the check prints for a reference from Top into Base when both are
+# in layer 1, as in every fixture that keeps mkfix's layers.
+# `same_layer <path:line> <name>`
+same_layer() {
+  echo "Sources/TBDDaemon/$1: Top (layer 1) uses Base (layer 1), its own layer: $2 is declared in Base"
 }
 
 # Run the check against a fixture. Sets RUN_OUT (stdout and stderr) and RUN_RC.
@@ -96,8 +115,7 @@ both_ways() {
   put "$d" Top/User.swift "$with"
   run_check "$d"
   assert_rc "$label: the reference fails the check" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "$label: and is named" "$RUN_OUT" \
-    "Sources/TBDDaemon/Top/User.swift:$line: Top -> Base is a new link: $name is declared in Base"
+  assert_contains "$label: and is named" "$RUN_OUT" "$(same_layer "Top/User.swift:$line" "$name")"
   put "$d" Top/User.swift "$without"
   run_check "$d"
   assert_rc "$label: without it, the check passes" 0 "$RUN_RC" "$RUN_OUT"
@@ -501,10 +519,11 @@ test_scoped_import_is_not_a_declaration() {
   local d; d="$(mkfix)"
   put "$d" Top/User.swift $'import TBDShared\nlet r = 1'
   put "$d" Mid/Reader.swift 'struct TBDShared {}'
+  layers "$d" 'Base, Mid, Top'
   run_check "$d"
   assert_rc "a declaration of the module's name is indexed" 1 "$RUN_RC" "$RUN_OUT"
   assert_contains "and the import names it" "$RUN_OUT" \
-    "Sources/TBDDaemon/Top/User.swift:1: Top -> Mid is a new link: TBDShared is declared in Mid"
+    "Sources/TBDDaemon/Top/User.swift:1: Top (layer 1) uses Mid (layer 1), its own layer: TBDShared is declared in Mid"
   put "$d" Mid/Reader.swift $'import struct TBDShared.Gizmo\nimport func TBDShared.gizmoCount\nstruct Reader {}'
   run_check "$d"
   assert_rc "a scoped import declares nothing" 0 "$RUN_RC" "$RUN_OUT"
@@ -518,7 +537,7 @@ test_privacy_is_per_declaration() {
   put "$d" Base/More.swift 'private let seed = 1; struct Gizmo {}'
   run_check "$d"
   assert_rc "a declaration after a private one on its line is indexed" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 Gizmo)"
   put "$d" Base/More.swift $'let seed = 1\nprivate\nstruct Gizmo {}'
   run_check "$d"
   assert_rc "a private on the line above its keyword is not" 0 "$RUN_RC" "$RUN_OUT"
@@ -532,7 +551,7 @@ test_private_member_is_no_modifier() {
   put "$d" Base/More.swift $'let level: Privacy = .private\nstruct Gizmo {}'
   run_check "$d"
   assert_rc "a declaration after .private is indexed" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 Gizmo)"
   put "$d" Base/More.swift $'let level: Privacy = .private\nprivate struct Gizmo {}'
   run_check "$d"
   assert_rc "a private one is not" 0 "$RUN_RC" "$RUN_OUT"
@@ -546,7 +565,7 @@ test_actor_as_a_value_declares_nothing() {
   put "$d" Base/More.swift 'actor Gizmo {}'
   run_check "$d"
   assert_rc "an actor is indexed" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 Gizmo)"
   put "$d" Top/User.swift 'let y = 1 as Int'
   put "$d" Base/More.swift 'let x = actor as Int'
   run_check "$d"
@@ -560,7 +579,7 @@ test_private_set_is_indexed() {
   put "$d" Base/More.swift 'private(set) var gizmoCount = 0'
   run_check "$d"
   assert_rc "a private(set) global is indexed" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gizmoCount"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 gizmoCount)"
   put "$d" Base/More.swift 'private var gizmoCount = 0'
   run_check "$d"
   assert_rc "a private one is not" 0 "$RUN_RC" "$RUN_OUT"
@@ -573,7 +592,7 @@ test_tuple_global_is_indexed() {
   put "$d" Base/More.swift 'let (gizmoWidth, gizmoHeight) = (1, 2)'
   run_check "$d"
   assert_rc "a tuple global is indexed" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gizmoHeight"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 gizmoHeight)"
   put "$d" Base/More.swift 'let (gizmoWidth, gizmoDepth) = (1, 2)'
   run_check "$d"
   assert_rc "without the name, the check passes" 0 "$RUN_RC" "$RUN_OUT"
@@ -587,7 +606,7 @@ test_private_declarations_not_indexed() {
   put "$d" Base/Widget.swift "${BASE_SWIFT/private func baseSecret/func baseSecret}"
   run_check "$d"
   assert_rc "made internal, it is" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: baseSecret"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 baseSecret)"
 }
 
 # The blind spot the guide names: a member another unit's extension adds is
@@ -600,116 +619,428 @@ test_extension_members_not_indexed() {
   put "$d" Base/Widget.swift "$BASE_SWIFT"$'\nfunc gadgetName() -> String { "" }'
   run_check "$d"
   assert_rc "a top-level function of the same name is" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gadgetName"
+  assert_contains "and is named" "$RUN_OUT" "$(same_layer Top/User.swift:1 gadgetName)"
 }
 
 # ---------------------------------------------------------------------------
-# The list
+# The layer order
 # ---------------------------------------------------------------------------
 
-test_listed_link_passes_and_unused_is_stale() {
-  local d; d="$(mkfix)"
+# A unit may use a unit in a lower layer, and not one in a higher layer.
+test_lower_layer_passes_higher_fails() {
+  local d; d="$(mkfix_core)"
   put "$d" Top/User.swift 'let w = Widget()'
-  list "$d" 'Top -> Base'
+  layers "$d" 'Core' 'Top'
   run_check "$d"
-  assert_rc "a listed link passes" 0 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and says so" "$RUN_OUT" "lint-daemon-layers: OK"
-
-  put "$d" Top/User.swift ''
+  assert_rc "a reference into a lower layer passes" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and says so" "$RUN_OUT" "lint-daemon-layers: OK, 2 units in 2 layers, 1 link, each into a lower layer."
+  layers "$d" 'Top' 'Core'
   run_check "$d"
-  assert_rc "a listed link no code makes fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "as stale, at its line in the list" "$RUN_OUT" \
-    "scripts/daemon-links.txt:2: Top -> Base is stale: no file in Top names a declaration from Base"
+  assert_rc "a reference into a higher layer fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named with both layers" "$RUN_OUT" \
+    "Sources/TBDDaemon/Top/User.swift:1: Top (layer 1) uses Core (layer 2), a higher layer: Widget is declared in Core"
 }
 
-test_failure_footer() {
-  local d; d="$(mkfix)"
-  put "$d" Top/User.swift 'let w = Widget()'
+# Units in one layer may not use each other, whichever is listed first. Every
+# reference case above is the other direction: Top using Base in mkfix's layer.
+test_same_layer_fails() {
+  local d; d="$(mkfix_core)"
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Core/Back.swift 'let g = Gadget()'
   run_check "$d"
-  assert_rc "an unlisted link fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "the footer prints the line to add" "$RUN_OUT" $'\n    Top -> Base\n'
-  assert_contains "and how to repair main when the link is not this change's" "$RUN_OUT" \
-    "Add the line to scripts/daemon-links.txt in a one-line pull request of its own."
-  assert_lacks "it says nothing of stale links" "$RUN_OUT" "Delete the line"
-  assert_contains "and points to the guide" "$RUN_OUT" 'Sources/TBDDaemon/CLAUDE.md, "Links between folders"'
-
-  put "$d" Top/User.swift 'let w = 1'
-  list "$d" 'Top -> Base'
+  assert_rc "Core using Top in their one layer fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" \
+    "Sources/TBDDaemon/Core/Back.swift:1: Core (layer 1) uses Top (layer 1), its own layer: Gadget is declared in Top"
+  layers "$d" 'Top' 'Core'
   run_check "$d"
-  assert_rc "a stale link fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "the footer says to delete the line" "$RUN_OUT" \
-    "Delete its line from scripts/daemon-links.txt in this change."
-  assert_contains "and how to repair main when the change removed no reference" "$RUN_OUT" \
-    "Delete the line in a one-line pull request of its own."
-  assert_lacks "it says nothing of new links" "$RUN_OUT" "Add the line"
+  assert_rc "with Top a layer below, it passes" 0 "$RUN_RC" "$RUN_OUT"
 }
 
-test_misspelled_unit_is_stale() {
-  local d; d="$(mkfix)"
+# Any lower layer will do, not only the one just below.
+test_skipping_layers_passes() {
+  local d; d="$(mkfix_core)"
   put "$d" Top/User.swift 'let w = Widget()'
-  list "$d" 'Tpo -> Base'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  layers "$d" 'Core' 'Mid' 'Top'
   run_check "$d"
-  assert_rc "a misspelled unit fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "the real link is new" "$RUN_OUT" "Top -> Base is a new link"
-  assert_contains "the misspelled one is stale" "$RUN_OUT" "Tpo -> Base is stale"
-  assert_contains "and named as no unit" "$RUN_OUT" "(Tpo is not a unit under Sources/TBDDaemon)"
+  assert_rc "a reference two layers down passes" 0 "$RUN_RC" "$RUN_OUT"
+  layers "$d" 'Top' 'Mid' 'Core'
+  run_check "$d"
+  assert_rc "two layers up, it fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top (layer 1) uses Core (layer 3), a higher layer: Widget"
 }
 
-test_moved_file_flips_links() {
-  local d; d="$(mkfix)"
+# Layer numbers count layer lines: a comment or a blank line is no layer.
+test_layer_numbers_count_layer_lines() {
+  local d; d="$(mkfix_core)"
   put "$d" Top/User.swift 'let w = Widget()'
-  list "$d" 'Top -> Base'
+  layers "$d" 'Top' '' '# between' 'Core'
   run_check "$d"
-  assert_rc "before the move, the list matches" 0 "$RUN_RC" "$RUN_OUT"
-
-  mkdir -p "$d/$DAEMON_REL/Mid"
-  mv "$d/$DAEMON_REL/Top/User.swift" "$d/$DAEMON_REL/Mid/User.swift"
+  assert_rc "a reference up past a comment fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and names the layers by count" "$RUN_OUT" "Top (layer 1) uses Core (layer 2), a higher layer"
+  layers "$d" 'Core' '' '# between' 'Top'
   run_check "$d"
-  assert_rc "after the move, the check fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "the old link is stale" "$RUN_OUT" "Top -> Base is stale"
-  assert_contains "the new link is new" "$RUN_OUT" "Sources/TBDDaemon/Mid/User.swift:1: Mid -> Base is a new link"
+  assert_rc "down past it, it passes" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "with two layers" "$RUN_OUT" "2 units in 2 layers"
 }
 
-test_list_whitespace_is_tolerated() {
+# A file's layer is its folder's. A folder emptied of Swift is no unit any
+# more, so its name leaves the layer file in the change that empties it.
+test_moved_file_takes_its_folders_layer() {
+  local d; d="$(mkfix_core)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  put "$d" Low/Lowly.swift 'struct Lowly {}'
+  layers "$d" 'Low' 'Core' 'Top'
+  run_check "$d"
+  assert_rc "before the move, it passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  mv "$d/$DAEMON_REL/Top/User.swift" "$d/$DAEMON_REL/Low/User.swift"
+  run_check "$d"
+  assert_rc "the emptied folder is no unit" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and its line is named" "$RUN_OUT" \
+    "lint-daemon-layers: cannot read scripts/daemon-layers.txt:4: Top is not a unit under Sources/TBDDaemon"
+  layers "$d" 'Low' 'Core'
+  run_check "$d"
+  assert_rc "listed without it, the moved file's reference fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "from its new folder" "$RUN_OUT" \
+    "Sources/TBDDaemon/Low/User.swift:1: Low (layer 1) uses Core (layer 2), a higher layer: Widget is declared in Core"
+}
+
+# Base stays on the bottom line, where it may use no other unit. Anywhere
+# else, or on no line, the check says so and judges nothing more: every place
+# it would name assumes Base at the bottom. Only a unit named Base is held.
+test_base_stays_on_the_bottom_line() {
   local d; d="$(mkfix)"
   put "$d" Top/User.swift 'let w = Widget()'
-  printf '# fixture\r\n\r\nTop -> Base  \r\n' > "$d/scripts/daemon-links.txt"
+  layers "$d" 'Base' 'Top'
   run_check "$d"
-  assert_rc "CRLF endings and trailing spaces are tolerated" 0 "$RUN_RC" "$RUN_OUT"
-  printf '# fixture\r\n\r\nTop -> Base  ' > "$d/scripts/daemon-links.txt"
+  assert_rc "Base on the bottom line passes" 0 "$RUN_RC" "$RUN_OUT"
+  layers "$d" 'Top' 'Base'
+  run_check "$d"
+  assert_rc "Base above it fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and says where Base is" "$RUN_OUT" \
+    "scripts/daemon-layers.txt: Base is in layer 2; Base stays on the bottom line"
+  assert_contains "and counts it" "$RUN_OUT" "lint-daemon-layers: Base is not on the bottom line."
+  assert_contains "and says what to do" "$RUN_OUT" "Put Base on the first line of scripts/daemon-layers.txt"
+  assert_contains "and points to the guide's Base rule" "$RUN_OUT" 'Sources/TBDDaemon/CLAUDE.md, "Base".'
+  assert_lacks "and judges nothing else" "$RUN_OUT" "a higher layer"
+  layers "$d" 'Top'
+  run_check "$d"
+  assert_rc "Base on no line fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "the same way" "$RUN_OUT" "scripts/daemon-layers.txt: Base has no layer; Base stays on the bottom line"
+  assert_lacks "with no place suggested" "$RUN_OUT" "it fits in"
+
+  d="$(mkfix_core)"
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Core/Back.swift 'let g = Gadget()'
+  layers "$d" 'Top' 'Core'
+  run_check "$d"
+  assert_rc "a unit with another name may sit above another" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# Every unit has a layer, even one that uses nothing and that nothing uses:
+# a new folder fails until a line lists it. The root files too.
+test_unlisted_unit_fails() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let n = 1'
+  layers "$d" 'Base'
+  run_check "$d"
+  assert_rc "a unit no line lists fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "scripts/daemon-layers.txt: Top has no layer; it fits in layer 1"
+  assert_contains "and counted" "$RUN_OUT" "lint-daemon-layers: 1 unit with no layer."
+  layers "$d" 'Base, Top'
+  run_check "$d"
+  assert_rc "listed, it passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  put "$d" Daemon.swift 'let n = 1'
+  run_check "$d"
+  assert_rc "root files no line lists fail" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "as (root)" "$RUN_OUT" "scripts/daemon-layers.txt: (root) has no layer"
+  layers "$d" 'Base, Top, (root)'
+  run_check "$d"
+  assert_rc "listed, they pass" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# A unit with no layer is told where it fits: the lowest layer above every
+# unit it uses and below every unit that uses it, or a new line. Listing it
+# there passes. References to and from it wait until it has a layer. No new
+# line goes below Base, which stays on the bottom line.
+test_unlisted_unit_says_where_it_fits() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'struct Gadget {}'
+  layers "$d" 'Base' 'Top'
+
+  put "$d" Mid/Middle.swift 'let w = Widget()'
+  run_check "$d"
+  assert_contains "a unit using layer 1 fits in layer 2" "$RUN_OUT" "Mid has no layer; it fits in layer 2"
+  assert_lacks "and its reference waits for its layer" "$RUN_OUT" "uses Base"
+  layers "$d" 'Base' 'Top, Mid'
+  run_check "$d"
+  assert_rc "listed there, it passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  layers "$d" 'Base' 'Top'
+  put "$d" Top/User.swift $'struct Gadget {}\nlet m = Middle()'
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet w = Widget()'
+  run_check "$d"
+  assert_contains "one between two layers needs a new line" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line between layers 1 and 2"
+  layers "$d" 'Base' 'Mid' 'Top'
+  run_check "$d"
+  assert_rc "listed there, it passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  layers "$d" 'Base' 'Top'
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Mid/Middle.swift 'let g = Gadget()'
+  run_check "$d"
+  assert_contains "one using the top layer needs a new line at the top" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line at the top"
+  layers "$d" 'Base' 'Top' 'Mid'
+  run_check "$d"
+  assert_rc "listed there, it passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  layers "$d" 'Base, Top'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  put "$d" Top/User.swift $'struct Gadget {}\nlet m = Middle()'
+  run_check "$d"
+  assert_contains "one the bottom layer uses fits nowhere, since no line goes below Base" "$RUN_OUT" \
+    "Mid has no layer; no layer fits it: layer 1 uses it, and Base stays on the bottom line"
+  layers "$d" 'Base, Mid' 'Top'
+  run_check "$d"
+  assert_rc "with its user moved up, it passes beside Base" 0 "$RUN_RC" "$RUN_OUT"
+
+  layers "$d" 'Base' 'Top'
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet g = Gadget()'
+  run_check "$d"
+  assert_rc "one that a layer uses and that uses it" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "fits nowhere" "$RUN_OUT" "Mid has no layer; no layer fits it: it uses layer 2, and layer 2 uses it"
+  assert_lacks "and names no unit the use runs through" "$RUN_OUT" "uses it through"
+
+  d="$(mkfix_core)"
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  put "$d" Core/Back.swift 'let m = Middle()'
+  layers "$d" 'Core' 'Top'
+  run_check "$d"
+  assert_contains "with no Base, one the bottom layer uses needs a new line at the bottom" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line at the bottom"
+  layers "$d" 'Mid' 'Core' 'Top'
+  run_check "$d"
+  assert_rc "listed there, it passes" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# Units with no layer are placed together, each above every unit it uses and
+# below every unit that uses it, listed or not. Placed apart, two where one
+# uses the other would each fit in layer 1, where that use fails.
+test_new_units_are_placed_together() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Low/Lowly.swift 'struct Lowly {}'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_contains "apart, one fits in layer 1" "$RUN_OUT" "Low has no layer; it fits in layer 1"
+  assert_contains "and so does the other" "$RUN_OUT" "Mid has no layer; it fits in layer 1"
+
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet l = Lowly()'
+  run_check "$d"
+  assert_rc "one using the other" 1 "$RUN_RC" "$RUN_OUT"
+  assert_lacks "never stops on a traceback" "$RUN_OUT" "Traceback"
+  assert_contains "the one used fits in layer 1" "$RUN_OUT" "Low has no layer; it fits in layer 1"
+  assert_contains "and the one using it in layer 2" "$RUN_OUT" "Mid has no layer; it fits in layer 2"
+  layers "$d" 'Base, Low' 'Top, Mid'
+  run_check "$d"
+  assert_rc "listed there, they pass" 0 "$RUN_RC" "$RUN_OUT"
+  layers "$d" 'Base, Low, Mid' 'Top'
+  run_check "$d"
+  assert_rc "listed both in layer 1, they fail" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "on that use" "$RUN_OUT" "Mid (layer 1) uses Low (layer 1), its own layer: Lowly is declared in Low"
+
+  # Between two layers, each takes a new line, and the user's goes above the
+  # lines of the units it uses.
+  layers "$d" 'Base' 'Top'
+  put "$d" Top/User.swift $'struct Gadget {}\nlet m = Middle()'
+  put "$d" Low/Lowly.swift $'struct Lowly {}\nlet w = Widget()'
+  put "$d" Lone/Lonely.swift $'struct Lonely {}\nlet w = Widget()'
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet l = Lowly()\nlet o = Lonely()'
+  run_check "$d"
+  assert_lacks "never stops on a traceback" "$RUN_OUT" "Traceback"
+  assert_contains "one used needs a new line between the two layers" "$RUN_OUT" \
+    "Low has no layer; it needs a new line between layers 1 and 2"
+  assert_contains "and so does the other" "$RUN_OUT" "Lone has no layer; it needs a new line between layers 1 and 2"
+  assert_contains "and the user one above theirs" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line between layers 1 and 2, above the lines for Lone and Low"
+  layers "$d" 'Base' 'Lone, Low' 'Mid' 'Top'
+  run_check "$d"
+  assert_rc "listed there, they pass" 0 "$RUN_RC" "$RUN_OUT"
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet l = Lowly()'
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_contains "using one, the user goes above its line" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line between layers 1 and 2, above the line for Low"
+  assert_contains "and the other, used by none, fits in layer 2" "$RUN_OUT" "Lone has no layer; it fits in layer 2"
+  layers "$d" 'Base' 'Low' 'Mid' 'Top, Lone'
+  run_check "$d"
+  assert_rc "listed there, they pass" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# When no layer fits a unit with no layer, the message says why: a use that
+# runs through another unit with no layer, or a circle of them. A unit that
+# uses one no layer fits, or is near a circle, waits for it.
+test_new_units_no_layer_fits() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift $'struct Gadget {}\nlet m = Middle()'
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet l = Lowly()'
+  put "$d" Low/Lowly.swift $'struct Lowly {}\nlet g = Gadget()'
+  put "$d" Hub/Hub.swift 'let m = Middle()'
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_rc "a use up through a unit with no layer" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named with the unit it runs through" "$RUN_OUT" \
+    "Low has no layer; no layer fits it: it uses layer 2, and layer 2 uses it through Mid"
+  assert_contains "and the unit using it waits" "$RUN_OUT" "Mid has no layer; no layer fits it until one fits Low"
+  assert_contains "as does one further up, for the same unit" "$RUN_OUT" "Hub has no layer; no layer fits it until one fits Low"
+  put "$d" Low/Lowly.swift 'struct Lowly {}'
+  run_check "$d"
+  assert_contains "without that use, one fits in layer 1" "$RUN_OUT" "Low has no layer; it fits in layer 1"
+  assert_contains "the next between it and its user" "$RUN_OUT" \
+    "Mid has no layer; it needs a new line between layers 1 and 2"
+  assert_lacks "above no new line, since the unit it uses sits in layer 1" "$RUN_OUT" "above the line for Low"
+  assert_contains "and the last above both" "$RUN_OUT" "Hub has no layer; it fits in layer 2"
+  layers "$d" 'Base, Low' 'Mid' 'Top, Hub'
+  run_check "$d"
+  assert_rc "listed there, they pass" 0 "$RUN_RC" "$RUN_OUT"
+
+  put "$d" Top/User.swift 'struct Gadget {}'
+  put "$d" Low/Lowly.swift $'struct Lowly {}\nlet m = Middle()'
+  put "$d" Mid/Middle.swift $'struct Middle {}\nlet l = Lowly()\nlet f = Leaf()'
+  put "$d" Leaf/Leaf.swift 'struct Leaf {}'
+  put "$d" Hub/Hub.swift 'let m = Middle()'
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_rc "units with no layer that use each other" 1 "$RUN_RC" "$RUN_OUT"
+  assert_lacks "never stop on a traceback" "$RUN_OUT" "Traceback"
+  assert_contains "run in a circle" "$RUN_OUT" "Low has no layer; no layer fits it: its links run in a circle, Low -> Mid -> Low"
+  assert_contains "named from each" "$RUN_OUT" "Mid has no layer; no layer fits it: its links run in a circle, Mid -> Low -> Mid"
+  assert_contains "a unit using the circle waits" "$RUN_OUT" "Hub has no layer; no layer fits it until one fits Low"
+  assert_contains "and so does one it uses" "$RUN_OUT" "Leaf has no layer; no layer fits it until one fits Low"
+  put "$d" Low/Lowly.swift 'struct Lowly {}'
+  run_check "$d"
+  assert_lacks "with the circle broken, all fit" "$RUN_OUT" "no layer fits it"
+  assert_contains "and the unit that uses the rest goes above them" "$RUN_OUT" \
+    "Hub has no layer; it needs a new line at the top"
+  layers "$d" 'Base, Leaf, Low' 'Top, Mid' 'Hub'
+  run_check "$d"
+  assert_rc "listed where they fit, they pass" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# A name that is no unit is a typo, or a folder renamed or emptied: the check
+# cannot tell which layer was meant, so it stops at the line.
+test_unknown_unit_cannot_check() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let n = 1'
+  layers "$d" 'Base' 'Tpo'
+  run_check "$d"
+  assert_rc "a misspelled unit" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named at its line" "$RUN_OUT" \
+    "lint-daemon-layers: cannot read scripts/daemon-layers.txt:3: Tpo is not a unit under Sources/TBDDaemon"
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_rc "spelled right, it passes" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# A unit listed twice has two layers. The message names both lines.
+test_duplicate_unit_cannot_check() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  layers "$d" 'Base' 'Top' 'Base'
+  run_check "$d"
+  assert_rc "a unit on two lines" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named at the second" "$RUN_OUT" \
+    "lint-daemon-layers: cannot read scripts/daemon-layers.txt:4: Base is listed twice: line 2 lists it too"
+  layers "$d" 'Base, Base' 'Top'
+  run_check "$d"
+  assert_rc "a unit twice on one line" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "scripts/daemon-layers.txt:2: Base is listed twice: line 2 lists it too"
+  layers "$d" 'Base' 'Top'
+  run_check "$d"
+  assert_rc "listed once, it passes" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# Units on a line are separated by commas. An empty name is a stray comma, and
+# a name with a space in it a missing one.
+test_layer_line_format() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  layers "$d" 'Base,' 'Top, Mid'
+  run_check "$d"
+  assert_rc "a stray comma" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" \
+    'lint-daemon-layers: cannot read scripts/daemon-layers.txt:2: "Base," has an empty name: a comma with no unit beside it'
+  printf '# fixture\r\n  Base, \r\nTop, Mid\r\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "a stray comma before spaces and a CRLF ending" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named with the line trimmed" "$RUN_OUT" \
+    'lint-daemon-layers: cannot read scripts/daemon-layers.txt:2: "Base," has an empty name: a comma with no unit beside it'
+  layers "$d" 'Base' 'Top Mid'
+  run_check "$d"
+  assert_rc "a missing comma" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" \
+    'lint-daemon-layers: cannot read scripts/daemon-layers.txt:3: "Top Mid": a unit name has no spaces in it; separate units with commas'
+  layers "$d" 'Base' 'Top,Mid'
+  run_check "$d"
+  assert_rc "commas with no spaces pass" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and read as one layer" "$RUN_OUT" "3 units in 2 layers"
+}
+
+# Whitespace around a line or a name, CRLF endings and a missing final newline
+# read the same as a clean file. A comment may be indented.
+test_layer_file_whitespace_is_tolerated() {
+  local d; d="$(mkfix_core)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
+  printf '# fixture\r\n\r\n  Core \r\n\tTop ,  Mid  \r\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "CRLF endings and stray spaces are tolerated" 0 "$RUN_RC" "$RUN_OUT"
+  printf '# fixture\r\n\r\nCore\r\n Top , Mid ' > "$d/scripts/daemon-layers.txt"
   run_check "$d"
   assert_rc "so is a missing final newline" 0 "$RUN_RC" "$RUN_OUT"
+  printf '# fixture\n  # Top, Mid\n\t# a comment after a tab\nCore\nTop, Mid\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "an indented comment is no layer" 0 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is not counted" "$RUN_OUT" "3 units in 2 layers"
+  printf '# fixture\r\n\r\n\tTop ,  Mid  \r\n  Core \r\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "and such lines still order the layers" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "as written" "$RUN_OUT" "Top (layer 1) uses Core (layer 2), a higher layer"
 }
 
-test_malformed_list_cannot_check() {
+# The layer file is UTF-8 like the Swift: a byte that is not stops the check at
+# its line. A byte order mark is not text, in the layer file or a Swift file.
+test_layer_file_encoding() {
+  local d bom; d="$(mkfix)"; bom="$(printf '\357\273\277')"
+  put "$d" Top/User.swift 'let n = 1'
+  printf '# fixture\nBase, Top\n\351\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "a byte that is not UTF-8" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-layers.txt:3: not valid UTF-8"
+  printf '\357\273\277Base, Top\n' > "$d/scripts/daemon-layers.txt"
+  run_check "$d"
+  assert_rc "a byte order mark before the first unit passes" 0 "$RUN_RC" "$RUN_OUT"
+  both_ways "a Swift file that starts with a byte order mark" 1 Widget \
+    "${bom}Widget.pattern.firstMatch(in: s)" "${bom}/Widget/.firstMatch(in: s)"
+}
+
+test_missing_layer_file_cannot_check() {
   local d empty; d="$(mkfix)"
-  put "$d" Top/User.swift 'let w = Widget()'
-
-  list "$d" 'Top->Base'
+  put "$d" Top/User.swift 'let n = 1'
+  mv "$d/scripts/daemon-layers.txt" "$d/scripts/kept.txt"
   run_check "$d"
-  assert_rc "a line without the arrow's spaces" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" 'lint-daemon-layers: cannot read scripts/daemon-links.txt:2: expected "A -> B", got "Top->Base"'
-
-  list "$d" 'Top -> Base' 'Top -> Base'
+  assert_rc "a missing layer file" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-layers.txt: not found"
+  mv "$d/scripts/kept.txt" "$d/scripts/daemon-layers.txt"
   run_check "$d"
-  assert_rc "a duplicate" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" 'scripts/daemon-links.txt:3: "Top -> Base" is listed twice'
-
-  list "$d" 'Top -> Base' 'Mid -> Base'
-  run_check "$d"
-  assert_rc "an unsorted list" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named, with the line it sorts before" "$RUN_OUT" \
-    'scripts/daemon-links.txt:3: "Mid -> Base" is out of order: it sorts before "Top -> Base" on line 2'
-
-  list "$d" 'Top -> Top'
-  run_check "$d"
-  assert_rc "a self-link" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" 'scripts/daemon-links.txt:2: "Top -> Top" links a unit to itself'
-
-  rm "$d/scripts/daemon-links.txt"
-  run_check "$d"
-  assert_rc "a missing list" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-links.txt: not found"
+  assert_rc "back in place, it passes" 0 "$RUN_RC" "$RUN_OUT"
 
   empty="$(mktemp -d "$WORK/empty.XXXXXX")"
   run_check "$empty"
@@ -717,51 +1048,37 @@ test_malformed_list_cannot_check() {
   assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot scan Sources/TBDDaemon: not found"
 }
 
-# A unit name is one word. A space in one is a format error at its line, and
-# a folder with a space in its name stops the scan, since its links could not
-# be listed.
-test_unit_name_with_a_space_cannot_check() {
-  local d; d="$(mkfix)"
+# A folder the layer file could not name stops the scan: a line separates its
+# names with commas and trims the spaces around them, and a line that starts
+# with `#` is a comment.
+test_folder_the_layer_file_cannot_name() {
+  local d folder reason; d="$(mkfix)"
   put "$d" Top/User.swift 'let w = Widget()'
-  list "$d" 'Top Level -> Base'
+  layers "$d" 'Base' 'Top'
   run_check "$d"
-  assert_rc "a listed unit with a space" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" \
-    'lint-daemon-layers: cannot read scripts/daemon-links.txt:2: "Top Level -> Base": a unit name has no spaces in it'
-  list "$d" 'Top -> Base'
+  assert_rc "a folder the layer file can name passes" 0 "$RUN_RC" "$RUN_OUT"
+  while IFS='|' read -r folder reason; do
+    mv "$d/$DAEMON_REL/Top" "$d/$DAEMON_REL/$folder"
+    run_check "$d"
+    mv "$d/$DAEMON_REL/$folder" "$d/$DAEMON_REL/Top"
+    assert_rc "a folder that $reason" 2 "$RUN_RC" "$RUN_OUT"
+    assert_contains "is named" "$RUN_OUT" \
+      "lint-daemon-layers: cannot scan Sources/TBDDaemon/$folder/User.swift: the folder \"$folder\" $reason, so the layer file cannot name it"
+  done <<'EOF'
+Top Level|has a space in its name
+Top,Level|has a comma in its name
+#Top|starts with "#"
+EOF
   run_check "$d"
-  assert_rc "without the space, the check passes" 0 "$RUN_RC" "$RUN_OUT"
-
-  mkdir -p "$d/$DAEMON_REL/Top Level"
-  mv "$d/$DAEMON_REL/Top/User.swift" "$d/$DAEMON_REL/Top Level/User.swift"
-  run_check "$d"
-  assert_rc "a folder with a space in its name" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" \
-    'lint-daemon-layers: cannot scan Sources/TBDDaemon/Top Level/User.swift: the folder "Top Level" has a space in its name'
-}
-
-# The list is UTF-8 like the Swift: a byte that is not stops the check at its
-# line. A byte order mark is not text, in the list or in a Swift file.
-test_list_encoding() {
-  local d bom; d="$(mkfix)"; bom="$(printf '\357\273\277')"
-  put "$d" Top/User.swift 'let w = Widget()'
-  printf '# fixture\nTop -> Base\n\351\n' > "$d/scripts/daemon-links.txt"
-  run_check "$d"
-  assert_rc "a list byte that is not UTF-8" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-links.txt:3: not valid UTF-8"
-  printf '\357\273\277# fixture\nTop -> Base\n' > "$d/scripts/daemon-links.txt"
-  run_check "$d"
-  assert_rc "a list that starts with a byte order mark passes" 0 "$RUN_RC" "$RUN_OUT"
-  both_ways "a Swift file that starts with a byte order mark" 1 Widget \
-    "${bom}Widget.pattern.firstMatch(in: s)" "${bom}/Widget/.firstMatch(in: s)"
+  assert_rc "renamed back, it passes" 0 "$RUN_RC" "$RUN_OUT"
 }
 
 # A file or folder the check cannot open stops it with exit 2 and the path,
-# never a traceback: skipping it would drop its links.
+# never a traceback: skipping it would drop its references.
 test_unreadable_cannot_check() {
   local d; d="$(mkfix)"
   put "$d" Top/User.swift 'let w = Widget()'
-  list "$d" 'Top -> Base'
+  layers "$d" 'Base' 'Top'
   chmod 000 "$d/$DAEMON_REL/Top/User.swift"
   if [ -r "$d/$DAEMON_REL/Top/User.swift" ]; then
     chmod 644 "$d/$DAEMON_REL/Top/User.swift"
@@ -779,60 +1096,51 @@ test_unreadable_cannot_check() {
   assert_rc "an unreadable folder" 2 "$RUN_RC" "$RUN_OUT"
   assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read Sources/TBDDaemon/Top: Permission denied"
 
-  chmod 000 "$d/scripts/daemon-links.txt"
+  chmod 000 "$d/scripts/daemon-layers.txt"
   run_check "$d"
-  chmod 644 "$d/scripts/daemon-links.txt"
-  assert_rc "an unreadable list" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-links.txt: Permission denied"
+  chmod 644 "$d/scripts/daemon-layers.txt"
+  assert_rc "an unreadable layer file" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-layers.txt: Permission denied"
 
   run_check "$d"
   assert_rc "readable again, the check passes" 0 "$RUN_RC" "$RUN_OUT"
 }
 
-# ---------------------------------------------------------------------------
-# The cycle report
-# ---------------------------------------------------------------------------
-
-test_two_unit_cycle_reported() {
+# The footer counts the failures and says how to fix each kind present, and
+# only those.
+test_failure_footer() {
   local d; d="$(mkfix)"
-  put "$d" Base/Back.swift 'let g = Gadget()'
-  put "$d" Top/User.swift $'struct Gadget {}\nlet w = Widget()'
-  list "$d" 'Base -> Top' 'Top -> Base'
+  put "$d" Top/User.swift $'let w = Widget()\nlet n = widgetCount()'
   run_check "$d"
-  assert_rc "a listed cycle passes" 0 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is counted" "$RUN_OUT" "cycles among the listed links: 1 group"
-  assert_contains "and named" "$RUN_OUT" "    2 units, 2 links: Base, Top"
-}
+  assert_rc "two references against the order" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "are counted, with their one link" "$RUN_OUT" \
+    "lint-daemon-layers: 2 references against the layer order, in 1 link."
+  assert_contains "the footer says to move the declaration" "$RUN_OUT" \
+    "Move the declaration into the unit that uses it, or into a lower unit both can use."
+  assert_contains "or pass a closure or a protocol in" "$RUN_OUT" \
+    "Pass a closure or a protocol in from the unit above, so the lower unit stops naming the higher one."
+  assert_contains "or move the using unit up" "$RUN_OUT" \
+    "move the using unit up, to a line above the unit it uses, in scripts/daemon-layers.txt in this change"
+  assert_contains "and how to repair main when the reference is not this change's" "$RUN_OUT" \
+    "If this change makes none of these references, main already fails"
+  assert_lacks "it says nothing of units with no layer" "$RUN_OUT" "Every unit has a layer"
+  assert_contains "and points to the guide" "$RUN_OUT" 'Sources/TBDDaemon/CLAUDE.md, "Folder layers"'
 
-test_no_cycle_reported_as_none() {
-  local d; d="$(mkfix)"
-  put "$d" Top/User.swift $'struct Gadget {}\nlet w = Widget()'
-  list "$d" 'Top -> Base'
+  put "$d" Mid/Middle.swift 'struct Middle {}'
   run_check "$d"
-  assert_rc "a list with no cycle passes" 0 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and says so" "$RUN_OUT" "cycles among the listed links: none"
-}
+  assert_contains "both kinds are counted" "$RUN_OUT" \
+    "lint-daemon-layers: 2 references against the layer order, in 1 link; 1 unit with no layer."
 
-# Leaf hangs off the cycle without being in it.
-test_three_unit_cycle_excludes_tail() {
-  local d; d="$(mkfix)"
-  put "$d" Top/User.swift $'struct Topper {}\nlet m = Middle()'
-  put "$d" Mid/User.swift $'struct Middle {}\nlet w = Widget()'
-  put "$d" Base/Back.swift $'let t = Topper()\nlet l = Leafy()'
-  put "$d" Leaf/Leafy.swift 'struct Leafy {}'
-  list "$d" 'Base -> Leaf' 'Base -> Top' 'Mid -> Base' 'Top -> Mid'
+  layers "$d" 'Base' 'Top'
   run_check "$d"
-  assert_rc "a listed three-unit cycle passes" 0 "$RUN_RC" "$RUN_OUT"
-  assert_contains "and is named" "$RUN_OUT" $'\n    3 units, 3 links: Base, Mid, Top'
-  assert_lacks "without its tail" "$RUN_OUT" "Leaf"
-}
-
-test_cycles_not_printed_on_failure() {
-  local d; d="$(mkfix)"
-  list "$d" 'Top -> Base'
-  run_check "$d"
-  assert_rc "a stale link fails" 1 "$RUN_RC" "$RUN_OUT"
-  assert_lacks "and the cycle report waits for a pass" "$RUN_OUT" "cycles among"
+  assert_rc "a unit with no layer alone" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is counted" "$RUN_OUT" "lint-daemon-layers: 1 unit with no layer."
+  assert_contains "the footer says to add it where it fits" "$RUN_OUT" \
+    "Every unit has a layer. Add each unit above to scripts/daemon-layers.txt in this change: in the layer it fits in, or on the new line it needs."
+  assert_contains "and what to do where none fits" "$RUN_OUT" \
+    "Where no layer fits a unit, change a reference, or move the units involved to other lines so that every use points down."
+  assert_lacks "it says nothing of references" "$RUN_OUT" "Move the declaration"
+  assert_contains "and points to the guide" "$RUN_OUT" 'Sources/TBDDaemon/CLAUDE.md, "Folder layers"'
 }
 
 # ---------------------------------------------------------------------------
@@ -843,31 +1151,36 @@ test_root_files_are_one_unit() {
   local d; d="$(mkfix)"
   put "$d" Daemon.swift 'let p = PIDFile()'
   put "$d" PIDFile.swift 'struct PIDFile {}'
+  layers "$d" 'Base, (root)'
   run_check "$d"
   assert_rc "root files referencing each other make no link" 0 "$RUN_RC" "$RUN_OUT"
 
   put "$d" Daemon.swift 'let w = Widget()'
   run_check "$d"
   assert_rc "a root file referencing Base" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is a link from (root)" "$RUN_OUT" "Sources/TBDDaemon/Daemon.swift:1: (root) -> Base is a new link: Widget"
+  assert_contains "is a reference from (root)" "$RUN_OUT" \
+    "Sources/TBDDaemon/Daemon.swift:1: (root) (layer 1) uses Base (layer 1), its own layer: Widget is declared in Base"
 
   put "$d" Daemon.swift 'let p = PIDFile()'
   put "$d" Base/Uses.swift 'let p = PIDFile()'
   run_check "$d"
   assert_rc "Base referencing a root file" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is a link to (root)" "$RUN_OUT" "Base -> (root) is a new link: PIDFile"
+  assert_contains "is a reference to (root)" "$RUN_OUT" \
+    "Base (layer 1) uses (root) (layer 1), its own layer: PIDFile is declared in (root)"
 }
 
 test_main_swift_is_skipped() {
   local d; d="$(mkfix)"
   put "$d" main.swift 'let w = Widget()'
+  layers "$d" 'Base'
   run_check "$d"
   assert_rc "main.swift's references are not read" 0 "$RUN_RC" "$RUN_OUT"
   rm "$d/$DAEMON_REL/main.swift"
   put "$d" Launch.swift 'let w = Widget()'
+  layers "$d" 'Base, (root)'
   run_check "$d"
   assert_rc "the same line in another root file" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is a link from (root)" "$RUN_OUT" "(root) -> Base is a new link: Widget"
+  assert_contains "is a reference from (root)" "$RUN_OUT" "(root) (layer 1) uses Base (layer 1), its own layer: Widget"
 
   d="$(mkfix)"
   put "$d" main.swift 'struct Entry {}'
@@ -876,9 +1189,10 @@ test_main_swift_is_skipped() {
   assert_rc "main.swift's declarations are not indexed" 0 "$RUN_RC" "$RUN_OUT"
   rm "$d/$DAEMON_REL/main.swift"
   put "$d" Launch.swift 'struct Entry {}'
+  layers "$d" 'Base, Top, (root)'
   run_check "$d"
   assert_rc "the same declaration in another root file" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is a link to (root)" "$RUN_OUT" "Top -> (root) is a new link: Entry"
+  assert_contains "is a reference to (root)" "$RUN_OUT" "Top (layer 1) uses (root) (layer 1), its own layer: Entry"
 }
 
 test_nested_folders_fold_into_top_folder() {
@@ -886,24 +1200,28 @@ test_nested_folders_fold_into_top_folder() {
   put "$d" Top/Deep/Nested.swift 'let w = Widget()'
   run_check "$d"
   assert_rc "a subfolder's reference" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "belongs to its top folder" "$RUN_OUT" "Sources/TBDDaemon/Top/Deep/Nested.swift:1: Top -> Base is a new link"
+  assert_contains "belongs to its top folder" "$RUN_OUT" "$(same_layer Top/Deep/Nested.swift:1 Widget)"
 
   d="$(mkfix)"
   put "$d" Base/Inner/More.swift 'let w = Widget()'
+  layers "$d" 'Base'
   run_check "$d"
   assert_rc "a subfolder referencing its own top folder makes no link" 0 "$RUN_RC" "$RUN_OUT"
 }
 
+# A folder that holds no Swift is no unit, so it needs no layer.
 test_non_swift_files_are_ignored() {
   local d; d="$(mkfix)"
   put "$d" Top/Migrations/20260101000000_x.sql 'Widget()'
   put "$d" Top/CLAUDE.md 'Widget'
+  layers "$d" 'Base'
   run_check "$d"
   assert_rc "SQL and Markdown files are not read" 0 "$RUN_RC" "$RUN_OUT"
   put "$d" Top/Migrations/X.swift 'Widget()'
+  layers "$d" 'Base, Top'
   run_check "$d"
   assert_rc "the same content in a Swift file" 1 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is a link" "$RUN_OUT" "Top -> Base is a new link"
+  assert_contains "is a reference" "$RUN_OUT" "$(same_layer Top/Migrations/X.swift:1 Widget)"
 }
 
 # ---------------------------------------------------------------------------

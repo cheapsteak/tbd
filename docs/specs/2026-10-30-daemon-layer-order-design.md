@@ -93,7 +93,7 @@ None of these changes behaviour. The existing tests cover the code they touch.
 The last PR replaces `scripts/daemon-links.txt` with `scripts/daemon-layers.txt`, which lists the layers from bottom to top, one line per layer.
 - **A unit may use only units in a lower layer.** Units in the same layer may not use each other.
 - **Every unit must be listed.** A new folder fails the check until it has a layer.
-- **Moving a unit up is a one-line edit** that a reviewer sees. That is how a new link between two units in the same layer gets made.
+- **Moving a unit up moves its name to a higher line,** an edit that a reviewer sees. That is how a new link between two units in the same layer gets made.
 
 The simulated order, from the bottom:
 1. Base, Diagnostics, Keychain, SSH, Update

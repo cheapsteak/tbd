@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Check the links between the daemon's folders against scripts/daemon-links.txt.
+"""Check the daemon's folders against the layer order in scripts/daemon-layers.txt.
 
 `TBDDaemonLib` is one SwiftPM module, so the compiler lets any folder under
 Sources/TBDDaemon use any other. This check gives the folders a direction
-without a build. It reads every Swift file in the library, finds each place a
-file in one folder names a declaration from another, and compares the links
-those references make with the committed list. It fails on a link the list
-lacks, so a new one reaches review in the diff, and on a listed link no code
-makes any more, so a removed link leaves the list in the same change and the list grows only by a hand edit a reviewer sees. The design is in
+without a build. The layer file lists the layers bottom first, one line per
+layer. The check reads every Swift file in the library, finds each place a
+file in one unit names a declaration from another, and fails when the unit it
+names is in the same layer or a higher one. It also fails when a unit has no
+layer, so a new folder gets one in the change that adds it, and when `Base`,
+the folder of code the others share, is not on the bottom line. The design is in
 docs/specs/2026-10-30-daemon-layer-order-design.md; how to read and fix a
-failure is in Sources/TBDDaemon/CLAUDE.md, "Links between folders".
+failure is in Sources/TBDDaemon/CLAUDE.md, "Folder layers".
 
 A unit is a folder directly under Sources/TBDDaemon, subfolders included, or
 `(root)` for the files directly in it. `main.swift` belongs to the executable
@@ -29,13 +30,16 @@ lowercase local, pattern binding or parameter.
 
 It fails closed: a file or folder it cannot open, and Swift it cannot read
 -- an unbalanced brace, a literal or comment that never closes, bytes that
-are not UTF-8 -- stop it with exit 2, rather than let it report a link set
-that is silently wrong.
+are not UTF-8 -- stop it with exit 2, rather than let it judge references
+it may have read wrong. So does a layer file it cannot read: a name that is
+no unit, a unit listed twice, a stray comma, or bytes that are not UTF-8; and
+a folder the layer file could not name, with a space or a comma in its name or
+a `#` at its start.
 
-Exit codes: 0 every link is listed and every listed link is made; 1 a new or
-stale link; 2 the tree or the list cannot be read. A pass also reports the
-cycles among the listed links. That report is information, not a failure: it
-measures how far the folders are from taking a layer order.
+Exit codes: 0 every reference runs into a lower layer, every unit has a layer
+and Base is on the bottom line; 1 a reference into the same layer or a higher
+one, a unit with no layer, or Base off the bottom line; 2 the tree or the
+layer file cannot be read.
 
 Usage:
   scripts/lint-daemon-layers.py [--repo-root DIR]
@@ -50,14 +54,14 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, NoReturn
+from typing import NoReturn
 
 # --------------------------------------------------------------------------
 # Where things live, relative to the repository root
 # --------------------------------------------------------------------------
 
 DAEMON_DIR = PurePosixPath("Sources/TBDDaemon")
-LINKS_FILE = PurePosixPath("scripts/daemon-links.txt")
+LAYERS_FILE = PurePosixPath("scripts/daemon-layers.txt")
 
 # The unit for the files directly under DAEMON_DIR. The parentheses keep it
 # from colliding with any folder name Swift code could live in.
@@ -68,14 +72,19 @@ ROOT_UNIT = "(root)"
 # executable's business.
 EXECUTABLE_ONLY = "main.swift"
 
-GUIDE = 'Sources/TBDDaemon/CLAUDE.md, "Links between folders"'
+GUIDE = 'Sources/TBDDaemon/CLAUDE.md, "Folder layers"'
+
+# The folder of code two or more others share. It stays on the bottom line,
+# where it may use no other unit; the guide's section on it says why.
+BASE_UNIT = "Base"
+BASE_GUIDE = 'Sources/TBDDaemon/CLAUDE.md, "Base"'
 
 # (from unit, to unit)
 Link = tuple[str, str]
 
 
 class CannotCheck(Exception):
-    """The tree or the list cannot be read. The message is what follows
+    """The tree or the layer file cannot be read. The message is what follows
     `lint-daemon-layers: ` on stderr."""
 
 
@@ -116,12 +125,6 @@ class SourceFile:
 class Scan:
     units: set[str]
     references: list[Reference]
-
-    def links(self) -> dict[Link, list[Reference]]:
-        found: dict[Link, list[Reference]] = {}
-        for reference in self.references:
-            found.setdefault(reference.link, []).append(reference)
-        return found
 
 
 def unit_of(rel: PurePosixPath) -> str:
@@ -851,6 +854,19 @@ def swift_files(daemon: Path) -> list[PurePosixPath]:
     return sorted(found)
 
 
+def unnameable_because(unit: str) -> str:
+    """Why the layer file could not name the unit, or "" when it can. A line
+    separates its names with commas and trims the spaces around them, and one
+    that starts with `#` is a comment."""
+    if any(char.isspace() for char in unit):
+        return "has a space in its name"
+    if "," in unit:
+        return "has a comma in its name"
+    if unit.startswith("#"):
+        return 'starts with "#"'
+    return ""
+
+
 def scan_daemon(repo_root: Path) -> Scan:
     daemon = repo_root / DAEMON_DIR
     if not daemon.is_dir():
@@ -861,9 +877,9 @@ def scan_daemon(repo_root: Path) -> Scan:
             continue
         repo_path = (DAEMON_DIR / rel).as_posix()
         unit = unit_of(rel)
-        if any(char.isspace() for char in unit):
-            # The list could not hold its links: a unit name is one word.
-            raise CannotCheck(f'cannot scan {repo_path}: the folder "{unit}" has a space in its name')
+        unnameable = unnameable_because(unit)
+        if unnameable:
+            raise CannotCheck(f'cannot scan {repo_path}: the folder "{unit}" {unnameable}, so the layer file cannot name it')
         source = read_text(daemon / rel, repo_path, "cannot scan")
         tokens = tokenize(blank_literals_and_comments(source, repo_path))
         files.append(SourceFile(repo_path, unit, tokens, parse_declarations(tokens, repo_path)))
@@ -875,60 +891,217 @@ def scan_daemon(repo_root: Path) -> Scan:
 
 
 # --------------------------------------------------------------------------
-# The list
+# The layer order
 # --------------------------------------------------------------------------
 
-_LIST_LINE = re.compile(r"(\S+) -> (\S+)\Z")
-# A line that would be a link but for a space in a unit's name.
-_LIST_LINE_WITH_SPACES = re.compile(r"(.+?) -> (.+)\Z")
 
+def read_layers(repo_root: Path, units: set[str]) -> list[list[str]]:
+    """The layers, bottom first, each holding the units its line lists.
 
-def read_list(repo_root: Path) -> dict[Link, int]:
-    """Each listed link, mapped to its line in the list."""
-    path = repo_root / LINKS_FILE
+    A line lists its units separated by commas. A blank line, or one that
+    starts with `#` after any spaces, is no layer, so layer numbers count
+    layer lines only.
+    Raises CannotCheck at the line of a name that is no unit, a unit listed
+    twice, an empty name or a name with a space in it: an order read past
+    any of those would be the wrong order, not a broken one.
+    """
+    path = repo_root / LAYERS_FILE
     if not path.exists():
-        raise CannotCheck(f"cannot read {LINKS_FILE}: not found")
-    text = read_text(path, str(LINKS_FILE), "cannot read")
-    listed: dict[Link, int] = {}
-    previous, previous_number = "", 0
+        raise CannotCheck(f"cannot read {LAYERS_FILE}: not found")
+    text = read_text(path, str(LAYERS_FILE), "cannot read")
+    layers: list[list[str]] = []
+    listed_on: dict[str, int] = {}
     for number, raw in enumerate(text.split("\n"), start=1):
-        # Trailing whitespace, `\r` included, so a hand edit with CRLF line
-        # endings or trailing spaces reads the same as a clean one.
-        line = raw.rstrip()
+        # Surrounding whitespace, `\r` included, so a hand edit with CRLF line
+        # endings or stray spaces reads the same as a clean one.
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        where = f"cannot read {LINKS_FILE}:{number}"
-        match = _LIST_LINE.match(line)
-        if match is None:
-            if _LIST_LINE_WITH_SPACES.match(line):
-                raise CannotCheck(f'{where}: "{line}": a unit name has no spaces in it')
-            raise CannotCheck(f'{where}: expected "A -> B", got "{line}"')
-        link = (match.group(1), match.group(2))
-        if link[0] == link[1]:
-            raise CannotCheck(f'{where}: "{line}" links a unit to itself')
-        if link in listed:
-            raise CannotCheck(f'{where}: "{line}" is listed twice')
-        # Sorted byte by byte, so that parallel branches add lines in
-        # predictable places and their merges conflict only when they add the
-        # same link. The message names both lines: sorting the whole file
-        # would scramble the comments at its top.
-        if line < previous:
-            raise CannotCheck(
-                f'{where}: "{line}" is out of order: it sorts before "{previous}" on line {previous_number}'
-            )
-        listed[link] = number
-        previous, previous_number = line, number
-    return listed
+        where = f"cannot read {LAYERS_FILE}:{number}"
+        layer: list[str] = []
+        for item in line.split(","):
+            name = item.strip()
+            if not name:
+                raise CannotCheck(f'{where}: "{line}" has an empty name: a comma with no unit beside it')
+            if any(char.isspace() for char in name):
+                raise CannotCheck(f'{where}: "{name}": a unit name has no spaces in it; separate units with commas')
+            if name in listed_on:
+                raise CannotCheck(f"{where}: {name} is listed twice: line {listed_on[name]} lists it too")
+            if name not in units:
+                raise CannotCheck(f"{where}: {name} is not a unit under {DAEMON_DIR}")
+            listed_on[name] = number
+            layer.append(name)
+        layers.append(layer)
+    return layers
 
 
-def compare_with_list(
-    links: dict[Link, list[Reference]], listed: dict[Link, int]
-) -> tuple[dict[Link, list[Reference]], dict[Link, int]]:
-    """(new, stale): the links code makes that the list lacks, and the listed
-    links no code makes."""
-    new = {link: references for link, references in links.items() if link not in listed}
-    stale = {link: number for link, number in listed.items() if link not in links}
-    return new, stale
+def layer_numbers(layers: list[list[str]]) -> dict[str, int]:
+    """Each listed unit's layer, 1 for the bottom."""
+    return {unit: number for number, layer in enumerate(layers, start=1) for unit in layer}
+
+
+def check_order(scan: Scan, layer_of: dict[str, int]) -> tuple[list[Reference], list[str]]:
+    """(against, unlisted): the references from a unit into its own layer or a
+    higher one, and the units no line lists. A reference to or from a unit
+    with no layer is not judged; that unit fails on its own."""
+    against = [
+        reference
+        for reference in scan.references
+        if reference.link[0] in layer_of
+        and reference.link[1] in layer_of
+        and layer_of[reference.link[1]] >= layer_of[reference.link[0]]
+    ]
+    return against, sorted(scan.units - layer_of.keys())
+
+
+def reachable(unit: str, step: dict[str, list[str]]) -> set[str]:
+    """Every unit `step` leads to from `unit`, one or more steps away."""
+    reached: set[str] = set()
+    frontier = list(step[unit])
+    while frontier:
+        here = frontier.pop()
+        if here not in reached:
+            reached.add(here)
+            frontier.extend(step[here])
+    return reached
+
+
+def circle_from(unit: str, uses: dict[str, list[str]]) -> list[str]:
+    """The shortest run of links from `unit` back to itself, both ends
+    included. `unit` must be on a circle."""
+    came_from: dict[str, str] = {}
+    frontier = [unit]
+    while unit not in came_from and frontier:
+        reached: list[str] = []
+        for here in frontier:
+            for there in uses[here]:
+                if there not in came_from:
+                    came_from[there] = here
+                    reached.append(there)
+        frontier = reached
+    path = [unit]
+    while len(path) == 1 or path[-1] != unit:
+        path.append(came_from[path[-1]])
+    return path[::-1]
+
+
+def where_new_units_fit(
+    new_units: list[str], links: set[Link], layer_of: dict[str, int], top: int, base_on_bottom: bool
+) -> dict[str, str]:
+    """Where each unit with no layer can go, as the text that follows
+    "<unit> has no layer; ".
+
+    The units with no layer are placed together, as if each were listed: a
+    unit goes above every unit it uses and below every unit that uses it,
+    whether that unit is listed or not. Each takes the lowest layer above the
+    units it uses that still leaves room for the new units that use it, or
+    else a new line just above the units it uses. With `base_on_bottom`, no
+    new line goes below layer 1, where Base stays. Layer numbers are the
+    file's as it stands.
+    """
+    new = set(new_units)
+    uses = {unit: sorted(target for source, target in links if source == unit) for unit in new}
+    used_by = {unit: sorted(source for source, target in links if target == unit) for unit in new}
+    new_uses = {unit: [target for target in uses[unit] if target in new] for unit in new}
+    new_used_by = {unit: [source for source in used_by[unit] if source in new] for unit in new}
+
+    # One scale for every place a unit can take: layer k is at k * step, and
+    # the new lines between layers k and k + 1 take the places in between,
+    # enough for a chain of every new unit.
+    step = len(new) + 1
+
+    def line(layer: int) -> int:
+        return layer * step
+
+    fits: dict[str, str] = {}
+    placed: dict[str, int] = {}
+    # For each unit no layer fits, the unit that has to fit first: itself when
+    # the cause is its own.
+    waits_on: dict[str, str] = {}
+
+    circling = {unit for unit in new if unit in reachable(unit, new_uses)}
+    for unit in sorted(circling):
+        fits[unit] = "no layer fits it: its links run in a circle, " + " -> ".join(circle_from(unit, new_uses))
+        waits_on[unit] = unit
+    for unit in sorted(new - circling):
+        near = (reachable(unit, new_uses) | reachable(unit, new_used_by)) & circling
+        if near:
+            waits_on[unit] = min(near)
+
+    ceilings: dict[str, tuple[int, int, str]] = {}
+
+    def ceiling(unit: str) -> tuple[int, int, str]:
+        """The highest place the unit can take, the layer whose use sets it,
+        and the new unit that use runs through, or "". No unit a circle
+        reaches comes here, so the recursion ends."""
+        if unit not in ceilings:
+            best = (line(top + 1) - 1, top + 1, "")
+            for user in used_by[unit]:
+                if user in layer_of:
+                    candidate = (line(layer_of[user]) - 1, layer_of[user], "")
+                else:
+                    highest, layer, _ = ceiling(user)
+                    candidate = (highest - 1, layer, user)
+                if candidate[0] < best[0]:
+                    best = candidate
+            ceilings[unit] = best
+        return ceilings[unit]
+
+    def place(unit: str) -> None:
+        if unit in placed or unit in waits_on:
+            return
+        lowest = line(1) if base_on_bottom else 1
+        for target in new_uses[unit]:
+            place(target)
+            if target in waits_on:
+                waits_on[unit] = waits_on[target]
+                return
+            lowest = max(lowest, placed[target] + 1)
+        listed = [layer_of[target] for target in uses[unit] if target in layer_of]
+        if listed:
+            lowest = max(lowest, line(max(listed)) + 1)
+        highest, layer, through = ceiling(unit)
+        if lowest > highest:
+            used = f"layer {layer} uses it" + (f" through {through}" if through else "")
+            if listed:
+                fits[unit] = f"no layer fits it: it uses layer {max(listed)}, and {used}"
+            else:
+                # Only the bottom limit can leave no room: every new unit it
+                # uses was placed below the room its users leave.
+                fits[unit] = f"no layer fits it: {used}, and {BASE_UNIT} stays on the bottom line"
+            waits_on[unit] = unit
+            return
+        # The first layer at or above its lowest place, if the units that use
+        # it leave room; else a new line. The ceiling is below any layer past
+        # the top.
+        layer_above = line(-(-lowest // step))
+        placed[unit] = layer_above if layer_above <= highest else lowest
+
+    def describe(unit: str) -> str:
+        gap, rest = divmod(placed[unit], step)
+        if rest == 0:
+            return f"it fits in layer {gap}"
+        if gap == top:
+            where = "at the top"
+        elif gap == 0:
+            where = "at the bottom"
+        else:
+            where = f"between layers {gap} and {gap + 1}"
+        # The new units it uses on new lines in the same gap: its line goes
+        # above theirs.
+        under = [target for target in new_uses[unit] if placed[target] // step == gap and placed[target] % step]
+        if under:
+            where += f", above the line{'s' if len(under) > 1 else ''} for {' and '.join(under)}"
+        return f"it needs a new line {where}"
+
+    for unit in sorted(new):
+        place(unit)
+    for unit in sorted(new):
+        if unit in placed:
+            fits[unit] = describe(unit)
+        elif waits_on[unit] != unit:
+            fits[unit] = f"no layer fits it until one fits {waits_on[unit]}"
+    return fits
 
 
 # --------------------------------------------------------------------------
@@ -940,119 +1113,62 @@ def plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def link_text(link: Link) -> str:
-    return f"{link[0]} -> {link[1]}"
-
-
-def cycle_groups(links: Iterable[Link]) -> list[list[str]]:
-    """The strongly connected groups of two or more units: within a group,
-    every unit reaches every other by following links. Each group is sorted,
-    and the groups run largest first, then by first unit."""
-    graph: dict[str, set[str]] = {}
-    for source, target in links:
-        graph.setdefault(source, set()).add(target)
-        graph.setdefault(target, set())
-
-    # Tarjan's algorithm. Recursion is safe at this size: one frame per unit.
-    order: dict[str, int] = {}
-    low: dict[str, int] = {}
-    path: list[str] = []
-    on_path: set[str] = set()
-    groups: list[list[str]] = []
-
-    def visit(unit: str) -> None:
-        order[unit] = low[unit] = len(order)
-        path.append(unit)
-        on_path.add(unit)
-        for target in sorted(graph[unit]):
-            if target not in order:
-                visit(target)
-                low[unit] = min(low[unit], low[target])
-            elif target in on_path:
-                low[unit] = min(low[unit], order[target])
-        if low[unit] == order[unit]:
-            group: list[str] = []
-            while True:
-                member = path.pop()
-                on_path.discard(member)
-                group.append(member)
-                if member == unit:
-                    break
-            if len(group) > 1:
-                groups.append(sorted(group))
-
-    for unit in sorted(graph):
-        if unit not in order:
-            visit(unit)
-    return sorted(groups, key=lambda group: (-len(group), group[0]))
-
-
-def format_cycles(listed: Iterable[Link]) -> str:
-    links = list(listed)
-    groups = cycle_groups(links)
-    if not groups:
-        return "cycles among the listed links: none"
-    lines = [f"cycles among the listed links: {plural(len(groups), 'group')}"]
-    for group in groups:
-        members = set(group)
-        inside = sum(1 for source, target in links if source in members and target in members)
-        lines.append(f"    {plural(len(group), 'unit')}, {plural(inside, 'link')}: {', '.join(group)}")
-    return "\n".join(lines)
-
-
-def failure_report(new: dict[Link, list[Reference]], stale: dict[Link, int], units: set[str]) -> str:
+def failure_report(
+    against: list[Reference], unlisted: list[str], layer_of: dict[str, int], links: set[Link], top: int
+) -> str:
     lines: list[str] = []
-    references = sorted(
-        (reference for found in new.values() for reference in found),
-        key=lambda r: (link_text(r.link), r.path, r.line, r.name),
-    )
-    for reference in references:
+    for reference in sorted(against, key=lambda r: (r.path, r.line, r.name, r.link)):
+        user, used = reference.link
+        relation = "its own layer" if layer_of[used] == layer_of[user] else "a higher layer"
         lines.append(
-            f"{reference.path}:{reference.line}: {link_text(reference.link)} is a new link: "
-            f"{reference.name} is declared in {reference.link[1]}"
+            f"{reference.path}:{reference.line}: {user} (layer {layer_of[user]}) uses "
+            f"{used} (layer {layer_of[used]}), {relation}: {reference.name} is declared in {used}"
         )
-    for link, number in sorted(stale.items(), key=lambda item: item[1]):
-        line = (
-            f"{LINKS_FILE}:{number}: {link_text(link)} is stale: "
-            f"no file in {link[0]} names a declaration from {link[1]}"
-        )
-        missing = [unit for unit in link if unit not in units]
-        if len(missing) == 1:
-            line += f" ({missing[0]} is not a unit under {DAEMON_DIR})"
-        elif missing:
-            line += f" ({missing[0]} and {missing[1]} are not units under {DAEMON_DIR})"
-        lines.append(line)
+    fits = where_new_units_fit(unlisted, links, layer_of, top, BASE_UNIT in layer_of)
+    for unit in unlisted:
+        lines.append(f"{LAYERS_FILE}: {unit} has no layer; {fits[unit]}")
 
     counts = []
-    if new:
-        counts.append(plural(len(new), "new link"))
-    if stale:
-        counts.append(plural(len(stale), "stale link"))
-    lines.append(f"lint-daemon-layers: {', '.join(counts)}.")
-    if new:
-        lines.append(
-            "A new link is a reference from one daemon folder into another that "
-            f"{LINKS_FILE} does not list. Remove it by moving the declaration into "
-            "the folder that uses it or a lower one, or by passing a closure or "
-            "protocol in from the folder above. If the link is right, add its line "
-            f"to {LINKS_FILE} in this change, so the reviewer sees it:"
+    if against:
+        counts.append(
+            f"{plural(len(against), 'reference')} against the layer order, "
+            f"in {plural(len({reference.link for reference in against}), 'link')}"
         )
-        lines.extend(f"    {link_text(link)}" for link in sorted(new, key=link_text))
+    if unlisted:
+        counts.append(f"{plural(len(unlisted), 'unit')} with no layer")
+    lines.append(f"lint-daemon-layers: {'; '.join(counts)}.")
+    if against:
+        lines.extend([
+            f"{LAYERS_FILE} lists the layers bottom first, and a unit may use only units "
+            "in a lower layer. Fix each reference above in one of three ways:",
+            "    - Move the declaration into the unit that uses it, or into a lower unit both can use.",
+            "    - Pass a closure or a protocol in from the unit above, so the lower unit stops naming the higher one.",
+            "    - If the direction is right, move the using unit up, to a line above the unit it uses, "
+            f"in {LAYERS_FILE} in this change, so the reviewer sees the move.",
+            "If this change makes none of these references, main already fails: one change moved a unit "
+            "or a declaration, and another that passed alone added a reference the old order allowed. "
+            "Fix it the same way, in a pull request of its own.",
+        ])
+    if unlisted:
         lines.append(
-            "If this change makes no such reference, main already does: two "
-            "changes that each passed alone made it together. Add the line to "
-            f"{LINKS_FILE} in a one-line pull request of its own."
-        )
-    if stale:
-        lines.append(
-            "A stale link is listed, but no code makes it any more. "
-            f"Delete its line from {LINKS_FILE} in this change. If this change "
-            "removed none of its references, main is already stale: two changes "
-            "that each passed alone removed the last ones together. Delete the "
-            "line in a one-line pull request of its own."
+            f"Every unit has a layer. Add each unit above to {LAYERS_FILE} in this change: in the layer "
+            "it fits in, or on the new line it needs. Where no layer fits a unit, change a reference, "
+            "or move the units involved to other lines so that every use points down."
         )
     lines.append(f"How to read and fix a failure: {GUIDE}.")
     return "\n".join(lines)
+
+
+def base_report(layer: int | None) -> str:
+    """The failure when Base is not on the bottom line. The check judges
+    nothing else then: every place it would name assumes Base at the bottom."""
+    where = "has no layer" if layer is None else f"is in layer {layer}"
+    return "\n".join([
+        f"{LAYERS_FILE}: {BASE_UNIT} {where}; {BASE_UNIT} stays on the bottom line",
+        f"lint-daemon-layers: {BASE_UNIT} is not on the bottom line.",
+        f"Put {BASE_UNIT} on the first line of {LAYERS_FILE}; the check judges nothing else until it is there. "
+        f"Why it never moves up, and what to change instead: {BASE_GUIDE}.",
+    ])
 
 
 def main(argv: list[str]) -> int:
@@ -1062,7 +1178,7 @@ def main(argv: list[str]) -> int:
 
     try:
         scan = scan_daemon(args.repo_root)
-        listed = read_list(args.repo_root)
+        layers = read_layers(args.repo_root, scan.units)
     except CannotCheck as error:
         print(f"lint-daemon-layers: {error}", file=sys.stderr)
         return 2
@@ -1071,18 +1187,19 @@ def main(argv: list[str]) -> int:
         print(f"lint-daemon-layers: cannot read {error.filename or 'a file'}: {error.strerror or error}", file=sys.stderr)
         return 2
 
-    links = scan.links()
-    new, stale = compare_with_list(links, listed)
-    if new or stale:
-        print(failure_report(new, stale, scan.units))
+    layer_of = layer_numbers(layers)
+    if BASE_UNIT in scan.units and layer_of.get(BASE_UNIT) != 1:
+        print(base_report(layer_of.get(BASE_UNIT)))
+        return 1
+    links = {reference.link for reference in scan.references}
+    against, unlisted = check_order(scan, layer_of)
+    if against or unlisted:
+        print(failure_report(against, unlisted, layer_of, links, len(layers)))
         return 1
     print(
-        f"lint-daemon-layers: OK, {plural(len(links), 'link')} among "
-        f"{plural(len(scan.units), 'unit')}, each listed in {LINKS_FILE}."
+        f"lint-daemon-layers: OK, {plural(len(scan.units), 'unit')} in {plural(len(layers), 'layer')}, "
+        f"{plural(len(links), 'link')}, each into a lower layer."
     )
-    # Information, not a verdict: the cycles still to break before the
-    # folders can take a layer order.
-    print(format_cycles(listed))
     return 0
 
 
