@@ -225,7 +225,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// also raised by `ParentResolver` during worktree *creation* — the parent
 /// validation rules (`parentNotFound`, `parentIsMain`, `parentIsArchived`)
 /// apply identically at both call sites. The `selfReference` and `cycle`
-/// cases are move-only by construction (a brand-new row has no descendants).
+/// cases are move-only by construction (a brand-new row has no descendants),
+/// and the cases after `worktreeNotFound` are raised by `moveMany` alone.
 public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
     case selfReference
     case cycle
@@ -233,6 +234,19 @@ public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
     case parentIsMain
     case parentIsArchived
     case worktreeNotFound
+    /// `moveMany` was given no worktrees.
+    case emptyMove
+    /// A carried row is the repo's main worktree, which has a fixed place.
+    case carriesMain
+    /// A carried scratch row was given a parent.
+    case scratchCannotNest
+    /// Rows bound for the top level come from different top-level groups
+    /// (different repos, or a repo and the scratch rows).
+    case mixedGroups
+    /// `before` names a row outside the destination group.
+    case beforeNotInGroup
+    /// `before` names one of the rows being moved.
+    case beforeIsCarried
 
     public var description: String {
         switch self {
@@ -242,6 +256,12 @@ public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
         case .parentIsMain: return "Cannot nest under the main worktree."
         case .parentIsArchived: return "Cannot nest under an archived worktree."
         case .worktreeNotFound: return "Worktree not found."
+        case .emptyMove: return "No worktrees to move."
+        case .carriesMain: return "The main worktree cannot be moved."
+        case .scratchCannotNest: return "A scratch worktree cannot be nested."
+        case .mixedGroups: return "Worktrees from different repos cannot be moved to the top level together."
+        case .beforeNotInGroup: return "The drop position is not among the destination's worktrees."
+        case .beforeIsCarried: return "Cannot place worktrees before one of the worktrees being moved."
         }
     }
 
@@ -1113,6 +1133,132 @@ public struct WorktreeStore: Sendable {
                     sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
                     arguments: [parentArg, newSortOrder, worktreeID.uuidString]
                 )
+            }
+        }
+    }
+
+    /// Move several worktrees at once to one destination group, all or
+    /// nothing, and return every row of that group in its new order.
+    ///
+    /// The sidebar's drop path. The caller names the destination by IDs — a
+    /// parent (nil for the top level of the rows' own group) and the row to
+    /// land before (nil for the end) — and every `sortOrder` is computed here,
+    /// inside the transaction, so no client does arithmetic on values a
+    /// concurrent write may have changed.
+    ///
+    /// Validation, every check before any write:
+    /// - each carried row exists and is not `main`, and a scratch row is not
+    ///   given a parent;
+    /// - a non-nil parent passes `validateParent` for every carried row;
+    /// - for the top level, every carried row belongs to one top-level group:
+    ///   the rows with no parent, the same `repoID` and a status other than
+    ///   `main`. `repoID IS ?` keeps it NULL-safe, so scratch rows form their
+    ///   own group;
+    /// - `before`, when given, is in the destination group and is not carried.
+    ///
+    /// The destination group is ordered by `sortOrder`, `SiblingPlacement.place`
+    /// computes the new order, and the group is renumbered 0…n−1. The group
+    /// includes archived rows, which the app does not list; placement keeps
+    /// the relative order of the rows it does not carry, so the app, running
+    /// the same placement on its own list, agrees on every row it shows.
+    ///
+    /// A carried remote row whose parent changes spends its adoption
+    /// assignment (`remote_parent_assigned = 1`), exactly as `move` does; a
+    /// reorder that keeps its parent leaves the marker alone.
+    ///
+    /// A carried ID named twice is moved once. The write transaction commits
+    /// before this returns, so a caller that replies after it returns replies
+    /// only once the move is durable.
+    public func moveMany(
+        worktreeIDs: [UUID], newParentID: UUID?, before: UUID?
+    ) async throws -> [WorktreeOrderEntry] {
+        try await writer.write { db in
+            var seen = Set<UUID>()
+            let carriedIDs = worktreeIDs.filter { seen.insert($0).inserted }
+            guard !carriedIDs.isEmpty else { throw WorktreeMoveError.emptyMove }
+
+            var carried: [WorktreeRecord] = []
+            for worktreeID in carriedIDs {
+                guard let record = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
+                    throw WorktreeMoveError.worktreeNotFound
+                }
+                if record.status == WorktreeStatus.main.rawValue {
+                    throw WorktreeMoveError.carriesMain
+                }
+                if let parentID = newParentID {
+                    if record.repoID == nil {
+                        throw WorktreeMoveError.scratchCannotNest
+                    }
+                    try Self.validateParent(db, worktreeID: worktreeID, parentID: parentID)
+                }
+                carried.append(record)
+            }
+
+            let parentArg = newParentID?.uuidString
+            let groupRequest: QueryInterfaceRequest<WorktreeRecord>
+            if let parentArg {
+                groupRequest = WorktreeRecord.filter(Column("parentWorktreeID") == parentArg)
+            } else {
+                // One top-level group per repo, and one for the scratch rows.
+                let repoID = carried[0].repoID
+                guard carried.allSatisfy({ $0.repoID == repoID }) else {
+                    throw WorktreeMoveError.mixedGroups
+                }
+                groupRequest = WorktreeRecord.all().filter(
+                    sql: "parentWorktreeID IS NULL AND repoID IS ? AND status != ?",
+                    arguments: [repoID, WorktreeStatus.main.rawValue])
+            }
+            let group = try groupRequest
+                .order(Column("sortOrder").asc, Column("createdAt").asc, Column("id").asc)
+                .fetchAll(db)
+            let groupIDs = group.compactMap { UUID(uuidString: $0.id) }
+
+            if let before {
+                if seen.contains(before) {
+                    throw WorktreeMoveError.beforeIsCarried
+                }
+                if !groupIDs.contains(before) {
+                    throw WorktreeMoveError.beforeNotInGroup
+                }
+            }
+
+            let ordered = SiblingPlacement.place(group: groupIDs, carried: carriedIDs, before: before)
+
+            let currentOrder = Dictionary(
+                group.map { ($0.id, $0.sortOrder) }, uniquingKeysWith: { first, _ in first })
+            let carriedByID = Dictionary(
+                carried.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for (sortOrder, worktreeID) in ordered.enumerated() {
+                let key = worktreeID.uuidString
+                if let record = carriedByID[key] {
+                    let reparentsARemoteRow = record.parentWorktreeID != parentArg
+                        && record.location == "remote"
+                    if reparentsARemoteRow {
+                        try db.execute(
+                            sql: """
+                                UPDATE worktree
+                                SET parentWorktreeID = ?, sortOrder = ?, remote_parent_assigned = 1
+                                WHERE id = ?
+                                """,
+                            arguments: [parentArg, sortOrder, key]
+                        )
+                    } else {
+                        try db.execute(
+                            sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                            arguments: [parentArg, sortOrder, key]
+                        )
+                    }
+                } else if currentOrder[key] != sortOrder {
+                    try db.execute(
+                        sql: "UPDATE worktree SET sortOrder = ? WHERE id = ?",
+                        arguments: [sortOrder, key]
+                    )
+                }
+            }
+
+            return ordered.enumerated().map { sortOrder, worktreeID in
+                WorktreeOrderEntry(
+                    worktreeID: worktreeID, parentWorktreeID: newParentID, sortOrder: sortOrder)
             }
         }
     }

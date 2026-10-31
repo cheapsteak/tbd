@@ -603,6 +603,20 @@ public struct WorktreeMovedDelta: Codable, Sendable {
     }
 }
 
+/// One row of a sibling group after `worktree.moveMany`: its parent (nil for a
+/// top-level row) and its new `sortOrder` within the group.
+public struct WorktreeOrderEntry: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    public let parentWorktreeID: UUID?
+    public let sortOrder: Int
+
+    public init(worktreeID: UUID, parentWorktreeID: UUID?, sortOrder: Int) {
+        self.worktreeID = worktreeID
+        self.parentWorktreeID = parentWorktreeID
+        self.sortOrder = sortOrder
+    }
+}
+
 /// Banner payload for a remote session needing attention. `kind` is the new
 /// agent state's raw value ("waiting_input" | "exited").
 public struct RemoteSessionAttentionDelta: Codable, Sendable {
