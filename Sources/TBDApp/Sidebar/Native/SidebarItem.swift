@@ -23,11 +23,15 @@ final class SidebarItem: NSObject {
 
 /// The ID-keyed store of `SidebarItem`s.
 ///
-/// `NSOutlineView` does not retain its items, so this cache is what keeps them
-/// alive. An item is made the first time the outline asks for its node and is
-/// dropped once the node leaves the shown tree, never reused: a node that comes
-/// back gets a fresh object, so the outline cannot carry over expansion it
-/// remembered for the old one (see `OutlineStep`).
+/// The cache is how the controller finds the one item for an ID; it is not what
+/// keeps an item alive for the outline. The outline retains every item it still
+/// references (`stronglyReferencesItems`, which the controller sets), so
+/// dropping an item here never frees it under a row, an animation or an AppKit
+/// callback, wherever the prune runs. An item is made the first time the
+/// outline asks for its node and is dropped once the node leaves the shown
+/// tree, never reused: a node that comes back gets a fresh object, so the
+/// outline cannot carry over expansion it remembered for the old one (see
+/// `OutlineStep`).
 struct SidebarItemCache {
     private var items: [SidebarNodeID: SidebarItem] = [:]
 
@@ -47,8 +51,8 @@ struct SidebarItemCache {
     }
 
     /// Keeps only the items of nodes in `tree`, each refreshed to the node's
-    /// latest value. Called once the outline has finished an update, so an
-    /// item it was still removing is not released under it.
+    /// latest value. Called once the outline has finished an update, so a
+    /// lookup by ID during the update still finds the item it is removing.
     mutating func retain(only tree: SidebarTree) {
         var kept: [SidebarNodeID: SidebarItem] = [:]
         kept.reserveCapacity(items.count)

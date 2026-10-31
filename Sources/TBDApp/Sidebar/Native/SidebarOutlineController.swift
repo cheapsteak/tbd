@@ -144,11 +144,13 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         self.options = SidebarBuildOptions(defaults: defaults)
         self.chevronBeforeTitle = SidebarOutlineController.storedChevronBeforeTitle(defaults)
         super.init(nibName: nil, bundle: nil)
+        // The notification arrives on whichever thread wrote the defaults.
+        // The weak reference is read on the main thread, so the controller is
+        // never retained, and so never released, anywhere else.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
         ) { [weak self] _ in
-            guard let self else { return }
-            SidebarOutlineController.performOnMain { self.defaultsDidChange() }
+            SidebarOutlineController.performOnMain { self?.defaultsDidChange() }
         }
     }
 
@@ -183,6 +185,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         outline.indentationMarkerFollowsCell = false
         outline.autoresizesOutlineColumn = false
         outline.autosaveExpandedItems = false
+        // The default since macOS 10.12, stated because `SidebarItemCache`
+        // relies on it: the outline retains every item it still references,
+        // so pruning the cache never frees an item under it.
+        outline.stronglyReferencesItems = true
         outline.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         outline.allowsColumnReordering = false
         outline.allowsColumnResizing = false
@@ -288,8 +294,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             _ = state.selectedRemoteSession
             return SidebarTreeBuilder.build(state, options: options, directoryExists: { exists[$0] ?? true })
         } onChange: { [weak self] in
-            guard let self else { return }
-            SidebarOutlineController.performOnMain { self.scheduleRebuild() }
+            // On the writing thread; read the weak reference on the main one.
+            SidebarOutlineController.performOnMain { self?.scheduleRebuild() }
         }
         self.options = options
         buildCount += 1
@@ -346,10 +352,18 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             return
         }
         let probe = scratchDirectoryProbe
-        Task.detached(priority: .utility) { [weak self] in
-            var found: [String: Bool] = [:]
-            for path in paths { found[path] = probe(path) }
-            await self?.scratchDirectoriesProbed(found, for: paths)
+        // The disk is read off the main thread, and the answer is taken on it
+        // by a main-actor task. A detached task holding the controller across
+        // that hop would release it off the main thread when it resumed, and
+        // if that were the last reference the controller and its views would
+        // be deallocated there.
+        Task { [weak self] in
+            let found = await Task.detached(priority: .utility) { () -> [String: Bool] in
+                var found: [String: Bool] = [:]
+                for path in paths { found[path] = probe(path) }
+                return found
+            }.value
+            self?.scratchDirectoriesProbed(found, for: paths)
         }
     }
 
