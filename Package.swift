@@ -307,7 +307,10 @@ let package = Package(
         // constructor in this target runs when the test bundle loads. AppKit
         // reads `NSTableViewCanEstimateRowHeights` once per process and every
         // suite shares the process, so a test registering it is too late
-        // whenever another suite built a table first. Test-only.
+        // whenever another suite built a table first. A second constructor
+        // installs the main run loop guard (`MainRunLoopGuard.m`): Swift's
+        // async test `main` exits 0 when the main run loop is stopped, and the
+        // guard resumes it as `NSApplication.run()` would. Test-only.
         .target(
             name: "TestProcessDefaults",
             path: "Tests/TestProcessDefaults",
@@ -388,7 +391,8 @@ let package = Package(
                 "TBDKernel",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
-                // test process before any table exists; see the target.
+                // test process before any table exists, and keeps the process
+                // running through a stopped main run loop; see the target.
                 "TestProcessDefaults",
                 "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),

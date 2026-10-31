@@ -12,4 +12,16 @@
 /// the test bundle.
 bool TBDTestProcessDefaultsRegistered(void);
 
+/// How many times MainRunLoopGuard.m has resumed the main run loop after
+/// something stopped it at its outermost level. Main thread only.
+///
+/// Called from Swift by the guard's test, which also keeps the linker from
+/// leaving MainRunLoopGuard.m's object file, and its constructor, out of the
+/// test bundle.
+long TBDTestHostMainRunLoopResumeCount(void);
+
+/// Marks the next resume as the guard's own test, so its stderr line says so
+/// and a real stop stays easy to find in a CI log. Main thread only.
+void TBDTestHostExpectMainRunLoopStop(void);
+
 #endif

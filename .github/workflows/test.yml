@@ -1553,3 +1553,21 @@ jobs:
           path: /tmp/xunit-*.xml
           if-no-files-found: warn
           retention-days: 7
+
+      # A test process that dies on a signal writes its stack only to a crash
+      # report, never to the log, which shows a pass that just stops. macOS
+      # writes the report under the runner user's real home whatever HOME the
+      # fenced pass ran with; each report names its process and time.
+      # `ignore`: a healthy run writes none. A process that exits 0 mid-run
+      # writes none either; for the main run loop case, see
+      # Tests/TestProcessDefaults/MainRunLoopGuard.m.
+      - name: Upload crash reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-crash-reports
+          path: |
+            ~/Library/Logs/DiagnosticReports/*.ips
+            ~/Library/Logs/DiagnosticReports/*.crash
+          if-no-files-found: ignore
+          retention-days: 14
