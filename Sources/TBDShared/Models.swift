@@ -835,6 +835,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// decode.
     public var claudeSpawnExtras: ClaudeSpawnExtras?
 
+    /// Whether the app's own composer holds an unsent draft for this terminal,
+    /// as the app last reported it. Response-derived and never persisted: the
+    /// draft lives only in the app's memory, and `terminal.list` fills this in
+    /// so a caller can see what a `terminal close` would discard. nil wherever
+    /// a response did not fill it in.
+    public var hasComposerDraft: Bool?
+
     /// The options this tab's Codex was launched with, or nil when it was
     /// launched with none — every non-Codex tab, every Codex tab started
     /// without a model or disabled features, and every row older than the
@@ -962,6 +969,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case serverName
         case startHeldReason, startHeldAt
         case claudeSpawnExtras
+        case hasComposerDraft
         case codexLaunchOptions
     }
 
@@ -1021,6 +1029,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         startHeldAt = try c.decodeIfPresent(Date.self, forKey: .startHeldAt)
         // Absent in JSON from a daemon that predates the column.
         claudeSpawnExtras = try c.decodeIfPresent(ClaudeSpawnExtras.self, forKey: .claudeSpawnExtras)
+        hasComposerDraft = try c.decodeIfPresent(Bool.self, forKey: .hasComposerDraft)
         codexLaunchOptions = try c.decodeIfPresent(
             CodexLaunchOptions.self, forKey: .codexLaunchOptions)
     }

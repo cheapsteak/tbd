@@ -115,6 +115,11 @@ public enum RPCErrorCode: String, Sendable {
     /// terminal is mid-turn or holding a permission prompt AND its window is
     /// still alive. The CLI maps this to exit 2; `--force` drops the rails.
     case terminalBusy
+    /// A `terminal.delete` with `respectActivityRails` was refused because the
+    /// app's own composer holds an unsent draft for the terminal, which the
+    /// close would discard. The CLI maps this to exit 2, like `terminalBusy`;
+    /// `--force` drops the rails.
+    case terminalHasComposerDraft
     /// A `terminal.wake` was aimed at a row TBD believes is awake whose pane
     /// positively disagrees — it is gone, its process exited, or it answers
     /// with another terminal's id. Reported as an error rather than the benign
@@ -262,6 +267,9 @@ public enum RPCMethod {
     /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
     public static let promptAnswer = "prompt.answer"
     public static let appSetForegroundState = "app.setForegroundState"
+    /// `app.setComposerDrafts` – the app reports which terminals hold an unsent
+    /// draft in its composer. The whole set, every time.
+    public static let appSetComposerDrafts = "app.setComposerDrafts"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
     public static let repoSetHidden = "repo.setHidden"
@@ -626,6 +634,14 @@ public struct SetMainAreaSizeParams: Codable, Sendable {
 public struct AppSetForegroundStateParams: Codable, Sendable {
     public let isForeground: Bool
     public init(isForeground: Bool) { self.isForeground = isForeground }
+}
+
+/// Params for `app.setComposerDrafts`: every terminal whose composer draft in
+/// the app is non-empty right now. A replacement, not a delta, so a report the
+/// daemon missed is corrected by the next one.
+public struct AppSetComposerDraftsParams: Codable, Sendable {
+    public let terminalIDs: [UUID]
+    public init(terminalIDs: [UUID]) { self.terminalIDs = terminalIDs }
 }
 
 // MARK: - Appearance RPC
@@ -2996,7 +3012,9 @@ public struct TerminalSendParams: Codable, Sendable {
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
     /// When true, refuse to close a terminal that is mid-turn or holding a
-    /// permission prompt, returning `RPCErrorCode.terminalBusy`. Optional and
+    /// permission prompt, returning `RPCErrorCode.terminalBusy`, or whose
+    /// composer draft in the app is unsent, returning
+    /// `RPCErrorCode.terminalHasComposerDraft`. Optional and
     /// defaulting to nil (= no rails) so the app's tab-close — a direct human
     /// gesture on a visible tab — keeps its existing unconditional semantics,
     /// and so older callers still decode.

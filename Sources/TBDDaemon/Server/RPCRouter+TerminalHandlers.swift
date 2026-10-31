@@ -853,6 +853,9 @@ extension RPCRouter {
             await claudeDelegationTracker.retain(
                 terminalIDs: Set(terminals.map(\.id)))
         }
+        for index in terminals.indices {
+            terminals[index].hasComposerDraft = composerDrafts.hasDraft(terminalID: terminals[index].id)
+        }
         return try RPCResponse(result: terminals)
     }
 
@@ -912,6 +915,22 @@ extension RPCRouter {
                     code: RPCErrorCode.terminalBusy.rawValue
                 )
             }
+        }
+
+        // The same rails also keep an unsent draft in the app's own composer.
+        // It lives only in the app's memory and dies with the row, so unlike
+        // the activity rail this one does not ask whether the session is
+        // alive: the draft is the person's text either way.
+        if params.respectActivityRails == true,
+           composerDrafts.hasDraft(terminalID: terminal.id) {
+            let message = "Terminal \(params.terminalID) has an unsent draft in TBD's composer, "
+                + "and closing it would discard the draft. Send or clear it in the app, "
+                + "or pass --force to close anyway."
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(
+                error: message,
+                code: RPCErrorCode.terminalHasComposerDraft.rawValue
+            )
         }
 
         let (transportCleanupFailure, teardownRefusal) = try await closeTerminalTab(
