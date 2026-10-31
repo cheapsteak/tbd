@@ -748,8 +748,11 @@ public struct PanelSurfaceStore: Sendable {
     /// caller's write transaction, with `fromWorktreeID`'s operation
     /// receipts. Histories go with their surfaces, because they key on the
     /// tab, which keeps its ID. Each moved row takes the counter's next
-    /// revision, as a sync's re-parent does. The receipts move rather than
-    /// go, so a `panel.apply` retried across the move still replays.
+    /// revision, as a sync's re-parent does, and a position after every
+    /// surface `toWorktreeID` already holds, in the order the rows had, so
+    /// no two of its surfaces share a position before the next sync sets
+    /// them. The receipts move rather than go, so a `panel.apply` retried
+    /// across the move still replays.
     ///
     /// Returns the moved surfaces as stored, ordered by position, for a
     /// delta's `tabs`; a row that cannot be read still moves but is not
@@ -764,8 +767,12 @@ public struct PanelSurfaceStore: Sendable {
             .filter(Column("worktreeID") == fromWorktreeID.uuidString)
             .order(Column("position"))
             .fetchAll(db)
+        let firstFreePosition = try Int.fetchOne(
+            db, sql: "SELECT MAX(position) + 1 FROM workspace_tab_surface WHERE worktreeID = ?",
+            arguments: [toWorktreeID.uuidString]) ?? 0
         for index in rows.indices {
             rows[index].worktreeID = toWorktreeID.uuidString
+            rows[index].position = firstFreePosition + index
             rows[index].revision = Int64(try Self.nextRevision(db: db))
             rows[index].updatedAt = now
             try rows[index].update(db)

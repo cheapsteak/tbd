@@ -935,7 +935,8 @@ struct PanelSurfaceStoreTests {
     /// A scratch promote archives the scratch row without going through
     /// `archive`, and moves its tabs to the main worktree. Their panels and
     /// receipts move with them, and no panel row stays on the archived row,
-    /// which no reconciler covers.
+    /// which no reconciler covers. They land after the main worktree's own
+    /// surfaces, so no two of its surfaces share a position.
     @Test func promoteScratchReparentsPanelSurfaces() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
@@ -945,6 +946,10 @@ struct PanelSurfaceStoreTests {
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main",
             path: "/tmp/pss-main-\(UUID())", tmuxServer: "tbd-main")
+        // The main worktree already holds surfaces at positions 0 and 1, the
+        // positions the scratch worktree's surfaces hold too.
+        let residents = try await seed(
+            db, worktreeID: main.id, [makeSurface(worktreeID: main.id), makeSurface(worktreeID: main.id)])
         let first = makeSurface(worktreeID: scratch.id, paths: ["/a.txt", "/b.txt"])
         let second = makeSurface(worktreeID: scratch.id, paths: ["/c.txt"])
         try await seed(db, worktreeID: scratch.id, [first, second])
@@ -965,15 +970,24 @@ struct PanelSurfaceStoreTests {
 
         let stamps = try await db.writerForTests.read { dbc in
             try Date.fetchAll(
-                dbc, sql: "SELECT updatedAt FROM workspace_tab_surface WHERE worktreeID = ?",
-                arguments: [main.id.uuidString])
+                dbc, sql: "SELECT updatedAt FROM workspace_tab_surface WHERE id IN (?, ?)",
+                arguments: [first.id.uuidString, second.id.uuidString])
         }
         #expect(stamps == [promotedAt, promotedAt], "the moved surfaces take the injected date")
         #expect(try await db.worktrees.get(id: scratch.id)?.archivedAt == promotedAt)
 
-        let after = try await db.panelSurface.surfaces(worktreeID: main.id)
+        let positions = try await db.writerForTests.read { dbc in
+            try Int.fetchAll(
+                dbc, sql: "SELECT position FROM workspace_tab_surface WHERE worktreeID = ? ORDER BY position",
+                arguments: [main.id.uuidString])
+        }
+        #expect(positions == [0, 1, 2, 3],
+                "the moved surfaces follow the main worktree's, in their order, each at its own position")
+        let mainSurfaces = try await db.panelSurface.surfaces(worktreeID: main.id)
+        #expect(mainSurfaces.map(\.id) == residents.map(\.id) + [first.id, second.id])
+        #expect(Array(mainSurfaces.prefix(2)) == residents, "the main worktree's own surfaces are untouched")
+        let after = Array(mainSurfaces.dropFirst(2))
         #expect(after == moved, "the promote returns the moved surfaces as stored, for its delta")
-        #expect(after.map(\.id) == [first.id, second.id])
         for (old, new) in zip(before, after) {
             #expect(new.worktreeID == main.id)
             #expect(new.side == old.side, "the panels move with their histories")

@@ -322,7 +322,9 @@ the scratch worktree's tabs to the new repo's main worktree. The same
 transaction moves their surfaces, histories included, to the main worktree at
 fresh revisions, and re-points the scratch worktree's operation receipts at the
 main worktree, so no panel row is left on the archived row and a `panel.apply`
-retried across the promote still replays its stored result. The promote then
+retried across the promote still replays its stored result. The moved surfaces
+take positions after the main worktree's own, in the order they had, so no two
+of its surfaces share a position before the next sync sets them. The promote then
 broadcasts a `panelSurfaceChanged` for the main worktree carrying the moved
 surfaces, beside its `worktreeArchived`, and the app adopts them there.
 
