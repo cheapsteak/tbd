@@ -5807,12 +5807,13 @@ extension RPCRouter {
         // `/clear`, `/compact` and a resume inside a live process, and a blanket
         // un-park there would silently undo an operator's deliberate hibernate.
         // Placed after the identity check above, so a hook this pass rejected
-        // retracts nothing.
+        // retracts nothing. The lift resets the stamp's `.idle` to `.unknown`,
+        // and the wake delta below carries the reset columns to the app.
         // A thrown store error is NOT the same fact as a refused retraction, and
         // collapsing the two would leave a terminal parked as `.exited` while its
         // Claude is live — refused (`false`) stays a trace, a failure is an error.
         do {
-            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id, at: observedAt) {
                 await broadcastExitStampChange(terminalID: terminal.id, parked: false)
                 logger.debug("""
                     sessionEvent: cleared the exit stamp on terminal \

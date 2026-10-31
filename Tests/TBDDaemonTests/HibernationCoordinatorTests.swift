@@ -2642,6 +2642,13 @@ struct HibernationCoordinatorTests {
         #expect(reconciled.claudeSessionID == parked.claudeSessionID)
         #expect(reconciled.transcriptPath == parked.transcriptPath)
         #expect(reconciled.sessionIncarnationID == parked.sessionIncarnationID)
+        // The park's `.idle` described a parked row, not the Claude found still
+        // running, and on tmux no report replaces it: the un-park resets it,
+        // so neither the idle sweep nor merge-park parks a turn in flight.
+        #expect(parked.activityState == .idle)
+        #expect(reconciled.activityState == .unknown)
+        #expect(reconciled.activityStateSource == .derived)
+        #expect(HibernationGate.decideForMerge(terminal: reconciled) == .unknownActivity)
     }
 
     @Test func reconcileOnStartupPreservesSessionStartAcceptedWhileReplacementStayedParked() async throws {

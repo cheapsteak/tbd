@@ -2496,7 +2496,7 @@ public actor HibernationCoordinator {
             // Window and process are alive, and the pane raised no identity
             // objection — clear the parked state
             do {
-                try await db.terminals.clearHibernated(id: terminal.id)
+                try await db.terminals.clearHibernated(id: terminal.id, at: now())
                 logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")
             } catch {
                 logger.warning("startup: failed to clear parked state for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -2528,7 +2528,7 @@ public actor HibernationCoordinator {
     private func liftEarlierBuildsExitStamp(_ terminal: Terminal) async {
         let kind = terminal.kind?.rawValue ?? "unrecorded"
         do {
-            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id, at: now()) {
                 logger.info("startup: lifted an earlier build's exit stamp from \(kind, privacy: .public) terminal \(terminal.id, privacy: .public) — no wake resumes Claude in it, and its shell was never stopped")
             }
         } catch {
@@ -2555,6 +2555,15 @@ public actor HibernationCoordinator {
                 && $0.tmuxWindowID == windowID
                 && serverWorktreeIDs.contains($0.worktreeID)
         }
+    }
+
+    /// Announce the activity columns `terminalID`'s row holds, read back after
+    /// a commit that changed them with no park or wake broadcast to carry
+    /// them: a park that rolled back before its broadcast, whose un-park reset
+    /// the intent's `.idle` to `.unknown`.
+    func broadcastActivityColumns(terminalID: UUID) async {
+        guard let row = try? await db.terminals.get(id: terminalID) else { return }
+        subscriptions?.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(columnsOf: row)))
     }
 
     /// `suspendedSnapshot`/`hibernateReason` ride hibernate broadcasts (and

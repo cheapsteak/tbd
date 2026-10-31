@@ -111,7 +111,17 @@ The mapping:
   `activityStateSource = .processLiveness`, the fact it comes from
 
 A park keeps writing `.idle` through `TerminalStore.setHibernated`; it is not
-a second state source, because a parked session runs no agent to report.
+a second state source, because a parked session runs no agent to report. No
+un-park leaves that `.idle` standing. A wake resets the column to `.unknown`
+for the incarnation it mints, and an un-park that launches nothing resets it
+the same way: `SessionStart` lifting an exit stamp, a park rolled back over a
+child that would not end or could not be verified, startup finding a parked
+agent still running, and a wake that adopts a holder already running. Each of
+those leaves an agent running under a value written for a parked row, and on
+tmux no report would ever replace it, so the idle sweep or merge-park could
+park a turn in flight. The exit stamp's reset is stamped at the `SessionStart`
+that lifts it; the others keep the park's stamp, so a report the agent made
+after the park still lands over the reset.
 
 The `done`, `error` and `needsAuth` distinctions stay in the store's snapshot,
 where the resolver reads them for display. In the column they are `.idle`, as
@@ -128,10 +138,11 @@ so is a `terminal.list` row; a newer one repeating both only advances the
 cached stamp. A delta older than the cached row's is dropped, because the
 store has two ingest paths, the daemon's own reader and the reports the app
 forwards, whose broadcasts can arrive out of commit order. A park's `.idle`
-and a wake's reset to `.unknown` for the incarnation it mints reach the app on
-the park's or wake's own `terminalHibernationChanged` delta, which carries the
-activity columns read back from the row; the app applies them under the same
-ordering stamp.
+and a wake's or un-park's reset to `.unknown` reach the app on the park's or
+wake's own `terminalHibernationChanged` delta, which carries the activity
+columns read back from the row; the app applies them under the same ordering
+stamp. A rolled-back park broadcast no park delta, so its reset goes out as an
+activity delta.
 
 ### Attention banner
 
@@ -214,8 +225,8 @@ agent reported draws no mark, because the tooltip below would misexplain it:
 one the agent's own bare `clear` wrote (`.programStatus`) — Claude Code
 restoring terminal modes around an external editor, or a clean Codex exit —
 and one a child exit wrote (`.processLiveness`), whose process is gone. The
-upgrade reset, which records no source, and a wake's or respawn's reset
-(`.derived`) do draw it. The grace period keeps a starting session from
+upgrade reset, which records no source, and a wake's, respawn's or un-park's
+reset (`.derived`) do draw it. The grace period keeps a starting session from
 flashing the mark before its first report. The app keeps the first-seen time
 in memory per incarnation; a new incarnation restarts it. The wait uses an
 injected clock.
@@ -363,7 +374,9 @@ Each branch of each new conditional gets a test.
   source are unchanged; a child exit over a never-reported `.unknown` rewrites
   and announces the source; a working or blocked task entry under an idle main
   entry; `clear`, child exit and incarnation change write `.unknown`; a park
-  still writes `.idle`.
+  still writes `.idle`; lifting an exit stamp resets it to `.unknown` at the
+  lift, and an un-park that launches nothing resets it at the park's stamp, so
+  a backlogged report still lands.
 - **Banner** – raised on entering `blocked` and not again while blocked; the
   fixed text per agent and kind; no banner for `kind=auth`; no `msg` text in
   the notification row.
@@ -371,7 +384,8 @@ Each branch of each new conditional gets a test.
 - **Probe** – answered on holder sessions in both readers with no gate; never
   on tmux; silent during snapshot replay.
 - **Hibernation** – `.unknown` blocks the idle sweep and merge-park; `.idle`
-  parks; manual park is unaffected.
+  parks; manual park is unaffected; a session whose exit stamp `SessionStart`
+  lifted, or that startup un-parked over a live agent, is not auto-parked.
 - **Resolution** – the snapshot rung over the column; the column after the
   store is emptied (a daemon restart); `.unknown(why:)` naming tmux and naming
   no report.

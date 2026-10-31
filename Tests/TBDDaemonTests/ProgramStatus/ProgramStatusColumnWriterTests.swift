@@ -466,9 +466,10 @@ import TestSupport
         #expect(await h.store.snapshot(for: terminal.id)?.incarnationID == incarnationB)
     }
 
-    /// A park that cannot confirm its child gone rolls back, leaving the
-    /// park's `.idle` under a live agent the store last saw working. The
-    /// agent's next report that maps to the same value must still be written.
+    /// A park that cannot confirm its child gone rolls back over a live agent
+    /// the store last saw working. The rollback resets the park's `.idle` to
+    /// `.unknown`, at the park's own stamp, and the agent's next report that
+    /// maps to the value the store last wrote must still be written.
     @Test func aRolledBackParkDoesNotSilenceTheNextReport() async throws {
         let h = try await Harness.make()
         let terminal = try await h.terminal()
@@ -479,7 +480,10 @@ import TestSupport
             id: terminal.id, expectedState: TerminalHibernationSnapshot(terminal: live),
             at: Self.at(2)))
         try await h.db.terminals.clearHibernated(id: terminal.id)
-        #expect(try await h.row(terminal).activityState == .idle)
+        let rolledBack = try await h.row(terminal)
+        #expect(rolledBack.activityState == .unknown)
+        #expect(rolledBack.activityStateSource == .derived)
+        #expect(rolledBack.activityStateOrderObservedAt == Self.at(2))
 
         await ingest(h, terminal, "state=working:app=claude-code:id=t1", at: 3)
         let row = try await h.row(terminal)
@@ -506,9 +510,36 @@ import TestSupport
 
         await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
         let row = try await h.row(terminal)
-        #expect(row.activityState == .idle)
-        #expect(row.activityStateSource == .database)
+        #expect(row.activityState == .unknown)
+        #expect(row.activityStateSource == .derived)
         #expect(try await h.attentionNotifications().isEmpty)
+    }
+
+    /// A wake that adopts a holder still running under a parked row un-parks
+    /// it without launching anything, so no wake reset replaces the park's
+    /// `.idle`: the un-park resets it to `.unknown` itself. It keeps the
+    /// park's stamp, so what the agent reported while the row read parked —
+    /// replayed by the wake's drop — still lands over the reset.
+    @Test func aBackloggedReportLandsOverTheResetOfAnUnparkThatLaunchedNothing() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=idle:app=claude-code", at: 1)
+        let live = try await h.row(terminal)
+        _ = try #require(try await h.db.terminals.beginHibernatedShellRespawn(
+            id: terminal.id, expectedState: TerminalHibernationSnapshot(terminal: live),
+            at: Self.at(2)))
+        #expect(await ingest(h, terminal, "state=working:app=claude-code", at: 3)
+            == .rejected("terminal is parked"))
+
+        try await h.db.terminals.clearHibernated(id: terminal.id, at: Self.at(500))
+        #expect(try await h.row(terminal).activityState == .unknown)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .working)
+        #expect(row.activityStateSource == .programStatus)
+        #expect(row.activityStateObservedAt == Self.at(3))
     }
 
     // MARK: - Deletion

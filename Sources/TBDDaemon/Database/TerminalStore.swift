@@ -519,13 +519,24 @@ private func resetAgentProcessLifecycle(
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
     record.pendingSessionIncarnationID = nil
+    resetActivityColumns(record: &record, at: date)
+    return incarnationID
+}
+
+/// The activity reset a wake makes: `.unknown`, stamped `.derived` at `date`,
+/// with no wait reason. What a process TBD has not heard from is doing is
+/// unknown, and `.unknown` is the value the idle sweep and merge-park refuse.
+/// Shared by every write that leaves a row awake over a process whose state
+/// no agent report has given yet — a wake, a recreated window, and an
+/// un-park that replaced nothing (`clearHibernated`,
+/// `clearSessionExitStamp`).
+private func resetActivityColumns(record: inout TerminalRecord, at date: Date) {
     record.activityState = TerminalActivityState.unknown.rawValue
     record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
     record.activityStateObservedAt = date
     record.activityStateOrderObservedAt = date
     record.awaitingInputReason = nil
     record.awaitingInputObservedAt = nil
-    return incarnationID
 }
 
 private func resetRecreatedShellLifecycle(
@@ -1150,12 +1161,7 @@ public struct TerminalStore: Sendable {
             record.hibernateReason = nil
             record.start_held_reason = nil
             record.start_held_at = nil
-            record.activityState = TerminalActivityState.unknown.rawValue
-            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
-            record.activityStateObservedAt = date
-            record.activityStateOrderObservedAt = date
-            record.awaitingInputReason = nil
-            record.awaitingInputObservedAt = nil
+            resetActivityColumns(record: &record, at: date)
             try record.update(db)
             return incarnationID
         }
@@ -1918,7 +1924,18 @@ public struct TerminalStore: Sendable {
     /// current incarnation. Any abandoned pending replacement is rolled back.
     /// A real wake first uses
     /// `prepareHibernatedAgentRespawn` below before launching the process.
-    public func clearHibernated(id: UUID) async throws {
+    ///
+    /// An activity value other than `.unknown` is the park's own `.idle` (or an
+    /// exit stamp's): the wake's reset has not replaced it, because this
+    /// un-park launched nothing — a park rolled back over a child that would
+    /// not die or could not be verified, startup finding the parked agent
+    /// still running, a wake that adopts a live holder. That `.idle` describes
+    /// a parked row, not the agent now running unparked, and on tmux no report
+    /// ever replaces it, so it is reset to `.unknown` as a wake resets it. The
+    /// reset keeps the stamp the park wrote, so a report the agent made after
+    /// the park — a holder's parked backlog, replayed by the wake's drop, or
+    /// one the app forwards late — still lands over it.
+    public func clearHibernated(id: UUID, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
@@ -1929,6 +1946,12 @@ public struct TerminalStore: Sendable {
             record.suspendedAt = nil
             record.hibernateReason = nil
             record.pendingSessionIncarnationID = nil
+            if record.activityState != TerminalActivityState.unknown.rawValue {
+                let parkStamp = record.activityStateOrderObservedAt
+                    ?? record.activityStateObservedAt
+                    ?? date
+                resetActivityColumns(record: &record, at: parkStamp)
+            }
             try record.update(db)
         }
     }
@@ -2054,8 +2077,14 @@ public struct TerminalStore: Sendable {
     /// would undo an operator's deliberate `.manual` hibernate. `clearHibernated`
     /// stays the wake path's writer — it also clears `suspendedAt` and the pending
     /// incarnation, which belong to a respawn this never performs.
+    ///
+    /// The activity columns are reset as a wake resets them, at `date`: the
+    /// stamp's `.idle` described the process that left, and the one that came
+    /// back has reported nothing. Left standing, it is an `.idle` no writer
+    /// replaces on tmux, where the stamp lives, so the idle sweep or merge-park
+    /// would park — and kill — a Claude that is mid-turn.
     @discardableResult
-    public func clearSessionExitStamp(id: UUID) async throws -> Bool {
+    public func clearSessionExitStamp(id: UUID, at date: Date = Date()) async throws -> Bool {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 return false
@@ -2065,6 +2094,7 @@ public struct TerminalStore: Sendable {
             record.hibernateReason = nil
             record.start_held_reason = nil
             record.start_held_at = nil
+            resetActivityColumns(record: &record, at: date)
             try record.update(db)
             return true
         }
