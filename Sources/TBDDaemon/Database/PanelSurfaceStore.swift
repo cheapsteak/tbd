@@ -680,10 +680,11 @@ public struct PanelSurfaceStore: Sendable {
     }
 
     /// Moves every surface of `fromWorktreeID` to `toWorktreeID` inside a
-    /// caller's write transaction, and deletes `fromWorktreeID`'s operation
+    /// caller's write transaction, with `fromWorktreeID`'s operation
     /// receipts. Histories go with their surfaces, because they key on the
     /// tab, which keeps its ID. Each moved row takes the counter's next
-    /// revision, as a sync's re-parent does.
+    /// revision, as a sync's re-parent does. The receipts move rather than
+    /// go, so a `panel.apply` retried across the move still replays.
     ///
     /// Returns the moved surfaces as stored, ordered by position, for a
     /// delta's `tabs`; a row that cannot be read still moves but is not
@@ -694,23 +695,20 @@ public struct PanelSurfaceStore: Sendable {
     static func reparentSurfaces(
         from fromWorktreeID: UUID, to toWorktreeID: UUID, now: Date, in db: GRDB.Database
     ) throws -> [WorkspaceTabSurface] {
-        let rows = try WorkspaceTabSurfaceRecord
+        var rows = try WorkspaceTabSurfaceRecord
             .filter(Column("worktreeID") == fromWorktreeID.uuidString)
             .order(Column("position"))
             .fetchAll(db)
-        var moved: [WorkspaceTabSurface] = []
-        for var row in rows {
-            row.worktreeID = toWorktreeID.uuidString
-            row.revision = Int64(try Self.nextRevision(db: db))
-            row.updatedAt = now
-            try row.update(db)
-            if let surface = try Self.loadSurface(row, db: db) {
-                moved.append(surface)
-            }
+        for index in rows.indices {
+            rows[index].worktreeID = toWorktreeID.uuidString
+            rows[index].revision = Int64(try Self.nextRevision(db: db))
+            rows[index].updatedAt = now
+            try rows[index].update(db)
         }
-        try PanelOperationReceiptRecord
-            .filter(Column("worktreeID") == fromWorktreeID.uuidString)
-            .deleteAll(db)
-        return moved
+        try db.execute(
+            sql: "UPDATE panel_operation_receipt SET worktreeID = ? WHERE worktreeID = ?",
+            arguments: [toWorktreeID.uuidString, fromWorktreeID.uuidString])
+        let historiesByTab = try Self.histories(tabKeys: rows.map(\.id), db: db)
+        return rows.compactMap { $0.toModel(histories: historiesByTab[$0.id] ?? [:]) }
     }
 }

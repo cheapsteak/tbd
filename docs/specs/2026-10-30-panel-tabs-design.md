@@ -302,10 +302,11 @@ above any they had.
 A scratch promote retires the scratch row in its own transaction, which moves
 the scratch worktree's tabs to the new repo's main worktree. The same
 transaction moves their surfaces, histories included, to the main worktree at
-fresh revisions and deletes the scratch worktree's operation receipts, so no
-panel row is left on the archived row. The promote then broadcasts a
-`panelSurfaceChanged` for the main worktree carrying the moved surfaces, beside
-its `worktreeArchived`, and the app adopts them there.
+fresh revisions, and re-points the scratch worktree's operation receipts at the
+main worktree, so no panel row is left on the archived row and a `panel.apply`
+retried across the promote still replays its stored result. The promote then
+broadcasts a `panelSurfaceChanged` for the main worktree carrying the moved
+surfaces, beside its `worktreeArchived`, and the app adopts them there.
 
 The sync does not carry the selected tab. The app already records it in
 `worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or

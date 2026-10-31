@@ -809,9 +809,9 @@ struct PanelSurfaceStoreTests {
     }
 
     /// A scratch promote archives the scratch row without going through
-    /// `archive`, and moves its tabs to the main worktree. Their panels move
-    /// with them, and no panel row stays on the archived row, which no
-    /// reconciler covers.
+    /// `archive`, and moves its tabs to the main worktree. Their panels and
+    /// receipts move with them, and no panel row stays on the archived row,
+    /// which no reconciler covers.
     @Test func promoteScratchReparentsPanelSurfaces() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
@@ -855,8 +855,51 @@ struct PanelSurfaceStoreTests {
         #expect(try await historyRowCount(db, tabID: second.id) == 1)
         #expect(try await panelRowCount(db, worktreeID: scratch.id) == 0,
                 "no surface, history or receipt references the archived scratch worktree")
-        #expect(try await receiptCount(db, worktreeID: main.id) == 0,
-                "the scratch worktree's receipts are deleted, not moved")
+        #expect(try await receiptCount(db, worktreeID: main.id) == 1,
+                "the scratch worktree's receipt moves to the main worktree rather than vanishing")
+    }
+
+    /// A `panel.apply` retried across a scratch promote, say because its
+    /// reply was lost to the reconnect, still names the scratch worktree. Its
+    /// receipt moved with the tab, so it replays the stored result instead of
+    /// looking for the tab under a worktree that no longer holds it.
+    @Test func retriedApplyAfterPromoteReplays() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/pss-retry-repo-\(UUID())", displayName: "r", defaultBranch: "main")
+        let scratch = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/pss-retry-scratch-\(UUID())", tmuxServer: "tbd-scratch")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/pss-retry-main-\(UUID())", tmuxServer: "tbd-main")
+        let tab = try await seed(db, worktreeID: scratch.id, [makeSurface(worktreeID: scratch.id)])[0]
+        let operationID = UUID()
+        let firstOutcome = try await db.panelSurface.applyReducing(
+            operationID: operationID, tabID: tab.id, worktreeID: scratch.id, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+        }
+        let first = try #require(firstOutcome)
+        guard case .applied(let applied) = first else {
+            Issue.record("expected .applied, got \(first)")
+            return
+        }
+
+        try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            tmuxServer: scratch.tmuxServer)
+        let moved = try #require(try await db.panelSurface.surface(tabID: tab.id))
+
+        let retried = try await db.panelSurface.applyReducing(
+            operationID: operationID, tabID: tab.id, worktreeID: scratch.id, now: Date()
+        ) { _ in
+            throw ReduceMustNotRun()
+        }
+
+        #expect(retried == .replayed(applied),
+                "the retry replays its receipt; nil means the receipt was lost with the scratch worktree")
+        #expect(try await db.panelSurface.receipt(operationID: operationID) == applied)
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == moved, "the replay changed nothing")
     }
 
     /// A sync that lands after the archive must not import the archived

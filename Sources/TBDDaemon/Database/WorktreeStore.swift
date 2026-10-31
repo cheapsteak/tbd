@@ -1281,8 +1281,9 @@ public struct WorktreeStore: Sendable {
     /// The retired row is archived here rather than through `archive`, so
     /// this transaction leaves no panel row on it: the surfaces move to the
     /// main worktree at fresh revisions, and the scratch worktree's operation
-    /// receipts are deleted. Returns the moved surfaces, which the caller
-    /// broadcasts under the main worktree.
+    /// receipts move with them, so a `panel.apply` retried across the promote
+    /// still replays. Returns the moved surfaces, which the caller broadcasts
+    /// under the main worktree.
     @discardableResult
     public func promoteScratchMigration(
         scratchID: UUID,
