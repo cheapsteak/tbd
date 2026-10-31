@@ -275,10 +275,36 @@ struct TranscriptImageAttachmentTests {
         #expect(TranscriptImageService.shared.metadata(forPath: "").state == .missing)
     }
 
-    /// Carries a probe's result back from a worker thread. A class so the escaping
-    /// closure can write it; the semaphore in the test is the ordering.
+    /// Carries a probe's progress and result back from its worker thread. Lock-
+    /// guarded because the test reads it while the worker may still be writing.
     private final class ProbeResult: @unchecked Sendable {
-        var state: TranscriptImageMetadata.State?
+        private let lock = NSLock()
+        private var _started = false
+        private var _finished = false
+        private var _state: TranscriptImageMetadata.State?
+
+        var started: Bool { lock.withLock { _started } }
+        var finished: Bool { lock.withLock { _finished } }
+        var state: TranscriptImageMetadata.State? { lock.withLock { _state } }
+
+        func markStarted() { lock.withLock { _started = true } }
+        func finish(_ state: TranscriptImageMetadata.State) {
+            lock.withLock { _state = state; _finished = true }
+        }
+    }
+
+    /// What the fifo probe's bounded wait observed when it expired. Thrown so the
+    /// diagnostic lands on the CI summary's primary failure line.
+    private struct FifoProbeDidNotReturn: Error, CustomStringConvertible {
+        let started: Bool
+        let elapsed: Duration
+        var description: String {
+            started
+                ? "the probe started but had not returned after \(elapsed) — it blocked " +
+                  "opening a fifo, so the .typeRegular guard is gone"
+                : "the probe thread never got to run within \(elapsed) — a scheduling " +
+                  "starvation, not a blocked open"
+        }
     }
 
     /// The hazard `fileStamp`'s `.typeRegular` check is named for, exercised with a
@@ -287,10 +313,18 @@ struct TranscriptImageAttachmentTests {
     /// what `nonRegularFileProbesAsMissing` covers — degrades for a different
     /// reason (it opens fine and simply has no image header) and cannot catch this.
     ///
-    /// The probe therefore runs OFF the main thread behind a deadline, so a
+    /// The probe therefore runs on a dedicated thread behind a bounded wait, so a
     /// regression fails this test instead of hanging the suite; if it does block,
     /// the test opens the write end to release the stuck opener before finishing.
-    @Test func fifoProbesAsMissingWithoutBlockingTheReader() throws {
+    ///
+    /// The bound is a hang guard, not the assertion: a blocked `open(2)` never
+    /// returns, so any finite deadline tells the two outcomes apart, and it is
+    /// sized for the saturated pass so that a probe merely waiting for a turn is
+    /// not mistaken for one wedged in a syscall. The thread is a `Thread`, not a
+    /// GCD global-queue block, because the global pool's width is capped and a
+    /// loaded pass can hold every one of its threads in other tests' blocking
+    /// waits — the probe would then never start, which is not what this guards.
+    @Test func fifoProbesAsMissingWithoutBlockingTheReader() async throws {
         TranscriptImageService.shared.clearCaches()
         let scratch = Scratch()
         let path = scratch.path("pipe.png")
@@ -299,20 +333,29 @@ struct TranscriptImageAttachmentTests {
         defer { unlink(path) }
 
         let result = ProbeResult()
-        let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            result.state = TranscriptImageService.shared.metadata(forPath: path).state
-            finished.signal()
+        let worker = Thread {
+            result.markStarted()
+            result.finish(TranscriptImageService.shared.metadata(forPath: path).state)
         }
-        let blocked = finished.wait(timeout: .now() + 5) == .timedOut
-        if blocked {
-            // Release the stuck `open(2)` so the worker thread is not leaked in a
-            // permanently blocking syscall, then report.
+        worker.name = "fifo-probe"
+        let started = ContinuousClock.now
+        worker.start()
+
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            result.finished
+        }
+        if outcome == .timedOut {
+            let didStart = result.started
+            // Release a stuck `open(2)` so the worker thread is not leaked in a
+            // permanently blocking syscall, then report what was observed.
             let writeEnd = open(path, O_WRONLY | O_NONBLOCK)
             if writeEnd >= 0 { close(writeEnd) }
-            _ = finished.wait(timeout: .now() + 2)
+            Issue.record(FifoProbeDidNotReturn(started: didStart, elapsed: ContinuousClock.now - started))
+            return
         }
-        #expect(!blocked, "the probe blocked opening a fifo — the .typeRegular guard is gone")
+        guard outcome == .satisfied else { return }
         #expect(result.state == .missing)
     }
 
