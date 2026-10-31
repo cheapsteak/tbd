@@ -207,7 +207,8 @@ extension SidebarOutlineController: SidebarMenuHost {
     func helpText(_ target: SidebarToolTips.Target, for id: SidebarNodeID) -> String? {
         switch (target, id) {
         case (.suffix, .worktree(let worktreeID)):
-            return worktreeSuffixHelp(worktreeID)
+            guard case .worktree(let model)? = tree.node(id)?.kind, let indicator = model.suffix else { return nil }
+            return Self.worktreeSuffixHelp(worktreeID, indicator: indicator, appState: appState)
         case (.noStatusMark, .worktree(let worktreeID)):
             return NoStatusMark.rowHelp(
                 terminals: appState.terminals[worktreeID] ?? [], sightings: appState.noStatusSightings)
@@ -215,9 +216,7 @@ extension SidebarOutlineController: SidebarMenuHost {
             return appState.findWorktree(id: worktreeID)?.repoID.flatMap { appState.repoName(for: $0) }
         case (.suffix, .remoteSession(let sessionID)):
             guard case .remoteSession(let model)? = tree.node(id)?.kind, let indicator = model.suffix else { return nil }
-            if case .working = indicator { return "Agent is working" }
-            return appState.remoteSessions.first { $0.id == sessionID }?.payload.agentStateReason
-                ?? "Needs your attention"
+            return Self.remoteSuffixHelp(sessionID, indicator: indicator, appState: appState)
         case (.providerName, .providerHeader(let name)):
             return provider(named: name).map { RemoteProviderIdentityPresentation.compactSummary($0) }
         case (.providerAuth, .providerHeader(let name)):
@@ -228,11 +227,11 @@ extension SidebarOutlineController: SidebarMenuHost {
         }
     }
 
-    /// `WorktreeRowView.suffixIcon`'s help: the badge's words, or the OSC
-    /// session states behind it.
-    private func worktreeSuffixHelp(_ worktreeID: UUID) -> String? {
-        guard case .worktree(let model)? = tree.node(.worktree(worktreeID))?.kind,
-              let indicator = model.suffix else { return nil }
+    /// `WorktreeRowView.suffixIcon`'s help for the badge `indicator`: the
+    /// badge's words, or the OSC session states behind it. The pinned dock
+    /// asks it for its rows too.
+    static func worktreeSuffixHelp(_ worktreeID: UUID, indicator: SuffixRowIndicator,
+                                   appState: AppState) -> String? {
         let terminals = appState.terminals[worktreeID] ?? []
         var resolutions: [UUID: ProgramStatusResolution] = [:]
         var entries: [(label: String, snapshot: ProgramStatusSnapshot)] = []
@@ -250,6 +249,15 @@ extension SidebarOutlineController: SidebarMenuHost {
             selected: indicator, oscTooltip: oscTooltip,
             resolvedValues: resolutions.values.map { $0.value },
             genericHelp: SidebarCellKit.spokenStatus(indicator))
+    }
+
+    /// `RemoteSessionRowView`'s suffix help: the working dots' words, or the
+    /// agent's own reason for wanting a look.
+    static func remoteSuffixHelp(_ sessionID: UUID, indicator: SuffixRowIndicator,
+                                 appState: AppState) -> String? {
+        if case .working = indicator { return "Agent is working" }
+        return appState.remoteSessions.first { $0.id == sessionID }?.payload.agentStateReason
+            ?? "Needs your attention"
     }
 
     private func provider(named name: String) -> RemoteProviderStatus? {
@@ -509,7 +517,8 @@ extension SidebarOutlineController: SidebarMenuHost {
         guard row >= 0 else { return }
         outline.scrollRowToVisible(row)
         guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSView & SidebarRenamableCell,
-              let editor = makeRenameEditor(for: node, seed: seed) else { return }
+              let editor = Self.makeRenameEditor(for: node.id, kind: node.kind, seed: seed, appState: appState)
+        else { return }
         beginHold(.rename)
         renamingID = id
         renamingCell = cell
@@ -538,11 +547,13 @@ extension SidebarOutlineController: SidebarMenuHost {
         endHold(.rename)
     }
 
-    /// The editor for `node`, committing where the SwiftUI row's
-    /// `RenameableLabel` commits.
-    private func makeRenameEditor(for node: SidebarNode, seed: String?) -> SidebarRenameEditor? {
+    /// The editor for the row `id` names, committing where the SwiftUI row's
+    /// `RenameableLabel` commits. The pinned dock renames its rows with it
+    /// too.
+    static func makeRenameEditor(for id: SidebarNodeID, kind: SidebarNodeKind, seed: String?,
+                                 appState: AppState) -> SidebarRenameEditor? {
         let state = appState
-        switch (node.id, node.kind) {
+        switch (id, kind) {
         case (.worktree(let worktreeID), .worktree(let model)):
             guard !model.isMain, let worktree = appState.findWorktree(id: worktreeID) else { return nil }
             return SidebarRenameEditor(text: worktree.displayName, seed: seed, allowsEmptyCommit: false) { name in
