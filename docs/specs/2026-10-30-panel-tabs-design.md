@@ -413,17 +413,27 @@ split tree.
 
 ### CLI and agent guidance
 
-`tbd panel` (`Sources/TBDCLI/Commands/PanelCommands.swift`):
+`tbd panel` (`Sources/TBDCLI/Commands/PanelCommands.swift`). Every subcommand
+takes the worktree as its first positional argument (a name or ID, so any
+worktree can be targeted, not only the current one), an optional `--tab`
+(default: the worktree's active tab), and `--json` for the raw result:
 
-- `list [--tab]` — the side region's panels: kind, content, active, collapsed.
-- `open <content> [--new-panel] [--tab]`
-- `navigate --panel <id> <content> [--tab]`
-- `close --panel <id> [--tab]`
-- `select --panel <id> [--tab]`
-- `back` / `forward --panel <id> [--tab]`
-- `jump --panel <id> --index <n> [--tab]`
-- `collapse` / `expand [--tab]`
-- `resize --width <share> [--tab]`
+- `list <worktree> [--tab] [--json]` — the side region's panels: kind, content,
+  active, collapsed.
+- `open <worktree> <content> [--new-panel] [--tab] [--json]`
+- `navigate <worktree> --panel <id> <content> [--tab] [--json]`
+- `close <worktree> --panel <id> [--tab] [--json]`
+- `select <worktree> --panel <id> [--tab] [--json]`
+- `back` / `forward <worktree> --panel <id> [--tab] [--json]`
+- `jump <worktree> --panel <id> --index <n> [--tab] [--json]`
+- `collapse` / `expand <worktree> [--tab] [--json]`
+- `resize <worktree> --width <share> [--tab] [--json]`
+
+`<content>` is one of `--file <path>` (with `--render` or `--source` to force a
+presentation), `--web <url>`, `--transcript <terminal-id>` or
+`--note <note-id>`. A relative `--file` path resolves against the CLI's current
+directory, not the target worktree's root, so an agent working outside the
+worktree passes an absolute path.
 
 `move`, `select-tab`, and the anchor, edge, share and ratio options are removed.
 The agent guidance in `Sources/TBDShared/TBDSkillContent.swift` is rewritten to
