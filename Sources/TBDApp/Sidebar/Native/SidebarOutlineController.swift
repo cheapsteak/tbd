@@ -71,6 +71,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     private var isApplyingStructure = false
     /// The options the shown tree was built with.
     private var options: SidebarBuildOptions
+    /// `AppState.chevronBeforeProjectNameKey`: which side of a section title
+    /// its chevron sits on, and with it the column every title and row uses.
+    /// Layout only, so a change reconfigures the cells instead of rebuilding.
+    private var chevronBeforeTitle: Bool
 
     /// Whether each unpromoted scratch row's directory exists, read on a
     /// background task so no rebuild touches the disk. A path not yet probed
@@ -99,6 +103,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         self.defaults = defaults
         self.scratchDirectoryProbe = scratchDirectoryProbe
         self.options = SidebarBuildOptions(defaults: defaults)
+        self.chevronBeforeTitle = SidebarOutlineController.storedChevronBeforeTitle(defaults)
         super.init(nibName: nil, bundle: nil)
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: nil
@@ -188,11 +193,16 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         rebuildNow()
     }
 
-    /// The fixed height of a row of `kind`.
+    /// The fixed height of a row of `kind`: each cell maps its model's height
+    /// class to a constant, so nothing measures.
     func rowHeight(for kind: SidebarNodeKind) -> CGFloat {
-        switch kind.heightClass {
-        case .single: WorktreeRowView.rowHeight
-        case .withSubtitle: WorktreeRowView.rowHeight + 12
+        switch kind {
+        case .worktree(let model): WorktreeRowCell.height(for: model)
+        case .remoteSession(let model): RemoteSessionRowCell.height(for: model)
+        case .scratchHeader(let model), .repoHeader(let model): SectionHeaderCell.height(for: model)
+        case .providerHeader(let model): ProviderHeaderCell.height(for: model)
+        case .groupHeader(let model): GroupHeaderCell.height(for: model)
+        case .scratchPrompt: ScratchPromptCell.rowHeight
         }
     }
 
@@ -251,6 +261,16 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         if SidebarBuildOptions(defaults: defaults) != options {
             scheduleRebuild()
         }
+        let stored = Self.storedChevronBeforeTitle(defaults)
+        if stored != chevronBeforeTitle {
+            chevronBeforeTitle = stored
+            reconfigure(nil)
+        }
+    }
+
+    private static func storedChevronBeforeTitle(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: AppState.chevronBeforeProjectNameKey) as? Bool
+            ?? AppState.chevronBeforeProjectNameDefault
     }
 
     // MARK: Apply
@@ -374,16 +394,20 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     // MARK: Content
 
-    /// Reconfigures the rows in `ids` on every row view the outline has,
-    /// including rows prepared ahead of scrolling. A reload would swap in a
-    /// recycled cell and lose transient state such as hover.
-    private func reconfigure(_ ids: Set<SidebarNodeID>) {
-        guard !ids.isEmpty else { return }
+    /// Reconfigures the rows in `ids` — every row for nil — on every row view
+    /// the outline has, including rows prepared ahead of scrolling. A reload
+    /// would swap in a recycled cell and lose transient state such as hover.
+    private func reconfigure(_ ids: Set<SidebarNodeID>?) {
+        if let ids, ids.isEmpty { return }
         outline.enumerateAvailableRowViews { rowView, row in
-            guard let item = self.outline.item(atRow: row) as? SidebarItem, ids.contains(item.id),
+            guard let item = self.outline.item(atRow: row) as? SidebarItem,
+                  ids?.contains(item.id) ?? true,
                   let node = self.tree.node(item.id) else { return }
-            if let cell = rowView.view(atColumn: 0) as? NSTableCellView {
-                self.configure(cell, node: node)
+            if let rowView = rowView as? SidebarRowView {
+                self.configure(rowView, node: node)
+            }
+            if let cell = rowView.view(atColumn: 0) as? NSView {
+                self.configure(cell, kind: node.kind)
             }
         }
     }
@@ -500,14 +524,20 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     // MARK: NSOutlineViewDelegate
 
-    static let plainCellIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.plainCell")
-
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let item = item as? SidebarItem, item !== Self.orphan, let node = tree.node(item.id) else { return nil }
-        let cell = (outlineView.makeView(withIdentifier: Self.plainCellIdentifier, owner: self) as? NSTableCellView)
-            ?? Self.makePlainCell()
-        configure(cell, node: node)
+        let cell = dequeueCell(for: node.kind)
+        configure(cell, kind: node.kind)
         return cell
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        let rowView = (outlineView.makeView(withIdentifier: SidebarRowView.reuseIdentifier, owner: self)
+            as? SidebarRowView) ?? SidebarRowView(frame: .zero)
+        if let item = item as? SidebarItem, let node = tree.node(item.id) {
+            configure(rowView, node: node)
+        }
+        return rowView
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
@@ -531,36 +561,94 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     // MARK: Cells
 
-    private func configure(_ cell: NSTableCellView, node: SidebarNode) {
-        cell.textField?.stringValue = Self.plainTitle(node.kind)
-    }
-
-    private static func makePlainCell() -> NSTableCellView {
-        let cell = NSTableCellView(frame: .zero)
-        cell.identifier = plainCellIdentifier
-        let label = NSTextField(labelWithString: "")
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(label)
-        cell.textField = label
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(
-                equalTo: cell.leadingAnchor,
-                constant: SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false)),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
-    }
-
-    private static func plainTitle(_ kind: SidebarNodeKind) -> String {
+    private func dequeueCell(for kind: SidebarNodeKind) -> NSTableCellView {
         switch kind {
-        case .scratchHeader(let model), .repoHeader(let model): model.title
-        case .scratchPrompt: "Click to create scratch space"
-        case .worktree(let model): model.name
-        case .remoteSession(let model): model.title
-        case .providerHeader(let model): model.name
-        case .groupHeader(let model): model.title
+        case .worktree:
+            return dequeue(WorktreeRowCell.reuseIdentifier) { WorktreeRowCell() }
+        case .remoteSession:
+            return dequeue(RemoteSessionRowCell.reuseIdentifier) { RemoteSessionRowCell() }
+        case .scratchHeader, .repoHeader:
+            return dequeue(SectionHeaderCell.reuseIdentifier) { SectionHeaderCell() }
+        case .providerHeader:
+            return dequeue(ProviderHeaderCell.reuseIdentifier) { ProviderHeaderCell() }
+        case .groupHeader:
+            return dequeue(GroupHeaderCell.reuseIdentifier) { GroupHeaderCell() }
+        case .scratchPrompt:
+            return dequeue(ScratchPromptCell.reuseIdentifier) { ScratchPromptCell() }
         }
+    }
+
+    private func dequeue<Cell: NSTableCellView>(
+        _ identifier: NSUserInterfaceItemIdentifier, make: () -> Cell
+    ) -> Cell {
+        (outline.makeView(withIdentifier: identifier, owner: self) as? Cell) ?? make()
+    }
+
+    /// Hands `cell` its model and the insets the chevron placement sets. Each
+    /// row ID names one kind for good, so the cell is always the kind's own.
+    private func configure(_ cell: NSView, kind: SidebarNodeKind) {
+        let rowInset = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
+        switch kind {
+        case .worktree(let model):
+            guard let cell = cell as? WorktreeRowCell else { return }
+            cell.leadingInset = rowInset
+            cell.configure(model)
+        case .remoteSession(let model):
+            guard let cell = cell as? RemoteSessionRowCell else { return }
+            cell.leadingInset = rowInset
+            cell.configure(model)
+        case .scratchHeader(let model), .repoHeader(let model):
+            guard let cell = cell as? SectionHeaderCell else { return }
+            if case .scratchHeader = kind { cell.style = .scratch } else { cell.style = .repo }
+            cell.chevronBeforeTitle = chevronBeforeTitle
+            cell.leadingInset = SidebarNativeMetrics.headerContentInset
+            cell.configure(model)
+        case .providerHeader(let model):
+            guard let cell = cell as? ProviderHeaderCell else { return }
+            cell.leadingInset = SidebarNativeMetrics.headerContentInset
+                + SidebarHeaderMetrics.titleLeadingInset(chevronBeforeProjectName: chevronBeforeTitle)
+            cell.configure(model)
+        case .groupHeader(let model):
+            guard let cell = cell as? GroupHeaderCell else { return }
+            cell.leadingInset = rowInset
+            cell.configure(model)
+        case .scratchPrompt:
+            guard let cell = cell as? ScratchPromptCell else { return }
+            cell.leadingInset = rowInset + 2
+            cell.configure()
+        }
+    }
+
+    /// The row view's tint origin, guide lines and provider highlight.
+    private func configure(_ rowView: SidebarRowView, node: SidebarNode) {
+        var configuration = SidebarRowView.Configuration()
+        configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
+        switch node.kind {
+        case .worktree(let model):
+            let ancestry = worktreeAncestorCount(of: node.id)
+            configuration.guideCount = ancestry
+            configuration.tintLevel = max(model.depth - ancestry, 0)
+            // A pinned row shows its pin without hover.
+            configuration.showsPinGap = model.isPinned && !model.isMain
+        case .remoteSession(let model):
+            configuration.tintLevel = model.depth
+        case .providerHeader(let model):
+            configuration.highlightsSelectedProvider = model.isSelected
+        case .scratchHeader, .repoHeader, .groupHeader, .scratchPrompt:
+            break
+        }
+        rowView.configuration = configuration
+    }
+
+    /// How many worktree rows `id` sits under: `WorktreeRowView`'s
+    /// `indentLevel`. Group headers between them add padding, not lines.
+    private func worktreeAncestorCount(of id: SidebarNodeID) -> Int {
+        var count = 0
+        var ancestor = tree.parent(of: id)
+        while let current = ancestor {
+            if case .worktree = current { count += 1 }
+            ancestor = tree.parent(of: current)
+        }
+        return count
     }
 }
