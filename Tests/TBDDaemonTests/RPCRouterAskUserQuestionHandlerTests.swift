@@ -154,6 +154,39 @@ extension RPCRouterTests {
         #expect(await router.pendingQuestions.entries(forTerminal: terminal.id).count == 1)
     }
 
+    /// A bare `clear` ends the agent's reporting: the store drops what it held
+    /// and writes `.unknown` with its own source. That column is no evidence
+    /// of a reporting session — an agent relaunched by hand in the shell may
+    /// not report at all — so the hook raises the banner.
+    @Test("askUserQuestion.pending raises a notification after the agent's bare clear")
+    func askUserQuestionPendingNotifiesAfterABareClear() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let started = Date()
+        #expect(await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: terminal.id, incarnation: .currentRow,
+            payload: Array("state=working:app=claude-code".utf8),
+            observedAt: started)) == .accepted)
+        #expect(await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: terminal.id, incarnation: .currentRow,
+            payload: Array("state=clear".utf8),
+            observedAt: started.addingTimeInterval(1))) == .accepted)
+        let cleared = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(cleared.activityState == .unknown)
+        #expect(cleared.activityStateSource == .programStatus)
+        let holds = await router.programStatus.holdsReport(
+            terminalID: terminal.id, incarnationID: cleared.sessionIncarnationID)
+        #expect(!holds, "a bare clear leaves the store holding nothing")
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(unread.map(\.type) == [.attentionNeeded])
+    }
+
     /// A wake mints a new incarnation and resets the column's source, so a
     /// value the store wrote for the incarnation the wake ended does not make
     /// the woken process a reporting one: until it reports, the hook raises

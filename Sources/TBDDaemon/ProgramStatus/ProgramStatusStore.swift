@@ -429,15 +429,20 @@ public actor ProgramStatusStore {
     }
 
     /// Whether `terminal`'s current incarnation is a reporting one: the store
-    /// holds a report from it, or the row's activity column holds a value
-    /// this store wrote (`.programStatus`). The column is the half that
-    /// survives a daemon restart, which starts the store empty. It speaks
-    /// only for the current incarnation, because every write that mints an
-    /// incarnation — a wake, a respawn, a park — rewrites the source, and the
-    /// store writes `.programStatus` only for the incarnation the row names.
+    /// holds a report from it, or the row's activity column holds a state
+    /// other than `.unknown` that this store wrote (`.programStatus`). The
+    /// column is the half that survives a daemon restart, which starts the
+    /// store empty. It speaks only for the current incarnation, because every
+    /// write that mints an incarnation — a wake, a respawn, a park — rewrites
+    /// the source, and the store writes `.programStatus` only for the
+    /// incarnation the row names. A store-written `.unknown` is the agent's
+    /// bare `clear`: it stopped reporting, and an agent relaunched by hand in
+    /// that shell may not report at all.
     public func isReporting(_ terminal: Terminal) -> Bool {
-        terminal.activityStateSource == .programStatus
-            || holdsReport(terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID)
+        if holdsReport(terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID) {
+            return true
+        }
+        return terminal.activityStateSource == .programStatus && terminal.activityState != .unknown
     }
 
     /// Every terminal that holds a main entry or task entries.

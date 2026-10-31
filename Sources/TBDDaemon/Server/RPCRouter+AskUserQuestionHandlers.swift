@@ -28,9 +28,10 @@ extension RPCRouter {
     /// before the assistant `tool_use` line is flushed to the JSONL.
     ///
     /// On a terminal whose current incarnation is not reporting its state —
-    /// the store holds no report from it and its column holds no value the
-    /// store wrote (`ProgramStatusStore.isReporting`): any tmux session, and a
-    /// holder session whose agent is too old to report — also marks the
+    /// the store holds no report from it and its column holds no store-written
+    /// state other than `.unknown` (`ProgramStatusStore.isReporting`): any
+    /// tmux session, a holder session whose agent is too old to report, and
+    /// one whose agent ended its reporting with a bare `clear` — also marks the
     /// worktree as needing attention by creating an `attentionNeeded`
     /// notification and broadcasting the matching delta. There the Stop hook
     /// (end of turn) is otherwise the only path that flips the worktree to

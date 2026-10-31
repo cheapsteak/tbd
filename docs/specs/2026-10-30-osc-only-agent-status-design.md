@@ -163,13 +163,15 @@ hook already reports the sign-in failure as an error notification.
 The `PreToolUse:AskUserQuestion` hook raises its own banner, with the
 question's text, only on a session whose current incarnation is not reporting
 — the store holds no report from it, and the row's activity column holds no
-value the store wrote (`activityStateSource = .programStatus`): any tmux
-session, and a holder session whose agent cannot report. A reporting session
-reports the question as `blocked kind=question` and the store's banner is the
-one, so a question is announced once. The column is what answers after a
-daemon restart, which empties the store; it speaks for the current incarnation
-only, because every write that mints an incarnation — a wake, a respawn, a
-park — rewrites the source.
+state other than `.unknown` that the store wrote (`activityStateSource =
+.programStatus`): any tmux session, a holder session whose agent cannot
+report, and one whose agent ended its reporting with a bare `clear`, after
+which an agent relaunched by hand in that shell may not report at all. A
+reporting session reports the question as `blocked kind=question` and the
+store's banner is the one, so a question is announced once. The column is what
+answers after a daemon restart, which empties the store; it speaks for the
+current incarnation only, because every write that mints an incarnation — a
+wake, a respawn, a park — rewrites the source.
 
 ### PR poll pacing
 
