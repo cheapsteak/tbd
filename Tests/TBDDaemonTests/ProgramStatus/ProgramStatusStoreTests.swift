@@ -389,6 +389,29 @@ import TestSupport
         #expect(last.terminalID == terminal.id)
     }
 
+    /// `holdsReport` answers whether the named incarnation is reporting: true
+    /// only while an entry of that incarnation is held, false for another
+    /// incarnation, for a terminal never heard from, and after a bare clear.
+    @Test func holdsReportNamesOnlyAReportingIncarnation() async {
+        let h = Harness()
+        let incarnation = UUID()
+        let terminal = holderClaude(incarnation: incarnation)
+        let silent = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        h.add(silent)
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation) == false)
+
+        _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: UUID()) == false)
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: nil) == false)
+        #expect(await h.store.holdsReport(
+            terminalID: silent.id, incarnationID: silent.sessionIncarnationID) == false)
+
+        _ = await h.store.ingest(inbound(terminal, "state=clear", at: 2))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation) == false)
+    }
+
     @Test func incarnationChangeDiscardsOldEntries() async throws {
         let h = Harness()
         let first = UUID()

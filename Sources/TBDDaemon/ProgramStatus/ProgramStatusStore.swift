@@ -388,6 +388,15 @@ public actor ProgramStatusStore {
         return out
     }
 
+    /// Whether the store holds a report from `incarnationID` of `terminalID` —
+    /// whether that process is reporting its state. The caller passes the
+    /// incarnation it read off the row. False after a bare `clear` or a drop,
+    /// and for an agent that never reported.
+    public func holdsReport(terminalID: UUID, incarnationID: UUID?) -> Bool {
+        guard let entry = held[terminalID] else { return false }
+        return entry.incarnationID == incarnationID
+    }
+
     /// Every terminal that holds a main entry or task entries.
     public func allSnapshots() -> [ProgramStatusSnapshot] {
         var out: [ProgramStatusSnapshot] = []

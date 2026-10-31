@@ -137,8 +137,9 @@ row and `msg` must not reach `state.db`:
 hook already reports the sign-in failure as an error notification.
 
 The `PreToolUse:AskUserQuestion` hook raises its own banner, with the
-question's text, only on a session that cannot report — any transport but the
-pty holder. On a holder session the agent reports the question as
+question's text, only on a session whose current incarnation is not reporting
+— the store holds no report from it: any tmux session, and a holder session
+whose agent cannot report. A reporting session reports the question as
 `blocked kind=question` and the store's banner is the one, so a question is
 announced once.
 

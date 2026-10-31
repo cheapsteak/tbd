@@ -84,31 +84,47 @@ extension RPCRouterTests {
         #expect(entries.first?.toolUseID == "toolu_test")
     }
 
-    // MARK: - Pending: transport decides who raises the banner
+    // MARK: - Pending: whether the session reports decides who raises the banner
 
-    /// A holder session reports the question itself (`blocked kind=question`)
-    /// and the program status store raises the banner for it, so the hook
-    /// raises none there; a tmux session cannot report, so the hook still
-    /// does. Both still record the pending question for the transcript.
-    @Test("askUserQuestion.pending raises a notification on tmux and none on a holder session")
-    func askUserQuestionPendingNotifiesOnlyWhereTheAgentCannotReport() async throws {
-        let (_, holderWorktreeID) = try await makeRepoAndWorktree()
+    /// A session whose current incarnation reports its state announces the
+    /// question itself (`blocked kind=question`) and the program status store
+    /// raises the banner for it, so the hook raises none there. A session that
+    /// is not reporting — a holder session whose agent is too old, or any tmux
+    /// session — gets the hook's banner. All three still record the pending
+    /// question for the transcript.
+    @Test("askUserQuestion.pending raises a notification unless the session's incarnation is reporting")
+    func askUserQuestionPendingNotifiesOnlyWhereTheAgentIsNotReporting() async throws {
+        let (_, reportingWorktreeID) = try await makeRepoAndWorktree()
+        let (_, silentWorktreeID) = try await makeRepoAndWorktree()
         let (_, tmuxWorktreeID) = try await makeRepoAndWorktree()
-        let holder = try await db.terminals.create(
-            worktreeID: holderWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
+        let reporting = try await db.terminals.create(
+            worktreeID: reportingWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder)
+        let silent = try await db.terminals.create(
+            worktreeID: silentWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
             kind: .claude, transport: .holder)
         let tmux = try await db.terminals.create(
             worktreeID: tmuxWorktreeID, tmuxWindowID: "@mock-h", tmuxPaneID: "%mock-h",
             kind: .claude, transport: .tmux)
+        // The reporting session's agent has reported from its current
+        // incarnation; the silent one's never has.
+        let outcome = await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: reporting.id, incarnation: .currentRow,
+            payload: Array("state=working:app=claude-code".utf8), observedAt: Date()))
+        #expect(outcome == .accepted)
         let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
 
-        #expect(await sendPending(terminalID: holder.id, inputJSON: inputJSON).success)
+        #expect(await sendPending(terminalID: reporting.id, inputJSON: inputJSON).success)
+        #expect(await sendPending(terminalID: silent.id, inputJSON: inputJSON).success)
         #expect(await sendPending(terminalID: tmux.id, inputJSON: inputJSON).success)
 
-        #expect(try await db.notifications.unread(worktreeID: holderWorktreeID).isEmpty)
+        #expect(try await db.notifications.unread(worktreeID: reportingWorktreeID).isEmpty)
+        let silentUnread = try await db.notifications.unread(worktreeID: silentWorktreeID)
+        #expect(silentUnread.map(\.type) == [.attentionNeeded])
         let tmuxUnread = try await db.notifications.unread(worktreeID: tmuxWorktreeID)
         #expect(tmuxUnread.map(\.type) == [.attentionNeeded])
-        #expect(await router.pendingQuestions.entries(forTerminal: holder.id).count == 1)
+        #expect(await router.pendingQuestions.entries(forTerminal: reporting.id).count == 1)
+        #expect(await router.pendingQuestions.entries(forTerminal: silent.id).count == 1)
         #expect(await router.pendingQuestions.entries(forTerminal: tmux.id).count == 1)
     }
 
