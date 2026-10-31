@@ -221,6 +221,84 @@ struct ProgramStatusAppTests {
         #expect(sent.all.map(\.payload) == ["state=done"])
     }
 
+    // MARK: - Re-sending after a reconnect
+
+    /// A report forwarded while the daemon was unreachable is lost, and the
+    /// agent reports again only on change: a restarted subscription forwards
+    /// each terminal's latest report again, with the incarnation and
+    /// observation time it was first sent with — and only the latest.
+    @Test("a restarted subscription forwards the latest report again")
+    func reconnectResendsTheLatestReport() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let incarnation = UUID()
+        let id = seed(state, kind: .claude, transport: .holder, incarnation: incarnation)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+        // `startSubscription` re-seeds program status from the daemon;
+        // answered here, so the test sends no RPC of its own for it.
+        state.programStatusListFetcher = { @MainActor in [] }
+        let earlier = Date(timeIntervalSince1970: 1_000)
+        let latest = earlier.addingTimeInterval(1)
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=blocked:app=claude-code".utf8), observedAt: earlier)
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=working:app=claude-code".utf8), observedAt: latest)
+
+        state.startSubscription()
+        // Only the re-send is under test: the subscription it started has no
+        // daemon to reach, and is ended at once.
+        state.stopSubscription()
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 3 }
+        if outcome == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let params = sent.all
+        try #require(params.count == 3)
+        #expect(params[2].terminalID == id)
+        #expect(params[2].payload == "state=working:app=claude-code")
+        #expect(params[2].incarnationID == incarnation)
+        #expect(params[2].observedAt == latest)
+    }
+
+    /// The memory is kept to terminals the app caches: a terminal the app no
+    /// longer lists has its entry dropped and nothing re-sent, while a cached
+    /// one's still is. The removed terminal's report was observed first, so a
+    /// re-send of it would arrive ahead of the cached one's.
+    @Test("a reconnect re-sends nothing for a terminal the app no longer caches")
+    func reconnectDropsAnUncachedTerminalsReport() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let removed = seed(state, kind: .claude, transport: .holder)
+        let kept = seed(state, kind: .codex, transport: .holder)
+        let removedWorktreeID = try #require(
+            state.terminals.first { $0.value.contains { $0.id == removed } }?.key)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+        state.programStatusListFetcher = { @MainActor in [] }
+        let earlier = Date(timeIntervalSince1970: 1_000)
+        state.forwardProgramStatusReport(
+            terminalID: removed, payload: Array("state=working:app=claude-code".utf8), observedAt: earlier)
+        state.forwardProgramStatusReport(
+            terminalID: kept, payload: Array("state=idle:app=codex".utf8),
+            observedAt: earlier.addingTimeInterval(1))
+        state.terminals[removedWorktreeID] = nil
+
+        state.startSubscription()
+        state.stopSubscription()
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 3 }
+        if outcome == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let params = sent.all
+        try #require(params.count >= 3)
+        #expect(params[2].terminalID == kept)
+        #expect(state.lastForwardedProgramStatusReports[removed] == nil)
+        #expect(state.lastForwardedProgramStatusReports[kept] != nil)
+    }
+
     // MARK: - The view's holder-vs-tmux switch
 
     @Test("the gate starts off, and set turns it on and back off")

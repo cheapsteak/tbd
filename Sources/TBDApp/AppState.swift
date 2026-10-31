@@ -1843,6 +1843,11 @@ final class AppState {
     /// snapshot cannot overwrite a newer one. Bookkeeping, not UI state, so it
     /// stays out of Observation — same reasoning as `pendingQuestionRevisions`.
     @ObservationIgnored var programStatusRevisions: [UUID: UInt64] = [:]
+    /// The latest OSC 7501 report forwarded per terminal, for a terminal the
+    /// app caches, so `resendLastProgramStatusReports()` can forward it again
+    /// when the daemon subscription reconnects. Memory only, never persisted.
+    /// Bookkeeping, not UI state.
+    @ObservationIgnored var lastForwardedProgramStatusReports: [UUID: TerminalProgramStatusReportParams] = [:]
     /// How `hydrateProgramStatus()` lists the daemon's snapshots — injectable
     /// for the same reason as `daemonCapabilitiesFetcher`, so tests can seed
     /// the mirror without a daemon.
@@ -3065,6 +3070,9 @@ final class AppState {
         programStatusSnapshots.removeAll()
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
+        // And a report forwarded while the daemon was unreachable was lost,
+        // while the agent reports again only on its next change.
+        resendLastProgramStatusReports()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe(onSubscribed: { [weak self] in

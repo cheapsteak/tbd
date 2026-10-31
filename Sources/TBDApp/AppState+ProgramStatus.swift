@@ -41,11 +41,44 @@ extension AppState {
                 "dropped non-UTF-8 OSC 7501 report for \(terminalID.uuidString, privacy: .public)")
             return
         }
-        programStatusForwarder.enqueue(TerminalProgramStatusReportParams(
+        let params = TerminalProgramStatusReportParams(
             terminalID: terminalID,
             incarnationID: terminal.sessionIncarnationID,
             payload: text,
-            observedAt: observedAt))
+            observedAt: observedAt)
+        programStatusForwarder.enqueue(params)
+        lastForwardedProgramStatusReports[terminalID] = params
+        forgetForwardedReportsOfUncachedTerminals()
+    }
+
+    /// Forward again, in observation order, the latest report forwarded for
+    /// each terminal the app still caches. Called when the daemon subscription
+    /// (re)connects: a report forwarded while the daemon was unreachable — a
+    /// `tbd update` handover, say — was lost, and an agent reports only on
+    /// change, so the column could keep a stale state (a `.waitingForUser`
+    /// the send gate refuses on) until the agent's next change. The store
+    /// refuses a re-sent report older than what it holds, and one it already
+    /// applied changes nothing, so a duplicate is harmless.
+    ///
+    /// Only the latest report per terminal is kept. A lost main entry followed
+    /// by a task-entry report the daemon did receive is not recovered — the
+    /// store refuses a report observed before the newest it accepted — and
+    /// waits for the agent's next change.
+    func resendLastProgramStatusReports() {
+        forgetForwardedReportsOfUncachedTerminals()
+        let latest = lastForwardedProgramStatusReports.values.sorted { $0.observedAt < $1.observedAt }
+        for params in latest {
+            programStatusForwarder.enqueue(params)
+        }
+    }
+
+    /// Keep `lastForwardedProgramStatusReports` to terminals the app caches.
+    private func forgetForwardedReportsOfUncachedTerminals() {
+        guard !lastForwardedProgramStatusReports.isEmpty else { return }
+        let cached = Set(terminals.values.lazy.flatMap { $0 }.map(\.id))
+        for terminalID in Array(lastForwardedProgramStatusReports.keys) where !cached.contains(terminalID) {
+            lastForwardedProgramStatusReports.removeValue(forKey: terminalID)
+        }
     }
 
     /// The same eligibility rule the daemon's `ProgramStatusStore` applies:
