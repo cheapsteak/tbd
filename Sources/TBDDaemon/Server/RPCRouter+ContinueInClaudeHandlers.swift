@@ -255,13 +255,6 @@ extension RPCRouter {
                 "Terminal \(source.id) already has a provider replacement pending.",
                 code: .terminalBusy)
         }
-        guard let activity = source.observedActivity,
-              activity.value == .idle,
-              source.activityStateOrderObservedAt != nil else {
-            throw ContinueInClaudeError(
-                "Wait for the current Codex turn to finish before continuing in Claude.",
-                code: .terminalBusy)
-        }
         guard let sourceThreadID = source.claudeSessionID,
               !sourceThreadID.isEmpty else {
             throw ContinueInClaudeError(
@@ -274,11 +267,12 @@ extension RPCRouter {
         }
         let rolloutFingerprint = try CodexRolloutFingerprint.read(path: rolloutPath)
 
-        // The persisted activity row is presentation state and may lag an
-        // append that reached the immutable rollout moments ago. Continue is
-        // destructive, so re-read the authoritative lifecycle stream through
-        // the same bounded tracker terminal.list uses. Missing, unreadable,
-        // or still-behind observations publish no state and therefore refuse.
+        // The idle check. A tmux Codex row carries no agent status — its
+        // activity reads `.unknown` — so the row cannot say whether a turn is
+        // open. Continue is destructive, so it reads the authoritative
+        // lifecycle stream, the immutable rollout, through the bounded
+        // tracker. Missing, unreadable, or still-behind observations publish
+        // no state and therefore refuse.
         let authoritativeActivity = await codexActivityTracker.observe(
             transcripts: [.init(
                 transcriptPath: rolloutFingerprint.path,
@@ -466,11 +460,15 @@ extension RPCRouter {
         _ prepared: PreparedContinueInClaude,
         currentWorktree: LocalWorktree
     ) async throws -> RPCResponse {
+        // The final fence. Preparation's rollout read is the idle gate, since a
+        // tmux Codex row carries no agent status; this guard holds the source
+        // to that read. The snapshot must still match, activity columns
+        // included, and an unchanged rollout fingerprint proves no new turn
+        // has started since.
         guard let current = try await db.terminals.get(id: prepared.source.id),
               prepared.sourceSnapshot.matches(current),
               current.kind == .codex,
               !current.isParked,
-              current.observedActivity?.value == .idle,
               try CodexRolloutFingerprint.read(
                 path: prepared.rolloutFingerprint.path) == prepared.rolloutFingerprint else {
             throw ContinueInClaudeError(
@@ -708,9 +706,9 @@ extension RPCRouter {
             // user may have resumed work in it since. While that pane is live,
             // still ours, and the immutable rollout shows a turn in flight (or
             // cannot be read), leave it alone: the row stays pending and the
-            // next pass looks again. Persisted activity cannot answer this,
-            // since hook writes are refused for a pending row. A dead or
-            // absent pane carries no such risk and is recovered below.
+            // next pass looks again. Persisted activity cannot answer this: a
+            // tmux Codex row carries no agent status. A dead or absent pane
+            // carries no such risk and is recovered below.
             let pane = try await self.tmux.paneSendProbe(
                 server: worktree.tmuxServer, paneID: current.tmuxPaneID)
             if case .live(let stampedTerminalID) = pane.target,

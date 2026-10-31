@@ -12,16 +12,10 @@ private final class IdleTransitionRecorder: @unchecked Sendable {
 }
 
 /// The `working -> idle` edge is detected inside `TerminalStore` because BOTH
-/// of its activity writers commit it. These tests pin the edge itself: which
-/// transitions fire, which deliberately do not, and that the profile id
-/// travelling with it is the terminal's own.
-///
-/// `applyActivityObservation` has two internal branches and both are covered
-/// here. The non-ordered one serves Claude hooks; the ordered one serves Codex
-/// (`kind`/`label`) and any observation sourced from `.terminalInterrupt`, and
-/// it reaches the edge by a different route — it asks the record what was
-/// COMMITTED rather than what the observation asserted, and it can reject an
-/// observation outright before the edge is ever computed.
+/// of its activity writers commit it: `applyProgramStatusActivity`, the agent's
+/// own OSC 7501 report, and `setActivityState`. These tests pin the edge
+/// itself: which transitions fire, which deliberately do not, and that the
+/// profile id travelling with it is the terminal's own.
 @Suite("terminal activity transition fan-out")
 struct TerminalActivityTransitionNotifierTests {
 
@@ -44,65 +38,71 @@ struct TerminalActivityTransitionNotifierTests {
             label: label, profileID: profileID, kind: kind)
     }
 
-    // MARK: applyActivityObservation — the path real Claude hooks take
+    /// One agent report, through the program status store's column writer.
+    @discardableResult
+    private func report(
+        _ db: TBDDatabase, _ terminalID: UUID, _ value: ProgramStatusColumnValue, at date: Date
+    ) async throws -> ProgramStatusActivityWrite? {
+        try await db.terminals.applyProgramStatusActivity(
+            id: terminalID, scope: .anyLiveIncarnation, activityState: value.activityState,
+            awaitingInputReason: value.awaitingInputReason, observedAt: date)
+    }
 
-    @Test func hookPathNotifiesOnWorkingToIdleWithTheTerminalsProfile() async throws {
+    // MARK: applyProgramStatusActivity — the agent's own reports
+
+    @Test func reportPathNotifiesOnWorkingToIdleWithTheTerminalsProfile() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorder = IdleTransitionRecorder()
         db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
 
         let profileID = UUID()
-        let terminal = try await makeTerminal(in: db, tag: "hook", profileID: profileID)
+        let terminal = try await makeTerminal(in: db, tag: "report", profileID: profileID)
         let base = Date(timeIntervalSince1970: 1_790_000_000)
 
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
+        try await report(db, terminal.id, .working, at: base)
         #expect(recorder.profileIDs.isEmpty)
 
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
+        try await report(db, terminal.id, .idle, at: base.addingTimeInterval(1))
 
         #expect(recorder.profileIDs == [profileID])
     }
 
     /// The off-branch that keeps this from firing on every session start: only
     /// `working -> idle` says a turn completed and utilization moved.
-    @Test func hookPathDoesNotNotifyWhenIdleArrivesFromUnknown() async throws {
+    @Test func reportPathDoesNotNotifyWhenIdleArrivesFromUnknown() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorder = IdleTransitionRecorder()
         db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
 
         let terminal = try await makeTerminal(in: db, tag: "fresh", profileID: UUID())
         // A freshly created terminal is `.unknown`; go straight to idle.
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle, source: .hookEvent("Stop"),
-            observedAt: Date(timeIntervalSince1970: 1_790_000_000))
+        let write = try await report(
+            db, terminal.id, .idle, at: Date(timeIntervalSince1970: 1_790_000_000))
 
+        #expect(write?.stateChanged == true)
         #expect(recorder.profileIDs.isEmpty)
     }
 
-    @Test func hookPathDoesNotNotifyOnWorkingToWaitingForUser() async throws {
+    @Test func reportPathDoesNotNotifyOnWorkingToWaitingForUser() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorder = IdleTransitionRecorder()
         db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
 
         let terminal = try await makeTerminal(in: db, tag: "waiting", profileID: UUID())
         let base = Date(timeIntervalSince1970: 1_790_000_000)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .waitingForUser,
-            source: .hookEvent("Notification"), observedAt: base.addingTimeInterval(1))
+        try await report(db, terminal.id, .working, at: base)
+        let write = try await report(
+            db, terminal.id,
+            .waitingForUser(ProgramStatusBlock(kind: .permission, taskID: nil)),
+            at: base.addingTimeInterval(1))
 
+        #expect(write?.stateChanged == true)
         #expect(recorder.profileIDs.isEmpty)
     }
 
-    /// A repeated `Stop` is the same durable value, so no second edge — the
+    /// A repeated `idle` is the same durable value, so no second edge — the
     /// notification tracks transitions, not observations.
-    @Test func repeatedIdleObservationNotifiesOnlyOnce() async throws {
+    @Test func repeatedIdleReportNotifiesOnlyOnce() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorder = IdleTransitionRecorder()
         db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
@@ -110,15 +110,9 @@ struct TerminalActivityTransitionNotifierTests {
         let profileID = UUID()
         let terminal = try await makeTerminal(in: db, tag: "repeat", profileID: profileID)
         let base = Date(timeIntervalSince1970: 1_790_000_000)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(2))
+        try await report(db, terminal.id, .working, at: base)
+        try await report(db, terminal.id, .idle, at: base.addingTimeInterval(1))
+        try await report(db, terminal.id, .idle, at: base.addingTimeInterval(2))
 
         #expect(recorder.profileIDs == [profileID])
     }
@@ -132,13 +126,10 @@ struct TerminalActivityTransitionNotifierTests {
 
         let terminal = try await makeTerminal(in: db, tag: "noprofile", profileID: nil)
         let base = Date(timeIntervalSince1970: 1_790_000_000)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
+        try await report(db, terminal.id, .working, at: base)
+        let write = try await report(db, terminal.id, .idle, at: base.addingTimeInterval(1))
 
+        #expect(write?.previousActivityState == .working)
         #expect(recorder.profileIDs.isEmpty)
     }
 
@@ -148,13 +139,10 @@ struct TerminalActivityTransitionNotifierTests {
         let db = try TBDDatabase(inMemory: true)
         let terminal = try await makeTerminal(in: db, tag: "noobs", profileID: UUID())
         let base = Date(timeIntervalSince1970: 1_790_000_000)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        let applied = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
-        #expect(applied?.activityState == .idle)
+        try await report(db, terminal.id, .working, at: base)
+        let write = try await report(db, terminal.id, .idle, at: base.addingTimeInterval(1))
+        #expect(write?.stateChanged == true)
+        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .idle)
     }
 
     // MARK: setActivityState — the second writer
@@ -204,124 +192,5 @@ struct TerminalActivityTransitionNotifierTests {
             id: terminal.id, activityState: .idle, source: .hookEvent("Stop"),
             observedAt: base.addingTimeInterval(1))
         #expect(retracted == true)
-    }
-
-    // MARK: applyActivityObservation — the ORDERED branch (Codex, interrupts)
-
-    /// Baseline for the branch nothing above reaches. A Codex terminal takes
-    /// `usesOrderedCodexActivity`, whose edge is computed from the value the
-    /// record actually committed; drop the fan-out from that leg and every
-    /// test above still passes.
-    @Test func orderedCodexPathNotifiesOnWorkingToIdle() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorder = IdleTransitionRecorder()
-        db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
-
-        let profileID = UUID()
-        let terminal = try await makeTerminal(
-            in: db, tag: "codex", profileID: profileID,
-            label: TerminalLabel.codex, kind: .codex)
-        let base = Date(timeIntervalSince1970: 1_790_000_000)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        #expect(recorder.profileIDs.isEmpty)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
-
-        #expect(recorder.profileIDs == [profileID])
-    }
-
-    /// The ordered path's `sameCompleteFact` coercion: a repeat of a value the
-    /// row already holds is ACCEPTED — it advances the ordering stamp and
-    /// returns an application — while leaving the durable state alone. An edge
-    /// keyed on "an observation asserting idle was accepted" would fire a
-    /// second, spurious probe here.
-    @Test func orderedCodexPathDoesNotNotifyOnACoercedSameValueWrite() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorder = IdleTransitionRecorder()
-        db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
-
-        let profileID = UUID()
-        let terminal = try await makeTerminal(
-            in: db, tag: "codexsame", profileID: profileID,
-            label: TerminalLabel.codex, kind: .codex)
-        let base = Date(timeIntervalSince1970: 1_790_000_000)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(1))
-        #expect(recorder.profileIDs == [profileID])
-
-        let coerced = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(2))
-
-        // Accepted, and coerced: the ordering stamp moved to the new
-        // observation while the recorded fact kept the original stamp.
-        #expect(coerced != nil)
-        #expect(coerced?.observedAt == base.addingTimeInterval(1))
-        #expect(coerced?.orderObservedAt == base.addingTimeInterval(2))
-        #expect(recorder.profileIDs == [profileID])
-    }
-
-    /// An out-of-order observation is rejected before the edge is computed at
-    /// all. The asserted state here IS idle and the row IS working, so an edge
-    /// derived from the asserted value — or computed before the rejection —
-    /// would fire a probe for a turn that never ended.
-    @Test func orderedCodexPathDoesNotNotifyOnAnOutOfOrderIdleObservation() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorder = IdleTransitionRecorder()
-        db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
-
-        let terminal = try await makeTerminal(
-            in: db, tag: "codexstale", profileID: UUID(),
-            label: TerminalLabel.codex, kind: .codex)
-        let base = Date(timeIntervalSince1970: 1_790_000_000)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"),
-            observedAt: base.addingTimeInterval(10))
-
-        let stale = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: base.addingTimeInterval(5))
-
-        #expect(stale == nil)
-        #expect(recorder.profileIDs.isEmpty)
-    }
-
-    /// The third route into the ordered branch is the SOURCE, not the terminal
-    /// kind: an explicit user interrupt arrives as `.terminalInterrupt`,
-    /// unbound from the session process and replacing a same value. It is a
-    /// real end of work, so it fires.
-    @Test func terminalInterruptSourceTakesTheOrderedPathAndNotifies() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorder = IdleTransitionRecorder()
-        db.terminals.activityTransitions.onSessionBecameIdle { recorder.record($0) }
-
-        let profileID = UUID()
-        let terminal = try await makeTerminal(
-            in: db, tag: "interrupt", profileID: profileID)
-        let base = Date(timeIntervalSince1970: 1_790_000_000)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent("UserPromptSubmit"), observedAt: base)
-        #expect(recorder.profileIDs.isEmpty)
-
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle,
-            source: .terminalInterrupt, observedAt: base.addingTimeInterval(1),
-            processBound: false, replaceSameValue: true)
-
-        #expect(recorder.profileIDs == [profileID])
     }
 }

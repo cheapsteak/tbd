@@ -1,5 +1,8 @@
 # Taking the raised hand down: transcript supersession for awaiting-input
 
+Status: **retired.** Transcript supersession is retired: its implementation
+has been removed from TBD, and this document is kept as the design record.
+
 A Claude session that stops on a permission prompt shows a raised hand in the
 sidebar. Nothing reliably takes that hand down. This document records why the
 existing mechanism cannot, and adds a second superseder that TBD evaluates for

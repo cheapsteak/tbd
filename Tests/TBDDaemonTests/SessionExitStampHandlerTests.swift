@@ -171,6 +171,48 @@ struct SessionExitStampHandlerTests {
         #expect(published.hibernateReason == nil)
     }
 
+    /// The stamp's `.idle` described the Claude that left. The one that came
+    /// back has reported nothing, and on tmux nothing ever will, so the lift
+    /// resets the columns to `.unknown` as a wake does — wait reason included —
+    /// and the idle sweep and merge-park leave the session alone instead of
+    /// parking a Claude that may be mid-turn. The wake delta carries the reset
+    /// columns, so the app's cached row reads them too.
+    @Test func sessionStartResetsTheExitStampsIdleToUnknown() async throws {
+        let f = try await makeFixture()
+        try await f.db.terminals.setActivityState(
+            id: f.terminal.id, activityState: .waitingForUser, source: .programStatus,
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            awaitingInputReason: AwaitingInputReason(message: ""))
+        try await sessionEnded(f, reason: "logout")
+        let stamped = try #require(try await f.db.terminals.get(id: f.terminal.id))
+        #expect(stamped.activityState == .idle)
+
+        _ = try await f.router.handleTerminalSessionEvent(sessionStartPayload(f))
+
+        let row = try #require(try await f.db.terminals.get(id: f.terminal.id))
+        #expect(!row.isParked)
+        #expect(row.activityState == .unknown)
+        #expect(row.activityStateSource == .derived)
+        #expect(row.awaitingInputReason == nil)
+        #expect(row.awaitingInputObservedAt == nil)
+        #expect(HibernationGate.decideForMerge(terminal: row) == .unknownActivity)
+        #expect(HibernationGate.decide(
+            terminal: row, autoHibernateEnabled: true, idleTimeout: 0,
+            idleSince: .distantPast, now: Date()) == .unknownActivity)
+
+        let published = try #require(f.deltas.hibernationDeltas().last)
+        #expect(!published.hibernated)
+        let activity = try #require(published.activity)
+        #expect(activity.activityState == .unknown)
+        #expect(activity.activityStateSource == .derived)
+        #expect(activity.activityStateObservedAt == row.activityStateObservedAt)
+        #expect(activity.activityStateOrderObservedAt == row.activityStateOrderObservedAt)
+        let stampedOrder = try #require(stamped.activityStateOrderObservedAt)
+        let liftedOrder = try #require(activity.activityStateOrderObservedAt)
+        #expect(liftedOrder > stampedOrder,
+                "the app orders the carried columns against the stamp's; an older one is dropped")
+    }
+
     private func sessionStartPayload(_ f: Fixture) throws -> Data {
         try JSONEncoder().encode(TerminalSessionEventParams(
             terminalID: f.terminal.id,

@@ -39,7 +39,7 @@ private let pluginDirLogger = Logger(subsystem: "com.tbd.daemon", category: "cla
 /// working-directory folder slug, which never matches an app-side rename.
 /// `--name` only sets the name at spawn; a later rename reaches the running
 /// session through the `UserPromptSubmit` hook's `sessionTitle` on its next
-/// prompt (see `ClaudeHookOverlay.workingCommand`). Display names are unvalidated free
+/// prompt (see `ClaudeHookOverlay.sessionTitleCommand`). Display names are unvalidated free
 /// text, so the name is sanitized here rather than at the rename handler (see
 /// `sanitizedSessionName`) — renaming must keep meaning what the user typed.
 ///

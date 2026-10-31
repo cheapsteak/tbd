@@ -134,13 +134,13 @@ enum PanelTabsFixture {
         return collector
     }
 
-    /// Stubs the daemon's state stream (`stateSubscriber`): a subscribe call
+    /// Stubs the daemon's state stream (`deltaSubscriber`): a subscribe call
     /// stays open until the test ends it, and the daemon acknowledges it only
     /// when the test says so.
     static func stubSubscription(_ state: AppState) -> PanelSubscriptionStub {
         let stub = PanelSubscriptionStub()
-        state.stateSubscriber = { @MainActor onRegistered, _ in
-            await stub.serve(onRegistered: onRegistered)
+        state.deltaSubscriber = { @MainActor onConnected, _ in
+            await stub.serve(onRegistered: onConnected)
         }
         return stub
     }

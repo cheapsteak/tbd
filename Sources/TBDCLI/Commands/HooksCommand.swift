@@ -12,7 +12,7 @@ struct HooksCommand: AsyncParsableCommand {
             HooksStatusCommand.self,
             StopRenameCheckCommand.self,
             StopFailureCommand.self,
-            NotificationHookCommand.self,
+            SessionTitleHookCommand.self,
             FakeRateLimitCommand.self
         ],
         defaultSubcommand: HooksStatusCommand.self

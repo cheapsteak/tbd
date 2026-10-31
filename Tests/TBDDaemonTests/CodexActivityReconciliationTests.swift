@@ -46,6 +46,25 @@ struct CodexActivityReconciliationTests {
             actuationLog: makeTestActuationLog())
     }
 
+    /// Writes `contents` to `session.jsonl` in a fresh temporary directory and
+    /// returns the file. The caller removes the directory
+    /// (`deletingLastPathComponent()`) in a `defer` registered right after the
+    /// call; a write that fails removes it here, since no caller's `defer` is
+    /// registered yet.
+    private func makeTranscript(_ contents: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("session.jsonl")
+        do {
+            try contents.write(to: path, atomically: true, encoding: .utf8)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        return path
+    }
+
     private func makeBoundaryTerminal(
         tag: String,
         kind: TerminalKind = .codex
@@ -112,258 +131,34 @@ struct CodexActivityReconciliationTests {
         return (router, terminal, directory)
     }
 
-    @Test("terminal.list exposes transcript working without changing persisted hook activity")
-    func terminalListExposesWorkingPresentationWithoutMutation() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-repo-\(UUID().uuidString)",
-            displayName: "car-repo",
-            defaultBranch: "main"
-        )
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car"
-        )
-
-        let transcriptPath = try makeTranscript(
+    /// The listed row is the stored row: no transcript-derived presentation
+    /// rides on it, even for a Codex rollout with a turn in flight — not in the
+    /// model, and not on the wire.
+    @Test("terminal.list publishes no presentation")
+    func terminalListPublishesNoPresentation() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "no-presentation")
+        let transcript = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n")
-        defer { try? FileManager.default.removeItem(at: transcriptPath.deletingLastPathComponent()) }
-
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex
-        )
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
         _ = try #require(try await db.terminals.applySessionStart(
             id: terminal.id,
             expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
             sessionID: "codex-session",
-            transcriptPath: transcriptPath.path,
-            observedAt: Date(timeIntervalSince1970: 1_779_999_999)))
-        let observedAt = Date(timeIntervalSince1970: 1_780_000_000)
-        try await db.terminals.setActivityState(
-            id: terminal.id, activityState: .idle,
-            source: .hookEvent("Stop"), observedAt: observedAt)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id)
-        )
-        let response = await router.handle(request)
-        #expect(response.success)
-
-        let terminals = try response.decodeResult([Terminal].self)
-        #expect(terminals.count == 1)
-        #expect(terminals[0].presentationActivityState == .working)
-        #expect(terminals[0].presentationActivityObservedAt == presentationObservedAt)
-        #expect(terminals[0].activityState == .idle)
-        #expect(terminals[0].activityStateSource == .hookEvent("Stop"))
-        #expect(terminals[0].activityStateObservedAt == observedAt)
-
-        let persisted = try await db.terminals.get(id: terminal.id)
-        #expect(persisted?.presentationActivityState == nil)
-        #expect(persisted?.presentationActivityObservedAt == nil)
-        #expect(persisted?.activityState == .idle)
-        #expect(persisted?.activityStateSource == .hookEvent("Stop"))
-        #expect(persisted?.activityStateObservedAt == observedAt)
-    }
-
-    @Test("ordinary activity hooks do not invalidate an in-flight transcript observation")
-    func ordinaryActivityHookKeepsTranscriptEvidence() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-hook-race-repo-\(UUID().uuidString)",
-            displayName: "car-hook-race-repo",
-            defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-hook-race-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-hook-race")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "current-session",
             transcriptPath: transcript.path,
-            observedAt: Date(timeIntervalSince1970: 1_790_000_009)))
-        let initialActivityAt = Date(timeIntervalSince1970: 1_790_000_010)
-        try await db.terminals.setActivityState(
-            id: terminal.id,
-            activityState: .idle,
-            source: .hookEvent("Stop"),
-            observedAt: initialActivityAt)
+            observedAt: presentationObservedAt.addingTimeInterval(-1)))
 
-        let listAt = initialActivityAt.addingTimeInterval(1)
-        let hookAt = listAt.addingTimeInterval(1)
-        let dates = BlockingListDates(first: listAt, subsequent: hookAt)
-        let raceRouter = makeRouter(now: dates.provider)
-        let list = try RPCRequest(
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminal.id,
-                activityState: .working))
-
-        let inFlightList = gateHoldingTask { await raceRouter.handle(list) }
-        guard await waitUntil(
-            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await inFlightList.value
-            Issue.record("terminal.list never reached its transcript stamp")
-            return
-        }
-        #expect((await raceRouter.handle(hook)).success)
-        dates.releaseFirstCall()
-
-        let response = await inFlightList.value
+            params: TerminalListParams(worktreeID: terminal.worktreeID)))
         #expect(response.success)
         let listed = try #require(
             response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(listed.activityState == .working)
-        #expect(listed.activityStateOrderObservedAt == hookAt)
-        #expect(listed.presentationActivityState == .working)
-        #expect(listed.presentationActivityObservedAt == listAt)
+        #expect(listed.activityState == .unknown)
+        let wire = try #require(response.result)
+        #expect(!wire.contains("presentationActivity"))
     }
 
-    @Test("accepted same-path SessionStart supersedes an orphan transcript turn")
-    func samePathSessionStartResetsTranscriptLifecycle() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-reset-repo-\(UUID().uuidString)",
-            displayName: "car-reset-repo",
-            defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-reset-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-reset")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex)
-        try await db.terminals.updateSession(
-            id: terminal.id,
-            sessionID: "same-session",
-            transcriptPath: transcript.path)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-
-        let before = await router.handle(list)
-        #expect(before.success)
-        #expect(try before.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
-
-        try append(
-            Data((#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
-                + "\n").utf8),
-            to: transcript)
-        let current = await router.handle(list)
-        #expect(current.success)
-        #expect(try current.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "same-session",
-                transcriptPath: transcript.path,
-                source: "resume"))
-        #expect((await router.handle(sessionStart)).success)
-
-        let afterBoundary = await router.handle(list)
-        #expect(afterBoundary.success)
-        #expect(try afterBoundary.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
-
-        try append(
-            Data((#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"later"}}"#
-                + "\n").utf8),
-            to: transcript)
-        let afterLaterTurn = await router.handle(list)
-        #expect(afterLaterTurn.success)
-        #expect(try afterLaterTurn.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-    }
-
-    @Test("first SessionStart retains a turn that began before the hook arrived")
-    func firstSessionStartRetainsAlreadyStartedTurn() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-first-start-repo-\(UUID().uuidString)",
-            displayName: "car-first-start-repo",
-            defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-first-start-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-first-start")
-        let transcript = try makeTranscript(
-            #"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
-                + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex)
-        #expect(terminal.claudeSessionID == nil)
-
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "initial-session",
-                transcriptPath: transcript.path,
-                source: "SessionStart"))
-        #expect((await router.handle(sessionStart)).success)
-
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let working = await router.handle(list)
-        #expect(working.success)
-        #expect(try working.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-
-        try append(
-            Data((
-                #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"initial-turn"}}"#
-                    + "\n").utf8),
-            to: transcript)
-        let idle = await router.handle(list)
-        #expect(idle.success)
-        #expect(try idle.decodeResult([Terminal].self).first?
-            .presentationActivityState == .idle)
-    }
-
-    @Test("recreated Codex window adopts its new process's initial task")
+    @Test("recreated Codex window attaches its new process's session")
     func recreatedCodexWindowAdoptsInitialTask() async throws {
         let worktreeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-recreate-\(UUID().uuidString)", isDirectory: true)
@@ -417,10 +212,6 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: oldTranscript.path,
                 source: "startup"))
         #expect((await recreateRouter.handle(oldSessionStart)).success)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        #expect((await recreateRouter.handle(list)).success)
 
         let transcript = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
@@ -492,7 +283,8 @@ struct CodexActivityReconciliationTests {
         #expect(recreated.claudeSessionID == "new-session")
         #expect(recreated.transcriptPath == transcript.path)
         #expect(recreated.sessionOrderObservedAt == dates.now)
-        #expect(recreated.activityState == .idle)
+        // The new incarnation has not reported its state.
+        #expect(recreated.activityState == .unknown)
         let launchCommands = launchRecorder.snapshot()
         let newWindowIndex = try #require(
             launchCommands.firstIndex(where: { $0.contains("new-window") }))
@@ -503,33 +295,6 @@ struct CodexActivityReconciliationTests {
             }))
         #expect(newWindowIndex < codexLaunchIndex)
         #expect(launchCommands[newWindowIndex].last?.contains(" --profile") == false)
-
-        // A delayed hook from the dead process must not mutate the replacement
-        // process after its new identity is attached.
-        dates.advance(by: 1)
-        let staleActivity = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminal.id,
-                activityState: .working,
-                sessionID: "old-session"))
-        #expect((await recreateRouter.handle(staleActivity)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .idle)
-
-        let working = await recreateRouter.handle(list)
-        #expect(working.success)
-        #expect(try working.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-
-        try append(
-            Data((
-                #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"new-turn"}}"#
-                    + "\n").utf8),
-            to: transcript)
-        let idle = await recreateRouter.handle(list)
-        #expect(idle.success)
-        #expect(try idle.decodeResult([Terminal].self).first?
-            .presentationActivityState == .idle)
     }
 
     @Test("failed Codex staging keeps the previous durable session")
@@ -628,14 +393,7 @@ struct CodexActivityReconciliationTests {
         let stored = try #require(try await db.terminals.get(id: terminal.id))
         let persistedGeneration = try #require(stored.sessionOrderObservedAt)
         #expect(persistedGeneration == observedAt)
-
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await roundedRouter.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
+        #expect(stored.codexTranscriptBoundaryOffset == 0)
     }
 
     @Test("a stored transcript path makes a nil-identity SessionStart a later attachment")
@@ -667,13 +425,6 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: transcript.path, source: "SessionStart"))
         #expect((await router.handle(sessionStart)).success)
 
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await router.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
         #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
             == Int64(try Data(contentsOf: transcript).count))
     }
@@ -707,13 +458,6 @@ struct CodexActivityReconciliationTests {
                 transcriptPath: transcript.path, source: "SessionStart"))
         #expect((await router.handle(sessionStart)).success)
 
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await router.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
         #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset
             == Int64(try Data(contentsOf: transcript).count))
     }
@@ -1158,120 +902,6 @@ struct CodexActivityReconciliationTests {
             == laterGeneration)
     }
 
-    @Test("initial durable boundary recovers during list reconstruction")
-    func initialBoundaryRecoversAcrossPersistedSessionListRace() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-adoption-race-repo-\(UUID().uuidString)",
-            displayName: "car-adoption-race-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-adoption-race-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-adoption-race")
-        let transcript = try makeTranscript(
-            #"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
-                + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-
-        let observedAt = Date(timeIntervalSince1970: 1_790_000_000.123_6)
-        let application = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "initial-session",
-            transcriptPath: transcript.path, observedAt: observedAt))
-        #expect(application.isInitialAttachment)
-        let stored = try #require(try await db.terminals.get(id: terminal.id))
-        let persistedGeneration = try #require(stored.sessionOrderObservedAt)
-        #expect(persistedGeneration == observedAt)
-
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let racedList = await router.handle(list)
-        #expect(racedList.success)
-        #expect(try racedList.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-
-        await router.codexActivityTracker.adoptInitialSession(
-            transcriptPath: transcript.path,
-            worktreeID: wt.id,
-            terminalID: terminal.id,
-            generation: try #require(application.orderObservedAt))
-        let afterAdoption = await router.handle(list)
-        #expect(afterAdoption.success)
-        #expect(try afterAdoption.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-    }
-
-    @Test("a fresh router progressively recovers activity older than the transcript tail")
-    func freshRouterRecoversInitialSessionBeyondOneMiB() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-cold-recovery-repo-\(UUID().uuidString)",
-            displayName: "car-cold-recovery-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-cold-recovery-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-cold-recovery")
-        let transcript = try makeTranscript(String(decoding: lifecycleEvent(
-            type: "task_started", turnID: "current"), as: UTF8.self))
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        for index in 0..<17 {
-            try append(lifecycleEvent(
-                type: "agent_message",
-                turnID: "padding-\(index)",
-                exactByteCount: 64 * 1024), to: transcript)
-        }
-        #expect(try Data(contentsOf: transcript).count > 1024 * 1024)
-
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "initial-session",
-                transcriptPath: transcript.path,
-                source: "SessionStart"))
-        #expect((await router.handle(sessionStart)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?
-            .codexTranscriptBoundaryOffset == 0)
-
-        let restartedRouter = makeRouter(now: { presentationObservedAt })
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let firstResponse = await restartedRouter.handle(list)
-        #expect(firstResponse.success)
-        #expect(try firstResponse.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
-
-        var recoveredState: TerminalActivityState?
-        for _ in 0..<3 where recoveredState == nil {
-            let response = await restartedRouter.handle(list)
-            #expect(response.success)
-            recoveredState = try response.decodeResult([Terminal].self).first?
-                .presentationActivityState
-        }
-        #expect(recoveredState == .working)
-        #expect(try await db.terminals.get(id: terminal.id)?
-            .codexTranscriptBoundaryOffset == 0)
-
-        try append(lifecycleEvent(
-            type: "task_complete", turnID: "current"), to: transcript)
-        var completedState = recoveredState
-        for _ in 0..<2 where completedState != .idle {
-            let response = await restartedRouter.handle(list)
-            #expect(response.success)
-            completedState = try response.decodeResult([Terminal].self).first?
-                .presentationActivityState
-        }
-        #expect(completedState == .idle)
-    }
-
     @Test("durable boundary supersedes same-generation provisional EOF but not newer state")
     func durableBoundaryWinsAfterListReconstructionRace() async throws {
         let tracker = CodexTranscriptActivityTracker()
@@ -1312,85 +942,7 @@ struct CodexActivityReconciliationTests {
             worktreeID: worktreeID) == .working)
     }
 
-    @Test("an unavailable initial rollout remains eligible for later bootstrap")
-    func unavailableInitialSessionBootstrapsWhenRolloutAppears() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-late-rollout-repo-\(UUID().uuidString)",
-            displayName: "car-late-rollout-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-late-rollout-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-late-rollout")
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-car-late-rollout-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let transcript = directory.appendingPathComponent("rollout.jsonl")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "initial-session",
-                transcriptPath: transcript.path, source: "SessionStart"))
-        #expect((await router.handle(sessionStart)).success)
-        #expect(!(await router.codexActivityTracker.hasBaseline(
-            transcriptPath: transcript.path)))
-
-        try (#"{"type":"session_meta","payload":{"id":"initial-session"}}"# + "\n"
-            + #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"initial-turn"}}"#
-            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await router.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-    }
-
-    @Test("a fresh tracker replays an unavailable initial rollout when it appears")
-    func unavailableInitialBoundaryReplaysWhenRolloutAppears() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-unavailable-restart-repo-\(UUID().uuidString)",
-            displayName: "car-unavailable-restart-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-unavailable-restart-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-unavailable-restart")
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "tbd-car-unavailable-restart-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let transcript = directory.appendingPathComponent("rollout.jsonl")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "persisted-session",
-            transcriptPath: transcript.path, observedAt: presentationObservedAt))
-        let restartedRouter = makeRouter(now: { presentationObservedAt })
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-
-        let unavailable = await restartedRouter.handle(list)
-        #expect(unavailable.success)
-        #expect(try unavailable.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
-
-        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"historical"}}"#
-            + "\n").write(to: transcript, atomically: true, encoding: .utf8)
-        let afterFileAppears = await restartedRouter.handle(list)
-        #expect(afterFileAppears.success)
-        #expect(try afterFileAppears.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-    }
-
-    @Test("sub-millisecond later boundary remains pending across database reload")
+    @Test("a sub-millisecond later generation survives a database round trip")
     func submillisecondUnavailableLaterBoundaryDoesNotBootstrapHistory() async throws {
         let repo = try await db.repos.create(
             path: "/tmp/car-submillisecond-boundary-repo-\(UUID().uuidString)",
@@ -1425,16 +977,9 @@ struct CodexActivityReconciliationTests {
         let stored = try #require(try await db.terminals.get(id: terminal.id))
         let persistedGeneration = try #require(stored.sessionOrderObservedAt)
         #expect(persistedGeneration == observedAt)
-
-        try (#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"historical"}}"#
-            + "\n").write(to: missingTranscript, atomically: true, encoding: .utf8)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await roundedRouter.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
+        // The rollout did not exist when the later session attached, so no
+        // safe boundary was available.
+        #expect(stored.codexTranscriptBoundaryOffset == nil)
     }
 
     @Test("a later session boundary defeats an older delayed initial adoption")
@@ -1515,432 +1060,6 @@ struct CodexActivityReconciliationTests {
             transcriptPath: transcript.path, worktreeID: worktreeID) == nil)
     }
 
-    @Test("a persisted SessionStart boundary survives a fresh tracker")
-    func samePathSessionBoundarySurvivesFreshTracker() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-restart-repo-\(UUID().uuidString)",
-            displayName: "car-restart-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-restart-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-restart")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        try await db.terminals.updateSession(
-            id: terminal.id, sessionID: "same-session", transcriptPath: transcript.path)
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "same-session",
-                transcriptPath: transcript.path, source: "SessionStart"))
-        #expect((await router.handle(sessionStart)).success)
-        _ = try await db.terminals.applyActivityObservation(
-            id: terminal.id,
-            activityState: .working,
-            source: .hookEvent(RPCMethod.terminalActivityEvent),
-            observedAt: presentationObservedAt.addingTimeInterval(1))
-
-        let restartedRouter = makeRouter(now: { presentationObservedAt })
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let afterRestart = await restartedRouter.handle(list)
-        #expect(afterRestart.success)
-        #expect(try afterRestart.decodeResult([Terminal].self).first?
-            .presentationActivityState == nil)
-    }
-
-    @Test("an equal-stamped duplicate SessionStart does not hide a later turn")
-    func duplicateSessionStartDoesNotResetLaterTurn() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-duplicate-repo-\(UUID().uuidString)",
-            displayName: "car-duplicate-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-duplicate-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-duplicate")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        try await db.terminals.updateSession(
-            id: terminal.id, sessionID: "same-session", transcriptPath: transcript.path)
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "same-session",
-                transcriptPath: transcript.path, source: "SessionStart"))
-        #expect((await router.handle(sessionStart)).success)
-        try append(
-            Data((#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"later"}}"#
-                + "\n").utf8),
-            to: transcript)
-
-        #expect((await router.handle(sessionStart)).success)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let response = await router.handle(list)
-        #expect(response.success)
-        #expect(try response.decodeResult([Terminal].self).first?
-            .presentationActivityState == .working)
-    }
-
-    @Test("matching transcript completion clears presentation while missed Stop remains persisted working")
-    func terminalListObservesAppendedCompletionWithoutMutation() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-idle-repo-\(UUID().uuidString)",
-            displayName: "car-idle-repo",
-            defaultBranch: "main"
-        )
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-idle-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-idle"
-        )
-
-        let transcriptPath = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n")
-        defer { try? FileManager.default.removeItem(at: transcriptPath.deletingLastPathComponent()) }
-
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex
-        )
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "codex-session",
-            transcriptPath: transcriptPath.path,
-            observedAt: Date(timeIntervalSince1970: 1_779_999_999)))
-        try await db.terminals.setActivityState(
-            id: terminal.id, activityState: .working, source: .hookEvent("TurnStart"),
-            observedAt: Date(timeIntervalSince1970: 1_780_000_000))
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id)
-        )
-        let workingResponse = await router.handle(request)
-        #expect(workingResponse.success)
-        let working = try workingResponse.decodeResult([Terminal].self)
-        #expect(working.first?.presentationActivityState == .working)
-
-        let handle = try FileHandle(forWritingTo: transcriptPath)
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data(
-            (#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"# + "\n").utf8))
-        try handle.close()
-
-        let idleResponse = await router.handle(request)
-        #expect(idleResponse.success)
-        let idle = try idleResponse.decodeResult([Terminal].self)
-        #expect(idle.first?.presentationActivityState == .idle)
-        #expect(idle.first?.activityState == .working)
-
-        let persisted = try await db.terminals.get(id: terminal.id)
-        #expect(persisted?.presentationActivityState == nil)
-        #expect(persisted?.activityState == .working)
-    }
-
-    @Test("terminal.list leaves presentation unknown for unreadable Codex transcript and Claude")
-    func terminalListUsesPresentationOnlyForReadableCodexTranscript() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-scope-repo-\(UUID().uuidString)",
-            displayName: "car-scope-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-scope-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-scope")
-        let missingPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("missing-\(UUID().uuidString).jsonl").path
-
-        let codex = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        try await db.terminals.updateSession(
-            id: codex.id, sessionID: "codex-session", transcriptPath: missingPath)
-        try await db.terminals.setActivityState(
-            id: codex.id, activityState: .working, source: .hookEvent("TurnStart"))
-
-        let claudeTranscript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n")
-        defer { try? FileManager.default.removeItem(at: claudeTranscript.deletingLastPathComponent()) }
-        let claude = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
-            label: "Claude", kind: .claude)
-        try await db.terminals.updateSession(
-            id: claude.id, sessionID: "claude-session", transcriptPath: claudeTranscript.path)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalList, params: TerminalListParams(worktreeID: wt.id))
-        let response = await router.handle(request)
-        #expect(response.success)
-
-        let terminals = try response.decodeResult([Terminal].self)
-        #expect(terminals.first(where: { $0.id == codex.id })?.presentationActivityState == nil)
-        #expect(terminals.first(where: { $0.id == codex.id })?.presentationActivityObservedAt
-            == presentationObservedAt)
-        #expect(terminals.first(where: { $0.id == codex.id })?.activityState == .working)
-        #expect(terminals.first(where: { $0.id == claude.id })?.presentationActivityState == nil)
-        #expect(terminals.first(where: { $0.id == claude.id })?.presentationActivityObservedAt == nil)
-    }
-
-    @Test(
-        "terminal.list binds presentation to the post-observation transcript identity",
-        .serialized,
-        arguments: [true, false]
-    )
-    func terminalListRejectsPresentationFromRetargetedTranscript(
-        scoped: Bool
-    ) async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-rollover-repo-\(UUID().uuidString)",
-            displayName: "car-rollover-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-rollover-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-rollover")
-        let oldTranscript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}"#
-                + "\n")
-        let currentTranscript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"current"}}"#
-                + "\n")
-        defer {
-            try? FileManager.default.removeItem(
-                at: oldTranscript.deletingLastPathComponent())
-            try? FileManager.default.removeItem(
-                at: currentTranscript.deletingLastPathComponent())
-        }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "old-session",
-            transcriptPath: oldTranscript.path,
-            observedAt: Date(timeIntervalSince1970: 1_790_000_099)))
-
-        let firstAt = Date(timeIntervalSince1970: 1_790_000_100)
-        let currentAt = firstAt.addingTimeInterval(1)
-        let dates = BlockingListDates(first: firstAt, subsequent: currentAt)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true),
-            startTime: Date(),
-            now: dates.provider,
-            actuationLog: makeTestActuationLog())
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: scoped ? wt.id : nil))
-        let priorResponse = await self.router.handle(list)
-        #expect(priorResponse.success)
-        let priorTerminal = try #require(
-            priorResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(priorTerminal.presentationActivityState == .working)
-        #expect(priorTerminal.presentationActivityObservedAt == presentationObservedAt)
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "current-session",
-                transcriptPath: currentTranscript.path,
-                source: "SessionStart"))
-
-        let staleList = gateHoldingTask { await router.handle(list) }
-        guard await waitUntil(
-            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await staleList.value
-            Issue.record("first terminal.list never reached its transcript stamp")
-            return
-        }
-        let sessionUpdate = Task { await router.handle(sessionStart) }
-        guard await waitUntilAsync(
-            {
-                let current = try? await db.terminals.get(id: terminal.id)
-                return current?.claudeSessionID == "current-session"
-            },
-            timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await staleList.value
-            _ = await sessionUpdate.value
-            Issue.record("SessionStart never committed its atomic retarget")
-            return
-        }
-        let currentList = Task { await router.handle(list) }
-        dates.releaseFirstCall()
-
-        let staleResponse = await staleList.value
-        #expect((await sessionUpdate.value).success)
-        let currentResponse = await currentList.value
-        #expect(staleResponse.success)
-        #expect(currentResponse.success)
-        let staleTerminal = try #require(
-            staleResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        let currentTerminal = try #require(
-            currentResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-
-        #expect(staleTerminal.claudeSessionID == "current-session")
-        #expect(staleTerminal.transcriptPath == currentTranscript.path)
-        #expect(staleTerminal.presentationActivityState == nil)
-        #expect(staleTerminal.presentationActivityObservedAt == firstAt)
-        #expect(currentTerminal.transcriptPath == currentTranscript.path)
-        // SessionStart establishes a boundary at the transcript's current EOF,
-        // so pre-boundary lifecycle events are not evidence for the new session.
-        #expect(currentTerminal.presentationActivityState == nil)
-        #expect(currentTerminal.presentationActivityObservedAt == currentAt)
-        #expect(!(await router.codexActivityTracker.hasBaseline(
-            transcriptPath: oldTranscript.path)))
-        #expect(await router.codexActivityTracker.hasBaseline(
-            transcriptPath: currentTranscript.path))
-    }
-
-    @Test(
-        "terminal.list rejects a pre-boundary observation when the path is unchanged",
-        .serialized,
-        arguments: [true, false]
-    )
-    func terminalListRejectsPreBoundarySamePathObservation(
-        scoped: Bool
-    ) async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-generation-repo-\(UUID().uuidString)",
-            displayName: "car-generation-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-generation-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-generation")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"orphan"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        try await db.terminals.updateSession(
-            id: terminal.id, sessionID: "same-session", transcriptPath: transcript.path)
-
-        let listAt = Date(timeIntervalSince1970: 1_790_000_200)
-        let sessionAt = listAt.addingTimeInterval(1)
-        let dates = BlockingListDates(first: listAt, subsequent: sessionAt)
-        let raceRouter = makeRouter(now: dates.provider)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: scoped ? wt.id : nil))
-        let sessionStart = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "same-session",
-                transcriptPath: transcript.path, source: "SessionStart"))
-
-        let staleList = gateHoldingTask { await raceRouter.handle(list) }
-        guard await waitUntil(
-            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await staleList.value
-            Issue.record("terminal.list never reached its transcript stamp")
-            return
-        }
-        let sessionUpdate = Task { await raceRouter.handle(sessionStart) }
-        guard await waitUntilAsync(
-            {
-                let current = try? await db.terminals.get(id: terminal.id)
-                return current?.activityStateOrderObservedAt == sessionAt
-            },
-            timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await staleList.value
-            _ = await sessionUpdate.value
-            Issue.record("same-path SessionStart never advanced its activity generation")
-            return
-        }
-        dates.releaseFirstCall()
-
-        let staleResponse = await staleList.value
-        #expect((await sessionUpdate.value).success)
-        #expect(staleResponse.success)
-        let staleTerminal = try #require(
-            staleResponse.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(staleTerminal.claudeSessionID == "same-session")
-        #expect(staleTerminal.transcriptPath == transcript.path)
-        #expect(staleTerminal.presentationActivityState == nil)
-        #expect(staleTerminal.presentationActivityObservedAt == listAt)
-    }
-
-    @Test("terminal.list revalidates the durable transcript boundary")
-    func terminalListRejectsPresentationFromChangedBoundary() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-boundary-identity-repo-\(UUID().uuidString)",
-            displayName: "car-boundary-identity-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-boundary-identity-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-boundary-identity")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-        let generation = Date(timeIntervalSince1970: 1_790_400_600)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "current-session",
-            transcriptPath: transcript.path, observedAt: generation))
-        let dates = BlockingListDates(
-            first: presentationObservedAt,
-            subsequent: presentationObservedAt.addingTimeInterval(1))
-        let raceRouter = makeRouter(now: dates.provider)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-
-        let inFlightList = gateHoldingTask { await raceRouter.handle(list) }
-        guard await waitUntil(
-            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await inFlightList.value
-            Issue.record("terminal.list never reached its transcript stamp")
-            return
-        }
-        try await db.writerForTests.write { database in
-            try database.execute(
-                sql: "UPDATE terminal SET codexTranscriptBoundaryOffset = ? WHERE id = ?",
-                arguments: [Int64(1), terminal.id.uuidString])
-        }
-        dates.releaseFirstCall()
-
-        let response = await inFlightList.value
-        #expect(response.success)
-        let listed = try #require(
-            response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(listed.presentationActivityState == nil)
-        #expect(listed.presentationActivityObservedAt == presentationObservedAt)
-    }
-
     @Test("terminal.list retention respects worktree and fleet scopes")
     func terminalListRetainsTrackerBaselinesByRequestScope() async throws {
         let repo = try await db.repos.create(
@@ -1954,12 +1073,10 @@ struct CodexActivityReconciliationTests {
             path: "/tmp/car-retain-second-\(UUID().uuidString)", tmuxServer: "tbd-car-second")
         let firstPath = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"# + "\n")
+        defer { try? FileManager.default.removeItem(at: firstPath.deletingLastPathComponent()) }
         let secondPath = try makeTranscript(
             #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"b"}}"# + "\n")
-        defer {
-            try? FileManager.default.removeItem(at: firstPath.deletingLastPathComponent())
-            try? FileManager.default.removeItem(at: secondPath.deletingLastPathComponent())
-        }
+        defer { try? FileManager.default.removeItem(at: secondPath.deletingLastPathComponent()) }
         let first = try await db.terminals.create(
             worktreeID: firstWorktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .codex)
         let second = try await db.terminals.create(
@@ -1968,6 +1085,13 @@ struct CodexActivityReconciliationTests {
             id: first.id, sessionID: "first", transcriptPath: firstPath.path)
         try await db.terminals.updateSession(
             id: second.id, sessionID: "second", transcriptPath: secondPath.path)
+        // Continue in Claude's rollout reads are what take baselines; the list
+        // only prunes them.
+        _ = await router.codexActivityTracker.observe(
+            transcriptPath: firstPath.path, worktreeID: firstWorktree.id)
+        _ = await router.codexActivityTracker.observe(
+            transcriptPath: secondPath.path, worktreeID: secondWorktree.id)
+        #expect(await router.codexActivityTracker.baselineCount == 2)
 
         let fleetRequest = try RPCRequest(
             method: RPCMethod.terminalList, params: TerminalListParams())
@@ -1987,122 +1111,7 @@ struct CodexActivityReconciliationTests {
         #expect(await router.codexActivityTracker.baselineCount == 0)
     }
 
-    @Test("terminal.list shares its transcript byte budget fairly across Codex terminals")
-    func terminalListSharesTranscriptBudgetFairly() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-budget-repo-\(UUID().uuidString)",
-            displayName: "car-budget-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-budget-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-budget")
-        let paths = try ["first", "second"].map { turnID in
-            try makeTranscript(String(decoding: lifecycleEvent(
-                type: "task_complete", turnID: turnID), as: UTF8.self))
-        }
-        defer {
-            for path in paths {
-                try? FileManager.default.removeItem(at: path.deletingLastPathComponent())
-            }
-        }
-
-        for (index, path) in paths.enumerated() {
-            let terminal = try await db.terminals.create(
-                worktreeID: wt.id,
-                tmuxWindowID: "@\(index + 1)", tmuxPaneID: "%\(index + 1)",
-                label: "Codex \(index + 1)", kind: .codex)
-            try await db.terminals.updateSession(
-                id: terminal.id, sessionID: "codex-\(index + 1)", transcriptPath: path.path)
-        }
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        #expect(await router.handle(request).success)
-
-        let oversizedRecordByteCount = CodexTranscriptActivityTracker.maxBufferedRecordByteCount + 128
-        for (index, path) in paths.enumerated() {
-            try append(
-                lifecycleEvent(
-                    type: "agent_message", turnID: "padding-\(index)",
-                    exactByteCount: oversizedRecordByteCount)
-                    + lifecycleEvent(type: "task_started", turnID: "turn-\(index)"),
-                to: path)
-        }
-
-        let firstResponse = await router.handle(request)
-        #expect(firstResponse.success)
-        let firstTerminals = try firstResponse.decodeResult([Terminal].self)
-        #expect(firstTerminals.allSatisfy { $0.presentationActivityState == nil })
-
-        var bufferedByteCount = 0
-        var progressedPathCount = 0
-        for path in paths {
-            let buffered = await router.codexActivityTracker.bufferedRecordState(
-                transcriptPath: path.path)
-            bufferedByteCount += buffered?.byteCount ?? 0
-            if let buffered, buffered.byteCount > 0 {
-                progressedPathCount += 1
-            }
-        }
-        #expect(bufferedByteCount == Int(CodexTranscriptActivityTracker.requestReadByteLimit))
-        #expect(progressedPathCount == paths.count)
-
-        try append(
-            lifecycleEvent(
-                type: "agent_message", turnID: "first-keeps-growing",
-                exactByteCount: 64 * 1024),
-            to: paths[0])
-        let secondResponse = await router.handle(request)
-        #expect(secondResponse.success)
-        let secondTerminals = try secondResponse.decodeResult([Terminal].self)
-        #expect(secondTerminals.allSatisfy { $0.presentationActivityState == nil })
-
-        try append(
-            lifecycleEvent(
-                type: "agent_message", turnID: "first-still-growing",
-                exactByteCount: 64 * 1024),
-            to: paths[0])
-        let finalResponse = await router.handle(request)
-        #expect(finalResponse.success)
-        let finalTerminals = try finalResponse.decodeResult([Terminal].self)
-        #expect(finalTerminals.allSatisfy { $0.presentationActivityState == .working })
-    }
-
-    private func makeTranscript(_ contents: String) throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let path = directory.appendingPathComponent("session.jsonl")
-        try contents.write(to: path, atomically: true, encoding: .utf8)
-        return path
-    }
-
-    private func lifecycleEvent(
-        type: String,
-        turnID: String,
-        exactByteCount: Int? = nil
-    ) -> Data {
-        func encoded(padding: String?) -> Data {
-            let paddingField = padding.map { #", "padding":"\#($0)""# } ?? ""
-            return Data((
-                #"{"type":"event_msg","payload":{"type":"\#(type)","turn_id":"\#(turnID)"\#(paddingField)}}"#
-                    + "\n").utf8)
-        }
-
-        guard let exactByteCount else { return encoded(padding: nil) }
-        let emptyPadded = encoded(padding: "")
-        precondition(exactByteCount >= emptyPadded.count)
-        return encoded(padding: String(repeating: "x", count: exactByteCount - emptyPadded.count))
-    }
-
-    private func append(_ data: Data, to path: URL) throws {
-        let handle = try FileHandle(forWritingTo: path)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
-    }
-
-    // MARK: - The date seam on the two handlers that WRITE codex activity
+    // MARK: - The date seam on the handler that WRITES codex activity
 
     /// Pinned through the router's date seam, so each stored stamp is an exact
     /// assertion rather than a freshness window.
@@ -2113,10 +1122,10 @@ struct CodexActivityReconciliationTests {
     /// `setActivityState` defaults `observedAt` to a bare `Date()` **at the
     /// store**, so a handler that omits the argument mints a timestamp nothing
     /// outside the store can name. That is not a cosmetic difference: the stamp
-    /// is *compared* — `SessionStateResolver` orders it against the
-    /// awaiting-input stamp at rung 4 to decide which observation is newer — so
-    /// per the root `CLAUDE.md` date-seam rule it is data, and it belongs on the
-    /// router's seam like every sibling call site in this file.
+    /// is *compared* — hibernation ages the at-rest clock by it, and an ordered
+    /// write refuses an observation older than it — so per the root
+    /// `CLAUDE.md` date-seam rule it is data, and it belongs on the router's
+    /// seam like every sibling call site in this file.
     private func pinnedRouter() -> RPCRouter {
         RPCRouter(
             db: db,
@@ -2127,31 +1136,6 @@ struct CodexActivityReconciliationTests {
             startTime: Date(),
             now: { Self.observedAt },
             actuationLog: makeTestActuationLog())
-    }
-
-    @Test("terminal.sessionEvent stamps the codex idle observation from the router's date seam")
-    func sessionEventStampsFromTheDateSeam() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-seam-repo-\(UUID().uuidString)",
-            displayName: "car-seam-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-seam-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-seam")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "codex-session",
-                transcriptPath: nil, source: "SessionStart"))
-        #expect(await pinnedRouter().handle(request).success)
-
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(after.activityState == .idle)
-        #expect(after.activityStateObservedAt == Self.observedAt)
-        #expect(after.observedActivity?.observedAt == Self.observedAt)
     }
 
     @Test("terminal.recreateWindow stamps the derived codex unknown from the router's date seam")
@@ -2192,24 +1176,6 @@ struct CodexActivityReconciliationTests {
     }
 }
 
-/// The deadline is the shared saturated-pass budget rather than a literal: both
-/// call sites wait for a gate reached through production code that hands its
-/// work to an unstructured task, which stays on the cooperative pool behind the
-/// whole fast pass (`gateHoldingTask` in
-/// `Tests/TestSupport/BoundedGateSupport.swift`).
-private func waitUntilAsync(
-    _ condition: @escaping @Sendable () async -> Bool,
-    timeout: Duration = TestDeadlines.saturatedPass
-) async -> Bool {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
-    repeat {
-        if await condition() { return true }
-        await Task.yield()
-    } while clock.now < deadline
-    return false
-}
-
 private actor ConcurrentAsyncGate {
     private let participantCount: Int
     private var continuations: [CheckedContinuation<Void, Never>] = []
@@ -2233,48 +1199,6 @@ private actor ConcurrentAsyncGate {
         for continuation in waiting {
             continuation.resume()
         }
-    }
-}
-
-/// Holds the first `now()` call until the test releases it, so "the earlier
-/// request is mid-flight" is a deterministic state rather than a timing window.
-///
-/// The held request MUST be started with `gateHoldingTask`: this blocks the
-/// thread it runs on, and a blocked cooperative-pool thread starves every
-/// other test in the process. See `Tests/TestSupport/BoundedGateSupport.swift`.
-private final class BlockingListDates: @unchecked Sendable {
-    private let lock = NSLock()
-    private let first: Date
-    private let subsequent: Date
-    private let release = DispatchSemaphore(value: 0)
-    private var callCount = 0
-    private var firstBlocked = false
-
-    init(first: Date, subsequent: Date) {
-        self.first = first
-        self.subsequent = subsequent
-    }
-
-    var firstCallIsBlocked: Bool {
-        lock.withLock { firstBlocked }
-    }
-
-    var provider: @Sendable () -> Date {
-        { [self] in
-            let call = lock.withLock { () -> Int in
-                let call = callCount
-                callCount += 1
-                if call == 0 { firstBlocked = true }
-                return call
-            }
-            guard call == 0 else { return subsequent }
-            release.waitForGate("codex activity reconciliation first date-provider call")
-            return first
-        }
-    }
-
-    func releaseFirstCall() {
-        release.signal()
     }
 }
 

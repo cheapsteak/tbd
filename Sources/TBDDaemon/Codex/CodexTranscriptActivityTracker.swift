@@ -174,11 +174,6 @@ actor CodexTranscriptActivityTracker {
         }
     }
 
-    struct StampedObservation: Sendable {
-        let states: [String: TerminalActivityState]
-        let observedAt: Date
-    }
-
     private struct Baseline {
         enum Policy {
             case knownBoundary(UInt64)
@@ -247,7 +242,7 @@ actor CodexTranscriptActivityTracker {
     // A 64 KiB read is the fairness and I/O quantum: each active transcript
     // gets one bounded step before another path can consume the shared budget.
     private static let readChunkSize = 64 * 1024
-    // terminal.list is a two-second polling hot path. One MiB bounds all
+    // Continue in Claude's preflight reads inside an RPC. One MiB bounds all
     // transcript work per request without imposing a historical horizon.
     static let transcriptReadByteLimit: UInt64 = 1024 * 1024
     static let incrementalReadByteLimit = transcriptReadByteLimit
@@ -347,7 +342,7 @@ actor CodexTranscriptActivityTracker {
                 case .behind:
                     if result.bytesRead == 0 {
                         // A future scanner change must not turn a no-progress
-                        // result into a tight loop on the terminal-list path.
+                        // result into a tight loop inside a request.
                         active[cursor] = false
                         activeCount -= 1
                     }
@@ -367,21 +362,6 @@ actor CodexTranscriptActivityTracker {
             && current.transcriptPath == target.transcriptPath
             && current.boundaryOffset == target.transcriptBoundaryOffset
             && !current.boundaryEstablished
-    }
-
-    /// Couples a batch result to the actor order in which its transcript
-    /// observation completed. Minting the timestamp before this actor accepts
-    /// another call prevents reversed RPC completions from assigning a newer
-    /// timestamp to an older transcript result.
-    func observeStamped(
-        transcripts: [Target],
-        totalByteLimit: UInt64 = requestReadByteLimit,
-        now: @Sendable () -> Date
-    ) -> StampedObservation {
-        return StampedObservation(
-            states: observe(transcripts: transcripts, totalByteLimit: totalByteLimit),
-            observedAt: now()
-        )
     }
 
     /// Attach the first accepted session without fencing lifecycle records the
@@ -480,7 +460,7 @@ actor CodexTranscriptActivityTracker {
                         return
                     }
                 }
-                // A terminal-list reconstruction is provisional. The
+                // A reconstruction from a read is provisional. The
                 // SessionStart writer's exact offset is authoritative even if
                 // the provisional nil-boundary fence reached current EOF.
                 baselines.removeValue(forKey: current.transcriptPath)

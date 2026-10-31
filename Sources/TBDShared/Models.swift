@@ -751,12 +751,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var pendingSessionIncarnationID: UUID?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
-    /// Activity reconstructed for display from the current agent transcript.
-    /// This is response-derived and is never persisted as hook activity.
-    public var presentationActivityState: TerminalActivityState?
-    /// When the daemon completed the transcript observation that produced
-    /// `presentationActivityState`. Response-derived and never persisted.
-    public var presentationActivityObservedAt: Date?
     /// When set, the terminal is HIBERNATED: its `claude` process was
     /// gracefully terminated to reclaim memory, but the tmux window (and its
     /// shell) is kept alive. `claudeSessionID` still points at the session to
@@ -791,9 +785,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// confirms the same semantic state, so it must not be used as an
     /// at-rest-since timestamp.
     public var activityStateOrderObservedAt: Date?
-    /// The structured reason this session is waiting, carried verbatim from
-    /// Claude Code's `Notification` hook. Superseded by the next activity
-    /// observation, so it describes the *current* wait or nothing at all.
+    /// The structured reason this session is waiting: the block the agent
+    /// reported over OSC 7501, written by `ProgramStatusStore` beside
+    /// `activityState` and carrying no message text. Rewritten with every
+    /// value the store writes, so it describes the *current* wait or nothing
+    /// at all.
     public var awaitingInputReason: AwaitingInputReason?
     /// When `awaitingInputReason` was observed.
     public var awaitingInputObservedAt: Date?
@@ -862,29 +858,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             value: activityState, source: activityStateSource, observedAt: activityStateObservedAt)
     }
 
-    /// The recorded wait reason as a fact — value, source, observed-at — or nil.
-    ///
-    /// The source is not a column of its own: a wait reason is only ever
-    /// recorded from a hook event, and the event's name is already carried on
-    /// the reason, so `.hookEvent(name)` IS the provenance rather than a second
-    /// copy of it. A reason with no event name — or with an empty one, which
-    /// names a source just as poorly — is therefore half a triple and reports
-    /// no fact, on the same rule `observedActivity` follows.
-    ///
-    /// This is a *recorded reason*, not a claim about what the session is doing
-    /// now — nothing here asserts `activityState`. Composing the two into a
-    /// session state is the resolver's job.
-    public var observedAwaitingInput: ObservedFact<AwaitingInputReason>? {
-        guard let awaitingInputReason,
-              let awaitingInputObservedAt,
-              let hookEventName = awaitingInputReason.hookEventName,
-              !hookEventName.isEmpty else { return nil }
-        return ObservedFact(
-            value: awaitingInputReason,
-            source: .hookEvent(hookEventName),
-            observedAt: awaitingInputObservedAt)
-    }
-
     /// Whether this row is parked because Claude's own process left, rather than
     /// because TBD parked it. Both columns are required: `hibernatedAt` is what
     /// makes it a park at all, and the reason is what says who ended it.
@@ -904,8 +877,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 pendingSessionIncarnationID: UUID? = nil,
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
-                presentationActivityState: TerminalActivityState? = nil,
-                presentationActivityObservedAt: Date? = nil,
                 hibernatedAt: Date? = nil,
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
@@ -938,8 +909,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.pendingSessionIncarnationID = pendingSessionIncarnationID
         self.kind = kind
         self.activityState = activityState
-        self.presentationActivityState = presentationActivityState
-        self.presentationActivityObservedAt = presentationActivityObservedAt
         self.hibernatedAt = hibernatedAt
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
@@ -961,7 +930,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath
         case sessionOrderObservedAt, codexTranscriptBoundaryOffset, sessionIncarnationID
         case pendingSessionIncarnationID, kind
-        case activityState, presentationActivityState, presentationActivityObservedAt
+        case activityState
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
@@ -995,10 +964,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             UUID.self, forKey: .pendingSessionIncarnationID)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
-        presentationActivityState = try c.decodeIfPresent(
-            TerminalActivityState.self, forKey: .presentationActivityState)
-        presentationActivityObservedAt = try c.decodeIfPresent(
-            Date.self, forKey: .presentationActivityObservedAt)
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
@@ -1122,21 +1087,25 @@ public extension Terminal {
     ///   - not pinned keep-warm,
     ///   - not actively running a turn (`.working`),
     ///   - not waiting on a permission prompt (`.waitingForUser` — a raised
-    ///     hand; hibernating would eat it).
-    /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
-    /// the running/permission rails (see `isManuallyHibernatable`).
+    ///     hand; hibernating would eat it),
+    ///   - not `.unknown` — the agent has not reported its state, so a turn
+    ///     may be running.
+    /// Manual "Hibernate now" bypasses the keep-warm, unknown-activity and
+    /// idle checks but keeps the running/permission rails (see
+    /// `isManuallyHibernatable`).
     ///
     /// Transport does not enter into it: a holder-backed row is as eligible as
     /// a tmux-backed one, because both have a park mechanic and a wake path —
     /// see `isManuallyHibernatable`, which this defers the rails to.
     func isAutoHibernationEligible() -> Bool {
-        isManuallyHibernatable() && !keepWarm
+        isManuallyHibernatable() && !keepWarm && activityState != .unknown
     }
 
     /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
-    /// auto except keep-warm and idle-time don't apply — the user asked
-    /// explicitly. Still refuses to hibernate an in-flight turn or a raised
-    /// permission hand.
+    /// auto except keep-warm, unknown activity and idle-time don't apply — the
+    /// user asked explicitly, and a session that cannot report its state would
+    /// otherwise never be parkable. Still refuses to hibernate an in-flight
+    /// turn or a raised permission hand.
     ///
     /// The rails are the same on every transport. Park and wake on the holder
     /// transport do not go through tmux at all — the park ends the child by

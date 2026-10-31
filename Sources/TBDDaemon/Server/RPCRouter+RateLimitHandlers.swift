@@ -17,6 +17,10 @@ extension RPCRouter {
     ///
     /// Latch: when the terminal already has a pending resume (a repeat
     /// StopFailure while parked), do nothing — no duplicate notification.
+    ///
+    /// Runs the turn-end transcript sync first, latch or not: the hook prints
+    /// nothing once this call is accepted, so the `tbd notify --type error`
+    /// call that would otherwise run it never happens.
     func handleRateLimitDetected(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RateLimitDetectedParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -24,6 +28,7 @@ extension RPCRouter {
             logger.debug("rateLimitDetected: unknown terminal \(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
+        await syncTranscriptIntoCurrentProjectDir(terminal)
 
         let config = try? await db.config.get()
         let enabled = config?.autoResumeOnLimitReset ?? false
@@ -133,6 +138,10 @@ extension RPCRouter {
     /// handled: the CLI keeps its legacy error print, behavior unchanged.
     /// Gate ON → schedule an auto-continue with backoff, or give up past the
     /// cap. `handled` tells the CLI whether the daemon owns user messaging.
+    ///
+    /// Every handled answer runs the turn-end transcript sync, since the hook
+    /// then prints nothing and makes no `tbd notify --type error` call to run
+    /// it. An unhandled one leaves it to that call.
     func handleTransientApiErrorDetected(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TransientApiErrorDetectedParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -143,6 +152,7 @@ extension RPCRouter {
         guard enabled, let scheduler = limitResumeScheduler else {
             return try RPCResponse(result: TransientApiErrorDetectedResult(handled: false))
         }
+        await syncTranscriptIntoCurrentProjectDir(terminal)
 
         let attempts = (try? await db.scheduledResumes.countRecentApiErrorAttempts(
             terminalID: terminal.id,

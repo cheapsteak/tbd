@@ -229,19 +229,16 @@ final class AppState {
         return index
     }
     var terminals: [UUID: [Terminal]] = [:] {
-        didSet { sidebarHibernationCache.removeAll() }
+        didSet {
+            sidebarHibernationCache.removeAll()
+            terminalsDidChangeForNoStatus()
+        }
     }
     /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
     /// ID to the limit hit information. Cleared when the terminal starts working,
     /// changes profile, is removed, or the user dismisses. Used to render the
     /// limit banner.
     var limitHits: [UUID: TerminalLimitHit] = [:]
-    /// Ordering watermark for transcript presentation snapshots whose value
-    /// did not change. Kept outside `Terminal` so a two-second poll confirming
-    /// the same state does not publish a different row solely because its
-    /// response stamp advanced; still rejects an older overlapping response
-    /// that carries a different value.
-    @ObservationIgnored var terminalPresentationOrderObservedAt: [UUID: Date] = [:]
     /// Session identity ordering is independent of the published Terminal row
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
@@ -1912,11 +1909,43 @@ final class AppState {
     /// snapshot cannot overwrite a newer one. Bookkeeping, not UI state, so it
     /// stays out of Observation — same reasoning as `pendingQuestionRevisions`.
     @ObservationIgnored var programStatusRevisions: [UUID: UInt64] = [:]
+    /// The latest OSC 7501 report forwarded per terminal, for a terminal the
+    /// app caches, so `resendLastProgramStatusReports()` can forward it again
+    /// when the daemon subscription reconnects. Memory only, never persisted.
+    /// Bookkeeping, not UI state.
+    @ObservationIgnored var lastForwardedProgramStatusReports: [UUID: TerminalProgramStatusReportParams] = [:]
     /// How `hydrateProgramStatus()` lists the daemon's snapshots — injectable
     /// for the same reason as `daemonCapabilitiesFetcher`, so tests can seed
     /// the mirror without a daemon.
     @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
         { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
+    /// How `startSubscription()` opens the daemon's delta stream: calls
+    /// `onConnected` once the daemon answers, which also means it has
+    /// registered the subscription, `onDelta` for each delta, and returns when
+    /// the stream ends (`DaemonClient.subscribe`). Injectable so tests can
+    /// drive failed and successful connects, and say when the daemon registers
+    /// the subscription, without a daemon. Main-actor isolated so a stub that
+    /// answers without suspending keeps the whole subscribe chain on the main
+    /// actor, where handing it back is all a test needs to drain it.
+    @ObservationIgnored lazy var deltaSubscriber: @MainActor (
+        _ onConnected: @escaping @Sendable () -> Void,
+        _ onDelta: @escaping DaemonClient.DeltaHandler
+    ) async -> Void = { [daemonClient] onConnected, onDelta in
+        await daemonClient.subscribe(onDelta: onDelta, onConnected: onConnected)
+    }
+    /// Agent terminals seen sitting at `.unknown`, by terminal id, for the
+    /// sidebar's no-status mark. App memory only, kept in line with
+    /// `terminals` by `reconcileNoStatusSightings()`; see `NoStatusMark`.
+    var noStatusSightings: [UUID: NoStatusSighting] = [:]
+    /// The grace timer of each sighting still waiting out
+    /// `NoStatusMark.grace`. Bookkeeping, not UI state.
+    @ObservationIgnored var noStatusGraceTasks: [UUID: Task<Void, Never>] = [:]
+    /// Clock for the no-status grace period.
+    @ObservationIgnored var noStatusClock: any Clock<Duration> = ContinuousClock()
+    /// How many `coalescingNoStatusReconcile` calls are running, and whether
+    /// `terminals` changed during them — see that method.
+    @ObservationIgnored var noStatusReconcileDepth = 0
+    @ObservationIgnored var noStatusReconcilePending = false
     /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
     /// prompts) by terminal, mirrored from the daemon's store over
     /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
@@ -2436,18 +2465,6 @@ final class AppState {
     /// `panelGetFetcher`, so tests can count syncs without a real daemon.
     @ObservationIgnored lazy var panelSyncTrigger: @MainActor (PanelSyncTabsParams) async throws -> PanelSyncTabsResult =
         { [daemonClient] params in try await daemonClient.panelSyncTabs(params) }
-    /// How `startSubscription()` opens the daemon's state stream
-    /// (`state.subscribe`) — injectable for the same reason as
-    /// `panelGetFetcher`, so tests can say when the daemon registers the
-    /// subscription without opening a socket. The first closure runs once,
-    /// when the daemon acknowledges the subscription; the second runs for
-    /// each delta. Returns when the stream ends.
-    @ObservationIgnored lazy var stateSubscriber: @MainActor (
-        _ onRegistered: @escaping @Sendable () -> Void,
-        _ onDelta: @escaping DaemonClient.DeltaHandler
-    ) async -> Void = { [daemonClient] onRegistered, onDelta in
-        await daemonClient.subscribe(onDelta: onDelta, onRegistered: onRegistered)
-    }
     /// How `refreshRepos()` fetches the repo list — injectable for the same
     /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
     /// prunes no remembered sidebar group.
@@ -3119,14 +3136,24 @@ final class AppState {
         resetPanelSurfacesForResubscribe()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
-            await self.stateSubscriber(
+            await self.deltaSubscriber(
                 { [weak self] in
+                    // The daemon has registered the subscription, so panel
+                    // surfaces are refetched now (see above).
+                    //
+                    // A report forwarded while the daemon was unreachable was
+                    // lost, while the agent reports again only on its next
+                    // change. Re-sent once the daemon answers: the poll loop
+                    // starts a subscription every cycle during an outage, and
+                    // an attempt that never connects sends nothing.
+                    //
+                    // Every answered subscription also re-reports the whole
+                    // composer-draft set. The daemon keeps the last set across
+                    // a dropped subscription and loses it to a restart, so
+                    // this report is what brings it back in line either way.
                     Task { @MainActor [weak self] in
                         self?.panelSubscriptionRegistered()
-                        // Every acknowledged subscription re-reports the whole
-                        // draft set. The daemon keeps the last set across a
-                        // dropped subscription and loses it to a restart, so
-                        // this report is what brings it back in line either way.
+                        self?.resendLastProgramStatusReports()
                         self?.pushComposerDrafts()
                     }
                 },
@@ -3154,7 +3181,15 @@ final class AppState {
         subscriptionTask = nil
     }
 
+    /// Apply one delta from the daemon. A delta can write `terminals` several
+    /// times — a wake's flips the parked flag, then the incarnation, then the
+    /// activity columns — so the no-status sightings are reconciled once, after
+    /// the whole delta has applied.
     func handleDelta(_ delta: StateDelta) {
+        coalescingNoStatusReconcile { applyDelta(delta) }
+    }
+
+    private func applyDelta(_ delta: StateDelta) {
         switch delta {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
@@ -3444,9 +3479,9 @@ final class AppState {
             return
         }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
-            // Preserve the pre-Codex-reconciliation contract for Claude and
-            // shell: the last arriving session delta wins, and nil path keeps
-            // the current path. Ordering/presentation watermarks are Codex-only.
+            // Claude and shell: the last arriving session delta wins, and nil
+            // path keeps the current path. The session-order watermark is
+            // Codex-only.
             let currentTerminal = terminals[delta.worktreeID]![idx]
             var terminal = currentTerminal
             terminal.claudeSessionID = delta.sessionID
@@ -3454,7 +3489,6 @@ final class AppState {
                 terminal.transcriptPath = transcriptPath
             }
             terminal.sessionOrderObservedAt = nil
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
             if terminal != currentTerminal {
                 terminals[delta.worktreeID]?[idx] = terminal
@@ -3484,19 +3518,6 @@ final class AppState {
         } else if identityChanged {
             terminal.sessionOrderObservedAt = nil
         }
-        // Presentation belongs to one session identity. An ordered delta is
-        // an accepted SessionStart boundary even when Codex reused the same
-        // session/path; an unordered legacy delta is a boundary only when the
-        // effective identity changed.
-        if identityChanged || delta.sessionOrderObservedAt != nil {
-            terminal.presentationActivityState = nil
-            terminal.presentationActivityObservedAt = nil
-            if let incomingOrder = delta.sessionOrderObservedAt {
-                terminalPresentationOrderObservedAt[delta.terminalID] = incomingOrder
-            } else {
-                terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
-            }
-        }
         if let incomingOrder = delta.sessionOrderObservedAt {
             terminalSessionOrderObservedAt[delta.terminalID] = incomingOrder
         } else if identityChanged {
@@ -3511,37 +3532,41 @@ final class AppState {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
-        // Clear any limit hit when the terminal transitions to working
-        // (design 2026-09-05 §7.1)
-        if delta.activityState == .working {
-            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
-        }
-        guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
-            // Claude and shell activity deltas remain raw last-arrival state;
-            // provenance ordering is part of the Codex presentation fix only.
-            terminals[delta.worktreeID]?[idx].activityState = delta.activityState
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
-            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
-            return
-        }
+        // Ordered by the stamp on every row, not applied on arrival: the
+        // program status store has two ingest paths — the daemon's own reader
+        // and the reports the app forwards — whose broadcasts can arrive out
+        // of commit order, so a delta older than the cached row's is dropped.
         var terminal = terminals[delta.worktreeID]![idx]
-        let presentationOrderObservedAt = terminal.applyActivityDelta(
-            delta,
-            presentationOrderObservedAt: terminalPresentationOrderObservedAt[delta.terminalID]
-                ?? terminal.presentationActivityObservedAt)
-        if let presentationOrderObservedAt {
-            terminalPresentationOrderObservedAt[delta.terminalID] = presentationOrderObservedAt
-        } else {
-            terminalPresentationOrderObservedAt.removeValue(forKey: delta.terminalID)
+        let applied = terminal.applyActivityDelta(delta)
+        // Clear any limit hit when the terminal works again (design 2026-09-05
+        // §7.1): on a `working` observed after the hit arrived, whether or not
+        // the ordering applied it — a post-limit `working` that arrives behind
+        // its own `idle` is dropped, and still says the session ran again. A
+        // `working` observed before the hit says nothing about now. A delta
+        // with no stamp, from an older daemon, clears it only when applied.
+        if delta.activityState == .working, let limitHit = limitHits[delta.terminalID] {
+            let observedAt = delta.activityStateOrderObservedAt ?? delta.activityStateObservedAt
+            let observedAfterHit = observedAt.map { $0 > limitHit.receivedAt }
+            if observedAfterHit ?? applied {
+                limitHits.removeValue(forKey: delta.terminalID)
+            }
         }
+        if !terminal.isCodexTerminal {
+            // The session-order rail is Codex-only.
+            terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
+        }
+        // A dropped delta left the row as it was. Writing it back would still
+        // notify every reader of `terminals` and rescan the no-status
+        // sightings, for each stale delta the two ingest paths deliver.
+        guard applied else { return }
         terminals[delta.worktreeID]?[idx] = terminal
     }
 
     /// Mirror the daemon's awaiting-input columns onto the cached terminal.
     ///
-    /// Deliberately writes ONLY those two fields: a recorded wait reason says
-    /// nothing about `activityState`, and the daemon does not assert one from
-    /// the `Notification` hook either. The sidebar reads this instead of the
+    /// Deliberately writes ONLY those two fields: the program status store
+    /// writes the reason and `activityState` together, but announces the state
+    /// with its own activity delta. The sidebar reads this instead of the
     /// `.attentionNeeded` notification because notifications are unread mail —
     /// they are marked read as soon as the worktree is selected, so the row
     /// the user is looking at is exactly the one that would lose the signal.
@@ -3555,8 +3580,8 @@ final class AppState {
         terminal.awaitingInputObservedAt = delta.observedAt
         // One write-back through the tracked dictionary, not two: each
         // assignment is a full copy-on-write plus a notification to every view
-        // that read `terminals`, and this delta arrives on every
-        // `Notification` hook of every class.
+        // that read `terminals`, and this delta arrives with every change of
+        // wait an agent reports.
         terminals[delta.worktreeID]?[idx] = terminal
     }
 
@@ -3632,7 +3657,8 @@ final class AppState {
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
-    /// `suspendedSnapshot`, and `hibernateReason` on the row in place so the
+    /// `suspendedSnapshot`, `hibernateReason` and, when the delta carries them,
+    /// `sessionIncarnationID` and the activity columns on the row in place so the
     /// whisper indicator and action menu re-render without a full terminal
     /// refetch. Snapshot and reason must land WITH the `hibernated` flip: the
     /// parked TerminalPanelView materializes the instant `isParked` flips
@@ -3674,6 +3700,18 @@ final class AppState {
         }
         terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
         terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
+        // The incarnation the park or wake minted, with the flip: the woken
+        // view's first Program Status reports are forwarded under the cached
+        // row's incarnation, and the daemon refuses one it no longer runs.
+        if let incarnationID = delta.sessionIncarnationID {
+            terminals[delta.worktreeID]?[idx].sessionIncarnationID = incarnationID
+        }
+        // The activity columns the park (`.idle`) or wake (`.unknown`) wrote,
+        // which no activity delta announces. Ordered like one, so a report the
+        // woken agent made after the read-back is not undone by it.
+        if let activity = delta.activity {
+            terminals[delta.worktreeID]?[idx].applyActivityDelta(activity)
+        }
         if delta.hibernated {
             // Parked: the delta carries the just-captured snapshot + reason
             // (nil from an older daemon — same blank-pane behavior as before).
@@ -4314,12 +4352,15 @@ final class AppState {
             let allTerminals = try await daemonClient.listTerminals()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
-            for wtID in visibleWorktreeIDs {
-                adoptTerminalSnapshot(
-                    terminalsByWorktree[wtID] ?? [],
-                    worktreeID: wtID,
-                    startedAtReplacementGeneration: terminalSnapshotGeneration
-                )
+            // One no-status reconcile for the whole poll, not one per worktree.
+            coalescingNoStatusReconcile {
+                for wtID in visibleWorktreeIDs {
+                    adoptTerminalSnapshot(
+                        terminalsByWorktree[wtID] ?? [],
+                        worktreeID: wtID,
+                        startedAtReplacementGeneration: terminalSnapshotGeneration
+                    )
+                }
             }
 
             // Fetch all notes, group client-side

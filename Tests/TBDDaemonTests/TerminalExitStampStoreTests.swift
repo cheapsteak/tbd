@@ -46,9 +46,9 @@ struct TerminalExitStampStoreTests {
     @Test func stampResetsAWorkingActivityStateToIdle() async throws {
         let db = try TBDDatabase(inMemory: true)
         let terminal = try await makeTerminal(db)
-        try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .working, source: .hookEvent("Stop"),
-            observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        _ = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .anyLiveIncarnation, activityState: .working,
+            awaitingInputReason: nil, observedAt: Date(timeIntervalSince1970: 1_700_000_000))
 
         let changed = try await db.terminals.stampSessionExited(
             id: terminal.id, reportedIncarnationID: nil, at: stamp)
@@ -63,9 +63,9 @@ struct TerminalExitStampStoreTests {
     @Test func stampLeavesAnAlreadyIdleActivityStateIdle() async throws {
         let db = try TBDDatabase(inMemory: true)
         let terminal = try await makeTerminal(db)
-        try await db.terminals.applyActivityObservation(
-            id: terminal.id, activityState: .idle, source: .hookEvent("Stop"),
-            observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        _ = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .anyLiveIncarnation, activityState: .idle,
+            awaitingInputReason: nil, observedAt: Date(timeIntervalSince1970: 1_700_000_000))
 
         let changed = try await db.terminals.stampSessionExited(
             id: terminal.id, reportedIncarnationID: nil, at: stamp)

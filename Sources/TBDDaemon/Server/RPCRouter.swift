@@ -202,7 +202,8 @@ public final class RPCRouter: Sendable {
     /// enumeration helpers are shared with `pr.refresh` — and are installed at
     /// the end of `init`.
     public let prPollScheduler: PRPollScheduler
-    /// In-memory hook and selection stamps the schedule reads activity from.
+    /// In-memory agent-event and selection stamps the schedule reads activity
+    /// from. The same ledger the program status store stamps.
     public let activityLedger: WorktreeActivityLedger
     /// Starts the one PR driver at daemon start (`Daemon.start()`, step 12f)
     /// and swaps it live when `config.setPRPollScheduleEnabled` changes the
@@ -253,12 +254,10 @@ public final class RPCRouter: Sendable {
     /// installs. Built over `remoteTranscriptSync`, so it is `nil` exactly
     /// when that is.
     let remoteTranscriptBackgroundSync: RemoteTranscriptBackgroundSync?
-    /// Daemon-lifetime incremental transcript baselines used only to enrich
-    /// terminal-list responses for Codex presentation state.
+    /// Daemon-lifetime incremental Codex rollout baselines. Continue in
+    /// Claude's preflight and its pending recovery read them to tell whether
+    /// the last Codex turn closed; `terminal.list` only prunes them.
     let codexActivityTracker = CodexTranscriptActivityTracker()
-    /// Which Claude terminals owe a delegation sample, and what their last
-    /// sample claimed. Marked at every idle report; read during `terminal.list`.
-    let claudeDelegationTracker = ClaudeDelegationTracker()
     /// Answers `terminal.completions`. Holds the per-session inventory cache for
     /// the daemon's lifetime, which is why it is a stored collaborator rather
     /// than something the handler builds per request.
@@ -410,15 +409,6 @@ public final class RPCRouter: Sendable {
     /// it is not a general-purpose "what time is it".
     let now: @Sendable () -> Date
 
-    /// How a session transcript is measured when a prompt is recorded against
-    /// it. A seam, not a clock: a file's modification time is data, so it
-    /// follows the same rule as `now` rather than the `Clock` rule.
-    let transcriptFingerprinter: TranscriptFingerprinter
-    /// How the records a transcript gained since a stored fingerprint are read
-    /// and attributed. Paired with the fingerprinter: the stat says the file
-    /// moved, this says whether the session itself did.
-    let transcriptDeltaInspector: TranscriptDeltaInspector
-
     /// How the daemon asks whether Claude owns a pane's foreground process
     /// group. The same seam the limit-resume actuator uses, held here so the
     /// send path can refuse a pane whose agent has left, and the tmux in-place
@@ -475,6 +465,7 @@ public final class RPCRouter: Sendable {
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
         pendingQuestions: PendingPromptStore = PendingPromptStore(),
         programStatus: ProgramStatusStore? = nil,
+        activityLedger: WorktreeActivityLedger? = nil,
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
@@ -485,9 +476,6 @@ public final class RPCRouter: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
-        transcriptDeltaInspector: @escaping TranscriptDeltaInspector
-            = TranscriptDeltaInspection.live,
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
@@ -504,8 +492,6 @@ public final class RPCRouter: Sendable {
         self.processSignaller = processSignaller
         self.clock = clock
         self.now = now
-        self.transcriptFingerprinter = transcriptFingerprinter
-        self.transcriptDeltaInspector = transcriptDeltaInspector
         self.paneProcessInspector = paneProcessInspector
         self.completionInventory = completionInventory
         self.actuationLog = actuationLog
@@ -523,7 +509,9 @@ public final class RPCRouter: Sendable {
         self.branchTrackingCache = branchCache
         let poller = PRPoller()
         self.prPoller = poller
-        let ledger = WorktreeActivityLedger()
+        // The daemon passes the ledger its program status store stamps; a
+        // router built without one (tests) gets its own.
+        let ledger = activityLedger ?? WorktreeActivityLedger()
         self.activityLedger = ledger
         // Placeholder handlers: the real ones need the fully formed router and
         // are installed at the end of `init`, beside `prPoller.installPass`.
@@ -576,7 +564,7 @@ public final class RPCRouter: Sendable {
         // run loop, in mock mode too; a router built without one (tests) gets
         // its own.
         let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
-            db: db, subscriptions: subscriptions, now: now)
+            db: db, subscriptions: subscriptions, ledger: ledger, now: now)
         self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
@@ -824,12 +812,10 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSessionEvent:
                 return try await handleTerminalSessionEvent(request.paramsData)
-            case RPCMethod.terminalActivityEvent:
-                return try await handleTerminalActivityEvent(request.paramsData)
             case RPCMethod.terminalSessionEnded:
                 return try await handleTerminalSessionEnded(request.paramsData)
-            case RPCMethod.terminalNotificationEvent:
-                return try await handleTerminalNotificationEvent(request.paramsData)
+            case RPCMethod.terminalSessionTitle:
+                return try await handleTerminalSessionTitle(request.paramsData)
             case RPCMethod.sessionStates:
                 return try await handleSessionStates(request.paramsData)
             case RPCMethod.notify:
@@ -1300,8 +1286,9 @@ public final class RPCRouter: Sendable {
     /// active row, whether it is active, whether it has a branch discovery can
     /// match on, and its live bindings with their stored states.
     ///
-    /// Activity comes from the hook-fed session rows and the ledger's
-    /// in-memory stamps only — never from terminal text. The ledger is pruned
+    /// Activity comes from the session rows' activity column, which the agents'
+    /// own OSC 7501 reports write, and the ledger's in-memory stamps only —
+    /// never from terminal text. The ledger is pruned
     /// to the live terminals and rows here, so stamps for sessions and rows
     /// that left the fleet do not accumulate.
     ///

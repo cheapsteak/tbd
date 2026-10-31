@@ -355,12 +355,12 @@ actor PendingPromptCoordinator {
     /// **Not `claudeSessionID`.** A fresh Claude spawn is created with a
     /// pre-chosen `--session-id`, so that field is populated before the process
     /// has even started — reading it as readiness would paste into a booting
-    /// TUI. `transcriptPath` and a non-`unknown` `activityState` are written by
-    /// hook traffic (`terminal.sessionEvent`, `terminal.activityEvent`), which
-    /// is the fact wanted, and both legs are machine interfaces rather than
-    /// screen text.
+    /// TUI. `transcriptPath` is written by the `SessionStart` hook
+    /// (`terminal.sessionEvent`) and a non-`unknown` `activityState` by the
+    /// agent's own OSC 7501 report, which is the fact wanted, and both legs
+    /// are machine interfaces rather than screen text.
     ///
-    /// They are not written *exclusively* by hooks — parking a session stamps
+    /// They are not written *exclusively* by the agent — parking a session stamps
     /// `activityState = .idle` (`TerminalStore.setHibernated`) and window
     /// recreation stamps `.unknown` (`clearRecreated`). Neither weakens the
     /// answer here: a parked session did once announce itself, and a recreated

@@ -23,18 +23,37 @@ struct AwaitingInputSendGateTests {
     }
 
     @Test func noStandingReasonAllows() {
-        #expect(AwaitingInputSendGate.decide(reason: nil, superseded: false) == .allow)
+        #expect(AwaitingInputSendGate.decide(reason: nil) == .allow)
     }
 
     @Test func aPromptOnScreenRefusesAndCarriesItsMessage() {
         let decision = AwaitingInputSendGate.decide(
-            reason: reason("permission_prompt", message: "Allow Bash(rm -rf)?"),
-            superseded: false)
+            reason: reason("permission_prompt", message: "Allow Bash(rm -rf)?"))
         guard case .refuse(let message) = decision else {
             Issue.record("expected a refusal, got \(decision)")
             return
         }
         #expect(message.contains("Allow Bash(rm -rf)?"))
+    }
+
+    /// A reason the program status store wrote carries the block kind and no
+    /// message, so the refusal must quote the text derived from the kind
+    /// rather than an empty string.
+    @Test func aStoreWrittenReasonRefusesWithTextFromItsKind() {
+        let cases: [(ProgramStatusBlockKind, String)] = [
+            (.permission, "Waiting for a permission decision"),
+            (.question, "Waiting for an answer to a question"),
+        ]
+        for (kind, text) in cases {
+            let stored = AwaitingInputReason(
+                message: "", programStatusBlock: ProgramStatusBlock(kind: kind, taskID: nil))
+            let decision = AwaitingInputSendGate.decide(reason: stored)
+            guard case .refuse(let message) = decision else {
+                Issue.record("expected a refusal for \(kind), got \(decision)")
+                continue
+            }
+            #expect(message.contains("— \"\(text)\""), "\(kind): \(message)")
+        }
     }
 
     @Test func everyPromptOnScreenTypeRefuses() {
@@ -43,7 +62,7 @@ struct AwaitingInputSendGateTests {
             "worker_permission_prompt", "elicitation_url_dialog",
         ] {
             guard case .refuse = AwaitingInputSendGate.decide(
-                reason: reason(type), superseded: false) else {
+                reason: reason(type)) else {
                 Issue.record("\(type) must refuse")
                 continue
             }
@@ -54,12 +73,12 @@ struct AwaitingInputSendGateTests {
     /// this build has never heard of is treated as a dialog.
     @Test func anUnrecognizedTypeIsTreatedAsADialog() {
         guard case .refuse = AwaitingInputSendGate.decide(
-            reason: reason("brand_new_dialog_kind"), superseded: false) else {
+            reason: reason("brand_new_dialog_kind")) else {
             Issue.record("an unknown notification type must be treated as a dialog")
             return
         }
         guard case .refuse = AwaitingInputSendGate.decide(
-            reason: reason(nil), superseded: false) else {
+            reason: reason(nil)) else {
             Issue.record("an absent notification type must be treated as a dialog")
             return
         }
@@ -69,24 +88,15 @@ struct AwaitingInputSendGateTests {
     /// state the composer exists to answer.
     @Test func theIdlePromptIsAllowed() {
         #expect(AwaitingInputSendGate.decide(
-            reason: reason("idle_prompt"), superseded: false) == .allow)
+            reason: reason("idle_prompt")) == .allow)
     }
 
     @Test func informationalReasonsAreAllowed() {
         for type in ["agent_completed", "auth_success", "push_notification"] {
             #expect(
-                AwaitingInputSendGate.decide(reason: reason(type), superseded: false) == .allow,
+                AwaitingInputSendGate.decide(reason: reason(type)) == .allow,
                 "\(type) must be allowed")
         }
-    }
-
-    /// The supersession check is what stops a stale hand from blocking sends
-    /// forever: the session's own transcript showed it moved on.
-    @Test func aSupersededPromptIsAllowedThrough() {
-        #expect(AwaitingInputSendGate.decide(
-            reason: reason("permission_prompt"), superseded: true) == .allow)
-        #expect(AwaitingInputSendGate.decide(
-            reason: reason("brand_new_dialog_kind"), superseded: true) == .allow)
     }
 }
 
@@ -98,12 +108,7 @@ struct AwaitingInputSendGateOptInTests {
 
     @Test func anOptedInSendIntoAPromptIsRefused() async throws {
         let harness = try await SendHarness.make()
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true,
@@ -119,12 +124,7 @@ struct AwaitingInputSendGateOptInTests {
     /// the send goes through, because that is how an agent answers a dialog.
     @Test func anOptedOutSendIntoTheSamePromptIsNotGated() async throws {
         let harness = try await SendHarness.make()
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true),
@@ -143,6 +143,48 @@ struct AwaitingInputSendGateOptInTests {
         #expect(response.success, "error was: \(response.error ?? "none")")
     }
 
+    /// A reported block stands until the agent reports it moved on. The
+    /// session's transcript growing — a nested agent writing, or the parent
+    /// itself — is no answer to the prompt, so the send stays refused.
+    @Test func aPromptRefusesASendEvenAfterTheTranscriptGrew() async throws {
+        let harness = try await SendHarness.make()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-gate-transcript-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transcript = directory.appendingPathComponent("session.jsonl")
+        try Data((#"{"type":"user","isSidechain":false}"# + "\n").utf8).write(to: transcript)
+        try await harness.db.terminals.updateSession(
+            id: harness.terminal.id,
+            sessionID: harness.terminal.claudeSessionID ?? "gate-session",
+            transcriptPath: transcript.path)
+        let reason = try #require(ProgramStatusColumnValue.waitingForUser(
+            ProgramStatusBlock(kind: .permission, taskID: nil)).awaitingInputReason)
+        _ = try #require(try await harness.db.terminals.applyProgramStatusActivity(
+            id: harness.terminal.id, scope: .anyLiveIncarnation,
+            activityState: .waitingForUser, awaitingInputReason: reason,
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000)))
+        let gated = TerminalSendParams(
+            terminalID: harness.terminal.id, text: "yes", submit: true,
+            gateOnAwaitingInput: true)
+
+        let first = try await harness.send(gated, actor: .app)
+        #expect(!first.success)
+
+        let handle = try FileHandle(forWritingTo: transcript)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(
+            (#"{"type":"assistant","isSidechain":false}"# + "\n").utf8))
+        try handle.close()
+
+        let second = try await harness.send(gated, actor: .app)
+        #expect(!second.success)
+        #expect(try #require(second.error).contains("a prompt on screen"))
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(try await harness.db.terminals.get(id: harness.terminal.id)?
+            .awaitingInputReason == reason)
+    }
+
     /// **The gate applies to BOTH transports.** It used to sit after the
     /// early return that dispatches a holder-backed row to its own delivery
     /// arm, so a holder row was never gated at all: a composer send answered a
@@ -152,12 +194,7 @@ struct AwaitingInputSendGateOptInTests {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true,
@@ -176,12 +213,7 @@ struct AwaitingInputSendGateOptInTests {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true),
@@ -189,6 +221,21 @@ struct AwaitingInputSendGateOptInTests {
 
         #expect(response.success, "error was: \(response.error ?? "none")")
         #expect(recorder.writes.count == 1)
+    }
+}
+
+private extension SendHarness {
+    /// A standing permission prompt with its text, so a refusal can be shown
+    /// to quote it.
+    func seedPrompt() async throws {
+        _ = try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .waitingForUser,
+            source: .programStatus,
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            awaitingInputReason: AwaitingInputReason(
+                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
+                notificationType: "permission_prompt"))
     }
 }
 

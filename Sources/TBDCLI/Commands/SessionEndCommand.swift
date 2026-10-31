@@ -5,9 +5,9 @@ import TBDShared
 
 private let sessionEndLogger = Logger(subsystem: "com.tbd.cli", category: "sessionEnd")
 
-/// Bridges Claude Code's `SessionEnd` hook into TBD so a session that exits
-/// while background agents are live cannot leave a standing delegation claim,
-/// and so the daemon knows the session's process is gone.
+/// Bridges Claude Code's `SessionEnd` hook into TBD so the daemon knows the
+/// session's process is gone: it resolves the session's open prompts and, when
+/// the process itself is leaving, stamps the terminal exited.
 ///
 /// Every failure is silent, like every other hook bridge: a hook must never
 /// wedge or redden the agent it observes.

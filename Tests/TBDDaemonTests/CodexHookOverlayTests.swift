@@ -1,5 +1,4 @@
 import Foundation
-import GRDB
 import Testing
 import TBDShared
 import TestSupport
@@ -7,29 +6,9 @@ import TestSupport
 
 @Suite struct CodexHookOverlayTests {
 
-    private func invokedIdleActivity(_ invocations: [String]) -> Bool {
-        invocations.contains { $0.hasPrefix("terminal-activity idle") }
-    }
-
-    /// Writes Codex's goals database in process, rather than through a
-    /// spawned `sqlite3`. The hook reads it with `sqlite3 -readonly`, so it has
-    /// to be an ordinary rollback-journal file by the time this returns: a
-    /// `DatabaseQueue` (a pool would switch it to WAL), whose connection is
-    /// closed before the hook starts.
-    private func writeGoalsDatabase(at path: String, sql: String) throws {
-        let queue = try DatabaseQueue(path: path)
-        try queue.write { db in try db.execute(sql: sql) }
-        try queue.close()
-    }
-
-    private func runStopHook(
-        goalStatus: String,
-        sessionID: String = "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
-        priorGoalStatus: String? = nil,
-        assistantMessage: String = "done",
-        goalTimestampsTie: Bool = false,
-        createdAtBreaksUpdateTie: Bool = false
-    ) async throws -> [String] {
+    /// Runs the Stop hook against a stub `tbd` that logs each invocation's
+    /// arguments, and the message `notify` received, one per line.
+    private func runStopHook(assistantMessage: String = "done") async throws -> [String] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-stop-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -40,10 +19,6 @@ import TestSupport
         try """
         #!/bin/sh
         printf '%s\\n' "$*" >> "$TBD_HOOK_TEST_LOG"
-        if [ "$1" = terminal-activity ]; then
-          ACTIVITY_PAYLOAD=$(cat)
-          printf 'activity-payload=%s\\n' "$ACTIVITY_PAYLOAD" >> "$TBD_HOOK_TEST_LOG"
-        fi
         if [ "$1" = notify ]; then
           printf 'notify-message=%s\\n' "$5" >> "$TBD_HOOK_TEST_LOG"
         fi
@@ -51,54 +26,6 @@ import TestSupport
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: tbdPath.path
-        )
-
-        // Codex 0.147 keys this table by thread_id. Only the history test
-        // relaxes that constraint to exercise a possible future schema shape.
-        let threadIDConstraint = priorGoalStatus == nil ? "PRIMARY KEY NOT NULL" : "NOT NULL"
-        let currentTimestamp = goalTimestampsTie ? 1 : 2
-        let currentCreatedAt = createdAtBreaksUpdateTie ? 2 : currentTimestamp
-        let currentUpdatedAt = createdAtBreaksUpdateTie ? 3 : currentTimestamp
-        let priorUpdatedAt = createdAtBreaksUpdateTie ? 3 : 1
-        let priorGoalInsert = priorGoalStatus.map { status in
-            """
-            INSERT INTO thread_goals (
-                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
-            ) VALUES (
-                '\(sessionID)', 'prior-goal-id', 'Prior objective', '\(status)',
-                1, \(priorUpdatedAt)
-            );
-            """
-        } ?? ""
-        let currentGoalInsert = """
-            INSERT INTO thread_goals (
-                thread_id, goal_id, objective, status, created_at_ms, updated_at_ms
-            ) VALUES (
-                '\(sessionID)', 'goal-id', 'Test objective', '\(goalStatus)',
-                \(currentCreatedAt), \(currentUpdatedAt)
-            );
-            """
-        let goalInserts = createdAtBreaksUpdateTie
-            ? "\(currentGoalInsert)\n\(priorGoalInsert)"
-            : "\(priorGoalInsert)\n\(currentGoalInsert)"
-        try writeGoalsDatabase(
-            at: directory.appendingPathComponent("goals_1.sqlite").path,
-            sql: """
-            CREATE TABLE thread_goals (
-                thread_id TEXT \(threadIDConstraint),
-                goal_id TEXT NOT NULL,
-                objective TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN (
-                    'active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'complete'
-                )),
-                token_budget INTEGER,
-                tokens_used INTEGER NOT NULL DEFAULT 0,
-                time_used_seconds INTEGER NOT NULL DEFAULT 0,
-                created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL
-            );
-            \(goalInserts)
-            """
         )
 
         let process = Process()
@@ -118,7 +45,7 @@ import TestSupport
         process.environment = environment
 
         let payload = """
-        {"session_id":"\(sessionID)","hook_event_name":"Stop","last_assistant_message":"\(assistantMessage)"}
+        {"session_id":"a1b2c3d4-e5f6-4789-abcd-0123456789ab","hook_event_name":"Stop","last_assistant_message":"\(assistantMessage)"}
         """
         // Feeds the payload, closes the hook's stdin, and waits without
         // parking a cooperative-pool thread.
@@ -127,6 +54,14 @@ import TestSupport
 
         let log = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
         return log.split(separator: "\n").map(String.init)
+    }
+
+    private func stopCommands(_ hooks: [String: Any]?) -> [String] {
+        let stop = hooks?["Stop"] as? [[String: Any]]
+        return (stop ?? []).flatMap { entry -> [String] in
+            let inner = entry["hooks"] as? [[String: Any]] ?? []
+            return inner.compactMap { $0["command"] as? String }
+        }
     }
 
     @Test func generateBodyHasExpectedShape() throws {
@@ -142,38 +77,29 @@ import TestSupport
         #expect(sessionCommand?.contains("TBD_CLI_PATH-tbd") == true)
         #expect(sessionCommand?.contains("session-event") == true)
 
-        let stop = hooks?["Stop"] as? [[String: Any]]
-        #expect(stop?.count == 1)
-        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
-        }
-        #expect(stopCommands.count == 1)
-        #expect(stopCommands.contains {
+        #expect((hooks?["Stop"] as? [[String: Any]])?.count == 1)
+        let stop = stopCommands(hooks)
+        #expect(stop.count == 1)
+        #expect(stop.contains {
             $0.contains("tbd hooks stop-rename-check")
                 && $0.contains("tbd notify --type response_complete")
-                && $0.contains("tbd terminal-activity idle")
                 && $0.contains("if [ -n \"$RENAME_RESULT\" ]")
         })
-
-        let promptSubmit = hooks?["UserPromptSubmit"] as? [[String: Any]]
-        let promptCommands: [String] = (promptSubmit ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
-        }
-        #expect(promptCommands.contains { $0.contains("tbd terminal-activity working") })
-        #expect(promptCommands.contains { $0.contains("--read-hook-payload") })
-
-        let permissionRequest = hooks?["PermissionRequest"] as? [[String: Any]]
-        let permissionCommands: [String] = (permissionRequest ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
-        }
-        #expect(permissionCommands.contains { $0.contains("tbd terminal-activity waiting_for_user") })
-        #expect(permissionCommands.contains { $0.contains("--read-hook-payload") })
     }
 
-    @Test func sessionStartForwardsTheExactPayloadToBothBridges() async throws {
+    /// Codex reports its own state over OSC 7501, so only the two entries that
+    /// report something else are registered, and nothing writes state.
+    @Test func onlySessionStartAndStop() throws {
+        let data = try CodexHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = try #require(parsed?["hooks"] as? [String: Any])
+        #expect(hooks.keys.sorted() == ["SessionStart", "Stop"])
+        let body = try #require(String(data: data, encoding: .utf8))
+        #expect(!body.contains("terminal-activity"))
+        #expect(!body.contains("sqlite3"))
+    }
+
+    @Test func sessionStartForwardsTheExactPayloadToSessionEventOnly() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-session-hook-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -184,9 +110,8 @@ import TestSupport
         #!/bin/sh
         if [ "$1" = session-event ]; then
           cat > "$TBD_SESSION_STDIN"
-        elif [ "$1" = terminal-activity ]; then
-          printf '%s\n' "$*" > "$TBD_ACTIVITY_ARGS"
-          cat > "$TBD_ACTIVITY_STDIN"
+        else
+          printf '%s\n' "$*" > "$TBD_OTHER_ARGS"
         fi
         """.write(to: tbdPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -197,8 +122,7 @@ import TestSupport
             [.posixPermissions: 0o755],
             ofItemAtPath: fallbackPath.path)
         let sessionInput = directory.appendingPathComponent("session-input")
-        let activityInput = directory.appendingPathComponent("activity-input")
-        let activityArgs = directory.appendingPathComponent("activity-args")
+        let otherArgs = directory.appendingPathComponent("other-args")
         let payload = #"{"session_id":"session-current","value":"$(touch should-not-run); ' \""}"#
 
         let process = Process()
@@ -209,16 +133,14 @@ import TestSupport
         environment["PATH"] = "\(directory.path):/usr/bin:/bin"
         environment["TBD_CLI_PATH"] = tbdPath.path
         environment["TBD_SESSION_STDIN"] = sessionInput.path
-        environment["TBD_ACTIVITY_STDIN"] = activityInput.path
-        environment["TBD_ACTIVITY_ARGS"] = activityArgs.path
+        environment["TBD_OTHER_ARGS"] = otherArgs.path
         process.environment = environment
         let output = try await collectOutput(of: process, stdin: Data(payload.utf8))
 
         #expect(output.status == 0)
         #expect(try String(contentsOf: sessionInput, encoding: .utf8) == payload)
-        #expect(try String(contentsOf: activityInput, encoding: .utf8) == payload)
-        #expect(try String(contentsOf: activityArgs, encoding: .utf8)
-            == "terminal-activity idle --read-hook-payload\n")
+        // No second bridge: the hook runs `session-event` and nothing else.
+        #expect(!FileManager.default.fileExists(atPath: otherArgs.path))
         #expect(!FileManager.default.fileExists(
             atPath: directory.appendingPathComponent("should-not-run").path))
     }
@@ -246,127 +168,36 @@ import TestSupport
         let output = try await collectOutput(of: process, stdin: Data())
 
         #expect(output.status == 0)
-        #expect(try String(contentsOf: marker, encoding: .utf8) == "terminal-activity")
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "session-event")
     }
 
-    @Test func stopHookGatesIdleBehindRenameCheck() throws {
+    @Test func stopHookGatesTheNotificationBehindRenameCheck() throws {
         let data = try CodexHookOverlay.generateBody()
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let hooks = parsed?["hooks"] as? [String: Any]
-        let stop = hooks?["Stop"] as? [[String: Any]]
-        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
-        }
-        #expect(stopCommands.count == 1)
-        let stopCommand = stopCommands.first
+        let stop = stopCommands(parsed?["hooks"] as? [String: Any])
+        #expect(stop.count == 1)
+        let stopCommand = stop.first
         #expect(stopCommand?.contains("RENAME_RESULT=") == true)
         #expect(stopCommand?.contains("printf '%s\\n' \"$RENAME_RESULT\"") == true)
         #expect(stopCommand?.contains("tbd notify --type response_complete") == true)
-        #expect(stopCommand?.contains("tbd terminal-activity idle") == true)
     }
 
-    @Test func stopHookKeepsWorkingWhileCodexGoalIsActive() async throws {
-        let invocations = try await runStopHook(goalStatus: "active")
+    /// The Stop hook runs the rename check and the response-complete
+    /// notification, and nothing else — no goal lookup, no state write.
+    @Test func stopHookRunsOnlyTheRenameCheckAndTheNotification() async throws {
+        let invocations = try await runStopHook()
 
-        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
-        #expect(!invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookReadsSessionIDFromPayloadJSON() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "active",
-            sessionID: "b2c3d4e5-f607-489a-bcde-1234567890ab"
-        )
-
-        #expect(!invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookForwardsPayloadToIdleActivityBridge() async throws {
-        let sessionID = "c3d4e5f6-0718-49ab-cdef-2345678901bc"
-        let invocations = try await runStopHook(goalStatus: "complete", sessionID: sessionID)
-
-        #expect(invocations.contains("terminal-activity idle --read-hook-payload"))
-        #expect(invocations.contains { line in
-            line.hasPrefix("activity-payload=") && line.contains(sessionID)
-        })
+        #expect(invocations == [
+            "hooks stop-rename-check",
+            "notify --type response_complete --message done",
+            "notify-message=done",
+        ])
     }
 
     @Test func stopHookReadsAssistantMessageFromPayloadJSON() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "complete",
-            assistantMessage: "goal work finished"
-        )
+        let invocations = try await runStopHook(assistantMessage: "goal work finished")
 
         #expect(invocations.contains("notify-message=goal work finished"))
-    }
-
-    @Test func stopHookUsesMostRecentlyUpdatedGoalStateIfSchemaAllowsHistory() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "active",
-            priorGoalStatus: "complete"
-        )
-
-        #expect(!invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookIgnoresStaleActiveGoalIfLatestStateIsComplete() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "complete",
-            priorGoalStatus: "active"
-        )
-
-        #expect(invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookUsesLatestActiveStateWhenGoalTimestampsTie() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "active",
-            priorGoalStatus: "complete",
-            goalTimestampsTie: true
-        )
-
-        #expect(!invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookUsesLatestCompleteStateWhenGoalTimestampsTie() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "complete",
-            priorGoalStatus: "active",
-            goalTimestampsTie: true
-        )
-
-        #expect(invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookUsesCreatedAtWhenUpdatedTimesTieBeforeInsertionOrder() async throws {
-        let invocations = try await runStopHook(
-            goalStatus: "active",
-            priorGoalStatus: "complete",
-            createdAtBreaksUpdateTie: true
-        )
-
-        #expect(!invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookPublishesIdleWhenCodexGoalIsComplete() async throws {
-        let invocations = try await runStopHook(goalStatus: "complete")
-
-        #expect(invocations.contains { $0.hasPrefix("notify --type response_complete") })
-        #expect(invokedIdleActivity(invocations))
-    }
-
-    @Test func stopHookPublishesIdleWhenCodexGoalIsBlocked() async throws {
-        let invocations = try await runStopHook(goalStatus: "blocked")
-
-        #expect(invokedIdleActivity(invocations))
-    }
-
-    @Test(arguments: ["paused", "usage_limited", "budget_limited"])
-    func stopHookPublishesIdleWhenCodexGoalCannotContinue(status: String) async throws {
-        let invocations = try await runStopHook(goalStatus: status)
-
-        #expect(invokedIdleActivity(invocations))
     }
 
     @Test func roundtripsAsValidJSON() throws {
@@ -386,10 +217,7 @@ import TestSupport
         let data = try Data(contentsOf: path)
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let hooks = parsed?["hooks"] as? [String: Any]
-        #expect(hooks?["SessionStart"] != nil)
-        #expect(hooks?["Stop"] != nil)
-        #expect(hooks?["UserPromptSubmit"] != nil)
-        #expect(hooks?["PermissionRequest"] != nil)
+        #expect(hooks?.keys.sorted() == ["SessionStart", "Stop"])
     }
 
     @Test func writePluginCreatesTBDSkillInCodexPlugin() throws {

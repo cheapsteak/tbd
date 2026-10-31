@@ -412,6 +412,10 @@ struct HolderHibernationLiveTests {
         // One sweep is all it takes and all that is wanted: the row is at rest
         // but nowhere near a one-minute window, so the gate answers
         // `.notIdleLongEnough`, which seeds `idleSince` and fires nothing.
+        // The row is reported idle first: a row whose activity is unknown
+        // never arms the marker at all.
+        try await fixture.db.terminals.setActivityState(
+            id: terminal.id, activityState: .idle, source: .derived)
         try await fixture.db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
         await fixture.coordinator.sweep()
         let armed = await fixture.coordinator.idleSince[terminal.id]

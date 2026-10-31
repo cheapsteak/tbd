@@ -6,10 +6,11 @@ import TBDShared
 /// Split out from `HibernationCoordinator` so every gating branch — the hard
 /// safety rails plus the idle-duration check — is unit-testable without an
 /// actor, a tmux server, or a database. The rails themselves (running turn,
-/// permission prompt, keep-warm, already-hibernated/suspended, resumable
-/// Claude) live on `Terminal.isAutoHibernationEligible()`; this adds the two
-/// inputs that pure method can't see: whether the feature is enabled and how
-/// long the terminal has been idle relative to the configured timeout.
+/// permission prompt, unknown activity, keep-warm, already-hibernated/
+/// suspended, resumable Claude) live on `Terminal.isAutoHibernationEligible()`;
+/// this adds the two inputs that pure method can't see: whether the feature
+/// is enabled and how long the terminal has been idle relative to the
+/// configured timeout.
 public enum HibernationGate {
     /// Why a terminal was or wasn't selected for auto-hibernation. `.eligible`
     /// is the only go; every other case names the rail that blocked it, so the
@@ -24,6 +25,7 @@ public enum HibernationGate {
         case keepWarm
         case running            // actively running a turn — never eat an in-flight generation
         case waitingForUser     // a raised permission hand — hibernating would eat it
+        case unknownActivity    // no agent report: TBD does not know whether a turn is running
         case notIdleLongEnough  // idle, but not past the timeout yet
     }
 
@@ -65,11 +67,16 @@ public enum HibernationGate {
     /// reports `.alreadyHibernated`, not `.running`). Kept identical to the cascade
     /// that used to be inlined in `decide` so existing behavior is preserved.
     ///
+    /// `.unknown` activity blocks, last: the agent has not reported its
+    /// state, so TBD cannot tell a finished turn from a running one, and a
+    /// park could end a turn in flight. Only a reported `.idle` parks.
+    ///
     /// Transport does not appear here. Park and wake exist on every transport,
     /// so a holder-backed row passes or fails these rails on exactly the facts
-    /// a tmux-backed one does. Mirrors `Terminal.isManuallyHibernatable`, which
-    /// this cascade deliberately re-implements rather than calls (it needs
-    /// per-rail reasons).
+    /// a tmux-backed one does. Mirrors `Terminal.isAutoHibernationEligible`,
+    /// which this cascade deliberately re-implements rather than calls (it
+    /// needs per-rail reasons). A manual park (`isManuallyHibernatable`) skips
+    /// the keep-warm and unknown-activity rails and keeps the rest.
     static func blockingRail(terminal: Terminal) -> Decision? {
         guard terminal.isClaudeResumable else { return .notClaudeResumable }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
@@ -80,7 +87,9 @@ public enum HibernationGate {
             return .running
         case .waitingForUser:
             return .waitingForUser
-        case .idle, .unknown:
+        case .unknown:
+            return .unknownActivity
+        case .idle:
             return nil
         }
     }
