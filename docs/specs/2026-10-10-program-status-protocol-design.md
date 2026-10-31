@@ -190,10 +190,12 @@ lost. The store keeps the last state it accepted, and the agent's next change
 corrects it. For a report the app forwarded while the daemon was unreachable
 — a `tbd update` handover, say — the app also keeps the latest report it
 forwarded per terminal it caches, in memory only, and forwards each one again
-when its daemon subscription reconnects; the store refuses a re-sent report
-older than the newest it accepted, so a duplicate changes nothing. Otherwise,
-and for a lost report followed by one the daemon did receive, the agent's
-next change is the only recovery — and Codex, which never probes and
+once per reconnect, when the daemon answers the new subscription. An attempt
+that never reaches the daemon sends nothing, so an outage does not queue a
+failing send per stored report on every retry. The store refuses a re-sent
+report older than the newest it accepted, so a duplicate changes nothing.
+Otherwise, and for a lost report followed by one the daemon did receive, the
+agent's next change is the only recovery — and Codex, which never probes and
 suppresses repeats, changes only when its state does, so the worst case is the
 whole span of the current state (for example a full `blocked` wait).
 

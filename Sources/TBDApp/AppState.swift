@@ -1853,6 +1853,16 @@ final class AppState {
     /// the mirror without a daemon.
     @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
         { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
+    /// How `startSubscription()` opens the daemon's delta stream: calls
+    /// `onConnected` once the daemon answers, `onDelta` for each delta, and
+    /// returns when the stream ends (`DaemonClient.subscribe`). Injectable so
+    /// tests can drive failed and successful connects without a daemon.
+    @ObservationIgnored lazy var deltaSubscriber: @Sendable (
+        _ onConnected: @escaping @Sendable () -> Void,
+        _ onDelta: @escaping DaemonClient.DeltaHandler
+    ) async -> Void = { [daemonClient] onConnected, onDelta in
+        await daemonClient.subscribe(onDelta: onDelta, onConnected: onConnected)
+    }
     /// Agent terminals seen sitting at `.unknown`, by terminal id, for the
     /// sidebar's no-status mark. App memory only, kept in line with
     /// `terminals` by `reconcileNoStatusSightings()`; see `NoStatusMark`.
@@ -3074,22 +3084,30 @@ final class AppState {
         programStatusSnapshots.removeAll()
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
-        // And a report forwarded while the daemon was unreachable was lost,
-        // while the agent reports again only on its next change.
-        resendLastProgramStatusReports()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
-            await self.daemonClient.subscribe(onSubscribed: { [weak self] in
-                // Every acknowledged subscription re-reports the whole draft
-                // set. The daemon keeps the last set across a dropped
-                // subscription and loses it to a restart, so this report is
-                // what brings it back in line either way.
-                Task { @MainActor [weak self] in self?.pushComposerDrafts() }
-            }) { [weak self] delta in
-                Task { @MainActor [weak self] in
-                    self?.handleDelta(delta)
-                }
-            }
+            await self.deltaSubscriber(
+                { [weak self] in
+                    // A report forwarded while the daemon was unreachable was
+                    // lost, while the agent reports again only on its next
+                    // change. Re-sent once the daemon answers: the poll loop
+                    // starts a subscription every cycle during an outage, and
+                    // an attempt that never connects sends nothing.
+                    //
+                    // Every answered subscription also re-reports the whole
+                    // composer-draft set. The daemon keeps the last set across
+                    // a dropped subscription and loses it to a restart, so
+                    // this report is what brings it back in line either way.
+                    Task { @MainActor [weak self] in
+                        self?.resendLastProgramStatusReports()
+                        self?.pushComposerDrafts()
+                    }
+                },
+                { [weak self] delta in
+                    Task { @MainActor [weak self] in
+                        self?.handleDelta(delta)
+                    }
+                })
             // Subscription disconnected — nil out so poll loop restarts it
             await MainActor.run { self.subscriptionTask = nil }
         }

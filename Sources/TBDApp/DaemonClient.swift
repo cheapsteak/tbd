@@ -1886,11 +1886,13 @@ actor DaemonClient {
 
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
-    /// `onSubscribed` runs when the daemon acknowledges the subscription, which
-    /// it does only after registering it.
+    ///
+    /// `onConnected` runs once, on the daemon's first line — its
+    /// acknowledgment, or a delta broadcast ahead of it — so an attempt that
+    /// never reaches a live daemon never calls it.
     nonisolated func subscribe(
-        onSubscribed: (@Sendable () -> Void)? = nil,
-        onDelta: @escaping DeltaHandler
+        onDelta: @escaping DeltaHandler,
+        onConnected: @escaping @Sendable () -> Void = {}
     ) async {
         guard let fd = try? makeConnectedSocket() else { return }
 
@@ -1922,6 +1924,7 @@ actor DaemonClient {
         var accumulated = Data()
         let decoder = JSONDecoder()
         let probe = RPCVolumeProbe.shared
+        var announcedConnect = false
 
         while !Task.isCancelled {
             let bytesRead = recv(fd, buffer, bufferSize, 0)
@@ -1942,6 +1945,10 @@ actor DaemonClient {
             while let newlineIndex = accumulated.firstIndex(of: 0x0A) {
                 let lineData = accumulated[accumulated.startIndex..<newlineIndex]
                 accumulated = accumulated[accumulated.index(after: newlineIndex)...]
+                if !announcedConnect {
+                    announcedConnect = true
+                    onConnected()
+                }
 
                 // Measured from here so the recorded cost is the WHOLE frame's
                 // decode, including the ack probe below that fails on every
@@ -1955,7 +1962,6 @@ actor DaemonClient {
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
-                    onSubscribed?()
                     continue
                 }
 

@@ -6,6 +6,8 @@ import Darwin
 import Glibc
 #endif
 @testable import TBDApp
+import TBDShared
+import TestSupport
 
 // BUG 1: the persistent subscribe() loop must unwind promptly when its Task is
 // cancelled, even if the daemon has gone silent without closing the socket
@@ -92,5 +94,80 @@ struct DaemonClientRecvTimeoutTests {
         }
 
         #expect(finishedInTime, "subscribe() did not unwind within 3s after cancel — recv wedge not fixed")
+    }
+
+    /// Counts calls from whichever thread makes them.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+
+        func increment() {
+            lock.lock()
+            calls += 1
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return calls
+        }
+    }
+
+    /// `onConnected` runs once per subscription, on the daemon's first line,
+    /// however many lines follow: the app re-sends its stored program-status
+    /// reports from it, so a second call would re-send them twice.
+    @Test("subscribe() calls onConnected once, on the daemon's first line")
+    func subscribeAnnouncesTheConnectOnce() async throws {
+        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
+        let listenFd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(listenFd >= 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        socketPath.withCString { ptr in
+            withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
+                let raw = UnsafeMutableRawPointer(pathPtr)
+                raw.copyMemory(from: ptr, byteCount: strlen(ptr) + 1)
+            }
+        }
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                bind(listenFd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        #expect(bindResult == 0)
+        #expect(listen(listenFd, 1) == 0)
+        defer {
+            close(listenFd)
+            unlink(socketPath)
+        }
+
+        // The daemon's acknowledgment, twice, then the stream ends.
+        var ackLine = try JSONEncoder().encode(RPCResponse.ok())
+        ackLine.append(0x0A)
+        let lines = ackLine + ackLine
+        DispatchQueue.global().async {
+            let clientFd = accept(listenFd, nil, nil)
+            guard clientFd >= 0 else { return }
+            var buf = [UInt8](repeating: 0, count: 4096)
+            _ = recv(clientFd, &buf, buf.count, 0) // read the subscribe bytes
+            lines.withUnsafeBytes { bytes in
+                _ = send(clientFd, bytes.baseAddress!, bytes.count, 0)
+            }
+            close(clientFd)
+        }
+
+        let connects = CallCounter()
+        let finished = CallCounter()
+        let client = DaemonClient(socketPath: socketPath)
+        let task = Task {
+            await client.subscribe(onDelta: { _ in }, onConnected: { connects.increment() })
+            finished.increment()
+        }
+        let ended = await pollUntilTrue(timeout: .seconds(5)) { finished.count == 1 }
+        task.cancel()
+
+        #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
+        #expect(connects.count == 1)
     }
 }

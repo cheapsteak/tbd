@@ -55,8 +55,9 @@ extension AppState {
     }
 
     /// Forward again, in observation order, the latest report forwarded for
-    /// each terminal the app still caches. Called when the daemon subscription
-    /// (re)connects: a report forwarded while the daemon was unreachable — a
+    /// each terminal the app still caches. Called once per (re)connect, when
+    /// the daemon answers a new subscription — never for an attempt that does
+    /// not reach it: a report forwarded while the daemon was unreachable — a
     /// `tbd update` handover, say — was lost, and an agent reports only on
     /// change, so the column could keep a stale state (a `.waitingForUser`
     /// the send gate refuses on) until the agent's next change. The store
