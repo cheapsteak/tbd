@@ -17,8 +17,45 @@ extension AppState {
     func composerDraft(for key: ComposerKey) -> ComposerDraft {
         if let existing = composerDrafts[key] { return existing }
         let draft = ComposerDraft()
+        if case .terminal = key {
+            draft.onContentChange = { [weak self] _ in self?.pushComposerDrafts() }
+        }
         composerDrafts[key] = draft
         return draft
+    }
+
+    /// Local terminals whose composer holds something a close would discard.
+    var terminalIDsWithComposerDrafts: Set<UUID> {
+        Set(composerDrafts.compactMap { key, draft in
+            guard case .terminal(let id) = key, draft.hasContent else { return nil }
+            return id
+        })
+    }
+
+    /// Tell the daemon which terminals hold a composer draft, so a CLI
+    /// `terminal close` refuses to discard one and `terminal list` shows it.
+    /// Called when a draft gains or loses content, when one is forgotten, and
+    /// each time the daemon acknowledges the state subscription. The daemon
+    /// keeps the last set it was given even after a subscription drops, so the
+    /// report on a resubscribe is what replaces a set gone stale while the
+    /// connection was down. An empty set is sent like any other: it is how a
+    /// stale entry gets cleared.
+    ///
+    /// Pushes are chained, and each reads the set when its turn comes rather
+    /// than when it was queued: the RPCs travel on separate connections, so
+    /// unchained pushes could land out of order and leave the daemon holding
+    /// an older set than the app.
+    func pushComposerDrafts() {
+        let previous = composerDraftsPush
+        composerDraftsPush = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self else { return }
+            do {
+                try await self.composerDraftsSetter(Array(self.terminalIDsWithComposerDrafts))
+            } catch {
+                logger.debug("composer drafts report failed: \(error, privacy: .public)")
+            }
+        }
     }
 
     /// A local terminal's draft — `composerDraft(for: .terminal(id))`.
@@ -28,7 +65,9 @@ extension AppState {
 
     /// Forget a target's draft — on a successful send, and when its tab closes.
     func discardComposerDraft(for key: ComposerKey) {
+        let hadContent = composerDrafts[key]?.hasContent ?? false
         composerDrafts[key] = nil
+        if hadContent { pushComposerDrafts() }
     }
 
     /// A local terminal's `discardComposerDraft(for: .terminal(id))`.

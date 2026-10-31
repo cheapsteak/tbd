@@ -2471,6 +2471,14 @@ actor DaemonClient {
         )
     }
 
+    /// Report every terminal whose composer draft is unsent (the whole set).
+    func setComposerDrafts(terminalIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.appSetComposerDrafts,
+            params: AppSetComposerDraftsParams(terminalIDs: terminalIDs)
+        )
+    }
+
     /// Read-only scan of the user's settings.json files for legacy TBD hook
     /// entries (the ones now superseded by the spawn-time --settings overlay).
     func legacyHooksStatus() async throws -> LegacyHooksStatusResult {

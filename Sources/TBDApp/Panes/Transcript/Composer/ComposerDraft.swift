@@ -23,8 +23,32 @@ final class ComposerDraft {
         let path: String
     }
 
-    var text: String = ""
-    private(set) var attachments: [Int: Attachment] = [:]
+    var text: String = "" {
+        didSet { noteContentChange() }
+    }
+    private(set) var attachments: [Int: Attachment] = [:] {
+        didSet { noteContentChange() }
+    }
+
+    /// Whether the draft holds anything a terminal close would throw away:
+    /// text beyond whitespace, or a staged image.
+    var hasContent: Bool {
+        !attachments.isEmpty || !text.allSatisfy(\.isWhitespace)
+    }
+
+    /// Called on the main actor when `hasContent` flips, so the app can tell
+    /// the daemon which terminals hold a draft (`app.setComposerDrafts`). The
+    /// draft lives only here, and nothing outside the app could see it
+    /// otherwise.
+    @ObservationIgnored var onContentChange: (@MainActor (_ hasContent: Bool) -> Void)?
+    @ObservationIgnored private var reportedHasContent = false
+
+    private func noteContentChange() {
+        let hasContent = hasContent
+        guard hasContent != reportedHasContent else { return }
+        reportedHasContent = hasContent
+        onContentChange?(hasContent)
+    }
 
     /// Monotonic within one message. A freed number is never reused, because
     /// reusing it would silently re-point a token the person had already typed

@@ -13,6 +13,9 @@ public final class RPCRouter: Sendable {
     public let git: GitManager
     public let startTime: Date
     public let subscriptions: StateSubscriptionManager
+    /// Terminals whose composer draft in the app is unsent, as the app last
+    /// reported them. See `ComposerDraftRegistry`.
+    public let composerDrafts = ComposerDraftRegistry()
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
     /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
@@ -972,6 +975,10 @@ public final class RPCRouter: Sendable {
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
                 await appForegroundState?.set(isForeground: params.isForeground)
+                return .ok()
+            case RPCMethod.appSetComposerDrafts:
+                let params = try decoder.decode(AppSetComposerDraftsParams.self, from: request.paramsData)
+                composerDrafts.replace(with: Set(params.terminalIDs))
                 return .ok()
             case RPCMethod.appearanceUpdateColorFgBg:
                 return try await handleAppearanceUpdateColorFgBg(request.paramsData)

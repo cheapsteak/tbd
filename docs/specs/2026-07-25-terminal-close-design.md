@@ -228,6 +228,7 @@ target set — which is exactly when an autonomous caller would reach for it.
 | Working (`.working`), window alive | **refused**, exit 2 | closed |
 | Waiting on permission (`.waitingForUser`), window alive | **refused**, exit 2 | closed |
 | `.working`/`.waitingForUser` but **window dead** | closed (rail is liveness-qualified — see §6 D1) | closed |
+| Unsent draft in the app's own composer (`hasComposerDraft` in `terminal list --json`) | **refused**, exit 2 — not liveness-qualified, since the draft lives in the app rather than the pane | closed; the draft is discarded |
 | Plain shell (`activityState` is agent-fed; shells stay `.unknown`) | closed | closed |
 | Hibernated-parked, window alive | closed; resumes cancelled; scrollback captured | same |
 | Recovery-parked, window already dead | closed; **capture stores nothing** (dead pane); session becomes unreachable from TBD, transcript survives on disk | same |
@@ -254,6 +255,7 @@ All to stderr.
 | --- | --- | --- |
 | Self-close | `Refusing to close the calling terminal (<uuid>). A terminal cannot close itself — spawn a successor and have it close this one.` | 2 |
 | Busy, no `--force` | `Terminal <uuid> is <mid-turn\|waiting on a permission prompt> (activityState=<working\|waiting_for_user>). Closing now would kill in-flight work. Pass --force to close anyway.` | 2 |
+| Composer draft, no `--force` | `Terminal <uuid> has an unsent draft in TBD's composer, and closing it would discard the draft. Send or clear it in the app, or pass --force to close anyway.` | 2 |
 | Missing `--terminal` | ArgumentParser's standard missing-required-option error | 64 |
 | Invalid UUID | `Invalid terminal ID: <s>` (matches `TerminalCommands.swift:136`) | 1 |
 

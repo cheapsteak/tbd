@@ -90,4 +90,88 @@ struct ComposerDraftTests {
         state.discardComposerDraft(for: id)
         #expect(state.composerDraft(for: id).text.isEmpty)
     }
+
+    // MARK: - Reporting drafts to the daemon
+
+    @Test func whitespaceIsNoContentButAnImageIs() {
+        let draft = ComposerDraft()
+        #expect(!draft.hasContent)
+        draft.text = "  \n"
+        #expect(!draft.hasContent, "whitespace is nothing a close would lose")
+        _ = draft.stage(path: "/tmp/a.png", id: UUID())
+        #expect(draft.hasContent, "a staged image alone is a draft")
+    }
+
+    @Test func contentChangeFiresOnlyWhenItFlips() {
+        let draft = ComposerDraft()
+        let flips = Recorder<Bool>()
+        draft.onContentChange = { flips.values.append($0) }
+
+        draft.text = "h"
+        draft.text = "hi"
+        draft.text = ""
+        draft.text = "again"
+        draft.clear()
+
+        #expect(flips.values == [true, false, true, false])
+    }
+
+    /// The daemon learns every terminal whose draft has content, as a whole
+    /// set, on each gain, loss and discard — what `terminal close` checks.
+    @Test func terminalDraftsAreReportedAsAWholeSet() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let reports = Recorder<Set<UUID>>()
+        state.composerDraftsSetter = { reports.values.append(Set($0)) }
+        let a = UUID(), b = UUID()
+
+        state.composerDraft(for: a).text = "for a"
+        await state.composerDraftsPush?.value
+        state.composerDraft(for: b).text = "for b"
+        await state.composerDraftsPush?.value
+        state.composerDraft(for: a).text = ""
+        await state.composerDraftsPush?.value
+        state.discardComposerDraft(for: b)
+        await state.composerDraftsPush?.value
+
+        #expect(reports.values == [[a], [a, b], [b], []])
+    }
+
+    /// Reports are chained and each reads the set when it runs, so changes
+    /// that queue up behind one another still leave the daemon on the latest.
+    @Test func queuedReportsEndOnTheLatestSet() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let reports = Recorder<Set<UUID>>()
+        state.composerDraftsSetter = { reports.values.append(Set($0)) }
+        let id = UUID()
+
+        state.composerDraft(for: id).text = "typed"
+        state.composerDraft(for: id).text = ""
+        await state.composerDraftsPush?.value
+
+        #expect(reports.values.last == [])
+    }
+
+    /// Typing that never changes whether there is a draft sends nothing.
+    @Test func editingADraftThatStaysNonEmptyReportsOnce() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let reports = Recorder<Set<UUID>>()
+        state.composerDraftsSetter = { reports.values.append(Set($0)) }
+        let id = UUID()
+
+        for text in ["r", "re", "ref", "refactor"] {
+            state.composerDraft(for: id).text = text
+        }
+        await state.composerDraftsPush?.value
+
+        #expect(reports.values == [[id]])
+    }
+}
+
+/// A reference box for values a `@MainActor` closure appends to.
+@MainActor
+private final class Recorder<Value> {
+    var values: [Value] = []
 }
