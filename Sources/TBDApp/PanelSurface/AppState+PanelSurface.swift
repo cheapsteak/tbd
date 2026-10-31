@@ -341,21 +341,37 @@ extension AppState {
     // MARK: - Tab sync
 
     /// The observer on `tabs`. Marks a worktree dirty when its tab IDs, order,
-    /// labels or primaries changed — every field of `TBDShared.Tab`, so a plain
-    /// comparison of the two lists — and schedules one flush for the next
-    /// main-actor turn when a dirty worktree is ready to sync.
+    /// labels or primaries differ from `panelTabSignatures` — every field of
+    /// `TBDShared.Tab`, so a plain comparison of the two lists — records the
+    /// new list there, and schedules one flush for the next main-actor turn
+    /// when a dirty worktree is ready to sync. A worktree whose list went away
+    /// is dropped from the signatures, so a list that comes back is new.
     ///
     /// Hung off the property rather than its call sites because tabs are
     /// created, closed, reordered, relabelled and re-pointed from many places
     /// (terminal and note reconciliation, notes, the PR tab, the file viewer,
-    /// terminal revival). Free while the flag is off.
-    func notePanelTabsChanged(old: [UUID: [TBDShared.Tab]], new: [UUID: [TBDShared.Tab]]) {
+    /// terminal revival). Does nothing, not even a comparison, while the flag
+    /// is off.
+    func notePanelTabsChanged() {
         guard panelTabsActive else { return }
         var dirty = Set<UUID>()
-        for (worktreeID, tabList) in new where old[worktreeID] != tabList {
+        for (worktreeID, tabList) in tabs where panelTabSignatures[worktreeID] != tabList {
             dirty.insert(worktreeID)
+            panelTabSignatures[worktreeID] = tabList
+        }
+        // Every key of `tabs` is now a key here, so a larger count means a
+        // worktree whose list went away.
+        if panelTabSignatures.count > tabs.count {
+            panelTabSignatures = panelTabSignatures.filter { tabs[$0.key] != nil }
         }
         markPanelSyncDirty(dirty)
+    }
+
+    /// Takes `panelTabSignatures` from `tabs` as they are, sharing each
+    /// worktree's array rather than the dictionary, so the next in-place edit
+    /// of `tabs` does not copy it whole.
+    private func snapshotPanelTabSignatures() {
+        panelTabSignatures = tabs.mapValues { $0 }
     }
 
     /// Drops an archived worktree from the copy. Archiving deletes its
@@ -381,20 +397,35 @@ extension AppState {
     /// renders legacy, and closing that extra terminal edits `layouts`, not
     /// `tabs`, so without this nothing would offer it to the daemon again.
     ///
-    /// Marks dirty the worktree of each changed tab the last sync skipped
-    /// (`panelSyncSkippedTabIDs`), and no other. A tab with a surface is the
-    /// daemon's, and its legacy layout is no longer read; a tab the copy has
-    /// merely not loaded would otherwise send a sync on every ordinary legacy
-    /// layout write. Free while the flag is off or nothing is skipped.
-    func notePanelLayoutsChanged(old: [UUID: LayoutNode], new: [UUID: LayoutNode]) {
+    /// Marks dirty the worktree of each tab the last sync skipped
+    /// (`panelSyncSkippedTabIDs`) whose layout differs from
+    /// `panelSkippedTabLayouts`, records the new layout there, and marks no
+    /// other. A tab with a surface is the daemon's, and its legacy layout is
+    /// no longer read; a tab the copy has merely not loaded would otherwise
+    /// send a sync on every ordinary legacy layout write. Does nothing, not
+    /// even a comparison, while the flag is off or nothing is skipped.
+    func notePanelLayoutsChanged() {
         guard panelTabsActive, !panelSyncSkippedTabIDs.isEmpty else { return }
-        let changedTabIDs = panelSyncSkippedTabIDs.filter { old[$0] != new[$0] }
+        var changedTabIDs = Set<UUID>()
+        for tabID in panelSyncSkippedTabIDs where layouts[tabID] != panelSkippedTabLayouts[tabID] {
+            changedTabIDs.insert(tabID)
+            panelSkippedTabLayouts[tabID] = layouts[tabID]
+        }
         guard !changedTabIDs.isEmpty else { return }
         var dirty = Set<UUID>()
         for (worktreeID, tabList) in tabs where tabList.contains(where: { changedTabIDs.contains($0.id) }) {
             dirty.insert(worktreeID)
         }
         markPanelSyncDirty(dirty)
+    }
+
+    /// Retakes `panelSkippedTabLayouts` for the skipped set as it now stands.
+    func snapshotPanelSkippedTabLayouts() {
+        var snapshot: [UUID: LayoutNode] = [:]
+        for tabID in panelSyncSkippedTabIDs {
+            snapshot[tabID] = layouts[tabID]
+        }
+        panelSkippedTabLayouts = snapshot
     }
 
     /// Writes the skipped set only when it differs: it is tracked, and an
@@ -498,26 +529,30 @@ extension AppState {
     // MARK: - Capability transitions and resubscribe
 
     /// Keeps the copy and the sync in step with the daemon's flag after a
-    /// capabilities fetch. Off clears the copy and forgets pending syncs and
-    /// skipped tabs, so a daemon-rendered tab falls back to legacy at once and
-    /// nothing further is sent.
+    /// capabilities fetch. Off clears the copy and forgets pending syncs,
+    /// skipped tabs and the observers' snapshots, so a daemon-rendered tab
+    /// falls back to legacy at once and nothing further is sent.
     ///
-    /// Off to on marks every worktree with tabs dirty and syncs the ready
-    /// ones. It loads their surfaces too only while the daemon has
-    /// acknowledged the current subscription — a Settings toggle at runtime.
-    /// At connect the flag turns on before the subscription is acknowledged,
-    /// and the acknowledgement refetches every worktree itself
-    /// (`panelSubscriptionRegistered`), so launch loads each worktree once.
+    /// Off to on takes the `tabs` observer's snapshot afresh, since edits made
+    /// while the flag was off went unrecorded, then marks every worktree with
+    /// tabs dirty and syncs the ready ones. It loads their surfaces too only
+    /// while the daemon has acknowledged the current subscription — a
+    /// Settings toggle at runtime. At connect the flag turns on before the
+    /// subscription is acknowledged, and the acknowledgement refetches every
+    /// worktree itself (`panelSubscriptionRegistered`), so launch loads each
+    /// worktree once.
     func panelTabsCapabilityChanged(wasEnabled: Bool) {
         guard panelTabsActive else {
             if !panelSurfaces.isEmpty {
                 panelSurfaces = [:]
             }
             panelSyncDirty.removeAll()
+            panelTabSignatures.removeAll()
             setPanelSyncSkippedTabIDs([])
             return
         }
         guard !wasEnabled else { return }
+        snapshotPanelTabSignatures()
         let worktreeIDs = Array(tabs.keys)
         guard !worktreeIDs.isEmpty else { return }
         panelSyncDirty.formUnion(worktreeIDs)

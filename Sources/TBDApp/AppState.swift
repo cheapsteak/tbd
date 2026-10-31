@@ -836,7 +836,9 @@ final class AppState {
     var layouts: [UUID: LayoutNode] = [:] {
         didSet {
             persistLayouts()
-            notePanelLayoutsChanged(old: oldValue, new: layouts)
+            // Never read `oldValue` here: it copies the whole dictionary on
+            // every in-place edit. The observer keeps its own snapshot.
+            notePanelLayoutsChanged()
         }
     }
     /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
@@ -851,9 +853,11 @@ final class AppState {
     }
     /// Workspace tabs per worktree. The one observer below is how a tab created,
     /// closed, reordered, relabelled or re-pointed anywhere in the app reaches
-    /// the daemon's `panel.syncTabs` (`AppState+PanelSurface.swift`).
+    /// the daemon's `panel.syncTabs` (`AppState+PanelSurface.swift`). It never
+    /// reads `oldValue`, which would copy the whole dictionary on every
+    /// in-place edit; it compares against `panelTabSignatures` instead.
     var tabs: [UUID: [TBDShared.Tab]] = [:] {
-        didSet { notePanelTabsChanged(old: oldValue, new: tabs) }
+        didSet { notePanelTabsChanged() }
     }
     /// The app's copy of the daemon-owned panel surfaces: worktree → workspace
     /// tab → surface. Filled by `panel.get` and kept current by
@@ -864,6 +868,16 @@ final class AppState {
     var panelSurfaces: [UUID: [WorkspaceTabID: WorkspaceTabSurface]] = [:]
     /// Worktrees whose workspace tabs changed since their last `panel.syncTabs`.
     @ObservationIgnored var panelSyncDirty: Set<UUID> = []
+    /// Each worktree's tab list — every field the sync sends: IDs, order,
+    /// labels and contents — as the `tabs` observer last marked it, taken
+    /// while the flag is on and empty while it is off. The observer compares
+    /// `tabs` against this rather than against `oldValue`. It shares each
+    /// worktree's array with `tabs`, never the dictionary itself, so an
+    /// in-place edit with the flag on copies at most that worktree's tabs.
+    @ObservationIgnored var panelTabSignatures: [UUID: [TBDShared.Tab]] = [:]
+    /// The legacy layouts of the tabs in `panelSyncSkippedTabIDs`, as the
+    /// `layouts` observer last saw them; empty when nothing is skipped.
+    @ObservationIgnored var panelSkippedTabLayouts: [UUID: LayoutNode] = [:]
     /// A tab-sync flush is scheduled or running; later changes join it rather
     /// than scheduling another.
     @ObservationIgnored var panelSyncFlushScheduled = false
@@ -883,8 +897,11 @@ final class AppState {
     /// the only layout change that sends a sync. Each sync result replaces the
     /// members among the tabs it listed. Tracked, because a detail view's
     /// load key reads it (`panelSurfaceLoadKey`), and written only when its
-    /// value changes, because every reader is notified on any write.
-    var panelSyncSkippedTabIDs: Set<UUID> = []
+    /// value changes, because every reader is notified on any write. Each
+    /// write retakes `panelSkippedTabLayouts` for the new set.
+    var panelSyncSkippedTabIDs: Set<UUID> = [] {
+        didSet { snapshotPanelSkippedTabLayouts() }
+    }
     /// `panel.get` calls awaiting their reply. While any is, every delta and
     /// adopted apply reply records the tab IDs it touched in
     /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.

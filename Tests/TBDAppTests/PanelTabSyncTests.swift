@@ -168,6 +168,40 @@ struct PanelTabSyncTests {
         }
     }
 
+    @Test("flag off: tab and layout edits leave the observers' snapshots untouched and schedule nothing")
+    func flagOffTabsEditDoesNoPanelWork() async {
+        await Fixture.withState(panelTabs: false) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            // Sentinels an observer that compared anything would overwrite.
+            state.panelTabSignatures = [worktreeID: []]
+            state.panelSyncSkippedTabIDs = [tab.id]
+            #expect(state.panelSkippedTabLayouts.isEmpty, "precondition: the skipped tab has no layout yet")
+
+            state.tabs[worktreeID]?.append(Fixture.terminalTab(label: "shell"))
+            state.tabs[worktreeID]?[0].label = "renamed"
+            state.layouts[tab.id] = .pane(tab.content)
+            await Fixture.drainMainActor()
+
+            #expect(state.panelTabSignatures == [worktreeID: []], "the tabs observer compared or recorded")
+            #expect(state.panelSkippedTabLayouts.isEmpty, "the layouts observer compared or recorded")
+            #expect(state.panelSyncDirty.isEmpty)
+            #expect(!state.panelSyncFlushScheduled)
+            #expect(syncs.sent.isEmpty)
+
+            // Control: with the flag on, the same edits are recorded.
+            state.daemonCapabilities = Fixture.capabilities(panelTabs: true)
+            state.tabs[worktreeID]?[0].label = "renamed again"
+            state.layouts[tab.id] = .pane(.terminal(terminalID: UUID()))
+            #expect(state.panelTabSignatures[worktreeID] == state.tabs[worktreeID])
+            #expect(state.panelSkippedTabLayouts[tab.id] == state.layouts[tab.id])
+            #expect(state.panelSyncDirty.contains(worktreeID) || state.panelSyncFlushScheduled)
+            await Fixture.drainMainActor()
+            #expect(syncs.sent.map(\.worktreeID) == [worktreeID])
+        }
+    }
+
     // MARK: - Legacy layouts
 
     /// A tab the daemon skipped: its legacy layout holds a second terminal
