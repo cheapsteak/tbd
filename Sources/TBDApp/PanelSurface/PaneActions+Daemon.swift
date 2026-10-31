@@ -59,6 +59,10 @@ extension PaneActions {
     ///   primary document opens in the side region instead.
     /// - The primary has no history and cannot be closed. Closing a note
     ///   panel closes the panel and keeps the note.
+    /// - Choosing the entry already shown in a history palette sends nothing,
+    ///   as the legacy path does nothing: the reducer refuses a jump to the
+    ///   cursor. Back and forward at the ends need no such check, because
+    ///   their chevrons are disabled there.
     @MainActor
     static func daemon(
         appState: AppState,
@@ -79,6 +83,10 @@ extension PaneActions {
         return PaneActions(
             historyStep: { _, step in
                 guard let panelID else { return }
+                if case .jump(let index) = step,
+                   index == currentSide().panel(id: panelID)?.history.cursor {
+                    return
+                }
                 send(.history(panelID: panelID, action: step.panelHistoryAction))
             },
             navigateInPane: { _, path in

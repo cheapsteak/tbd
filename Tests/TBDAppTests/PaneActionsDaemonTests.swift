@@ -119,6 +119,34 @@ struct PaneActionsDaemonTests {
         }
     }
 
+    @Test("choosing the entry already shown sends nothing; another entry still sends a jump")
+    func jumpToCurrentEntrySendsNothing() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let first = PanelContent.file(FileReference(path: "/w/a.md"))
+            let second = PanelContent.file(FileReference(path: "/w/b.md"))
+            let history: PanelHistory = {
+                var built = PanelHistory.seeded(with: first)
+                built.recordReplacement(outgoing: first, incoming: second)
+                return built
+            }()
+            #expect(history.cursor == 0, "precondition: the newest entry is shown")
+            let file = ViewerPanel(id: UUID(), history: history)
+            let surface = Self.seed(state, side: Self.side([file], active: file.id))
+            let envelopes = Fixture.collectEnvelopes(state, replying: surface)
+            let actions = Self.actions(state, on: surface, panelID: file.id)
+            let content = PaneContent.codeViewer(id: file.id, path: "/w/b.md")
+
+            actions.historyStep(content, .jump(history.cursor))
+            await Fixture.drainMainActor()
+            #expect(envelopes.envelopes.isEmpty, "observed \(envelopes.envelopes.map(\.operation))")
+
+            actions.historyStep(content, .jump(1))
+            await Fixture.drainMainActor()
+            let expected: [PanelOperation] = [.history(panelID: file.id, action: .jump(index: 1))]
+            #expect(envelopes.envelopes.map(\.operation) == expected)
+        }
+    }
+
     @Test("a link inside a side panel's document navigates that panel")
     func navigateInPaneSendsNavigate() async {
         await Fixture.withState(panelTabs: true) { state in
