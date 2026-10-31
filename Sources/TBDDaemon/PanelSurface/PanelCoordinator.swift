@@ -226,14 +226,9 @@ public actor PanelCoordinator {
             """)
 
         // Broadcast AFTER commit, once, and only when something changed.
-        if !outcome.changed.isEmpty || !outcome.removed.isEmpty {
-            broadcast(.panelSurfaceChanged(PanelSurfaceDelta(
-                worktreeID: params.worktreeID,
-                tabs: outcome.changed,
-                removedTabIDs: outcome.removed,
-                activeTabID: nil,
-                originOperationID: nil)))
-        }
+        broadcastPanelSurfaceChanged(
+            worktreeID: params.worktreeID, tabs: outcome.changed, removedTabIDs: outcome.removed,
+            via: broadcast)
 
         return PanelSyncTabsResult(
             importedTabIDs: outcome.imported,
@@ -286,13 +281,9 @@ extension StateSubscriptionManager {
     /// archives a worktree sends it after the archive commits, beside its
     /// `.worktreeArchived`; nothing is sent when no surface was deleted.
     func broadcastPanelSurfacesRemoved(worktreeID: UUID, tabIDs: [UUID]) {
-        guard !tabIDs.isEmpty else { return }
-        broadcast(delta: .panelSurfaceChanged(PanelSurfaceDelta(
-            worktreeID: worktreeID,
-            tabs: [],
-            removedTabIDs: tabIDs,
-            activeTabID: nil,
-            originOperationID: nil)))
+        broadcastPanelSurfaceChanged(
+            worktreeID: worktreeID, tabs: [], removedTabIDs: tabIDs,
+            via: { broadcast(delta: $0) })
     }
 
     /// Tells the app that a scratch promote moved these panel surfaces to
@@ -302,12 +293,22 @@ extension StateSubscriptionManager {
     /// `worktreeID`, which drops it from the scratch worktree's entry. Sent
     /// after the promote commits; nothing is sent when nothing moved.
     func broadcastPanelSurfacesMoved(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
-        guard !surfaces.isEmpty else { return }
-        broadcast(delta: .panelSurfaceChanged(PanelSurfaceDelta(
-            worktreeID: worktreeID,
-            tabs: surfaces,
-            removedTabIDs: [],
-            activeTabID: nil,
-            originOperationID: nil)))
+        broadcastPanelSurfaceChanged(
+            worktreeID: worktreeID, tabs: surfaces, removedTabIDs: [],
+            via: { broadcast(delta: $0) })
     }
+}
+
+/// Sends one `panelSurfaceChanged` for `worktreeID` through `broadcast`,
+/// carrying `tabs` and naming `removedTabIDs`, with no `activeTabID` and no
+/// originating operation: every panel broadcast but an apply's, which names
+/// its operation. Sends nothing when both lists are empty.
+private func broadcastPanelSurfaceChanged(
+    worktreeID: UUID, tabs: [WorkspaceTabSurface], removedTabIDs: [UUID],
+    via broadcast: (StateDelta) -> Void
+) {
+    guard !tabs.isEmpty || !removedTabIDs.isEmpty else { return }
+    broadcast(.panelSurfaceChanged(PanelSurfaceDelta(
+        worktreeID: worktreeID, tabs: tabs, removedTabIDs: removedTabIDs,
+        activeTabID: nil, originOperationID: nil)))
 }
