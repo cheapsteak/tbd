@@ -248,14 +248,22 @@ Every other consumer of the column sees the same `.unknown`. The delivery
 verifier reports a send to such a session as undetermined rather than
 confirmed, and the PR poll schedule sees no activity from it.
 
-Three checks that refuse while a session is mid-turn or waiting on the user
-have nothing to act on for such a session, and there are no rails on
-`.unknown`: the composer's gated send never refuses, because nothing records
-a prompt on screen; `tbd terminal close` without `--force` closes it; and a
-manual "Hibernate now" parks it. So a composer send can land on an open
-dialog, and a close or a manual park can end a running turn. That is the
-accepted cost of a session that cannot report; the idle sweep and merge-park
-still leave it alone.
+The checks that refuse a user's action while a session is mid-turn or
+waiting on the user have nothing to act on for such a session, and there are
+no rails on `.unknown`: the composer's gated send never refuses, because
+nothing records a prompt on screen; `tbd terminal close` without `--force`
+closes it; a manual "Hibernate now" parks it; and a transport migration or a
+profile swap, which park and respawn the session, go ahead. So a composer send
+can land on an open dialog, and a close, a manual park, a migration or a swap
+can end a running turn. That is the accepted cost of a session that cannot
+report. Every action TBD takes without a user's gesture — the idle sweep and
+merge-park — still leaves it alone.
+
+The same `.unknown` follows any reset that ends what the column knew — the
+upgrade migration, a wake, an un-park that rolls back a park — and an agent
+reports only on change, so an idle agent stays `.unknown` until it next
+changes state. That fails closed: the session is not auto-parked in the
+meantime.
 
 ### Continue in Claude
 
