@@ -1,13 +1,16 @@
 import AppKit
+import SwiftUI
 
 /// The native sidebar's root: the outline's scroll view filling the column,
 /// then a divider and the pinned dock along the bottom edge — the stack the
 /// SwiftUI path's footer group draws, where one divider tops the dock and the
-/// footer beneath it.
+/// footer beneath it, over one `.bar` backdrop.
 ///
 /// The dock's height is `PinnedDockMetrics.height(rowCount:availableHeight:)`:
-/// at most five rows and 40% of the height the outline shares with it. It is
-/// recomputed on every layout and whenever the dock's row count changes.
+/// at most five rows and 40% of the list above the divider. It is recomputed
+/// on every layout and whenever the dock's row count changes.
+///
+/// The outline and the dock share one sheet presenter and one `+` menu.
 @MainActor
 final class SidebarContainerController: NSViewController {
     /// The divider between the outline and the dock, as SwiftUI's `Divider`.
@@ -15,10 +18,6 @@ final class SidebarContainerController: NSViewController {
 
     let outlineController: SidebarOutlineController
     let dockController: DockTableController
-    /// The dock's backdrop, pinned to the bottom edge: the bar material the
-    /// SwiftUI footer beneath it draws, so the dock and the footer read as one
-    /// group.
-    let dockSlot = NSVisualEffectView(frame: .zero)
     private(set) var dockHeight: NSLayoutConstraint?
 
     /// - Parameter sheets: the slot `NativeSidebarView` presents the
@@ -31,11 +30,12 @@ final class SidebarContainerController: NSViewController {
         // answers, probed off the main thread; it never reads the disk itself.
         dockController = DockTableController(
             appState: appState, defaults: defaults, sheets: presenter,
-            directoryExists: { [weak outline] path in outline?.scratchDirectoryExists[path] ?? true })
+            directoryExists: { [weak outline] path in outline?.scratchDirectoryExists[path] ?? true },
+            plusMenu: outline.plusMenu)
         super.init(nibName: nil, bundle: nil)
         let dock = dockController
         outline.onScratchDirectoriesChanged = { [weak dock] in dock?.scheduleRebuild() }
-        dock.onRowCountChange = { [weak self] in self?.updateDockHeight() }
+        dock.onRowCountChange = { [weak self] in self?.dockRowCountChanged() }
     }
 
     @available(*, unavailable)
@@ -49,19 +49,20 @@ final class SidebarContainerController: NSViewController {
         addChild(dockController)
         let outlineView = outlineController.view
         let dockView = dockController.view
+        // The SwiftUI footer's own backdrop, behind the divider and the dock,
+        // so the three read as one group as they do in the `List` path.
+        let backdrop = NSHostingView(rootView: SidebarBarBackdrop())
+        backdrop.sizingOptions = []
         let divider = NSBox(frame: .zero)
         divider.boxType = .separator
-        dockSlot.material = .titlebar
-        dockSlot.blendingMode = .withinWindow
-        dockSlot.state = .followsWindowActiveState
-        for view in [outlineView, divider, dockSlot, dockView] {
+        for view in [outlineView, backdrop, divider, dockView] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         root.addSubview(outlineView)
+        root.addSubview(backdrop)
         root.addSubview(divider)
-        root.addSubview(dockSlot)
-        dockSlot.addSubview(dockView)
-        let dockHeight = dockSlot.heightAnchor.constraint(equalToConstant: 0)
+        root.addSubview(dockView)
+        let dockHeight = dockView.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             outlineView.topAnchor.constraint(equalTo: root.topAnchor),
             outlineView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -70,18 +71,27 @@ final class SidebarContainerController: NSViewController {
             divider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             divider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             divider.heightAnchor.constraint(equalToConstant: Self.dividerThickness),
-            divider.bottomAnchor.constraint(equalTo: dockSlot.topAnchor),
-            dockSlot.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            dockSlot.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            dockSlot.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            divider.bottomAnchor.constraint(equalTo: dockView.topAnchor),
+            dockView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            dockView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            dockView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             dockHeight,
-            dockView.topAnchor.constraint(equalTo: dockSlot.topAnchor),
-            dockView.leadingAnchor.constraint(equalTo: dockSlot.leadingAnchor),
-            dockView.trailingAnchor.constraint(equalTo: dockSlot.trailingAnchor),
-            dockView.bottomAnchor.constraint(equalTo: dockSlot.bottomAnchor),
+            backdrop.topAnchor.constraint(equalTo: divider.topAnchor),
+            backdrop.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         self.dockHeight = dockHeight
         view = root
+
+        // The shared `+` menu opening or closing keeps its `+` shown in
+        // whichever list it belongs to; each list asks about its own rows.
+        let outline = outlineController
+        let dock = dockController
+        outline.plusMenu.onOpenChange = { [weak outline, weak dock] _, _ in
+            outline?.applyHoverToAvailableRows()
+            dock?.applyHoverToAvailableRows()
+        }
     }
 
     override func viewDidLayout() {
@@ -89,13 +99,15 @@ final class SidebarContainerController: NSViewController {
         updateDockHeight()
     }
 
-    /// The height the outline shares with the dock: the outline's own plus
-    /// the dock's, which is the column below the divider's line. Measured that
-    /// way, never as the outline's height alone, so the dock's height never
-    /// feeds back into its own input — the reason `SidebarView` measures its
-    /// `List` and never the dock.
+    /// The list height the clamp's 40% is of: the SwiftUI dock settles where
+    /// it is 40% of the list above the divider. The outline and the dock
+    /// share the column below the window's top and above the divider's line,
+    /// so with `fraction` = 0.4 that list is (outline + dock) / (1 +
+    /// fraction), and a dock sized from it lands there in one pass instead
+    /// of feeding its own height back into the outline's.
     var dockAvailableHeight: CGFloat {
-        max((viewIfLoaded?.bounds.height ?? 0) - Self.dividerThickness, 0)
+        let shared = max((viewIfLoaded?.bounds.height ?? 0) - Self.dividerThickness, 0)
+        return shared / (1 + PinnedDockMetrics.maxSidebarFraction)
     }
 
     /// Sizes the dock for its rows. A layout pass after a change finds the
@@ -106,5 +118,19 @@ final class SidebarContainerController: NSViewController {
             rowCount: dockController.rows.count, availableHeight: dockAvailableHeight)
         guard height != dockHeight.constant else { return }
         dockHeight.constant = height
+    }
+
+    /// The dock's rows changed in number: it takes its new height now, laid
+    /// out before the dock scrolls a new selection into it.
+    private func dockRowCountChanged() {
+        updateDockHeight()
+        viewIfLoaded?.layoutSubtreeIfNeeded()
+    }
+}
+
+/// The `.bar` material the SwiftUI footer draws behind itself.
+private struct SidebarBarBackdrop: View {
+    var body: some View {
+        Rectangle().fill(.bar)
     }
 }

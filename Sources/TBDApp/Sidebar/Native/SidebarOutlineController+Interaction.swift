@@ -54,7 +54,7 @@ extension SidebarOutlineController: SidebarMenuHost {
     func applyHover(to cell: NSView, id: SidebarNodeID) {
         let hovered = hoverState.row == id
         let part = hovered ? hoverState.part : .none
-        let menuOpen = plusMenu.isOpen && plusMenu.owner == id
+        let menuOpen = plusMenu.isOpen(for: id, in: outline)
         switch cell {
         case let cell as WorktreeRowCell:
             cell.setHovered(hovered)
@@ -86,19 +86,12 @@ extension SidebarOutlineController: SidebarMenuHost {
         }
     }
 
-    /// The pointer reaching or leaving a `+` that opens the profile picker —
-    /// `HoverMenuModel.triggerHover`, as the SwiftUI `+`'s `onHover` drives it.
+    /// The pointer reaching or leaving a `+` that opens the profile picker.
     private func updatePlusTrigger(from old: SidebarHoverTracker.State, to new: SidebarHoverTracker.State) {
-        let wasOn = old.part == .plus ? old.row : nil
-        let isOn = new.part == .plus ? new.row : nil
-        guard wasOn != isOn else { return }
-        if let wasOn, plusMenu.owner == wasOn {
-            plusMenu.model.triggerHover(false)
-        }
-        if let isOn, let anchor = plusAnchor(for: isOn), let target = plusTarget(for: isOn) {
-            bindPlusMenu(owner: isOn, anchor: anchor, repoID: target.repoID, parent: target.parent)
-            plusMenu.model.triggerHover(true)
-        }
+        plusMenu.pointerMoved(
+            from: old.part == .plus ? old.row : nil, to: new.part == .plus ? new.row : nil, in: outline,
+            anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
+            appState: appState, sheets: sheets)
     }
 
     private func plusAnchor(for id: SidebarNodeID) -> NSView? {
@@ -115,41 +108,17 @@ extension SidebarOutlineController: SidebarMenuHost {
     /// Where a `+` creates: a repo header's repo, or a worktree row's repo
     /// with the row as parent. Nil for the Scratch `+`, which has no menu, and
     /// for a missing repo, which never opens one.
-    private func plusTarget(for id: SidebarNodeID) -> (repoID: UUID, parent: UUID?)? {
+    private func plusTarget(for id: SidebarNodeID) -> SidebarPlusTarget? {
         switch id {
         case .repoHeader(let repoID):
             guard let repo = appState.repos.first(where: { $0.id == repoID }), repo.status != .missing else { return nil }
-            return (repoID, nil)
+            return SidebarPlusTarget(repoID: repoID, parent: nil)
         case .worktree(let worktreeID):
             guard let worktree = appState.findWorktree(id: worktreeID), worktree.status != .main,
                   let repoID = worktree.repoID else { return nil }
-            return (repoID, worktreeID)
+            return SidebarPlusTarget(repoID: repoID, parent: worktreeID)
         case .scratchHeader, .scratchPrompt, .remoteSession, .providerHeader, .group:
             return nil
-        }
-    }
-
-    private func bindPlusMenu(owner: SidebarNodeID, anchor: NSView, repoID: UUID, parent: UUID?) {
-        let state = appState
-        let model = plusMenu.model
-        plusMenu.bind(owner: owner, anchor: anchor) { [weak self] highlight in
-            AnyView(
-                WorktreeProfilePickerView(
-                    repoID: repoID,
-                    parentWorktreeID: parent,
-                    highlightDefaultProfile: highlight,
-                    onClose: { model.closeNow() },
-                    // The picker closes itself first, so this only creates or
-                    // presents the sheet.
-                    onStartRemoteSession: { provider in
-                        self?.startRemoteSession(provider, repoID: repoID, parent: parent)
-                    }
-                )
-                .environment(state)
-                .background(.ultraThickMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .onHover { model.menuHover($0) }
-            )
         }
     }
 
@@ -294,7 +263,7 @@ extension SidebarOutlineController: SidebarMenuHost {
 
     @objc func nestedPlusClicked(_ sender: NSView) {
         guard let id = nodeID(for: sender), case .worktree = id, let target = plusTarget(for: id) else { return }
-        plusPressed(owner: id, anchor: sender, repoID: target.repoID, parent: target.parent)
+        plusMenu.press(owner: id, anchor: sender, in: outline, target: target, appState: appState, sheets: sheets)
     }
 
     @objc func sectionPlusClicked(_ sender: NSView) {
@@ -304,54 +273,9 @@ extension SidebarOutlineController: SidebarMenuHost {
             appState.createScratch()
         case .repoHeader:
             guard let target = plusTarget(for: id) else { return }
-            plusPressed(owner: id, anchor: sender, repoID: target.repoID, parent: nil)
+            plusMenu.press(owner: id, anchor: sender, in: outline, target: target, appState: appState, sheets: sheets)
         case .worktree, .scratchPrompt, .remoteSession, .providerHeader, .group:
             break
-        }
-    }
-
-    /// A plain click creates a worktree with the default profile; ⌥-click
-    /// opens the picker at once. ⌥ is read from `NSEvent.modifierFlags`, the
-    /// keyboard's state now, as the SwiftUI `+` reads it.
-    private func plusPressed(owner: SidebarNodeID, anchor: NSView, repoID: UUID, parent: UUID?) {
-        switch HoverMenuModel.plusOutcome(optionHeld: NSEvent.modifierFlags.contains(.option)) {
-        case .openMenu:
-            bindPlusMenu(owner: owner, anchor: anchor, repoID: repoID, parent: parent)
-            plusMenu.model.openImmediately()
-        case .createDefault:
-            plusMenu.model.closeNow()
-            appState.createWorktree(repoID: repoID, parentWorktreeID: parent)
-        }
-    }
-
-    /// The picker's remote-lane row: create at once when every answer is
-    /// knowable, else open the form — `RepoSectionView.startRemoteSession`
-    /// and `WorktreeRowView.startRemoteSession`, which differ only in the
-    /// parent.
-    private func startRemoteSession(_ provider: RemoteProviderStatus, repoID: UUID, parent: UUID?) {
-        let repo = appState.repos.first { $0.id == repoID }
-        let prefill = RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL)
-        let launch = RemoteCreateFormLogic.launch(
-            describe: provider.describe,
-            repoPrefill: prefill,
-            repoDefaults: repo?.remoteCreateDefaults ?? [:],
-            globalDefaults: appState.globalRemoteCreateDefaults,
-            generatedSlug: NameGenerator.generate())
-        switch launch {
-        case .createNow(let paramsJSON):
-            let state = appState
-            Task {
-                await state.createRemoteSession(
-                    provider: provider.config.name, paramsJSON: paramsJSON,
-                    parentWorktreeID: parent, repoID: repoID)
-            }
-        case .openForm:
-            present(.remoteCreate(NativeSidebarRemoteCreate(
-                provider: provider,
-                repoPrefill: prefill,
-                repoDefaults: repo?.remoteCreateDefaults ?? [:],
-                parentWorktreeID: parent,
-                repoID: repoID)))
         }
     }
 
@@ -583,9 +507,9 @@ extension SidebarOutlineController: SidebarMenuHost {
     /// The `+` menu closes once the row it belongs to is no longer shown, as
     /// the SwiftUI `+` closes when its row unmounts.
     func closePlusMenuIfItsRowLeft() {
-        guard plusMenu.model.isOpen, let owner = plusMenu.owner else { return }
-        let shown = items.existing(owner).map { outline.row(forItem: $0) >= 0 } ?? false
-        if !shown { plusMenu.model.closeNow() }
+        plusMenu.closeIfOwnerLeft(outline) { owner in
+            items.existing(owner).map { outline.row(forItem: $0) >= 0 } ?? false
+        }
     }
 }
 

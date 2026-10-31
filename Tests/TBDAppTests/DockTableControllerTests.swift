@@ -134,6 +134,66 @@ struct DockTableControllerTests {
         #expect(h.dock.fallbackReloadCount == 0, h.evidence(names))
     }
 
+    // MARK: Hover
+
+    @Test func dockHoverShowsRowControls() throws {
+        let h = DockHarness("hover")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let a = Self.pinned("a", repo, order: 0, pinOrder: 0)
+        let a1 = SidebarOutlineControllerTests.row("a1", repo, parent: a.id, order: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [a, a1]]
+        h.state.selectedWorktreeIDs = [a.id]
+        h.mount()
+        let names = [a.id: "a", a1.id: "a1"]
+        let shown = h.shownIDs
+        try #require(shown == [.worktree(a.id), .worktree(a1.id)], h.evidence(names))
+        let tracker = try #require(h.dock.hoverTracker)
+        let root = try #require(h.cell(.worktree(a.id)) as? WorktreeRowCell)
+        let child = try #require(h.cell(.worktree(a1.id)) as? WorktreeRowCell)
+        let rootPoint = try #require(h.windowCenter(of: .worktree(a.id)))
+        let childPoint = try #require(h.windowCenter(of: .worktree(a1.id)))
+
+        // At rest: the pinned root shows its pin, the unpinned descendant
+        // none, and neither its `+`.
+        #expect(!root.pinButton.isHidden)
+        #expect(child.pinButton.isHidden)
+        #expect(root.plusButton.isHidden)
+        let restingGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
+        #expect(restingGap == false)
+
+        // Over the descendant: its pin shows, and its guide line breaks there.
+        tracker.pointerMoved(toWindowPoint: childPoint)
+        #expect(h.dock.hoverState.row == .worktree(a1.id), h.evidence(names))
+        #expect(!child.pinButton.isHidden)
+        let hoveredGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
+        #expect(hoveredGap == true)
+
+        // Over the root: its nested `+` shows, and the descendant's pin goes.
+        tracker.pointerMoved(toWindowPoint: rootPoint)
+        #expect(h.dock.hoverState.row == .worktree(a.id), h.evidence(names))
+        #expect(!root.plusButton.isHidden)
+        #expect(child.pinButton.isHidden)
+
+        // The pointer leaves: both go.
+        tracker.pointerExited()
+        #expect(h.dock.hoverState.row == nil)
+        #expect(root.plusButton.isHidden)
+        #expect(child.pinButton.isHidden)
+        let exitedGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
+        #expect(exitedGap == false)
+
+        // A drag clears the hover.
+        tracker.pointerMoved(toWindowPoint: rootPoint)
+        try #require(!root.plusButton.isHidden, "Hovering the root again did not show its +")
+        let info = try Self.startDrag(.worktree(a.id), in: h)
+        defer { info.release() }
+        #expect(h.dock.hoverState.row == nil)
+        #expect(root.plusButton.isHidden)
+        Self.endDrag(in: h)
+    }
+
     // MARK: Height
 
     @Test func heightClampsToFiveRowsAndFortyPercent() throws {
@@ -143,8 +203,8 @@ struct DockTableControllerTests {
         }
         let rowHeight = PinnedDockMetrics.rowHeight
 
-        // A tall sidebar: seven pins want 196 pt and 40% of the column would
-        // allow 239.6, so five rows cap it.
+        // A tall sidebar: seven pins want 196 pt, and 40% of the list above
+        // the divider would allow about 171, so five rows cap it.
         let tall = DockHarness("height.tall")
         defer { tall.tearDown() }
         tall.state.repos = [repo]
@@ -174,16 +234,25 @@ struct DockTableControllerTests {
         tall.flush()
         #expect(tall.dockHeight == 0, tall.evidence())
 
-        // A short sidebar: 40% of the column binds before five rows do.
+        // A short sidebar: 40% binds before five rows do, and the dock
+        // settles where the SwiftUI dock does — 40% of the list above the
+        // divider, as laid out, in one pass. Within a point, since a frame
+        // may land on a pixel boundary.
         let short = DockHarness("height.short")
         defer { short.tearDown() }
         short.state.repos = [repo]
         short.state.worktrees = [repo.id: pins]
         short.mount(size: NSSize(width: 320, height: 250))
-        let shared = 250 - SidebarContainerController.dividerThickness
-        let fraction = shared * PinnedDockMetrics.maxSidebarFraction
-        #expect(abs(short.dockHeight - fraction) < 0.01, short.evidence())
-        #expect(short.dockHeight < 5 * rowHeight)
+        #expect(short.dockHeight < 5 * rowHeight, short.evidence())
+        let shortOutline = short.outlineController.view.frame.height
+        let fortyPercent = PinnedDockMetrics.maxSidebarFraction * shortOutline
+        #expect(abs(short.dockHeight - fortyPercent) < 1, short.evidence())
+        let shortDockFrame = short.dock.view.frame.height
+        #expect(abs(shortDockFrame - short.dockHeight) < 1)
+        // A further layout pass leaves it there.
+        let settled = short.dockHeight
+        short.container.updateDockHeight()
+        #expect(short.dockHeight == settled)
     }
 
     // MARK: Reorder
@@ -255,6 +324,13 @@ struct DockTableControllerTests {
         #expect(acceptedInside)
         let secondCall = h.reorders.calls.last
         #expect(secondCall == ReorderCall(source: IndexSet(integer: 2), destination: 1), h.evidence(names))
+
+        // A gap that would leave the order as it is takes no drop: just
+        // above `c`, and just below it, before the remote pins.
+        let aboveItself = h.dock.tableView(h.table, validateDrop: info, proposedRow: 3, proposedDropOperation: .above)
+        #expect(aboveItself == [])
+        let belowItself = h.dock.tableView(h.table, validateDrop: info, proposedRow: 4, proposedDropOperation: .above)
+        #expect(belowItself == [])
 
         // A pin unpinned mid-drag: the drag holds the dock's rows, so `c`
         // still shows, but the drop is refused and nothing is reordered.
@@ -336,6 +412,42 @@ struct DockTableControllerTests {
         #expect(dockRemote == [.remoteSession(lane.id)], h.evidence(names))
         let outlineRemote = h.outlineSelectedIDs
         #expect(outlineRemote == [.remoteSession(lane.id)], h.evidence(names))
+    }
+
+    @Test func extendingDockSelectionKeepsRowsItDoesNotShow() throws {
+        let h = DockHarness("extend")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let a = Self.pinned("a", repo, order: 0, pinOrder: 0)
+        let b = Self.pinned("b", repo, order: 1, pinOrder: 1)
+        let loose = SidebarOutlineControllerTests.row("loose", repo, order: 2)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [a, b, loose]]
+        h.state.selectedWorktreeIDs = [loose.id]
+        h.mount()
+        let names = [a.id: "a", b.id: "b", loose.id: "loose"]
+        let dockAtRest = h.selectedIDs
+        try #require(dockAtRest.isEmpty, h.evidence(names))
+
+        // ⌘-click: the dock's row joins the selection, and the row only the
+        // outline shows stays in it.
+        h.dock.selectionModifiers = { .command }
+        h.table.selectRowIndexes(IndexSet(integer: h.row(.worktree(b.id))), byExtendingSelection: true)
+        #expect(h.state.selectedWorktreeIDs == [loose.id, b.id], h.evidence(names))
+        h.flush()
+        let outlineSelected = Set(h.outlineSelectedIDs)
+        #expect(outlineSelected == [.worktree(loose.id), .worktree(b.id)], h.evidence(names))
+
+        // ⇧ extends the same way.
+        h.dock.selectionModifiers = { .shift }
+        let both = IndexSet([h.row(.worktree(a.id)), h.row(.worktree(b.id))])
+        h.table.selectRowIndexes(both, byExtendingSelection: false)
+        #expect(h.state.selectedWorktreeIDs == [loose.id, a.id, b.id], h.evidence(names))
+
+        // Control: a plain click replaces the selection.
+        h.dock.selectionModifiers = { [] }
+        h.table.selectRowIndexes(IndexSet(integer: h.row(.worktree(a.id))), byExtendingSelection: false)
+        #expect(h.state.selectedWorktreeIDs == [a.id], h.evidence(names))
     }
 
     // MARK: Pasteboard types
@@ -536,6 +648,14 @@ private final class DockHarness {
         }
     }
 
+    /// The centre of `id`'s dock row, in window coordinates.
+    func windowCenter(of id: SidebarNodeID) -> NSPoint? {
+        let index = row(id)
+        guard index >= 0 else { return nil }
+        let rect = table.rect(ofRow: index)
+        return table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+    }
+
     func rowView(_ id: SidebarNodeID) -> SidebarRowView? {
         let index = row(id)
         guard index >= 0 else { return nil }
@@ -604,8 +724,6 @@ private final class DockStubDraggingInfo: NSObject, NSDraggingInfo {
     var springLoadingHighlight: NSSpringLoadingHighlight { .none }
 
     func slideDraggedImage(to screenPoint: NSPoint) {}
-
-    nonisolated func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
 
     func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?,
                                 classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],

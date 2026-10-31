@@ -62,6 +62,9 @@ struct DockRow: Equatable {
 ///   type, which the outline does not register; the dock registers only that
 ///   type. A drop calls `AppState.reorderPins(fromOffsets:toOffset:)` with
 ///   offsets into the roots, as the SwiftUI dock's `.onMove` does.
+/// - **Hover.** A `SidebarHoverTracker` of its own shows the hovered row's
+///   gutter pin and nested `+`, as the outline's rows show them. The `+` opens
+///   the one `SidebarPlusMenu` the whole sidebar shares.
 ///
 /// Every dock row is `PinnedDockMetrics.rowHeight` tall, which the container's
 /// height clamp counts on.
@@ -99,6 +102,19 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// thread, so no rebuild touches the disk.
     private let directoryExists: (String) -> Bool
 
+    /// The `+` menu, shared with the outline inside the container.
+    let plusMenu: SidebarPlusMenu
+    /// Whether the dock made `plusMenu` itself, and so refreshes its own rows
+    /// when the menu opens or closes. Otherwise the container does.
+    private let ownsPlusMenu: Bool
+    /// Drives the hover tracker's 80 ms section debounce, which the dock,
+    /// having no sections, never starts.
+    private let hoverClock: any Clock<Duration>
+    /// Made with the view; the table keeps it alive.
+    private(set) var hoverTracker: SidebarHoverTracker?
+    /// What the pointer was last reported over.
+    private(set) var hoverState = SidebarHoverTracker.State()
+
     // MARK: Test seams
 
     /// Applies that fell back to `reloadData` because the row count disagreed
@@ -113,6 +129,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     var reorderPinsForTesting: ((IndexSet, Int) -> Void)?
     /// Opens a pull request's page; tests hand in a recorder.
     var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    /// The modifier keys of the event that changed the selection: what tells
+    /// a ⌘- or ⇧-click from a plain one. Tests hand in fixed keys.
+    var selectionModifiers: @MainActor () -> NSEvent.ModifierFlags = {
+        NSApplication.shared.currentEvent?.modifierFlags ?? []
+    }
 
     // MARK: State
 
@@ -144,16 +165,24 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     ///     mounted on its own gets one of its own.
     ///   - directoryExists: answers for unpromoted scratch rows. A dock with
     ///     no answers dims none.
+    ///   - plusMenu: the outline's `+` menu; a dock mounted on its own gets
+    ///     one of its own.
+    ///   - clock: the hover tracker's clock.
     init(
         appState: AppState,
         defaults: UserDefaults,
         sheets: NativeSidebarSheetPresenter? = nil,
-        directoryExists: @escaping (String) -> Bool = { _ in true }
+        directoryExists: @escaping (String) -> Bool = { _ in true },
+        plusMenu: SidebarPlusMenu? = nil,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.appState = appState
         self.defaults = defaults
         self.sheets = sheets ?? NativeSidebarSheetPresenter()
         self.directoryExists = directoryExists
+        self.plusMenu = plusMenu ?? SidebarPlusMenu()
+        self.ownsPlusMenu = plusMenu == nil
+        self.hoverClock = clock
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -207,6 +236,22 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         view = scrollView
+        installHover()
+    }
+
+    /// The hover tracker, made once the table is in its scroll view, so it
+    /// recomputes on every scroll. A dock row sits in no section.
+    private func installHover() {
+        let tracker = SidebarHoverTracker(
+            table: table,
+            resolve: { [weak self] index in self?.hoverRow(index) },
+            onChange: { [weak self] state in self?.hoverChanged(state) },
+            clock: hoverClock)
+        table.hoverTracker = tracker
+        hoverTracker = tracker
+        if ownsPlusMenu {
+            plusMenu.onOpenChange = { [weak self] _, _ in self?.applyHoverToAvailableRows() }
+        }
     }
 
     override func viewDidLoad() {
@@ -242,6 +287,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     func beginHold(_ reason: HoldReason) {
         holds.insert(reason)
+        // Nothing is hovered under a drag; the next pointer move recomputes.
+        if reason == .drag { hoverTracker?.clear() }
     }
 
     /// Ends one hold; when it was the last, the held rows update now.
@@ -330,10 +377,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
         applyModelSelection()
         isApplyingModelSelection = false
-        scrollNewSelectionIntoView()
+        // The dock takes its new height before a new selection scrolls into
+        // it, so the scroll reads the height the rows will have.
         if rows.count != previousCount {
             onRowCountChange?()
         }
+        scrollNewSelectionIntoView()
+        // Rows may have moved under a still pointer.
+        hoverTracker?.recompute()
+        plusMenu.closeIfOwnerLeft(table) { owner in rows.contains { $0.id == owner } }
     }
 
     /// Inserts and removes rows by ID, so a row that stays keeps its row view
@@ -450,7 +502,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
         let selected = table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? rows[$0].id : nil }
         var ids = SidebarSelectionBridge.appStateIDs(for: selected)
-        if Self.extendsSelection(NSApplication.shared.currentEvent) {
+        if !selectionModifiers().intersection([.command, .shift]).isEmpty {
             let shown = Set(rows.map(\.id))
             ids.formUnion(appState.selectedWorktreeIDs.filter { !shown.contains(.worktree($0)) })
         }
@@ -458,12 +510,6 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         isApplyingModelSelection = true
         applyModelSelection()
         isApplyingModelSelection = false
-    }
-
-    /// Whether `event` is a click or key press that extends a selection.
-    private static func extendsSelection(_ event: NSEvent?) -> Bool {
-        guard let event else { return false }
-        return !event.modifierFlags.intersection([.command, .shift]).isEmpty
     }
 
     private func writeSelection(_ ids: Set<UUID>) {
@@ -544,18 +590,90 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         default:
             break
         }
+        applyHover(to: cell, id: id)
     }
 
     /// The row view's tint origin and guide lines: one line per level of a
-    /// descendant's depth, as `WorktreeRowView` draws them.
+    /// descendant's depth, as `WorktreeRowView` draws them, broken where the
+    /// gutter pin shows — on hover, and always once pinned.
     private func configureRowView(_ rowView: SidebarRowView, row: DockRow) {
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.guideCount = row.depth
-            configuration.showsPinGap = model.isPinned && !model.isMain
+            configuration.showsPinGap = (model.isPinned || hoverState.row == row.id) && !model.isMain
         }
         rowView.configuration = configuration
+    }
+
+    // MARK: Hover
+
+    /// A dock row as the hover tracker sees it: its ID, in no section.
+    private func hoverRow(_ index: Int) -> (id: SidebarNodeID, section: SidebarNodeID?)? {
+        guard rows.indices.contains(index) else { return nil }
+        return (id: rows[index].id, section: nil)
+    }
+
+    /// The tracker's report: the `+` under the pointer arms the shared menu,
+    /// and every row the table has takes the new hover. A recompute that finds
+    /// nothing changed leaves the rows as they are.
+    func hoverChanged(_ state: SidebarHoverTracker.State) {
+        let previous = hoverState
+        hoverState = state
+        guard state != previous else { return }
+        plusMenu.pointerMoved(
+            from: previous.part == .plus ? previous.row : nil, to: state.part == .plus ? state.row : nil,
+            in: table, anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
+            appState: appState, sheets: sheets)
+        applyHoverToAvailableRows()
+    }
+
+    /// Hands every row view the table has its pin gap, and every cell its
+    /// hover.
+    func applyHoverToAvailableRows() {
+        table.enumerateAvailableRowViews { rowView, index in
+            guard self.rows.indices.contains(index) else { return }
+            let row = self.rows[index]
+            if let rowView = rowView as? SidebarRowView {
+                self.configureRowView(rowView, row: row)
+            }
+            if let cell = rowView.view(atColumn: 0) as? NSView {
+                self.applyHover(to: cell, id: row.id)
+            }
+        }
+    }
+
+    /// The hovered row shows its pin and nested `+`, the control under the
+    /// pointer its wash; the `+` whose menu is open stays shown.
+    private func applyHover(to cell: NSView, id: SidebarNodeID) {
+        let hovered = hoverState.row == id
+        switch cell {
+        case let cell as WorktreeRowCell:
+            cell.setHovered(hovered)
+            cell.setMenuOpen(plusMenu.isOpen(for: id, in: table))
+            cell.setHoveredPart(hovered ? hoverState.part : .none)
+        case let cell as RemoteSessionRowCell:
+            cell.setHovered(hovered)
+        default:
+            break
+        }
+    }
+
+    /// The nested `+` of a row the dock shows.
+    private func plusAnchor(for id: SidebarNodeID) -> NSView? {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? WorktreeRowCell else {
+            return nil
+        }
+        return cell.plusButton
+    }
+
+    /// Where a dock row's nested `+` creates: the row's repo, under the row.
+    /// Nil for the main row and a scratch row, which offer none.
+    private func plusTarget(for id: SidebarNodeID) -> SidebarPlusTarget? {
+        guard case .worktree(let worktreeID) = id, let worktree = appState.findWorktree(id: worktreeID),
+              worktree.status != .main, let repoID = worktree.repoID else { return nil }
+        return SidebarPlusTarget(repoID: repoID, parent: worktreeID)
     }
 
     /// The text AppKit asks for when the pointer rests on a cell's badge,
@@ -588,7 +706,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         return id
     }
 
-    /// The gutter pin, shown solid on every pinned row: a click unpins.
+    /// The gutter pin, shown on hover and always once pinned: a click pins
+    /// or unpins the row.
     @objc func pinClicked(_ sender: NSView) {
         guard let worktreeID = rowWorktreeID(for: sender),
               let worktree = appState.findWorktree(id: worktreeID) else { return }
@@ -597,15 +716,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         Task { await state.setPinned(worktreeID: worktreeID, pinned: pinned) }
     }
 
-    /// The dock tracks no hover, so its rows never show the nested `+`; the
-    /// row's "New nested worktree" accessibility action lands here and creates
-    /// one with the default profile, as a plain click on the `+` does. The
-    /// context menu offers the same.
+    /// The nested `+`, through the outline's own press: a plain click creates
+    /// a worktree with the default profile, ⌥-click opens the picker.
     @objc func nestedPlusClicked(_ sender: NSView) {
-        guard let worktreeID = rowWorktreeID(for: sender),
-              let worktree = appState.findWorktree(id: worktreeID),
-              worktree.status != .main, let repoID = worktree.repoID else { return }
-        appState.createWorktree(repoID: repoID, parentWorktreeID: worktreeID)
+        guard let worktreeID = rowWorktreeID(for: sender), let target = plusTarget(for: .worktree(worktreeID)) else {
+            return
+        }
+        plusMenu.press(owner: .worktree(worktreeID), anchor: sender, in: table, target: target,
+                       appState: appState, sheets: sheets)
     }
 
     /// The table's click action: a click on a worktree row's PR glyph opens
@@ -706,7 +824,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// above all — is refused.
     func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo,
                    proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard cachedPayload(of: info) != nil, let gap = Self.rootGap(proposedRow: row, in: rows) else { return [] }
+        guard let carried = cachedPayload(of: info), let gap = Self.rootGap(proposedRow: row, in: rows) else {
+            return []
+        }
+        // A gap that would leave the order as it is takes no drop: no line,
+        // and the drag slides back.
+        let roots = shownRootIDs
+        let before = gap.offset < roots.count ? roots[gap.offset] : nil
+        guard Self.reorder(carried: carried, before: before, roots: roots) != nil else { return [] }
         if gap.row != row || dropOperation != .above {
             tableView.setDropRow(gap.row, dropOperation: .above)
         }
@@ -722,10 +847,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
                    row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         guard let carried = Self.dockPayload(from: info.draggingPasteboard),
               let gap = Self.rootGap(proposedRow: row, in: rows) else { return false }
-        let shownRoots: [UUID] = rows.compactMap { entry in
-            guard entry.isPinnedRoot, case .worktree(let id) = entry.id else { return nil }
-            return id
-        }
+        let shownRoots = shownRootIDs
         let before = gap.offset < shownRoots.count ? shownRoots[gap.offset] : nil
         guard let move = Self.reorder(carried: carried, before: before, roots: currentRootIDs()) else {
             dockLogger.info(
@@ -738,6 +860,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             appState.reorderPins(fromOffsets: move.source, toOffset: move.destination)
         }
         return true
+    }
+
+    /// The pinned roots the dock shows, top to bottom.
+    private var shownRootIDs: [UUID] {
+        rows.compactMap { entry in
+            guard entry.isPinnedRoot, case .worktree(let id) = entry.id else { return nil }
+            return id
+        }
     }
 
     /// The pinned roots as `AppState` holds them now: the list
@@ -832,6 +962,10 @@ extension DockTableController: SidebarMenuHost {
 /// a row's button that never starts a drag, and drags that stay moves
 /// whatever modifier is held.
 final class DockTableView: NSTableView {
+    /// Kept alive as long as the table: the tracker owns the table's one
+    /// tracking area, and a tracking area does not retain its owner.
+    var hoverTracker: SidebarHoverTracker?
+
     /// The context menu for a row, built when the menu is asked for.
     var contextMenuProvider: ((Int) -> NSMenu?)?
 

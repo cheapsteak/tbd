@@ -479,7 +479,7 @@ struct SidebarInteractionTests {
         // Open for the row's `+`. The anchor is in no window, so no panel is
         // put on screen; the model's state is what is under test.
         let menu = h.controller.plusMenu
-        menu.bind(owner: .worktree(row.id), anchor: NSView(frame: .zero)) { _ in AnyView(EmptyView()) }
+        menu.bind(owner: .worktree(row.id), anchor: NSView(frame: .zero), in: h.outline) { _ in AnyView(EmptyView()) }
         menu.model.openImmediately()
         try #require(menu.model.isOpen)
 
