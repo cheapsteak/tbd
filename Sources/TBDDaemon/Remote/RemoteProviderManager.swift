@@ -657,7 +657,9 @@ public actor RemoteProviderManager {
         // keeps the full sightings.
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: provider, sessions: sightings.map(\.withoutTranscriptHint),
-            complete: complete, now: now)
+            complete: complete,
+            honorsArchiveHorizon: describes[provider]?.archiveHorizonSeconds != nil,
+            now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can

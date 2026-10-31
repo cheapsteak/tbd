@@ -286,8 +286,20 @@ public struct RemoteSessionStore: Sendable {
     /// partial view would make that view survive a restart looking current.
     /// Defaulted to `true` so every caller that predates the field keeps its
     /// exact behavior.
+    ///
+    /// `honorsArchiveHorizon` is true when the provider declares an archive
+    /// horizon (`docs/remote-provider-contract.md` § Archive horizon). Such a
+    /// provider may leave long-archived, exited sessions out of a complete
+    /// snapshot, so the absence pass skips every row whose most recent
+    /// sighting had `archived: true`: no `missingCount` step, no `gone`. The
+    /// rule reads only the stored last sighting, never a clock, and it follows
+    /// the latest sighting, so a row seen unarchived again is advanced as
+    /// usual. A row whose payload cannot be decoded is not known to be
+    /// archived and is advanced as usual. Defaulted to `false`, which is the
+    /// drift rule for every provider that declares no horizon.
     public func applySnapshot(
-        provider: String, sessions: [RemoteSessionPayload], complete: Bool = true, now: Date
+        provider: String, sessions: [RemoteSessionPayload], complete: Bool = true,
+        honorsArchiveHorizon: Bool = false, now: Date
     ) async throws -> SnapshotOutcome {
         try await writer.write { db in
             var changed = false
@@ -320,6 +332,7 @@ public struct RemoteSessionStore: Sendable {
             // mirror exactly where it stands.
             if complete {
                 for var row in byID.values where !row.gone {
+                    if honorsArchiveHorizon, row.decodedPayload?.isArchived == true { continue }
                     row.missingCount += 1
                     if row.missingCount >= 2 { row.gone = true }
                     changed = true

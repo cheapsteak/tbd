@@ -1234,11 +1234,14 @@ func remoteCreateConfirmation(
 /// policy can be read next to the sidebar's.
 ///
 /// **Archived sessions are hidden by default, and that is a caller decision
-/// rather than a provider one.** The contract requires a provider to keep
-/// archived sessions in `list` and assigns the caller the policy about which a
-/// human sees; the sidebar drops them, and this drops them too, so the two
-/// surfaces cannot disagree about what "the working set" means. `--archived`
-/// asks for the complete inventory.
+/// rather than a provider one.** A provider keeps archived sessions in `list`
+/// unless it declares an archive horizon, and the contract assigns the caller
+/// the policy about which a human sees; the sidebar drops them, and this drops
+/// them too, so the two surfaces cannot disagree about what "the working set"
+/// means. `--archived` shows every archived session TBD has mirrored. A
+/// provider with a horizon may stop listing sessions archived (and exited) long
+/// ago; TBD keeps each one it saw archived, but one it never saw archived
+/// before the horizon passed is not listed.
 ///
 /// Dismissed rows are always hidden: dismiss is TBD's own local tombstone, and
 /// a row a user removed from their lists reappearing here would make the
@@ -1289,8 +1292,10 @@ struct RemoteList: AsyncParsableCommand {
         abstract: "List the provider-hosted sessions TBD is mirroring",
         discussion: """
             Archived sessions are hidden unless --archived is passed, matching \
-            what the sidebar shows: the provider keeps them in its inventory by \
-            contract, and which of them a human sees is TBD's decision.
+            what the sidebar shows. A provider that declares an archive horizon \
+            may stop listing sessions archived long ago: --archived still shows \
+            every one TBD saw archived, but not one it never saw archived before \
+            the horizon passed.
 
             Sessions you have dismissed are always hidden — dismiss is a local \
             tombstone, and this is one of the lists it removes them from.
