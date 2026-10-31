@@ -1284,15 +1284,18 @@ public struct WorktreeStore: Sendable {
     /// receipts move with them, so a `panel.apply` retried across the promote
     /// still replays. Returns the moved surfaces, which the caller broadcasts
     /// under the main worktree.
+    ///
+    /// `now` stamps the retired row's `archivedAt` and the moved surfaces'
+    /// `updatedAt`.
     @discardableResult
     public func promoteScratchMigration(
         scratchID: UUID,
         mainWorktreeID: UUID,
         repoID: UUID,
-        tmuxServer: String
+        tmuxServer: String,
+        now: Date = Date()
     ) async throws -> [WorkspaceTabSurface] {
         try await writer.write { db -> [WorkspaceTabSurface] in
-            let now = Date()
             // Re-parent terminal, tab and panel rows first, guards after: a
             // missing row then exercises the rollback of these UPDATEs (and
             // tests assert exactly that), rather than short-circuiting before

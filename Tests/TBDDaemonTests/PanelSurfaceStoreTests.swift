@@ -878,9 +878,18 @@ struct PanelSurfaceStoreTests {
         #expect(before.map(\.id) == [first.id, second.id])
         #expect(try await panelRowCount(db, worktreeID: scratch.id) == 6)
 
+        let promotedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let moved = try await db.worktrees.promoteScratchMigration(
             scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
-            tmuxServer: scratch.tmuxServer)
+            tmuxServer: scratch.tmuxServer, now: promotedAt)
+
+        let stamps = try await db.writerForTests.read { dbc in
+            try Date.fetchAll(
+                dbc, sql: "SELECT updatedAt FROM workspace_tab_surface WHERE worktreeID = ?",
+                arguments: [main.id.uuidString])
+        }
+        #expect(stamps == [promotedAt, promotedAt], "the moved surfaces take the injected date")
+        #expect(try await db.worktrees.get(id: scratch.id)?.archivedAt == promotedAt)
 
         let after = try await db.panelSurface.surfaces(worktreeID: main.id)
         #expect(after == moved, "the promote returns the moved surfaces as stored, for its delta")
