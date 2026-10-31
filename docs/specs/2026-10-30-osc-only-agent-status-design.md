@@ -212,6 +212,15 @@ Every other consumer of the column sees the same `.unknown`. The delivery
 verifier reports a send to such a session as undetermined rather than
 confirmed, and the PR poll schedule sees no activity from it.
 
+Three checks that refuse while a session is mid-turn or waiting on the user
+have nothing to act on for such a session, and there are no rails on
+`.unknown`: the composer's gated send never refuses, because nothing records
+a prompt on screen; `tbd terminal close` without `--force` closes it; and a
+manual "Hibernate now" parks it. So a composer send can land on an open
+dialog, and a close or a manual park can end a running turn. That is the
+accepted cost of a session that cannot report; the idle sweep and merge-park
+still leave it alone.
+
 ### Continue in Claude
 
 Continue in Claude replaces a Codex process with Claude, and runs only on the
