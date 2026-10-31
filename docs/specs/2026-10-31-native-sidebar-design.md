@@ -344,23 +344,73 @@ The daemon, in `WorktreeStore.moveMany`:
 4. Writes each carried row's `parentWorktreeID`, and `sortOrder` 0…n−1 across
    the group in the new order. A carried remote row whose parent changes gets
    `remote_parent_assigned = 1`, exactly as `move` sets it.
-5. Broadcasts the same change notification `worktree.move` does.
+5. Broadcasts a `worktreeSiblingsReordered` delta carrying the destination
+   group's full result: every row in it, with its `parentWorktreeID` and new
+   `sortOrder`. The existing `worktreeMoved` delta carries only the moved row,
+   so a client applying it holds stale sibling sort orders until its next poll;
+   the full-group delta brings a client to the daemon's state in one step. A
+   client that predates the delta catches up at its next poll. The
+   implementation confirms that an unknown delta is skipped rather than ending
+   the subscription.
 
 Any failed check throws a typed error and writes nothing. `worktree.move` stays
 for `tbd worktree reparent`. Single-row drags send `moveMany` with one ID, so
 the sidebar has one commit path.
 
 `AppState.moveWorktrees(ids:newParentID:before:)` replaces the unused
-`moveWorktree`. It updates local state first, using the same
-`SiblingPlacement.place`, so the rows land under the cursor at once, and rolls
-back to its snapshot if the RPC fails. The daemon's group includes archived rows
-and the app's local lists do not, but the placement preserves the relative order
-of the rows both sides hold, so the two orders agree on every visible row.
+`moveWorktree`:
+
+- **Local first.** It applies the move to `worktrees` or `scratchWorktrees`
+  with the same `SiblingPlacement.place` the daemon runs, so the rows land
+  under the cursor before any message leaves the app. The daemon's group
+  includes archived rows and the app's lists do not, but the placement keeps
+  the relative order of the rows both sides hold, so the two agree on every
+  visible row.
+- **A pending-move overlay.** The app re-fetches worktrees every 2 s. A poll
+  sent before the daemon committed and answered after the local move carries
+  the old order, and assigning it would snap the rows back until the next poll.
+  So `AppState` records each in-flight move and re-applies it on top of every
+  poll result before that result is compared and assigned; a stale poll then
+  produces the arrays the app already holds and publishes nothing. This follows
+  the archive tombstones in `applyWorktreeArchivedDelta`, which keep a poll that
+  predates an archive from resurrecting its row. A move leaves the overlay once
+  its RPC has succeeded and either its `worktreeSiblingsReordered` delta has
+  been applied or a poll sent after the RPC returned has been.
+- **Failure.** If the RPC fails, the move leaves the overlay, the app refreshes
+  its worktrees from the daemon, whose state is the truth, and a toast names
+  the row and the reason. Rebuilding from the daemon rather than restoring a
+  snapshot keeps any change that landed during the RPC.
 
 ### Dock
 
 The dock reorders pins only, through the existing `reorderPins` and its
 `PinnedDockReorder` stale-order guard.
+
+## Responsiveness
+
+A drop never waits for the daemon. The rows move in the app first, and the RPC
+and its echo arrive after the user has already seen the result. What remains on
+the main thread has a budget:
+
+- **Rebuild and apply** – building the tree, diffing it and applying the result
+  takes at most 8 ms, half a frame, on a sidebar of 320 rows, the size measured
+  on a heavy install, and at most 16 ms with 800 remote sessions. The same
+  budget covers every rebuild, whether a drop, a status change or a poll caused
+  it.
+- **Drop to screen** – the outline shows a drop's result on the main-loop turn
+  after the drop, within the rebuild budget.
+- **Drop validation** – `validateDrop` runs on every mouse movement during a
+  drag. `SidebarDropPolicy` answers by walking ancestors and looking up children
+  through the existing children index, so its cost grows with the tree's depth,
+  not its size; each call takes under 1 ms on the trees above.
+- **No blocking work** – the rebuild, the drop path and the cells do no IPC, no
+  disk access and no Launch Services queries on the main thread.
+
+`SidebarListUpdateBench` (env-gated, not a CI timing test, since timing on a
+shared runner flakes) is extended to measure a full rebuild and apply, a drop
+and a `validateDrop` call on 320-row and 800-session trees. The rebuild and apply
+steps also emit `os_signpost` intervals, so Instruments can attribute a slow
+frame to them.
 
 ## Flag and rollout
 
@@ -382,8 +432,9 @@ The dock reorders pins only, through the existing `reorderPins` and its
   2. The parity checklist below was walked live and ticked off.
   3. No hang-stack sample in `~/Library/Logs/TBD/hang-stacks/` from the soak
      has a frame in `Sidebar/Native/`.
-  4. `SidebarListUpdateBench`, extended to the native rebuild and apply, shows
-     the native path no slower than the `List` path at 800 remote sessions.
+  4. `SidebarListUpdateBench` shows the native path within every budget in
+     "Responsiveness", and no slower than the `List` path at 800 remote
+     sessions.
 - **Graduation** – flips `appKitSidebarDefault` to true. Deleting the SwiftUI
   sidebar path is a later, separate PR, once the new default has held.
 
@@ -438,12 +489,21 @@ Daemon:
 - `moveMany` writes nothing when any row fails validation, keeps the carried
   order, shifts scratch siblings through the NULL-safe group, sets
   `remote_parent_assigned` only when a remote row's parent changes, and rejects
-  carried rows from different top-level groups. The RPC handler has a test.
+  carried rows from different top-level groups. The RPC handler has a test, and
+  the `worktreeSiblingsReordered` delta it broadcasts carries the whole
+  destination group.
 
 App:
 
-- `moveWorktrees` matches the daemon's order optimistically and rolls back when
-  the RPC fails.
+- `moveWorktrees` matches the daemon's order locally before the RPC returns.
+- A poll result that predates the commit, assigned while the move is in
+  flight, leaves the rows where the move put them and publishes nothing.
+- A move leaves the overlay after its delta is applied, and after a poll sent
+  once the RPC returned, and not before either.
+- Applying `worktreeSiblingsReordered` leaves the app's sibling sort orders
+  equal to the daemon's.
+- A failed RPC removes the overlay, refreshes from the daemon, keeps a change
+  that landed during the RPC, and shows the toast.
 - Offscreen AppKit tests through `OffscreenHost` mount the outline and the dock
   and check rows and kinds, the selection round trip, expansion through the
   `AppState` setters, `validateDrop` and `acceptDrop` with a stub
@@ -466,8 +526,11 @@ per `CLAUDE.md`.
   tells them to. The builder is the only reader of `AppState`, so a missed input
   shows up as a builder test that fails, not as a cell that forgot to observe.
 - **Main-thread rebuild cost.** A rebuild walks every row, about 320 on a heavy
-  sidebar today. Coalescing bounds the passes, and graduation criterion 4 bounds
-  their cost.
+  sidebar today. Coalescing bounds the passes, and the budgets in
+  "Responsiveness", enforced at graduation, bound their cost.
+- **Rows that jump after a drop.** A stale poll or a partial echo could move
+  rows back after the user placed them. The pending-move overlay and the
+  full-group delta exist to prevent that, and each has a test.
 - **Scroll jumps on structural updates.** `NSTableView` re-anchors its visible
   rows during its own layout after height changes. Offscreen tests check scroll
   position across inserts, removes and height-class changes.
