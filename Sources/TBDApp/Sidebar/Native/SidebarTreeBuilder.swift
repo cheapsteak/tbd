@@ -74,14 +74,15 @@ enum SidebarTreeBuilder {
     /// - Parameters:
     ///   - now: the clock the staleness and issue captions read.
     ///   - directoryExists: answers whether an unpromoted scratch row's
-    ///     directory is still there; the default stats the path, exactly as
-    ///     `WorktreeRowView` does on every body evaluation today. The
-    ///     controller can hand in a cached probe instead.
+    ///     directory is still there. Required, with no disk-checking
+    ///     default: a rebuild must not touch the disk, so the controller hands
+    ///     in its cache of answers probed off the main thread, and tests a
+    ///     fixed answer.
     static func build(
         _ appState: AppState,
         options: SidebarBuildOptions,
         now: Date = Date(),
-        directoryExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        directoryExists: @escaping (String) -> Bool
     ) -> SidebarTree {
         var pass = BuildPass(
             appState: appState, options: options,

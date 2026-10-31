@@ -7,11 +7,12 @@ import TBDShared
 /// sidebar paths, so the SwiftUI `List` and the native outline offer the same
 /// footer.
 ///
-/// The filter menu binds the same `sidebar.showHiddenRepos` key `SidebarView`
-/// reads, so flipping it here re-filters whichever list is showing.
+/// The filter menu binds `SidebarBuildOptions.showHiddenReposKey`, the key
+/// `SidebarView` and the native outline read, so flipping it here re-filters
+/// whichever list is showing.
 struct SidebarFooter: View {
     @Environment(AppState.self) var appState
-    @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
+    @AppStorage(SidebarBuildOptions.showHiddenReposKey) private var showHiddenRepos: Bool = false
     @State private var showingClone = false
 
     var body: some View {
