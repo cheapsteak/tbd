@@ -38,7 +38,7 @@ extension SidebarOutlineController {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let item = item as? SidebarItem, item !== Self.orphan, let node = tree.node(item.id) else { return nil }
         let cell = dequeueCell(for: node.kind)
-        configure(cell, kind: node.kind)
+        configure(cell, kind: node.kind, id: node.id)
         return cell
     }
 
@@ -105,18 +105,21 @@ extension SidebarOutlineController {
         (outline.makeView(withIdentifier: identifier, owner: self) as? Cell) ?? make()
     }
 
-    /// Hands `cell` its model and the insets the chevron placement sets. Each
-    /// row ID names one kind for good, so the cell is always the kind's own.
-    func configure(_ cell: NSView, kind: SidebarNodeKind) {
+    /// Hands `cell` its model, the insets the chevron placement sets, its
+    /// controls' target, and the current hover. Each row ID names one kind
+    /// for good, so the cell is always the kind's own.
+    func configure(_ cell: NSView, kind: SidebarNodeKind, id: SidebarNodeID) {
         let rowInset = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
         switch kind {
         case .worktree(let model):
             guard let cell = cell as? WorktreeRowCell else { return }
             cell.leadingInset = rowInset
+            wireControls(of: cell, id: id)
             cell.configure(model)
         case .remoteSession(let model):
             guard let cell = cell as? RemoteSessionRowCell else { return }
             cell.leadingInset = rowInset
+            cell.toolTips.provider = { [weak self] target in self?.helpText(target, for: id) }
             cell.configure(model)
         case .scratchHeader(let model), .repoHeader(let model):
             guard let cell = cell as? SectionHeaderCell else { return }
@@ -127,11 +130,18 @@ extension SidebarOutlineController {
             cell.chevronButton.action = #selector(chevronClicked(_:))
             cell.locateButton.target = self
             cell.locateButton.action = #selector(locateClicked(_:))
+            cell.plusButton.target = self
+            cell.plusButton.action = #selector(sectionPlusClicked(_:))
             cell.configure(model)
         case .providerHeader(let model):
             guard let cell = cell as? ProviderHeaderCell else { return }
             cell.leadingInset = SidebarNativeMetrics.headerContentInset
                 + SidebarHeaderMetrics.titleLeadingInset(chevronBeforeProjectName: chevronBeforeTitle)
+            cell.plusButton.target = self
+            cell.plusButton.action = #selector(providerPlusClicked(_:))
+            cell.authButton.target = self
+            cell.authButton.action = #selector(authClicked(_:))
+            cell.toolTips.provider = { [weak self] target in self?.helpText(target, for: id) }
             cell.configure(model)
         case .groupHeader(let model):
             guard let cell = cell as? GroupHeaderCell else { return }
@@ -142,6 +152,7 @@ extension SidebarOutlineController {
             cell.leadingInset = rowInset + 2
             cell.configure()
         }
+        applyHover(to: cell, id: id)
     }
 
     /// The row view's tint origin, guide lines and provider highlight.
@@ -153,8 +164,8 @@ extension SidebarOutlineController {
             let ancestry = worktreeAncestorCount(of: node.id)
             configuration.guideCount = ancestry
             configuration.tintLevel = max(model.depth - ancestry, 0)
-            // A pinned row shows its pin without hover.
-            configuration.showsPinGap = model.isPinned && !model.isMain
+            // The pin shows on hover, and always once pinned.
+            configuration.showsPinGap = (model.isPinned || hoverState.row == node.id) && !model.isMain
         case .remoteSession(let model):
             configuration.tintLevel = model.depth
         case .providerHeader(let model):
@@ -164,6 +175,9 @@ extension SidebarOutlineController {
         }
         rowView.configuration = configuration
         configuredRowViews[ObjectIdentifier(rowView)] = node.id
+        // `RepoSectionView` dims its rows while the section's chevron is
+        // hovered: the gesture is about to hide them.
+        rowView.alphaValue = isDimmedByChevron(node) ? 0.7 : 1
     }
 
     /// How many worktree rows `id` sits under: `WorktreeRowView`'s

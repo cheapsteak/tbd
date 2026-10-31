@@ -72,6 +72,9 @@ struct WorktreeRowModel: Equatable {
     var isMain: Bool
     /// `.withSubtitle` exactly when `subtitles` is not empty.
     var heightClass: RowHeightClass
+    /// `worktree.repoID != nil`. Nesting is repo-only, so a scratch row offers
+    /// no nested `+` and no "New nested worktree" action.
+    var hasRepo: Bool = false
 }
 
 /// A repo or Scratch section header (`RepoSectionView.headerRow`,

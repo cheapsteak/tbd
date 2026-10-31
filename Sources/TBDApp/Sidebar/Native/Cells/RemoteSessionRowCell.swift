@@ -4,8 +4,8 @@ import AppKit
 /// `RemoteSessionRowView` draws it: the pending glyph or the globe, the name
 /// (bold when unread, secondary once exited) with its state caption, then the
 /// status suffix or typing dots. A session the provider no longer reports draws
-/// at half opacity.
-final class RemoteSessionRowCell: NSTableCellView {
+/// at half opacity. The name can be swapped for the inline rename editor.
+final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.remoteSessionRow")
 
     /// `RemoteSessionRowView` pins `.frame(height: 28)` with or without its
@@ -22,8 +22,14 @@ final class RemoteSessionRowCell: NSTableCellView {
     let nameField = SidebarCellKit.label(font: SidebarCellKit.nameFont)
     let captionField = SidebarCellKit.label(font: SidebarCellKit.captionFont, color: .secondaryLabelColor)
     private(set) lazy var suffix = SuffixSlot(in: self)
+    let toolTips = SidebarToolTips()
 
     private(set) var model: RemoteSessionRowModel?
+    private(set) var isHovered = false
+    /// The name is wider than the room it has: hovering the row shows it in
+    /// the tooltip bubble.
+    private(set) var isNameTruncated = false
+    private(set) var renameEditor: SidebarRenameEditor?
 
     init() {
         super.init(frame: .zero)
@@ -48,12 +54,15 @@ final class RemoteSessionRowCell: NSTableCellView {
             leadingImageView.image = SidebarCellKit.symbol("circle.dotted", size: 10, weight: .semibold)
             leadingImageView.contentTintColor = .secondaryLabelColor
             leadingImageView.alphaValue = 1
+            leadingImageView.toolTip = nil
         } else {
             leadingImageView.image = SidebarCellKit.symbol("globe", size: 10)
             leadingImageView.contentTintColor = .secondaryLabelColor
             leadingImageView.alphaValue = 0.55
+            leadingImageView.toolTip = "Remote session"
         }
         nameField.stringValue = model.title
+        nameField.isHidden = isRenaming
         nameField.font = model.isNameBold ? SidebarCellKit.boldNameFont : SidebarCellKit.nameFont
         nameField.textColor = model.isExited ? .secondaryLabelColor : .labelColor
         captionField.stringValue = model.caption ?? ""
@@ -64,12 +73,34 @@ final class RemoteSessionRowCell: NSTableCellView {
         needsLayout = true
     }
 
-    /// The hover hook rename and the context menu hang from.
-    func setHovered(_ hovered: Bool) {}
+    /// The pointer entered or left the row; the controller reads it for the
+    /// truncated-name bubble.
+    func setHovered(_ hovered: Bool) {
+        isHovered = hovered
+    }
+
+    // MARK: Rename
+
+    func beginRename(_ editor: SidebarRenameEditor) {
+        renameEditor?.view.removeFromSuperview()
+        renameEditor = editor
+        nameField.isHidden = true
+        addSubview(editor.view)
+        needsLayout = true
+    }
+
+    func endRename() {
+        renameEditor?.view.removeFromSuperview()
+        renameEditor = nil
+        nameField.isHidden = false
+        needsLayout = true
+    }
 
     override func prepareForReuse() {
+        releaseRenameForReuse()
         super.prepareForReuse()
         model = nil
+        isHovered = false
     }
 
     static func accessibilityLabel(for model: RemoteSessionRowModel) -> String {
@@ -94,6 +125,11 @@ final class RemoteSessionRowCell: NSTableCellView {
         let blockHeight = nameSize.height + (captionField.isHidden ? 0 : captionSize.height - 2)
         let top = ((bounds.height - blockHeight) / 2).rounded()
         nameField.frame = NSRect(x: x, y: top, width: min(nameSize.width, blockWidth), height: nameSize.height)
+        isNameTruncated = nameSize.width > nameField.frame.width + 0.5
+        if let editor = renameEditor {
+            editor.view.frame = NSRect(
+                x: x, y: 0, width: max(bounds.width - x - trailingWidth - 4, 40), height: bounds.height)
+        }
         if !captionField.isHidden {
             captionField.frame = NSRect(
                 x: x, y: top + nameSize.height - 2,
@@ -103,5 +139,6 @@ final class RemoteSessionRowCell: NSTableCellView {
         if suffix.isShown {
             suffix.place(atX: x + spacing, midY: midY)
         }
+        toolTips.update(on: self, [(rect: suffix.shownFrame, target: .suffix)])
     }
 }

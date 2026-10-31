@@ -32,8 +32,10 @@ import TBDShared
 /// The class is split by concern: this file holds its state, the view, the
 /// public surface, the update loop and the scratch-directory cache;
 /// `+Apply` applies trees, `+DataSource` answers the outline and configures
-/// cells, `+Selection` mirrors selection both ways, and `+Expansion` runs
-/// header actions, chevrons and reveal.
+/// cells, `+Selection` mirrors selection both ways, `+Expansion` runs
+/// header actions, chevrons and reveal, and `+Interaction` runs hover, the
+/// row and header controls, inline rename, context menus, sheets and the
+/// tooltip bubble.
 ///
 /// Selection (spec "Selection"): a user's selection goes to
 /// `AppState.selectedWorktreeIDs` through `SidebarSelectionBridge`, whose
@@ -129,18 +131,40 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     nonisolated(unsafe) private var defaultsObserver: (any NSObjectProtocol)?
 
+    // MARK: Interaction state (`+Interaction`)
+
+    /// Drives the hover tracker's 80 ms section debounce.
+    let hoverClock: any Clock<Duration>
+    /// Made with the view; the outline keeps it alive.
+    var hoverTracker: SidebarHoverTracker?
+    /// What the pointer was last reported over.
+    var hoverState = SidebarHoverTracker.State()
+    /// Laid over the scroll view, above every row.
+    let tooltipOverlay = RowTooltipOverlay(frame: .zero)
+    /// The `+` menu every repo header and worktree row shares.
+    let plusMenu = SidebarPlusMenu()
+    /// The row being renamed, its editor, and the cell showing it.
+    var renamingID: SidebarNodeID?
+    var renameEditor: SidebarRenameEditor?
+    weak var renamingCell: NSView?
+    var authPopover: NSPopover?
+
     static let signposter = OSSignposter(subsystem: "com.tbd.app", category: "native-sidebar")
 
-    /// - Parameter scratchDirectoryProbe: answers whether a scratch directory
-    ///   exists. Runs off the main thread; tests hand in a fixed answer.
+    /// - Parameters:
+    ///   - scratchDirectoryProbe: answers whether a scratch directory exists.
+    ///     Runs off the main thread; tests hand in a fixed answer.
+    ///   - clock: the hover tracker's clock, for its 80 ms debounce.
     init(
         appState: AppState,
         defaults: UserDefaults,
-        scratchDirectoryProbe: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        scratchDirectoryProbe: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.appState = appState
         self.defaults = defaults
         self.scratchDirectoryProbe = scratchDirectoryProbe
+        self.hoverClock = clock
         self.options = SidebarBuildOptions(defaults: defaults)
         self.chevronBeforeTitle = SidebarOutlineController.storedChevronBeforeTitle(defaults)
         super.init(nibName: nil, bundle: nil)
@@ -208,7 +232,18 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        view = scrollView
+
+        // The tooltip bubble floats over the scroll view, so it never joins
+        // the outline's own subviews and never scrolls away from its anchor.
+        let container = NSView(frame: .zero)
+        scrollView.frame = container.bounds
+        scrollView.autoresizingMask = [.width, .height]
+        tooltipOverlay.frame = container.bounds
+        tooltipOverlay.autoresizingMask = [.width, .height]
+        container.addSubview(scrollView)
+        container.addSubview(tooltipOverlay)
+        view = container
+        installInteractions()
     }
 
     override func viewDidLoad() {
@@ -239,6 +274,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     func beginHold(_ reason: HoldReason) {
         holds.insert(reason)
+        // Nothing is hovered under a drag; the next pointer move recomputes.
+        if reason == .drag { hoverTracker?.clear() }
     }
 
     /// Ends one hold; when it was the last, the held structure applies now.
@@ -283,6 +320,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         let exists = scratchDirectoryExists
         var scratchPaths: Set<String> = []
         var options = self.options
+        var renameRequest: UUID?
         let latest: SidebarTree = withObservationTracking { () -> SidebarTree in
             // Reveals write `AppState` before the tracking is installed, so
             // their writes schedule nothing, and the build below sees them.
@@ -292,7 +330,11 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             // The selection the apply mirrors into the outline.
             _ = state.selectedWorktreeIDs
             _ = state.selectedRemoteSession
-            return SidebarTreeBuilder.build(state, options: options, directoryExists: { exists[$0] ?? true })
+            let built = SidebarTreeBuilder.build(state, options: options, directoryExists: { exists[$0] ?? true })
+            // Rename-on-create: taken, and cleared, before the tracking is
+            // installed, like the reveals; the rename starts after the apply.
+            renameRequest = self.takeRenameRequest(in: built)
+            return built
         } onChange: { [weak self] in
             // On the writing thread; read the weak reference on the main one.
             SidebarOutlineController.performOnMain { self?.scheduleRebuild() }
@@ -305,6 +347,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         Self.signposter.endInterval("rebuild", interval)
         refreshScratchDirectories(scratchPaths)
         apply(latest)
+        if let renameRequest {
+            beginRename(.worktree(renameRequest))
+        }
     }
 
     /// Runs `body` on the main actor: at once when already on the main thread,

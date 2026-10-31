@@ -60,6 +60,25 @@ enum SidebarCellKit {
         return button
     }
 
+    /// A 20 pt square hover affordance in `HoverPressButtonStyle`'s look: a
+    /// secondary glyph that gains a wash while the pointer is over it and a
+    /// deeper one while pressed. The section `+`, the worktree row's nested
+    /// `+` and its gutter pin.
+    static func hoverButton(symbol name: String = "plus", size: CGFloat = 10) -> SidebarHoverButton {
+        let button = SidebarHoverButton(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+        button.isBordered = false
+        button.setButtonType(.momentaryChange)
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.title = ""
+        button.focusRingType = .none
+        button.refusesFirstResponder = true
+        button.image = SidebarCellKit.symbol(name, size: size)
+        button.contentTintColor = .secondaryLabelColor
+        button.isHidden = true
+        return button
+    }
+
     /// The label's single-line size, padding included.
     static func size(of field: NSTextField) -> NSSize {
         let size = field.intrinsicContentSize
@@ -106,6 +125,96 @@ enum SidebarCellKit {
         case .hibernated: "Hibernating — wakes on focus"
         case .needsAuth: "Needs you to sign in again"
         case .turnFailed: "The last turn failed"
+        }
+    }
+}
+
+/// Which control or glyph inside a row the pointer is over. The hover tracker
+/// asks the hovered row's cell, so the one tracking area also drives the
+/// button washes, the chevron's dimming of its section and the PR tooltip.
+enum SidebarHoverPart: Equatable {
+    case none
+    /// A section header's disclosure chevron.
+    case chevron
+    /// A section header's `+`, or a worktree row's nested `+`.
+    case plus
+    /// A worktree row's gutter pin.
+    case pin
+    /// A worktree row's leading PR glyph or PR-unknown mark.
+    case leadingGlyph
+}
+
+/// A cell with controls or glyphs the pointer can be over.
+@MainActor
+protocol SidebarHoverTarget: AnyObject {
+    /// The part at `point`, in the cell's own coordinates.
+    func hoverPart(at point: NSPoint) -> SidebarHoverPart
+}
+
+/// A borderless glyph button that draws `HoverPressButtonStyle`'s wash: the
+/// primary colour at 0.08 while the pointer is over it, 0.15 while pressed.
+/// The hover tracker, not a tracking area of its own, says when it is hovered.
+final class SidebarHoverButton: NSButton {
+    var showsHoverWash = false {
+        didSet { if showsHoverWash != oldValue { needsDisplay = true } }
+    }
+    /// Off for the chevron leading a title, which the SwiftUI path draws
+    /// plain.
+    var drawsWash = true {
+        didSet { if drawsWash != oldValue { needsDisplay = true } }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if drawsWash, isEnabled, isHighlighted || showsHoverWash {
+            NSColor.labelColor.withAlphaComponent(isHighlighted ? 0.15 : 0.08).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
+/// Help text a cell asks for only when AppKit is about to show it, so a row's
+/// tooltip — a status badge's OSC detail, the no-status reason, a provider's
+/// summary — is computed when the pointer arrives rather than on every
+/// rebuild (spec "Units": text needed only on hover).
+@MainActor
+final class SidebarToolTips: NSObject, NSViewToolTipOwner {
+    enum Target: Equatable {
+        /// A row's status badge or typing dots.
+        case suffix
+        /// A worktree row's no-status mark.
+        case noStatusMark
+        /// A worktree row's shortened "(repo)" suffix: the full repo name.
+        case crossRepo
+        /// A provider header's name: the provider's compact summary.
+        case providerName
+        /// A provider header's needs-auth key.
+        case providerAuth
+    }
+
+    /// Answers a target's text; the controller sets it with the row it is
+    /// configuring. Nil or an empty answer shows nothing.
+    var provider: ((Target) -> String?)?
+    private var targets: [NSView.ToolTipTag: Target] = [:]
+
+    /// Replaces `view`'s tooltip rectangles with `regions`, in `view`'s
+    /// coordinates. Called from the cell's `layout()`.
+    func update(on view: NSView, _ regions: [(rect: NSRect, target: Target)]) {
+        view.removeAllToolTips()
+        targets = [:]
+        for region in regions where !region.rect.isEmpty {
+            targets[view.addToolTip(region.rect, owner: self, userData: nil)] = region.target
+        }
+    }
+
+    /// `nonisolated` with an assumed main actor, so the conformance holds
+    /// whichever isolation the SDK in use declares for the requirement.
+    nonisolated func view(
+        _ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        MainActor.assumeIsolated {
+            targets[tag].flatMap { provider?($0) } ?? ""
         }
     }
 }
@@ -158,6 +267,16 @@ final class SuffixSlot {
             typingDots?.isHidden = true
             imageView.isHidden = true
             imageView.image = nil
+        }
+    }
+
+    /// The frame of whatever the slot shows, for its tooltip; `.zero` when
+    /// empty.
+    var shownFrame: NSRect {
+        switch indicator {
+        case .working?: typingDots?.frame ?? .zero
+        case .some: imageView.isHidden ? .zero : imageView.frame
+        case nil: .zero
         }
     }
 
