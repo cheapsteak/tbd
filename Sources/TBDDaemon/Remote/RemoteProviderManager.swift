@@ -41,7 +41,7 @@ public actor RemoteProviderManager {
     /// convergence points (`apply` and `applyUpsert`). Installed after the
     /// RPC router exists, because the router owns the binding coordinator;
     /// nil in fixtures that do not exercise it, where naming PRs does nothing.
-    private var providerPRBinder: ProviderPRBinder?
+    private var providerPRBinder: (any ProviderPRBinding)?
     /// Hands every sighting — after deletion suppression, hint intact — to
     /// remote transcript background sync, which records the hint and decides
     /// whether the session's cache needs a sync. Installed after the RPC
@@ -784,7 +784,7 @@ public actor RemoteProviderManager {
     /// Install (or clear) the binder for provider-named PRs. Called once at
     /// boot, after the RPC router is built and before `start()`, so no
     /// snapshot is applied without it.
-    func setProviderPRBinder(_ binder: ProviderPRBinder?) {
+    func setProviderPRBinder(_ binder: (any ProviderPRBinding)?) {
         providerPRBinder = binder
     }
 

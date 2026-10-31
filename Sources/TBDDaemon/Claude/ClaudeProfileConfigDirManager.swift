@@ -10,9 +10,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 /// maintain independent credentials.
 ///
 /// Each profile dir mirrors slots from the host's `~/.claude/` directory via
-/// symlinks. Eight are host *customizations* — `projects/`, `plugins/`,
-/// `skills/`, `agents/`, `commands/`, `hooks/`, `CLAUDE.md`, and
-/// `settings.json` — and the ninth, `sessions/`, is not a customization at all
+/// symlinks. Nine are host *customizations* — `projects/`, `plugins/`,
+/// `skills/`, `agents/`, `commands/`, `hooks/`, `CLAUDE.md`,
+/// `settings.json`, and `keybindings.json` — and the tenth, `sessions/`, is not a customization at all
 /// but Claude Code's live cross-session peer registry, mirrored so profiles can
 /// see each other's sessions (see `mirrorSlots`). Per-profile identity
 /// (`.claude.json`, Keychain entry keyed on `CLAUDE_CONFIG_DIR` path, and
@@ -102,7 +102,9 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Slots that each TBD profile dir mirrors from the host's claude config dir.
     /// Symlinked from <profile>/claude/<slot> to <host-base>/<slot>.
     /// `projects` migrates pre-existing real-dir content into the host store
-    /// before symlinking (file-level collision check; atomic abort), `sessions`
+    /// before symlinking (byte-identical duplicates dropped, diverged
+    /// transcripts resolved longer-wins with a backup, alias symlinks dropped;
+    /// any other collision aborts the whole migration atomically), `sessions`
     /// merges its rows into the host registry, and every other slot with
     /// pre-existing real content is moved to `<slot>.profile-local` as a sidecar
     /// before the symlink is created — see `ensureMirrorSlot` for the full
@@ -116,6 +118,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         "hooks",
         "CLAUDE.md",
         "settings.json",
+        "keybindings.json",
         // Claude Code's cross-session peer registry: one small JSON row per
         // live session (pid, session id, cwd, tmux pane, inbox socket path,
         // name, status), written to `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`.
@@ -131,7 +134,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Slots whose host directory is created on demand when it does not exist
     /// yet, instead of skipping the slot (the default in `ensureMirrorSlot`).
     ///
-    /// Only `sessions` qualifies. The other eight are host *customizations* —
+    /// Only `sessions` qualifies. The other nine are host *customizations* —
     /// a profile has nothing to gain from a symlink to an empty directory the
     /// user never created, and creating one would invent host state. The peer
     /// registry is the opposite: Claude Code creates it the first time a
@@ -145,7 +148,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// (the default in `ensureMirrorSlot`).
     ///
     /// Only `sessions` qualifies, and the distinction is not stylistic: the
-    /// other eight slots hold inert user content, while a `sessions/` row is
+    /// other nine slots hold inert user content, while a `sessions/` row is
     /// live process state. `ensureHostMirrors` runs on every spawn, so a
     /// sidecar move there would relocate *running* sessions' rows out from
     /// under them — nothing reads the sidecar, and each session's exit-time
@@ -161,10 +164,10 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
     /// Slots whose host entry must be a directory before it can be mirrored.
     ///
-    /// Scoped to `sessions` deliberately. The other eight keep their
-    /// pre-existing unchecked behaviour — two of them (`CLAUDE.md`,
-    /// `settings.json`) are files by design, and the rest have never been
-    /// reported wedged. What makes `sessions` different is that TBD *writes*
+    /// Scoped to `sessions` deliberately. The other nine keep their
+    /// pre-existing unchecked behaviour — three of them (`CLAUDE.md`,
+    /// `settings.json`, `keybindings.json`) are files by design, and the rest
+    /// have never been reported wedged. What makes `sessions` different is that TBD *writes*
     /// through the mirror: a host `sessions` that is a regular file would give
     /// every profile a symlink to a file and fail every registry write.
     private static let slotsRequiringHostDirectory: Set<String> = ["sessions"]
@@ -177,53 +180,198 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// socket paths — are not world-readable.
     private static let sessionsDirectoryPermissions = 0o700
 
-    /// Walk `src` against `dst`, returning the path of the first real collision
-    /// found, or nil if `src` can be merged into `dst` without overwriting any
-    /// existing file. Read-only.
+    /// One pass-1 decision about a profile `projects/` entry that pass 2 applies.
+    private enum ProjectsCollisionResolution {
+        /// The profile file is byte-identical to the host file: remove the profile copy.
+        /// The sizes pass 1 saw are re-checked at apply time, which makes it much
+        /// less likely that a live writer appending in between loses bytes. It
+        /// does not rule it out: an append between the re-check and the unlink,
+        /// or a same-size rewrite, still gets past it.
+        case dropDuplicate(profile: URL, host: URL, profileSize: UInt64, hostSize: UInt64)
+        /// The profile entry is a symlink to its own host counterpart: remove only the link.
+        case dropAliasLink(profile: URL)
+        /// A differing transcript on both sides: the longer copy ends up at the
+        /// host path and the other is kept beside it as a `.backup` file.
+        case keepLonger(profile: URL, host: URL, profileSize: UInt64, hostSize: UInt64)
+    }
+
+    /// Pass-1 output: resolvable collisions plus every unresolvable one.
+    private struct ProjectsMigrationPlan {
+        var resolutions: [ProjectsCollisionResolution] = []
+        /// Host-side paths that cannot be resolved without discarding data.
+        var conflicts: [URL] = []
+    }
+
+    /// True when anything, including a dangling symlink, sits at `url`.
+    /// `fileExists` answers false for a dangling link; `attributesOfItem` does not follow.
+    private static func pathOccupied(_ url: URL) -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
+    }
+
+    /// True when `url` is itself a symlink. Never follows it.
+    private static func isSymlink(_ url: URL) -> Bool {
+        let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        return type == .typeSymbolicLink
+    }
+
+    /// True when `url` resolves to a directory. Follows symlinks, so callers
+    /// that must tell a link apart check `isSymlink` first.
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    private static func fileSize(of url: URL) -> UInt64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.uint64Value
+    }
+
+    /// Walk the profile tree `src` against the host tree `dst`, recording how
+    /// each collision resolves (or that it cannot). Read-only.
     ///
-    /// "Real collision" means: at some matching path, both sides exist AND
-    /// (either they have different types, or both are non-directory files).
-    /// Same-named directories on both sides recurse.
-    private func findCollisionRecursive(src: URL, dst: URL) -> URL? {
+    /// Classification at every path where the profile has an entry:
+    /// 1. Profile symlink: aliasing its own host counterpart is dropped (checked
+    ///    first, so a link is never moved onto its own target); otherwise it is
+    ///    moved as-is when the host path is free and a conflict when not. A
+    ///    profile-side symlink is never followed or recursed into.
+    /// 2. Host path unoccupied (a dangling host symlink counts as occupied): nothing to do.
+    /// 3. File versus directory: conflict.
+    /// 4. Two directories: recurse.
+    /// 5. Two files: byte-identical is a duplicate; a differing `.jsonl`
+    ///    transcript of another size keeps the longer; anything else conflicts.
+    private func planProjectsMigration(src: URL, dst: URL, into plan: inout ProjectsMigrationPlan) {
         let fm = FileManager.default
 
-        var dstIsDir: ObjCBool = false
-        let dstExists = fm.fileExists(atPath: dst.path, isDirectory: &dstIsDir)
-        if !dstExists {
-            return nil  // dst absent → src can be moved whole-tree
-        }
-
-        // If src has vanished between enumeration and this recursive call
-        // (rare race with another process), treat as no collision — there's
-        // nothing to merge so nothing to clash with.
-        var srcIsDir: ObjCBool = false
-        guard fm.fileExists(atPath: src.path, isDirectory: &srcIsDir) else { return nil }
-
-        // Type mismatch (one file, one directory) → real collision.
-        if srcIsDir.boolValue != dstIsDir.boolValue {
-            return dst
-        }
-
-        // Both files at the same path → real collision (no overwrite).
-        if !srcIsDir.boolValue {
-            return dst
-        }
-
-        // Both directories — recurse into src's children.
-        let srcEntries = (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
-        for entry in srcEntries {
-            let dstEntry = dst.appendingPathComponent(entry.lastPathComponent)
-            if let collision = findCollisionRecursive(src: entry, dst: dstEntry) {
-                return collision
+        if Self.isSymlink(src) {
+            if let dest = try? fm.destinationOfSymbolicLink(atPath: src.path) {
+                let target = URL(fileURLWithPath: dest, relativeTo: src.deletingLastPathComponent())
+                    .resolvingSymlinksInPath()
+                if target.path == dst.resolvingSymlinksInPath().path {
+                    plan.resolutions.append(.dropAliasLink(profile: src))
+                    return
+                }
             }
+            if Self.pathOccupied(dst) { plan.conflicts.append(dst) }
+            return
         }
-        return nil
+
+        guard Self.pathOccupied(dst) else {
+            // Free slot: the profile entry is moved whole later. A real directory
+            // can still carry an alias link that would become a self-loop at
+            // its new home, so look inside it too (every dst below is free, so
+            // only alias links can come out of this walk).
+            var freeSrcIsDir: ObjCBool = false
+            if fm.fileExists(atPath: src.path, isDirectory: &freeSrcIsDir), freeSrcIsDir.boolValue {
+                planChildren(of: src, against: dst, into: &plan)
+            }
+            return
+        }
+
+        // src vanished between enumeration and this call (rare race): nothing to merge.
+        var srcIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: src.path, isDirectory: &srcIsDir) else { return }
+
+        var dstIsDir: ObjCBool = false
+        // Dangling host symlink: occupied but unresolvable.
+        guard fm.fileExists(atPath: dst.path, isDirectory: &dstIsDir) else {
+            plan.conflicts.append(dst)
+            return
+        }
+
+        if srcIsDir.boolValue != dstIsDir.boolValue {
+            plan.conflicts.append(dst)
+            return
+        }
+
+        if srcIsDir.boolValue {
+            planChildren(of: src, against: dst, into: &plan)
+            return
+        }
+
+        // Both regular files.
+        guard let profileSize = Self.fileSize(of: src),
+              let hostSize = Self.fileSize(of: dst.resolvingSymlinksInPath()) else {
+            plan.conflicts.append(dst)
+            return
+        }
+        if profileSize == hostSize, fm.contentsEqual(atPath: src.path, andPath: dst.path) {
+            plan.resolutions.append(
+                .dropDuplicate(profile: src, host: dst, profileSize: profileSize, hostSize: hostSize)
+            )
+        } else if src.pathExtension == "jsonl", profileSize != hostSize, !Self.isSymlink(dst) {
+            plan.resolutions.append(
+                .keepLonger(profile: src, host: dst, profileSize: profileSize, hostSize: hostSize)
+            )
+        } else {
+            plan.conflicts.append(dst)
+        }
+    }
+
+    private func planChildren(of src: URL, against dst: URL, into plan: inout ProjectsMigrationPlan) {
+        let entries = (try? FileManager.default.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
+        for entry in entries {
+            planProjectsMigration(src: entry, dst: dst.appendingPathComponent(entry.lastPathComponent), into: &plan)
+        }
+    }
+
+    /// Throws unless both files still have the sizes pass 1 judged them by.
+    private static func requireUnchanged(profile: URL, profileSize: UInt64, host: URL, hostSize: UInt64) throws {
+        guard fileSize(of: profile) == profileSize,
+              fileSize(of: host.resolvingSymlinksInPath()) == hostSize else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "\(host.lastPathComponent) changed since it was planned; will re-plan on the next spawn",
+            ])
+        }
+    }
+
+    /// First `<file>.backup`, `<file>.backup-2`, … beside `file` whose name is
+    /// free both there and in `otherDirectory`, the profile directory being
+    /// merged into `file`'s directory. A profile entry of that name moves into
+    /// the host directory later in the same pass, so a backup under its name
+    /// would collide with it and fail the merge.
+    /// `.backup` does not end in `.jsonl`, so transcript scanners ignore it.
+    private static func backupURL(for file: URL, avoidingNamesIn otherDirectory: URL) -> URL {
+        var candidate = file.appendingPathExtension("backup")
+        var n = 2
+        while pathOccupied(candidate)
+            || pathOccupied(otherDirectory.appendingPathComponent(candidate.lastPathComponent)) {
+            candidate = file.deletingLastPathComponent()
+                .appendingPathComponent("\(file.lastPathComponent).backup-\(n)")
+            n += 1
+        }
+        return candidate
+    }
+
+    /// Apply one pass-1 resolution. Idempotent across a partial failure: a
+    /// retry re-plans from the filesystem as it then stands.
+    private func apply(_ resolution: ProjectsCollisionResolution, hostPrefix: String) throws {
+        let fm = FileManager.default
+        switch resolution {
+        case .dropDuplicate(let profile, let host, let profileSize, let hostSize):
+            try Self.requireUnchanged(profile: profile, profileSize: profileSize, host: host, hostSize: hostSize)
+            try fm.removeItem(at: profile)
+        case .dropAliasLink(let profile):
+            // removeItem on a symlink unlinks it; the target is untouched.
+            try fm.removeItem(at: profile)
+        case .keepLonger(let profile, let host, let profileSize, let hostSize):
+            try Self.requireUnchanged(profile: profile, profileSize: profileSize, host: host, hostSize: hostSize)
+            let backup = Self.backupURL(for: host, avoidingNamesIn: profile.deletingLastPathComponent())
+            let profileIsLonger = profileSize > hostSize
+            if profileIsLonger {
+                try fm.moveItem(at: host, to: backup)
+                try fm.moveItem(at: profile, to: host)
+            } else {
+                try fm.moveItem(at: profile, to: backup)
+            }
+            let rel = host.path.hasPrefix(hostPrefix) ? String(host.path.dropFirst(hostPrefix.count)) : host.path
+            logger.warning("diverged transcript \(rel, privacy: .public): kept the \(profileIsLonger ? "profile" : "host", privacy: .public) copy as the longer (profile \(profileSize, privacy: .public) bytes, host \(hostSize, privacy: .public) bytes); other copy saved as \(backup.lastPathComponent, privacy: .public)")
+        }
     }
 
     /// Move every file/subdirectory in `src` into the corresponding location
     /// under `dst`. The caller must have already verified
-    /// `findCollisionRecursive(src:dst:)` returned nil — no overwrite checks are
-    /// performed here. After a successful merge, `src` is removed.
+    /// the projects plan had no conflicts and its resolutions were applied — no
+    /// overwrite checks are performed here. After a successful merge, `src` is removed.
     private func mergeRecursive(src: URL, dst: URL) throws {
         let fm = FileManager.default
 
@@ -331,12 +479,19 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     ///   sidecar, which lets the symlink be created without destroying what was
     ///   there.
     ///
-    /// For `projects/` (migrateContent=true), performs file-level collision detection
-    /// by recursively walking the full tree structure. Same-named directories on both
-    /// sides recurse; type mismatches and same-named files are real collisions that
-    /// trigger atomic abort. Cwd-hash directories with disjoint trees are merged into
-    /// the host store. Atomic with respect to name collisions: pass 1 confirms no
-    /// file-level conflicts before pass 2 moves anything. Not atomic with respect to
+    /// For `projects/` (migrateContent=true), pass 1 recursively walks the full tree
+    /// and plans (`planProjectsMigration`); same-named directories on both sides
+    /// recurse. Resolvable collisions: a byte-identical profile file is dropped, a
+    /// profile symlink to its own host counterpart is unlinked, and a differing
+    /// `.jsonl` transcript of another size keeps the longer copy at the host path
+    /// with the other beside it as `<name>.backup`. Any other collision (type
+    /// mismatch, a differing non-transcript file, a symlink pointing elsewhere onto
+    /// an occupied host path) aborts the whole migration with nothing changed.
+    /// Otherwise pass 2 applies the resolutions and merges everything else into the
+    /// host store. Only byte-identical copies, alias links and a top-level Finder
+    /// `.DS_Store` are ever deleted.
+    /// Atomic with respect to conflicts: pass 1 confirms none exist before pass 2
+    /// changes anything. Not atomic with respect to
     /// I/O failures during pass 2 — those leave partial state that the next call
     /// cleans up.
     ///
@@ -414,62 +569,62 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
 
-                    // Pass 1: Recursive collision scan. For each top-level cwd-hash entry,
-                    // check if it exists on host and scan the full tree for collisions.
-                    var collidingPath: URL?
-                    for entry in entries {
-                        let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
-                        let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
-
-                        // Skip stray non-directory entries at the top level (e.g. .DS_Store).
-                        // These get swept explicitly before the final removeItem.
-                        var isCwdHashDir: ObjCBool = false
-                        guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
-                              isCwdHashDir.boolValue else { continue }
-
-                        if let collision = findCollisionRecursive(src: cwdHashPath, dst: hostCwdHashPath) {
-                            collidingPath = collision
-                            break
-                        }
+                    // Every top-level entry is planned, so a stray regular file is
+                    // moved or reported as a conflict, never swept. The one exception
+                    // is Finder's .DS_Store: view metadata Finder regenerates, which
+                    // would otherwise turn a differing copy into a conflict that
+                    // blocks the link forever.
+                    func isPlannable(_ url: URL) -> Bool {
+                        guard url.lastPathComponent == ".DS_Store" else { return true }
+                        return Self.isSymlink(url) || Self.isDirectory(url)
                     }
 
-                    if let collidingPath {
-                        // Log the colliding entry as a path relative to the host slot root
-                        // (e.g. "-cwd-A/sub/leaf.md") rather than the absolute host path —
-                        // less noisy, and the host-slot context is already obvious from the
-                        // slot name in the message.
-                        let hostPrefix = hostEntry.path + "/"
-                        let rel = collidingPath.path.hasPrefix(hostPrefix)
-                            ? String(collidingPath.path.dropFirst(hostPrefix.count))
-                            : collidingPath.path
-                        let collisionDesc = " (\(rel))"
-                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc, privacy: .public); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
+                    // Pass 1 (read-only): plan resolutions and collect every conflict.
+                    var plan = ProjectsMigrationPlan()
+                    for entry in entries where isPlannable(entry) {
+                        planProjectsMigration(
+                            src: entry,
+                            dst: hostEntry.appendingPathComponent(entry.lastPathComponent),
+                            into: &plan
+                        )
+                    }
+
+                    // Conflicts are logged relative to the host slot root
+                    // (e.g. "-cwd-A/sub/leaf.md"), not as absolute host paths.
+                    let hostPrefix = hostEntry.path + "/"
+                    if !plan.conflicts.isEmpty {
+                        let rels = plan.conflicts.map { conflict in
+                            conflict.path.hasPrefix(hostPrefix)
+                                ? String(conflict.path.dropFirst(hostPrefix.count))
+                                : conflict.path
+                        }
+                        logger.warning("projects migration incomplete for profile due to file collision (\(rels.joined(separator: ", "), privacy: .public)); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
 
-                    // Pass 2: No collisions detected; safe to migrate all entries recursively.
-                    for entry in entries {
-                        let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
-                        let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
-
-                        // Same directory-only guard as pass 1 — strays handled by the sweep below.
-                        var isCwdHashDir: ObjCBool = false
-                        guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
-                              isCwdHashDir.boolValue else { continue }
-
-                        try mergeRecursive(src: cwdHashPath, dst: hostCwdHashPath)
+                    // Pass 2: apply resolutions, then move everything else (now collision-free).
+                    for resolution in plan.resolutions {
+                        try apply(resolution, hostPrefix: hostPrefix)
+                    }
+                    for entry in entries where isPlannable(entry) {
+                        // An alias link dropped above is gone; skip it.
+                        guard Self.pathOccupied(entry) else { continue }
+                        try mergeRecursive(src: entry, dst: hostEntry.appendingPathComponent(entry.lastPathComponent))
                     }
 
-                    // Sweep any stray non-directory entries left behind by the
-                    // pass 1/2 guards (e.g. a .DS_Store). removeItem(at:) on the
-                    // parent would delete them recursively without a log trail
-                    // — do it explicitly here so the destruction is observable.
-                    let leftover = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
-                    for stray in leftover {
-                        logger.debug("removing stray entry \(stray.lastPathComponent, privacy: .public) from profile projects/ during migration")
-                        try? fm.removeItem(at: stray)
+                    // Drop the unplanned Finder .DS_Store files explicitly so the
+                    // removal is observable, then remove the directory itself
+                    // non-recursively: rmdir refuses a non-empty directory, so
+                    // anything a live writer created after planning is never deleted.
+                    for entry in entries where !isPlannable(entry) {
+                        logger.debug("removing Finder metadata \(entry.lastPathComponent, privacy: .public) from profile projects/ during migration")
+                        try? fm.removeItem(at: entry)
                     }
-                    try fm.removeItem(at: profileEntry)
+                    if rmdir(profileEntry.path) != 0 {
+                        let left = ((try? fm.contentsOfDirectory(atPath: profileEntry.path)) ?? []).sorted()
+                        logger.warning("profile \(name, privacy: .public)/ not empty after migration (left: \(left.joined(separator: ", "), privacy: .public)); symlink will not be created, will re-plan on the next spawn")
+                        return
+                    }
                 } catch {
                     logger.warning("failed migrating \(name, privacy: .public) for profile: \(error.localizedDescription, privacy: .public)")
                     return

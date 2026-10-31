@@ -68,8 +68,8 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     case forge
     /// The daemon's git sweep.
     case gitSweep
-    /// Claude Code's own OSC 7501 report, read off the pty by whichever TBD
-    /// reader owned it.
+    /// The agent's own OSC 7501 report — Claude Code's or Codex's — read off
+    /// the pty by whichever TBD reader owned it.
     case programStatus
     /// Composed by TBD from other facts.
     ///
@@ -355,7 +355,7 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// `session.states` — should not have to reimplement the grouping to read
     /// the record.
     public let classification: AwaitingInputClass
-    /// The block Claude Code announced over OSC 7501, when the wait was
+    /// The block the agent announced over OSC 7501, when the wait was
     /// reported that way rather than by the `Notification` hook. Absent on
     /// hook-delivered reasons and on rows written before this existed.
     ///
@@ -413,13 +413,14 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     }
 }
 
-/// A block Claude Code announced over OSC 7501 (`state=blocked`), carried on
+/// A block the agent announced over OSC 7501 (`state=blocked`), carried on
 /// the `AwaitingInputReason` it produced.
 ///
-/// `kind` is Claude Code's own label for the block, carried rather than
+/// `kind` is the agent's own label for the block, carried rather than
 /// interpreted beyond the vocabulary `ProgramStatusBlockKind` names.
 public struct ProgramStatusBlock: Codable, Sendable, Equatable {
-    /// permission / question, or nil for an open dialog.
+    /// permission / question, or nil when the agent named no kind — Claude
+    /// Code's open dialog, or any block from Codex 0.163.0.
     public let kind: ProgramStatusBlockKind?
     /// The task entry that blocked, or nil for the main entry.
     public let taskID: String?

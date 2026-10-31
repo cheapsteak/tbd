@@ -736,8 +736,8 @@ struct ReplacementSpawnOverlay: Sendable {
     static func repointSettings(
         in command: String, from: String, to: String, fileExists: (String) -> Bool
     ) -> String {
-        let flag = " --settings \(SystemPromptBuilder.shellEscape(from))"
-        let replacement = fileExists(to) ? " --settings \(SystemPromptBuilder.shellEscape(to))" : ""
+        let flag = " --settings \(shellEscape(from))"
+        let replacement = fileExists(to) ? " --settings \(shellEscape(to))" : ""
         return command.replacingOccurrences(of: flag, with: replacement)
     }
 }

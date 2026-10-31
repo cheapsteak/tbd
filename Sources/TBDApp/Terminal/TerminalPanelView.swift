@@ -491,8 +491,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState.closeFocusedTab()
         }
         // Program Status Protocol (OSC 7501) reports go to the app, which
-        // forwards only a holder Claude session's; the probe gate is set
-        // below, once the coordinator knows this panel.
+        // forwards only a holder Claude or Codex session's; the probe gate
+        // is set below, once the coordinator knows this panel.
         let programStatusAppState = appState
         let programStatusTerminalID = terminalID
         tv.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in

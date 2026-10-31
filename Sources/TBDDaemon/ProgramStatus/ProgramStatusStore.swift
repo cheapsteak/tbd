@@ -146,16 +146,19 @@ public actor ProgramStatusStore {
             report = parsed
         }
 
-        // 2. App. Claude Code stamps `app=claude-code` on every state report
-        // but writes both clears without it — the bare `state=clear` and
-        // `state=clear:id=X` (read from the v2.1.301 bundle) — so a clear with
-        // no `app` is accepted; one naming another app is still refused.
-        // Refusing app-less clears left a finished task entry standing, and
-        // with it a session stuck reading as working.
-        let appAccepted = report.app == ProgramStatusProtocol.expectedApp
-            || (report.app == nil && report.state == .clear)
-        guard appAccepted else {
-            return reject(terminalID, "app is not \(ProgramStatusProtocol.expectedApp)")
+        // 2. App. Each agent stamps its own `app` on every state report —
+        // `claude-code` or `codex` — but writes its clears without one: Claude
+        // Code both the bare `state=clear` and `state=clear:id=X` (read from
+        // the v2.1.301 bundle), Codex its bare `state=clear`. So a clear with
+        // no `app` is accepted; one naming an app TBD does not know is still
+        // refused. Refusing app-less clears left a finished task entry
+        // standing, and with it a session stuck reading as working. Whether
+        // the app is the terminal's own agent is checked after the lookup.
+        guard report.app != nil || report.state == .clear else {
+            return reject(terminalID, "missing app")
+        }
+        if let app = report.app, !ProgramStatusProtocol.knownApps.contains(app) {
+            return reject(terminalID, "unknown app")
         }
 
         // A report observed at or before the terminal's latest drop belongs
@@ -164,15 +167,22 @@ public actor ProgramStatusStore {
             return reject(terminalID, "observed before drop")
         }
 
-        // 3. A live holder session whose recorded agent is Claude.
+        // 3. A live holder session running an agent that reports, and a
+        // report from that agent: `app` must be the terminal's own, so a
+        // Claude report on a Codex terminal (or the reverse) is refused. An
+        // app-less clear is either agent's.
         let generationBeforeLookup = dropGenerations[terminalID] ?? 0
         guard let terminal = await terminalLookup(terminalID) else {
             return reject(terminalID, "unknown terminal")
         }
         guard terminal.transport == .holder else { return reject(terminalID, "not a holder session") }
         guard !terminal.isParked else { return reject(terminalID, "terminal is parked") }
-        let isClaude = terminal.kind == .claude || (terminal.kind == nil && !terminal.isCodexTerminal)
-        guard isClaude else { return reject(terminalID, "not a Claude session") }
+        guard let expectedApp = ProgramStatusProtocol.expectedApp(for: terminal) else {
+            return reject(terminalID, "not an agent session")
+        }
+        if let app = report.app, app != expectedApp {
+            return reject(terminalID, "app does not match the terminal's agent")
+        }
 
         // 4. Incarnation.
         let incarnationID: UUID?

@@ -43,6 +43,9 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
+    var codexDisable: [String] = []
+
     @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
     var pluginDirs: [String] = []
 
@@ -51,14 +54,30 @@ struct TerminalCreate: AsyncParsableCommand {
 
     /// The params this invocation sends, with each `--plugin-dir` made
     /// absolute against `cwd`, or none sent when the flag was not given.
-    func createParams(worktreeID: UUID, prompt: String?, cwd: String) -> TerminalCreateParams {
+    /// `codexDisabledFeatures` is the already-normalized `--codex-disable`
+    /// list, nil when the flag was not given.
+    func createParams(
+        worktreeID: UUID, prompt: String?, cwd: String,
+        codexDisabledFeatures: [String]? = nil
+    ) -> TerminalCreateParams {
         TerminalCreateParams(
             worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
             claudeSettingsOverlay: claudeSettings, model: model,
+            codexDisabledFeatures: codexDisabledFeatures,
             pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd))
     }
 
     mutating func validate() throws {
+        if !codexDisable.isEmpty {
+            guard type == .codex else {
+                throw ValidationError(TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                _ = try TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+            } catch {
+                throw ValidationError(error.localizedDescription)
+            }
+        }
         if !pluginDirs.isEmpty {
             // The daemon's rule: a Claude type, or any resume, is a Claude
             // terminal. This command sends no resume id, so only `--type
@@ -81,12 +100,16 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
+        let disabledFeatures: [String]? = try codexDisable.isEmpty
+            ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
             params: createParams(
                 worktreeID: worktreeID,
                 prompt: try resolvePrompt(inline: prompt, file: promptFile),
-                cwd: FileManager.default.currentDirectoryPath),
+                cwd: FileManager.default.currentDirectoryPath,
+                codexDisabledFeatures: disabledFeatures),
             resultType: Terminal.self
         )
 

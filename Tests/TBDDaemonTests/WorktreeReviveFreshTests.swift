@@ -387,13 +387,13 @@ struct WorktreeReviveFreshTests {
         #expect(command.contains("--resume A"), "\(command)")
         #expect(command.contains("--fork-session"), "\(command)")
         #expect(
-            command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(plugA.path))"),
+            command.contains(" --plugin-dir \(shellEscape(plugA.path))"),
             "\(command)")
         #expect(!command.contains(plugB.path), "\(command)")
 
         let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: claude.id.uuidString)
         #expect(
-            command.contains(" --settings \(SystemPromptBuilder.shellEscape(settingsPath))"),
+            command.contains(" --settings \(shellEscape(settingsPath))"),
             "\(command)")
         let settingsData = try Data(contentsOf: URL(fileURLWithPath: settingsPath))
         let settings = try #require(

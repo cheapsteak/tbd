@@ -80,6 +80,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// NULL when nothing was passed and on rows written before the column.
     var claude_spawn_extras: String?
 
+    /// JSON-encoded `CodexLaunchOptions` — see `Terminal.codexLaunchOptions`.
+    var codex_launch_options: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -116,6 +119,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.start_held_reason = terminal.startHeldReason
         self.start_held_at = terminal.startHeldAt
         self.claude_spawn_extras = ClaudeSpawnExtrasColumn.encode(terminal.claudeSpawnExtras)
+        self.codex_launch_options = FactColumnJSON.encode(terminal.codexLaunchOptions)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -170,6 +174,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         model.startHeldAt = start_held_at
         model.claudeSpawnExtras = ClaudeSpawnExtrasColumn.decode(
             claude_spawn_extras, table: Self.databaseTableName, rowID: id)
+        // An unreadable blob degrades to "no options recorded", so a relaunch
+        // falls back to the default command rather than failing the row.
+        model.codexLaunchOptions = FactColumnJSON.decode(
+            CodexLaunchOptions.self, from: codex_launch_options)
         return model
     }
 }
@@ -556,6 +564,8 @@ private func resetRecreatedShellLifecycle(
     record.start_held_at = nil
     record.label = TerminalLabel.shell
     record.kind = TerminalKind.shell.rawValue
+    // A shell launches no Codex, so the tab no longer has Codex options.
+    record.codex_launch_options = nil
     return incarnationID
 }
 
@@ -812,7 +822,8 @@ public struct TerminalStore: Sendable {
         holderChildStartedAt: Date? = nil,
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil,
-        claudeSpawnExtras: ClaudeSpawnExtras? = nil
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -833,6 +844,7 @@ public struct TerminalStore: Sendable {
         terminal.serverName = serverName
         terminal.sessionIncarnationID = sessionIncarnationID
         terminal.claudeSpawnExtras = claudeSpawnExtras
+        terminal.codexLaunchOptions = codexLaunchOptions
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -1355,6 +1367,8 @@ public struct TerminalStore: Sendable {
             }
             record.kind = TerminalKind.claude.rawValue
             record.label = TerminalLabel.claudeCode
+            // The tab now runs Claude; its Codex options no longer describe it.
+            record.codex_launch_options = nil
             record.profile_id = profileID?.uuidString
             record.claudeSessionID = sessionID
             record.transcriptPath = transcriptPath

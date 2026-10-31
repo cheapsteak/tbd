@@ -661,6 +661,47 @@ public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
     }
 }
 
+/// The per-terminal options a Codex tab was launched with: its model override
+/// and the Codex features turned off for it.
+///
+/// Recorded on the terminal row at spawn, because every later relaunch of
+/// Codex in that same tab — recreating a dead window, or restoring Codex after
+/// a failed continue-in-Claude — has nothing else to read them from, and a
+/// relaunch without them would quietly start the tab on the default model with
+/// those features back on.
+public struct CodexLaunchOptions: Codable, Sendable, Equatable {
+    /// Passed to Codex as `-c model="<id>"`. Nil when the tab took the `tbd`
+    /// Codex profile's model.
+    public var model: String?
+    /// Passed to Codex as `--disable <feature>`, in launch order.
+    public var disabledFeatures: [String]
+
+    public init(model: String? = nil, disabledFeatures: [String] = []) {
+        self.model = model
+        self.disabledFeatures = disabledFeatures
+    }
+
+    /// The options worth recording for a launch, or nil when it used none, so
+    /// a tab started without options keeps a NULL column and relaunches with
+    /// the default command. An empty model is no override, matching
+    /// `CodexSpawnCommandBuilder.modelOverrideArgument`.
+    public static func recorded(model: String?, disabledFeatures: [String]) -> CodexLaunchOptions? {
+        let model = model.flatMap { $0.isEmpty ? nil : $0 }
+        guard model != nil || !disabledFeatures.isEmpty else { return nil }
+        return CodexLaunchOptions(model: model, disabledFeatures: disabledFeatures)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case model, disabledFeatures
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        disabledFeatures = try c.decodeIfPresent([String].self, forKey: .disabledFeatures) ?? []
+    }
+}
+
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -791,6 +832,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// a response did not fill it in.
     public var hasComposerDraft: Bool?
 
+    /// The options this tab's Codex was launched with, or nil when it was
+    /// launched with none — every non-Codex tab, every Codex tab started
+    /// without a model or disabled features, and every row older than the
+    /// column. Stamped at spawn, reapplied whenever Codex is relaunched in this
+    /// tab, and cleared when the tab stops running Codex.
+    public var codexLaunchOptions: CodexLaunchOptions?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -912,6 +960,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case startHeldReason, startHeldAt
         case claudeSpawnExtras
         case hasComposerDraft
+        case codexLaunchOptions
     }
 
     public init(from decoder: Decoder) throws {
@@ -971,6 +1020,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         // Absent in JSON from a daemon that predates the column.
         claudeSpawnExtras = try c.decodeIfPresent(ClaudeSpawnExtras.self, forKey: .claudeSpawnExtras)
         hasComposerDraft = try c.decodeIfPresent(Bool.self, forKey: .hasComposerDraft)
+        codexLaunchOptions = try c.decodeIfPresent(
+            CodexLaunchOptions.self, forKey: .codexLaunchOptions)
     }
 }
 

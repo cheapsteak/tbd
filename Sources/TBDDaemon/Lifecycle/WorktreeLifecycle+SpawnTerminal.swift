@@ -96,6 +96,10 @@ extension WorktreeLifecycle {
     ///     settings overlay, written onto the new row so later starts of its
     ///     session can reapply them. Already applied to `command` by the
     ///     caller; nil stores nothing.
+    ///   - codexLaunchOptions: the options a Codex spawn's command was built
+    ///     with, nil for every other spawn and for a Codex spawn with none.
+    ///     Written in the same insert, so every later relaunch of Codex in this
+    ///     tab can reapply them.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -113,7 +117,8 @@ extension WorktreeLifecycle {
         transport: TerminalSpawnTransport,
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil,
-        claudeSpawnExtras: ClaudeSpawnExtras? = nil
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -175,7 +180,8 @@ extension WorktreeLifecycle {
                 holderChildStartedAt: holderHandle == nil ? nil : now(),
                 serverName: serverName,
                 sessionIncarnationID: sessionIncarnationID,
-                claudeSpawnExtras: claudeSpawnExtras
+                claudeSpawnExtras: claudeSpawnExtras,
+                codexLaunchOptions: codexLaunchOptions
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

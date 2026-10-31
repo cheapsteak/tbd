@@ -140,7 +140,7 @@ public final class SocketServer: Sendable {
         // already bound sets `cleanupOnClose` to false — "socket already bound,
         // owner must clean up" — which is what puts the unlink under the
         // ownership check in `unlinkOwnedSocketFile()`.
-        let boundFD = try Self.bindListeningSocket(at: socketPath)
+        let boundFD = try bindListeningSocket(at: socketPath)
         // Read the file's identity as close to `bind(2)` as possible, before
         // any await gives a successor the chance to replace it. A successor
         // daemon's `start()` unlinks whatever is at this path and binds a fresh
@@ -186,51 +186,6 @@ public final class SocketServer: Sendable {
             try? await self.group.shutdownGracefully()
             self.unlinkOwnedSocketFile()
         }
-    }
-
-    /// Create an `AF_UNIX` stream socket and `bind(2)` it at `path`, returning
-    /// the bound descriptor for NIO to adopt.
-    ///
-    /// Only creation and bind happen here. NIO sets the descriptor
-    /// non-blocking and calls `listen(2)` on it while it builds the channel,
-    /// exactly as it would for a socket it had made itself. What changes is
-    /// ownership of the *file*: because NIO did not open the path, it will not
-    /// unlink the path when the channel closes, and `stop()` decides that
-    /// instead.
-    static func bindListeningSocket(at path: String) throws -> Int32 {
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        let capacity = MemoryLayout.size(ofValue: addr.sun_path)
-        guard pathBytes.count < capacity else {
-            throw SocketServerStartError.socketPathTooLong(path: path, limit: capacity - 1)
-        }
-        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
-            raw.copyBytes(from: pathBytes)
-            raw[pathBytes.count] = 0
-        }
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw SocketServerStartError.socketCreationFailed(code: errno)
-        }
-
-        let bound = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                bind(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bound == 0 else {
-            let code = errno
-            close(fd)
-            throw SocketServerStartError.bindFailed(path: path, code: code)
-        }
-
-        // Restrict the socket before anything can connect to it. NIO's listen
-        // comes later, so there is no window here where the file is reachable
-        // at the old mode.
-        chmod(path, 0o700)
-        return fd
     }
 
     /// Reclaim the socket file this server bound, if it is still there and
@@ -317,61 +272,6 @@ public final class SocketServer: Sendable {
             return
         }
         try? FileManager.default.removeItem(atPath: socketPath)
-    }
-}
-
-// MARK: - Start errors
-
-/// Why binding the RPC socket failed. These are all fatal to daemon startup;
-/// they exist so the failure names itself instead of arriving as a bare errno.
-public enum SocketServerStartError: Error, LocalizedError, CustomStringConvertible {
-    case socketPathTooLong(path: String, limit: Int)
-    case socketCreationFailed(code: Int32)
-    case bindFailed(path: String, code: Int32)
-
-    public var errorDescription: String? { description }
-
-    public var description: String {
-        switch self {
-        case .socketPathTooLong(let path, let limit):
-            return "socket path is \(path.utf8.count) bytes, over the \(limit)-byte sun_path limit: \(path)"
-        case .socketCreationFailed(let code):
-            return "socket(AF_UNIX, SOCK_STREAM): \(String(cString: strerror(code)))"
-        case .bindFailed(let path, let code):
-            return "bind(2) on \(path): \(String(cString: strerror(code)))"
-        }
-    }
-}
-
-// MARK: - Socket file identity
-
-/// The identity of a file on disk — `(st_dev, st_ino)` — as distinct from its
-/// path. Two sockets bound in turn at one path are two different inodes, and
-/// that is the only thing that tells them apart.
-struct SocketFileIdentity: Equatable {
-    let device: dev_t
-    let inode: ino_t
-
-    /// Reads the identity of whatever is at `path`, or `nil` if nothing is.
-    ///
-    /// `lstat` rather than `stat`: a symlink swapped in at the path is not the
-    /// socket we bound, and must not be mistaken for it.
-    ///
-    /// By the path, and not by `fstat(2)` on the bound descriptor, however
-    /// tempting the tighter window looks: on darwin the two do not name the
-    /// same thing. `fstat(2)` on a bound `AF_UNIX` descriptor reports the
-    /// socket's own in-kernel vnode — a different inode, with `st_dev` of -1 —
-    /// not the filesystem entry `bind(2)` created. Measured on darwin 25.1:
-    /// `fstat` answered `dev=-1 ino=15302332` for a socket whose path
-    /// `lstat`ed as `dev=16777235 ino=863366896`. An identity captured that
-    /// way could never equal the one read back from the path, so every
-    /// ownership check would fail closed and the socket file would never be
-    /// reclaimed at all.
-    init?(path: String) {
-        var info = stat()
-        guard lstat(path, &info) == 0 else { return nil }
-        self.device = info.st_dev
-        self.inode = info.st_ino
     }
 }
 

@@ -4,11 +4,6 @@ import TBDShared
 /// Builds the `--append-system-prompt` value for Claude sessions in TBD worktrees.
 enum SystemPromptBuilder {
 
-    /// Shell-escape a string for embedding in a single-quoted shell argument.
-    static func shellEscape(_ text: String) -> String {
-        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
     static let defaultRenamePrompt = RepoConstants.defaultRenamePrompt
 
     /// Slim pointer injected via `--append-system-prompt` on fresh Claude
