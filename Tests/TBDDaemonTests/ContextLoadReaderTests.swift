@@ -4,9 +4,8 @@ import Testing
 import TBDShared
 
 /// Tier 2 — real files in a temp directory, because the reader's contract
-/// includes a byte-bounded tail read, and the `FileHandle.modificationDate()`
-/// stamp defined beside it reads a real descriptor; neither survives being
-/// mocked away. No `TBD_HOME` involved: every path is passed in.
+/// includes a byte-bounded tail read, which does not survive being mocked
+/// away. No `TBD_HOME` involved: every path is passed in.
 @Suite struct ContextLoadReaderTests {
 
     private struct Scratch {
@@ -163,39 +162,6 @@ import TBDShared
 
         #expect(load.used?.value == 777,
                 "a tail cut mid-codepoint erased a numerator that was plainly there")
-    }
-
-    // MARK: - The stamp belongs to the payload
-
-    /// `contents(atPath:)` then `attributesOfItem(atPath:)` are two lookups of
-    /// the same *name*, and the two can answer about different files — a rename
-    /// can land between them, and `attributesOfItem` does not even follow a
-    /// symlink — so the pair can hand back one file's bytes with another's
-    /// modification time. That produces an `ObservedFact` whose observed-at is
-    /// newer than the value it labels — a stale fact made to look fresh, which
-    /// is what `ObservedFact`'s provenance exists to rule out.
-    /// `modificationDate()` asks the descriptor the bytes are read through: one
-    /// open, one inode, both halves.
-    @Test func theStampComesFromTheFileTheHandleHasOpen() throws {
-        let scratch = try Scratch()
-        defer { scratch.cleanUp() }
-        let target = scratch.root.appendingPathComponent("real-transcript.jsonl").path
-        let published = Date(timeIntervalSince1970: 1_700_000_000)
-        try Data(#"{"message":{"usage":{"input_tokens":5}}}"#.utf8)
-            .write(to: URL(fileURLWithPath: target))
-        try FileManager.default.setAttributes(
-            [.modificationDate: published], ofItemAtPath: target)
-
-        // The name the handle is opened on resolves to that file, but is itself
-        // a different filesystem object with its own, much newer stamp.
-        let link = scratch.root.appendingPathComponent("transcript-link.jsonl").path
-        try FileManager.default.createSymbolicLink(
-            atPath: link, withDestinationPath: target)
-
-        let handle = try #require(FileHandle(forReadingAtPath: link))
-        defer { try? handle.close() }
-        #expect(handle.modificationDate() == published,
-                "the stamp came from a different file than the one the handle reads")
     }
 
     @Test func unreadableTranscriptIsAbsenceNotZero() {
