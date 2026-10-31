@@ -151,6 +151,24 @@ extension RPCRouter {
             return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
         }
 
+        // Disabled features are likewise a Codex launch argument. Refuse them
+        // elsewhere, and refuse a malformed key rather than hand it to Codex.
+        // A `let`, not a `var`: the Codex spawn below reads it inside a
+        // concurrently-executing closure, which may not capture a var.
+        let codexDisabledFeatures: [String]
+        if let requested = params.codexDisabledFeatures, !requested.isEmpty {
+            guard params.type == .codex else {
+                return RPCResponse(error: TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                codexDisabledFeatures = try TerminalCreateParams.normalizedCodexDisabledFeatures(requested)
+            } catch {
+                return RPCResponse(error: error.localizedDescription)
+            }
+        } else {
+            codexDisabledFeatures = []
+        }
+
         // Which agent this call spawns, decided once: the plugin-folder check
         // below, the admission gate and the spawn all read the same answer.
         // Codex wins; otherwise a Claude type or any resume of a session is
@@ -339,6 +357,10 @@ extension RPCRouter {
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let codexSpawnEnv = codexEnv
+            // The same model and features the command below is built from,
+            // recorded on the row so a relaunch of Codex in this tab keeps them.
+            let codexLaunchOptions = CodexLaunchOptions.recorded(
+                model: params.model, disabledFeatures: codexDisabledFeatures)
             let terminal = try await actuating(actuationID) {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: params.worktreeID,
@@ -358,7 +380,8 @@ extension RPCRouter {
                         command: CodexSpawnCommandBuilder.build(
                             initialPrompt: params.prompt,
                             executablePath: codexPreparation.executablePath,
-                            model: params.model),
+                            model: params.model,
+                            disabledFeatures: codexDisabledFeatures),
                         env: codexSpawnEnv,
                         sensitiveEnv: codexEnvOverrides,
                         cols: resolvedCols,
@@ -367,7 +390,8 @@ extension RPCRouter {
                         claudeSessionID: nil,
                         profileID: nil,
                         kind: .codex,
-                        transport: decidedTransport)
+                        transport: decidedTransport,
+                        codexLaunchOptions: codexLaunchOptions)
                 }
             }
 
@@ -1795,8 +1819,12 @@ extension RPCRouter {
                             server: currentWorktree.tmuxServer,
                             windowID: window.windowID,
                             cwd: currentWorktree.path,
+                            // Relaunch with the model and disabled features
+                            // the tab was started with, read from the row
+                            // re-fetched under this lock.
                             shellCommand: CodexSpawnCommandBuilder.command(
-                                executablePath: codexPreparation.executablePath),
+                                executablePath: codexPreparation.executablePath,
+                                launchOptions: currentTerminal.codexLaunchOptions),
                             env: replacementEnv,
                             sensitiveEnv: codexEnvOverrides,
                             cols: resolvedCols,

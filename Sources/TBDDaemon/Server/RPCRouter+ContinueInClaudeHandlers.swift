@@ -418,11 +418,15 @@ extension RPCRouter {
             repo: repo?.envOverrides,
             profile: nil
         ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+        // The rollback relaunches Codex in this same tab, so it keeps the
+        // model and disabled features the tab was started with.
         let codexCommand = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
             resumeThreadID: sourceThreadID,
             executablePath: codexPreparation.executablePath,
-            profileFlag: profileFlag)
+            profileFlag: profileFlag,
+            model: source.codexLaunchOptions?.model,
+            disabledFeatures: source.codexLaunchOptions?.disabledFeatures ?? [])
 
         return PreparedContinueInClaude(
             source: source,
@@ -636,11 +640,15 @@ extension RPCRouter {
         let codexPreparation = try CodexLaunchPreparation.prepare(
             executableResolver: codexExecutableResolver,
             homeEnsurer: codexHomeEnsurer)
+        // A pending row is still the Codex tab, so its recorded options are
+        // the ones the restored Codex must keep.
         let command = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
             resumeThreadID: sourceThreadID,
             executablePath: codexPreparation.executablePath,
-            profileFlag: codexProfileFlagResolver(codexPreparation.executablePath))
+            profileFlag: codexProfileFlagResolver(codexPreparation.executablePath),
+            model: candidate.codexLaunchOptions?.model,
+            disabledFeatures: candidate.codexLaunchOptions?.disabledFeatures ?? [])
 
         guard let initialWorktree = try await db.worktrees.getLocal(
             id: candidate.worktreeID) else {

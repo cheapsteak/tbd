@@ -55,7 +55,7 @@ that the new session can make judgment calls rather than follow narrow steps.
 EOF
 ```
 
-Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` does the same for a new worktree whose primary agent is Codex. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
+Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` does the same for a new worktree whose primary agent is Codex. Add `--codex-disable <feature>` (repeatable, e.g. `--codex-disable computer_use`) to turn a Codex feature off for that one terminal; TBD passes it to Codex as `--disable <feature>` and leaves the user's own Codex config untouched. `tbd worktree create` has no equivalent yet. TBD keeps a terminal's `--model` and `--codex-disable` choices with that terminal, so if its window dies and is recreated, Codex relaunches with them. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
 
 ### Create a new worktree with an initial task
 

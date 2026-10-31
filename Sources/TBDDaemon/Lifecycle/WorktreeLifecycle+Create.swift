@@ -1559,6 +1559,10 @@ extension WorktreeLifecycle {
         // for a restored one, the source session's for a carryover. Nil for
         // any other primary.
         var primarySpawnExtras: ClaudeSpawnExtras? = nil
+        // The options a Codex primary's command is built with, recorded on its
+        // row so a relaunch of Codex in that tab keeps them. Nil for any other
+        // primary.
+        var primaryCodexLaunchOptions: CodexLaunchOptions? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1579,6 +1583,8 @@ extension WorktreeLifecycle {
                 initialPrompt: effectivePrompt,
                 executablePath: codexLaunch.executablePath,
                 model: codexModelOverride)
+            primaryCodexLaunchOptions = CodexLaunchOptions.recorded(
+                model: codexModelOverride, disabledFeatures: [])
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
@@ -1739,7 +1745,8 @@ extension WorktreeLifecycle {
                 kind: primaryTerminalKind,
                 transport: transport,
                 sessionIncarnationID: primarySessionIncarnationID,
-                claudeSpawnExtras: primarySpawnExtras)
+                claudeSpawnExtras: primarySpawnExtras,
+                codexLaunchOptions: primaryCodexLaunchOptions)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
             throw error
