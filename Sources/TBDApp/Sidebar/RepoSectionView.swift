@@ -50,6 +50,10 @@ struct RepoSectionView: View {
     /// See `AppState.sidebarWorkflowGroupsKey`.
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
+    /// Whether ended unadopted sessions sit behind one collapsed "Ended" row.
+    /// See `AppState.sidebarCollapseEndedSessionsKey`.
+    @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
+    private var collapseEnded: Bool = AppState.sidebarCollapseEndedSessionsDefault
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -339,7 +343,8 @@ struct RepoSectionView: View {
     @ViewBuilder
     private var expandedContent: some View {
         let layout = appState.sidebarRepositoryLayout(
-            repoID: repo.id, grouped: workflowGroups, matchedSessions: matchedRemoteSessions)
+            repoID: repo.id, grouped: workflowGroups, collapseEnded: collapseEnded,
+            matchedSessions: matchedRemoteSessions)
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -368,11 +373,26 @@ struct RepoSectionView: View {
         // worktrees carry a user-controlled order and sessions nothing
         // comparable, so appending stays predictable after a manual reorder.
         remoteSessionRows(layout.inlineSessions, depth: 0)
+        if let ended = layout.ended {
+            endedGroupContent(ended)
+        }
         if let groups = layout.remoteGroups {
             remoteGroupContent(groups)
         }
         if let hibernation = layout.hibernation {
             hibernatedGroupContent(hibernation)
+        }
+    }
+
+    /// The collapse-ended option's "Ended" row. Collapsed, no session row
+    /// exists in the List at all, which is the point.
+    @ViewBuilder
+    private func endedGroupContent(_ ended: SidebarEndedSessions) -> some View {
+        let id = SidebarGroupID(owner: .repository(repo.id), kind: .ended)
+        SidebarGroupHeader(id: id, title: "Ended", summary: ended.summary)
+            .listRowInsets(childRowInsets)
+        if appState.expandedSidebarGroups.contains(id) {
+            remoteSessionRows(ended.ended, depth: 1)
         }
     }
 
