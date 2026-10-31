@@ -52,8 +52,14 @@ struct WorkspaceTabSurfaceRecord: Codable, FetchableRecord, PersistableRecord, S
     var layout: String
     var revision: Int64
     var updatedAt: Date
+    /// True while the surface awaits its tab's first listing in a
+    /// `panel.syncTabs` for its worktree, so a sync that omits the tab does
+    /// not prune it. A scratch promote sets it on the surfaces it moves; the
+    /// first sync that lists the tab clears it. Store-internal: the shared
+    /// `WorkspaceTabSurface` does not carry it, and every write sets it.
+    var awaitingListing: Bool
 
-    init(from surface: WorkspaceTabSurface, position: Int, updatedAt: Date) throws {
+    init(from surface: WorkspaceTabSurface, position: Int, awaitingListing: Bool, updatedAt: Date) throws {
         self.id = surface.id.uuidString
         self.worktreeID = surface.worktreeID.uuidString
         self.primaryContent = try encodeJSONString(surface.primary)
@@ -62,6 +68,7 @@ struct WorkspaceTabSurfaceRecord: Codable, FetchableRecord, PersistableRecord, S
         self.layout = try encodeJSONString(StoredSideRegion(surface.side))
         self.revision = Int64(surface.revision)
         self.updatedAt = updatedAt
+        self.awaitingListing = awaitingListing
     }
 
     /// Failable decode: returns nil after a logged warning, never traps, when
@@ -308,7 +315,8 @@ public struct PanelSurfaceStore: Sendable {
     ///
     /// `position: nil` keeps the row's existing position (0 for a new row).
     /// Throws `invalidSurface` or `panelHistoryOwnedByOtherTab` before
-    /// anything lands.
+    /// anything lands. A commit lists no tab, so the row keeps its
+    /// `awaitingListing` marker (none for a new row).
     ///
     /// The surface is stored at the revision it carries, since its caller
     /// owns it whole; the revision counter is raised to at least that
@@ -318,7 +326,7 @@ public struct PanelSurfaceStore: Sendable {
         now: Date = Date()
     ) async throws {
         _ = try await writer.write { db in
-            try Self.writeSurface(surface, position: position, db: db, now: now)
+            try Self.writeSurface(surface, position: position, awaitingListing: nil, db: db, now: now)
             try Self.raiseRevisionCounter(toAtLeast: surface.revision, db: db)
             if let receipt {
                 try receipt.save(db)
@@ -372,6 +380,16 @@ public struct PanelSurfaceStore: Sendable {
         }
     }
 
+    /// Clears one row's `awaitingListing` marker, and nothing else, against an
+    /// already-open write transaction: a sync listed its tab. The marker is
+    /// store-internal, so the surface the app sees is unchanged and takes no
+    /// revision.
+    private static func clearAwaitingListing(tabKey: String, db: GRDB.Database) throws {
+        try db.execute(
+            sql: "UPDATE workspace_tab_surface SET awaitingListing = 0 WHERE id = ?",
+            arguments: [tabKey])
+    }
+
     /// One row's surface with its own histories joined in, or nil when the
     /// row cannot be read.
     private static func loadSurface(
@@ -391,9 +409,11 @@ public struct PanelSurfaceStore: Sendable {
     /// - writes a panel's history row only when its history changed, so an
     ///   untouched panel keeps its row's `updatedAt`.
     ///
-    /// `position: nil` keeps the row's existing position (0 for a new row).
+    /// `position: nil` keeps the row's existing position (0 for a new row),
+    /// and `awaitingListing: nil` keeps its marker (false for a new row).
     private static func writeSurface(
-        _ surface: WorkspaceTabSurface, position: Int?, db: GRDB.Database, now: Date
+        _ surface: WorkspaceTabSurface, position: Int?, awaitingListing: Bool?,
+        db: GRDB.Database, now: Date
     ) throws {
         let violations = PanelSurfaceValidator.violations(in: surface)
         guard violations.isEmpty else {
@@ -401,13 +421,16 @@ public struct PanelSurfaceStore: Sendable {
         }
         let tabKey = surface.id.uuidString
 
-        let resolvedPosition: Int
-        if let position {
-            resolvedPosition = position
-        } else {
-            resolvedPosition = try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabKey)?.position ?? 0
+        var existing: WorkspaceTabSurfaceRecord?
+        if position == nil || awaitingListing == nil {
+            existing = try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabKey)
         }
-        try WorkspaceTabSurfaceRecord(from: surface, position: resolvedPosition, updatedAt: now).save(db)
+        try WorkspaceTabSurfaceRecord(
+            from: surface,
+            position: position ?? existing?.position ?? 0,
+            awaitingListing: awaitingListing ?? existing?.awaitingListing ?? false,
+            updatedAt: now
+        ).save(db)
 
         let existingRows = try PanelHistoryRecord
             .filter(Column("tabID") == tabKey)
@@ -509,7 +532,8 @@ public struct PanelSurfaceStore: Sendable {
     /// error), and `.operationIDReused` without running `reduce` when
     /// `operationID`'s receipt is another tab's. The reduced surface is
     /// stored at the revision counter's next value, whatever revision the
-    /// reducer gave it. The row keeps its position; the receipt stores the
+    /// reducer gave it. The row keeps its position and its `awaitingListing`
+    /// marker, since an operation lists no tab; the receipt stores the
     /// result.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
@@ -533,7 +557,8 @@ public struct PanelSurfaceStore: Sendable {
             var next = try reduce(current)
             next.revision = try Self.nextRevision(db: db)
 
-            try Self.writeSurface(next, position: record.position, db: db, now: now)
+            try Self.writeSurface(
+                next, position: record.position, awaitingListing: record.awaitingListing, db: db, now: now)
 
             let result = PanelApplyResult(tab: next, replayed: false)
             let receipt = PanelOperationReceiptRecord(
@@ -569,9 +594,16 @@ public struct PanelSurfaceStore: Sendable {
     ///   revision counter's next value and is reported in `changed`. Panels
     ///   and histories are never touched.
     ///
-    /// This worktree's rows for tabs not listed are deleted first; their
-    /// histories cascade. Other worktrees' rows, and every receipt but a
-    /// re-parented tab's, are left alone.
+    /// Listing a tab clears its row's `awaitingListing` marker, whichever
+    /// case applies. Clearing it alone changes nothing the app sees, so it
+    /// takes no revision and is not reported.
+    ///
+    /// This worktree's rows for tabs not listed are deleted first, except a
+    /// row awaiting its tab's first listing; their histories cascade. A
+    /// scratch promote moves surfaces here before the app's tab list names
+    /// them, and a sync built from the earlier list can land after the move,
+    /// so such a row survives until a sync lists its tab. Other worktrees'
+    /// rows, and every receipt but a re-parented tab's, are left alone.
     ///
     /// An archived worktree changes nothing and gets an empty outcome:
     /// archiving deleted its surfaces (`WorktreeStore.archive`), and a sync
@@ -591,6 +623,7 @@ public struct PanelSurfaceStore: Sendable {
             let unlisted = try WorkspaceTabSurfaceRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .filter(!listedKeys.contains(Column("id")))
+                .filter(Column("awaitingListing") == false)
                 .order(Column("position"))
                 .fetchAll(db)
             for row in unlisted {
@@ -608,6 +641,9 @@ public struct PanelSurfaceStore: Sendable {
                 let current = try record.flatMap { try Self.loadSurface($0, db: db) }
                 guard let record, let current else {
                     guard let candidate = entry.importCandidate else {
+                        if let record, record.awaitingListing {
+                            try Self.clearAwaitingListing(tabKey: record.id, db: db)
+                        }
                         outcome.skipped.append(entry.tabID)
                         continue
                     }
@@ -625,7 +661,8 @@ public struct PanelSurfaceStore: Sendable {
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
                         primary: entry.primary ?? candidate.primary, side: candidate.side,
                         revision: try Self.nextRevision(db: db))
-                    try Self.writeSurface(imported, position: entry.position, db: db, now: now)
+                    try Self.writeSurface(
+                        imported, position: entry.position, awaitingListing: false, db: db, now: now)
                     outcome.imported.append(entry.tabID)
                     outcome.changed.append(imported)
                     continue
@@ -635,6 +672,9 @@ public struct PanelSurfaceStore: Sendable {
                 let reparented = current.worktreeID != worktreeID
                 guard reparented || record.position != entry.position
                         || current.label != entry.label || current.primary != primary else {
+                    if record.awaitingListing {
+                        try Self.clearAwaitingListing(tabKey: record.id, db: db)
+                    }
                     continue
                 }
                 let updated = WorkspaceTabSurface(
@@ -650,6 +690,7 @@ public struct PanelSurfaceStore: Sendable {
                 row.position = entry.position
                 row.revision = Int64(updated.revision)
                 row.updatedAt = now
+                row.awaitingListing = false
                 try row.update(db)
 
                 if reparented {
@@ -729,7 +770,8 @@ public struct PanelSurfaceStore: Sendable {
     /// can name them in a delta's `removedTabIDs`. `WorktreeStore.archive`
     /// runs it in the transaction that archives the worktree: an archived
     /// worktree keeps its row, so the cascade from that row never fires, and
-    /// this is what reclaims its panel rows.
+    /// this is what reclaims its panel rows. A row awaiting its tab's first
+    /// listing goes too: a moved tab the app never lists is reclaimed here.
     @discardableResult
     static func deleteSurfaces(worktreeID: UUID, in db: Database) throws -> [UUID] {
         let tabKeys = try String.fetchAll(
@@ -754,6 +796,12 @@ public struct PanelSurfaceStore: Sendable {
     /// them. The receipts move rather than go, so a `panel.apply` retried
     /// across the move still replays.
     ///
+    /// Each moved row is marked `awaitingListing`. The app learns of the
+    /// main worktree before this move, so a `panel.syncTabs` it built from
+    /// its earlier tab list, which does not name the moved tabs, can land
+    /// after it; the marker keeps that sync from pruning them, until a sync
+    /// lists the tab. `WorktreeStore.archive` still deletes a marked row.
+    ///
     /// Returns the moved surfaces as stored, ordered by position, for a
     /// delta's `tabs`; a row that cannot be read still moves but is not
     /// returned. `WorktreeStore.promoteScratchMigration` runs it in the
@@ -775,6 +823,7 @@ public struct PanelSurfaceStore: Sendable {
             rows[index].position = firstFreePosition + index
             rows[index].revision = Int64(try Self.nextRevision(db: db))
             rows[index].updatedAt = now
+            rows[index].awaitingListing = true
             try rows[index].update(db)
         }
         try db.execute(

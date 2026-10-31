@@ -1049,6 +1049,175 @@ struct PanelSurfaceStoreTests {
         #expect(try await db.panelSurface.surface(tabID: tab.id) == moved, "the replay changed nothing")
     }
 
+    // MARK: - Awaiting listing
+
+    /// The `awaitingListing` column of a tab's row, or nil when it has none.
+    private func awaitingListing(_ db: TBDDatabase, tabID: UUID) async throws -> Bool? {
+        try await db.writerForTests.read { dbc in
+            try Bool.fetchOne(
+                dbc, sql: "SELECT awaitingListing FROM workspace_tab_surface WHERE id = ?",
+                arguments: [tabID.uuidString])
+        }
+    }
+
+    private struct PromotedFixture {
+        let repoID: UUID
+        let mainID: UUID
+        /// The main worktree's own surfaces, at positions 0, 1, ….
+        let residents: [WorkspaceTabSurface]
+        /// The scratch worktree's surfaces as the promote stored them under
+        /// the main worktree, after the residents.
+        let moved: [WorkspaceTabSurface]
+    }
+
+    /// A main worktree holding `residentCount` surfaces, and a scratch
+    /// worktree, with one surface per entry of `scratchPaths`, just promoted
+    /// into it.
+    private func promoted(
+        _ db: TBDDatabase, residentCount: Int = 1, scratchPaths: [[String]] = [["/a.txt", "/b.txt"]]
+    ) async throws -> PromotedFixture {
+        let repo = try await db.repos.create(
+            path: "/tmp/pss-await-repo-\(UUID())", displayName: "r", defaultBranch: "main")
+        let scratch = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/pss-await-scratch-\(UUID())", tmuxServer: "tbd-scratch")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/pss-await-main-\(UUID())", tmuxServer: "tbd-main")
+        let residents = try await seed(
+            db, worktreeID: main.id, (0..<residentCount).map { _ in makeSurface(worktreeID: main.id) })
+        try await seed(
+            db, worktreeID: scratch.id, scratchPaths.map { makeSurface(worktreeID: scratch.id, paths: $0) })
+        let moved = try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            tmuxServer: scratch.tmuxServer)
+        return PromotedFixture(repoID: repo.id, mainID: main.id, residents: residents, moved: moved)
+    }
+
+    /// The app learns of the main worktree before a promote moves the
+    /// scratch worktree's surfaces to it, so a sync built from its earlier
+    /// tab list, which does not name the moved tabs, can land after the
+    /// move. That sync must not prune them, while the main worktree's own
+    /// unlisted surface still goes.
+    @Test func syncDoesNotPruneSurfaceAwaitingListing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fixture = try await promoted(db, residentCount: 2)
+        let moved = try #require(fixture.moved.first)
+        let kept = fixture.residents[0]
+        let dropped = fixture.residents[1]
+        #expect(try await awaitingListing(db, tabID: moved.id) == true)
+        #expect(try await awaitingListing(db, tabID: kept.id) == false, "an import awaits nothing")
+
+        let outcome = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID, entries: [entry(for: kept, position: 0)], now: Date())
+
+        #expect(outcome == SyncOutcome(removed: [dropped.id]),
+                "only the main worktree's own unlisted surface is pruned")
+        #expect(try await db.panelSurface.surface(tabID: moved.id) == moved)
+        #expect(try await historyRowCount(db, tabID: moved.id) == 2)
+        #expect(try await awaitingListing(db, tabID: moved.id) == true,
+                "a sync that omits the tab leaves it awaiting its listing")
+    }
+
+    /// The first sync that lists a moved tab clears its marker, whether the
+    /// listing changes the row or not, and from then on a sync that omits
+    /// the tab prunes it like any other.
+    @Test func listingClearsAwaitingMarker() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fixture = try await promoted(db, scratchPaths: [["/a.txt"], ["/b.txt", "/c.txt"]])
+        let resident = fixture.residents[0]
+        try #require(fixture.moved.count == 2)
+        // At positions 1 and 2: one is listed where the promote put it, the
+        // other somewhere else.
+        let inPlace = fixture.moved[0]
+        let shifted = fixture.moved[1]
+
+        let listing = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID,
+            entries: [
+                entry(for: resident, position: 0), entry(for: inPlace, position: 1),
+                entry(for: shifted, position: 3),
+            ],
+            now: Date())
+
+        let revision = try #require(listing.changed.first).revision
+        #expect(listing == SyncOutcome(changed: [Self.revised(shifted, revision)]),
+                "clearing the marker alone changes nothing the app sees")
+        #expect(try await db.panelSurface.surface(tabID: inPlace.id) == inPlace)
+        #expect(try await awaitingListing(db, tabID: inPlace.id) == false)
+        #expect(try await awaitingListing(db, tabID: shifted.id) == false)
+
+        let omitting = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID, entries: [entry(for: resident, position: 0)], now: Date())
+
+        #expect(omitting.removed == [inPlace.id, shifted.id])
+        #expect(try await db.panelSurface.surface(tabID: inPlace.id) == nil)
+        #expect(try await db.panelSurface.surface(tabID: shifted.id) == nil)
+        #expect(try await historyRowCount(db, tabID: inPlace.id) == 0)
+        #expect(try await historyRowCount(db, tabID: shifted.id) == 0)
+    }
+
+    /// An operation lists no tab: an agent acting on a moved tab before the
+    /// app lists it keeps the marker, so a sync that omits the tab still
+    /// leaves its surface, with the operation's change.
+    @Test func applyKeepsAwaitingListingMarker() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fixture = try await promoted(db)
+        let moved = try #require(fixture.moved.first)
+        let outcome = try await db.panelSurface.applyReducing(
+            operationID: UUID(), tabID: moved.id, worktreeID: fixture.mainID, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+        }
+        guard case .applied(let applied)? = outcome else {
+            Issue.record("expected .applied, got \(String(describing: outcome))")
+            return
+        }
+        #expect(try await awaitingListing(db, tabID: moved.id) == true)
+
+        let sync = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID, entries: [entry(for: fixture.residents[0], position: 0)], now: Date())
+
+        #expect(sync.removed.isEmpty)
+        #expect(try await db.panelSurface.surface(tabID: moved.id) == applied.tab)
+    }
+
+    /// `WorktreeStore.archive` deletes every surface of the worktree, one
+    /// awaiting its listing too. A promote marks surfaces only under a main
+    /// worktree, which `archive` refuses, so the store's own move marks one
+    /// under an ordinary worktree here.
+    @Test func archiveDeletesSurfaceAwaitingListing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fromID = try await makeWorktree(db, name: "from")
+        let toID = try await makeWorktree(db, name: "to")
+        let tab = makeSurface(worktreeID: fromID, paths: ["/a.txt", "/b.txt"])
+        try await seed(db, worktreeID: fromID, [tab])
+        try await db.writerForTests.write { dbc in
+            _ = try PanelSurfaceStore.reparentSurfaces(from: fromID, to: toID, now: Date(), in: dbc)
+        }
+        #expect(try await awaitingListing(db, tabID: tab.id) == true)
+
+        let removed = try await db.worktrees.archive(id: toID)
+
+        #expect(removed == [tab.id])
+        #expect(try await awaitingListing(db, tabID: tab.id) == nil)
+        #expect(try await historyRowCount(db, tabID: tab.id) == 0)
+    }
+
+    /// The main worktree a promote moves surfaces to cannot be archived; a
+    /// moved tab the app never lists goes when the main worktree's row is
+    /// deleted, with its repo.
+    @Test func removingTheRepoReclaimsSurfaceAwaitingListing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fixture = try await promoted(db)
+        let moved = try #require(fixture.moved.first)
+        #expect(try await awaitingListing(db, tabID: moved.id) == true)
+
+        try await db.worktrees.deleteForRepo(repoID: fixture.repoID)
+
+        #expect(try await awaitingListing(db, tabID: moved.id) == nil)
+        #expect(try await historyRowCount(db, tabID: moved.id) == 0)
+    }
+
     /// A sync that lands after the archive must not import the archived
     /// worktree's tabs again, nor move a tab it lists from another worktree:
     /// it changes nothing and reports nothing.

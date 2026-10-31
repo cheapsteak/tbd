@@ -238,7 +238,9 @@ zero.
 - `workspace_tab_surface` keeps one row per workspace tab. Its `layout` column
   holds the `SideRegion` JSON without histories; `primaryContent`, `label` and
   `position` keep their meaning, and `revision` holds the counter value the
-  row's last write took.
+  row's last write took. `awaitingListing` marks a surface a scratch promote
+  moved that no tab sync has listed yet (see "Tab sync"); it is the store's
+  own, and `WorkspaceTabSurface` does not carry it.
 - `panel_history` keeps one row per panel. The store joins histories into
   `ViewerPanel.history` when it reads a surface and splits them out when it
   writes one, inside the same transaction.
@@ -300,8 +302,13 @@ tab is created, closed, reordered or relabelled. In one transaction the daemon:
   the list. No operation changes a primary, so the primary is app-owned like
   the tab itself; the file viewer, for one, points a file tab's primary at a
   new file in place;
+- **clears the `awaitingListing` marker** of every listed tab's surface. The
+  marker is the store's own, so clearing it alone changes nothing the app sees
+  and takes no revision;
 - **deletes this worktree's surfaces for tabs not in the list,** with their
-  histories, and names them in the delta's `removedTabIDs`.
+  histories, and names them in the delta's `removedTabIDs`. A surface still
+  awaiting its listing is kept: it is one a scratch promote moved here, and
+  the sync may predate the move (see below).
 
 It broadcasts one `panelSurfaceChanged` for whatever changed. The worktree's
 existing cascade still removes every surface when the worktree row is deleted.
@@ -327,6 +334,20 @@ take positions after the main worktree's own, in the order they had, so no two
 of its surfaces share a position before the next sync sets them. The promote then
 broadcasts a `panelSurfaceChanged` for the main worktree carrying the moved
 surfaces, beside its `worktreeArchived`, and the app adopts them there.
+
+The app learns of the new main worktree before the promote moves anything, so
+a sync for it can be built from a tab list that does not yet name the moved
+tabs and still land after the move. Pruning on that list would delete the
+moved surfaces and their histories, and a later sync would import them again
+from the legacy layout, losing every panel opened since the first import. So
+the move marks each moved surface `awaitingListing`, and a sync never prunes a
+marked surface. The first sync that lists the tab clears the marker, and from
+then on an unlisting sync prunes it like any other. An operation lists no tab,
+so it keeps the marker. A moved tab the app never lists is reclaimed when its
+worktree is archived or deleted, since `WorktreeStore.archive` deletes every
+surface whatever its marker and deleting the worktree row cascades; the main
+worktree a promote fills cannot be archived, so for it that is the removal of
+its repo.
 
 The sync does not carry the selected tab. The app already records it in
 `worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or
@@ -536,7 +557,10 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   with its import and reports an unreadable one it cannot convert as skipped,
   updates order, labels and primaries,
   re-parents a surface from another worktree, deletes absent tabs with their
-  histories, and broadcasts once; receipt replay returns the stored v2 result;
+  histories, and broadcasts once; a sync that omits a surface a promote moved
+  keeps it, the first sync that lists it clears the marker, and an operation
+  keeps it; archiving or deleting the worktree reclaims a marked surface;
+  receipt replay returns the stored v2 result;
   `get` returns histories.
 - **CLI:** parsing for each new and changed command, and rejection of the
   removed options.

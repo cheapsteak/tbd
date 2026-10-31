@@ -140,6 +140,11 @@ struct PanelTabsFlagTests {
             // left above it.
             let counter = try Int64.fetchAll(db, sql: "SELECT value FROM panel_revision_counter")
             #expect(counter == [0])
+            // The surfaces gain the store-internal marker a scratch promote
+            // sets: never NULL, and 0 for a row that awaits no listing.
+            let marker = try db.columns(in: "workspace_tab_surface").first { $0.name == "awaitingListing" }
+            #expect(marker?.isNotNull == true)
+            #expect(marker?.defaultValueSQL == "0")
         }
     }
 

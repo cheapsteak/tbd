@@ -8,6 +8,12 @@ ALTER TABLE config ADD COLUMN panel_tabs_enabled INTEGER;
 DELETE FROM panel_operation_receipt;
 DELETE FROM panel_history;
 DELETE FROM workspace_tab_surface;
+-- 1 while a surface awaits its tab's first listing in a panel.syncTabs: a
+-- scratch promote moves surfaces to the main worktree before the app's tab
+-- list names them, and a sync that omits such a surface must not prune it.
+-- Not a feature flag, so the DEFAULT is deliberate: every existing row has
+-- been listed, and the backfilled 0 is correct for it.
+ALTER TABLE workspace_tab_surface ADD COLUMN awaitingListing INTEGER NOT NULL DEFAULT 0;
 -- One daemon-wide counter every surface write takes its revision from, so a
 -- tab's revisions keep rising across a delete and re-import. It never goes
 -- down; the surface rows are all gone above, so it starts at zero.
