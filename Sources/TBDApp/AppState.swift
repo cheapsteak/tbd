@@ -3482,11 +3482,18 @@ final class AppState {
         // of commit order, so a delta older than the cached row's is dropped.
         var terminal = terminals[delta.worktreeID]![idx]
         let applied = terminal.applyActivityDelta(delta)
-        // Clear any limit hit when the terminal transitions to working
-        // (design 2026-09-05 §7.1) — on a delta that was applied: a stale
-        // `working` dropped behind a newer value says nothing about now.
-        if applied, delta.activityState == .working, limitHits[delta.terminalID] != nil {
-            limitHits.removeValue(forKey: delta.terminalID)
+        // Clear any limit hit when the terminal works again (design 2026-09-05
+        // §7.1): on a `working` observed after the hit arrived, whether or not
+        // the ordering applied it — a post-limit `working` that arrives behind
+        // its own `idle` is dropped, and still says the session ran again. A
+        // `working` observed before the hit says nothing about now. A delta
+        // with no stamp, from an older daemon, clears it only when applied.
+        if delta.activityState == .working, let limitHit = limitHits[delta.terminalID] {
+            let observedAt = delta.activityStateOrderObservedAt ?? delta.activityStateObservedAt
+            let observedAfterHit = observedAt.map { $0 > limitHit.receivedAt }
+            if observedAfterHit ?? applied {
+                limitHits.removeValue(forKey: delta.terminalID)
+            }
         }
         if !terminal.isCodexTerminal {
             // The session-order rail is Codex-only.

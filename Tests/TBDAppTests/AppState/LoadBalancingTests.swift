@@ -186,10 +186,10 @@ struct LoadBalancingTests {
     // MARK: - Limit Hits Lifecycle Tests
 
     @MainActor
-    private func seedLimitHit(_ appState: AppState, terminalID: UUID) {
+    private func seedLimitHit(_ appState: AppState, terminalID: UUID, receivedAt: Date = Date()) {
         appState.limitHits[terminalID] = TerminalLimitHit(
             profileID: UUID(), resetsAt: Date(), limitType: "session",
-            suggestedProfileID: nil, receivedAt: Date())
+            suggestedProfileID: nil, receivedAt: receivedAt)
     }
 
     @Test @MainActor
@@ -222,8 +222,8 @@ struct LoadBalancingTests {
     }
 
     /// Activity deltas are ordered by their stamp, and a `working` older than
-    /// the cached row's value is dropped. Dropped, it says nothing about the
-    /// session now, so the limit hit it would have cleared stays.
+    /// the cached row's value is dropped. One observed before the limit hit
+    /// arrived says nothing about the session now, so the hit stays.
     @Test @MainActor
     func limitHitsKeptWhenAStaleWorkingDeltaIsDropped() async throws {
         try await withAppState("limit-keep-stale-working") { appState in
@@ -232,7 +232,7 @@ struct LoadBalancingTests {
             let t1 = Date(timeIntervalSince1970: 1_800_000_000)
             let t2 = t1.addingTimeInterval(10)
             appState.terminals[worktreeID] = [claudeTerminal(worktreeID: worktreeID, profileID: UUID(), id: terminalID)]
-            seedLimitHit(appState, terminalID: terminalID)
+            seedLimitHit(appState, terminalID: terminalID, receivedAt: t1.addingTimeInterval(5))
             appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminalID, worktreeID: worktreeID, activityState: .idle,
                 activityStateSource: .programStatus,
@@ -245,6 +245,60 @@ struct LoadBalancingTests {
 
             #expect(appState.terminals[worktreeID]?.first?.activityState == .idle)
             #expect(appState.limitHits[terminalID] != nil, "a dropped working delta cleared the limit hit")
+        }
+    }
+
+    /// A `working` observed before the limit hit arrived is stale even when the
+    /// ordering applies it — the cached row held nothing newer — so it leaves
+    /// the hit standing.
+    @Test @MainActor
+    func limitHitsKeptByAnAppliedWorkingObservedBeforeTheHit() async throws {
+        try await withAppState("limit-keep-applied-early-working") { appState in
+            let terminalID = UUID()
+            let worktreeID = UUID()
+            let received = Date(timeIntervalSince1970: 1_800_000_000)
+            let observed = received.addingTimeInterval(-10)
+            appState.terminals[worktreeID] = [claudeTerminal(worktreeID: worktreeID, profileID: UUID(), id: terminalID)]
+            seedLimitHit(appState, terminalID: terminalID, receivedAt: received)
+
+            appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .working,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: observed, activityStateOrderObservedAt: observed)))
+
+            #expect(appState.terminals[worktreeID]?.first?.activityState == .working)
+            #expect(appState.limitHits[terminalID] != nil,
+                    "a working observed before the limit hit cleared it")
+        }
+    }
+
+    /// A `working` observed after the limit hit arrived clears it even when the
+    /// ordering drops it behind a newer `idle` — the session's own `idle` that
+    /// overtook it — because the session demonstrably ran again.
+    @Test @MainActor
+    func limitHitsClearedByAPostLimitWorkingDroppedBehindItsIdle() async throws {
+        try await withAppState("limit-clear-dropped-post-limit-working") { appState in
+            let terminalID = UUID()
+            let worktreeID = UUID()
+            let received = Date(timeIntervalSince1970: 1_800_000_000)
+            let worked = received.addingTimeInterval(10)
+            let idled = received.addingTimeInterval(20)
+            appState.terminals[worktreeID] = [claudeTerminal(worktreeID: worktreeID, profileID: UUID(), id: terminalID)]
+            seedLimitHit(appState, terminalID: terminalID, receivedAt: received)
+            appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .idle,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: idled, activityStateOrderObservedAt: idled)))
+            #expect(appState.limitHits[terminalID] != nil, "idle is not recovery — the banner stays")
+
+            appState.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .working,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: worked, activityStateOrderObservedAt: worked)))
+
+            #expect(appState.terminals[worktreeID]?.first?.activityState == .idle)
+            #expect(appState.limitHits[terminalID] == nil,
+                    "a post-limit working dropped by the ordering left the limit hit standing")
         }
     }
 
