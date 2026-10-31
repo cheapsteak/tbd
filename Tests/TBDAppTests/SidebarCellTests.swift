@@ -55,7 +55,8 @@ struct SidebarCellTests {
         #expect(cell.nameField.stringValue == "beta")
         #expect(cell.nameField.font == SidebarCellKit.nameFont)
         #expect(cell.leadingImageView.isHidden)
-        #expect(cell.subtitleFields.allSatisfy(\.isHidden))
+        let subtitlesHidden = cell.subtitleFields.allSatisfy { $0.isHidden }
+        #expect(subtitlesHidden)
         #expect(cell.suffix.imageView.isHidden)
         #expect(cell.suffix.typingDots?.isHidden == false, "A working row draws the typing dots")
         #expect(cell.noStatusImageView.isHidden)
