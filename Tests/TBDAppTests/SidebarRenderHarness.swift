@@ -17,6 +17,9 @@ import TestSupport
 ///     TBD_SIDEBAR_SHOTS_DIR=/tmp/sidebar-shots scripts/test.sh \
 ///         -Xswiftc -DTBD_HARNESSES --filter SidebarRenderHarness
 ///
+/// `renderSwiftUIAndNativeSideBySide` renders one fixture through the SwiftUI
+/// sidebar and the native outline and writes both, plus a joined image.
+///
 /// Nothing in CI compiles this file, so a refactor elsewhere can leave it
 /// failing to build; fix it when you next enable it.
 @MainActor
@@ -157,6 +160,143 @@ struct SidebarRenderHarness {
         let name = "sidebar-nested-\(width)-\(dark ? "dark" : "light")-\(label).png"
         try capture.writePNG(to: directory.appendingPathComponent(name))
         #expect(state.recentlyAttachedRemoteSessions.isEmpty)
+    }
+
+    // MARK: SwiftUI and native side by side
+
+    /// Renders one fixture through the SwiftUI `List` sidebar and through the
+    /// native outline, as `sidebar-compare-<width>-<light|dark>-swiftui.png`
+    /// and `...-native.png`, then a third file with the two next to each
+    /// other (`...-side-by-side.png`, SwiftUI on the left).
+    @Test func renderSwiftUIAndNativeSideBySide() async throws {
+        guard let path = ProcessInfo.processInfo.environment["TBD_SIDEBAR_SHOTS_DIR"], !path.isEmpty else { return }
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for width in [320, 240] {
+            for dark in [false, true] {
+                try await renderComparison(width: width, dark: dark, into: directory)
+            }
+        }
+    }
+
+    /// The same rows for both paths: pinned and plain worktrees, children,
+    /// and remote workers.
+    private func populateComparison(_ state: AppState, defaults: UserDefaults) {
+        defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")
+        let web = Repo(path: "/tmp/acme-web", displayName: "acme/web")
+        state.repos = [api, web]
+        state.remoteProviders = [SidebarGroupFixtures.provider()]
+        let main = SidebarGroupFixtures.row("main", repoID: api.id, status: .main)
+        var director = SidebarGroupFixtures.row("API director", repoID: api.id)
+        director.pinnedAt = Date(timeIntervalSince1970: 1)
+        let child = SidebarGroupFixtures.row("Local review", repoID: api.id, parent: director.id)
+        let plain = SidebarGroupFixtures.row("Index tuning", repoID: api.id, order: 1)
+        let names = ["Index worker", "API tests worker", "Pagination worker"]
+        let workers = names.enumerated().map {
+            SidebarGroupFixtures.row($0.element, repoID: api.id, remote: "cmp-\($0.offset)", order: $0.offset + 2)
+        }
+        let webMain = SidebarGroupFixtures.row("main", repoID: web.id, status: .main)
+        let webRow = SidebarGroupFixtures.row("Response audit", repoID: web.id)
+        state.worktrees = [api.id: [main, director, child, plain] + workers, web.id: [webMain, webRow]]
+        state.remoteSessions = names.indices.map {
+            SidebarGroupFixtures.session("cmp-\($0)", state: .running, repoID: api.id, agent: $0 == 1 ? .waitingInput : .idle)
+        }
+    }
+
+    private func renderComparison(width: Int, dark: Bool, into directory: URL) async throws {
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        let label = "sidebar-compare-\(width)-\(dark ? "dark" : "light")"
+        let size = NSSize(width: width, height: 780)
+
+        // SwiftUI path.
+        let swiftUIImage: NSBitmapImageRep
+        do {
+            let suite = TestDefaultsSuite("SidebarRenderHarness.Compare.SwiftUI")
+            defer { suite.tearDown() }
+            suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
+            let state = AppState(userDefaults: suite.defaults)
+            populateComparison(state, defaults: suite.defaults)
+            let view = SidebarView().environment(state).defaultAppStorage(suite.defaults)
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let host = OffscreenHost(root: view, size: size, appearance: appearance)
+            defer { host.tearDown() }
+            await host.pump(times: 40)
+            let capture = try host.capture(scale: 2)
+            try #require(capture.luminanceVariance() >= OffscreenHostDefaults.minLuminanceVariance,
+                         "SwiftUI sidebar capture was blank")
+            swiftUIImage = capture.rep
+            try capture.writePNG(to: directory.appendingPathComponent("\(label)-swiftui.png"))
+        }
+
+        // Native path: the outline controller over the same fixture.
+        let nativeImage: NSBitmapImageRep
+        do {
+            let suite = TestDefaultsSuite("SidebarRenderHarness.Compare.Native")
+            defer { suite.tearDown() }
+            let state = AppState(userDefaults: suite.defaults)
+            populateComparison(state, defaults: suite.defaults)
+            let controller = SidebarOutlineController(
+                appState: state, defaults: suite.defaults, scratchDirectoryProbe: { _ in true })
+            let host = OffscreenAppKitHost(controller: controller, size: size, appearance: appearance)
+            defer { host.tearDown() }
+            controller.flushPendingRebuild()
+            host.layout()
+            // Cells are made during layout; give the window a few turns to draw.
+            for _ in 0..<5 {
+                await Task.yield()
+                host.layout()
+            }
+            nativeImage = try Self.bitmap(of: host.window, scale: 2)
+            let root = try #require(host.window.contentView)
+            let native = OffscreenHost<EmptyView>.Capture(rep: nativeImage, root: root, scale: 2)
+            try #require(native.luminanceVariance() >= OffscreenHostDefaults.minLuminanceVariance,
+                         "Native sidebar capture was blank")
+            let name = "\(label)-native.png"
+            try Self.writePNG(nativeImage, to: directory.appendingPathComponent(name))
+        }
+
+        try Self.writePNG(Self.joined(swiftUIImage, nativeImage), to: directory.appendingPathComponent("\(label)-side-by-side.png"))
+    }
+
+    /// The window's content drawn at `scale` pixels per point.
+    private static func bitmap(of window: NSWindow, scale: CGFloat) throws -> NSBitmapImageRep {
+        let view = try #require(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        let bounds = view.bounds
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int((bounds.width * scale).rounded()),
+            pixelsHigh: Int((bounds.height * scale).rounded()), bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        rep.size = bounds.size
+        let context = try #require(NSGraphicsContext(bitmapImageRep: rep))
+        view.displayIgnoringOpacity(bounds, in: context)
+        return rep
+    }
+
+    /// `left` and `right` next to each other with a gap between.
+    private static func joined(_ left: NSBitmapImageRep, _ right: NSBitmapImageRep) throws -> NSBitmapImageRep {
+        let gap = 16
+        let width = left.pixelsWide + gap + right.pixelsWide
+        let height = max(left.pixelsHigh, right.pixelsHigh)
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: rep))
+        let saved = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        defer { NSGraphicsContext.current = saved }
+        NSColor.gray.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        left.draw(in: NSRect(x: 0, y: height - left.pixelsHigh, width: left.pixelsWide, height: left.pixelsHigh))
+        right.draw(in: NSRect(x: left.pixelsWide + gap, y: height - right.pixelsHigh,
+                              width: right.pixelsWide, height: right.pixelsHigh))
+        return rep
+    }
+
+    private static func writePNG(_ rep: NSBitmapImageRep, to url: URL) throws {
+        let data = try #require(rep.representation(using: .png, properties: [:]))
+        try data.write(to: url)
     }
 }
 #endif
