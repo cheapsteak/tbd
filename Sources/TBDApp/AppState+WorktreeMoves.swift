@@ -34,7 +34,8 @@ extension AppState {
     // MARK: - Moving worktrees
 
     /// Moves `ids` under `newParentID` (nil: the top level of their own
-    /// group), before `before` (nil: at the end), and returns the move's ID.
+    /// group), before `before` (nil: at the end), and returns the move's ID,
+    /// or nil when nothing moved and no RPC was sent.
     ///
     /// The rows move here first, with the same `SiblingPlacement.place` the
     /// daemon runs, before any message leaves the app. The move then stays in
@@ -44,18 +45,19 @@ extension AppState {
     /// every other row keeps whatever changed meanwhile, a toast names the row
     /// and the reason, and the app refreshes from the daemon.
     ///
-    /// A parent the app does not list, or one that is `main`, is refused here:
-    /// nothing moves and no RPC is sent.
+    /// A parent the app does not list, or one that is `main`, is refused here,
+    /// as is an empty `ids`: nothing moves, no RPC is sent, and the result is
+    /// nil.
     @discardableResult
-    func moveWorktrees(ids: [UUID], newParentID: UUID?, before: UUID?) -> UUID {
-        let moveID = UUID()
-        guard !ids.isEmpty else { return moveID }
+    func moveWorktrees(ids: [UUID], newParentID: UUID?, before: UUID?) -> UUID? {
+        guard !ids.isEmpty else { return nil }
         var lists = WorktreeMoveLists(worktrees: worktrees, scratch: scratchWorktrees)
         if let newParentID, !lists.acceptsParent(newParentID) {
             logger.warning(
                 "worktree.moveMany refused locally: parent \(newParentID, privacy: .public) is not listed or is main")
-            return moveID
+            return nil
         }
+        let moveID = UUID()
         let move = PendingWorktreeMove(
             moveID: moveID, worktreeIDs: ids, newParentID: newParentID, before: before,
             fence: nil, rpcSucceeded: false, deltaApplied: false)

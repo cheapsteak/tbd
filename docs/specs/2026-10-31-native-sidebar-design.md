@@ -381,10 +381,17 @@ Each rule applies to every carried row; if one fails, the drop is rejected.
 - **Rejected:**
   - a drop onto a carried row or one of its descendants;
   - nesting under a scratch row, a remote session or a header;
-  - a destination in another repo's section, unless the carried rows are
-    reordered among their current siblings there;
-  - a gap inside a state group (Remote, Exited or Hibernated) other than the one
-    the rows came from, because a row's state decides which group renders it;
+  - a destination in a section other than the carried rows' own repo (judged
+    by each row's home repo, never by its label), unless the rows are
+    reordered among their current siblings there. A child nested under a row
+    in another repo's section can therefore be un-nested into its own repo's
+    section;
+  - for a row inside a state group (Remote, Exited or Hibernated), any
+    destination outside that same group: a top-level gap, a gap in another
+    group, the main row, or a row elsewhere. A row's state decides which group
+    renders it, so a drop outside its group would land where the row cannot
+    appear. The rule holds both ways: a row from outside a group cannot be
+    placed or nested inside it;
   - any position inside a collapsed section. Collapsed sections do not spring
     open during a drag, since that would fight model-driven expansion:
     `outlineView(_:shouldExpandItem:)` returns false from

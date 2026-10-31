@@ -9,6 +9,9 @@ extension SidebarOutlineController {
     /// runs, and a click on a worktree row's PR glyph opens the pull request.
     /// Row clicks otherwise select through the outline and need nothing here.
     @objc func outlineClicked(_ sender: Any?) {
+        // A click is not a drag: a press recorded as a drag's origin that
+        // never became one must not outlive it.
+        outline.dragOrigin = nil
         var point: NSPoint?
         if let event = NSApp.currentEvent, event.type == .leftMouseUp || event.type == .leftMouseDown {
             point = outline.convert(event.locationInWindow, from: nil)

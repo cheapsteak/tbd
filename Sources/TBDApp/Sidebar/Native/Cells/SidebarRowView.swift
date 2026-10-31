@@ -25,6 +25,10 @@ final class SidebarRowView: NSTableRowView {
         /// The row is the selected provider's header: tinted at 0.13 across
         /// the full width, as its `listRowBackground` is.
         var highlightsSelectedProvider = false
+        /// A drag would nest its rows under this one: the row draws the nest
+        /// highlight over the selection tint's area. The outline draws no
+        /// drop feedback of its own.
+        var isNestTarget = false
     }
 
     var configuration = Configuration() {
@@ -57,20 +61,42 @@ final class SidebarRowView: NSTableRowView {
         }
     }
 
+    /// The tint's area: from `tintOrigin` to the trailing edge.
+    var tintRect: NSRect {
+        let x = tintOrigin
+        return NSRect(x: x, y: 0, width: max(bounds.width - x, 0), height: bounds.height)
+    }
+
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
-        guard configuration.highlightsSelectedProvider else { return }
-        NSColor.controlAccentColor.withAlphaComponent(0.13).setFill()
-        bounds.fill()
+        if configuration.highlightsSelectedProvider {
+            NSColor.controlAccentColor.withAlphaComponent(0.13).setFill()
+            bounds.fill()
+        }
+        if configuration.isNestTarget {
+            drawNestHighlight()
+        }
     }
 
     /// The SwiftUI row's tint: accent at 0.2 in a 4 pt rounded rectangle.
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        let x = tintOrigin
-        let rect = NSRect(x: x, y: 0, width: max(bounds.width - x, 0), height: bounds.height)
         NSColor.controlAccentColor.withAlphaComponent(0.2).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+        NSBezierPath(roundedRect: tintRect, xRadius: 4, yRadius: 4).fill()
+    }
+
+    /// The nest target: the tint's rounded rectangle, washed and outlined in
+    /// the accent colour, so it reads as a destination rather than a
+    /// selection.
+    private func drawNestHighlight() {
+        let rect = tintRect.insetBy(dx: 1, dy: 1)
+        guard rect.width > 0, rect.height > 0 else { return }
+        let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+        path.fill()
+        path.lineWidth = 2
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
     }
 
     /// The guide lines go over the tint, as the SwiftUI row overlays them.

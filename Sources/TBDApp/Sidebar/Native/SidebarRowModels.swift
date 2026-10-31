@@ -56,6 +56,10 @@ struct WorktreeRowModel: Equatable {
     /// The muted "(repo)" suffix on a row nested under another repo's
     /// section, with the repo name shortened as the SwiftUI row shortens it.
     var crossRepoLabel: String?
+    /// `worktree.repoID`: the repo the row belongs to, nil for a scratch row.
+    /// The cell does not draw it; `SidebarDropPolicy` compares it with a
+    /// section's repo to tell a row's own section from another repo's.
+    var homeRepoID: UUID?
     /// `worktree.pinnedAt != nil`: the gutter pin shows solid, without hover.
     var isPinned: Bool
     /// The row's visual depth — its outline level below the section header —

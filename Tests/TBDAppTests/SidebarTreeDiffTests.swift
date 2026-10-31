@@ -238,7 +238,7 @@ struct SidebarTreeDiffTests {
     static func row(_ name: String, height: RowHeightClass = .single) -> SidebarNodeKind {
         .worktree(WorktreeRowModel(
             name: name, leading: nil, isNameBold: false, subtitles: [], suffix: nil,
-            showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: nil, isPinned: false,
+            showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: nil, homeRepoID: nil, isPinned: false,
             depth: 0, isDimmed: false, isInHiddenSection: false, isMain: false, heightClass: height))
     }
 
