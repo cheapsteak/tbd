@@ -61,7 +61,6 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/lintmig-test.XXXXXX"; }
 # Mutants land in one directory removed on exit, so a case that dies early does
 # not leave a weakened copy of the lint behind.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
 FIXTURES=()
 # `${FIXTURES[@]+"${FIXTURES[@]}"}` rather than a bare `"${FIXTURES[@]}"`: this
 # file runs under `set -u`, and macOS's bash 3.2 treats an EMPTY array as an
@@ -72,8 +71,9 @@ trap 'rm -rf "$MUTANT_DIR" ${FIXTURES[@]+"${FIXTURES[@]}"}' EXIT
 
 mutant_of() {
   local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.py"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   # A mutation that changes nothing is a mutation that proves nothing.
   if cmp -s "$SCRIPT" "$out"; then
