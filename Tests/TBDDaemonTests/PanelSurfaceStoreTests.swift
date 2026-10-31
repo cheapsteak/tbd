@@ -648,6 +648,51 @@ struct PanelSurfaceStoreTests {
         #expect(try await db.panelSurface.surface(tabID: moved.id) == expected)
     }
 
+    /// The worktree `operationID`'s receipt is filed under, or nil when it
+    /// has no receipt.
+    private func receiptWorktreeID(_ db: TBDDatabase, operationID: UUID) async throws -> String? {
+        try await db.writerForTests.read { dbc in
+            try String.fetchOne(
+                dbc, sql: "SELECT worktreeID FROM panel_operation_receipt WHERE operationID = ?",
+                arguments: [operationID.uuidString])
+        }
+    }
+
+    /// A re-parented tab's operation receipts move with it, so the worktree
+    /// it left no longer prunes or archives them; another tab's stay put.
+    @Test func syncReparentMovesTheTabsReceipts() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let scratchID = try await makeWorktree(db, name: "scratch")
+        let mainID = try await makeWorktree(db, name: "main")
+        let seeded = try await seed(db, worktreeID: scratchID, [
+            makeSurface(worktreeID: scratchID), makeSurface(worktreeID: scratchID),
+        ])
+        let movedTabID = seeded[0].id
+        let stayingTabID = seeded[1].id
+        let movedOperationID = UUID()
+        let stayingOperationID = UUID()
+        for (operationID, tabID) in [(movedOperationID, movedTabID), (stayingOperationID, stayingTabID)] {
+            _ = try await db.panelSurface.applyReducing(
+                operationID: operationID, tabID: tabID, worktreeID: scratchID, now: Date()
+            ) { current in
+                try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+            }
+        }
+        let moving = try #require(try await db.panelSurface.surface(tabID: movedTabID))
+
+        let outcome = try await db.panelSurface.syncTabs(
+            worktreeID: mainID, entries: [entry(for: moving, position: 0)], now: Date())
+
+        #expect(outcome.reparented == [movedTabID])
+        #expect(try await receiptWorktreeID(db, operationID: movedOperationID) == mainID.uuidString)
+        #expect(try await receiptWorktreeID(db, operationID: stayingOperationID) == scratchID.uuidString)
+
+        // Archiving the worktree the tab left reclaims only its own tab's receipt.
+        try await db.worktrees.archive(id: scratchID)
+        #expect(try await db.panelSurface.receipt(operationID: movedOperationID) != nil)
+        #expect(try await db.panelSurface.receipt(operationID: stayingOperationID) == nil)
+    }
+
     @Test func syncDeletesUnlistedTabsWithHistories() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)

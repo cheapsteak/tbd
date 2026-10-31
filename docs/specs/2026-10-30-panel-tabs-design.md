@@ -293,7 +293,9 @@ tab is created, closed, reordered or relabelled. In one transaction the daemon:
   asking for a surface it cannot get;
 - **re-parents a listed tab's surface that sits under another worktree.** Tab
   IDs are global, and promoting a scratch worktree moves its tabs to the main
-  worktree; the tab's panels move with it;
+  worktree; the tab's panels move with it, and so do its operation receipts,
+  so the worktree that now holds the tab prunes them and its archive reclaims
+  them;
 - **updates `position`, `label` and `primary`** on existing surfaces to match
   the list. No operation changes a primary, so the primary is app-owned like
   the tab itself; the file viewer, for one, points a file tab's primary at a

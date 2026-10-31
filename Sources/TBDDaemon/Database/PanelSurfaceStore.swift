@@ -562,14 +562,16 @@ public struct PanelSurfaceStore: Sendable {
     ///   reported in `skipped`, so the app stops asking for a surface it
     ///   cannot get.
     /// - **Readable row** – never overwritten. Re-points it to this worktree
-    ///   when it sits under another, and applies the entry's position, label
-    ///   and primary (primary only when non-nil). When any of those changed,
-    ///   the surface takes the revision counter's next value and is reported
-    ///   in `changed`. Panels and histories are never touched.
+    ///   when it sits under another, with the tab's operation receipts, so
+    ///   they are pruned and archived with the worktree that now holds the
+    ///   tab; and applies the entry's position, label and primary (primary
+    ///   only when non-nil). When any of those changed, the surface takes the
+    ///   revision counter's next value and is reported in `changed`. Panels
+    ///   and histories are never touched.
     ///
     /// This worktree's rows for tabs not listed are deleted first; their
-    /// histories cascade. Other worktrees' rows and every receipt are left
-    /// alone.
+    /// histories cascade. Other worktrees' rows, and every receipt but a
+    /// re-parented tab's, are left alone.
     ///
     /// An archived worktree changes nothing and gets an empty outcome:
     /// archiving deleted its surfaces (`WorktreeStore.archive`), and a sync
@@ -651,6 +653,10 @@ public struct PanelSurfaceStore: Sendable {
                 try row.update(db)
 
                 if reparented {
+                    // The tab's receipts follow it, as a scratch promote's do.
+                    try db.execute(
+                        sql: "UPDATE panel_operation_receipt SET worktreeID = ? WHERE tabID = ?",
+                        arguments: [worktreeID.uuidString, record.id])
                     outcome.reparented.append(entry.tabID)
                 }
                 outcome.changed.append(updated)
