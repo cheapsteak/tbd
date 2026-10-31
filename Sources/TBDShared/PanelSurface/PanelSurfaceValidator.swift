@@ -1,82 +1,90 @@
 import Foundation
 
 public enum PanelSurfaceViolation: Equatable, Sendable {
-    case primaryCount(Int)
+    /// Two panels in the side region share this ID.
     case duplicatePanelID(PanelID)
-    case duplicateSplitID(SplitID)
-    case degenerateSplit(SplitID)
-    case ratioCountMismatch(SplitID)
-    case ratioBelowMinimum(SplitID)
-    case ratioSumInvalid(SplitID)
+    /// `activePanelID` names no panel in a region that has panels.
+    case activePanelMissing(PanelID)
+    /// The region has no panels but names an active one.
+    case activePanelWithoutPanels
+    /// The region has panels but none is active.
+    case noActivePanel
+    /// `recency` is not a permutation of the panel IDs.
+    case recencyMismatch
+    /// The panel's history is empty or its cursor is out of range.
     case malformedHistory(PanelID)
-    case historyContentMismatch(PanelID)
+    /// The panel's history holds more than `MRUHistory.maxEntries` entries.
+    case historyOverCap(PanelID)
+    /// The panel's history holds content of more than one kind.
+    case historyMixesKinds(PanelID)
+    /// More than one panel currently shows this terminal's transcript.
+    case duplicateTranscriptView(terminalID: UUID)
+    /// `width` is not finite or lies outside `SideRegion.widthRange`.
+    case widthOutOfRange(Double)
 }
 
-/// Structural invariants from Spec C §5.5. Resource-existence checks
-/// (notes/terminals belong to an allowed worktree) need daemon context and
-/// live in the Phase 2 coordinator, not here.
+/// Structural invariants from the panel tabs spec ("The model"). Resource
+/// checks (a note or terminal belongs to an allowed worktree) need daemon
+/// context and live in the coordinator, not here.
 public enum PanelSurfaceValidator {
-    public static let minShare = 0.1
-    private static let ratioSumTolerance = 0.001
-
     public static func violations(in surface: WorkspaceTabSurface) -> [PanelSurfaceViolation] {
+        let side = surface.side
+        let panelIDs = side.panels.map(\.id)
         var found: [PanelSurfaceViolation] = []
 
-        let primaries = surface.layout.primaryCount
-        if primaries != 1 { found.append(.primaryCount(primaries)) }
-
         var seenPanels = Set<PanelID>()
-        for id in surface.layout.allPanelIDs where !seenPanels.insert(id).inserted {
+        for id in panelIDs where !seenPanels.insert(id).inserted {
             found.append(.duplicatePanelID(id))
         }
-        var seenSplits = Set<SplitID>()
-        for id in surface.layout.allSplitIDs where !seenSplits.insert(id).inserted {
-            found.append(.duplicateSplitID(id))
+
+        if let active = side.activePanelID {
+            if side.panels.isEmpty {
+                found.append(.activePanelWithoutPanels)
+            } else if side.panel(id: active) == nil {
+                found.append(.activePanelMissing(active))
+            }
+        } else if !side.panels.isEmpty {
+            found.append(.noActivePanel)
         }
 
-        appendSplitViolations(of: surface.layout, to: &found)
-        return found
-    }
+        // A multiset comparison, so duplicate panel IDs are reported once, as
+        // duplicates, and not again as a recency mismatch.
+        if occurrences(of: side.recency) != occurrences(of: panelIDs) {
+            found.append(.recencyMismatch)
+        }
 
-    public static func violations(in state: PanelSurfaceState) -> [PanelSurfaceViolation] {
-        var found = violations(in: state.surface)
-        for (panelID, history) in state.histories {
-            if !history.isWellFormed {
-                found.append(.malformedHistory(panelID))
+        for panel in side.panels {
+            let history = panel.history
+            guard history.isWellFormed, !history.entries.isEmpty else {
+                found.append(.malformedHistory(panel.id))
                 continue
             }
-            if let slot = state.surface.layout.panelSlot(id: panelID),
-               !history.entries.isEmpty,
-               history.entries[history.cursor] != slot.content {
-                found.append(.historyContentMismatch(panelID))
+            if history.entries.count > PanelHistory.maxEntries {
+                found.append(.historyOverCap(panel.id))
+            }
+            if Set(history.entries.map(\.kind)).count > 1 {
+                found.append(.historyMixesKinds(panel.id))
             }
         }
+
+        // Views are what panels show now; a transcript held only further back
+        // in a history is not a view.
+        var shownTranscripts = Set<UUID>()
+        for panel in side.panels {
+            guard case .transcript(let terminalID)? = panel.content else { continue }
+            if !shownTranscripts.insert(terminalID).inserted {
+                found.append(.duplicateTranscriptView(terminalID: terminalID))
+            }
+        }
+
+        if !(side.width.isFinite && SideRegion.widthRange.contains(side.width)) {
+            found.append(.widthOutOfRange(side.width))
+        }
+
         return found
     }
 
-    private static func appendSplitViolations(
-        of node: PanelLayoutNode, to found: inout [PanelSurfaceViolation]
-    ) {
-        guard case .split(let split) = node else { return }
-        if split.children.count < 2 {
-            found.append(.degenerateSplit(split.id))
-        }
-        if split.ratios.count != split.children.count {
-            found.append(.ratioCountMismatch(split.id))
-        } else if split.children.count >= 2 {
-            if split.ratios.contains(where: { !$0.isFinite }) {
-                found.append(.ratioSumInvalid(split.id))
-            } else {
-                if split.ratios.contains(where: { $0 < minShare - ratioSumTolerance }) {
-                    found.append(.ratioBelowMinimum(split.id))
-                }
-                if abs(split.ratios.reduce(0, +) - 1.0) > ratioSumTolerance {
-                    found.append(.ratioSumInvalid(split.id))
-                }
-            }
-        }
-        for child in split.children {
-            appendSplitViolations(of: child, to: &found)
-        }
+    private static func occurrences(of ids: [PanelID]) -> [PanelID: Int] {
+        ids.reduce(into: [:]) { counts, id in counts[id, default: 0] += 1 }
     }
 }

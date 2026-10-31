@@ -29,6 +29,7 @@ struct ConfigGet: AsyncParsableCommand {
             "agent-background: \(config.agentBackgroundEnabled ? "on" : "off")",
             "start-admission: \(config.startAdmissionEnabled ? "on" : "off")",
             "holder-claim-reconcile: \(config.holderClaimReconcileEnabled ? "on" : "off")",
+            "panel-tabs: \(config.panelTabsEnabled ? "on" : "off")",
             "session-usage: \(config.sessionModUsageEnabled ? "on" : "off")",
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
@@ -59,6 +60,7 @@ struct ConfigSet: AsyncParsableCommand {
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
         "transcript-prompt-answer", "composer-draft", "session-usage",
         "clone-checkout", "start-admission", "agent-background", "holder-claim-reconcile",
+        "panel-tabs",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
@@ -66,11 +68,11 @@ struct ConfigSet: AsyncParsableCommand {
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
         transcript-prompt-answer, composer-draft, session-usage, clone-checkout, \
-        start-admission, agent-background, holder-claim-reconcile, update-mode)
+        start-admission, agent-background, holder-claim-reconcile, panel-tabs, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage, clone-checkout, start-admission, agent-background and holder-claim-reconcile; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage, clone-checkout, start-admission, agent-background, holder-claim-reconcile and panel-tabs; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -130,6 +132,12 @@ struct ConfigSet: AsyncParsableCommand {
         case ("holder-claim-reconcile", .off):
             return "Set holder-claim-reconcile to off. The daemon only logs the sessions it "
                 + "would take back from the app, and changes nothing. Takes effect at the next poll."
+        case ("panel-tabs", .on):
+            return "Set panel-tabs to on. Each tab shows the daemon's side panel, and agents can "
+                + "open content in it with tbd panel. Takes effect now."
+        case ("panel-tabs", .off):
+            return "Set panel-tabs to off. Tabs keep the app's own layout, and tbd panel commands "
+                + "that change the side panel are refused. Takes effect now."
         case ("clone-checkout", .on):
             return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
                 + "checkout where the volume supports it, so unchanged files share disk blocks. "
@@ -236,6 +244,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetHolderClaimReconcileEnabled,
                 params: ConfigSetHolderClaimReconcileParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "panel-tabs":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetPanelTabsEnabled,
+                params: ConfigSetPanelTabsParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "clone-checkout":
             let parsed = try Self.parseOnOff(value, key: key)

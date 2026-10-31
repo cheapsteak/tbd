@@ -909,6 +909,21 @@ extension AppState {
         }
     }
 
+    // MARK: - Panel tabs
+
+    /// Persist the panel tabs gate and refresh daemon capabilities, so the
+    /// toggle shows what the daemon holds. The daemon reads the flag on every
+    /// panel call; no restart.
+    func setPanelTabsEnabled(_ enabled: Bool) async {
+        do {
+            try await panelTabsFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set panel tabs: \(error, privacy: .public)")
+            showAlert("Failed to set the side panel with tabs: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     // MARK: - Session usage
 
     /// Persist the session usage gate and refresh daemon capabilities, so the

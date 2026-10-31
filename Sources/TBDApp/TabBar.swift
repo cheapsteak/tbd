@@ -1090,73 +1090,56 @@ private struct TabBarItem: View {
         }
     }
 
+    /// Viewer content shows the icon it shares with the side region's strip
+    /// (`PanelKind.tabSystemImage`); a terminal's icon follows its session.
     @ViewBuilder
     private var tabIconView: some View {
         let style = isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary)
-        switch tab.content {
-        case .terminal:
-            if isParked {
-                Image(systemName: "moon.zzz")
-                    .font(.system(size: 10))
-                    .foregroundStyle(style)
-            } else if isClaudeTerminal {
-                Text("✳")
-                    .font(.system(size: 10))
-                    .foregroundStyle(style)
-            } else if isCodexTerminal {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 10))
-                    .foregroundStyle(style)
-            } else {
-                Image(systemName: "terminal")
-                    .font(.system(size: 10))
-                    .foregroundStyle(style)
-            }
-        case .webview:
-            Image(systemName: "globe")
+        if let viewer = LegacyTabConverter.panelContent(from: tab.content) {
+            Image(systemName: viewer.kind.tabSystemImage)
                 .font(.system(size: 10))
                 .foregroundStyle(style)
-        case .codeViewer:
-            Image(systemName: "doc.text")
+        } else if isParked {
+            Image(systemName: "moon.zzz")
                 .font(.system(size: 10))
                 .foregroundStyle(style)
-        case .note:
-            Image(systemName: "note.text")
+        } else if isClaudeTerminal {
+            Text("✳")
                 .font(.system(size: 10))
                 .foregroundStyle(style)
-        case .liveTranscript:
-            Image(systemName: "text.bubble")
+        } else if isCodexTerminal {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 10))
+                .foregroundStyle(style)
+        } else {
+            Image(systemName: "terminal")
                 .font(.system(size: 10))
                 .foregroundStyle(style)
         }
     }
 
+    /// A user's label wins. Otherwise viewer content shows the title it
+    /// shares with the side region's strip (`PanelContent.tabTitle`), with an
+    /// untitled note numbered by this tab's position, and a terminal shows
+    /// `AutoTabLabelResolver`'s.
     private var tabLabel: String {
         if let label = tab.label, !label.isEmpty {
             return label
         }
-        switch tab.content {
-        case .terminal:
-            return AutoTabLabelResolver.terminalLabel(
-                terminal: terminal,
-                fallbackIndex: index,
-                modelProfiles: appState.modelProfiles,
-                worktreeTabs: appState.tabs[worktreeID] ?? [],
-                worktreeTerminals: appState.terminals[worktreeID] ?? []
-            )
-        case .webview(_, let url):
-            return url.host ?? "Web"
-        case .codeViewer(_, let path):
-            return URL(fileURLWithPath: path).lastPathComponent
-        case .note(let noteID):
-            let allNotes = appState.notes.values.flatMap { $0 }
-            if let title = allNotes.first(where: { $0.id == noteID })?.title, !title.isEmpty {
-                return title
-            }
-            return "Note \(index + 1)"
-        case .liveTranscript:
-            return "Transcript"
+        if let viewer = LegacyTabConverter.panelContent(from: tab.content) {
+            return viewer.tabTitle(
+                noteTitle: { noteID in
+                    appState.notes.values.flatMap { $0 }.first(where: { $0.id == noteID })?.title
+                },
+                untitledNote: "Note \(index + 1)")
         }
+        return AutoTabLabelResolver.terminalLabel(
+            terminal: terminal,
+            fallbackIndex: index,
+            modelProfiles: appState.modelProfiles,
+            worktreeTabs: appState.tabs[worktreeID] ?? [],
+            worktreeTerminals: appState.terminals[worktreeID] ?? []
+        )
     }
 }
 

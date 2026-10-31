@@ -214,12 +214,13 @@ extension WorktreeLifecycle {
 
         // Status flip, session save, and SHA persist all in one transaction —
         // a crash mid-archive can't leave the row half-updated.
-        try await db.worktrees.archive(
+        let removedPanelTabIDs = try await db.worktrees.archive(
             id: worktreeID,
             claudeSessionIDs: claudeSessionIDs,
             claudeSpawnExtras: claudeSpawnExtras,
             archivedHeadSHA: capturedSHA
         )
+        subscriptions?.broadcastPanelSurfacesRemoved(worktreeID: worktreeID, tabIDs: removedPanelTabIDs)
 
         // Dev servers TBD started in its tabs stop first, while those tabs'
         // processes are alive to be signalled, and before the archive hook

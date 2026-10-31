@@ -115,6 +115,24 @@ import Foundation
     #expect(!body.contains("predates the feature"))
 }
 
+@Test func bodyDescribesTheTabbedSidePanel() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("## Panels"))
+    #expect(body.contains("tbd panel list"))
+    #expect(body.contains("Open content and let the reuse rule place it"))
+    #expect(body.contains("`--new-panel`"))
+    #expect(body.contains("`select --panel <id>`"))
+    #expect(body.contains("`collapse` hides the side panel"))
+    #expect(body.contains("`expand` shows it again"))
+    #expect(body.contains("enabled \"Side panel with tabs\" in Settings"))
+    #expect(body.contains("unless you pass `--tab <id>`"))
+    // The v1 free-split vocabulary is gone from the guidance.
+    #expect(!body.contains("select-tab"))
+    #expect(!body.contains("`move`"))
+    #expect(!body.contains("--split"))
+    #expect(!body.contains("splitID"))
+}
+
 @Test func bodyContainsScratchPromotionSection() {
     let body = TBDSkillContent.body
     #expect(body.contains("## Scratch spaces & promotion"))

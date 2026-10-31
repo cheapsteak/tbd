@@ -1562,15 +1562,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// Days a reap snapshot (`refs/tbd/snapshots/...`) is retained before
     /// being pruned.
     public var gcSnapshotRetentionDays: Int
-    /// Master switch for the daemon-owned panel-surface store (spec C Phase
-    /// 2 §8). Default OFF: the store is inert (no reads/writes) until this
-    /// flips on. See `Database/CLAUDE.md` three-place migration rule for the
-    /// `v59_panel_surface` migration that backs this column.
-    public var panelSurfaceEnabled: Bool
-    /// Gate for agent-originated panel-surface mutations. Default OFF, and
-    /// independent of `panelSurfaceEnabled` — an agent may only mutate panel
-    /// layout once both flags are true.
-    public var agentPanelControlEnabled: Bool
     /// Master switch for remote agent backends (spec 2026-07-24). Default OFF:
     /// the daemon polls provider executables in the background and can stop
     /// remote sessions, so it is opt-in until it soaks.
@@ -1809,6 +1800,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
     /// Read on every create, so a change takes effect at the next one.
     public var cloneCheckoutEnabled: Bool = Config.cloneCheckoutDefault
+    /// The side panel with tabs, shared with agents
+    /// (docs/specs/2026-10-30-panel-tabs-design.md): one switch for the
+    /// daemon's panel store, the tab sync, app rendering and agent control.
+    /// Resolved as `panel_tabs_enabled ?? Config.panelTabsDefault`. Assigned
+    /// after construction by the daemon, like `composerDraftEnabled`.
+    public var panelTabsEnabled: Bool = Config.panelTabsDefault
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1955,6 +1952,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `cloneCheckoutEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let cloneCheckoutDefault = false
+    /// The shipped default for `panelTabsEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let panelTabsDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1975,8 +1976,6 @@ public struct Config: Codable, Sendable, Equatable {
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
                 gcSnapshotRetentionDays: Int = Config.defaultGCSnapshotRetentionDays,
-                panelSurfaceEnabled: Bool = false,
-                agentPanelControlEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
@@ -2014,8 +2013,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcEnabled = gcEnabled
         self.gcGraceSeconds = gcGraceSeconds
         self.gcSnapshotRetentionDays = gcSnapshotRetentionDays
-        self.panelSurfaceEnabled = panelSurfaceEnabled
-        self.agentPanelControlEnabled = agentPanelControlEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
@@ -2073,9 +2070,6 @@ public struct Config: Codable, Sendable, Equatable {
             ?? Config.defaultGCGraceSeconds
         gcSnapshotRetentionDays = try c.decodeIfPresent(Int.self, forKey: .gcSnapshotRetentionDays)
             ?? Config.defaultGCSnapshotRetentionDays
-        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
-        agentPanelControlEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .agentPanelControlEnabled) ?? false
         remoteBackendsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteBackendsEnabled) ?? false
         // Absent (older daemon / older persisted JSON) defaults to OFF, matching
@@ -2161,6 +2155,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
+        // Absent means the sender knew nothing about the flag, the NULL
+        // column's situation — follow the shipped default.
+        panelTabsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .panelTabsEnabled) ?? Config.panelTabsDefault
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(

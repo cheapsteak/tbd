@@ -1202,8 +1202,9 @@ public actor RemoteProviderManager {
             )
             return
         }
+        let removedPanelTabIDs: [UUID]
         do {
-            try await db.worktrees.archive(id: row.id)
+            removedPanelTabIDs = try await db.worktrees.archive(id: row.id)
         } catch {
             await log.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")
@@ -1218,6 +1219,7 @@ public actor RemoteProviderManager {
         // status is watermarked, whichever path made it.
         noteFilingDecision(worktreeID: row.id, at: now)
         await log.appendOutcome(confirms: actuationID, result: .dispatched)
+        subscriptions.broadcastPanelSurfacesRemoved(worktreeID: row.id, tabIDs: removedPanelTabIDs)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: row.id)))
         do {
             let notification = try await db.notifications.create(

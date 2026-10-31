@@ -277,6 +277,7 @@ struct GeneralSettingsTab: View {
                 sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
+                panelTabsToggle
                 updateModePicker
             }
         }
@@ -352,6 +353,24 @@ struct GeneralSettingsTab: View {
 
     static let holderClaimReconcileHelp = "Lets the daemon take back a session the app has stopped showing "
         + "when the handback to the daemon was lost, and is off by default while it soaks."
+
+    /// Panel tabs opt-in. Reads `daemon.capabilities`, writes
+    /// `config.setPanelTabsEnabled`. Off by default (soaking). One flag turns
+    /// on the daemon's panel store, the app's tab sync, rendering from the
+    /// daemon and agent panel control together.
+    @ViewBuilder
+    private var panelTabsToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Side panel with tabs, shared with agents (experimental)", isOn: Binding(
+            get: { capabilities?.panelTabsEnabled ?? Config.panelTabsDefault },
+            set: { newValue in Task { await appState.setPanelTabsEnabled(newValue) } }
+        ))
+        .help(Self.panelTabsHelp)
+    }
+
+    static let panelTabsHelp = "Shows files, pages, notes and transcripts in a side panel with tabs beside "
+        + "each tab's main content, and lets agents open and arrange its panels with tbd panel. "
+        + "Off by default while it soaks."
 
     /// Moves the sessions that already exist onto the holder. Sits beside the
     /// toggle because that is where someone who just turned it on looks for what

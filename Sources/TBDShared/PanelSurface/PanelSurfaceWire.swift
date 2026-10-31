@@ -52,33 +52,46 @@ public struct LegacyTabPayload: Codable, Sendable, Equatable {
     }
 }
 
-public struct PanelImportParams: Codable, Sendable, Equatable {
+/// `panel.syncTabs` (panel tabs spec, "Tab sync"): every workspace tab of one
+/// worktree as the app knows it. The daemon imports each listed tab that has
+/// no surface through `LegacyTabConverter`, never overwrites one that has a
+/// surface, re-parents a listed tab's surface held under another worktree,
+/// updates position, label and primary on existing surfaces, and deletes this
+/// worktree's surfaces for tabs not listed.
+public struct PanelSyncTabsParams: Codable, Sendable, Equatable {
     public let worktreeID: UUID
+    /// Every workspace tab, in tab-bar order.
     public let tabs: [LegacyTabPayload]
-    public let tabOrder: [UUID]
-    public let activeTabID: UUID?
-    /// PR #472's persisted per-slot histories (legacy `PaneContent` MRU),
-    /// keyed by legacy slot/pane ID.
+    /// PR #472's persisted per-pane histories (legacy `PaneContent` MRU),
+    /// keyed by legacy pane ID; read when a tab is imported.
     public let paneHistories: [UUID: MRUHistory<PaneContent>]
-    public init(worktreeID: UUID, tabs: [LegacyTabPayload], tabOrder: [UUID],
-                activeTabID: UUID?, paneHistories: [UUID: MRUHistory<PaneContent>]) {
+    public init(worktreeID: UUID, tabs: [LegacyTabPayload],
+                paneHistories: [UUID: MRUHistory<PaneContent>]) {
         self.worktreeID = worktreeID
         self.tabs = tabs
-        self.tabOrder = tabOrder
-        self.activeTabID = activeTabID
         self.paneHistories = paneHistories
     }
 }
 
-public struct PanelImportResult: Codable, Sendable, Equatable {
-    public let imported: Bool
-    public let tabCount: Int
-    public let promotedTerminalTabs: Int
+public struct PanelSyncTabsResult: Codable, Sendable, Equatable {
+    /// Listed tabs that had no surface and now have one.
+    public let importedTabIDs: [UUID]
+    /// Listed tabs whose surface moved here from another worktree.
+    public let reparentedTabIDs: [UUID]
+    /// This worktree's surfaces deleted because their tab was not listed.
+    public let removedTabIDs: [UUID]
+    /// Listed tabs the daemon could not import, which the sync left without a
+    /// surface: they render legacy. A tab that already has a surface is never
+    /// named, whatever its legacy layout holds.
+    public let skippedTabIDs: [UUID]
+    /// The reason for each of `skippedTabIDs`, in the same order.
     public let skipped: [String]
-    public init(imported: Bool, tabCount: Int, promotedTerminalTabs: Int, skipped: [String]) {
-        self.imported = imported
-        self.tabCount = tabCount
-        self.promotedTerminalTabs = promotedTerminalTabs
+    public init(importedTabIDs: [UUID], reparentedTabIDs: [UUID],
+                removedTabIDs: [UUID], skippedTabIDs: [UUID], skipped: [String]) {
+        self.importedTabIDs = importedTabIDs
+        self.reparentedTabIDs = reparentedTabIDs
+        self.removedTabIDs = removedTabIDs
+        self.skippedTabIDs = skippedTabIDs
         self.skipped = skipped
     }
 }

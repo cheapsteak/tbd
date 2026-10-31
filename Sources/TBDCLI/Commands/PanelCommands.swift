@@ -5,32 +5,31 @@ import TBDShared
 struct PanelCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "panel",
-        abstract: "Inspect and arrange a worktree's panels (agent See/Arrange)",
+        abstract: "Inspect and arrange the side panel in each tab of a worktree",
         subcommands: [
             PanelList.self,
             PanelOpen.self,
             PanelNavigate.self,
             PanelClose.self,
-            PanelMove.self,
-            PanelResize.self,
+            PanelSelect.self,
             PanelBack.self,
             PanelForward.self,
             PanelJump.self,
-            PanelSelectTab.self,
+            PanelCollapse.self,
+            PanelExpand.self,
+            PanelResize.self,
         ]
     )
 }
 
-// MARK: - ExpressibleByArgument conformance for CLI
-
-extension PanelEdge: ExpressibleByArgument {}
+private let tabHelp: ArgumentHelp = "Tab ID (default: the worktree's active tab)"
 
 // MARK: - panel list (See)
 
 struct PanelList: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "Show a worktree's tabs, panels, and layout — read-only, always available regardless of gating"
+        abstract: "Show each tab's primary content and side panel — read-only, works even when the side panel is off"
     )
 
     @Argument(help: "Worktree name or ID")
@@ -47,6 +46,9 @@ struct PanelList: AsyncParsableCommand {
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
+        // `panel.get` is ungated, so `list` answers while the flag is off.
+        // Scoped to `--tab` when given; scoped or not, the reply names the
+        // worktree's active tab, which the listing marks.
         let result: PanelGetResult = try client.call(
             method: RPCMethod.panelGet,
             params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
@@ -56,65 +58,80 @@ struct PanelList: AsyncParsableCommand {
         if json {
             printJSON(result)
         } else {
-            if result.tabs.isEmpty {
-                print("No tabs found.")
-                return
-            }
-            for (index, tab) in result.tabs.enumerated() {
-                if index > 0 { print() }
-                for line in tabLines(tab, activeTabID: result.activeTabID) {
-                    print(line)
-                }
+            for line in panelListLines(result) {
+                print(line)
             }
         }
     }
 }
 
-// MARK: - panel open / navigate / close / move / resize / history / select-tab (Arrange)
+/// The text `tbd panel list` prints for `result`: each tab's lines, the
+/// active tab's marked `[ACTIVE]`, with a blank line between tabs, or a note
+/// when there is no tab.
+func panelListLines(_ result: PanelGetResult) -> [String] {
+    guard !result.tabs.isEmpty else { return ["No tabs found."] }
+    var lines: [String] = []
+    for (index, tab) in result.tabs.enumerated() {
+        if index > 0 { lines.append("") }
+        lines.append(contentsOf: tabLines(tab, activeTabID: result.activeTabID))
+    }
+    return lines
+}
+
+// MARK: - Arrange verbs
+//
+// Each verb names its `PanelOperation` in `operation()` — pure, so tests pin
+// the mapping without a daemon — and `run()` hands it to
+// `runPanelOperation`, which resolves the tab and applies it.
 
 struct PanelOpen: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "open",
-        abstract: "Open a new panel in a tab's layout"
+        abstract: "Show content in the side panel",
+        discussion: """
+            Selects a panel already showing this content. Otherwise a file, web page \
+            or note goes into the active panel when it is the same kind, else into the \
+            most recently used panel of that kind, and the old content stays in that \
+            panel's history. A transcript, --new-panel, or content with no panel of \
+            its kind gets a new panel after the active one. Opening also expands a \
+            collapsed side panel.
+            """
     )
 
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @OptionGroup var content: ContentOptions
-    @OptionGroup var placement: PlacementOptions
+
+    @Flag(name: .long, help: "Always open a new panel instead of reusing one of the same kind")
+    var newPanel = false
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelContent = try resolvePanelContent(content)
-        let panelPlacement = try resolvePanelPlacement(placement)
+    func operation() throws -> PanelOperation {
+        .open(content: try resolvePanelContent(content), newPanel: newPanel)
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .open(content: panelContent, placement: panelPlacement))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
 struct PanelNavigate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "navigate",
-        abstract: "Change what an existing panel displays"
+        abstract: "Point one panel at new content of the same kind"
     )
 
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Option(name: .long, help: "Panel ID to navigate")
     var panel: String
@@ -124,31 +141,28 @@ struct PanelNavigate: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
-        let destination = try resolvePanelContent(content)
+    func operation() throws -> PanelOperation {
+        .navigate(
+            panelID: try parseUUID(panel, label: "panel ID"),
+            destination: try resolvePanelContent(content))
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .navigate(panelID: panelID, destination: destination))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
 struct PanelClose: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "close",
-        abstract: "Close a panel"
+        abstract: "Close a panel and its history"
     )
 
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Option(name: .long, help: "Panel ID to close")
     var panel: String
@@ -156,85 +170,39 @@ struct PanelClose: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
+    func operation() throws -> PanelOperation {
+        .close(panelID: try parseUUID(panel, label: "panel ID"))
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .close(panelID: panelID))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
-struct PanelMove: AsyncParsableCommand {
+struct PanelSelect: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "move",
-        abstract: "Move a panel to a new placement in the layout"
+        commandName: "select",
+        abstract: "Bring a panel to the front, expanding a collapsed side panel"
     )
 
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
-    @Option(name: .long, help: "Panel ID to move")
+    @Option(name: .long, help: "Panel ID to select")
     var panel: String
 
-    @OptionGroup var placement: PlacementOptions
-
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
-        let panelPlacement = try resolvePanelPlacement(placement)
-
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .move(panelID: panelID, placement: panelPlacement))
-        printApplyResult(result, json: json)
+    func operation() throws -> PanelOperation {
+        .select(panelID: try parseUUID(panel, label: "panel ID"))
     }
-}
-
-struct PanelResize: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "resize",
-        abstract: "Resize a split's children"
-    )
-
-    @Argument(help: "Worktree name or ID")
-    var worktree: String
-
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
-
-    @Option(name: .long, help: "Split ID to resize")
-    var split: String
-
-    @Option(name: .long, help: "Comma-separated ratios for the split's children, e.g. '0.5,0.5'")
-    var ratios: String
-
-    @Flag(name: .long, help: "Output JSON")
-    var json = false
 
     mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let splitID = try parseUUID(split, label: "split ID")
-        let parsedRatios = try parseRatios(ratios)
-
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .resize(splitID: splitID, ratios: parsedRatios))
-        printApplyResult(result, json: json)
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
@@ -247,8 +215,8 @@ struct PanelBack: AsyncParsableCommand {
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Option(name: .long, help: "Panel ID")
     var panel: String
@@ -256,16 +224,12 @@ struct PanelBack: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
+    func operation() throws -> PanelOperation {
+        .history(panelID: try parseUUID(panel, label: "panel ID"), action: .back)
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .history(panelID: panelID, action: .back))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
@@ -278,8 +242,8 @@ struct PanelForward: AsyncParsableCommand {
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Option(name: .long, help: "Panel ID")
     var panel: String
@@ -287,16 +251,12 @@ struct PanelForward: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
+    func operation() throws -> PanelOperation {
+        .history(panelID: try parseUUID(panel, label: "panel ID"), action: .forward)
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .history(panelID: panelID, action: .forward))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
@@ -309,8 +269,8 @@ struct PanelJump: AsyncParsableCommand {
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Option(name: .long, help: "Panel ID")
     var panel: String
@@ -321,50 +281,98 @@ struct PanelJump: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
-        let panelID = try parseUUID(panel, label: "panel ID")
+    func operation() throws -> PanelOperation {
+        .history(panelID: try parseUUID(panel, label: "panel ID"), action: .jump(index: index))
+    }
 
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .history(panelID: panelID, action: .jump(index: index)))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
-struct PanelSelectTab: AsyncParsableCommand {
+struct PanelCollapse: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "select-tab",
-        abstract: "Make a tab the active tab"
+        commandName: "collapse",
+        abstract: "Hide the side panel, keeping its panels"
     )
 
     @Argument(help: "Worktree name or ID")
     var worktree: String
 
-    @Option(name: .long, help: "Tab ID to select")
-    var tab: String
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
-        let tabID = try parseUUID(tab, label: "tab ID")
+    func operation() -> PanelOperation {
+        .setCollapsed(true)
+    }
 
-        // baseRevision here is the SELECTED tab's own revision (there's no
-        // separate target panel/tab) — fine because selectTab never mutates
-        // a tab's layout, so staleness on that tab's tree can't apply.
-        let result = try applyPanelOperation(
-            client: client, worktreeID: worktreeID, tabID: tabID,
-            operation: .selectTab(tabID: tabID))
-        printApplyResult(result, json: json)
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
 }
 
-// MARK: - Shared flag groups (open/navigate share content; open/move share placement)
+struct PanelExpand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "expand",
+        abstract: "Show a collapsed side panel again"
+    )
+
+    @Argument(help: "Worktree name or ID")
+    var worktree: String
+
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    func operation() -> PanelOperation {
+        .setCollapsed(false)
+    }
+
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
+    }
+}
+
+struct PanelResize: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "resize",
+        abstract: "Set the side panel's width"
+    )
+
+    @Argument(help: "Worktree name or ID")
+    var worktree: String
+
+    @Option(name: .long, help: tabHelp)
+    var tab: String?
+
+    @Option(
+        name: .long,
+        help: """
+            Width as a fraction of the tab's width, from \(SideRegion.widthRange.lowerBound) \
+            to \(SideRegion.widthRange.upperBound)
+            """)
+    var width: Double
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    /// Sent as given: the daemon rejects an out-of-range or non-finite width
+    /// with a typed error, which `run()` prints.
+    func operation() -> PanelOperation {
+        .resize(width: width)
+    }
+
+    mutating func run() async throws {
+        try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
+    }
+}
+
+// MARK: - Content flags (used by open and navigate)
 
 /// The four `PanelContent` sources as CLI flags. Exactly one must be given.
 struct ContentOptions: ParsableArguments {
@@ -385,24 +393,6 @@ struct ContentOptions: ParsableArguments {
 
     @Option(name: .long, help: "Open/navigate to a note (note ID)")
     var note: String?
-
-    init() {}
-}
-
-/// `PanelPlacement` as CLI flags. Neither `--replace` nor `--beside` given
-/// means `.automatic`.
-struct PlacementOptions: ParsableArguments {
-    @Option(name: .long, help: "Replace this panel's content in place (panel ID)")
-    var replace: String?
-
-    @Option(name: .long, help: "Place beside this anchor: 'primary' or a panel ID")
-    var beside: String?
-
-    @Option(name: .long, help: "Edge to place beside — required with --beside")
-    var edge: PanelEdge?
-
-    @Option(name: .long, help: "Share of space (0..1) for the new panel — optional with --beside")
-    var share: Double?
 
     init() {}
 }
@@ -447,60 +437,7 @@ func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
     return content
 }
 
-/// Resolve `PlacementOptions` into a `PanelPlacement`. `--replace` and
-/// `--beside` are mutually exclusive; `--edge`/`--share` are only valid
-/// alongside `--beside`; no placement flags at all means `.automatic`.
-func resolvePanelPlacement(_ opts: PlacementOptions) throws -> PanelPlacement {
-    switch (opts.replace, opts.beside) {
-    case (nil, nil):
-        // "requires --beside" must win over the range check below — a bare
-        // --share with no placement target is missing --beside, not out of range.
-        guard opts.edge == nil, opts.share == nil else {
-            throw CLIError.invalidArgument("--edge/--share require --beside")
-        }
-        return .automatic
-
-    case (let replace?, nil):
-        guard opts.edge == nil, opts.share == nil else {
-            throw CLIError.invalidArgument("--edge/--share are not valid with --replace")
-        }
-        return .replace(panelID: try parseUUID(replace, label: "panel ID"))
-
-    case (nil, let beside?):
-        guard let edge = opts.edge else {
-            throw CLIError.invalidArgument("--beside requires --edge")
-        }
-        if let share = opts.share {
-            guard (0...1).contains(share) else {
-                throw CLIError.invalidArgument("--share must be between 0 and 1")
-            }
-        }
-        let anchor: PanelAnchor = beside.lowercased() == "primary"
-            ? .primary
-            : .panel(try parseUUID(beside, label: "--beside target"))
-        return .beside(target: anchor, edge: edge, share: opts.share)
-
-    case (.some, .some):
-        throw CLIError.invalidArgument("Cannot use both --replace and --beside")
-    }
-}
-
-/// Parse a comma-separated ratio list, e.g. "0.5,0.5" -> [0.5, 0.5].
-func parseRatios(_ csv: String) throws -> [Double] {
-    let parts = csv.split(separator: ",", omittingEmptySubsequences: false)
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-    guard !parts.isEmpty, !parts.contains("") else {
-        throw CLIError.invalidArgument("Invalid --ratios: \(csv)")
-    }
-    return try parts.map { part in
-        guard let value = Double(part) else {
-            throw CLIError.invalidArgument("Invalid ratio: \(part)")
-        }
-        return value
-    }
-}
-
-// MARK: - Layout tree rendering (shared by `list` and Arrange result printing)
+// MARK: - Rendering (used by `list` and by Arrange result printing)
 
 func describe(_ content: PanelContent) -> String {
     switch content {
@@ -530,34 +467,37 @@ func describe(_ content: PrimaryContent) -> String {
     }
 }
 
-/// Render a layout tree indented, one line per node. Panel slots show their
-/// panelID + content; splits show their splitID, direction, and ratios;
-/// `.primary` marks where the tab's primary anchor sits in the tree — these
-/// IDs are the handles agents need to target Arrange mutations.
-func renderPanelTree(_ node: PanelLayoutNode, indent: String) -> [String] {
-    switch node {
-    case .primary:
-        return ["\(indent)[primary]"]
-    case .panel(let slot):
-        return ["\(indent)panel \(slot.id): \(describe(slot.content))"]
-    case .split(let split):
-        let ratios = split.ratios.map { String(format: "%.2f", $0) }.joined(separator: ",")
-        var lines = ["\(indent)split \(split.id) (\(split.direction.rawValue), ratios: \(ratios))"]
-        for child in split.children {
-            lines.append(contentsOf: renderPanelTree(child, indent: indent + "  "))
-        }
-        return lines
+/// The side region, one line per panel in tab-strip order. Each panel line
+/// carries the panel ID — the handle `--panel` takes — and its content, which
+/// `describe` leads with the panel's kind; the active panel is marked
+/// `[ACTIVE]`. The header gives the width and notes a collapsed region.
+func renderSideRegion(_ surface: WorkspaceTabSurface) -> [String] {
+    let side = surface.side
+    guard !side.panels.isEmpty else { return ["side region: no panels"] }
+
+    let count = side.panels.count == 1 ? "1 panel" : "\(side.panels.count) panels"
+    var header = "side region: \(count), width \(String(format: "%.2f", side.width))"
+    if side.collapsed {
+        header += ", collapsed (hidden, panels kept; `tbd panel expand` shows it)"
     }
+
+    var lines = [header]
+    for panel in side.panels {
+        let marker = panel.id == side.activePanelID ? " [ACTIVE]" : ""
+        let shown = panel.content.map { describe($0) } ?? "(no content)"
+        lines.append("  panel \(panel.id)\(marker): \(shown)")
+    }
+    return lines
 }
 
-/// Full text rendering of one tab: header + primary + layout tree.
+/// Full text rendering of one tab: header + primary + revision + side region.
 func tabLines(_ tab: WorkspaceTabSurface, activeTabID: UUID?) -> [String] {
     let marker = tab.id == activeTabID ? " [ACTIVE]" : ""
     let label = tab.label.map { " — \($0)" } ?? ""
     var lines = ["Tab \(tab.id)\(marker)\(label)"]
     lines.append("  primary: \(describe(tab.primary))")
     lines.append("  revision: \(tab.revision)")
-    lines.append(contentsOf: renderPanelTree(tab.layout, indent: "  "))
+    lines.append(contentsOf: renderSideRegion(tab).map { "  " + $0 })
     return lines
 }
 
@@ -583,29 +523,74 @@ private func parseUUID(_ raw: String, label: String) throws -> UUID {
     return id
 }
 
-/// Fetch a tab's current revision, then apply an operation against it as
-/// `origin: .agentCLI`. Every Arrange verb funnels through here so the
-/// `baseRevision` fetch-then-apply sequence lives in exactly one place.
-private func applyPanelOperation(
-    client: SocketClient, worktreeID: UUID, tabID: UUID, operation: PanelOperation
-) throws -> PanelApplyResult {
-    let current: PanelGetResult = try client.call(
-        method: RPCMethod.panelGet,
-        params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
-        resultType: PanelGetResult.self
-    )
-    guard let tab = current.tabs.first(where: { $0.id == tabID }) else {
-        throw CLIError.invalidArgument("Tab not found: \(tabID)")
-    }
+/// The tab an Arrange verb acts on, and the `panel.get` reply its
+/// `baseRevision` comes from.
+struct PanelTarget {
+    let tabID: UUID
+    let current: PanelGetResult
+}
 
-    let envelope = PanelOperationEnvelope(
-        operationID: UUID(), worktreeID: worktreeID, tabID: tabID,
-        baseRevision: tab.revision, origin: .agentCLI, operation: operation)
-    return try client.call(
+/// Resolves the tab an Arrange verb acts on with one `panel.get`, whose reply
+/// the envelope's `baseRevision` is then read from. `get` sends that get,
+/// scoped to the tab it is passed or unscoped for nil.
+///
+/// With `--tab`, the get is scoped to that tab. Without it, the get is
+/// unscoped, because the tab is not known yet: its `activeTabID` names the
+/// worktree's active tab (the daemon reads `worktree.activeTabID`, which the
+/// app keeps current), and it carries every surface of the worktree, that
+/// tab's among them when it has one.
+func resolvePanelTarget(
+    tab: String?, get: (_ tabID: UUID?) throws -> PanelGetResult
+) throws -> PanelTarget {
+    if let tab {
+        let tabID = try parseUUID(tab, label: "tab ID")
+        return PanelTarget(tabID: tabID, current: try get(tabID))
+    }
+    let current = try get(nil)
+    guard let active = current.activeTabID else {
+        throw CLIError.invalidArgument("no active tab; pass --tab")
+    }
+    return PanelTarget(tabID: active, current: current)
+}
+
+/// Resolve the worktree and tab, apply `operation` as the agent CLI, and
+/// print the tab it leaves behind. Every Arrange verb's `run()` is this call:
+/// one `panel.get` (see `resolvePanelTarget`), then one `panel.apply`.
+private func runPanelOperation(
+    worktree: String, tab: String?, json: Bool, operation: PanelOperation
+) throws {
+    let client = SocketClient()
+    let worktreeID = try resolveWorktreeArg(worktree, client: client)
+    let target = try resolvePanelTarget(tab: tab) { scopedTabID in
+        try client.call(
+            method: RPCMethod.panelGet,
+            params: PanelGetParams(worktreeID: worktreeID, tabID: scopedTabID),
+            resultType: PanelGetResult.self
+        )
+    }
+    let envelope = panelEnvelope(
+        worktreeID: worktreeID, tabID: target.tabID, current: target.current, operation: operation)
+    let result: PanelApplyResult = try client.call(
         method: RPCMethod.panelApply,
         params: PanelApplyParams(envelope: envelope),
         resultType: PanelApplyResult.self
     )
+    printApplyResult(result, json: json)
+}
+
+/// The envelope an Arrange verb sends, as `origin: .agentCLI`. `baseRevision`
+/// is the tab's revision in `current`, or nil when `current` holds no surface
+/// for the tab. The apply still goes out then, so the daemon names the real
+/// reason: the side panel is off (no surfaces exist until it is turned on),
+/// or no surface exists for that tab.
+func panelEnvelope(
+    worktreeID: UUID, tabID: UUID, current: PanelGetResult, operation: PanelOperation,
+    operationID: UUID = UUID()
+) -> PanelOperationEnvelope {
+    PanelOperationEnvelope(
+        operationID: operationID, worktreeID: worktreeID, tabID: tabID,
+        baseRevision: current.tabs.first(where: { $0.id == tabID })?.revision,
+        origin: .agentCLI, operation: operation)
 }
 
 /// Resolve a worktree argument that could be a UUID or a name. Duplicated

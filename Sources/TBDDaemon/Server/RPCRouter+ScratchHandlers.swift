@@ -351,7 +351,8 @@ extension RPCRouter {
         // teardown above has run, unless another row naming the same session
         // may still be running.
         lifecycle.removeSessionDirectories(for: sessions)
-        try await db.worktrees.archive(id: wt.id)
+        let removedPanelTabIDs = try await db.worktrees.archive(id: wt.id)
+        subscriptions.broadcastPanelSurfacesRemoved(worktreeID: wt.id, tabIDs: removedPanelTabIDs)
 
         // Same delta `scratch.delete` broadcasts — deliberate: from the
         // client's perspective the row leaves the active section identically
@@ -520,9 +521,10 @@ extension RPCRouter {
             // — the scratch row stays un-promoted and retryable, and no
             // half-migrated state can leave `scratch.delete` free to tmux-kill
             // live un-reparented terminals.
+            let movedPanelSurfaces: [WorkspaceTabSurface]
             do {
                 if let failureHook = scratchPromoteMigrationFailureHook { try await failureHook() }
-                try await db.worktrees.promoteScratchMigration(
+                movedPanelSurfaces = try await db.worktrees.promoteScratchMigration(
                     scratchID: wt.id,
                     mainWorktreeID: mainWorktree.id,
                     repoID: repo.id,
@@ -569,12 +571,15 @@ extension RPCRouter {
                 oldPath: wt.path, newPath: repo.path, terminals: migratedTerminals)
 
             // .repoAdded was already broadcast by addRepo. Announce the moved
-            // terminals under their new worktree, then the scratch row's exit
-            // from the active section — same delta scratch.archive/delete use.
+            // terminals and panel surfaces under their new worktree, then the
+            // scratch row's exit from the active section — same delta
+            // scratch.archive/delete use.
             for terminal in migratedTerminals {
                 subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
                     terminalID: terminal.id, worktreeID: mainWorktree.id, label: terminal.label)))
             }
+            subscriptions.broadcastPanelSurfacesMoved(
+                worktreeID: mainWorktree.id, surfaces: movedPanelSurfaces)
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
         } else {
             // Set the promotion pointer even though nothing migrated: the

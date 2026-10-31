@@ -10,9 +10,6 @@ private let tmuxResolutionLogger = Logger(
     subsystem: "com.tbd.app",
     category: "tmux"
 )
-/// Spec C §11.3 — log-only shadow-compare diagnostic. Dedicated category so
-/// it can be streamed/filtered independently of the rest of AppState.
-private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "panelShadow")
 /// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
@@ -852,7 +849,12 @@ final class AppState {
     @ObservationIgnored private var lastBroadcastRows: Int = 0
     var isConnected: Bool = false
     var layouts: [UUID: LayoutNode] = [:] {
-        didSet { persistLayouts() }
+        didSet {
+            persistLayouts()
+            // Never read `oldValue` here: it copies the whole dictionary on
+            // every in-place edit. The observer keeps its own snapshot.
+            notePanelLayoutsChanged()
+        }
     }
     /// Multi-worktree grid layouts, keyed by WORKTREE ID. Presentation-only
     /// (spec C §3.12): never persisted, never mirrored, never part of the
@@ -864,7 +866,71 @@ final class AppState {
     var paneHistories: [UUID: PaneHistory] = [:] {
         didSet { persistPaneHistories() }
     }
-    var tabs: [UUID: [TBDShared.Tab]] = [:]
+    /// Workspace tabs per worktree. The one observer below is how a tab created,
+    /// closed, reordered, relabelled or re-pointed anywhere in the app reaches
+    /// the daemon's `panel.syncTabs` (`AppState+PanelSurface.swift`). It never
+    /// reads `oldValue`, which would copy the whole dictionary on every
+    /// in-place edit; it compares against `panelTabSignatures` instead.
+    var tabs: [UUID: [TBDShared.Tab]] = [:] {
+        didSet { notePanelTabsChanged() }
+    }
+    /// The app's copy of the daemon-owned panel surfaces: worktree → workspace
+    /// tab → surface. Filled by `panel.get` and kept current by
+    /// `panelSurfaceChanged` deltas while `panel_tabs_enabled` is on; empty
+    /// otherwise. Carries no tab order — the renderer looks tabs up by ID.
+    /// Written only when a value actually changes, because every reader of a
+    /// dictionary-keyed tracked property is notified on any write.
+    var panelSurfaces: [UUID: [WorkspaceTabID: WorkspaceTabSurface]] = [:]
+    /// Worktrees whose workspace tabs changed since their last `panel.syncTabs`.
+    @ObservationIgnored var panelSyncDirty: Set<UUID> = []
+    /// Each worktree's tab list — every field the sync sends: IDs, order,
+    /// labels and contents — as the `tabs` observer last marked it, taken
+    /// while the flag is on and empty while it is off. The observer compares
+    /// `tabs` against this rather than against `oldValue`. It shares each
+    /// worktree's array with `tabs`, never the dictionary itself, so an
+    /// in-place edit with the flag on copies at most that worktree's tabs.
+    @ObservationIgnored var panelTabSignatures: [UUID: [TBDShared.Tab]] = [:]
+    /// The legacy layouts of the tabs in `panelSyncSkippedTabIDs`, as the
+    /// `layouts` observer last saw them; empty when nothing is skipped.
+    @ObservationIgnored var panelSkippedTabLayouts: [UUID: LayoutNode] = [:]
+    /// A tab-sync flush is scheduled or running; later changes join it rather
+    /// than scheduling another.
+    @ObservationIgnored var panelSyncFlushScheduled = false
+    /// The flush that is sending, if one is. Syncs go out one at a time, so
+    /// the daemon applies a worktree's tab lists in the order the app built
+    /// them; a later flush awaits this one before it starts.
+    @ObservationIgnored var panelSyncFlushTask: Task<Void, Never>?
+    /// Worktrees whose tab list is complete enough to sync: both the
+    /// terminal-backed and the note-backed tabs have been reconciled against a
+    /// fetch since the current subscription. A sync deletes the surface of
+    /// every tab it does not list, so a list holding only one of the two
+    /// would delete the other's panels. Cleared on resubscribe.
+    @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
+    /// Workspace tabs the last `panel.syncTabs` of their worktree left without
+    /// a surface (`PanelSyncTabsResult.skippedTabIDs`): the daemon could not
+    /// import their legacy layout. A change to one of these tabs' layouts is
+    /// the only layout change that sends a sync. Each sync result replaces the
+    /// members among the tabs it listed. Tracked, because a detail view's
+    /// load key reads it (`panelSurfaceLoadKey`), and written only when its
+    /// value changes, because every reader is notified on any write. Each
+    /// write retakes `panelSkippedTabLayouts` for the new set.
+    var panelSyncSkippedTabIDs: Set<UUID> = [] {
+        didSet { snapshotPanelSkippedTabLayouts() }
+    }
+    /// `panel.get` calls awaiting their reply. While any is, every delta and
+    /// adopted apply reply records the tab IDs it touched in
+    /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.
+    @ObservationIgnored var panelLoadsInFlight = 0
+    /// Orders those touches against each load's issue point.
+    @ObservationIgnored var panelTouchSequence: UInt64 = 0
+    /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
+    /// load is in flight and emptied when the last one lands.
+    @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
+    /// The daemon has acknowledged the subscription `startSubscription()` last
+    /// opened. Until it has, the flag turning on syncs but loads nothing: the
+    /// acknowledgement refetches every worktree itself
+    /// (`panelSubscriptionRegistered`).
+    @ObservationIgnored var panelSubscriptionAcknowledged = false
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -1854,10 +1920,14 @@ final class AppState {
     @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
         { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
     /// How `startSubscription()` opens the daemon's delta stream: calls
-    /// `onConnected` once the daemon answers, `onDelta` for each delta, and
-    /// returns when the stream ends (`DaemonClient.subscribe`). Injectable so
-    /// tests can drive failed and successful connects without a daemon.
-    @ObservationIgnored lazy var deltaSubscriber: @Sendable (
+    /// `onConnected` once the daemon answers, which also means it has
+    /// registered the subscription, `onDelta` for each delta, and returns when
+    /// the stream ends (`DaemonClient.subscribe`). Injectable so tests can
+    /// drive failed and successful connects, and say when the daemon registers
+    /// the subscription, without a daemon. Main-actor isolated so a stub that
+    /// answers without suspending keeps the whole subscribe chain on the main
+    /// actor, where handing it back is all a test needs to drain it.
+    @ObservationIgnored lazy var deltaSubscriber: @MainActor (
         _ onConnected: @escaping @Sendable () -> Void,
         _ onDelta: @escaping DaemonClient.DeltaHandler
     ) async -> Void = { [daemonClient] onConnected, onDelta in
@@ -2046,6 +2116,10 @@ final class AppState {
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
+    /// How `setPanelTabsEnabled` persists the panel tabs soak flag —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var panelTabsFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setPanelTabsEnabled(enabled) }
     /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
     /// the same reason as `controlModeSetter`, so the sweep's cadence and its
     /// answers are testable without a daemon.
@@ -2375,20 +2449,22 @@ final class AppState {
     /// the sequence of responses without a daemon.
     @ObservationIgnored lazy var tabStatesFetcher: @MainActor (UUID) async throws -> TabListResponse =
         { [daemonClient] worktreeID in try await daemonClient.listTabs(worktreeID: worktreeID) }
-    /// How the one-shot legacy panel import fires its RPC — injectable for the
-    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
-    /// no protocol), so trigger tests can record calls without a real daemon.
-    @ObservationIgnored lazy var panelImportTrigger: @MainActor (PanelImportParams) async throws -> PanelImportResult =
-        { [daemonClient] params in try await daemonClient.panelImportLegacy(params) }
-    /// How the shadow-compare diagnostic (spec C §11.3) fetches the daemon's
-    /// imported surface — injectable for the same reason as `panelImportTrigger`.
+    /// How the app fetches a worktree's daemon-owned panel surfaces
+    /// (`panel.get`, every tab) — injectable for the same reason as
+    /// `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no protocol),
+    /// so tests can drive the replies without a real daemon.
     @ObservationIgnored lazy var panelGetFetcher: @MainActor (UUID) async throws -> PanelGetResult =
         { [daemonClient] worktreeID in try await daemonClient.panelGet(worktreeID: worktreeID) }
-    /// Guards the one-shot legacy panel import to at most once per launch.
-    /// Deliberately NOT persisted — the daemon's create-if-absent import guard
-    /// (spec C §11.2) is the real idempotence boundary; this only avoids
-    /// redundant RPC fan-out as `loadTabStates` runs per worktree.
-    @ObservationIgnored private var hasAttemptedPanelImport = false
+    /// How the app sends one panel operation (`panel.apply`) — injectable for
+    /// the same reason as `panelGetFetcher`, so tests can record envelopes and
+    /// script replies or failures.
+    @ObservationIgnored lazy var panelApplyTrigger: @MainActor (PanelOperationEnvelope) async throws -> PanelApplyResult =
+        { [daemonClient] envelope in try await daemonClient.panelApply(envelope) }
+    /// How the app sends a worktree's workspace tabs to the daemon
+    /// (`panel.syncTabs`) — injectable for the same reason as
+    /// `panelGetFetcher`, so tests can count syncs without a real daemon.
+    @ObservationIgnored lazy var panelSyncTrigger: @MainActor (PanelSyncTabsParams) async throws -> PanelSyncTabsResult =
+        { [daemonClient] params in try await daemonClient.panelSyncTabs(params) }
     /// How `refreshRepos()` fetches the repo list — injectable for the same
     /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
     /// prunes no remembered sidebar group.
@@ -2494,8 +2570,36 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
+            let wasPanelTabsEnabled = panelTabsActive
             daemonCapabilities = capabilities
+            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
         }
+    }
+
+    /// The capability fetch `connectAndLoadInitialState` makes before its
+    /// first `refreshAll`. Keeps the last known value on failure, as
+    /// `refreshDaemonCapabilities` does: a transient hiccup at connect must
+    /// not switch panel tabs off for the session by clearing the copy. Runs
+    /// the panel-tabs hook only after a successful fetch. A failure with
+    /// nothing to keep is retried on the poll
+    /// (`retryDaemonCapabilitiesIfMissing`).
+    func fetchDaemonCapabilitiesAtConnect() async {
+        let wasPanelTabsEnabled = panelTabsActive
+        guard let capabilities = await daemonCapabilitiesFetcher() else {
+            logger.warning("Daemon capabilities fetch failed at connect; keeping the last known value")
+            return
+        }
+        daemonCapabilities = capabilities
+        panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
+    }
+
+    /// Run on each poll cycle: while the app is connected and holds no
+    /// capabilities, because every fetch so far failed, fetch them again.
+    /// Without this a failed connect-time fetch would leave every capability
+    /// flag reading off until some later `.modelProfilesChanged`.
+    func retryDaemonCapabilitiesIfMissing() async {
+        guard isConnected, daemonCapabilities == nil else { return }
+        await refreshDaemonCapabilities()
     }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     @ObservationIgnored lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -2925,19 +3029,26 @@ final class AppState {
         }
     }
 
-    // MARK: - Legacy panel import (spec C §11.2)
+    // MARK: - Panel tab sync payload
 
-    /// Builds the legacy-import payload for one worktree from AppState's
-    /// current in-memory tab/layout/history state. Grid-layout entries — the
-    /// persisted `layouts` blob's stale worktree-keyed rows from pre-#478
-    /// installs — are excluded BY CONSTRUCTION: only `layouts[tab.id]` is
-    /// ever consulted, never `layouts.values` (spec §11.2.2, "grid state is
-    /// not imported"). `paneHistories` is filtered to pane IDs that actually
-    /// appear in the included tabs' layouts, absorbing the #477
-    /// over-retention concern at the import boundary rather than trusting
-    /// the caller.
-    func buildPanelImportParams(worktreeID: UUID) -> PanelImportParams {
-        let wtTabs = tabs[worktreeID] ?? []
+    /// Builds the `panel.syncTabs` payload for one worktree from AppState's
+    /// current in-memory tab/layout/history state: every workspace tab in
+    /// tab-bar order (the order `tabs[worktreeID]` holds after
+    /// `applyStoredOrder`), each with its label, content and legacy layout.
+    ///
+    /// Returns nil when the worktree's tab list has not been loaded. A sync
+    /// deletes the surface of every tab it does not list, so "not loaded yet"
+    /// must never be sent as an empty list; a loaded but empty list is sent
+    /// as `tabs: []`.
+    ///
+    /// Grid-layout entries — the persisted `layouts` blob's stale
+    /// worktree-keyed rows from pre-#478 installs — are excluded BY
+    /// CONSTRUCTION: only `layouts[tab.id]` is ever consulted, never
+    /// `layouts.values`. `paneHistories` is filtered to pane IDs that actually
+    /// appear in the included tabs, absorbing the #477 over-retention concern
+    /// at the sync boundary rather than trusting the caller.
+    func buildPanelSyncParams(worktreeID: UUID) -> PanelSyncTabsParams? {
+        guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
         let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
             let layout = layouts[tab.id]
@@ -2945,78 +3056,12 @@ final class AppState {
             if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
             return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
         }
-        let tabOrder = worktreeTabOrders[worktreeID] ?? wtTabs.map(\.id)
-        let activeTabID: UUID? = activeTabIndices[worktreeID].flatMap { idx in
-            wtTabs.indices.contains(idx) ? wtTabs[idx].id : nil
-        }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
-        return PanelImportParams(
+        return PanelSyncTabsParams(
             worktreeID: worktreeID,
             tabs: legacyTabs,
-            tabOrder: tabOrder,
-            activeTabID: activeTabID,
             paneHistories: includedPaneHistories
         )
-    }
-
-    /// Fires the one-shot legacy panel import once per launch, once the
-    /// daemon confirms panel-surface ownership is enabled (default OFF while
-    /// the feature soaks — this whole path is inert until then). Called from
-    /// the tail of `loadTabStates` for every worktree; imports every worktree
-    /// whose tabs are already loaded at that point. Failures are logged and
-    /// non-fatal — the daemon's create-if-absent guard means a skipped
-    /// worktree simply retries on the next launch.
-    func triggerPanelImportIfNeeded() {
-        guard !hasAttemptedPanelImport, daemonCapabilities?.panelSurfaceEnabled == true else { return }
-        hasAttemptedPanelImport = true
-        let worktreeIDs = Array(tabs.keys)
-        Task {
-            for worktreeID in worktreeIDs {
-                let params = buildPanelImportParams(worktreeID: worktreeID)
-                do {
-                    _ = try await panelImportTrigger(params)
-                } catch {
-                    logger.error("panelImportLegacy failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-                    continue
-                }
-                // Spec C §11.3 — shadow compare runs once, right after this
-                // worktree's import call succeeds (whether it imported just
-                // now or the daemon already had a surface from a prior
-                // launch). Diagnostics only; never blocks/gates the import
-                // above, which has already completed by this point.
-                await runPanelShadowCompare(worktreeID: worktreeID)
-            }
-        }
-    }
-
-    /// Spec C §11.3 — migration-validation shadow compare. Log-only: never
-    /// mutates state, never surfaces to the user, never throws in a way that
-    /// affects the caller (all failures are logged and swallowed here).
-    /// Re-converts the CURRENT live legacy state (not the params already sent
-    /// to `panelImportTrigger` — state may have moved on since) via the same
-    /// `LegacySurfaceImporter.convert` the daemon's import path used, fetches
-    /// the daemon's imported surface, and logs any divergence.
-    private func runPanelShadowCompare(worktreeID: UUID) async {
-        let params = buildPanelImportParams(worktreeID: worktreeID)
-        let local = LegacySurfaceImporter.convert(
-            worktreeID: worktreeID, tabs: params.tabs, tabOrder: params.tabOrder,
-            paneHistories: params.paneHistories)
-        let daemon: PanelGetResult
-        do {
-            daemon = try await panelGetFetcher(worktreeID)
-        } catch {
-            shadowCompareLogger.error("panel.get failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-            return
-        }
-        let mismatches = PanelShadowCompare.mismatches(local: local, daemon: daemon)
-        guard !mismatches.isEmpty else {
-            shadowCompareLogger.debug("\(worktreeID, privacy: .public): no divergence")
-            return
-        }
-        for mismatch in mismatches {
-            shadowCompareLogger.error("\(worktreeID, privacy: .public): \(mismatch, privacy: .public)")
-        }
-        shadowCompareLogger.info("\(worktreeID, privacy: .public): \(mismatches.count, privacy: .public) mismatch(es)")
     }
 
     // MARK: - Selection Persistence
@@ -3084,10 +3129,18 @@ final class AppState {
         programStatusSnapshots.removeAll()
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
+        // And for panel surfaces: deltas sent while no subscription was up
+        // were missed, so every worktree with a tab list is refetched — once
+        // the daemon has registered the new subscription, so that no change
+        // can fall between a refetch's reply and the first delta.
+        resetPanelSurfacesForResubscribe()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.deltaSubscriber(
                 { [weak self] in
+                    // The daemon has registered the subscription, so panel
+                    // surfaces are refetched now (see above).
+                    //
                     // A report forwarded while the daemon was unreachable was
                     // lost, while the agent reports again only on its next
                     // change. Re-sent once the daemon answers: the poll loop
@@ -3099,6 +3152,7 @@ final class AppState {
                     // a dropped subscription and loses it to a restart, so
                     // this report is what brings it back in line either way.
                     Task { @MainActor [weak self] in
+                        self?.panelSubscriptionRegistered()
                         self?.resendLastProgramStatusReports()
                         self?.pushComposerDrafts()
                     }
@@ -3218,6 +3272,8 @@ final class AppState {
             )
         case .devServersChanged:
             Task { [weak self] in await self?.refreshDevServersAfterChange() }
+        case .panelSurfaceChanged(let delta):
+            applyPanelSurfaceDelta(delta)
         default:
             break
         }
@@ -3961,6 +4017,7 @@ final class AppState {
                 // expensive pr.list still lands ~every 15 executed cycles rather
                 // than drifting earlier off wall-clock ticks that did no work.
                 await self.runPollCycleIfIdle {
+                    await self.retryDaemonCapabilitiesIfMissing()
                     await self.refreshAll()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()
@@ -3995,7 +4052,7 @@ final class AppState {
             // grouped-sessions vs control-mode at creation time. Fetching
             // afterwards would leave every initially-rendered pane on the
             // grouped path even when the control-mode gate is on.
-            daemonCapabilities = try? await daemonClient.daemonCapabilities()
+            await fetchDaemonCapabilitiesAtConnect()
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
@@ -4333,6 +4390,16 @@ final class AppState {
             // histories for worktrees not yet loaded — the pane back/forward
             // history was lost on every restart because of that.
             prunePaneHistories()
+
+            // Both of each visible worktree's tab sources have now been
+            // reconciled against a fetch: terminal-backed tabs through
+            // `adoptTerminalSnapshot` -> `reconcileTabs`, note-backed tabs
+            // through `reconcileNoteTabs`. Each reconcile runs only when its
+            // list changed, so readiness is marked here, where the fetch was
+            // adopted, rather than inside the reconcilers: a worktree with no
+            // notes, or one whose lists were already current after a
+            // resubscribe, would otherwise never become ready.
+            markPanelSyncReady(worktreeIDs: visibleWorktreeIDs)
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)

@@ -168,7 +168,10 @@ struct LocalizedErrorPayloadTests {
                     incomingTabID: Self.incomingTabID
                 )
             ),
-            ("PanelSurfaceStoreError.alreadyImported", PanelSurfaceStoreError.alreadyImported),
+            (
+                "PanelSurfaceStoreError.invalidSurface",
+                PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel])
+            ),
         ]
     }
 
@@ -261,6 +264,11 @@ struct LocalizedErrorPayloadTests {
             ),
             [Self.panelID.uuidString, Self.owningTabID.uuidString, Self.incomingTabID.uuidString],
             "PanelSurfaceStoreError.panelHistoryOwnedByOtherTab"
+        )
+        assertRenders(
+            PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel]),
+            [Self.incomingTabID.uuidString, "noActivePanel"],
+            "PanelSurfaceStoreError.invalidSurface"
         )
     }
 

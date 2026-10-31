@@ -97,7 +97,6 @@ struct LocalizedErrorPayloadTests {
     /// `any Error` so the lookup goes through the bridge.
     private static let sampleErrors: [(String, any Error)] = {
         let panelID = PanelID()
-        let splitID = SplitID()
         return [
             ("SidecarFramingError.truncatedPayload", SidecarFramingError.truncatedPayload),
             ("SidecarFramingError.undecodableHeader", SidecarFramingError.undecodableHeader),
@@ -108,8 +107,11 @@ struct LocalizedErrorPayloadTests {
             ("TmuxExecutableResolverError.pathMustBeAbsolute", TmuxExecutableResolverError.pathMustBeAbsolute),
             ("TmuxExecutableResolverError.pathIsNotExecutable", TmuxExecutableResolverError.pathIsNotExecutable),
             ("PanelOperationError.panelNotFound", PanelOperationError.panelNotFound(panelID)),
-            ("PanelOperationError.splitNotFound", PanelOperationError.splitNotFound(splitID)),
-            ("PanelOperationError.invalidRatios", PanelOperationError.invalidRatios(reason: "ratios must sum to 1")),
+            (
+                "PanelOperationError.kindMismatch",
+                PanelOperationError.kindMismatch(panelID: panelID, expected: .note, actual: .transcript)
+            ),
+            ("PanelOperationError.invalidWidth", PanelOperationError.invalidWidth(0.95)),
             ("PanelOperationError.historyUnavailable", PanelOperationError.historyUnavailable(panelID)),
             ("CLIInstallerError.linkCreationFailed", CLIInstallerError.linkCreationFailed("remove existing: EACCES")),
             (
@@ -157,22 +159,29 @@ struct LocalizedErrorPayloadTests {
     @Test("UUID payloads reach the rendered description")
     func uuidPayloadsRender() {
         let panelID = PanelID()
-        let splitID = SplitID()
         assertRenders(
             PanelOperationError.panelNotFound(panelID),
             [panelID.uuidString],
             "PanelOperationError.panelNotFound"
         )
+        // Both kinds as well as the panel: "note" and "transcript" appear
+        // nowhere else in the description, so each must come from the payload.
         assertRenders(
-            PanelOperationError.splitNotFound(splitID),
-            [splitID.uuidString],
-            "PanelOperationError.splitNotFound"
+            PanelOperationError.kindMismatch(panelID: panelID, expected: .note, actual: .transcript),
+            [panelID.uuidString, "note", "transcript"],
+            "PanelOperationError.kindMismatch"
         )
         assertRenders(
             PanelOperationError.historyUnavailable(panelID),
             [panelID.uuidString],
             "PanelOperationError.historyUnavailable"
         )
+    }
+
+    @Test("width payloads reach the rendered description")
+    func widthPayloadsRender() {
+        // The bounds 0.1 and 0.9 are in the description too; 0.95 is not.
+        assertRenders(PanelOperationError.invalidWidth(0.95), ["0.95"], "PanelOperationError.invalidWidth")
     }
 
     @Test("reason payloads reach the rendered description")
@@ -186,11 +195,6 @@ struct LocalizedErrorPayloadTests {
             SettingsJSONSafety.Error.writeFailed("atomic replace refused"),
             ["atomic replace refused"],
             "SettingsJSONSafety.Error.writeFailed"
-        )
-        assertRenders(
-            PanelOperationError.invalidRatios(reason: "ratios must sum to 1"),
-            ["ratios must sum to 1"],
-            "PanelOperationError.invalidRatios"
         )
         assertRenders(
             RemoteProviderRegistry.RegistryError.duplicateName("acme-prod"),

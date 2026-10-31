@@ -572,6 +572,7 @@ import Testing
             "20261025031506_notification_unread_index",
             "20261025182152_config_holder_claim_reconcile",
             "20261030170000_reset_hook_written_activity",
+            "20261030194425_panel_tabs",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

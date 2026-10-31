@@ -214,12 +214,6 @@ extension AppState {
         // not here — this method is also called directly (initial load, tests),
         // and clearing from here would drop a marker belonging to a fetch that
         // is still running.
-        //
-        // Gated one-shot legacy panel import (spec C §11.2) — fires at most
-        // once per launch regardless of whether this particular listTabs
-        // call succeeded, since it imports from AppState's already-loaded
-        // in-memory state, not from this call's response.
-        triggerPanelImportIfNeeded()
     }
 
     // MARK: - Active tab persistence

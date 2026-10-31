@@ -291,6 +291,7 @@ struct ArchiveHarness {
     let tempDir: URL
 
     static func make(
+        subscriptions: StateSubscriptionManager? = nil,
         onWorktreeRemoved:
             (@Sendable (_ worktreeID: UUID, _ worktreePath: String, _ repoPath: String)
                 async -> Void)? = nil
@@ -301,7 +302,8 @@ struct ArchiveHarness {
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver()
+            hooks: HookResolver(),
+            subscriptions: subscriptions
         )
         lifecycle.onWorktreeRemoved = onWorktreeRemoved
 

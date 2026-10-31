@@ -48,7 +48,13 @@ struct PanePlaceholder: View {
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
     let tabID: UUID?
-    @Binding var layout: LayoutNode
+    /// The leaf's only window onto the workspace around it: every layout
+    /// change it triggers, and what it needs to know about that layout. See
+    /// `PaneActions`.
+    let actions: PaneActions
+    /// False where something outside the leaf already names the pane (a tab
+    /// in the side region), so the header drops its own title.
+    var showsPaneLabel: Bool = true
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
@@ -108,30 +114,33 @@ struct PanePlaceholder: View {
             // pane, unaffected by which trailing buttons a pane type has.
             // Both buttons always render (16x16 fixed frames, disabled when
             // unavailable), so the title never jumps.
-            if content.isViewerClass {
-                historyNavigation
+            if let history = actions.history(content) {
+                historyNavigation(history: history)
             }
 
-            paneLabel
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                // Scoped to the title only (not the whole header row) so
-                // right-click on the history chevrons / close button isn't
-                // swallowed by the file menu.
-                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
+            if showsPaneLabel {
+                paneLabel
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    // Scoped to the title only (not the whole header row) so
+                    // right-click on the history chevrons / close button isn't
+                    // swallowed by the file menu.
+                    .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
+            }
 
             Spacer()
 
             toolbarActions
 
-            Button(action: closePane) {
+            Button(action: { actions.close(content) }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.secondary)
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.borderless)
+            .disabled(!actions.canClose(content))
             .help("Close pane")
         }
         .padding(.horizontal, 8)
@@ -201,8 +210,8 @@ struct PanePlaceholder: View {
         switch content {
         case .terminal(let terminalID):
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
-                let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
-                Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
+                let transcriptOpen = actions.isTranscriptOpen(terminalID)
+                Button(action: { actions.toggleTranscript(content, terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
                         Text("Transcript")
@@ -245,29 +254,24 @@ struct PanePlaceholder: View {
     /// Search icon + back/forward chevrons for viewer-class slot panes. The
     /// search icon opens the MRU history palette (searchable replacement for
     /// the old right-click dropdown — see `historySearchButton`); the
-    /// chevrons still left-click step one entry at a time.
+    /// chevrons still left-click step one entry at a time. `history` comes
+    /// from `actions.history`, which seeds a never-navigated slot with its
+    /// current content.
     @ViewBuilder
-    private var historyNavigation: some View {
-        // A pane that hasn't navigated yet has no recorded history — but it
-        // always has its current content, so fall back to a single-entry
-        // history seeded with it rather than an empty one. Otherwise the
-        // search button would wrongly read as "nothing to show" for the
-        // common case of a freshly opened viewer slot.
-        let history = appState.paneHistories[content.paneID] ?? PaneHistory.seeded(with: content)
-
+    private func historyNavigation(history: PaneHistory) -> some View {
         historySearchButton(history: history)
 
         historyButton(
             icon: "chevron.left",
             help: "Back",
-            action: { navigateHistory { $0.goBack() } }
+            action: { actions.historyStep(content, .back) }
         )
         .disabled(!history.canGoBack)
 
         historyButton(
             icon: "chevron.right",
             help: "Forward",
-            action: { navigateHistory { $0.goForward() } }
+            action: { actions.historyStep(content, .forward) }
         )
         .disabled(!history.canGoForward)
     }
@@ -295,7 +299,7 @@ struct PanePlaceholder: View {
         .disabled(!PaneHistoryPaletteButtonModel.isEnabled(entryCount: history.entries.count))
         .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
             PaneHistoryPaletteView(history: history) { index in
-                navigateHistory { $0.go(to: index) }
+                actions.historyStep(content, .jump(index))
             }
         }
     }
@@ -321,35 +325,6 @@ struct PanePlaceholder: View {
         .help(help)
     }
 
-    /// Applies a history navigation to this slot: mutate the slot's history,
-    /// then swap the layout content in place keeping the pane UUID. Goes
-    /// through `replacingContent` directly — never through the routing
-    /// functions — so navigating does not push new history entries.
-    private func navigateHistory(_ step: (inout PaneHistory) -> PaneContent?) {
-        guard var history = appState.paneHistories[content.paneID],
-              let target = step(&history),
-              let updated = layout.replacingContent(at: content.paneID, with: target)
-        else { return }
-        appState.paneHistories[content.paneID] = history
-        layout = updated
-    }
-
-    /// Point THIS pane at another file, keeping its pane UUID — raised by a
-    /// link click inside a rendered markdown document.
-    ///
-    /// Not `routeFileClick`: that one picks a destination slot, and the
-    /// destination here is already known. `routeInPaneFileNavigation` is the
-    /// same swap over the same primitives, aimed at one named pane, and its
-    /// result is consumed exactly like every other viewer route in this file.
-    private func navigateCodeViewer(to path: String) {
-        guard let result = routeInPaneFileNavigation(
-            into: layout, paneID: content.paneID, path: path) else { return }
-        if let replaced = result.replaced {
-            appState.recordPaneReplacement(replaced)
-        }
-        layout = result.layout
-    }
-
     // MARK: - Pane Body
 
     @ViewBuilder
@@ -364,7 +339,9 @@ struct PanePlaceholder: View {
                 path: path,
                 worktreePath: worktree.path,
                 showSourceCode: showSourceCode,
-                onNavigate: { navigateCodeViewer(to: $0) }
+                // A link clicked inside a rendered markdown document points
+                // THIS pane at the linked file, keeping its pane UUID.
+                onNavigate: { actions.navigateInPane(content, $0) }
             )
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
@@ -372,24 +349,13 @@ struct PanePlaceholder: View {
             if transcriptFeatureEnabled {
                 TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                 .environment(\.openFilePreview, { path in
-                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                    actions.openFilePreview(content, path)
                 })
                 .environment(\.openTranscriptOverlay) { itemID in
                     overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
                 }
                 .environment(\.openTranscriptLink) { target in
-                    switch TranscriptLinkDestination.live(
-                        target, layout: layout, terminalID: terminalID
-                    ) {
-                    case .route(let result):
-                        if let replaced = result.replaced {
-                            appState.recordPaneReplacement(replaced)
-                        }
-                        layout = result.layout
-                    case .openInBrowser(let url):
-                        NSWorkspace.shared.open(url)
-                    }
+                    actions.openTranscriptLink(content, terminalID, target)
                 }
             } else {
                 transcriptDisabledPlaceholder
@@ -424,11 +390,7 @@ struct PanePlaceholder: View {
                 worktreePath: worktree.path,
                 remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                 onFilePathClicked: { path in
-                    let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
-                    if let replaced = result.replaced {
-                        appState.recordPaneReplacement(replaced)
-                    }
-                    layout = result.layout
+                    actions.routeTerminalFile(terminalID, path)
                 },
                 onTerminalNotification: { title, body in
                     debugLog("OSC 777: \(title) — \(body)")
@@ -501,8 +463,7 @@ struct PanePlaceholder: View {
                         onClose: { overlayCoordinator.close() }
                     )
                     .environment(\.openFilePreview, { path in
-                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                        layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                        actions.openFilePreview(content, path)
                     })
                     .padding(16)
                 }
@@ -566,28 +527,6 @@ struct PanePlaceholder: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Close
-
-    private func closePane() {
-        // Delete the underlying resource for note panes
-        if case .note(let noteID) = content {
-            Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
-        }
-
-        appState.paneHistories.removeValue(forKey: content.paneID)
-
-        if let newLayout = layout.removePane(id: content.paneID) {
-            layout = newLayout
-        } else {
-            // Last pane in this tab — remove the entire tab
-            let worktreeID = worktree.id
-            if let tabIndex = appState.tabs[worktreeID]?.firstIndex(where: { $0.id == content.paneID || $0.content.paneID == content.paneID }) {
-                appState.tabs[worktreeID]?.remove(at: tabIndex)
-                appState.layouts.removeValue(forKey: content.paneID)
-            }
-        }
-    }
-
     // MARK: - Webview Actions
 
     private func copyWebviewURL() {
@@ -603,37 +542,19 @@ struct PanePlaceholder: View {
             didCopyURL = false
         }
     }
-
-    private func toggleTranscriptPane(terminalID: UUID) {
-        let result = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
-        if let replaced = result.replaced {
-            appState.recordPaneReplacement(replaced)
-        }
-        if let removed = result.removedPaneID {
-            // Reused slot: restore its pre-transcript content in place instead
-            // of applying the removal layout.
-            if let previous = appState.popHistoryForRemovedPane(removed),
-               let restored = layout.replacingContent(at: removed, with: previous) {
-                layout = restored
-                return
-            }
-        }
-        layout = result.layout
-    }
-
-    private func isTranscriptOpen(terminalID: UUID) -> Bool {
-        layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
-    }
 }
 
 // MARK: - Header File Context Menu
 
-private extension View {
+extension View {
     /// Attach the pane-header file context menu (Copy Path / Reveal in Finder /
     /// Open With) only when the pane has an associated file — other panes get no
     /// contextMenu at all so right-click is a true no-op rather than an empty
     /// menu. `transcriptPath` supplies the `.jsonl` path for live-transcript
     /// panes (resolving it needs the terminal model, so the caller passes it in).
+    ///
+    /// Also hung on a side-region tab (`SideRegionView`), whose leaf hides
+    /// the title this menu otherwise sits on.
     @ViewBuilder
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
         if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {

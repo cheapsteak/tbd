@@ -16,7 +16,7 @@ public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equa
 
     public init() {}
 
-    /// Internal re-key seam for `LegacySurfaceImporter` (same module) and
+    /// Internal re-key seam for the legacy import (same module), `map`, and
     /// `@testable` tests: rebuilds a history from already-known
     /// entries/cursor to preserve order during import. Deliberately skips the
     /// dedup/`maxEntries` cap and cursor-range guarantees that
@@ -37,6 +37,23 @@ public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equa
         history.entries = [element]
         history.cursor = 0
         return history
+    }
+
+    /// The entry the cursor points at. Nil when the history is empty or
+    /// malformed — which only decoded data or `init(entries:cursor:)` can
+    /// produce — so a bad cursor never traps.
+    public var current: Element? {
+        entries.indices.contains(cursor) ? entries[cursor] : nil
+    }
+
+    /// The same history over transformed entries: order and cursor are kept
+    /// as they are, unvalidated like `init(entries:cursor:)` — a malformed
+    /// cursor stays malformed, and a transform that maps two entries to equal
+    /// values leaves both in place.
+    public func map<T: Codable & Equatable & Sendable>(
+        _ transform: (Element) -> T
+    ) -> MRUHistory<T> {
+        MRUHistory<T>(entries: entries.map(transform), cursor: cursor)
     }
 
     /// Back moves toward older entries (higher indices).

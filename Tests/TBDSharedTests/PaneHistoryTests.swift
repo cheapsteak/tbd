@@ -147,6 +147,48 @@ struct PaneHistoryTests {
         #expect(!history.canGoBack && !history.canGoForward)
     }
 
+    @Test func currentIsTheCursorEntry() {
+        var history = PaneHistory.seeded(with: viewer("/a"))
+        #expect(history.current == viewer("/a"))
+        history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
+        #expect(history.current == viewer("/b"))
+        _ = history.goBack()
+        #expect(history.current == viewer("/a"))
+    }
+
+    @Test func currentIsNilWhenMalformed() {
+        #expect(PaneHistory(entries: [viewer("/a")], cursor: 1).current == nil, "cursor past the end")
+        #expect(PaneHistory(entries: [viewer("/a")], cursor: -1).current == nil, "cursor before the start")
+        #expect(PaneHistory(entries: [], cursor: 0).current == nil, "cursor into no entries")
+        #expect(PaneHistory().current == nil, "empty history shows nothing")
+    }
+
+    @Test func mapPreservesEntriesAndCursor() {
+        var history = PaneHistory()
+        history.recordReplacement(outgoing: viewer("/a"), incoming: viewer("/b"))
+        history.recordReplacement(outgoing: viewer("/b"), incoming: viewer("/c"))
+        _ = history.goBack()
+
+        let paths: MRUHistory<String> = history.map { content in
+            if case .codeViewer(_, let path) = content { return path }
+            return ""
+        }
+
+        #expect(paths.entries == ["/c", "/b", "/a"])
+        #expect(paths.cursor == 1)
+        #expect(paths.current == "/b")
+    }
+
+    /// `map` copies the cursor verbatim; it neither repairs nor rejects a
+    /// malformed history, so the validator still sees what was decoded.
+    @Test func mapCarriesAMalformedCursorThrough() {
+        let broken = PaneHistory(entries: [viewer("/a")], cursor: 3)
+        let mapped: MRUHistory<String> = broken.map { _ in "x" }
+        #expect(mapped.entries == ["x"])
+        #expect(mapped.cursor == 3)
+        #expect(!mapped.isWellFormed)
+    }
+
     @Test func decodesPR472PersistedShape() throws {
         // Exact wire shape persisted by PR #472's app-side PaneHistory.
         let blob = """

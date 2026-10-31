@@ -271,6 +271,13 @@ struct SingleWorktreeView: View {
                       AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) else { return }
                 await appState.fetchSessions(worktreeID: worktreeID)
             }
+            .task(id: panelSurfaceLoadKey) {
+                // Fill the app's copy of this worktree's panel surfaces when
+                // the shown tab has none, so it can render from the daemon.
+                // Deltas keep the copy current after that, a sync's imports
+                // included. Inert while `panel_tabs_enabled` is off.
+                await appState.loadPanelSurfacesForShownTab(panelSurfaceLoadKey)
+            }
         } else {
             Text("Worktree not found")
                 .foregroundStyle(.secondary)
@@ -286,6 +293,13 @@ struct SingleWorktreeView: View {
     private func layoutContent(worktree: LocalWorktree?) -> some View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
+        } else if let tab = activeTab, let worktree,
+                  case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) {
+            // The daemon-owned surface: only with `panel_tabs_enabled` on and
+            // this tab in the app's copy. Every other case falls through to
+            // the legacy branch below, unchanged.
+            PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
+                .id(tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },
@@ -330,6 +344,11 @@ struct SingleWorktreeView: View {
 
     private var activeTab: TBDShared.Tab? {
         appState.resolvedActiveTab(worktreeID: worktreeID)
+    }
+
+    /// When the panel-surface load task reruns, and whether it loads.
+    private var panelSurfaceLoadKey: PanelSurfaceLoadKey {
+        appState.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: activeTab?.id)
     }
 
     /// The active tab's terminal, if any — used to decide whether to show
@@ -739,11 +758,12 @@ private struct MultiWorktreeCell: View {
                     appState.gridLayouts[worktreeID] = newLayout
                 }
             )
+            let tabID = activeTab?.id
             PanePlaceholder(
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
-                tabID: activeTab?.id,
-                layout: layoutBinding
+                tabID: tabID,
+                actions: .legacy(layout: layoutBinding, appState: appState, worktree: worktree)
             )
         } else {
             ZStack {
