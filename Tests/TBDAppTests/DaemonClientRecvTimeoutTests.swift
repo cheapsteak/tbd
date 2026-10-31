@@ -26,18 +26,16 @@ struct DaemonClientRecvTimeoutTests {
         var fd: Int32 = -1
     }
 
-    @Test("subscribe() loop unwinds promptly on cancel against a silent daemon")
-    func subscribeCancelsPromptlyWhenDaemonSilent() async throws {
-        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
-
-        // 1. Raw listener bound to the short temp path. bind() creates the
-        //    socket file, which makeConnectedSocket() requires to exist.
+    /// A raw AF_UNIX listener bound to `path`, with a backlog of one. bind()
+    /// creates the socket file, which makeConnectedSocket() requires to exist.
+    /// The caller closes the returned fd and unlinks `path`.
+    private static func makeListeningSocket(path: String) -> Int32 {
         let listenFd = socket(AF_UNIX, SOCK_STREAM, 0)
         #expect(listenFd >= 0)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        socketPath.withCString { ptr in
+        path.withCString { ptr in
             withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
                 let raw = UnsafeMutableRawPointer(pathPtr)
                 raw.copyMemory(from: ptr, byteCount: strlen(ptr) + 1)
@@ -50,6 +48,15 @@ struct DaemonClientRecvTimeoutTests {
         }
         #expect(bindResult == 0)
         #expect(listen(listenFd, 1) == 0)
+        return listenFd
+    }
+
+    @Test("subscribe() loop unwinds promptly on cancel against a silent daemon")
+    func subscribeCancelsPromptlyWhenDaemonSilent() async throws {
+        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
+
+        // 1. Raw listener bound to the short temp path.
+        let listenFd = Self.makeListeningSocket(path: socketPath)
 
         let acceptedBox = FdBox()
         defer {
@@ -120,23 +127,7 @@ struct DaemonClientRecvTimeoutTests {
     @Test("subscribe() calls onConnected once, on the daemon's first line")
     func subscribeAnnouncesTheConnectOnce() async throws {
         let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
-        let listenFd = socket(AF_UNIX, SOCK_STREAM, 0)
-        #expect(listenFd >= 0)
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        socketPath.withCString { ptr in
-            withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
-                let raw = UnsafeMutableRawPointer(pathPtr)
-                raw.copyMemory(from: ptr, byteCount: strlen(ptr) + 1)
-            }
-        }
-        let bindResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                bind(listenFd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        #expect(bindResult == 0)
-        #expect(listen(listenFd, 1) == 0)
+        let listenFd = Self.makeListeningSocket(path: socketPath)
         defer {
             close(listenFd)
             unlink(socketPath)
