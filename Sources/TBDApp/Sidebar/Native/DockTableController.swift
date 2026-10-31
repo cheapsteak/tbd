@@ -502,7 +502,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
         let selected = table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? rows[$0].id : nil }
         var ids = SidebarSelectionBridge.appStateIDs(for: selected)
-        if !selectionModifiers().intersection([.command, .shift]).isEmpty {
+        if !selectionModifiers().isDisjoint(with: [.command, .shift]) {
             let shown = Set(rows.map(\.id))
             ids.formUnion(appState.selectedWorktreeIDs.filter { !shown.contains(.worktree($0)) })
         }
@@ -609,7 +609,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     // MARK: Hover
 
     /// A dock row as the hover tracker sees it: its ID, in no section.
-    private func hoverRow(_ index: Int) -> (id: SidebarNodeID, section: SidebarNodeID?)? {
+    func hoverRow(_ index: Int) -> (id: SidebarNodeID, section: SidebarNodeID?)? {
         guard rows.indices.contains(index) else { return nil }
         return (id: rows[index].id, section: nil)
     }

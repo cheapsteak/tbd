@@ -154,6 +154,9 @@ struct DockTableControllerTests {
         let child = try #require(h.cell(.worktree(a1.id)) as? WorktreeRowCell)
         let rootPoint = try #require(h.windowCenter(of: .worktree(a.id)))
         let childPoint = try #require(h.windowCenter(of: .worktree(a1.id)))
+        // The tracker can only report a row the table shows under the point.
+        let childRow = h.table.row(at: h.table.convert(childPoint, from: nil))
+        try #require(childRow == h.row(.worktree(a1.id)), h.hoverEvidence(at: childPoint))
 
         // At rest: the pinned root shows its pin, the unpinned descendant
         // none, and neither its `+`.
@@ -165,15 +168,15 @@ struct DockTableControllerTests {
 
         // Over the descendant: its pin shows, and its guide line breaks there.
         tracker.pointerMoved(toWindowPoint: childPoint)
-        #expect(h.dock.hoverState.row == .worktree(a1.id), h.evidence(names))
-        #expect(!child.pinButton.isHidden)
+        #expect(h.dock.hoverState.row == .worktree(a1.id), h.hoverEvidence(at: childPoint))
+        #expect(!child.pinButton.isHidden, h.hoverEvidence(at: childPoint))
         let hoveredGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
-        #expect(hoveredGap == true)
+        #expect(hoveredGap == true, h.hoverEvidence(at: childPoint))
 
         // Over the root: its nested `+` shows, and the descendant's pin goes.
         tracker.pointerMoved(toWindowPoint: rootPoint)
-        #expect(h.dock.hoverState.row == .worktree(a.id), h.evidence(names))
-        #expect(!root.plusButton.isHidden)
+        #expect(h.dock.hoverState.row == .worktree(a.id), h.hoverEvidence(at: rootPoint))
+        #expect(!root.plusButton.isHidden, h.hoverEvidence(at: rootPoint))
         #expect(child.pinButton.isHidden)
 
         // The pointer leaves: both go.
@@ -186,7 +189,7 @@ struct DockTableControllerTests {
 
         // A drag clears the hover.
         tracker.pointerMoved(toWindowPoint: rootPoint)
-        try #require(!root.plusButton.isHidden, "Hovering the root again did not show its +")
+        try #require(!root.plusButton.isHidden, h.hoverEvidence(at: rootPoint))
         let info = try Self.startDrag(.worktree(a.id), in: h)
         defer { info.release() }
         #expect(h.dock.hoverState.row == nil)
@@ -212,6 +215,12 @@ struct DockTableControllerTests {
         tall.mount(size: NSSize(width: 320, height: 600))
         #expect(tall.table.numberOfRows == 7)
         #expect(tall.dockHeight == 5 * rowHeight, tall.evidence())
+        // The column keeps its width: nothing in the container may pull the
+        // window narrower, as a divider made at a zero frame once did.
+        let windowWidth = tall.host?.window.contentView?.frame.width
+        #expect(windowWidth == 320, tall.evidence())
+        let dockWidth = tall.dock.view.frame.width
+        #expect(dockWidth == 320, tall.evidence())
         // The dock is that tall and scrolls the rest; the outline keeps the
         // column above the divider.
         let dockFrame = tall.dock.view.frame.height
@@ -296,10 +305,16 @@ struct DockTableControllerTests {
         let pinPoint = h.table.convert(NSPoint(x: pin.midX, y: pin.midY), from: cell.pinButton)
         let name = cell.nameField.frame
         let namePoint = h.table.convert(NSPoint(x: name.midX, y: name.midY), from: cell)
+        let pressEvidence = h.pressEvidence(cell, pinPoint: pinPoint, namePoint: namePoint)
+        let pinIsButton = h.table.isOnButton(pinPoint)
+        #expect(pinIsButton, pressEvidence)
         let pressedPin = h.table.canDragRows(with: rows, at: pinPoint)
-        #expect(!pressedPin)
+        #expect(!pressedPin, pressEvidence)
+        // The name's centre is clear of the pin and the `+`.
+        let nameIsButton = h.table.isOnButton(namePoint)
+        try #require(!nameIsButton, pressEvidence)
         let pressedName = h.table.canDragRows(with: rows, at: namePoint)
-        #expect(pressedName)
+        #expect(pressedName, pressEvidence)
 
         // `c` dragged to the top: its offset among the roots, not the rows.
         let info = try Self.startDrag(.worktree(c.id), in: h)
@@ -654,6 +669,33 @@ private final class DockHarness {
         guard index >= 0 else { return nil }
         let rect = table.rect(ofRow: index)
         return table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+    }
+
+    /// What a failing hover expectation prints: the window's and the dock's
+    /// geometry, the pointer in the table's coordinates, the row the table
+    /// finds there, and what the dock's hover resolver answers for it.
+    func hoverEvidence(at windowPoint: NSPoint) -> Comment {
+        let point = table.convert(windowPoint, from: nil)
+        let index = table.row(at: point)
+        let resolved = dock.hoverRow(index).map { OutlineHarness.label($0.id, [:]) } ?? "nil"
+        let windowWidth = host?.window.contentView?.frame.width ?? -1
+        return Comment(rawValue: "window content width \(windowWidth) · dock frame \(dock.view.frame)"
+            + " · table frame \(table.frame) · visible \(table.visibleRect)"
+            + " · window point \(windowPoint) · table point \(point) · row(at:) \(index)"
+            + " · resolver \(resolved) · hover state \(String(describing: dock.hoverState.row))")
+    }
+
+    /// What a failing press expectation prints: both points, and the pin's,
+    /// the `+`'s and the name's frames, all in the table's coordinates.
+    func pressEvidence(_ cell: WorktreeRowCell, pinPoint: NSPoint, namePoint: NSPoint) -> Comment {
+        let pin = table.convert(cell.pinButton.bounds, from: cell.pinButton)
+        let plus = table.convert(cell.plusButton.bounds, from: cell.plusButton)
+        let name = table.convert(cell.nameField.frame, from: cell)
+        return Comment(rawValue: "pin point \(pinPoint) · name point \(namePoint)"
+            + " · pin frame \(pin) hidden \(cell.pinButton.isHidden)"
+            + " · plus frame \(plus) hidden \(cell.plusButton.isHidden) · name frame \(name)"
+            + " · table frame \(table.frame) · visible \(table.visibleRect)"
+            + " · window content width \(host?.window.contentView?.frame.width ?? -1)")
     }
 
     func rowView(_ id: SidebarNodeID) -> SidebarRowView? {

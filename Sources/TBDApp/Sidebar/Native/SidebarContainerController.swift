@@ -53,8 +53,15 @@ final class SidebarContainerController: NSViewController {
         // so the three read as one group as they do in the `List` path.
         let backdrop = NSHostingView(rootView: SidebarBarBackdrop())
         backdrop.sizingOptions = []
-        let divider = NSBox(frame: .zero)
+        // Made wider than tall: a separator box takes its orientation from
+        // its frame, and one made at `.zero` is vertical, with an intrinsic
+        // width of 1 pt that it hugs above the window's own size priority —
+        // Auto Layout then shrank the whole window to 1 pt wide. Its width
+        // stays the layout's to set.
+        let divider = NSBox(frame: NSRect(x: 0, y: 0, width: 100, height: Self.dividerThickness))
         divider.boxType = .separator
+        divider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        divider.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         for view in [outlineView, backdrop, divider, dockView] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
