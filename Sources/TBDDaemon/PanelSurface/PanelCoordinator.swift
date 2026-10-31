@@ -153,11 +153,13 @@ public actor PanelCoordinator {
     /// `panel.syncTabs` (panel tabs spec, "Tab sync"): brings the worktree's
     /// surfaces in line with the app's workspace tabs in one store
     /// transaction. Each listed tab is converted from its legacy layout; the
-    /// conversion is used only when the tab has no surface yet, so the daemon
-    /// stays the authority for what is inside a tab. A tab the converter
-    /// skips and that has no surface gets none, keeps rendering legacy, and
-    /// is returned in `skippedTabIDs` with its reason in `skipped`. A tab
-    /// that already has a surface keeps it and is never reported skipped.
+    /// conversion is used only when the tab has no readable surface, so the
+    /// daemon stays the authority for what is inside a tab: a readable
+    /// surface is never overwritten, and an unreadable one is replaced. A tab
+    /// the converter skips and that has no readable surface gets none, keeps
+    /// rendering legacy, and is returned in `skippedTabIDs` with its reason in
+    /// `skipped`. A tab with a readable surface keeps it and is never
+    /// reported skipped.
     ///
     /// An empty `tabs` list is legal and deletes every surface of the
     /// worktree; the app syncs a worktree only once its tabs are loaded.
@@ -210,8 +212,9 @@ public actor PanelCoordinator {
             throw error
         }
 
-        // Only a tab the sync left without a surface is skipped: one that
-        // already had a surface keeps it, whatever its legacy layout holds.
+        // Only a tab the sync left without a readable surface is skipped: one
+        // that already had a readable surface keeps it, whatever its legacy
+        // layout holds.
         let skippedTabIDs = outcome.skipped
         let skipped = skippedTabIDs.compactMap { skipReasons[$0] }
         let skippedCount = skippedTabIDs.count

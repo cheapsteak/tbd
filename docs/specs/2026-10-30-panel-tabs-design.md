@@ -273,8 +273,15 @@ tab is created, closed, reordered or relabelled. In one transaction the daemon:
 
 - **imports each listed tab that has no surface,** converting its legacy layout
   (see "Legacy import");
-- **never overwrites a tab that has a surface,** so the daemon stays the
-  authority for what is inside a tab;
+- **never overwrites a readable surface,** so the daemon stays the authority
+  for what is inside a tab;
+- **replaces an unreadable surface,** one whose row fails to decode or
+  validate, with the tab's legacy import and a logged warning, histories
+  included, at a fresh revision, and reports it as imported. No later sync
+  could read that row either, so keeping it would leave the tab on legacy for
+  good. A tab whose unreadable row has no import, because the converter
+  skips it, keeps the row and is named in `skippedTabIDs`, so the app stops
+  asking for a surface it cannot get;
 - **re-parents a listed tab's surface that sits under another worktree.** Tab
   IDs are global, and promoting a scratch worktree moves its tabs to the main
   worktree; the tab's panels move with it;
@@ -330,9 +337,9 @@ The converter in `TBDShared` maps one legacy tab to one surface:
 
 - The tab's `content` becomes the primary.
 - A tab whose layout holds a terminal anywhere but its primary is not
-  converted. If it has no surface it gets none, renders legacy, and the sync
-  result names it in `skippedTabIDs`, with its reason in `skipped`; a tab that
-  already has a surface keeps it and is not named. Spec C's importer promoted
+  converted. If it has no readable surface it gets none, renders legacy, and
+  the sync result names it in `skippedTabIDs`, with its reason in `skipped`; a
+  tab that already has a readable surface keeps it and is not named. Spec C's importer promoted
   such terminals to new workspace tabs, but workspace tabs are app-owned here,
   so a daemon-made tab would be deleted by the next sync. Terminal splits
   cannot be created since spec C's phase 1, so only layouts older than that
@@ -510,7 +517,9 @@ Each gated branch is tested both ways, asserting opposite outcomes.
 - **Daemon:** the gate under NULL, false and true; a pre-migration config row
   reads NULL, and an explicit false survives a change to the default constant;
   the migration empties the three v1 tables; tab sync imports missing tabs,
-  never overwrites a tab's panels, updates order, labels and primaries,
+  never overwrites a readable tab's panels, replaces an unreadable surface
+  with its import and reports an unreadable one it cannot convert as skipped,
+  updates order, labels and primaries,
   re-parents a surface from another worktree, deletes absent tabs with their
   histories, and broadcasts once; receipt replay returns the stored v2 result;
   `get` returns histories.

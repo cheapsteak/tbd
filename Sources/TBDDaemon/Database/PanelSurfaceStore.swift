@@ -4,6 +4,7 @@ import os
 import TBDShared
 
 private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
+private let panelSyncLogger = Logger(subsystem: "com.tbd.daemon", category: "panel.sync")
 
 private func encodeJSONString<T: Encodable>(_ value: T) throws -> String {
     let data = try JSONEncoder().encode(value)
@@ -231,15 +232,16 @@ public struct SyncTabEntry: Sendable {
 public struct SyncOutcome: Sendable, Equatable {
     /// Every surface the call inserted or updated, as stored.
     public var changed: [WorkspaceTabSurface]
-    /// Listed tabs that had no row and now have one.
+    /// Listed tabs that had no readable row and now have one: imported where
+    /// there was no row, or replacing a row that could not be read.
     public var imported: [UUID]
     /// Listed tabs whose row moved here from another worktree.
     public var reparented: [UUID]
     /// This worktree's tabs whose rows were deleted because they were not
     /// listed.
     public var removed: [UUID]
-    /// Listed tabs with no row and no import candidate, because the converter
-    /// skipped them: the sync left them without a surface.
+    /// Listed tabs with no readable row and no import candidate, because the
+    /// converter skipped them: the sync left them without a surface.
     public var skipped: [UUID]
 
     public init(changed: [WorkspaceTabSurface] = [], imported: [UUID] = [],
@@ -508,15 +510,21 @@ public struct PanelSurfaceStore: Sendable {
     ///
     /// - **No row** – inserts `importCandidate` under this worktree with the
     ///   entry's position, label and (when given) primary, at the revision
-    ///   counter's next value; nothing when the candidate is nil, because the
-    ///   converter skipped the tab, which is then reported in `skipped`.
-    /// - **Unreadable row** – left exactly as it is. The store never replaces
-    ///   data it could not read.
-    /// - **Readable row** – re-points it to this worktree when it sits under
-    ///   another, and applies the entry's position, label and primary (primary
-    ///   only when non-nil). When any of those changed, the surface takes the
-    ///   revision counter's next value and is reported in `changed`. Panels
-    ///   and histories are never touched.
+    ///   counter's next value, and reports it in `imported` and `changed`;
+    ///   nothing when the candidate is nil, because the converter skipped the
+    ///   tab, which is then reported in `skipped`.
+    /// - **Unreadable row** – one that fails to decode or validate is
+    ///   replaced, with its histories, by `importCandidate`, exactly as a
+    ///   missing row is imported, with a logged warning: otherwise the tab
+    ///   would stay on legacy for good, since no later sync could read it
+    ///   either. With no candidate the row is left as it is and the tab is
+    ///   reported in `skipped`, so the app stops asking for a surface it
+    ///   cannot get.
+    /// - **Readable row** – never overwritten. Re-points it to this worktree
+    ///   when it sits under another, and applies the entry's position, label
+    ///   and primary (primary only when non-nil). When any of those changed,
+    ///   the surface takes the revision counter's next value and is reported
+    ///   in `changed`. Panels and histories are never touched.
     ///
     /// This worktree's rows for tabs not listed are deleted first; their
     /// histories cascade. Other worktrees' rows and every receipt are left
@@ -553,10 +561,22 @@ public struct PanelSurfaceStore: Sendable {
             for entry in entries {
                 guard seen.insert(entry.tabID).inserted else { continue }
 
-                guard let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: entry.tabID.uuidString) else {
+                let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: entry.tabID.uuidString)
+                let current = try record.flatMap { try Self.loadSurface($0, db: db) }
+                guard let record, let current else {
                     guard let candidate = entry.importCandidate else {
                         outcome.skipped.append(entry.tabID)
                         continue
+                    }
+                    if let record {
+                        panelSyncLogger.warning("""
+                            panel.syncTabs worktree=\(worktreeID, privacy: .public) \
+                            replacing tab \(entry.tabID, privacy: .public)'s unreadable surface \
+                            (stored under worktree \(record.worktreeID, privacy: .public)) \
+                            with its legacy import
+                            """)
+                        // Its histories cascade.
+                        try WorkspaceTabSurfaceRecord.deleteOne(db, key: record.id)
                     }
                     let imported = WorkspaceTabSurface(
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
@@ -567,8 +587,6 @@ public struct PanelSurfaceStore: Sendable {
                     outcome.changed.append(imported)
                     continue
                 }
-
-                guard let current = try Self.loadSurface(record, db: db) else { continue }
 
                 let primary = entry.primary ?? current.primary
                 let reparented = current.worktreeID != worktreeID

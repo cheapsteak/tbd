@@ -471,13 +471,55 @@ struct PanelSurfaceStoreTests {
         #expect(try await historyRowCount(db, tabID: existing.id) == 1)
     }
 
-    /// A listed tab whose row cannot be read still has a surface: the sync
-    /// leaves it exactly as it is rather than replace data it could not read.
-    @Test func syncNeverReplacesAnUnreadableRow() async throws {
+    /// A listed tab whose row cannot be read, with an import candidate, gets
+    /// the candidate in its place — row and histories — at a fresh revision,
+    /// reported as imported; otherwise no later sync could read it either and
+    /// the tab would stay on legacy for good.
+    @Test func syncReplacesUnreadableSurface() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let existing = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [existing])
+        let existing = try await seed(
+            db, worktreeID: wtID, [makeSurface(worktreeID: wtID, paths: ["/a.txt", "/b.txt"])])[0]
+        let unreadable = #"{"primary":{}}"#
+        try await db.writerForTests.write { dbc in
+            try dbc.execute(
+                sql: "UPDATE workspace_tab_surface SET layout = ? WHERE id = ?",
+                arguments: [unreadable, existing.id.uuidString])
+        }
+        #expect(try await db.panelSurface.surface(tabID: existing.id) == nil, "precondition: unreadable")
+
+        let candidate = makeSurface(
+            worktreeID: wtID, tabID: existing.id, label: "renamed", paths: ["/x.txt"])
+        let outcome = try await db.panelSurface.syncTabs(
+            worktreeID: wtID, entries: [entry(for: candidate, position: 3)], now: Date())
+
+        let replaced = try #require(outcome.changed.first)
+        #expect(outcome.changed == [Self.revised(candidate, replaced.revision)])
+        #expect(replaced.revision > existing.revision, "the replacement takes the counter's next value")
+        #expect(outcome.imported == [existing.id])
+        #expect(outcome.skipped.isEmpty)
+        #expect(outcome.reparented.isEmpty)
+        #expect(outcome.removed.isEmpty)
+        #expect(try await db.panelSurface.surface(tabID: existing.id) == replaced)
+        #expect(try await layoutColumn(db, tabID: existing.id) != unreadable)
+        // The old panels' history rows went with the row; the candidate's one stands.
+        #expect(try await historyRowCount(db, tabID: existing.id) == 1)
+        let oldPanelKeys = existing.side.panels.map(\.id.uuidString)
+        let oldRows = try await db.writerForTests.read { dbc in
+            try Int.fetchOne(
+                dbc, sql: "SELECT COUNT(*) FROM panel_history WHERE panelID IN (?, ?)",
+                arguments: [oldPanelKeys[0], oldPanelKeys[1]])
+        }
+        #expect(oldRows == 0)
+    }
+
+    /// A listed tab whose row cannot be read and whose legacy layout the
+    /// converter skips keeps its row, and is reported skipped, so the app
+    /// stops asking for a surface no load would find.
+    @Test func syncReportsUnreadableUnconvertibleTabAsSkipped() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let existing = try await seed(db, worktreeID: wtID, [makeSurface(worktreeID: wtID)])[0]
         let unreadable = #"{"primary":{}}"#
         try await db.writerForTests.write { dbc in
             try dbc.execute(
@@ -485,12 +527,14 @@ struct PanelSurfaceStoreTests {
                 arguments: [unreadable, existing.id.uuidString])
         }
 
-        let candidate = makeSurface(
-            worktreeID: wtID, tabID: existing.id, label: "renamed", paths: ["/x.txt"])
         let outcome = try await db.panelSurface.syncTabs(
-            worktreeID: wtID, entries: [entry(for: candidate, position: 3)], now: Date())
+            worktreeID: wtID,
+            entries: [SyncTabEntry(
+                tabID: existing.id, position: 3, label: "renamed",
+                primary: existing.primary, importCandidate: nil)],
+            now: Date())
 
-        #expect(outcome == SyncOutcome())
+        #expect(outcome == SyncOutcome(skipped: [existing.id]))
         #expect(try await layoutColumn(db, tabID: existing.id) == unreadable)
         #expect(try await historyRowCount(db, tabID: existing.id) == 1)
     }
