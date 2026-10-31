@@ -68,8 +68,13 @@ extension SidebarOutlineController {
 
     /// The model alone expands and collapses: the outline's own gestures would
     /// leave it out of step with the tree the next diff starts from.
+    ///
+    /// Nothing expands during a drag session, so a collapsed section never
+    /// springs open under the pointer. The veto refuses the controller's own
+    /// `expandItem` too, so `draggingSession(_:endedAt:)` lifts it before the
+    /// held structure replays.
     func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
-        isApplyingStructure
+        isApplyingStructure && !isDragSessionActive
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
@@ -173,6 +178,7 @@ extension SidebarOutlineController {
         case .scratchHeader, .repoHeader, .groupHeader, .scratchPrompt:
             break
         }
+        configuration.isNestTarget = nestTargetID == node.id
         rowView.configuration = configuration
         configuredRowViews[ObjectIdentifier(rowView)] = node.id
         // `RepoSectionView` dims its rows while the section's chevron is

@@ -21,7 +21,8 @@ import TBDShared
 /// 4. The first visible row's ID and offset are recorded before an apply and
 ///    restored after it.
 /// 5. While a drag or a rename holds the structure, only content applies; the
-///    held structure lands when the last hold ends.
+///    held structure lands when the last hold ends. A drag's hold ends in
+///    `draggingSession(_:endedAt:)`, which applies it at once.
 ///
 /// The outline is the only writer of its own structure and expansion: the
 /// delegate refuses every expand and collapse the controller did not ask for,
@@ -33,9 +34,9 @@ import TBDShared
 /// public surface, the update loop and the scratch-directory cache;
 /// `+Apply` applies trees, `+DataSource` answers the outline and configures
 /// cells, `+Selection` mirrors selection both ways, `+Expansion` runs
-/// header actions, chevrons and reveal, and `+Interaction` runs hover, the
+/// header actions, chevrons and reveal, `+Interaction` runs hover, the
 /// row and header controls, inline rename, context menus, sheets and the
-/// tooltip bubble.
+/// tooltip bubble, and `+Drag` runs drag and drop.
 ///
 /// Selection (spec "Selection"): a user's selection goes to
 /// `AppState.selectedWorktreeIDs` through `SidebarSelectionBridge`, whose
@@ -154,6 +155,24 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// Opens a pull request's page; tests hand in a recorder.
     var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    // MARK: Drag state (`+Drag`)
+
+    /// Where a drop decision looks up the shown tree. Built once per apply,
+    /// so the drag path, which asks on every pointer move, never builds one.
+    var dropIndex = SidebarDropIndex(tree: SidebarTree())
+    /// True from a drag session's `willBeginAt` to its `endedAt`. The outline
+    /// then expands nothing, the controller's own `expandItem` included, so
+    /// a collapsed section never springs open under a drag.
+    var isDragSessionActive = false
+    /// The row showing the nest highlight.
+    var nestTargetID: SidebarNodeID?
+    /// The rows a drag carries, as read from its pasteboard, keyed by the
+    /// drag's sequence number: `validateDrop` runs on every pointer move and
+    /// reads the pasteboard once per drag.
+    var dropPayloadCache: (sequence: Int, ids: [UUID])?
+    /// Laid over the scroll view, below the tooltip bubble.
+    let dropIndicator = SidebarDropIndicatorView(frame: .zero)
+
     static let signposter = OSSignposter(subsystem: "com.tbd.app", category: "native-sidebar")
 
     /// - Parameters:
@@ -242,17 +261,21 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
 
-        // The tooltip bubble floats over the scroll view, so it never joins
-        // the outline's own subviews and never scrolls away from its anchor.
+        // The tooltip bubble and the drop's insertion line float over the
+        // scroll view, so they never join the outline's own subviews.
         let container = NSView(frame: .zero)
         scrollView.frame = container.bounds
         scrollView.autoresizingMask = [.width, .height]
+        dropIndicator.frame = container.bounds
+        dropIndicator.autoresizingMask = [.width, .height]
         tooltipOverlay.frame = container.bounds
         tooltipOverlay.autoresizingMask = [.width, .height]
         container.addSubview(scrollView)
+        container.addSubview(dropIndicator)
         container.addSubview(tooltipOverlay)
         view = container
         installInteractions()
+        installDragAndDrop()
     }
 
     override func viewDidLoad() {
@@ -361,6 +384,16 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             startRename(.worktree(renameRequest.id), seed: renameRequest.seed,
                         commitOpenEdit: !renameRequest.handsOver)
         }
+    }
+
+    /// `AppState` as it stands now, built outside the update loop: no
+    /// reveals, no tracking, nothing applied. What `acceptDrop` checks a drop
+    /// against, since a drag holds the shown structure and the shown tree
+    /// may still carry rows the model has dropped.
+    func currentTree() -> SidebarTree {
+        let exists = scratchDirectoryExists
+        return SidebarTreeBuilder.build(
+            appState, options: SidebarBuildOptions(defaults: defaults), directoryExists: { exists[$0] ?? true })
     }
 
     /// Runs `body` on the main actor: at once when already on the main thread,

@@ -21,6 +21,8 @@ extension SidebarOutlineController {
         } else {
             loadFully(latest)
         }
+        // Once per applied tree, so no drop decision builds one.
+        dropIndex = SidebarDropIndex(tree: tree)
         applyModelSelection()
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false

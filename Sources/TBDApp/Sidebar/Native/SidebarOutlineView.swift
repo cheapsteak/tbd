@@ -50,6 +50,15 @@ final class SidebarOutlineView: NSOutlineView {
     /// rows — group headers, provider headers, the scratch prompt — show none.
     var contextMenuProvider: ((Int) -> NSMenu?)?
 
+    /// The row a drag's mouse-down landed on, recorded by
+    /// `canDragRows(with:at:)`: its kind decides what the drag carries when
+    /// the selection mixes scratch rows and worktrees. Nil once the drag ends.
+    var dragOrigin: SidebarNodeID?
+
+    /// Runs when a drag leaves the outline, concludes over it or ends: the
+    /// drop's insertion line and nest highlight clear.
+    var onDropFeedbackEnded: (() -> Void)?
+
     /// The row's menu, shown through `super` so the outline draws its usual
     /// highlight around the right-clicked row. The outline does not override
     /// `mouseDown`: rows select and drag natively.
@@ -58,6 +67,78 @@ final class SidebarOutlineView: NSOutlineView {
         menu = row >= 0 ? contextMenuProvider?(row) : nil
         guard menu != nil else { return nil }
         return super.menu(for: event)
+    }
+
+    // MARK: Drag and drop
+
+    /// A press on a row's pin toggle or nested `+` tracks the button and
+    /// never starts a drag; a press anywhere else in the row can. The row the
+    /// press landed on is recorded as the drag's origin.
+    ///
+    /// - Parameters:
+    ///   - rowIndexes: the rows the drag would carry: the selection when the
+    ///     pressed row is selected, otherwise the pressed row alone.
+    ///   - mouseDownPoint: in the outline's coordinates.
+    override func canDragRows(with rowIndexes: IndexSet, at mouseDownPoint: NSPoint) -> Bool {
+        dragOrigin = nil
+        if isOnButton(mouseDownPoint) { return false }
+        if let row = pressedRow(at: mouseDownPoint, among: rowIndexes) {
+            dragOrigin = (item(atRow: row) as? SidebarItem)?.id
+        }
+        return super.canDragRows(with: rowIndexes, at: mouseDownPoint)
+    }
+
+    /// The pressed row, which is always among the rows a drag would carry:
+    /// the row under the point, or the lone row when the point names none of
+    /// them.
+    private func pressedRow(at point: NSPoint, among rows: IndexSet) -> Int? {
+        let underPoint = row(at: point)
+        if underPoint >= 0, rows.contains(underPoint) { return underPoint }
+        return rows.count == 1 ? rows.first : nil
+    }
+
+    /// Whether `point`, in the outline's coordinates, lands on a button
+    /// inside a row.
+    func isOnButton(_ point: NSPoint) -> Bool {
+        guard let superview else { return false }
+        var view = hitTest(convert(point, to: superview))
+        while let current = view, current !== self {
+            if current is NSButton { return true }
+            view = current.superview
+        }
+        return false
+    }
+
+    // The outline draws no drop feedback of its own
+    // (`draggingDestinationFeedbackStyle = .none`); the controller draws it
+    // from the drop policy's answer, and these clear it. Each passes the
+    // message on first, when `NSOutlineView` implements it.
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        if Self.inheritsDragMessage(#selector(NSDraggingDestination.draggingExited(_:))) {
+            super.draggingExited(sender)
+        }
+        onDropFeedbackEnded?()
+    }
+
+    override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) {
+        if Self.inheritsDragMessage(#selector(NSDraggingDestination.concludeDragOperation(_:))) {
+            super.concludeDragOperation(sender)
+        }
+        onDropFeedbackEnded?()
+    }
+
+    override func draggingEnded(_ sender: any NSDraggingInfo) {
+        if Self.inheritsDragMessage(#selector(NSDraggingDestination.draggingEnded(_:))) {
+            super.draggingEnded(sender)
+        }
+        onDropFeedbackEnded?()
+    }
+
+    /// `NSDraggingDestination`'s methods are optional, so `super` may not
+    /// implement one; sending it anyway would raise.
+    private static func inheritsDragMessage(_ selector: Selector) -> Bool {
+        NSOutlineView.instancesRespond(to: selector)
     }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
