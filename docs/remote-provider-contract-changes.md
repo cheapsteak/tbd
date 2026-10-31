@@ -680,9 +680,11 @@ a complete snapshot.
 
 **What the caller does.** It stops applying the drift rule to any session whose
 last sighting was archived, so that session stays archived in its mirror. TBD's
-caller does not read the field yet. Until it does, a session beyond the
-horizon becomes a gone row in TBD, and a lane TBD had archived stays revivable
-through `unarchive`.
+caller reads the field from `describe`, treats a malformed value as absent, and
+applies that rule in the absence pass of every complete snapshot, from `list` or
+from the `events` snapshot. A session last seen unarchived, or whose last
+payload cannot be read, follows the ordinary drift rule. TBD does not display
+`hidden_archived`. A lane TBD had archived stays revivable through `unarchive`.
 
 **If you ignore it.** Nothing changes. You list every session, and a listing you
 cannot finish reports `complete: false`, as section 1 says.
