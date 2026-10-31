@@ -46,16 +46,20 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
     var codexDisable: [String] = []
 
+    @Option(name: .long, help: "Existing Codex home for this terminal only (relative paths use the current directory). Requires --type codex and a readable PreToolUse hook; does not change ordinary Codex terminals.")
+    var codexHome: String?
+
     @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
     var pluginDirs: [String] = []
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    /// The params this invocation sends, with each `--plugin-dir` made
-    /// absolute against `cwd`, or none sent when the flag was not given.
-    /// `codexDisabledFeatures` is the already-normalized `--codex-disable`
-    /// list, nil when the flag was not given.
+    /// The params this invocation sends, with each `--plugin-dir` and a
+    /// relative `--codex-home` made absolute against `cwd`, or none sent when
+    /// the flag was not given. `codexDisabledFeatures` is the
+    /// already-normalized `--codex-disable` list, nil when the flag was not
+    /// given.
     func createParams(
         worktreeID: UUID, prompt: String?, cwd: String,
         codexDisabledFeatures: [String]? = nil
@@ -64,7 +68,8 @@ struct TerminalCreate: AsyncParsableCommand {
             worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
             claudeSettingsOverlay: claudeSettings, model: model,
             codexDisabledFeatures: codexDisabledFeatures,
-            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd))
+            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd),
+            codexHome: Self.normalizedCodexHomePath(codexHome, currentDirectoryPath: cwd))
     }
 
     mutating func validate() throws {
@@ -77,6 +82,9 @@ struct TerminalCreate: AsyncParsableCommand {
             } catch {
                 throw ValidationError(error.localizedDescription)
             }
+        }
+        if codexHome != nil, type != .codex {
+            throw ValidationError(TerminalCreateParams.codexHomeRequiresCodexMessage)
         }
         if !pluginDirs.isEmpty {
             // The daemon's rule: a Claude type, or any resume, is a Claude
@@ -103,13 +111,14 @@ struct TerminalCreate: AsyncParsableCommand {
         let disabledFeatures: [String]? = try codexDisable.isEmpty
             ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
 
+        let params = createParams(
+            worktreeID: worktreeID,
+            prompt: try resolvePrompt(inline: prompt, file: promptFile),
+            cwd: FileManager.default.currentDirectoryPath,
+            codexDisabledFeatures: disabledFeatures)
         let terminal: Terminal = try client.call(
-            method: RPCMethod.terminalCreate,
-            params: createParams(
-                worktreeID: worktreeID,
-                prompt: try resolvePrompt(inline: prompt, file: promptFile),
-                cwd: FileManager.default.currentDirectoryPath,
-                codexDisabledFeatures: disabledFeatures),
+            method: params.rpcMethod,
+            params: params,
             resultType: Terminal.self
         )
 
@@ -121,6 +130,17 @@ struct TerminalCreate: AsyncParsableCommand {
             print("  Window: \(terminal.tmuxWindowID)")
             print("  Pane:   \(terminal.tmuxPaneID)")
         }
+    }
+
+    /// The daemon accepts only canonical absolute paths. Resolve a relative
+    /// CLI argument against this process's cwd without resolving symlinks;
+    /// the daemon still checks the resulting path and directory strictly.
+    static func normalizedCodexHomePath(
+        _ path: String?, currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+    ) -> String? {
+        guard let path, !path.isEmpty, !path.hasPrefix("/") else { return path }
+        let cwd = URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
+        return URL(fileURLWithPath: path, relativeTo: cwd).standardizedFileURL.path
     }
 }
 

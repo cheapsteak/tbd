@@ -661,44 +661,54 @@ public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
     }
 }
 
-/// The per-terminal options a Codex tab was launched with: its model override
-/// and the Codex features turned off for it.
+/// The per-terminal options a Codex tab was launched with: its model override,
+/// the Codex features turned off for it, and its dedicated Codex home.
 ///
 /// Recorded on the terminal row at spawn, because every later relaunch of
 /// Codex in that same tab — recreating a dead window, or restoring Codex after
 /// a failed continue-in-Claude — has nothing else to read them from, and a
 /// relaunch without them would quietly start the tab on the default model with
-/// those features back on.
+/// those features back on, or on the shared home without its guard.
 public struct CodexLaunchOptions: Codable, Sendable, Equatable {
     /// Passed to Codex as `-c model="<id>"`. Nil when the tab took the `tbd`
     /// Codex profile's model.
     public var model: String?
     /// Passed to Codex as `--disable <feature>`, in launch order.
     public var disabledFeatures: [String]
+    /// The dedicated Codex home the tab was created with
+    /// (`tbd terminal create --codex-home`), or nil for the shared home. A
+    /// relaunch validates this home again and launches in it, or refuses; it
+    /// never falls back to the shared home.
+    public var codexHome: String?
 
-    public init(model: String? = nil, disabledFeatures: [String] = []) {
+    public init(model: String? = nil, disabledFeatures: [String] = [], codexHome: String? = nil) {
         self.model = model
         self.disabledFeatures = disabledFeatures
+        self.codexHome = codexHome
     }
 
     /// The options worth recording for a launch, or nil when it used none, so
     /// a tab started without options keeps a NULL column and relaunches with
     /// the default command. An empty model is no override, matching
     /// `CodexSpawnCommandBuilder.modelOverrideArgument`.
-    public static func recorded(model: String?, disabledFeatures: [String]) -> CodexLaunchOptions? {
+    public static func recorded(
+        model: String?, disabledFeatures: [String], codexHome: String? = nil
+    ) -> CodexLaunchOptions? {
         let model = model.flatMap { $0.isEmpty ? nil : $0 }
-        guard model != nil || !disabledFeatures.isEmpty else { return nil }
-        return CodexLaunchOptions(model: model, disabledFeatures: disabledFeatures)
+        guard model != nil || !disabledFeatures.isEmpty || codexHome != nil else { return nil }
+        return CodexLaunchOptions(
+            model: model, disabledFeatures: disabledFeatures, codexHome: codexHome)
     }
 
     enum CodingKeys: String, CodingKey {
-        case model, disabledFeatures
+        case model, disabledFeatures, codexHome
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         disabledFeatures = try c.decodeIfPresent([String].self, forKey: .disabledFeatures) ?? []
+        codexHome = try c.decodeIfPresent(String.self, forKey: .codexHome)
     }
 }
 

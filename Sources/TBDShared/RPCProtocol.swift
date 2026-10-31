@@ -170,6 +170,9 @@ public enum RPCMethod {
     public static let worktreeMove = "worktree.move"
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
+    /// A distinct method so an older daemon cannot silently ignore the new
+    /// codexHome field and launch an unguarded terminal instead.
+    public static let terminalCreateGuardedCodex = "terminal.createGuardedCodex"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalContinueInClaude = "terminal.continueInClaude"
     public static let terminalList = "terminal.list"
@@ -2737,7 +2740,12 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// terminals only: any other kind with a non-empty list is refused.
     /// Optional/defaulted for backward compatibility.
     public let pluginDirs: [String]?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil, pluginDirs: [String]? = nil) {
+    /// Explicit Codex home for this one terminal. The daemon validates its guard
+    /// before spawn and records it on the row with `model`
+    /// (`Terminal.codexLaunchOptions`), so a relaunch of Codex in this tab
+    /// re-validates and keeps it, or refuses. Nil keeps the shared Codex home.
+    public let codexHome: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil, pluginDirs: [String]? = nil, codexHome: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
@@ -2745,6 +2753,7 @@ public struct TerminalCreateParams: Codable, Sendable {
         self.model = model
         self.codexDisabledFeatures = codexDisabledFeatures
         self.pluginDirs = pluginDirs
+        self.codexHome = codexHome
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
@@ -2759,6 +2768,15 @@ public struct TerminalCreateParams: Codable, Sendable {
 
     public static let codexDisableRequiresCodexMessage =
         "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
+
+    public static let codexHomeRequiresCodexMessage =
+        "--codex-home requires --type codex: only Codex terminals use CODEX_HOME."
+
+    /// Guarded requests use a new RPC method: an older daemon must reject the
+    /// unknown method instead of ignoring an unknown `codexHome` JSON field.
+    public var rpcMethod: String {
+        codexHome == nil ? RPCMethod.terminalCreate : RPCMethod.terminalCreateGuardedCodex
+    }
 
     /// Validates and de-duplicates (first occurrence wins) Codex feature keys.
     /// A key is lowercase letters, digits and underscores, like
