@@ -47,8 +47,11 @@ extension AppState {
             payload: text,
             observedAt: observedAt)
         programStatusForwarder.enqueue(params)
+        // No prune here: this runs on every report. A terminal's entry goes
+        // when the app removes the terminal (`recordTerminalRemoval`, a list
+        // that drops it) and, for any other way out of the cache, at the next
+        // re-send.
         lastForwardedProgramStatusReports[terminalID] = params
-        forgetForwardedReportsOfUncachedTerminals()
     }
 
     /// Forward again, in observation order, the latest report forwarded for
@@ -72,7 +75,9 @@ extension AppState {
         }
     }
 
-    /// Keep `lastForwardedProgramStatusReports` to terminals the app caches.
+    /// Keep `lastForwardedProgramStatusReports` to terminals the app caches:
+    /// the catch-all for a terminal that left `terminals` by a path that did
+    /// not forget its entry itself.
     private func forgetForwardedReportsOfUncachedTerminals() {
         guard !lastForwardedProgramStatusReports.isEmpty else { return }
         let cached = Set(terminals.values.lazy.flatMap { $0 }.map(\.id))

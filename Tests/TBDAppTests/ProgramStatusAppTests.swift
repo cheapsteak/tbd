@@ -262,40 +262,52 @@ struct ProgramStatusAppTests {
         #expect(params[2].observedAt == latest)
     }
 
-    /// The memory is kept to terminals the app caches: a terminal the app no
-    /// longer lists has its entry dropped and nothing re-sent, while a cached
-    /// one's still is. The removed terminal's report was observed first, so a
-    /// re-send of it would arrive ahead of the cached one's.
-    @Test("a reconnect re-sends nothing for a terminal the app no longer caches")
-    func reconnectDropsAnUncachedTerminalsReport() async throws {
+    /// The memory is kept to terminals the app caches. A terminal the app
+    /// removes has its entry forgotten at once; one that leaves the cache by
+    /// any other path keeps it until the next re-send, which drops it and
+    /// re-sends nothing for it. Forwarding another report prunes nothing,
+    /// because that runs on every report. A cached terminal's report is still
+    /// re-sent. Both uncached terminals' reports were observed first, so a
+    /// re-send of either would arrive ahead of the cached one's.
+    @Test("a re-send forwards nothing for a terminal the app no longer caches")
+    func resendDropsAnUncachedTerminalsReport() async throws {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         let removed = seed(state, kind: .claude, transport: .holder)
+        let dropped = seed(state, kind: .claude, transport: .holder)
         let kept = seed(state, kind: .codex, transport: .holder)
         let removedWorktreeID = try #require(
             state.terminals.first { $0.value.contains { $0.id == removed } }?.key)
+        let droppedWorktreeID = try #require(
+            state.terminals.first { $0.value.contains { $0.id == dropped } }?.key)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
-        state.programStatusListFetcher = { @MainActor in [] }
         let earlier = Date(timeIntervalSince1970: 1_000)
         state.forwardProgramStatusReport(
             terminalID: removed, payload: Array("state=working:app=claude-code".utf8), observedAt: earlier)
         state.forwardProgramStatusReport(
-            terminalID: kept, payload: Array("state=idle:app=codex".utf8),
+            terminalID: dropped, payload: Array("state=working:app=claude-code".utf8),
             observedAt: earlier.addingTimeInterval(1))
-        state.terminals[removedWorktreeID] = nil
 
-        state.startSubscription()
-        state.stopSubscription()
+        state.removeDeletedTerminalFromState(terminalID: removed, worktreeID: removedWorktreeID)
+        #expect(state.lastForwardedProgramStatusReports[removed] == nil)
+        state.terminals[droppedWorktreeID] = nil
+        state.forwardProgramStatusReport(
+            terminalID: kept, payload: Array("state=idle:app=codex".utf8),
+            observedAt: earlier.addingTimeInterval(2))
+        #expect(state.lastForwardedProgramStatusReports[dropped] != nil,
+                "forwarding a report pruned another terminal's entry")
 
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 3 }
+        state.resendLastProgramStatusReports()
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 4 }
         if outcome == .timedOut {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         let params = sent.all
-        try #require(params.count >= 3)
-        #expect(params[2].terminalID == kept)
-        #expect(state.lastForwardedProgramStatusReports[removed] == nil)
+        try #require(params.count == 4)
+        #expect(params[3].terminalID == kept)
+        #expect(state.lastForwardedProgramStatusReports[dropped] == nil)
         #expect(state.lastForwardedProgramStatusReports[kept] != nil)
     }
 

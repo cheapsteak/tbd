@@ -402,6 +402,7 @@ extension AppState {
         for terminal in existing where !visibleIDs.contains(terminal.id) {
             terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
             terminalReplacementObservedGeneration.removeValue(forKey: terminal.id)
+            lastForwardedProgramStatusReports.removeValue(forKey: terminal.id)
         }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
@@ -550,6 +551,7 @@ extension AppState {
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
+        lastForwardedProgramStatusReports.removeValue(forKey: terminalID)
         if limitHits[terminalID] != nil { limitHits.removeValue(forKey: terminalID) }
         if terminalAttachRetries[terminalID] != nil {
             terminalAttachRetries.removeValue(forKey: terminalID)
