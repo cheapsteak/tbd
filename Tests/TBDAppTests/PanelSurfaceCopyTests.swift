@@ -629,8 +629,9 @@ struct PanelSurfaceCopyTests {
             // `connectAndLoadInitialState`: capabilities arrive with the flag
             // on, then the subscription starts, and the daemon acknowledges it
             // while the flag's sync is still in flight.
-            state.daemonCapabilities = Fixture.capabilities(panelTabs: true)
-            state.panelTabsCapabilityChanged(wasEnabled: false)
+            let on = Fixture.capabilities(panelTabs: true)
+            state.daemonCapabilitiesFetcher = { @MainActor in on }
+            await state.fetchDaemonCapabilitiesAtConnect()
             await Fixture.drainMainActor()
             try #require(syncGate.isHolding, "precondition: the flag turning on sent a sync, still in flight")
             state.startSubscription()
@@ -706,6 +707,73 @@ struct PanelSurfaceCopyTests {
             #expect(gets.worktreeIDs == [worktreeID], "a failed apply refetches exactly once")
             #expect(state.panelSurface(worktreeID: worktreeID, tabID: tabID) == truth)
             state.dismissToast()
+        }
+    }
+
+    // MARK: - Capabilities at connect
+
+    /// Counts capability fetches and answers each with `result` (nil: the
+    /// fetch failed).
+    @MainActor
+    private final class CapabilitiesFetchStub {
+        var result: DaemonCapabilitiesResult?
+        private(set) var count = 0
+
+        func install(on state: AppState) {
+            state.daemonCapabilitiesFetcher = { @MainActor [self] in
+                count += 1
+                return result
+            }
+        }
+    }
+
+    @Test("a failed capability fetch at connect keeps the previous value, and the poll retries while none is held")
+    func failedConnectCapabilityFetchKeepsPreviousAndRetries() async {
+        await Fixture.withState(panelTabs: true) { state in
+            state.programStatusListFetcher = { @MainActor in [] }
+            state.isConnected = true
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = UUID()
+            let surface = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 2)
+            state.panelSurfaces = [worktreeID: [tab.id: surface]]
+            let fetch = CapabilitiesFetchStub()
+            fetch.install(on: state)
+
+            // A reconnect whose fetch fails keeps the capabilities it held, and
+            // the copy with them.
+            await state.fetchDaemonCapabilitiesAtConnect()
+            #expect(fetch.count == 1)
+            #expect(state.panelTabsActive, "a transient failure must not switch panel tabs off")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == surface)
+
+            // Held capabilities need no retry.
+            await state.retryDaemonCapabilitiesIfMissing()
+            #expect(fetch.count == 1, "the poll fetches nothing while capabilities are held")
+
+            // A launch whose fetch fails holds none.
+            state.daemonCapabilities = nil
+            await state.fetchDaemonCapabilitiesAtConnect()
+            #expect(fetch.count == 2)
+            #expect(state.daemonCapabilities == nil)
+
+            // Disconnected, the poll does not ask.
+            state.isConnected = false
+            await state.retryDaemonCapabilitiesIfMissing()
+            #expect(fetch.count == 2, "the poll fetches nothing while disconnected")
+
+            // Connected, it asks every cycle until a fetch succeeds.
+            state.isConnected = true
+            await state.retryDaemonCapabilitiesIfMissing()
+            #expect(fetch.count == 3)
+            #expect(state.daemonCapabilities == nil)
+
+            fetch.result = Fixture.capabilities(panelTabs: true)
+            await state.retryDaemonCapabilitiesIfMissing()
+            #expect(fetch.count == 4)
+            #expect(state.panelTabsActive)
+
+            await state.retryDaemonCapabilitiesIfMissing()
+            #expect(fetch.count == 4, "a successful retry ends the retries")
         }
     }
 

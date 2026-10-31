@@ -402,8 +402,10 @@ match: an agent opens content and lets the reuse rule place it.
 `AppState+PanelSurface.swift` holds the surfaces per worktree as a tracked
 property of the `@Observable` `AppState`. It is filled by `panel.get` when the
 flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
-cleared when the daemon reports the flag off. A delta or fetch while the flag is
-off leaves it untouched. A worktree's detail view loads it whenever the shown
+cleared when the daemon reports the flag off. A failed capabilities fetch
+reports nothing: the app keeps the capabilities it held, at connect as at any
+later refresh, and while it holds none it asks again on its regular poll. A
+delta or fetch while the flag is off leaves it untouched. A worktree's detail view loads it whenever the shown
 tab has no surface in the copy — when that tab is shown, or when the flag turns
 on — after sending any tab sync still pending. So a tab left without a surface
 by a failed `panel.get`, or by an import delta missed while the subscription
@@ -532,7 +534,9 @@ Each gated branch is tested both ways, asserting opposite outcomes.
     resubscribing keeps rendering it and, only once the daemon acknowledges
     the subscription, refetches every worktree with a tab list, one with no
     surface included; a get that failed across the resubscribe is refetched
-    by the acknowledgement; launch loads each worktree once, after the sync.
+    by the acknowledgement; launch loads each worktree once, after the sync;
+    a failed capability fetch at connect keeps the flag and the copy, and the
+    poll fetches again only while no capabilities are held.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none; flag off
     sends none.

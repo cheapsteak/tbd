@@ -2524,6 +2524,32 @@ final class AppState {
             panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
         }
     }
+
+    /// The capability fetch `connectAndLoadInitialState` makes before its
+    /// first `refreshAll`. Keeps the last known value on failure, as
+    /// `refreshDaemonCapabilities` does: a transient hiccup at connect must
+    /// not switch panel tabs off for the session by clearing the copy. Runs
+    /// the panel-tabs hook only after a successful fetch. A failure with
+    /// nothing to keep is retried on the poll
+    /// (`retryDaemonCapabilitiesIfMissing`).
+    func fetchDaemonCapabilitiesAtConnect() async {
+        let wasPanelTabsEnabled = panelTabsActive
+        guard let capabilities = await daemonCapabilitiesFetcher() else {
+            logger.warning("Daemon capabilities fetch failed at connect; keeping the last known value")
+            return
+        }
+        daemonCapabilities = capabilities
+        panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
+    }
+
+    /// Run on each poll cycle: while the app is connected and holds no
+    /// capabilities, because every fetch so far failed, fetch them again.
+    /// Without this a failed connect-time fetch would leave every capability
+    /// flag reading off until some later `.modelProfilesChanged`.
+    func retryDaemonCapabilitiesIfMissing() async {
+        guard isConnected, daemonCapabilities == nil else { return }
+        await refreshDaemonCapabilities()
+    }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     @ObservationIgnored lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     @ObservationIgnored private var pollTimer: Timer?
@@ -3901,6 +3927,7 @@ final class AppState {
                 // expensive pr.list still lands ~every 15 executed cycles rather
                 // than drifting earlier off wall-clock ticks that did no work.
                 await self.runPollCycleIfIdle {
+                    await self.retryDaemonCapabilitiesIfMissing()
                     await self.refreshAll()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()
@@ -3935,9 +3962,7 @@ final class AppState {
             // grouped-sessions vs control-mode at creation time. Fetching
             // afterwards would leave every initially-rendered pane on the
             // grouped path even when the control-mode gate is on.
-            let wasPanelTabsEnabled = panelTabsActive
-            daemonCapabilities = try? await daemonClient.daemonCapabilities()
-            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
+            await fetchDaemonCapabilitiesAtConnect()
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
