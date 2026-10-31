@@ -569,6 +569,49 @@ import TestSupport
         #expect(await h.store.snapshot(for: other.id)?.main?.state == .working)
     }
 
+    /// An ingest whose terminal lookup read the row before it was deleted, and
+    /// that resumes after the row's `forget`, must not re-create what the
+    /// forget removed: nothing would ever forget it again.
+    @Test func anIngestRacingAForgetDoesNotResurrectTheTerminal() async {
+        let gate = LookupGate()
+        let h = Harness(lookupGate: gate)
+        let terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        let store = h.store
+        let report = inbound(terminal, "state=working:app=claude-code", at: 1)
+        let ingest = Task { await store.ingest(report) }
+
+        let reached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            gate.hasArrived
+        }
+        if reached == .timedOut {
+            Issue.record(LookupNotReached())
+        }
+        // The lookup already holds the row; the row is deleted and forgotten
+        // while it is suspended.
+        await store.forget(terminalIDs: [terminal.id])
+        gate.release()
+
+        #expect(await ingest.value == .rejected("terminal deleted"))
+        #expect(await store.keepsState(for: terminal.id) == false)
+        #expect(await store.snapshot(for: terminal.id) == nil)
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A deleted row's child exit or park reported after its `forget` keeps
+    /// nothing: no watermark, counter or ended incarnation outlives the row.
+    @Test func aDropAfterAForgetKeepsNothing() async {
+        let h = Harness()
+        let terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        #expect(await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1)) == .accepted)
+        await h.store.forget(terminalIDs: [terminal.id])
+
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        #expect(await h.store.keepsState(for: terminal.id) == false)
+    }
+
     @Test func revisionIsMonotonicAcrossClears() async {
         let h = Harness()
         let terminal = holderClaude()

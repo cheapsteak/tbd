@@ -520,6 +520,60 @@ import TestSupport
         #expect(await h.store.snapshot(for: kept.id)?.main?.state == .working)
     }
 
+    /// A worktree's terminal rows also go when the worktree's row does —
+    /// the foreign key cascades them — and a repo's with its worktrees. Each
+    /// of those deletes forgets the terminals it took, and only those.
+    @Test func deletingAWorktreeOrRepoForgetsItsTerminals() async throws {
+        let h = try await Harness.make()
+        func worktree(in repoID: UUID) async throws -> UUID {
+            try await h.db.worktrees.create(
+                repoID: repoID, name: "wt-\(UUID().uuidString)", branch: "main",
+                path: "/tmp/pscw-wt-\(UUID().uuidString)", tmuxServer: "tbd-pscw").id
+        }
+        func repo() async throws -> UUID {
+            try await h.db.repos.create(
+                path: "/tmp/pscw-repo-\(UUID().uuidString)", displayName: "acme",
+                defaultBranch: "main").id
+        }
+        func reportingTerminal(in worktreeID: UUID) async throws -> Terminal {
+            let terminal = try await h.db.terminals.create(
+                worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+                kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+            #expect(await ingest(h, terminal, "state=working:app=claude-code", at: 1) == .accepted)
+            #expect(await h.store.keepsState(for: terminal.id))
+            return terminal
+        }
+        let deletedRepo = try await repo()
+        let removedRepo = try await repo()
+        let deletedWorktree = try await worktree(in: deletedRepo)
+        let returnedWorktree = try await worktree(in: deletedRepo)
+        let byRepoWorktree = try await worktree(in: deletedRepo)
+        let removedRepoWorktree = try await worktree(in: removedRepo)
+        let deleted = try await reportingTerminal(in: deletedWorktree)
+        let returned = try await reportingTerminal(in: returnedWorktree)
+        let byRepo = try await reportingTerminal(in: byRepoWorktree)
+        let removed = try await reportingTerminal(in: removedRepoWorktree)
+        let kept = try await reportingTerminal(in: h.worktreeID)
+
+        try await h.db.worktrees.delete(id: deletedWorktree)
+        #expect(await h.store.keepsState(for: deleted.id) == false)
+        #expect(await h.store.keepsState(for: returned.id))
+
+        #expect(try await h.db.worktrees.deleteReturning(id: returnedWorktree) != nil)
+        #expect(await h.store.keepsState(for: returned.id) == false)
+        #expect(await h.store.keepsState(for: byRepo.id))
+
+        try await h.db.worktrees.deleteForRepo(repoID: deletedRepo)
+        #expect(await h.store.keepsState(for: byRepo.id) == false)
+        #expect(await h.store.keepsState(for: removed.id))
+
+        try await h.db.repos.remove(id: removedRepo)
+        #expect(await h.store.keepsState(for: removed.id) == false)
+        #expect(try await h.db.terminals.get(id: removed.id) == nil)
+
+        #expect(await h.store.snapshot(for: kept.id)?.main?.state == .working)
+    }
+
     // MARK: - Reentrancy
 
     /// Suspends the first caller until `release()`; every later caller passes.

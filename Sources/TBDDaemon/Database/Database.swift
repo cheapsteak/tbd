@@ -60,9 +60,10 @@ public final class TBDDatabase: Sendable {
         #endif
         let pool = try DatabasePool(path: path, configuration: config)
         self.writer = pool
-        self.repos = RepoStore(writer: pool)
-        self.worktrees = WorktreeStore(writer: pool)
-        self.terminals = TerminalStore(writer: pool)
+        let terminals = TerminalStore(writer: pool)
+        self.repos = RepoStore(writer: pool, terminalDeletions: terminals.deletions)
+        self.worktrees = WorktreeStore(writer: pool, terminalDeletions: terminals.deletions)
+        self.terminals = terminals
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: pool)
@@ -121,9 +122,10 @@ public final class TBDDatabase: Sendable {
         precondition(inMemory, "Use init(path:) for file-backed databases")
         let queue = try DatabaseQueue()
         self.writer = queue
-        self.repos = RepoStore(writer: queue)
-        self.worktrees = WorktreeStore(writer: queue)
-        self.terminals = TerminalStore(writer: queue)
+        let terminals = TerminalStore(writer: queue)
+        self.repos = RepoStore(writer: queue, terminalDeletions: terminals.deletions)
+        self.worktrees = WorktreeStore(writer: queue, terminalDeletions: terminals.deletions)
+        self.terminals = terminals
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: queue)

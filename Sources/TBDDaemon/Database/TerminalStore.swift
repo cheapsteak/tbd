@@ -591,7 +591,10 @@ public final class TerminalActivityTransitionNotifier: @unchecked Sendable {
 /// Fan-out for terminal-row deletions, so memory a daemon component keys by
 /// terminal ID is released on every path that deletes a row — a closed tab, a
 /// hook tab, an archived, forgotten or recovered worktree — without each of
-/// those paths having to know who keeps what.
+/// those paths having to know who keeps what. That includes the rows the
+/// foreign keys delete: a worktree's terminals go with the worktree, and a
+/// repo's with its worktrees, so `WorktreeStore` and `RepoStore` report them
+/// too (`terminalIDs`).
 ///
 /// A reference type for the reason `TerminalActivityTransitionNotifier` is
 /// one: `TerminalStore` is a value type built inside `TBDDatabase.init`,
@@ -623,6 +626,31 @@ public final class TerminalDeletionNotifier: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return observers
+    }
+
+    /// The terminal rows of worktree `worktreeID`: the rows a delete of the
+    /// worktree takes with it through the foreign-key cascade. Read inside the
+    /// deleting transaction, before the delete, so the notification after it
+    /// commits names exactly the rows that went.
+    static func terminalIDs(_ db: Database, worktreeID: UUID) throws -> [UUID] {
+        try String.fetchAll(
+            db, sql: "SELECT id FROM terminal WHERE worktreeID = ?",
+            arguments: [worktreeID.uuidString]
+        ).compactMap(UUID.init(uuidString:))
+    }
+
+    /// The terminal rows of every worktree of repo `repoID`: the rows a delete
+    /// of those worktrees, or of the repo row, takes with it through the
+    /// cascade. Read as `terminalIDs(_:worktreeID:)` is.
+    static func terminalIDs(_ db: Database, repoID: UUID) throws -> [UUID] {
+        try String.fetchAll(
+            db, sql: """
+                SELECT terminal.id FROM terminal
+                JOIN worktree ON terminal.worktreeID = worktree.id
+                WHERE worktree.repoID = ?
+                """,
+            arguments: [repoID.uuidString]
+        ).compactMap(UUID.init(uuidString:))
     }
 }
 
@@ -822,13 +850,11 @@ public struct TerminalStore: Sendable {
     /// Delete all terminals for a worktree.
     public func deleteForWorktree(worktreeID: UUID) async throws {
         let deleted = try await writer.write { db -> [UUID] in
-            let ids = try String.fetchAll(
-                db, sql: "SELECT id FROM terminal WHERE worktreeID = ?",
-                arguments: [worktreeID.uuidString])
+            let ids = try TerminalDeletionNotifier.terminalIDs(db, worktreeID: worktreeID)
             try TerminalRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .deleteAll(db)
-            return ids.compactMap(UUID.init(uuidString:))
+            return ids
         }
         await deletions.notifyDeleted(deleted)
     }

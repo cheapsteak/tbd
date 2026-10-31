@@ -257,7 +257,11 @@ the session it ended, and so does a park that rolls back: its un-park is no
 wake, and what it kept belongs to the session it was ending.
 
 The store forgets everything it keeps for a terminal when the terminal's row
-is deleted, on every path that deletes one.
+is deleted, on every path that deletes one — including the rows a worktree's
+or a repo's delete takes with it through the foreign keys. It keeps only a
+tombstone, the deleted terminal's ID in a bounded set, so that a report or a
+drop already validating against the row when it was deleted refuses instead
+of re-creating what was forgotten.
 
 ### State model
 

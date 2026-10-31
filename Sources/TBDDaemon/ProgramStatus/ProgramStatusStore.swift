@@ -123,6 +123,17 @@ public actor ProgramStatusStore {
     /// un-park is no wake.
     private var parkedBacklog: [UUID: [Inbound]] = [:]
     private static let maxParkedBacklog = ProgramStatusProtocol.maxTaskEntries + 1
+    /// Terminals whose rows were deleted (`forget`), newest last, at most
+    /// `maxForgotten`: the tombstone an `ingest` or a `drop` suspended on its
+    /// terminal lookup across the `forget` checks when it resumes. Its lookup
+    /// may have read the row before the delete committed, and applying would
+    /// re-create what `forget` removed, for a row nothing will ever delete
+    /// again. Bounded, because a terminal's ID is never reused, so only work
+    /// already under way when its row was deleted, or an exit reported just
+    /// after, can still name it.
+    private var forgotten: Set<UUID> = []
+    private var forgottenOrder: [UUID] = []
+    private static let maxForgotten = 512
 
     /// `effects` defaults to `.inert`: entries are held and published, and
     /// nothing is written, raised or stamped.
@@ -230,6 +241,11 @@ public actor ProgramStatusStore {
         let generationBeforeLookup = dropGenerations[terminalID] ?? 0
         guard let terminal = await terminalLookup(terminalID) else {
             return reject(terminalID, "unknown terminal")
+        }
+        // A row deleted while the lookup was suspended: what this report
+        // would hold has already been forgotten.
+        guard !forgotten.contains(terminalID) else {
+            return reject(terminalID, "terminal deleted")
         }
         guard terminal.transport == .holder else { return reject(terminalID, "not a holder session") }
         if terminal.isParked {
@@ -430,6 +446,9 @@ public actor ProgramStatusStore {
     /// already wrote `.unknown` for the new incarnation, which the woken agent
     /// may have overwritten by now.
     public func drop(terminalID: UUID, reason: DropReason) async {
+        // A deleted row's exit or park, reported after its `forget`: there is
+        // nothing to drop, and the watermarks would outlive the row.
+        guard !forgotten.contains(terminalID) else { return }
         let droppedNow = now()
         dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
         droppedAt[terminalID] = droppedNow
@@ -440,7 +459,11 @@ public actor ProgramStatusStore {
         removeHeld(terminalID: terminalID, reason: reason)
         // After the watermark is set, so no report this drop ended can slip
         // in while the lookup is suspended.
-        if let row = await terminalLookup(terminalID) {
+        let row = await terminalLookup(terminalID)
+        // Re-read after the await (actor reentrancy): a `forget` that ran
+        // meanwhile removed what this drop recorded, and the row is gone.
+        guard !forgotten.contains(terminalID) else { return }
+        if let row {
             recordEnded(row.sessionIncarnationID, terminalID: terminalID)
         }
         guard reason == .childExited else { return }
@@ -493,9 +516,18 @@ public actor ProgramStatusStore {
     /// counters, watermarks, the parked backlog and the column memo. A deleted
     /// row takes no further report — its lookup finds nothing — so none of it
     /// would ever be read again. `live` calls this for every row
-    /// `TerminalStore` deletes.
+    /// `TerminalStore` deletes, the rows a worktree or repo delete cascades to
+    /// among them.
+    ///
+    /// Leaves only a tombstone, in the bounded `forgotten`: an ingest or a
+    /// drop already suspended on its terminal lookup may have read the row
+    /// before the delete, and it refuses when it resumes instead of
+    /// re-creating what this removed.
     public func forget(terminalIDs: [UUID]) {
         for terminalID in terminalIDs {
+            if forgotten.insert(terminalID).inserted {
+                forgottenOrder.append(terminalID)
+            }
             held.removeValue(forKey: terminalID)
             revisions.removeValue(forKey: terminalID)
             dropGenerations.removeValue(forKey: terminalID)
@@ -505,9 +537,15 @@ public actor ProgramStatusStore {
             columnGenerations.removeValue(forKey: terminalID)
             parkedBacklog.removeValue(forKey: terminalID)
         }
+        if forgottenOrder.count > Self.maxForgotten {
+            let evicted = forgottenOrder.prefix(forgottenOrder.count - Self.maxForgotten)
+            forgotten.subtract(evicted)
+            forgottenOrder.removeFirst(evicted.count)
+        }
     }
 
-    /// Whether the store keeps anything at all for `terminalID`. Tests only.
+    /// Whether the store keeps anything for `terminalID` beyond `forget`'s
+    /// tombstone. Tests only.
     func keepsState(for terminalID: UUID) -> Bool {
         held[terminalID] != nil
             || revisions[terminalID] != nil
