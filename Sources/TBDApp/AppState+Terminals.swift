@@ -857,11 +857,13 @@ extension Terminal {
     /// Facts are ordered by `activityStateOrderObservedAt`, falling back to
     /// `activityStateObservedAt`. Provenance is one atomic pair: a partial
     /// incoming pair is either ignored as a same-value legacy echo or applied
-    /// with both halves cleared. A newer fact repeating the current state
-    /// advances only the order watermark, keeping the provenance of the
-    /// transition that began it. When timestamps tie, a wait for the user is
-    /// preserved, and an ambiguous working/non-working tie resolves toward
-    /// non-working.
+    /// with both halves cleared. A newer fact repeating the current state and
+    /// source advances only the order watermark, keeping the observation
+    /// stamp of the transition that began it; one that changes only the
+    /// source is a new fact, and replaces both — a child exit over a
+    /// never-reported `.unknown` is what hides the no-status mark. When
+    /// timestamps tie, a wait for the user is preserved, and an ambiguous
+    /// working/non-working tie resolves toward non-working.
     mutating func reconcileActivityObservation(against current: Terminal?) {
         let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
         guard let current else {
@@ -890,6 +892,7 @@ extension Terminal {
                     && current.preservesActivityAtEqualOrder(over: activityState))
             shouldPreserveCurrentSemanticFact = !shouldKeepCurrent
                 && activityState == current.activityState
+                && activityStateSource == current.activityStateSource
         } else if !incomingIsComplete, currentIsComplete {
             shouldKeepCurrent = activityState == current.activityState
             shouldPreserveCurrentSemanticFact = false
@@ -922,7 +925,9 @@ extension Terminal {
     }
 
     /// Apply a pushed activity observation under the same ordering and legacy
-    /// rules used for snapshots.
+    /// rules used for snapshots: a newer delta repeating the state and source
+    /// advances only the order watermark, and one that changes either is
+    /// applied whole.
     mutating func applyActivityDelta(_ delta: TerminalActivityDelta) {
         let incomingIsComplete = delta.activityStateSource != nil
             && delta.activityStateObservedAt != nil
@@ -953,7 +958,8 @@ extension Terminal {
             return
         }
 
-        if currentIsComplete, delta.activityState == activityState {
+        if currentIsComplete, delta.activityState == activityState,
+           delta.activityStateSource == activityStateSource {
             activityStateOrderObservedAt = incomingOrderObservedAt
             return
         }

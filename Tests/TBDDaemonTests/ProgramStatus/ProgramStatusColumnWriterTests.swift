@@ -247,6 +247,31 @@ import TestSupport
         #expect(h.activityDeltas(terminal).last?.activityStateSource == .processLiveness)
     }
 
+    /// A session whose agent never reported already reads `.unknown`, with a
+    /// wake's `.derived`. Its child exit changes only the source, and that is
+    /// still written and announced: the app hides the no-status mark for an
+    /// agent whose process is gone, and it learns that from the delta.
+    @Test func childExitOverANeverReportedRowWritesAndAnnouncesTheSource() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        try await h.db.terminals.setActivityState(
+            id: terminal.id, activityState: .unknown, source: .derived,
+            observedAt: Self.at(1))
+
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .unknown)
+        #expect(row.activityStateSource == .processLiveness)
+        #expect(row.activityStateObservedAt == Self.dropInstant)
+        let deltas = h.activityDeltas(terminal)
+        #expect(deltas.count == 1)
+        #expect(deltas.last?.activityState == .unknown)
+        #expect(deltas.last?.activityStateSource == .processLiveness)
+        #expect(deltas.last?.activityStateOrderObservedAt == Self.dropInstant)
+        #expect(h.awaitingInputDeltas(terminal).isEmpty)
+    }
+
     @Test func anIncarnationChangeResetsTheColumnAndTheMemo() async throws {
         let h = try await Harness.make()
         let terminal = try await h.terminal()

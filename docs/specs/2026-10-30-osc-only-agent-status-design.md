@@ -89,13 +89,15 @@ are unchanged. There is no flag check.
 
 When the rolled-up state of a terminal — its main entry together with its task
 entries, by the roll-up rules of the protocol spec — maps to a column value
-different from the last one written, the store writes `activityState`,
+different from the one the row holds, the store writes `activityState`,
 `activityStateSource = .programStatus`, `activityStateObservedAt` (the report's
 observed-at), and the wait-reason columns, through `TerminalStore`. A column
-value is the activity state together with the wait reason, so a block that
-changes kind — a permission prompt followed by a question — rewrites the
-reason although the state stays `.waitingForUser`. The store writes nothing
-when both are unchanged.
+value is the activity state, the wait reason and the source together, so a
+block that changes kind — a permission prompt followed by a question —
+rewrites the reason although the state stays `.waitingForUser`, and a child
+exit over a session that never reported rewrites the source although the state
+stays `.unknown`. When all three are unchanged, the store writes only the
+ordering stamp.
 
 The mapping:
 
@@ -118,14 +120,18 @@ may park.
 
 The store pushes the same `terminalActivityUpdated` and
 `terminalAwaitingInputChanged` deltas the hook handlers pushed, so the app's
-tab bar and sidebar read the same fields as before. The app applies an
-activity delta under its ordering stamp, on every row: the store has two
-ingest paths, the daemon's own reader and the reports the app forwards, whose
-broadcasts can arrive out of commit order, so a delta older than the cached
-row's is dropped. A park's `.idle` and a wake's reset to `.unknown` for the
-incarnation it mints reach the app on the park's or wake's own
-`terminalHibernationChanged` delta, which carries the activity columns read
-back from the row; the app applies them under the same ordering stamp.
+tab bar and sidebar read the same fields as before; an activity delta goes out
+when the state or the source changed. The app applies an activity delta under
+its ordering stamp, on every row. A newer delta whose state or source differs
+from the cached row's is applied whole, source and observed-at included, and
+so is a `terminal.list` row; a newer one repeating both only advances the
+cached stamp. A delta older than the cached row's is dropped, because the
+store has two ingest paths, the daemon's own reader and the reports the app
+forwards, whose broadcasts can arrive out of commit order. A park's `.idle`
+and a wake's reset to `.unknown` for the incarnation it mints reach the app on
+the park's or wake's own `terminalHibernationChanged` delta, which carries the
+activity columns read back from the row; the app applies them under the same
+ordering stamp.
 
 ### Attention banner
 
@@ -353,10 +359,11 @@ Each branch of each new conditional gets a test.
 - **Codex wire form** – the parser accepts Codex's exact bytes,
   `ESC ] 7501 ; state=blocked:app=codex:kind=permission ESC \`, and the 0.163.0
   form without `kind`.
-- **Column writer** – every mapping line; no write when the mapped value is
-  unchanged; a working or blocked task entry under an idle main entry; `clear`,
-  child exit and incarnation change write `.unknown`; a park still writes
-  `.idle`.
+- **Column writer** – every mapping line; no write when the state, reason and
+  source are unchanged; a child exit over a never-reported `.unknown` rewrites
+  and announces the source; a working or blocked task entry under an idle main
+  entry; `clear`, child exit and incarnation change write `.unknown`; a park
+  still writes `.idle`.
 - **Banner** – raised on entering `blocked` and not again while blocked; the
   fixed text per agent and kind; no banner for `kind=auth`; no `msg` text in
   the notification row.
@@ -371,7 +378,9 @@ Each branch of each new conditional gets a test.
 - **No-status mark** – absent before 15 seconds and present after; tooltip text
   by transport; cleared by a report; restarted by a new incarnation; never on a
   shell terminal; absent for a `.unknown` the agent's `clear` or a child exit
-  wrote, and present for the upgrade and wake resets.
+  wrote, and present for the upgrade and wake resets; hidden when a child exit
+  lands on a row that never reported, and armed when a wake's reset lands on a
+  row the agent's `clear` wrote.
 - **Upgrade migration** – a hook-written live row becomes `unknown` with no
   wait reason; a store-written row, a parked row and a suspended row keep
   their values.

@@ -172,6 +172,77 @@ struct NoStatusSightingTests {
             try await clock.requireSleeperArmed(timeout: Self.mainActorHop)
         }
     }
+
+    /// A holder agent row at `.unknown`, its source `source` stamped at
+    /// `stampedAt`.
+    private func holderRow(
+        kind: TerminalKind = .claude, source: FactSource, stampedAt: Date
+    ) -> TBDShared.Terminal {
+        TBDShared.Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            sessionIncarnationID: UUID(), kind: kind, activityState: .unknown,
+            activityStateSource: source, activityStateObservedAt: stampedAt,
+            activityStateOrderObservedAt: stampedAt, transport: .holder)
+    }
+
+    /// A child exit over a session that never reported leaves the state at
+    /// `.unknown` and changes only its source, to `.processLiveness`. Applied,
+    /// the row is an agent whose process is gone, and the mark hides.
+    @Test func aChildExitOverANeverReportedRowHidesTheMark() async throws {
+        try await withAppState { state, clock in
+            let reset = Date(timeIntervalSince1970: 1_800_000_000)
+            let row = holderRow(source: .derived, stampedAt: reset)
+            state.terminals[row.worktreeID] = [row]
+            try await clock.requireAdvanceWhenArmed(by: NoStatusMark.grace, timeout: Self.mainActorHop)
+            let elapsed = await awaitGraceElapsed(state, row.id)
+            #expect(elapsed == .satisfied, "the grace never marked the sighting elapsed")
+            #expect(help(state, row) == NoStatusMark.holderHelp)
+
+            let exited = reset.addingTimeInterval(30)
+            state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: row.id, worktreeID: row.worktreeID, activityState: .unknown,
+                activityStateSource: .processLiveness,
+                activityStateObservedAt: exited, activityStateOrderObservedAt: exited)))
+
+            let exitedRow = current(state, row)
+            #expect(exitedRow?.activityStateSource == .processLiveness)
+            #expect(exitedRow?.activityStateObservedAt == exited)
+            #expect(state.noStatusSightings[row.id] == nil)
+            #expect(help(state, row) == nil)
+        }
+    }
+
+    /// A Codex row whose agent cleared reads `.unknown` stamped
+    /// `.programStatus`, and shows no mark. A wake's reset for the
+    /// incarnation it mints changes only the source, to `.derived`. Applied,
+    /// the row is a session that has not reported, and the mark arms after
+    /// the grace.
+    @Test func aWakeResetOverAClearedCodexRowArmsTheMark() async throws {
+        try await withAppState { state, clock in
+            let cleared = Date(timeIntervalSince1970: 1_800_000_000)
+            let row = holderRow(kind: .codex, source: .programStatus, stampedAt: cleared)
+            state.terminals[row.worktreeID] = [row]
+            #expect(state.noStatusSightings[row.id] == nil)
+
+            let woken = UUID()
+            let reset = cleared.addingTimeInterval(60)
+            state.handleDelta(.terminalHibernationChanged(TerminalHibernationDelta(
+                terminalID: row.id, worktreeID: row.worktreeID,
+                hibernated: false, keepWarm: false, sessionIncarnationID: woken,
+                activity: TerminalActivityDelta(
+                    terminalID: row.id, worktreeID: row.worktreeID,
+                    activityState: .unknown, activityStateSource: .derived,
+                    activityStateObservedAt: reset, activityStateOrderObservedAt: reset))))
+
+            #expect(current(state, row)?.activityStateSource == .derived)
+            #expect(state.noStatusSightings[row.id]
+                == NoStatusSighting(incarnationID: woken, graceElapsed: false))
+            try await clock.requireAdvanceWhenArmed(by: NoStatusMark.grace, timeout: Self.mainActorHop)
+            let elapsed = await awaitGraceElapsed(state, row.id)
+            #expect(elapsed == .satisfied, "the grace never marked the sighting elapsed")
+            #expect(help(state, row) == NoStatusMark.holderHelp)
+        }
+    }
 }
 
 /// Counts writes to `AppState.noStatusSightings`. Observation's `onChange` is

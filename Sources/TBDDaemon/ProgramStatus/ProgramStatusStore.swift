@@ -351,13 +351,14 @@ public actor ProgramStatusStore {
         }
         if let columnValue {
             // Skipped only when this store's last write left the value AND the
-            // row read above still holds it: a park that rolled back writes
-            // the columns without this store seeing it.
+            // row read above still holds it, source included: a park that
+            // rolled back writes the columns without this store seeing it.
             let memoMatches = written[terminalID].map {
                 $0.incarnationID == incarnationID && $0.value == columnValue
             } ?? false
             let rowMatches = terminal.activityState == columnValue.activityState
                 && terminal.awaitingInputReason == columnValue.awaitingInputReason
+                && terminal.activityStateSource == .programStatus
             if !(memoMatches && rowMatches) {
                 let outcome = await writeColumn(ProgramStatusColumnWrite(
                     terminalID: terminalID, value: columnValue,
@@ -682,9 +683,9 @@ extension ProgramStatusEffects {
     /// The production effects.
     ///
     /// - `writeColumns` writes through `TerminalStore.applyProgramStatusActivity`
-    ///   (a failed write is a refusal) and broadcasts the
-    ///   `terminalActivityUpdated` and `terminalAwaitingInputChanged` deltas the
-    ///   app reads, each only when its half changed. A cancelled scheduled
+    ///   (a failed write is a refusal) and broadcasts the deltas the app
+    ///   reads: `terminalActivityUpdated` when the state or its source changed,
+    ///   `terminalAwaitingInputChanged` when the reason did. A cancelled scheduled
     ///   resume needs no wake of the resume scheduler: its loop re-reads
     ///   pending rows, and its eligibility check refuses a cancelled one.
     /// - `raiseAttention` creates an `.attentionNeeded` notification and
@@ -710,7 +711,9 @@ extension ProgramStatusEffects {
                     return .refused
                 }
                 guard let applied else { return .refused }
-                if applied.stateChanged {
+                // The source is announced with the state: a write can change
+                // only the source, and the app's no-status mark reads it.
+                if applied.stateChanged || applied.sourceChanged {
                     subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                         terminalID: write.terminalID,
                         worktreeID: applied.worktreeID,
@@ -728,7 +731,7 @@ extension ProgramStatusEffects {
                             reason: reason,
                             observedAt: reason == nil ? nil : write.observedAt)))
                 }
-                guard applied.stateChanged || applied.reasonChanged else { return .unchanged }
+                guard applied.changed else { return .unchanged }
                 return .written(previous: applied.previousActivityState)
             },
             raiseAttention: { worktreeID, message in

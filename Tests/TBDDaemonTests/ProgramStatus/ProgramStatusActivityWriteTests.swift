@@ -78,6 +78,8 @@ import TBDShared
         #expect(stored.activityStateObservedAt == at(2))
     }
 
+    /// A repeat of the state, the reason and the source changes nothing but
+    /// the ordering watermark.
     @Test func unchangedValueDoesNotRestamp() async throws {
         let fixture = try await makeFixture()
         try await apply(fixture, .working, at: 1)
@@ -85,9 +87,49 @@ import TBDShared
         let repeated = try #require(try await apply(fixture, .working, at: 2))
         #expect(repeated.stateChanged == false)
         #expect(repeated.reasonChanged == false)
+        #expect(repeated.sourceChanged == false)
+        #expect(!repeated.changed)
         #expect(repeated.previousActivityState == .working)
         let stored = try await row(fixture)
         #expect(stored.activityStateObservedAt == at(1))
+    }
+
+    /// The source is part of the value. A child exit over a session that
+    /// never reported keeps `.unknown` and no reason, and still rewrites the
+    /// source and its stamp, and says so: the app reads the source.
+    @Test func aWriteChangingOnlyTheSourceRestampsAndReportsTheChange() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.db.terminals.setActivityState(
+            id: fixture.terminal.id, activityState: .unknown, source: .derived,
+            observedAt: at(1))
+
+        let exited = try #require(try await fixture.db.terminals.applyProgramStatusActivity(
+            id: fixture.terminal.id, scope: .anyLiveIncarnation, activityState: .unknown,
+            awaitingInputReason: nil, observedAt: at(2), source: .processLiveness))
+        #expect(exited.stateChanged == false)
+        #expect(exited.reasonChanged == false)
+        #expect(exited.sourceChanged)
+        #expect(exited.changed)
+        let stored = try await row(fixture)
+        #expect(stored.activityState == .unknown)
+        #expect(stored.activityStateSource == .processLiveness)
+        #expect(stored.activityStateObservedAt == at(2))
+        #expect(stored.activityStateOrderObservedAt == at(2))
+    }
+
+    /// A different source is a different value, so it is ordered like one: a
+    /// write not newer than the stamp is refused.
+    @Test func aWriteChangingOnlyTheSourceIsRefusedWhenNotNewer() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.db.terminals.setActivityState(
+            id: fixture.terminal.id, activityState: .unknown, source: .derived,
+            observedAt: at(2))
+
+        let late = try await fixture.db.terminals.applyProgramStatusActivity(
+            id: fixture.terminal.id, scope: .anyLiveIncarnation, activityState: .unknown,
+            awaitingInputReason: nil, observedAt: at(2), source: .processLiveness)
+        #expect(late == nil)
+        #expect(try await row(fixture).activityStateSource == .derived)
     }
 
     /// A repeat advances only the ordering watermark, which is what refuses
@@ -114,24 +156,27 @@ import TBDShared
         #expect(stored.activityStateObservedAt == at(2))
     }
 
-    /// A wake's reset leaves `.unknown` stamped by TBD, not by a report. A
-    /// newer bare clear maps to that same value, so it writes nothing — but
-    /// it must still fence off an older report whose write is still in
-    /// flight, or the column sticks at the older value.
-    @Test func aRepeatOverAValueTBDWroteStillOrdersOutAnOlderReport() async throws {
+    /// A wake's reset leaves `.unknown` stamped by TBD (`.derived`), not by a
+    /// report. A newer bare clear keeps that state and reason and rewrites
+    /// only the source — the agent has now spoken — and it must fence off an
+    /// older report whose write is still in flight, or the column sticks at
+    /// the older value.
+    @Test func aClearOverAValueTBDWroteStillOrdersOutAnOlderReport() async throws {
         let fixture = try await makeFixture()
         try await fixture.db.terminals.setActivityState(
             id: fixture.terminal.id, activityState: .unknown, source: .derived,
             observedAt: at(1))
 
-        let repeated = try #require(try await apply(fixture, .unknown, at: 3))
-        #expect(repeated.stateChanged == false)
-        #expect(repeated.reasonChanged == false)
+        let cleared = try #require(try await apply(fixture, .unknown, at: 3))
+        #expect(cleared.stateChanged == false)
+        #expect(cleared.reasonChanged == false)
+        #expect(cleared.sourceChanged)
 
         #expect(try await apply(fixture, .working, at: 2) == nil)
         let stored = try await row(fixture)
         #expect(stored.activityState == .unknown)
-        #expect(stored.activityStateSource == .derived)
+        #expect(stored.activityStateSource == .programStatus)
+        #expect(stored.activityStateObservedAt == at(3))
         #expect(stored.activityStateOrderObservedAt == at(3))
     }
 

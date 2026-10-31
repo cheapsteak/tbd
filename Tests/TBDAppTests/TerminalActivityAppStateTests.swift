@@ -534,6 +534,35 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(!WorktreeRowView.isForegroundWorking(terminal))
 }
 
+/// The source is part of the fact: a newer snapshot with the cached state but
+/// another source — a child exit's `.unknown` over a never-reported one —
+/// replaces the source and its stamp, not just the order watermark.
+@MainActor
+@Test func appState_newerSnapshotChangingOnlyTheSourceReplacesTheProvenance() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let resetAt = Date(timeIntervalSinceReferenceDate: 20)
+    let exitedAt = Date(timeIntervalSinceReferenceDate: 30)
+    func row(source: FactSource, at stamp: Date) -> TBDShared.Terminal {
+        TBDShared.Terminal(
+            id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, activityState: .unknown, activityStateSource: source,
+            activityStateObservedAt: stamp, activityStateOrderObservedAt: stamp,
+            transport: .holder)
+    }
+    state.terminals = [worktreeID: [row(source: .derived, at: resetAt)]]
+
+    state.adoptTerminalSnapshot(
+        [row(source: .processLiveness, at: exitedAt)], worktreeID: worktreeID)
+
+    let terminal = try #require(state.terminals[worktreeID]?.first)
+    #expect(terminal.activityState == .unknown)
+    #expect(terminal.activityStateSource == .processLiveness)
+    #expect(terminal.activityStateObservedAt == exitedAt)
+    #expect(terminal.activityStateOrderObservedAt == exitedAt)
+}
+
 @MainActor
 @Test func appState_activityDeltaUsesOrderingWatermarkInsteadOfTransitionTime() throws {
     let state = AppState()

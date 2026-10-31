@@ -288,8 +288,15 @@ public struct ProgramStatusActivityWrite: Sendable, Equatable {
     /// Whether the stored wait reason took a new value (including a
     /// retraction to none).
     public let reasonChanged: Bool
+    /// Whether `activityStateSource` took a new value. A write can change only
+    /// this — a child exit's `.unknown` over a never-reported `.unknown` — and
+    /// the app reads the source, so it is announced like a state change.
+    public let sourceChanged: Bool
     /// Whether a `.working` write cancelled a pending scheduled resume.
     public let cancelledPendingResume: Bool
+
+    /// Whether the write changed anything a reader of the columns sees.
+    public var changed: Bool { stateChanged || reasonChanged || sourceChanged }
 }
 
 struct AppliedTerminalSessionStart: Sendable {
@@ -1650,15 +1657,18 @@ public struct TerminalStore: Sendable {
     ///   value. A report at the watermark that repeats the stored value is
     ///   accepted and changes nothing.
     ///
-    /// When the row already holds `activityState` and `awaitingInputReason`,
-    /// the value and `activityStateObservedAt` stay as they are, so the
-    /// at-rest clock hibernation reads keeps the moment the value was first
-    /// reported; only the ordering watermark advances, so every accepted
-    /// report fences off older ones. Otherwise the state, its `source`
+    /// The value is the state, the wait reason and the `source` together
     /// (`.programStatus` for a report, `.processLiveness` for a child exit's
-    /// `.unknown`), both observation stamps and the wait-reason columns are
-    /// written together, so the stored reason always describes the state
-    /// beside it.
+    /// `.unknown`). When the row already holds all three, the value and
+    /// `activityStateObservedAt` stay as they are, so the at-rest clock
+    /// hibernation reads keeps the moment the value was first reported; only
+    /// the ordering watermark advances, so every accepted report fences off
+    /// older ones. Otherwise all three, both observation stamps and the
+    /// wait-reason stamp are written together, so the stored reason always
+    /// describes the state beside it and the source names who wrote both. A
+    /// write that changes only the source still counts as a change: a child
+    /// exit over a never-reported `.unknown` tells the app the process is
+    /// gone, which the sidebar's no-status mark reads.
     ///
     /// A `.working` report cancels a pending scheduled resume — the session is
     /// already running a turn — and `working -> idle` notifies
@@ -1689,8 +1699,12 @@ public struct TerminalStore: Sendable {
                 .flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown
             let storedReason = FactColumnJSON.decode(
                 AwaitingInputReason.self, from: record.awaitingInputReason)
+            let storedSource = FactColumnJSON.decode(
+                FactSource.self, from: record.activityStateSource)
             let stateChanged = previousState != activityState
             let reasonChanged = storedReason != awaitingInputReason
+            let sourceChanged = storedSource != source
+            let valueChanged = stateChanged || reasonChanged || sourceChanged
             // Ordered against the stamp whoever wrote it — a report, a park, a
             // wake's reset — so a report older than the value standing can
             // never land over it. A tie is not newer: it is refused unless it
@@ -1699,10 +1713,10 @@ public struct TerminalStore: Sendable {
             // tiebreak on the values.
             let storedOrder = record.activityStateOrderObservedAt ?? record.activityStateObservedAt
             let isNewer = storedOrder.map { $0 < observedAt } ?? true
-            guard isNewer || (!stateChanged && !reasonChanged) else {
+            guard isNewer || !valueChanged else {
                 return ProgramStatusWriteOutcome(result: nil)
             }
-            if !stateChanged && !reasonChanged {
+            if !valueChanged {
                 // The report repeats the stored value: only the ordering
                 // watermark moves, so an older report still in flight is
                 // refused when it commits after this one.
@@ -1734,6 +1748,7 @@ public struct TerminalStore: Sendable {
                     previousActivityState: previousState,
                     stateChanged: stateChanged,
                     reasonChanged: reasonChanged,
+                    sourceChanged: sourceChanged,
                     cancelledPendingResume: cancelledPendingResume),
                 becameIdleProfileID: becameIdle
                     ? record.profile_id.flatMap(UUID.init(uuidString:)) : nil)
