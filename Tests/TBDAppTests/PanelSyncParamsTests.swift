@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 /// `AppState.buildPanelSyncParams` — the `panel.syncTabs` payload built from
 /// the app's in-memory tabs, legacy layouts and pane histories. Pure: no RPC,
@@ -11,10 +12,9 @@ import TBDShared
 @Suite("Panel sync params")
 struct PanelSyncParamsTests {
     private func withAppState(_ body: (AppState) throws -> Void) throws {
-        let name = "tbd-panel-sync-params-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
-        try body(AppState(userDefaults: defaults))
+        let suite = TestDefaultsSuite("tbd-panel-sync-params")
+        defer { suite.tearDown() }
+        try body(AppState(userDefaults: suite.defaults))
     }
 
     @Test func unloadedTabListBuildsNoParams() throws {

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. Every daemon hop goes through
 // an injected seam, so no socket is opened, and every `AppState` gets its own
@@ -39,10 +40,9 @@ enum PanelTabsFixture {
         panelTabs: Bool?,
         _ body: @MainActor (AppState) async throws -> Void
     ) async rethrows {
-        let suiteName = "PanelTabsTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let state = AppState(userDefaults: defaults)
+        let suite = TestDefaultsSuite("PanelTabsTests")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
         if let panelTabs {
             state.daemonCapabilities = capabilities(panelTabs: panelTabs)
         }

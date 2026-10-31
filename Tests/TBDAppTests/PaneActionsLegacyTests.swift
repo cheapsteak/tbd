@@ -4,6 +4,7 @@ import Testing
 import TBDShared
 
 @testable import TBDApp
+import TestSupport
 
 // Tier 1: the legacy pane action set against an in-memory layout and an
 // isolated AppState. Each action is checked against the shared routing
@@ -41,10 +42,9 @@ struct PaneActionsLegacyTests {
         _ layout: LayoutNode,
         _ body: (LegacyFixture) throws -> Void
     ) throws {
-        let suiteName = "TBDAppTests.PaneActionsLegacy-\(UUID())"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let state = AppState(userDefaults: defaults)
+        let suite = TestDefaultsSuite("TBDAppTests.PaneActionsLegacy")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
         let worktree = try #require(LocalWorktree(Worktree(
             repoID: UUID(), name: "wt", displayName: "WT", branch: "main",
             path: "/tmp/acme-wt", tmuxServer: "test-server")))
