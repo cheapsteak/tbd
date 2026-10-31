@@ -76,6 +76,18 @@ The main chat session agent should not write code directly. Delegate all impleme
 
 Compiled behavior is the hardest kind to change: it ships by rebuild and release, and a flagged default needs a forcing migration to flip later. User-land surfaces — CLI output, hooks, seeded reference scripts, files under `~/tbd/repos/<repoID>/` — change by editing a file. So when deciding where new behavior lives, default to exposing the facts and actuations that make it possible outside the daemon, and compile the behavior itself only when user-land cannot do it well (per-event cost across a whole fleet, liveness attestation, integrity of the record). Capability migrates inward only on field evidence, one piece at a time — the Built/Enabled ratchet in `docs/specs/2026-07-26-fleet-supervision-requirements.md`. Motivations for wanting a change differ case by case; the placement rule does not.
 
+### SwiftUI or AppKit: choose by the job
+
+SwiftUI on macOS is weak at two jobs: large scrolling collections, and custom mouse interaction inside lists. The transcript went through about eleven SwiftUI fix PRs under #129 before native `NSTableView` cells (#300) took a cold open from 13 s to ~50 ms, and sidebar drag-to-nest (#142) failed eight times on `List`.
+
+- **Start in AppKit** (`NSTableView`, `NSOutlineView`, `NSTextView`) for unbounded or variable-height scrolling content, custom drag and drop, text selection inside rows, and anything that needs exact measurement. `LazyVStack` re-measures rows on activation, hover and streaming; `List` builds every row at mount on macOS 26; on a `List` row, `.onMove` and `.draggable`/`.dropDestination` cannot coexist, and `.dropDestination` never says where the drop landed.
+- **Go AppKit all the way down to the cells.** An `NSTableView` of `NSHostingView` rows fails on both counts: the hosting view misreports height, so rows clip, and the table takes the mouse from in-row text selection. Host SwiftUI only for small fixed-size details inside a cell.
+- **Keep SwiftUI** for the window shell, settings, sheets, popovers, menus and status chips.
+- **Switch early.** When two SwiftUI fixes for the same hang or interaction fail without finding a root cause, spike the AppKit version next instead of trying a third fix.
+- **Keep work out of `body`.** No disk I/O, decoding, date formatting, parsing inside a sort comparator, or Launch Services queries in a view body or a `@State` default expression (it re-runs on every init of the parent view). Compute on change and read the cached result. SwiftUI runs bodies often and invisibly, so cost AppKit would tolerate becomes a hang, and this is the commonest shape in the hang recorder's samples that have TBD code on the stack.
+
+Moving an existing surface from SwiftUI to AppKit replaces a load-bearing path, so it needs a spec and a default-off flag (below).
+
 ### Large or risky new behavior ships behind a default-off flag
 
 New features that act autonomously or can destroy state land gated behind a flag that defaults to OFF, soak, and only then graduate (flip the default, eventually delete the flag). Required when the feature:
