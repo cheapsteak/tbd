@@ -503,9 +503,26 @@ public struct ProviderDescribe: Codable, Sendable {
     /// two registry entries running the same binary against different control
     /// planes report the same one. It is never sufficient identity on its own.
     public let identity: ProviderIdentity?
+    /// The archive horizon the provider declares, in seconds
+    /// (`docs/remote-provider-contract.md` § Archive horizon). A provider that
+    /// declares one may leave long-archived, exited sessions out of `list`
+    /// and the `events` snapshot, so a caller must not read their absence as
+    /// a loss.
+    ///
+    /// Nil means no horizon, and it is also what any malformed value reads as:
+    /// the contract says a value that is not an integer of at least `86400`
+    /// is read as absent. So a string, a bool, a fractional number, a
+    /// negative, zero, or `86399` all decode to nil, and the describe itself
+    /// still decodes. A whole-valued float such as `172800.0` is
+    /// accepted, because `JSONDecoder` reads it as an `Int`; `172800.5` is not.
+    public let archiveHorizonSeconds: Int?
+
+    /// The smallest horizon the contract allows.
+    public static let minimumArchiveHorizonSeconds = 86_400
 
     enum CodingKeys: String, CodingKey {
         case name, capabilities, identity
+        case archiveHorizonSeconds = "archive_horizon_seconds"
         case contractVersions = "contract_versions"
         case providerVersion = "provider_version"
         case createParams = "create_params"
@@ -517,7 +534,8 @@ public struct ProviderDescribe: Codable, Sendable {
     /// round-trip through `JSONDecoder`.
     public init(contractVersions: [Int] = [1], name: String, providerVersion: String? = nil,
                 capabilities: [String] = [], createParams: [ProviderCreateParamField] = [],
-                identity: ProviderIdentity? = nil) {
+                identity: ProviderIdentity? = nil, archiveHorizonSeconds: Int? = nil) {
+        self.archiveHorizonSeconds = archiveHorizonSeconds
         self.contractVersions = contractVersions
         self.name = name
         self.providerVersion = providerVersion
@@ -536,6 +554,11 @@ public struct ProviderDescribe: Codable, Sendable {
         // Never fatal: an identity block TBD can't read costs the identity
         // rows, never the provider's registration.
         identity = (try? c.decodeIfPresent(ProviderIdentity.self, forKey: .identity)).flatMap { $0 }
+        // Equally never fatal, and fail-closed: anything but an integer at or
+        // above the contract's floor reads as "no horizon".
+        archiveHorizonSeconds = (try? c.decodeIfPresent(Int.self, forKey: .archiveHorizonSeconds))
+            .flatMap { $0 }
+            .flatMap { $0 >= Self.minimumArchiveHorizonSeconds ? $0 : nil }
     }
 }
 
