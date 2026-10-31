@@ -27,6 +27,7 @@ extension SidebarOutlineController {
         reconcileVanishedSelection()
         // Rows may have moved under a still pointer.
         hoverTracker?.recompute()
+        closePlusMenuIfItsRowLeft()
     }
 
     /// Applies the diff from the shown tree to `latest` (or, while held, to

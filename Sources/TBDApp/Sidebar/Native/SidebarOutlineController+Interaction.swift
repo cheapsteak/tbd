@@ -263,9 +263,10 @@ extension SidebarOutlineController: SidebarMenuHost {
         cell.pinButton.action = #selector(pinClicked(_:))
         cell.plusButton.target = self
         cell.plusButton.action = #selector(nestedPlusClicked(_:))
-        cell.prButton.target = self
-        cell.prButton.action = #selector(prClicked(_:))
         cell.toolTips.provider = { [weak self] target in self?.helpText(target, for: id) }
+        if case .worktree(let worktreeID) = id {
+            cell.onOpenPullRequest = { [weak self] in self?.openPullRequest(worktreeID) ?? false }
+        }
     }
 
     /// The ID of the row `sender` sits in.
@@ -337,27 +338,43 @@ extension SidebarOutlineController: SidebarMenuHost {
                     parentWorktreeID: parent, repoID: repoID)
             }
         case .openForm:
-            presentSheet(RemoteCreateSheet(
-                provider: provider.config,
-                describe: provider.describe,
+            present(.remoteCreate(NativeSidebarRemoteCreate(
+                provider: provider,
                 repoPrefill: prefill,
                 repoDefaults: repo?.remoteCreateDefaults ?? [:],
                 parentWorktreeID: parent,
-                repoID: repoID))
+                repoID: repoID)))
         }
     }
 
-    @objc func prClicked(_ sender: NSView) {
-        guard case .worktree(let worktreeID)? = nodeID(for: sender),
-              let binding = PRBindingPresentation.iconBinding(appState.effectivePRBindings(worktreeID: worktreeID)),
-              let url = URL(string: binding.url) else { return }
-        NSWorkspace.shared.open(url)
+    /// Opens the pull request a worktree row's leading glyph stands for —
+    /// the worst-state binding, as `WorktreeRowView.openPR` picks it — when a
+    /// click on the row lands on the glyph. The glyph is not a button, so a
+    /// press on it can still start a drag; the outline's click action, which
+    /// runs on mouse-up, is what opens the page.
+    ///
+    /// - Parameter point: the click, in the outline's coordinates.
+    /// - Returns: whether the click opened a pull request.
+    @discardableResult
+    func openPullRequestIfClickedGlyph(row: Int, at point: NSPoint) -> Bool {
+        guard let item = outline.item(atRow: row) as? SidebarItem, case .worktree(let worktreeID) = item.id,
+              let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorktreeRowCell,
+              cell.isPullRequestGlyph(at: cell.convert(point, from: outline)) else { return false }
+        return openPullRequest(worktreeID)
+    }
+
+    /// Opens the worktree's worst-state pull request, if it has one.
+    func openPullRequest(_ worktreeID: UUID) -> Bool {
+        guard let binding = PRBindingPresentation.iconBinding(appState.effectivePRBindings(worktreeID: worktreeID)),
+              let url = URL(string: binding.url) else { return false }
+        openURL(url)
+        return true
     }
 
     /// `RemoteProviderHeaderRow`'s `+`: the create sheet with no repo prefill.
     @objc func providerPlusClicked(_ sender: NSView) {
         guard case .providerHeader(let name)? = nodeID(for: sender), let status = provider(named: name) else { return }
-        presentSheet(RemoteCreateSheet(provider: status.config, describe: status.describe, repoPrefill: nil))
+        present(.remoteCreate(NativeSidebarRemoteCreate(provider: status)))
     }
 
     /// The needs-auth key: the session detail pane's auth CTA in a popover;
@@ -369,12 +386,13 @@ extension SidebarOutlineController: SidebarMenuHost {
         authPopover?.close()
         let popover = NSPopover()
         popover.behavior = .transient
+        popover.delegate = self
         let content = RemoteProviderAuthCTAView(
             presentation: presentation,
             onRun: { [weak self, weak popover] in
                 popover?.close()
                 guard let run = RemoteRemediationRun(presentation) else { return }
-                self?.presentRemediation(run)
+                self?.present(.remediation(run))
             }
         )
         .padding(14)
@@ -384,18 +402,12 @@ extension SidebarOutlineController: SidebarMenuHost {
         authPopover = popover
     }
 
-    private func presentRemediation(_ run: RemoteRemediationRun) {
-        guard let appearance = appState.appearance else { return }
-        presentSheet(RemoteRemediationTerminalSheet(run: run).environmentObject(appearance))
-    }
-
     // MARK: Sheets and confirmations
 
-    /// Presents existing SwiftUI sheet content as an AppKit sheet on the
-    /// sidebar's window, so the SwiftUI path's sheets stay as they are.
-    func presentSheet<Content: View>(_ content: Content) {
-        guard view.window != nil else { return }
-        presentAsSheet(NSHostingController(rootView: content.environment(appState)))
+    /// Asks `NativeSidebarView` for a sheet. It presents with SwiftUI, so the
+    /// content's own `dismiss` closes it; one sheet at a time.
+    func present(_ sheet: NativeSidebarSheet) {
+        sheets.present(sheet)
     }
 
     /// `RepoSectionView`'s confirmation dialog, as an alert sheet.
@@ -433,14 +445,50 @@ extension SidebarOutlineController: SidebarMenuHost {
 
     // MARK: Rename
 
-    /// `editingWorktreeID`, consumed once its row is in the tree the apply is
-    /// about to show — as the SwiftUI row consumes it from `onChange`. While a
-    /// hold keeps a new row out of the shown structure, the request waits.
-    func takeRenameRequest(in latest: SidebarTree) -> UUID? {
-        guard let id = appState.editingWorktreeID, latest.contains(.worktree(id)) else { return nil }
-        guard !isHoldingStructure || tree.contains(.worktree(id)) else { return nil }
+    /// A rename `editingWorktreeID` asked for: the row, the text its field
+    /// opens with when an edit is handed over, and whether the open edit is
+    /// being handed over rather than committed.
+    struct RenameRequest {
+        let id: UUID
+        let seed: String?
+        let handsOver: Bool
+    }
+
+    /// `editingWorktreeID`, consumed once its row is shown in the tree the
+    /// apply is about to show — as the SwiftUI row consumes it from
+    /// `onChange` only once mounted. A row not shown yet (a hold keeps it out,
+    /// its section is collapsed) leaves the request pending until it is.
+    ///
+    /// The exception is the creating placeholder swapped for its real row
+    /// while being renamed: the creating row under the edit has left the
+    /// model, so the edit is handed to the new row with what was typed,
+    /// uncommitted.
+    func takeRenameRequest(in latest: SidebarTree) -> RenameRequest? {
+        guard let id = appState.editingWorktreeID else { return nil }
+        let rowID = SidebarNodeID.worktree(id)
+        if let renamingID, renamingID != rowID, !latest.contains(renamingID), holds == [.rename],
+           case .worktree(let renamed)? = tree.node(renamingID)?.kind, renamed.leading == .pending,
+           let editor = renameEditor, Self.isShown(rowID, in: latest) {
+            appState.editingWorktreeID = nil
+            // Untouched, the placeholder's generated name is not carried over.
+            let typed = editor.currentText
+            return RenameRequest(id: id, seed: typed == editor.session.originalText ? nil : typed, handsOver: true)
+        }
+        guard Self.isShown(rowID, in: isHoldingStructure ? tree : latest) else { return nil }
         appState.editingWorktreeID = nil
-        return id
+        return RenameRequest(id: id, seed: nil, handsOver: false)
+    }
+
+    /// Whether the outline shows `id` for `tree`: it is in the tree and every
+    /// ancestor shows its children.
+    private static func isShown(_ id: SidebarNodeID, in tree: SidebarTree) -> Bool {
+        guard tree.contains(id) else { return false }
+        var ancestor = tree.parent(of: id)
+        while let current = ancestor {
+            guard tree.node(current)?.showsChildren == true else { return false }
+            ancestor = tree.parent(of: current)
+        }
+        return true
     }
 
     /// Swaps the row's name for the inline editor and holds the structure
@@ -448,13 +496,20 @@ extension SidebarOutlineController: SidebarMenuHost {
     /// session row, or a repo header; anything else is ignored. One rename at
     /// a time: an open one is committed first.
     func beginRename(_ id: SidebarNodeID) {
-        renameEditor?.close(commitPending: true)
+        startRename(id, seed: nil, commitOpenEdit: true)
+    }
+
+    /// `beginRename`, with the text the field opens with when it differs from
+    /// the row's name, and whether an open edit is committed or dropped
+    /// before this one starts.
+    func startRename(_ id: SidebarNodeID, seed: String?, commitOpenEdit: Bool) {
+        renameEditor?.close(commitPending: commitOpenEdit)
         guard let node = tree.node(id), let item = items.existing(id) else { return }
         let row = outline.row(forItem: item)
         guard row >= 0 else { return }
         outline.scrollRowToVisible(row)
         guard let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSView & SidebarRenamableCell,
-              let editor = makeRenameEditor(for: node) else { return }
+              let editor = makeRenameEditor(for: node, seed: seed) else { return }
         beginHold(.rename)
         renamingID = id
         renamingCell = cell
@@ -485,12 +540,12 @@ extension SidebarOutlineController: SidebarMenuHost {
 
     /// The editor for `node`, committing where the SwiftUI row's
     /// `RenameableLabel` commits.
-    private func makeRenameEditor(for node: SidebarNode) -> SidebarRenameEditor? {
+    private func makeRenameEditor(for node: SidebarNode, seed: String?) -> SidebarRenameEditor? {
         let state = appState
         switch (node.id, node.kind) {
         case (.worktree(let worktreeID), .worktree(let model)):
             guard !model.isMain, let worktree = appState.findWorktree(id: worktreeID) else { return nil }
-            return SidebarRenameEditor(text: worktree.displayName, allowsEmptyCommit: false) { name in
+            return SidebarRenameEditor(text: worktree.displayName, seed: seed, allowsEmptyCommit: false) { name in
                 // `renameWorktree` applies the optimistic update itself.
                 Task { await state.renameWorktree(id: worktreeID, displayName: name) }
             }
@@ -511,6 +566,25 @@ extension SidebarOutlineController: SidebarMenuHost {
             }
         default:
             return nil
+        }
+    }
+
+    /// The `+` menu closes once the row it belongs to is no longer shown, as
+    /// the SwiftUI `+` closes when its row unmounts.
+    func closePlusMenuIfItsRowLeft() {
+        guard plusMenu.model.isOpen, let owner = plusMenu.owner else { return }
+        let shown = items.existing(owner).map { outline.row(forItem: $0) >= 0 } ?? false
+        if !shown { plusMenu.model.closeNow() }
+    }
+}
+
+/// The needs-auth popover lets go of itself once it closes.
+extension SidebarOutlineController: NSPopoverDelegate {
+    nonisolated func popoverDidClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            if let popover = notification.object as? NSPopover, popover === authPopover {
+                authPopover = nil
+            }
         }
     }
 }

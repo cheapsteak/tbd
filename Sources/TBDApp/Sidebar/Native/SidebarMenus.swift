@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 import TBDShared
 
 /// What the native sidebar's menus ask of the controller: the gestures that
@@ -9,7 +8,8 @@ import TBDShared
 protocol SidebarMenuHost: AnyObject {
     func beginRename(_ id: SidebarNodeID)
     func toggleExpansion(of id: SidebarNodeID)
-    func presentSheet<Content: View>(_ content: Content)
+    /// Asks the native sidebar's SwiftUI wrapper for a sheet.
+    func present(_ sheet: NativeSidebarSheet)
     func confirmRemove(_ repo: Repo)
 }
 
@@ -96,13 +96,12 @@ struct SidebarMenus {
 
     private func presentCreateSheet(_ provider: RemoteProviderStatus, nestedUnder worktree: Worktree) {
         let repo = appState.repos.first { $0.id == worktree.repoID }
-        host?.presentSheet(RemoteCreateSheet(
-            provider: provider.config,
-            describe: provider.describe,
+        host?.present(.remoteCreate(NativeSidebarRemoteCreate(
+            provider: provider,
             repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo?.remoteURL),
             repoDefaults: repo?.remoteCreateDefaults ?? [:],
             parentWorktreeID: worktree.id,
-            repoID: worktree.repoID))
+            repoID: worktree.repoID)))
     }
 
     // MARK: Repo headers
@@ -126,12 +125,11 @@ struct SidebarMenus {
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
         let providers = RepoSectionView.remoteSessionMenuProviders(providers: appState.remoteProviders)
         items += createItems(cloud: cloud, providers: providers) { provider in
-            host?.presentSheet(RemoteCreateSheet(
-                provider: provider.config,
-                describe: provider.describe,
+            host?.present(.remoteCreate(NativeSidebarRemoteCreate(
+                provider: provider,
                 repoPrefill: RemoteCreateFormLogic.repoPrefill(remoteURL: repo.remoteURL),
                 repoDefaults: repo.remoteCreateDefaults,
-                repoID: repo.id))
+                repoID: repo.id)))
         }
         items.append(.separator())
         items.append(SidebarMenuItem("Remove from List...") { host?.confirmRemove(repo) })
@@ -142,13 +140,12 @@ struct SidebarMenus {
 
     private func scratchItems() -> [NSMenuItem] {
         let host = self.host
-        let state = appState
         return [
             SidebarMenuItem(SidebarBuildOptions(defaults: defaults).scratchExpanded ? "Collapse" : "Expand") {
                 host?.toggleExpansion(of: .scratchHeader)
             },
             SidebarMenuItem("Edit Scratch Instructions…") {
-                host?.presentSheet(ScratchInstructionsView().environment(state))
+                host?.present(.scratchInstructions)
             },
         ]
     }

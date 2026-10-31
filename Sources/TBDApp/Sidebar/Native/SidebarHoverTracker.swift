@@ -80,6 +80,26 @@ final class SidebarHoverTracker: NSResponder {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// A tracking area does not retain its owner, so one left behind on an
+    /// outline that outlives the tracker would message a freed object. The
+    /// tracker is made and released on the main thread — by the outline that
+    /// holds it, or by a test.
+    deinit {
+        MainActor.assumeIsolated { invalidate() }
+    }
+
+    /// Takes the tracking area off the outline, stops listening for scrolls
+    /// and cancels pending debounces. Idempotent.
+    func invalidate() {
+        if let trackingArea {
+            outline?.removeTrackingArea(trackingArea)
+        }
+        trackingArea = nil
+        NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: nil)
+        for entry in lingering.values { entry.task.cancel() }
+        lingering.removeAll()
+    }
+
     // MARK: Events
 
     override func mouseEntered(with event: NSEvent) {

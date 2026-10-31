@@ -10,14 +10,16 @@ import AppKit
 /// outline's `frameOfCell` places it); `leadingInset` is the row inset every
 /// row under a section title carries.
 ///
-/// On top of the drawing sit the row's controls, as overlays that take no
+/// On top of the drawing sit the row's two controls, as overlays that take no
 /// layout width: the pin toggle in the gutter left of the content (shown on
-/// hover, and always once pinned), the nested `+` at the trailing edge (shown
-/// on hover or while its menu is open), and a transparent button over the PR
-/// glyph that opens the pull request. They are real `NSButton`s, so a press on
-/// one tracks the button; a press anywhere else reaches the outline. The
-/// buttons send their actions to whatever target the controller wires. The pin
-/// and the nested `+` are also offered as accessibility custom actions.
+/// hover, and always once pinned) and the nested `+` at the trailing edge
+/// (shown on hover or while its menu is open). They are real `NSButton`s, so a
+/// press on one tracks the button; a press anywhere else — the PR glyph
+/// included — reaches the outline and can start a drag. A click on the PR
+/// glyph opens the pull request through the outline's click action
+/// (`isPullRequestGlyph(at:)`). The buttons send their actions to whatever
+/// target the controller wires. The pin, the nested `+` and opening the pull
+/// request are also offered as accessibility custom actions.
 final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamableCell {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.worktreeRow")
 
@@ -36,6 +38,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     static let pinActionName = "Pin to dock"
     static let unpinActionName = "Unpin from dock"
     static let nestedWorktreeActionName = "New nested worktree"
+    static let openPullRequestActionName = "Open pull request"
 
     static func height(for model: WorktreeRowModel) -> CGFloat {
         switch model.heightClass {
@@ -59,9 +62,10 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
 
     let pinButton = SidebarCellKit.hoverButton(symbol: "pin")
     let plusButton = SidebarCellKit.hoverButton()
-    /// Draws nothing; the leading image view underneath is the glyph.
-    let prButton = NSButton(frame: .zero)
     let toolTips = SidebarToolTips()
+    /// Opens the row's pull request, for the accessibility action; the
+    /// controller sets it.
+    var onOpenPullRequest: (() -> Bool)?
 
     private(set) var model: WorktreeRowModel?
     private(set) var isHovered = false
@@ -86,19 +90,10 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         noStatusImageView.contentTintColor = .tertiaryLabelColor
         devServerDot.toolTip = "A dev server is running"
         devServerDot.setAccessibilityLabel("Dev server running")
-
-        prButton.isBordered = false
-        prButton.isTransparent = true
-        prButton.title = ""
-        prButton.focusRingType = .none
-        prButton.refusesFirstResponder = true
-        prButton.isHidden = true
-        prButton.setAccessibilityLabel("Open pull request")
         // No tooltip on the nested `+`: hovering it opens the profile picker,
         // which a tooltip would cover.
-        for view in [prButton, pinButton, plusButton] as [NSView] {
-            addSubview(view)
-        }
+        addSubview(pinButton)
+        addSubview(plusButton)
     }
 
     @available(*, unavailable)
@@ -120,7 +115,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         nameField.isHidden = isRenaming
         while subtitleFields.count < model.subtitles.count {
             let field = SidebarCellKit.label(font: SidebarCellKit.captionFont, color: .secondaryLabelColor)
-            addSubview(field, positioned: .below, relativeTo: prButton)
+            addSubview(field, positioned: .below, relativeTo: pinButton)
             subtitleFields.append(field)
         }
         for (index, field) in subtitleFields.enumerated() {
@@ -193,6 +188,14 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         return .none
     }
 
+    /// Whether `point`, in the cell's coordinates, lands on a PR glyph — the
+    /// click that opens the pull request, as the SwiftUI row's glyph button
+    /// does.
+    func isPullRequestGlyph(at point: NSPoint) -> Bool {
+        guard case .prStatus? = model?.leading, !leadingImageView.isHidden else { return false }
+        return leadingImageView.frame.contains(point)
+    }
+
     /// The leading slot shows the PR glyph or the PR-unknown mark, each of
     /// which explains itself in the tooltip bubble.
     var hasLeadingTooltip: Bool {
@@ -244,6 +247,11 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
                 MainActor.assumeIsolated { self?.send(self?.plusButton) ?? false }
             })
         }
+        if case .prStatus? = model.leading {
+            actions.append(NSAccessibilityCustomAction(name: Self.openPullRequestActionName) { [weak self] in
+                MainActor.assumeIsolated { self?.onOpenPullRequest?() ?? false }
+            })
+        }
         return actions
     }
 
@@ -284,11 +292,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
             leadingImageView.image = nil
         }
         leadingImageView.isHidden = leadingImageView.image == nil
-        if case .prStatus? = leading {
-            prButton.isHidden = leadingImageView.isHidden
-        } else {
-            prButton.isHidden = true
-        }
     }
 
     /// The name, then what a sighted user reads from the row's subtitles and
@@ -308,7 +311,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         var x = leadingInset
         if !leadingImageView.isHidden {
             leadingImageView.frame = NSRect(x: x, y: midY - 6, width: 12, height: 12)
-            prButton.frame = leadingImageView.frame
             x += 12 + spacing
         }
 

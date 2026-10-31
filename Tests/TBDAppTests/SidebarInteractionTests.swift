@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -176,6 +177,8 @@ struct SidebarInteractionTests {
                 if !state.revealedSections.contains(header) { hidden.record(true) }
             },
             clock: clock)
+        // Its tracking area leaves the outline with it.
+        defer { tracker.invalidate() }
 
         // A row of the section reveals its header at once.
         let point = try #require(Self.windowPoint(of: .worktree(row.id), in: h))
@@ -301,6 +304,195 @@ struct SidebarInteractionTests {
         #expect(!h.controller.isHoldingStructure)
     }
 
+    @Test func renameHandsOverWhenThePlaceholderIsSwapped() async throws {
+        let h = OutlineHarness("interaction.renameHandover")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let placeholder = SidebarOutlineControllerTests.row("swift-otter", repo, status: .creating)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [placeholder]]
+        h.state.pendingWorktreeIDs = [placeholder.id]
+        h.state.renameRPCOverride = { @MainActor _, _ in }
+        h.mount()
+
+        // Rename-on-create opens on the placeholder, and the user types.
+        h.state.editingWorktreeID = placeholder.id
+        h.controller.flushPendingRebuild()
+        let first = try #require(h.controller.renameEditor)
+        #expect(h.controller.renamingID == .worktree(placeholder.id))
+        h.host?.layout()
+        let drawn = RunLoopPump.until { first.textField != nil }
+        try #require(drawn, "The rename field was never drawn")
+        let field = try #require(first.textField)
+        field.stringValue = "typed name"
+        #expect(first.currentText == "typed name")
+
+        // The daemon answers: its row replaces the placeholder, and the swap
+        // asks for the rename on the real row.
+        let real = Worktree(repoID: repo.id, name: "brave-heron", displayName: "brave-heron",
+                            branch: "tbd/brave-heron", path: "/tmp/acme-heron", tmuxServer: "acme")
+        let swap = h.state.replaceCreationPlaceholder(
+            repoID: repo.id, placeholderID: placeholder.id, placeholderName: "swift-otter", with: real)
+        #expect(swap != nil)
+        h.state.pendingWorktreeIDs.remove(placeholder.id)
+        h.state.editingWorktreeID = real.id
+        h.controller.flushPendingRebuild()
+
+        // The edit moved to the real row with what was typed, uncommitted.
+        let second = try #require(h.controller.renameEditor)
+        #expect(second !== first)
+        #expect(first.isFinished)
+        #expect(first.view.superview == nil)
+        #expect(h.controller.renamingID == .worktree(real.id))
+        #expect(second.session.seed == "typed name")
+        #expect(second.session.originalText == "brave-heron")
+        #expect(h.state.editingWorktreeID == nil)
+        #expect(!h.shownIDs.contains(.worktree(placeholder.id)))
+        let editing = Self.renamingRows(in: h)
+        #expect(editing == [.worktree(real.id)], "Exactly one editor, on the real row")
+        #expect(h.state.findWorktree(id: real.id)?.displayName == "brave-heron", "The handover committed")
+
+        // Committing renames the real row with the typed text.
+        h.controller.finishRename(commitPending: true)
+        #expect(!h.controller.isHoldingStructure)
+        let state = h.state
+        let realID = real.id
+        let renamed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { state.findWorktree(id: realID)?.displayName == "typed name" }
+        }
+        #expect(renamed == .satisfied, "The real row never took the typed name")
+    }
+
+    @Test func renameRequestWaitsForItsRowToShow() throws {
+        let h = OutlineHarness("interaction.renamePending")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.scratchSectionExpandedKey)
+        let pad = Worktree(repoID: nil, name: "pad", displayName: "pad", branch: "", path: "/tmp/acme-pad",
+                           tmuxServer: "acme")
+        h.state.scratchWorktrees = [pad]
+        h.mount()
+        try #require(!h.shownIDs.contains(.worktree(pad.id)))
+
+        // The Scratch section is collapsed: the request stays pending.
+        h.state.editingWorktreeID = pad.id
+        h.controller.flushPendingRebuild()
+        #expect(h.state.editingWorktreeID == pad.id)
+        #expect(h.controller.renamingID == nil)
+
+        // Expanding it shows the row, and the rename starts.
+        h.defaults.set(true, forKey: AppState.scratchSectionExpandedKey)
+        h.controller.flushPendingRebuild()
+        #expect(h.shownIDs.contains(.worktree(pad.id)))
+        #expect(h.state.editingWorktreeID == nil)
+        #expect(h.controller.renamingID == .worktree(pad.id))
+        h.controller.finishRename(commitPending: false)
+    }
+
+    // MARK: Sheets, the PR glyph and the `+` menu
+
+    @Test func sheetsPresentThroughTheSwiftUIPresenter() throws {
+        let h = OutlineHarness("interaction.sheets")
+        defer { h.tearDown() }
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.mount()
+
+        // The provider header's `+` asks for the create form, with no repo.
+        let providerCell = try #require(Self.cell(.providerHeader("acme"), in: h) as? ProviderHeaderCell)
+        try #require(!providerCell.plusButton.isHidden)
+        h.controller.providerPlusClicked(providerCell.plusButton)
+        guard case .remoteCreate(let request)? = h.controller.sheets.sheet else {
+            Issue.record("The provider + did not ask for the create form")
+            return
+        }
+        #expect(request.provider.config.name == "acme")
+        #expect(request.repoID == nil)
+        #expect(request.parentWorktreeID == nil)
+        #expect(request.repoPrefill == nil)
+
+        // One slot: a request while the form is up is dropped, so a second
+        // form — and a second create — cannot stack on the first.
+        let formID = h.controller.sheets.sheet?.id
+        h.controller.present(.scratchInstructions)
+        #expect(h.controller.sheets.sheet?.id == formID)
+
+        // The form's own `dismiss` — Cancel, Escape, or the close after a
+        // successful create — writes nil through the binding `.sheet(item:)`
+        // holds, and the form is gone.
+        h.controller.sheets.binding.wrappedValue = nil
+        #expect(h.controller.sheets.sheet == nil)
+
+        // The Scratch header's menu item asks for the instructions sheet.
+        let scratch = try #require(h.controller.tree.node(.scratchHeader))
+        let menu = try #require(h.controller.menus.menu(for: scratch))
+        menu.performActionForItem(at: 1)
+        #expect(h.controller.sheets.sheet?.id == NativeSidebarSheet.scratchInstructions.id)
+    }
+
+    @Test func pullRequestGlyphClickOpensThePullRequest() throws {
+        let h = OutlineHarness("interaction.prGlyph")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = SidebarOutlineControllerTests.row("work", repo)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.state.prStatuses[row.id] = PRStatus(number: 7, url: "https://example.invalid/acme/pull/7", state: .mergeable)
+        h.mount()
+        let opened = FireRecorder<URL>()
+        h.controller.openURL = { opened.record($0) }
+
+        let id = SidebarNodeID.worktree(row.id)
+        let cell = try #require(Self.cell(id, in: h) as? WorktreeRowCell)
+        try #require(!cell.leadingImageView.isHidden)
+        let index = h.row(id)
+        let glyph = cell.leadingImageView.frame
+        let name = cell.nameField.frame
+        let glyphPoint = h.outline.convert(NSPoint(x: glyph.midX, y: glyph.midY), from: cell)
+        let namePoint = h.outline.convert(NSPoint(x: name.midX, y: name.midY), from: cell)
+
+        // No button sits on the glyph or the name: a press there reaches the
+        // outline, which selects the row and can start a drag.
+        let clip = try #require(h.outline.superview)
+        let glyphHit = h.outline.hitTest(clip.convert(glyphPoint, from: h.outline))
+        let nameHit = h.outline.hitTest(clip.convert(namePoint, from: h.outline))
+        #expect(!(glyphHit is NSButton))
+        #expect(!(nameHit is NSButton))
+        let item = try #require(h.controller.item(for: id))
+        #expect(h.controller.outlineView(h.outline, shouldSelectItem: item))
+
+        // A click elsewhere on the row opens nothing; on the glyph, the PR.
+        h.controller.handleClick(row: index, at: namePoint)
+        #expect(opened.values.isEmpty)
+        h.controller.handleClick(row: index, at: glyphPoint)
+        let urls = opened.values.map { $0.absoluteString }
+        #expect(urls == ["https://example.invalid/acme/pull/7"])
+    }
+
+    @Test func plusMenuClosesWhenItsRowLeaves() throws {
+        let h = OutlineHarness("interaction.plusMenu")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = SidebarOutlineControllerTests.row("work", repo)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.mount()
+
+        // Open for the row's `+`. The anchor is in no window, so no panel is
+        // put on screen; the model's state is what is under test.
+        let menu = h.controller.plusMenu
+        menu.bind(owner: .worktree(row.id), anchor: NSView(frame: .zero)) { _ in AnyView(EmptyView()) }
+        menu.model.openImmediately()
+        try #require(menu.model.isOpen)
+
+        // Positive control: an apply that keeps the row keeps the menu.
+        h.state.devServerRunningWorktreeIDs = [row.id]
+        h.controller.flushPendingRebuild()
+        #expect(menu.model.isOpen)
+
+        h.state.worktrees[repo.id]?.removeAll { $0.id == row.id }
+        h.controller.flushPendingRebuild()
+        #expect(!menu.model.isOpen)
+    }
+
     // MARK: Accessibility
 
     @Test func pinAndNestedPlusOfferedAsAccessibilityActions() throws {
@@ -390,6 +582,16 @@ struct SidebarInteractionTests {
         guard index >= 0 else { return nil }
         let rect = h.outline.rect(ofRow: index)
         return h.outline.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+    }
+
+    /// The rows whose cells show a rename editor.
+    static func renamingRows(in h: OutlineHarness) -> [SidebarNodeID] {
+        (0..<h.outline.numberOfRows).compactMap { index -> SidebarNodeID? in
+            guard let cell = h.outline.view(atColumn: 0, row: index, makeIfNecessary: false)
+                    as? NSView & SidebarRenamableCell,
+                  cell.isRenaming else { return nil }
+            return (h.outline.item(atRow: index) as? SidebarItem)?.id
+        }
     }
 
     /// The row under a window point.

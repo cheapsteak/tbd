@@ -81,7 +81,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     // MARK: State
 
     var items = SidebarItemCache()
-    private var holds: Set<HoldReason> = []
+    private(set) var holds: Set<HoldReason> = []
     var hasLoaded = false
     private var rebuildScheduled = false
     /// True while the controller itself expands, collapses or reloads, the
@@ -147,23 +147,32 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     var renamingID: SidebarNodeID?
     var renameEditor: SidebarRenameEditor?
     weak var renamingCell: NSView?
+    /// The needs-auth popover while it is open.
     var authPopover: NSPopover?
+    /// The sheet slot `NativeSidebarView` presents with SwiftUI.
+    let sheets: NativeSidebarSheetPresenter
+    /// Opens a pull request's page; tests hand in a recorder.
+    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
     static let signposter = OSSignposter(subsystem: "com.tbd.app", category: "native-sidebar")
 
     /// - Parameters:
     ///   - scratchDirectoryProbe: answers whether a scratch directory exists.
     ///     Runs off the main thread; tests hand in a fixed answer.
+    ///   - sheets: the slot the SwiftUI wrapper presents sheets from; a
+    ///     controller mounted on its own gets one of its own.
     ///   - clock: the hover tracker's clock, for its 80 ms debounce.
     init(
         appState: AppState,
         defaults: UserDefaults,
         scratchDirectoryProbe: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        sheets: NativeSidebarSheetPresenter? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.appState = appState
         self.defaults = defaults
         self.scratchDirectoryProbe = scratchDirectoryProbe
+        self.sheets = sheets ?? NativeSidebarSheetPresenter()
         self.hoverClock = clock
         self.options = SidebarBuildOptions(defaults: defaults)
         self.chevronBeforeTitle = SidebarOutlineController.storedChevronBeforeTitle(defaults)
@@ -320,7 +329,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         let exists = scratchDirectoryExists
         var scratchPaths: Set<String> = []
         var options = self.options
-        var renameRequest: UUID?
+        var renameRequest: RenameRequest?
         let latest: SidebarTree = withObservationTracking { () -> SidebarTree in
             // Reveals write `AppState` before the tracking is installed, so
             // their writes schedule nothing, and the build below sees them.
@@ -333,6 +342,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             let built = SidebarTreeBuilder.build(state, options: options, directoryExists: { exists[$0] ?? true })
             // Rename-on-create: taken, and cleared, before the tracking is
             // installed, like the reveals; the rename starts after the apply.
+            // A row not shown yet leaves the request pending.
             renameRequest = self.takeRenameRequest(in: built)
             return built
         } onChange: { [weak self] in
@@ -348,7 +358,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         refreshScratchDirectories(scratchPaths)
         apply(latest)
         if let renameRequest {
-            beginRename(.worktree(renameRequest))
+            startRename(.worktree(renameRequest.id), seed: renameRequest.seed,
+                        commitOpenEdit: !renameRequest.handsOver)
         }
     }
 
