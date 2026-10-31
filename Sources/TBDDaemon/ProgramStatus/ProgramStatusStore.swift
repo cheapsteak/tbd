@@ -297,6 +297,20 @@ public actor ProgramStatusStore {
             }
             current = existing
         } else {
+            // Nothing held for this incarnation, as after a daemon restart or
+            // a bare `clear`, so there is no held report to be stale against.
+            // A column this store wrote (`.programStatus`) speaks for the
+            // row's current incarnation and outlives the store's memory: a
+            // report observed at or before its stamp — one the app re-sends
+            // from before the restart — would install and publish a main
+            // entry older than the column, which a later task-entry report
+            // would then roll up and write.
+            if terminal.activityStateSource == .programStatus,
+               let columnOrder = terminal.activityStateOrderObservedAt
+                   ?? terminal.activityStateObservedAt,
+               inbound.observedAt <= columnOrder {
+                return reject(terminalID, "observed before the column")
+            }
             if held[terminalID] != nil {
                 programStatusLog.debug(
                     "drop terminal=\(terminalID.uuidString, privacy: .public) reason=\(DropReason.incarnationChanged.rawValue, privacy: .public)")

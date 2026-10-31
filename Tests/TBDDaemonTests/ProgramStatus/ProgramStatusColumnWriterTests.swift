@@ -84,6 +84,16 @@ import TestSupport
             }
         }
 
+        func programStatusDeltas(_ terminal: Terminal) -> [ProgramStatusSnapshot] {
+            deltas.withLock { $0 }.compactMap {
+                if case .terminalProgramStatusChanged(let snapshot) = $0,
+                   snapshot.terminalID == terminal.id {
+                    return snapshot
+                }
+                return nil
+            }
+        }
+
         func awaitingInputDeltas(_ terminal: Terminal) -> [TerminalAwaitingInputDelta] {
             deltas.withLock { $0 }.compactMap {
                 if case .terminalAwaitingInputChanged(let delta) = $0, delta.terminalID == terminal.id {
@@ -815,6 +825,32 @@ import TestSupport
             h, terminal, "state=blocked:app=claude-code:kind=permission", at: 2) == .accepted)
         #expect(try await h.row(terminal).activityState == .waitingForUser)
         #expect(try await h.attentionNotifications().isEmpty)
+    }
+
+    /// After a daemon restart the store holds nothing, so a report the app
+    /// re-sends from before the restart passes the check against what is
+    /// held. The column the previous store wrote is newer, and it speaks for
+    /// the same incarnation: the report is refused before it is held, so no
+    /// stale main entry is published or later rolled up. A report observed
+    /// after the column is accepted.
+    @Test func aFreshStoreRefusesAReportTheColumnOutdates() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        _ = try await h.db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .working, awaitingInputReason: nil, observedAt: Self.at(3))
+
+        #expect(await ingest(h, terminal, "state=idle:app=claude-code", at: 2)
+            == .rejected("observed before the column"))
+        #expect(await h.store.snapshot(for: terminal.id) == nil)
+        #expect(h.programStatusDeltas(terminal).isEmpty)
+        #expect(try await h.row(terminal).activityState == .working)
+
+        #expect(await ingest(h, terminal, "state=idle:app=claude-code", at: 4) == .accepted)
+        #expect(await h.store.snapshot(for: terminal.id)?.main?.state == .idle)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateObservedAt == Self.at(4))
     }
 
     // MARK: - Ledger

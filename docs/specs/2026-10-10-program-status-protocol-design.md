@@ -194,6 +194,11 @@ once per reconnect, when the daemon answers the new subscription. An attempt
 that never reaches the daemon sends nothing, so an outage does not queue a
 failing send per stored report on every retry. The store refuses a re-sent
 report older than the newest it accepted, so a duplicate changes nothing.
+After a daemon restart it has accepted nothing, so it also refuses, while it
+holds nothing for the terminal's current incarnation, a report observed at or
+before the activity column it wrote (`.programStatus`), which outlives its
+memory and speaks for that incarnation: a report from before the restart
+would otherwise be held and published although the column is newer.
 Otherwise, and for a lost report followed by one the daemon did receive, the
 agent's next change is the only recovery — and Codex, which never probes and
 suppresses repeats, changes only when its state does, so the worst case is the
