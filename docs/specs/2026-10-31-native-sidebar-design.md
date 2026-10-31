@@ -150,7 +150,12 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
      involved. Calls under a parent that is not expanded are skipped, since
      `NSOutlineView` ignores them; a parent inserted in this pass gets its
      children by being expanded, and a leaf that gains its first child gets
-     `reloadItem` and then `expandItem`.
+     `reloadItem` and then `expandItem`. That last case is the one exception to
+     keeping a moved row's view: `NSOutlineView` cannot move an item into a
+     parent whose children it has not loaded, so a row nested under a former
+     leaf or a collapsed parent is removed and reappears through the parent's
+     reload. The controller restores the selection and the scroll anchor
+     afterwards, so only the row view itself is new.
    - **Expansion** – each header's expanded flag drives `expandItem` and
      `collapseItem` in the same block, and a worktree row inserted with
      children is expanded after its insertion.
@@ -171,7 +176,9 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
    changes, as this app's transcript table showed.
 5. While a drag session or an inline rename is in progress, the controller
    holds structural changes and applies them when it ends. Content changes
-   still apply.
+   still apply. A drag's hold ends in `draggingSession(_:endedAt:)`, which
+   flushes the pending rebuild at once; the drop does not set
+   `animatesToDestination`, since the rows are not in place until that flush.
 
 `updateNSViewController` does nothing: the controller observes `AppState`
 itself. Mutating a table during SwiftUI's update pass blanked the transcript's
@@ -307,16 +314,31 @@ handling in `RenameableLabel` carries over.
   main rows, unadopted remote sessions, and any row whose ancestor is also
   carried, since that row travels with its ancestor. If the selection mixes
   scratch rows and worktrees, the drag carries the kind under the cursor.
-- The payload is a private, in-process UTI carrying the ordered worktree IDs. The
-  dock uses a different UTI, so rows never cross between the dock and the list.
+- AppKit asks for a pasteboard writer for every selected row, or for the
+  clicked row alone, so those rules live in the writer. An override of
+  `canDragRows(with:at:)` records the mouse-down row's kind; the writer returns
+  nil for a row of another kind, and for a **selected** row whose ancestor is
+  also selected. It never returns nil for an unselected row on that ground, or
+  dragging a child of a selected parent would not start.
+- Each carried row is one `NSPasteboardItem` holding its ID under a private,
+  in-process UTI. The drop reads every item through `pasteboardItems`, never
+  `propertyList(forType:)`, which reads only the first, and orders the IDs by
+  tree position. The dock uses a different UTI, so rows never cross between the
+  dock and the list.
+- Pressing the pin toggle or the nested `+` tracks the button and never starts
+  a drag; a press anywhere else in the row starts one. To keep that true, labels
+  are not selectable outside rename, overlay views return nil from `hitTest`,
+  the outline does not override `mouseDown`, and the `+` reads ⌥ from
+  `NSEvent.modifierFlags` rather than from the current event.
 
 ### Where it can go
 
 `validateDrop` hands the outline's proposal (an item and a child index, or "on
 item") to `SidebarDropPolicy`, which answers in IDs, never indices:
 `.nest(under:)`, `.place(parent:before:)` with `before: nil` meaning the end of
-the group, or `.reject`. It may retarget the proposal with
-`setDropItem(_:dropChildIndex:)`. `acceptDrop` resolves the answer again against
+the group, or `.reject`. It retargets the proposal with
+`setDropItem(_:dropChildIndex:)` only when its answer differs from what was
+proposed. `acceptDrop` resolves the answer again against
 the current tree, so a daemon push during the drag cannot land a move on rows
 that are gone.
 
@@ -341,7 +363,11 @@ Each rule applies to every carried row; if one fails, the drop is rejected.
   - a gap inside a state group (Remote, Exited or Hibernated) other than the one
     the rows came from, because a row's state decides which group renders it;
   - any position inside a collapsed section. Collapsed sections do not spring
-    open during a drag, since that would fight model-driven expansion.
+    open during a drag, since that would fight model-driven expansion:
+    `outlineView(_:shouldExpandItem:)` returns false from
+    `draggingSession(_:willBeginAt:)` to `draggingSession(_:endedAt:)`. That
+    veto also blocks the controller's own `expandItem` calls, so the flag
+    clears before the held structural changes replay.
 - **Retargeted:** a proposal above the main row, or among the inline remote
   sessions that follow a repo's worktrees, becomes the nearest valid top-level
   gap.
@@ -350,17 +376,23 @@ Each rule applies to every carried row; if one fails, the drop is rejected.
 
 The gap below a subtree's last row is ambiguous: it can mean the end of that
 subtree's children or a shallower level. The pointer's horizontal position
-chooses, as in Finder's list view, and the insertion line indents to the depth it
-chose.
+chooses, as in Finder's list view. The policy takes the pointer's x as an
+input and picks the depth `round((x − inset) / 16)`, clamped between the visual
+depths of the rows below and above the gap. It ignores the depth
+`NSOutlineView` proposes, which reads raw x against raw outline levels and so
+lags this sidebar's visual depth by one level. A proposal between two sections
+reads as the end of the section above.
 
 ### Feedback
 
-A nest highlights the target row. A place draws an insertion line at the
-destination's visual depth, aligned with the guide lines. The native
-`NSOutlineView` indicator indents by raw outline level, which is one level
-deeper than the visual depth used here; where it cannot be aligned, the outline
-suppresses it and `SidebarRowView` draws the line. The drag image shows the
-carried rows only, not their subtrees.
+The outline sets `draggingDestinationFeedbackStyle = .none` and draws both
+indicators from the policy's answer, because no public API moves the native
+between-rows line and it indents by raw outline level. `SidebarRowView` draws
+the nest highlight on the target row; one overlay view, which returns nil from
+`hitTest`, draws the insertion line at the destination's visual depth, aligned
+with the guide lines. Both clear in `draggingExited`, `concludeDragOperation`
+and `draggingEnded`. The drag image shows the carried rows only, not their
+subtrees.
 
 ### Commit: `worktree.moveMany`
 
@@ -431,7 +463,9 @@ the sidebar has one commit path.
   `worktreeSiblingsReordered` or `worktreeMoved` delta before the result is
   compared and assigned. A stale result then produces the arrays the app
   already holds and publishes nothing, and another writer's delta cannot undo
-  a move the daemon has not yet answered. This follows the archive tombstones
+  a move the daemon has not yet answered. A move whose destination parent the
+  app no longer lists is not re-applied, since the daemon refuses an archived
+  parent and the sidebar could not show rows under it. This follows the archive tombstones
   in `applyWorktreeArchivedDelta`, which keep a fetch that predates an archive
   from resurrecting its row, and the rebase-pending-mutations rule of sync
   engines such as Replicache.
@@ -448,10 +482,18 @@ the sidebar has one commit path.
 - **Failure.** At the drop, `AppState` snapshots the carried rows' parents and
   the order of their source and destination groups. If the RPC fails, the move
   leaves the overlay, the app restores those rows and groups from the snapshot,
-  leaving every other row as it is, then refreshes from the daemon, whose state
-  is the truth, and a toast names the row and the reason. The snapshot covers
-  the case where the daemon is unreachable and the refresh fails too; scoping
-  it to the affected groups keeps any other change that landed during the RPC.
+  leaving every other row as it is, shows a toast naming the row and the
+  reason, and then refreshes from the daemon, whose state is the truth. The
+  toast comes first so a slow daemon never leaves rows moving back without an
+  explanation. The snapshot covers the case where the daemon is unreachable
+  and the refresh fails too; scoping it to the affected groups keeps any other
+  change that landed during the RPC. A failed reply after the move's own
+  `worktreeSiblingsReordered` delta has arrived is not a failure: the daemon
+  broadcasts that delta only after it commits, so the move settles as a
+  success, with no restore and no toast.
+- **Refused locally.** A move whose destination parent the app does not list,
+  or whose parent is a `main` row, is refused before anything changes: no local
+  apply, no RPC.
 
 The overlay and the fence rely on two daemon invariants, which `moveMany`'s
 tests pin: `moveMany` replies only after its transaction commits, and
