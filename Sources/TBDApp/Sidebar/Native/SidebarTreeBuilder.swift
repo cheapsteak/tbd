@@ -490,6 +490,7 @@ struct SidebarRowModelFactory {
             showsDevServerDot: WorktreeRowView.showsServerDot(
                 worktreeID: id, running: appState.devServerRunningWorktreeIDs),
             crossRepoLabel: crossRepoLabel,
+            homeRepoID: worktree.repoID,
             isPinned: worktree.pinnedAt != nil,
             depth: depth,
             isDimmed: isDimmed,

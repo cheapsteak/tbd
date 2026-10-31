@@ -16,7 +16,7 @@ import TestSupport
 /// test's arguments are not main-actor isolated.
 enum SidebarRowInput: CaseIterable, Sendable {
     case leading, name, bold, subtitles, suffix, noStatusMark, devServerDot
-    case crossRepoLabel, pinned, depth, dimmed, hiddenSection, isMain, heightClass
+    case crossRepoLabel, homeRepo, pinned, depth, dimmed, hiddenSection, isMain, heightClass
 }
 
 @MainActor
@@ -162,7 +162,9 @@ struct SidebarTreeBuilderTests {
         let cross = try #require(Self.worktreeModel(tree, crossRepo.id))
         #expect(cross.depth == 1)
         #expect(cross.crossRepoLabel == "(widge…)")
+        #expect(cross.homeRepoID == other.id)
         #expect(try #require(Self.worktreeModel(tree, first.id)).crossRepoLabel == nil)
+        #expect(try #require(Self.worktreeModel(tree, first.id)).homeRepoID == repo.id)
         #expect(tree.node(.worktree(parent.id))?.isExpanded == true, "Worktree subtrees are always expanded")
     }
 
@@ -287,6 +289,7 @@ struct SidebarTreeBuilderTests {
         let model = try #require(Self.worktreeModel(one, pad.id))
         #expect(model.depth == 0)
         #expect(model.crossRepoLabel == nil)
+        #expect(model.homeRepoID == nil, "A scratch row belongs to no repo")
 
         let collapsed = Self.build(state, Self.options(scratchExpanded: false))
         #expect(collapsed.node(.scratchHeader)?.children.isEmpty == true)
@@ -516,7 +519,7 @@ struct SidebarTreeBuilderTests {
 
     static func subject(of input: SidebarRowInput, in fixture: RowFixture) -> UUID {
         switch input {
-        case .crossRepoLabel: fixture.child.id
+        case .crossRepoLabel, .homeRepo: fixture.child.id
         case .dimmed: fixture.scratch.id
         case .isMain: fixture.main.id
         default: fixture.subject.id
@@ -543,7 +546,7 @@ struct SidebarTreeBuilderTests {
             state.noStatusSightings[fixture.quietTerminalID] = NoStatusSighting(incarnationID: nil, graceElapsed: true)
         case .devServerDot:
             state.devServerRunningWorktreeIDs = [subject]
-        case .crossRepoLabel:
+        case .crossRepoLabel, .homeRepo:
             update(state, fixture.repo, fixture.child.id) { $0.repoID = fixture.otherRepo }
         case .pinned:
             update(state, fixture.repo, subject) { $0.pinnedAt = Date(timeIntervalSince1970: 0) }
@@ -570,6 +573,7 @@ struct SidebarTreeBuilderTests {
         case .noStatusMark: a.showsNoStatusMark != b.showsNoStatusMark
         case .devServerDot: a.showsDevServerDot != b.showsDevServerDot
         case .crossRepoLabel: a.crossRepoLabel != b.crossRepoLabel
+        case .homeRepo: a.homeRepoID != b.homeRepoID
         case .pinned: a.isPinned != b.isPinned
         case .depth: a.depth != b.depth
         case .dimmed: a.isDimmed != b.isDimmed

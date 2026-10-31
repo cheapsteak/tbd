@@ -1,5 +1,4 @@
 import AppKit
-import os
 
 // What a drag in the native sidebar carries, and what a drop proposal means.
 // Pure: everything here reads a `SidebarTree` and nothing else, and answers
@@ -47,14 +46,14 @@ enum SidebarDropDecision: Equatable {
 ///
 /// `validateDrop` hands it the outline's proposal — a parent item and a child
 /// index, or `dropOnItemIndex` for "onto the item" — and the pointer's depth;
-/// `acceptDrop` asks again against the tree current at the drop. The answer
-/// carries a retarget only when the position it chose differs from the one
-/// proposed, for `setDropItem(_:dropChildIndex:)`.
+/// `acceptDrop` asks again against an index of the tree current at the
+/// drop. The answer carries a retarget only when the position it chose
+/// differs from the one proposed, for `setDropItem(_:dropChildIndex:)`.
 ///
 /// Every rule applies to every carried row; if one fails, the drop is
 /// rejected. A decision reads only the nodes on the ancestor paths of the
-/// rows and positions it asks about, through a `SidebarDropIndex` built once
-/// per tree, so it costs the tree's depth, not its size.
+/// rows and positions it asks about, through the `SidebarDropIndex` the
+/// caller builds once per tree, so it costs the tree's depth, not its size.
 enum SidebarDropPolicy {
     /// `NSOutlineViewDropOnItemIndex`: a proposal onto an item rather than
     /// between its children.
@@ -87,10 +86,6 @@ enum SidebarDropPolicy {
     /// travels with that ancestor. A selection that mixes scratch rows and
     /// worktrees carries the kind of `origin`. Nothing is carried when
     /// `origin` itself cannot be dragged.
-    static func carried(selection: [SidebarNodeID], origin: SidebarNodeID, tree: SidebarTree) -> [UUID] {
-        carried(selection: selection, origin: origin, index: .shared(for: tree))
-    }
-
     static func carried(selection: [SidebarNodeID], origin: SidebarNodeID, index: SidebarDropIndex) -> [UUID] {
         guard let originRow = CarriedRow(origin, index: index) else { return [] }
         let candidates = selection.contains(origin) ? selection : [origin]
@@ -130,12 +125,6 @@ enum SidebarDropPolicy {
     /// outline levels and so lags this sidebar's depth by one. A proposal
     /// between two sections reads as the end of the section above.
     static func resolve(carried: [UUID], proposedParent: SidebarNodeID?, childIndex: Int,
-                        pointerDepth: Int, tree: SidebarTree) -> Answer {
-        resolve(carried: carried, proposedParent: proposedParent, childIndex: childIndex,
-                pointerDepth: pointerDepth, index: .shared(for: tree))
-    }
-
-    static func resolve(carried: [UUID], proposedParent: SidebarNodeID?, childIndex: Int,
                         pointerDepth: Int, index: SidebarDropIndex) -> Answer {
         guard let rows = CarriedRows(carried, index: index) else { return rejected }
         if childIndex == dropOnItemIndex {
@@ -152,6 +141,10 @@ enum SidebarDropPolicy {
     /// children; the main row un-nests them to the top of its repo's
     /// worktrees, directly below it. Every other row rejects: nesting under
     /// a scratch row, a remote session or a header is not a thing.
+    ///
+    /// State groups are closed both ways: a row inside a group nests only
+    /// onto a row in that same group, and a row outside every group nests
+    /// onto no row inside one.
     private static func onto(_ targetID: SidebarNodeID, rows: CarriedRows, index: SidebarDropIndex) -> Answer {
         guard let target = index.entry(targetID), case .worktree(let model) = target.node.kind,
               case .worktree(let targetUUID) = targetID else { return rejected }
@@ -163,10 +156,11 @@ enum SidebarDropPolicy {
         guard let lineage = trace(from: target, carried: rows.ids, index: index),
               !lineage.isCollapsed, !lineage.isCarried,
               !rows.isScratch, lineage.section != .scratchHeader else { return rejected }
-        // Nesting onto the rows' current parent only moves them among their
-        // current siblings, which another repo's section allows.
-        for row in rows.rows where !row.isNative(to: lineage.section) && row.parent != targetID {
-            return rejected
+        for row in rows.rows {
+            if lineage.group != row.lineage.group { return rejected }
+            // Nesting onto the rows' current parent only moves them among
+            // their current siblings, which another repo's section allows.
+            if !row.isNative(to: lineage.section), row.parent != targetID { return rejected }
         }
         return (.nest(under: targetUUID), nil)
     }
@@ -196,9 +190,10 @@ enum SidebarDropPolicy {
             return rejected
         }
         for row in rows.rows {
-            // A row's state decides which group renders it, so a group takes
-            // only the rows it already renders.
-            if let group = lineage.group, group != row.lineage.group { return rejected }
+            // A row's state decides which group renders it, so state groups
+            // are closed: a gap inside a group takes only the rows that came
+            // from it, and a row inside a group goes to no gap outside it.
+            if lineage.group != row.lineage.group { return rejected }
             // Another repo's section takes only a reorder among the rows'
             // current siblings.
             if !row.isNative(to: lineage.section), row.parent != parentID { return rejected }
@@ -358,9 +353,8 @@ enum SidebarDropPolicy {
         let uuid: UUID
         let parent: SidebarNodeID?
         let lineage: Lineage
-        /// The row shows another repo's "(repo)" suffix: it renders in a
-        /// section that is not its own repo's.
-        let isForeign: Bool
+        /// The repo the row belongs to; nil for a scratch row.
+        let homeRepoID: UUID?
 
         var isScratch: Bool { lineage.section == .scratchHeader }
 
@@ -374,13 +368,15 @@ enum SidebarDropPolicy {
             self.uuid = uuid
             self.parent = entry.parent
             self.lineage = lineage
-            self.isForeign = model.crossRepoLabel != nil
+            self.homeRepoID = model.homeRepoID
         }
 
-        /// Whether `section` is the row's own: the one it renders in, and of
-        /// its own repo.
+        /// Whether `section` is the row's own: its repo's section, or — for
+        /// the Scratch section and the Remote section's provider sections,
+        /// which belong to no repo — the section it renders in.
         func isNative(to section: SidebarNodeID) -> Bool {
-            !isForeign && lineage.section == section
+            if case .repoHeader(let repoID) = section { return homeRepoID == repoID }
+            return lineage.section == section
         }
     }
 
@@ -409,8 +405,8 @@ enum SidebarDropPolicy {
 
 /// Where every node of one `SidebarTree` sits — its parent, its position
 /// among its siblings, its outline level — so a drop decision reads only the
-/// nodes on the paths it asks about instead of walking the tree. Built once
-/// per tree; `shared(for:)` keeps the last one built, since a drag asks about
+/// nodes on the paths it asks about instead of walking the tree. The caller
+/// builds one per tree and keeps it while the tree stands: a drag asks about
 /// one tree many times a second.
 struct SidebarDropIndex {
     struct Entry {
@@ -435,11 +431,11 @@ struct SidebarDropIndex {
         init() {}
     }
 
-    private(set) var tree: SidebarTree
+    let tree: SidebarTree
     private let entries: [SidebarNodeID: Entry]
     private let counter: ReadCounter?
 
-    init(_ tree: SidebarTree, counter: ReadCounter? = nil) {
+    init(tree: SidebarTree, counter: ReadCounter? = nil) {
         var entries: [SidebarNodeID: Entry] = [:]
         SidebarDropIndex.add(tree.roots, parent: nil, level: 0, into: &entries)
         self.tree = tree
@@ -513,28 +509,5 @@ struct SidebarDropIndex {
             current = next
         }
         return Array(reversedPath.reversed())
-    }
-}
-
-extension SidebarDropIndex {
-    /// The last index `shared(for:)` built. One is enough: the outline asks
-    /// about one tree at a time.
-    private static let lastShared = OSAllocatedUnfairLock<SidebarDropIndex?>(uncheckedState: nil)
-
-    /// The index for `tree`, built only when `tree` differs from the last
-    /// one asked about. Comparing a copy of the same tree value is an
-    /// identity check on its storage; an equal tree with other storage is
-    /// compared once and then kept as the key.
-    static func shared(for tree: SidebarTree) -> SidebarDropIndex {
-        lastShared.withLockUnchecked { last in
-            if var cached = last, cached.tree == tree {
-                cached.tree = tree
-                last = cached
-                return cached
-            }
-            let built = SidebarDropIndex(tree)
-            last = built
-            return built
-        }
     }
 }

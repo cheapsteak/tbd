@@ -102,7 +102,7 @@ struct SidebarDropPolicyTests {
     /// A proposal between two section headers is the end of the section above.
     @Test func gapBetweenSectionsReadsAsEndOfSectionAbove() {
         let tree = Self.tree
-        // Between Repo B and Repo E: the end of Repo B's rows.
+        // Between Repo B and Repo F: the end of Repo B's rows.
         let endOfB = Self.drop([Rows.c1], into: nil, at: 3, depth: 0, in: tree)
         #expect(endOfB.decision == .place(parent: nil, before: nil))
         #expect(endOfB.retarget == Self.at(.repoHeader(Rows.repoB), 3))
@@ -206,7 +206,8 @@ struct SidebarDropPolicyTests {
     }
 
     /// Another repo's section takes nothing but a reorder among the carried
-    /// rows' current siblings there.
+    /// rows' current siblings there. A row's repo is its `homeRepoID`, never
+    /// the "(repo)" text it shows.
     @Test func otherRepoSectionRejectedExceptSiblingReorder() {
         let tree = Self.tree
         // Repo A's b into Repo B's section.
@@ -214,14 +215,36 @@ struct SidebarDropPolicyTests {
         #expect(Self.drop([Rows.b], onto: .worktree(Rows.c), in: tree).decision == .reject)
         #expect(Self.drop([Rows.b], onto: .worktree(Rows.mainB), in: tree).decision == .reject)
 
-        // y renders in Repo B's section but belongs to another repo: it
-        // reorders among its current siblings and goes nowhere else.
+        // y belongs to Repo A and renders under c in Repo B's section: there
+        // it reorders among its current siblings and goes nowhere else.
         let after = Self.drop([Rows.y], into: .worktree(Rows.c), at: 2, depth: 1, in: tree)
         #expect(after.decision == .place(parent: Rows.c, before: nil))
         #expect(Self.drop([Rows.y], onto: .worktree(Rows.c), in: tree).decision == .nest(under: Rows.c))
         #expect(Self.drop([Rows.y], into: .repoHeader(Rows.repoB), at: 2, depth: 0, in: tree).decision == .reject)
         #expect(Self.drop([Rows.y], onto: .worktree(Rows.d), in: tree).decision == .reject)
         #expect(Self.drop([Rows.y], onto: .worktree(Rows.mainB), in: tree).decision == .reject)
+
+        // Its own repo's section takes it: un-nested at Repo A's top level,
+        // onto Repo A's main row, or nested under a Repo A row.
+        let home = Self.drop([Rows.y], into: .repoHeader(Rows.repoA), at: 2, depth: 0, in: tree)
+        #expect(home.decision == .place(parent: nil, before: Rows.b))
+        #expect(home.retarget == nil)
+        let ontoMain = Self.drop([Rows.y], onto: .worktree(Rows.mainA), in: tree)
+        #expect(ontoMain.decision == .place(parent: nil, before: Rows.a))
+        #expect(ontoMain.retarget == Self.at(.repoHeader(Rows.repoA), 1))
+        #expect(Self.drop([Rows.y], onto: .worktree(Rows.a), in: tree).decision == .nest(under: Rows.a))
+    }
+
+    /// z belongs to a repo the sidebar does not list, so it shows no "(repo)"
+    /// suffix; it is still another repo's row in Repo B's section.
+    @Test func rowWithoutRepoLabelStillForeignInAnotherSection() {
+        let tree = Self.tree
+        #expect(Self.drop([Rows.z], into: .repoHeader(Rows.repoB), at: 2, depth: 0, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.z], onto: .worktree(Rows.c), in: tree).decision == .reject)
+        #expect(Self.drop([Rows.z], onto: .worktree(Rows.mainB), in: tree).decision == .reject)
+        // Among its current siblings it still moves.
+        #expect(Self.drop([Rows.z], into: .worktree(Rows.d), at: 0, depth: 2, in: tree).decision
+                == .place(parent: Rows.d, before: nil))
     }
 
     /// A row's state decides which group renders it, so a gap inside a state
@@ -237,16 +260,89 @@ struct SidebarDropPolicyTests {
         #expect(within.retarget == nil)
     }
 
+    /// State groups are closed: a row inside one goes only to gaps inside it
+    /// and onto rows inside it, and a row outside them nests into none.
+    @Test func stateGroupRowsStayInTheirGroup() {
+        let tree = Self.tree
+        // Out of the Hibernated group: between a and b, onto main, onto a row
+        // outside the group.
+        #expect(Self.drop([Rows.h1], into: .repoHeader(Rows.repoA), at: 2, depth: 0, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.h1], onto: .worktree(Rows.mainA), in: tree).decision == .reject)
+        #expect(Self.drop([Rows.h1], onto: .worktree(Rows.a), in: tree).decision == .reject)
+
+        // Within it: a reorder, and a nest onto a row of the same group.
+        let reorder = Self.drop([Rows.h1], into: .group(Self.hibernatedA), at: 2, depth: 1, in: tree)
+        #expect(reorder.decision == .place(parent: nil, before: nil))
+        #expect(reorder.retarget == nil)
+        #expect(Self.drop([Rows.h1], onto: .worktree(Rows.h2), in: tree).decision == .nest(under: Rows.h2))
+
+        // Into it from outside, by nesting.
+        #expect(Self.drop([Rows.b], onto: .worktree(Rows.h2), in: tree).decision == .reject)
+    }
+
+    /// A Remote group under a worktree places its rows under that worktree.
+    @Test func groupUnderWorktreePlacesUnderItsOwner() {
+        let tree = Self.tree
+        let first = Self.drop([Rows.xl2], into: .group(Self.remoteX), at: 0, depth: 2, in: tree)
+        #expect(first.decision == .place(parent: Rows.x, before: Rows.xl1))
+        #expect(first.retarget == nil)
+
+        // The owner's local child is not a remote lane, and a lane does not
+        // leave its group for the owner's other children.
+        #expect(Self.drop([Rows.x1], into: .group(Self.remoteX), at: 0, depth: 2, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.xl2], into: .worktree(Rows.x), at: 1, depth: 1, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.xl2], onto: .worktree(Rows.x), in: tree).decision == .reject)
+    }
+
+    /// Every rule applies to every carried row: one row that fails rejects
+    /// the drop, wherever it sits in the carried list.
+    @Test func everyCarriedRowMustPass() {
+        let tree = Self.tree
+        let hibernated = SidebarNodeID.group(Self.hibernatedA)
+        #expect(Self.drop([Rows.h2], into: hibernated, at: 0, depth: 1, in: tree).decision
+                == .place(parent: nil, before: Rows.h1))
+        #expect(Self.drop([Rows.h2, Rows.b], into: hibernated, at: 0, depth: 1, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.b, Rows.h2], into: hibernated, at: 0, depth: 1, in: tree).decision == .reject)
+
+        let sectionB = SidebarNodeID.repoHeader(Rows.repoB)
+        #expect(Self.drop([Rows.c1], into: sectionB, at: 2, depth: 0, in: tree).decision
+                == .place(parent: nil, before: Rows.d))
+        #expect(Self.drop([Rows.c1, Rows.y], into: sectionB, at: 2, depth: 0, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.y, Rows.c1], into: sectionB, at: 2, depth: 0, in: tree).decision == .reject)
+
+        #expect(Self.drop([Rows.a2], onto: .worktree(Rows.a1a), in: tree).decision == .nest(under: Rows.a1a))
+        #expect(Self.drop([Rows.a2, Rows.h1], onto: .worktree(Rows.a1a), in: tree).decision == .reject)
+        #expect(Self.drop([Rows.h1, Rows.a2], onto: .worktree(Rows.a1a), in: tree).decision == .reject)
+    }
+
+    /// A carried row the tree no longer has, or a carried set that mixes
+    /// scratch rows and worktrees, rejects the drop.
+    @Test func missingOrMixedCarriedRowsRejected() {
+        let tree = Self.tree
+        let gone = Rows.id(999)
+        #expect(Self.drop([gone], onto: .worktree(Rows.a), in: tree).decision == .reject)
+        #expect(Self.drop([Rows.b, gone], into: .repoHeader(Rows.repoA), at: 1, in: tree).decision == .reject)
+        #expect(Self.drop([gone, Rows.b], into: .repoHeader(Rows.repoA), at: 1, in: tree).decision == .reject)
+
+        #expect(Self.drop([Rows.s1, Rows.b], into: .repoHeader(Rows.repoA), at: 1, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.b, Rows.s1], into: .repoHeader(Rows.repoA), at: 1, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.s1, Rows.b], into: .scratchHeader, at: 0, in: tree).decision == .reject)
+    }
+
     /// No position inside a collapsed section takes rows.
     @Test func collapsedSectionRejected() {
         let tree = Self.tree
         #expect(Self.drop([Rows.b], into: .repoHeader(Rows.repoE), at: 0, in: tree).decision == .reject)
         // Below Repo E's header, the last section: the end of Repo E.
-        #expect(Self.drop([Rows.b], into: nil, at: 4, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.b], into: nil, at: 5, in: tree).decision == .reject)
 
         // The same section and rows, open and closed: the rows' own positions
         // are taken only while it is open.
-        let rows = [Self.row(Rows.mainE, main: true), Self.row(Rows.e1), Self.row(Rows.e2)]
+        let rows = [
+            Self.row(Rows.mainE, home: Rows.repoE, main: true),
+            Self.row(Rows.e1, home: Rows.repoE),
+            Self.row(Rows.e2, home: Rows.repoE),
+        ]
         let open = SidebarTree(roots: [Self.repo(Rows.repoE, rows)])
         let closed = SidebarTree(roots: [Self.repo(Rows.repoE, rows, expanded: false)])
         #expect(Self.drop([Rows.e2], into: .repoHeader(Rows.repoE), at: 1, in: open).decision
@@ -291,38 +387,31 @@ struct SidebarDropPolicyTests {
             .worktree(Rows.mainA), .remoteSession(Rows.r1), .worktree(Rows.a), .worktree(Rows.a1),
             .worktree(Rows.a1a), .worktree(Rows.b), .repoHeader(Rows.repoA), .group(Self.hibernatedA),
         ]
-        let fromA = SidebarDropPolicy.carried(selection: selection, origin: .worktree(Rows.a), tree: tree)
-        #expect(fromA == [Rows.a, Rows.b])
+        #expect(Self.carried(selection, from: .worktree(Rows.a), in: tree) == [Rows.a, Rows.b])
 
         // An adopted remote lane is a worktree row and travels; the rows come
         // back in tree order, not selection order.
-        let lane = SidebarDropPolicy.carried(
-            selection: [.worktree(Rows.l1), .worktree(Rows.b)], origin: .worktree(Rows.l1), tree: tree)
+        let lane = Self.carried([.worktree(Rows.l1), .worktree(Rows.b)], from: .worktree(Rows.l1), in: tree)
         #expect(lane == [Rows.b, Rows.l1])
 
         // A child travels with its selected parent.
-        let child = SidebarDropPolicy.carried(
-            selection: [.worktree(Rows.a1a), .worktree(Rows.a1)], origin: .worktree(Rows.a1a), tree: tree)
+        let child = Self.carried([.worktree(Rows.a1a), .worktree(Rows.a1)], from: .worktree(Rows.a1a), in: tree)
         #expect(child == [Rows.a1])
     }
 
     @Test func carriedMixedSelectionKeepsKindUnderCursor() {
         let tree = Self.tree
         let mixed: [SidebarNodeID] = [.worktree(Rows.b), .worktree(Rows.s2), .worktree(Rows.a), .worktree(Rows.s1)]
-        let scratch = SidebarDropPolicy.carried(selection: mixed, origin: .worktree(Rows.s2), tree: tree)
-        #expect(scratch == [Rows.s1, Rows.s2])
-        let worktrees = SidebarDropPolicy.carried(selection: mixed, origin: .worktree(Rows.a), tree: tree)
-        #expect(worktrees == [Rows.a, Rows.b])
+        #expect(Self.carried(mixed, from: .worktree(Rows.s2), in: tree) == [Rows.s1, Rows.s2])
+        #expect(Self.carried(mixed, from: .worktree(Rows.a), in: tree) == [Rows.a, Rows.b])
 
         // A drag from an unselected row carries that row alone.
-        let unselected = SidebarDropPolicy.carried(selection: mixed, origin: .worktree(Rows.d), tree: tree)
-        #expect(unselected == [Rows.d])
+        #expect(Self.carried(mixed, from: .worktree(Rows.d), in: tree) == [Rows.d])
 
         // A row that cannot be dragged starts no drag, selected or not.
-        let main = SidebarDropPolicy.carried(
-            selection: mixed + [.worktree(Rows.mainA)], origin: .worktree(Rows.mainA), tree: tree)
+        let main = Self.carried(mixed + [.worktree(Rows.mainA)], from: .worktree(Rows.mainA), in: tree)
         #expect(main.isEmpty)
-        let session = SidebarDropPolicy.carried(selection: mixed, origin: .remoteSession(Rows.r1), tree: tree)
+        let session = Self.carried(mixed, from: .remoteSession(Rows.r1), in: tree)
         #expect(session.isEmpty)
     }
 
@@ -335,13 +424,13 @@ struct SidebarDropPolicyTests {
     /// every row.
     @Test func resolveIsDepthBounded() {
         let chainDepth = 12
-        var chain = Self.row(Rows.id(9_000 + chainDepth))
+        var chain = Self.row(Rows.id(9_000 + chainDepth), home: Rows.repoA)
         for link in stride(from: chainDepth - 1, through: 1, by: -1) {
-            chain = Self.row(Rows.id(9_000 + link), [chain])
+            chain = Self.row(Rows.id(9_000 + link), home: Rows.repoA, [chain])
         }
-        var rows: [SidebarNode] = [Self.row(Rows.id(500), main: true)]
+        var rows: [SidebarNode] = [Self.row(Rows.id(500), home: Rows.repoA, main: true)]
         for number in 0..<700 {
-            rows.append(Self.row(Rows.id(1_000 + number), number == 350 ? [chain] : []))
+            rows.append(Self.row(Rows.id(1_000 + number), home: Rows.repoA, number == 350 ? [chain] : []))
         }
         for number in 0..<87 {
             rows.append(Self.session(Rows.id(5_000 + number)))
@@ -351,7 +440,7 @@ struct SidebarDropPolicyTests {
         #expect(tree.visibleRowCount == 801)
 
         let counter = SidebarDropIndex.ReadCounter()
-        let index = SidebarDropIndex(tree, counter: counter)
+        let index = SidebarDropIndex(tree: tree, counter: counter)
         let section = SidebarNodeID.repoHeader(Rows.repoA)
         let links = (1...chainDepth).map { SidebarNodeID.worktree(Rows.id(9_000 + $0)) }
         var proposals: [(parent: SidebarNodeID?, childIndex: Int)] = [(nil, 1)]
@@ -420,17 +509,28 @@ struct SidebarDropPolicyTests {
     // Repo B
     //   main B
     //   c
-    //     y               another repo's row, with the "(repo)" suffix
+    //     y               Repo A's row, with the "(repo)" suffix
     //     c1
     //   d
+    //     z               a row of a repo the sidebar does not list: no suffix
+    // Repo F
+    //   main F
+    //   x
+    //     x1
+    //     Remote          x's own Remote group
+    //       lane xl1
+    //       lane xl2
     // Repo E              collapsed
 
     enum Rows {
         static let s1 = id(101), s2 = id(102), s3 = id(103)
         static let repoA = id(1), mainA = id(10), a = id(11), a1 = id(12), a1a = id(13), a2 = id(14), a2a = id(15)
         static let b = id(16), r1 = id(17), r2 = id(18), l1 = id(19), h1 = id(20), h2 = id(21)
-        static let repoB = id(2), mainB = id(30), c = id(31), y = id(32), c1 = id(33), d = id(34)
+        static let repoB = id(2), mainB = id(30), c = id(31), y = id(32), c1 = id(33), d = id(34), z = id(35)
         static let repoE = id(3), mainE = id(40), e1 = id(41), e2 = id(42)
+        static let repoF = id(5), mainF = id(50), x = id(51), x1 = id(52), xl1 = id(53), xl2 = id(54)
+        /// A repo with no section in the sidebar.
+        static let repoUnlisted = id(9)
 
         static func id(_ number: Int) -> UUID {
             UUID(uuidString: String(format: "00000000-0000-0000-0000-%012ld", number))!
@@ -440,39 +540,53 @@ struct SidebarDropPolicyTests {
     static var scratchHibernated: SidebarGroupID { SidebarGroupID(owner: .scratch, kind: .hibernated) }
     static var remoteA: SidebarGroupID { SidebarGroupID(owner: .repository(Rows.repoA), kind: .remote) }
     static var hibernatedA: SidebarGroupID { SidebarGroupID(owner: .repository(Rows.repoA), kind: .hibernated) }
+    static var remoteX: SidebarGroupID { SidebarGroupID(owner: .parent(Rows.x), kind: .remote) }
 
     static var tree: SidebarTree {
-        SidebarTree(roots: [
+        let repoA = Rows.repoA
+        let repoB = Rows.repoB
+        let repoF = Rows.repoF
+        return SidebarTree(roots: [
             scratch([
-                row(Rows.s1),
-                row(Rows.s2),
-                group(scratchHibernated, [row(Rows.s3)]),
+                row(Rows.s1, home: nil),
+                row(Rows.s2, home: nil),
+                group(scratchHibernated, [row(Rows.s3, home: nil)]),
             ]),
-            repo(Rows.repoA, [
-                row(Rows.mainA, main: true),
-                row(Rows.a, [
-                    row(Rows.a1, [row(Rows.a1a)]),
-                    row(Rows.a2, [row(Rows.a2a)]),
+            repo(repoA, [
+                row(Rows.mainA, home: repoA, main: true),
+                row(Rows.a, home: repoA, [
+                    row(Rows.a1, home: repoA, [row(Rows.a1a, home: repoA)]),
+                    row(Rows.a2, home: repoA, [row(Rows.a2a, home: repoA)]),
                 ]),
-                row(Rows.b),
+                row(Rows.b, home: repoA),
                 session(Rows.r1),
                 session(Rows.r2),
-                group(remoteA, [row(Rows.l1)]),
-                group(hibernatedA, [row(Rows.h1), row(Rows.h2)]),
+                group(remoteA, [row(Rows.l1, home: repoA)]),
+                group(hibernatedA, [row(Rows.h1, home: repoA), row(Rows.h2, home: repoA)]),
             ]),
-            repo(Rows.repoB, [
-                row(Rows.mainB, main: true),
-                row(Rows.c, [row(Rows.y, foreign: true), row(Rows.c1)]),
-                row(Rows.d),
+            repo(repoB, [
+                row(Rows.mainB, home: repoB, main: true),
+                row(Rows.c, home: repoB, [row(Rows.y, home: repoA, label: "(acme)"), row(Rows.c1, home: repoB)]),
+                row(Rows.d, home: repoB, [row(Rows.z, home: Rows.repoUnlisted)]),
+            ]),
+            repo(repoF, [
+                row(Rows.mainF, home: repoF, main: true),
+                row(Rows.x, home: repoF, [
+                    row(Rows.x1, home: repoF),
+                    group(remoteX, [row(Rows.xl1, home: repoF), row(Rows.xl2, home: repoF)]),
+                ]),
             ]),
             repo(Rows.repoE, [], expanded: false),
         ])
     }
 
-    static func row(_ id: UUID, _ children: [SidebarNode] = [], main: Bool = false, foreign: Bool = false) -> SidebarNode {
+    /// A worktree row of `home`'s repo (nil for a scratch row). `label` is
+    /// the "(repo)" suffix the row shows, which the policy never reads.
+    static func row(_ id: UUID, home: UUID?, _ children: [SidebarNode] = [], main: Bool = false,
+                    label: String? = nil) -> SidebarNode {
         let model = WorktreeRowModel(
             name: "row", leading: nil, isNameBold: false, subtitles: [], suffix: nil,
-            showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: foreign ? "(acme)" : nil,
+            showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: label, homeRepoID: home,
             isPinned: false, depth: 0, isDimmed: false, isInHiddenSection: false, isMain: main,
             heightClass: .single)
         return SidebarNode(id: .worktree(id), kind: .worktree(model), children: children, isExpanded: true)
@@ -527,7 +641,7 @@ struct SidebarDropPolicyTests {
     static func drop(_ carried: [UUID], onto target: SidebarNodeID?, in tree: SidebarTree) -> Answer {
         answer(SidebarDropPolicy.resolve(
             carried: carried, proposedParent: target, childIndex: SidebarDropPolicy.dropOnItemIndex,
-            pointerDepth: 0, tree: tree))
+            pointerDepth: 0, index: SidebarDropIndex(tree: tree)))
     }
 
     /// Drops `carried` into the gap at `childIndex` among `parent`'s
@@ -535,11 +649,16 @@ struct SidebarDropPolicyTests {
     static func drop(_ carried: [UUID], into parent: SidebarNodeID?, at childIndex: Int, depth: Int = 0,
                      in tree: SidebarTree) -> Answer {
         answer(SidebarDropPolicy.resolve(
-            carried: carried, proposedParent: parent, childIndex: childIndex, pointerDepth: depth, tree: tree))
+            carried: carried, proposedParent: parent, childIndex: childIndex, pointerDepth: depth,
+            index: SidebarDropIndex(tree: tree)))
     }
 
     static func answer(_ resolved: SidebarDropPolicy.Answer) -> Answer {
         Answer(decision: resolved.decision,
                retarget: resolved.retarget.map { Target(parent: $0.parent, childIndex: $0.childIndex) })
+    }
+
+    static func carried(_ selection: [SidebarNodeID], from origin: SidebarNodeID, in tree: SidebarTree) -> [UUID] {
+        SidebarDropPolicy.carried(selection: selection, origin: origin, index: SidebarDropIndex(tree: tree))
     }
 }

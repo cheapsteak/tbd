@@ -229,7 +229,7 @@ struct SidebarCellTests {
     ) -> WorktreeRowModel {
         WorktreeRowModel(
             name: name, leading: leading, isNameBold: bold, subtitles: subtitles, suffix: suffix,
-            showsNoStatusMark: noStatus, showsDevServerDot: devServer, crossRepoLabel: crossRepo,
+            showsNoStatusMark: noStatus, showsDevServerDot: devServer, crossRepoLabel: crossRepo, homeRepoID: nil,
             isPinned: false, depth: 0, isDimmed: dimmed, isInHiddenSection: hiddenSection, isMain: false,
             heightClass: subtitles.isEmpty ? .single : .withSubtitle)
     }
