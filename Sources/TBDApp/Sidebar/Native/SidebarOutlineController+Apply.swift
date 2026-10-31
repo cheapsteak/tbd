@@ -33,17 +33,19 @@ extension SidebarOutlineController {
     /// A row nested onto a former leaf, or into a parent the outline has not
     /// expanded, cannot be moved there: `NSOutlineView` has not loaded that
     /// parent's children. The diff removes it and the parent's `reloadItem`
-    /// and `expand` bring it back. Its ID then gets a fresh item (see
-    /// `releasedDuringApply`), and the selection and scroll anchor restored at
-    /// the end of every apply put it back where it was, so only its row view
-    /// is new.
+    /// and `expand` bring it back, under the same `SidebarItem` (its ID is in
+    /// the new tree, so the cache keeps it). The selection and scroll anchor
+    /// restored at the end of every apply put it back where it was, so only
+    /// its row view is new.
+    ///
+    /// Nothing here asks the outline which item sits at an index while the
+    /// update runs: `child(_:ofItem:)` answers through the data source, which
+    /// already serves the new tree, so it names the wrong item mid-update.
     private func applyUpdate(to latest: SidebarTree) {
-        defer {
-            releasedDuringApply.removeAll()
-            movedDuringApply.removeAll()
-        }
         let target = isHoldingStructure ? Self.content(of: latest, inStructureOf: tree) : latest
         let update = diffForTesting?(tree, target) ?? SidebarTreeDiff.update(from: tree, to: target)
+        lastAppliedUpdate = update
+        configuredRowViews.removeAll()
         let anchor = captureScrollAnchor()
 
         isApplyingStructure = true
@@ -72,7 +74,9 @@ extension SidebarOutlineController {
             // The outline has let go of every removed item.
             items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
-            reconfigureRowViews(under: movedDuringApply)
+            // A move changes a row's ancestors even when its own model stays
+            // the same, and the row view's tint and guide lines follow them.
+            if !update.steps.isEmpty { refreshRowViewConfigurations() }
             noteHeights(update.heightChanged)
         }
         isApplyingStructure = false
@@ -106,18 +110,12 @@ extension SidebarOutlineController {
         switch step {
         case .remove(let parentID, let index):
             guard let parent = resolve(parentID) else { return }
-            if let removed = outline.child(index, ofItem: parent.item) as? SidebarItem {
-                release(removed)
-            }
             outline.removeItems(at: IndexSet(integer: index), inParent: parent.item, withAnimation: [])
         case .insert(let parentID, let index, _):
             guard let parent = resolve(parentID) else { return }
             outline.insertItems(at: IndexSet(integer: index), inParent: parent.item, withAnimation: [])
         case .move(let fromParent, let fromIndex, let toParent, let toIndex):
             guard let source = resolve(fromParent), let destination = resolve(toParent) else { return }
-            if let moved = outline.child(fromIndex, ofItem: source.item) as? SidebarItem {
-                movedDuringApply.append(moved.id)
-            }
             outline.moveItem(at: fromIndex, inParent: source.item, to: toIndex, inParent: destination.item)
         case .reloadItem(let id):
             guard let item = resolve(id)?.item else { return }
@@ -128,24 +126,6 @@ extension SidebarOutlineController {
         case .collapse(let id):
             guard let item = resolve(id)?.item else { return }
             outline.collapseItem(item, collapseChildren: true)
-        }
-    }
-
-    /// Drops `item` and everything the outline has loaded beneath it from the
-    /// cache, keeping the objects alive until the update ends. Whatever comes
-    /// back in this update comes back as a fresh item, never one the outline
-    /// has just let go of.
-    private func release(_ item: SidebarItem) {
-        var pending = [item]
-        while let next = pending.popLast() {
-            releasedDuringApply.append(next)
-            items.evict(next)
-            guard outline.isItemExpanded(next) else { continue }
-            for index in 0..<outline.numberOfChildren(ofItem: next) {
-                if let child = outline.child(index, ofItem: next) as? SidebarItem {
-                    pending.append(child)
-                }
-            }
         }
     }
 
@@ -201,19 +181,14 @@ extension SidebarOutlineController {
         }
     }
 
-    /// Reconfigures the row views of `ids` and of every row beneath them: their
-    /// guide lines and tint depend on their ancestors.
-    private func reconfigureRowViews(under ids: [SidebarNodeID]) {
-        guard !ids.isEmpty else { return }
-        var affected: Set<SidebarNodeID> = []
-        var pending = ids.compactMap { tree.node($0) }
-        while let node = pending.popLast() {
-            affected.insert(node.id)
-            pending.append(contentsOf: node.children)
-        }
+    /// Re-derives every row view's tint and guide lines from the current
+    /// tree, after `endUpdates`, by the row each view now shows. Cheap — only
+    /// the views the outline holds, each an ancestor walk — and a view whose
+    /// configuration is unchanged does not redraw.
+    private func refreshRowViewConfigurations() {
         outline.enumerateAvailableRowViews { rowView, row in
             guard let sidebarRow = rowView as? SidebarRowView,
-                  let item = self.outline.item(atRow: row) as? SidebarItem, affected.contains(item.id),
+                  let item = self.outline.item(atRow: row) as? SidebarItem,
                   let node = self.tree.node(item.id) else { return }
             self.configure(sidebarRow, node: node)
         }

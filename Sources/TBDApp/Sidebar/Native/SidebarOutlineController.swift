@@ -69,20 +69,16 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// Stands in for `SidebarTreeDiff.update` so a test can apply a wrong
     /// update and watch the fallback catch it.
     var diffForTesting: ((SidebarTree, SidebarTree) -> OutlineUpdate)?
+    /// The update the last structural apply ran, for a failing test to print.
+    var lastAppliedUpdate: OutlineUpdate?
+    /// Each row view configured since the last apply began, and the row it
+    /// was configured for: what a failing test prints to tell the view it
+    /// configured from the view the outline shows.
+    var configuredRowViews: [ObjectIdentifier: SidebarNodeID] = [:]
 
     // MARK: State
 
     var items = SidebarItemCache()
-    /// Items the current update removed from the outline. Their IDs leave the
-    /// cache at the removal, so an ID that comes back in the same update — a
-    /// row nested onto a former leaf, re-created by the parent's reload — gets
-    /// a fresh item; the objects stay alive here until the update is over,
-    /// since the outline does not retain them.
-    var releasedDuringApply: [SidebarItem] = []
-    /// Rows the current update moved. Their row views' guide lines and tint
-    /// follow their ancestors, which a move changes even when the row's own
-    /// model does not, so they are reconfigured after the update.
-    var movedDuringApply: [SidebarNodeID] = []
     private var holds: Set<HoldReason> = []
     var hasLoaded = false
     private var rebuildScheduled = false

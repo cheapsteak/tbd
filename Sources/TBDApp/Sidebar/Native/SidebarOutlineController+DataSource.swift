@@ -51,6 +51,16 @@ extension SidebarOutlineController {
         return rowView
     }
 
+    /// Every row view AppKit adds — fresh, reused, or moved to a new row —
+    /// takes its tint and guide lines from the current tree, so no view shows
+    /// a configuration from the row it held before.
+    func outlineView(_ outlineView: NSOutlineView, didAdd rowView: NSTableRowView, forRow row: Int) {
+        guard let sidebarRow = rowView as? SidebarRowView,
+              let item = outlineView.item(atRow: row) as? SidebarItem,
+              let node = tree.node(item.id) else { return }
+        configure(sidebarRow, node: node)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let item = item as? SidebarItem, let node = tree.node(item.id) else { return WorktreeRowView.rowHeight }
         return rowHeight(for: node.kind)
@@ -153,6 +163,7 @@ extension SidebarOutlineController {
             break
         }
         rowView.configuration = configuration
+        configuredRowViews[ObjectIdentifier(rowView)] = node.id
     }
 
     /// How many worktree rows `id` sits under: `WorktreeRowView`'s

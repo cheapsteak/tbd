@@ -73,6 +73,82 @@ final class OutlineHarness {
         host?.layout()
         return outline.rowView(atRow: index, makeIfNecessary: make)
     }
+
+    /// Rows whose shown item is not the item the controller holds for that
+    /// ID: an item dropped from the cache while the outline still shows it.
+    var shownItemsMissingFromCache: [SidebarNodeID] {
+        (0..<outline.numberOfRows).compactMap { row -> SidebarNodeID? in
+            guard let item = outline.item(atRow: row) as? SidebarItem else { return nil }
+            return controller.item(for: item.id) === item ? nil : item.id
+        }
+    }
+
+    // MARK: Evidence for a failing expectation
+
+    /// What a failing outline expectation prints, so a CI failure carries it:
+    /// the rows shown, the rows selected, the last update's steps, the
+    /// fallback count, and any shown row whose item left the cache. `names`
+    /// labels worktree rows.
+    func evidence(_ names: [UUID: String] = [:]) -> Comment {
+        let shown = shownIDs.map { Self.label($0, names) }.joined(separator: ", ")
+        let selectedIDs = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? SidebarItem)?.id }
+        let selected = selectedIDs.map { Self.label($0, names) }.joined(separator: ", ")
+        let steps = controller.lastAppliedUpdate.map { update in
+            update.steps.map { Self.describe($0, names) }.joined(separator: "; ")
+        } ?? "no update applied"
+        let uncached = shownItemsMissingFromCache.map { Self.label($0, names) }.joined(separator: ", ")
+        let appSelection = state.selectedWorktreeIDs.map { names[$0] ?? Self.short($0) }.sorted().joined(separator: ", ")
+        return Comment(rawValue: "shown [\(shown)] · selected [\(selected)] · AppState selection [\(appSelection)]"
+            + " · steps [\(steps)] · fallbacks \(controller.fallbackReloadCount)"
+            + " · shown but not cached [\(uncached)]")
+    }
+
+    /// `evidence` plus which row view was captured, which one the outline now
+    /// shows for `id`, their configurations, and the views configured for
+    /// `id` since the last apply began.
+    func rowViewEvidence(_ id: SidebarNodeID, captured: SidebarRowView, _ names: [UUID: String] = [:]) -> Comment {
+        let shownView = rowView(id, make: false)
+        let shownConfiguration = (shownView as? SidebarRowView).map { String(describing: $0.configuration) } ?? "none"
+        let configured = controller.configuredRowViews.filter { $0.value == id }.map { String(describing: $0.key) }
+        return Comment(rawValue: evidence(names).rawValue
+            + " · captured view \(String(describing: ObjectIdentifier(captured))) \(captured.configuration)"
+            + " · shown view \(shownView.map { String(describing: ObjectIdentifier($0)) } ?? "none") \(shownConfiguration)"
+            + " · configured for this row since the apply [\(configured.joined(separator: ", "))]")
+    }
+
+    static func short(_ id: UUID) -> String {
+        String(id.uuidString.prefix(8))
+    }
+
+    static func label(_ id: SidebarNodeID, _ names: [UUID: String]) -> String {
+        switch id {
+        case .worktree(let uuid): names[uuid] ?? "worktree \(short(uuid))"
+        case .remoteSession(let uuid): "session \(short(uuid))"
+        case .repoHeader(let uuid): "repo \(short(uuid))"
+        case .providerHeader(let name): "provider \(name)"
+        case .group(let group): "\(group.kind) group"
+        case .scratchHeader: "scratch"
+        case .scratchPrompt: "scratch prompt"
+        }
+    }
+
+    static func parentLabel(_ id: SidebarNodeID?, _ names: [UUID: String]) -> String {
+        guard let id else { return "root" }
+        return label(id, names)
+    }
+
+    static func describe(_ step: OutlineStep, _ names: [UUID: String]) -> String {
+        switch step {
+        case .remove(let from, let index): return "remove \(index) of \(parentLabel(from, names))"
+        case .insert(let into, let index, let id):
+            return "insert \(label(id, names)) at \(index) of \(parentLabel(into, names))"
+        case .move(let from, let fromIndex, let into, let toIndex):
+            return "move \(fromIndex) of \(parentLabel(from, names)) to \(toIndex) of \(parentLabel(into, names))"
+        case .reloadItem(let id): return "reload \(label(id, names))"
+        case .expand(let id): return "expand \(label(id, names))"
+        case .collapse(let id): return "collapse \(label(id, names))"
+        }
+    }
 }
 
 /// The native sidebar's update loop: first load, coalescing, applying diffs
@@ -334,23 +410,30 @@ struct SidebarOutlineControllerTests {
         h.state.worktrees[repo.id]?[index].parentWorktreeID = parent.id
         h.controller.flushPendingRebuild()
 
-        #expect(h.controller.fallbackReloadCount == 0)
-        #expect(h.shownIDs == h.freshTree().visibleIDs)
+        let names = [parent.id: "parent", working.id: "working", parked.id: "parked"]
+        #expect(h.controller.fallbackReloadCount == 0, h.evidence(names))
+        #expect(h.shownIDs == h.freshTree().visibleIDs, h.evidence(names))
         #expect(!h.controller.tree.contains(.group(shelf)), "The emptied shelf is gone")
         #expect(h.controller.item(for: .group(shelf)) == nil)
         #expect(h.controller.tree.parent(of: .worktree(parked.id)) == .worktree(parent.id))
-        #expect(h.controller.item(for: .worktree(parked.id)) === parkedItem, "The row moved rather than re-created")
-        #expect(h.rowView(.worktree(parked.id), make: false) === before)
+        #expect(h.controller.item(for: .worktree(parked.id)) === parkedItem, h.evidence(names))
+        let uncached = h.shownItemsMissingFromCache
+        #expect(uncached.isEmpty, h.evidence(names))
         // The row's model is the same at the same depth, but its ancestors
-        // changed: the moved row view's tint and guide line follow them.
-        #expect(before.configuration.tintLevel == 0)
-        #expect(before.configuration.guideCount == 1)
+        // changed. Whichever view the outline now shows for it takes its tint
+        // and guide line from them.
+        let shown = try #require(h.rowView(.worktree(parked.id), make: false) as? SidebarRowView,
+                                 h.rowViewEvidence(.worktree(parked.id), captured: before, names))
+        #expect(shown === before, "A move keeps the row's view; \(h.rowViewEvidence(.worktree(parked.id), captured: before, names).rawValue)")
+        #expect(shown.configuration.tintLevel == 0, h.rowViewEvidence(.worktree(parked.id), captured: before, names))
+        #expect(shown.configuration.guideCount == 1, h.rowViewEvidence(.worktree(parked.id), captured: before, names))
     }
 
     /// The one case a moved row cannot keep its view: nested onto a former
-    /// leaf, it is removed and re-created by the leaf's reload, its own child
-    /// with it. Its ID gets a fresh item, and the selection and scroll anchor
-    /// come back.
+    /// leaf, it is removed and brought back by the leaf's reload, its own
+    /// child with it. The rows match a fresh build, the selection and scroll
+    /// anchor come back, and every row the outline shows is the item the
+    /// cache holds for it.
     @Test func nestOntoLeafWithChildrenReplaysOnTheOutline() throws {
         let h = OutlineHarness("replay.nest")
         defer { h.tearDown() }
@@ -366,8 +449,6 @@ struct SidebarOutlineControllerTests {
         h.state.selectedWorktreeIDs = [moving.id]
         h.mount(size: NSSize(width: 320, height: 200))
 
-        let oldMoving = try #require(h.controller.item(for: .worktree(moving.id)))
-        let oldChild = try #require(h.controller.item(for: .worktree(movingChild.id)))
         let movingRow = h.row(.worktree(moving.id))
         try #require(h.outline.selectedRowIndexes == IndexSet(integer: movingRow))
         // The moving row is the first visible one, 6 pt above the clip's top.
@@ -380,23 +461,24 @@ struct SidebarOutlineControllerTests {
         h.state.worktrees[repo.id]?[index].parentWorktreeID = leaf.id
         h.controller.flushPendingRebuild()
 
-        #expect(h.controller.fallbackReloadCount == 0)
-        #expect(h.shownIDs == h.freshTree().visibleIDs)
+        let names = [leaf.id: "leaf", moving.id: "moving", movingChild.id: "moving child"]
+        #expect(h.controller.fallbackReloadCount == 0, h.evidence(names))
+        #expect(h.shownIDs == h.freshTree().visibleIDs, h.evidence(names))
         #expect(h.controller.tree.parent(of: .worktree(moving.id)) == .worktree(leaf.id))
-        #expect(h.outline.level(forRow: h.row(.worktree(movingChild.id))) == 3)
-        // Fresh items: a removed object is never handed back to the outline.
-        let newMoving = try #require(h.controller.item(for: .worktree(moving.id)))
-        let newChild = try #require(h.controller.item(for: .worktree(movingChild.id)))
-        #expect(newMoving !== oldMoving)
-        #expect(newChild !== oldChild)
-        #expect(h.outline.row(forItem: oldMoving) == -1)
+        #expect(h.outline.level(forRow: h.row(.worktree(movingChild.id))) == 3, h.evidence(names))
+        // Nothing the outline still shows was dropped from the cache, so every
+        // lookup by ID — selection, anchor, reconfigure — finds its row.
+        let uncached = h.shownItemsMissingFromCache
+        #expect(uncached.isEmpty, h.evidence(names))
         // The selection and the scroll anchor came back.
         let newRow = h.row(.worktree(moving.id))
-        #expect(h.outline.selectedRowIndexes == IndexSet(integer: newRow))
-        #expect(h.state.selectedWorktreeIDs == [moving.id])
-        #expect(h.controller.appStateSelectionWriteCount == 0)
+        try #require(newRow >= 0, h.evidence(names))
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: newRow), h.evidence(names))
+        #expect(h.state.selectedWorktreeIDs == [moving.id], h.evidence(names))
+        #expect(h.controller.appStateSelectionWriteCount == 0, h.evidence(names))
         let offsetAfter = h.outline.rect(ofRow: newRow).minY - h.clip.bounds.minY
-        #expect(abs(offsetAfter - offsetBefore) < 0.5, "The anchor row moved on screen: \(offsetBefore) → \(offsetAfter)")
+        #expect(abs(offsetAfter - offsetBefore) < 0.5,
+                "The anchor row moved on screen: \(offsetBefore) → \(offsetAfter); \(h.evidence(names).rawValue)")
     }
 
     // MARK: Holding structure
@@ -571,14 +653,19 @@ struct SidebarOutlineControllerTests {
         h.state.worktrees[repo.id]?.removeAll { $0.id == first.id }
         h.controller.flushPendingRebuild()
 
-        #expect(h.controller.item(for: .worktree(first.id)) == nil)
-        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))))
-        #expect(h.state.selectedWorktreeIDs == [second.id])
+        let names = [first.id: "first", second.id: "second"]
+        #expect(h.controller.item(for: .worktree(first.id)) == nil, h.evidence(names))
+        let uncached = h.shownItemsMissingFromCache
+        #expect(uncached.isEmpty, h.evidence(names))
+        let secondRow = h.row(.worktree(second.id))
+        try #require(secondRow >= 0, h.evidence(names))
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: secondRow), h.evidence(names))
+        #expect(h.state.selectedWorktreeIDs == [second.id], h.evidence(names))
         #expect(h.controller.appStateSelectionWriteCount == 1, "AppState must be told exactly once")
         // Converged: the rebuild that write schedules writes nothing more.
         h.controller.flushPendingRebuild()
-        #expect(h.controller.appStateSelectionWriteCount == 1)
-        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))))
+        #expect(h.controller.appStateSelectionWriteCount == 1, h.evidence(names))
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))), h.evidence(names))
 
         // A selected row that is only out of view stays selected, as in the List.
         h.state.repos[0].expanded = false
