@@ -1,7 +1,7 @@
 import AppKit
 
 /// What the pointer is over in the native sidebar, from one tracking area on
-/// the outline (spec "Hover").
+/// a list — the outline, or the pinned dock (spec "Hover").
 ///
 /// It answers three things the SwiftUI rows each learned from their own
 /// `onHover`:
@@ -23,9 +23,18 @@ import AppKit
 /// report, so the owner can re-anchor what follows the row; pointer moves
 /// report only a change.
 ///
+/// The list says what each row is through a resolver: the row's ID and its
+/// section, so the tracker needs to know nothing of outline items. The dock's
+/// rows sit in no section, so it reveals no header.
+///
 /// The 80 ms wait runs on the injected clock.
 @MainActor
 final class SidebarHoverTracker: NSResponder {
+    /// A row as the tracker sees it: its ID, and `section`, the top-level row
+    /// it sits under — its section's header, or the row itself when it is
+    /// one — nil in a list without sections. Nil for a row with no ID.
+    typealias RowResolver = (Int) -> (id: SidebarNodeID, section: SidebarNodeID?)?
+
     struct State: Equatable {
         var row: SidebarNodeID?
         var part: SidebarHoverPart = .none
@@ -39,7 +48,8 @@ final class SidebarHoverTracker: NSResponder {
     static let sectionLinger: Duration = .milliseconds(80)
 
     private(set) var state = State()
-    private weak var outline: NSOutlineView?
+    private weak var table: NSTableView?
+    private let resolve: RowResolver
     private let onChange: (State) -> Void
     private let clock: any Clock<Duration>
     private var trackingArea: NSTrackingArea?
@@ -52,12 +62,18 @@ final class SidebarHoverTracker: NSResponder {
     private var lingering: [SidebarNodeID: (token: Int, task: Task<Void, Never>)] = [:]
     private var lingerToken = 0
 
+    /// - Parameters:
+    ///   - table: the list, already the document view of its scroll view.
+    ///   - resolve: what each of `table`'s rows is. Called on every pointer
+    ///     move, so it must be cheap.
     init(
-        outline: NSOutlineView,
+        table: NSTableView,
+        resolve: @escaping RowResolver,
         onChange: @escaping (State) -> Void,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
-        self.outline = outline
+        self.table = table
+        self.resolve = resolve
         self.onChange = onChange
         self.clock = clock
         super.init()
@@ -65,9 +81,9 @@ final class SidebarHoverTracker: NSResponder {
             rect: .zero,
             options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self, userInfo: nil)
-        outline.addTrackingArea(area)
+        table.addTrackingArea(area)
         trackingArea = area
-        if let clip = outline.enclosingScrollView?.contentView {
+        if let clip = table.enclosingScrollView?.contentView {
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self, selector: #selector(clipViewScrolled(_:)),
@@ -75,24 +91,43 @@ final class SidebarHoverTracker: NSResponder {
         }
     }
 
+    /// The outline's tracker: each row's section is its top-level ancestor,
+    /// found by walking the outline's parents.
+    convenience init(
+        outline: NSOutlineView,
+        onChange: @escaping (State) -> Void,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
+        self.init(
+            table: outline,
+            resolve: { [weak outline] row in
+                guard let outline, let item = outline.item(atRow: row) as? SidebarItem else { return nil }
+                var top: Any = item
+                while let parent = outline.parent(forItem: top) { top = parent }
+                return (id: item.id, section: (top as? SidebarItem)?.id)
+            },
+            onChange: onChange,
+            clock: clock)
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// A tracking area does not retain its owner, so one left behind on an
-    /// outline that outlives the tracker would message a freed object. The
-    /// tracker is made and released on the main thread — by the outline that
+    /// A tracking area does not retain its owner, so one left behind on a
+    /// list that outlives the tracker would message a freed object. The
+    /// tracker is made and released on the main thread — by the list that
     /// holds it, or by a test.
     deinit {
         MainActor.assumeIsolated { invalidate() }
     }
 
-    /// Takes the tracking area off the outline, stops listening for scrolls
+    /// Takes the tracking area off the list, stops listening for scrolls
     /// and cancels pending debounces. Idempotent.
     func invalidate() {
         if let trackingArea {
-            outline?.removeTrackingArea(trackingArea)
+            table?.removeTrackingArea(trackingArea)
         }
         trackingArea = nil
         NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: nil)
@@ -118,7 +153,7 @@ final class SidebarHoverTracker: NSResponder {
         recompute()
     }
 
-    /// The pointer is at `point` in the outline's window.
+    /// The pointer is at `point` in the list's window.
     func pointerMoved(toWindowPoint point: NSPoint) {
         windowPoint = point
         update(force: false)
@@ -167,32 +202,28 @@ final class SidebarHoverTracker: NSResponder {
     /// The row under the pointer, the part of it, the repo section it
     /// reveals, and the Scratch header when that is the row.
     private func hitTest() -> (SidebarNodeID?, SidebarHoverPart, SidebarNodeID?, SidebarNodeID?) {
-        guard let outline, outline.window != nil, let windowPoint else { return (nil, .none, nil, nil) }
-        let point = outline.convert(windowPoint, from: nil)
-        guard outline.visibleRect.contains(point) else { return (nil, .none, nil, nil) }
-        let index = outline.row(at: point)
-        guard index >= 0, let item = outline.item(atRow: index) as? SidebarItem else { return (nil, .none, nil, nil) }
+        guard let table, table.window != nil, let windowPoint else { return (nil, .none, nil, nil) }
+        let point = table.convert(windowPoint, from: nil)
+        guard table.visibleRect.contains(point) else { return (nil, .none, nil, nil) }
+        let index = table.row(at: point)
+        guard index >= 0, let row = resolve(index) else { return (nil, .none, nil, nil) }
 
         var part = SidebarHoverPart.none
-        if let cell = outline.view(atColumn: 0, row: index, makeIfNecessary: false) as? NSView & SidebarHoverTarget {
-            part = cell.hoverPart(at: cell.convert(point, from: outline))
+        if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? NSView & SidebarHoverTarget {
+            part = cell.hoverPart(at: cell.convert(point, from: table))
         }
 
-        var top: Any = item
-        while let parent = outline.parent(forItem: top) { top = parent }
-        let header = (top as? SidebarItem)?.id
-
         var section: SidebarNodeID?
-        switch item.id {
+        switch row.id {
         case .repoHeader:
-            section = item.id
+            section = row.id
         case .worktree, .remoteSession:
-            if case .repoHeader? = header { section = header }
+            if case .repoHeader? = row.section { section = row.section }
         case .scratchHeader, .scratchPrompt, .providerHeader, .group:
             break
         }
-        let scratch: SidebarNodeID? = item.id == .scratchHeader ? item.id : nil
-        return (item.id, part, section, scratch)
+        let scratch: SidebarNodeID? = row.id == .scratchHeader ? row.id : nil
+        return (row.id, part, section, scratch)
     }
 
     // MARK: The 80 ms debounce

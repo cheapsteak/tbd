@@ -129,8 +129,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     /// Whether each unpromoted scratch row's directory exists, read on a
     /// background task so no rebuild touches the disk. A path not yet probed
-    /// reads as existing, so a row is never dimmed on a guess.
-    private var scratchDirectoryExists: [String: Bool] = [:]
+    /// reads as existing, so a row is never dimmed on a guess. The pinned
+    /// dock reads it too, through the container.
+    private(set) var scratchDirectoryExists: [String: Bool] = [:]
+    /// Runs after a probe changed an answer; the container points it at the
+    /// dock, which rebuilds as the outline does.
+    var onScratchDirectoriesChanged: (() -> Void)?
     private var probedScratchPaths: Set<String> = []
     private let scratchDirectoryProbe: @Sendable (String) -> Bool
 
@@ -467,6 +471,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         guard paths == probedScratchPaths else { return }
         let changed = found.contains { path, exists in (scratchDirectoryExists[path] ?? true) != exists }
         scratchDirectoryExists = found
-        if changed { scheduleRebuild() }
+        if changed {
+            scheduleRebuild()
+            onScratchDirectoriesChanged?()
+        }
     }
 }

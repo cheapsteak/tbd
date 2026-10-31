@@ -59,18 +59,17 @@ struct SidebarView: View {
         }
     }
 
-    /// The native path: the outline fills the column and the shared footer
-    /// sits beneath it. The outline controller observes `AppState` itself and
-    /// carries its own reveal handling, so none of the `List` path's
-    /// `onChange` handlers apply here.
+    /// The native path: the outline and the pinned dock fill the column and
+    /// the shared footer sits beneath them. The divider topping the dock is
+    /// the native container's, so the footer follows the dock directly, as in
+    /// the `List` path's footer group. The controllers observe `AppState`
+    /// themselves and carry their own reveal handling, so none of the `List`
+    /// path's `onChange` handlers apply here.
     private var nativeSidebar: some View {
         VStack(spacing: 0) {
             NativeSidebarView()
-            VStack(spacing: 0) {
-                Divider()
-                SidebarFooter()
-            }
-            .background(.bar)
+            SidebarFooter()
+                .background(.bar)
         }
     }
 
