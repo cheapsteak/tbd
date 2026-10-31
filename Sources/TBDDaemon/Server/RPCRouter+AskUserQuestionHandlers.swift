@@ -28,16 +28,19 @@ extension RPCRouter {
     /// before the assistant `tool_use` line is flushed to the JSONL.
     ///
     /// On a terminal whose current incarnation is not reporting its state —
-    /// the store holds no report from it: any tmux session, and a holder
-    /// session whose agent is too old to report — also marks the worktree as
-    /// needing attention by creating an `attentionNeeded` notification and
-    /// broadcasting the matching delta. There the Stop hook (end of turn) is
-    /// otherwise the only path that flips the worktree to unread, but Stop
-    /// doesn't fire while a tool call is pending — so an AskUserQuestion would
-    /// leave the worktree silently waiting. A reporting session reports the
-    /// question itself over OSC 7501 (`blocked kind=question`), and
-    /// `ProgramStatusStore` raises the banner for it, so a notification here
-    /// would be a second banner for one question.
+    /// the store holds no report from it and its column holds no value the
+    /// store wrote (`ProgramStatusStore.isReporting`): any tmux session, and a
+    /// holder session whose agent is too old to report — also marks the
+    /// worktree as needing attention by creating an `attentionNeeded`
+    /// notification and broadcasting the matching delta. There the Stop hook
+    /// (end of turn) is otherwise the only path that flips the worktree to
+    /// unread, but Stop doesn't fire while a tool call is pending — so an
+    /// AskUserQuestion would leave the worktree silently waiting. A reporting
+    /// session reports the question itself over OSC 7501 (`blocked
+    /// kind=question`), and `ProgramStatusStore` raises the banner for it, so
+    /// a notification here would be a second banner for one question. The
+    /// column half keeps that true after a daemon restart, which empties the
+    /// store's memory but not the column.
     func handleTerminalAskUserQuestionPending(_ paramsData: Data) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionPendingParams.self, from: paramsData)
         let pending = PendingAskUserQuestion(
@@ -59,8 +62,7 @@ extension RPCRouter {
             // this handler already resolves; a missing row has no worktree.
             await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
-            guard await !programStatus.holdsReport(
-                terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID) else {
+            guard await !programStatus.isReporting(terminal) else {
                 askUserQuestionLog.debug("reporting session — its own report raises the banner terminalID=\(p.terminalID.uuidString, privacy: .public)")
                 return .ok()
             }

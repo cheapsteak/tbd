@@ -413,6 +413,18 @@ public actor ProgramStatusStore {
         return entry.incarnationID == incarnationID
     }
 
+    /// Whether `terminal`'s current incarnation is a reporting one: the store
+    /// holds a report from it, or the row's activity column holds a value
+    /// this store wrote (`.programStatus`). The column is the half that
+    /// survives a daemon restart, which starts the store empty. It speaks
+    /// only for the current incarnation, because every write that mints an
+    /// incarnation — a wake, a respawn, a park — rewrites the source, and the
+    /// store writes `.programStatus` only for the incarnation the row names.
+    public func isReporting(_ terminal: Terminal) -> Bool {
+        terminal.activityStateSource == .programStatus
+            || holdsReport(terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID)
+    }
+
     /// Every terminal that holds a main entry or task entries.
     public func allSnapshots() -> [ProgramStatusSnapshot] {
         var out: [ProgramStatusSnapshot] = []

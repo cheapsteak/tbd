@@ -128,6 +128,63 @@ extension RPCRouterTests {
         #expect(await router.pendingQuestions.entries(forTerminal: tmux.id).count == 1)
     }
 
+    /// A daemon restart empties the program status store but not the column it
+    /// wrote. This router's store never saw the write below — as after a
+    /// restart — and the session is still a reporting one: its agent announces
+    /// the question itself when it reports the block, so the hook raises
+    /// nothing.
+    @Test("askUserQuestion.pending raises no notification after a restart over a column the store wrote")
+    func askUserQuestionPendingTrustsTheStoreWrittenColumnAfterARestart() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let written = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .working, awaitingInputReason: nil, observedAt: Date())
+        #expect(written != nil)
+        let reporting = await router.programStatus.holdsReport(
+            terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID)
+        #expect(!reporting, "the store starts empty, as after a restart")
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        #expect(try await db.notifications.unread(worktreeID: worktreeID).isEmpty)
+        #expect(await router.pendingQuestions.entries(forTerminal: terminal.id).count == 1)
+    }
+
+    /// A wake mints a new incarnation and resets the column's source, so a
+    /// value the store wrote for the incarnation the wake ended does not make
+    /// the woken process a reporting one: until it reports, the hook raises
+    /// the banner.
+    @Test("askUserQuestion.pending raises a notification once a wake has reset the store-written column")
+    func askUserQuestionPendingNotifiesAfterAWakeResetsTheColumn() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let written = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .idle, awaitingInputReason: nil, observedAt: Date())
+        #expect(written != nil)
+        try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+        let parked = try #require(try await db.terminals.get(id: terminal.id))
+        let wokenIncarnation = try await db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked))
+        #expect(wokenIncarnation != nil)
+        try await db.terminals.clearHibernated(id: terminal.id)
+        let woken = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(woken.activityState == .unknown)
+        #expect(woken.activityStateSource == .derived)
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(unread.map(\.type) == [.attentionNeeded])
+    }
+
     // MARK: - Pending: terminal missing
 
     @Test("askUserQuestion.pending without DB terminal still stores pending entry, no notification")
