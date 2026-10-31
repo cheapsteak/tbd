@@ -54,9 +54,11 @@ struct WorkspaceTabSurfaceRecord: Codable, FetchableRecord, PersistableRecord, S
     var updatedAt: Date
     /// True while the surface awaits its tab's first listing in a
     /// `panel.syncTabs` for its worktree, so a sync that omits the tab does
-    /// not prune it. A scratch promote sets it on the surfaces it moves; the
-    /// first sync that lists the tab clears it. Store-internal: the shared
-    /// `WorkspaceTabSurface` does not carry it, and every write sets it.
+    /// not prune it until `PanelSurfaceStore.awaitingListingGrace` has passed
+    /// since the row's last write. A scratch promote sets it on the surfaces
+    /// it moves; the first sync that lists the tab clears it. Store-internal:
+    /// the shared `WorkspaceTabSurface` does not carry it, and every write
+    /// sets it.
     var awaitingListing: Bool
 
     init(from surface: WorkspaceTabSurface, position: Int, awaitingListing: Bool, updatedAt: Date) throws {
@@ -599,11 +601,13 @@ public struct PanelSurfaceStore: Sendable {
     /// takes no revision and is not reported.
     ///
     /// This worktree's rows for tabs not listed are deleted first, except a
-    /// row awaiting its tab's first listing; their histories cascade. A
-    /// scratch promote moves surfaces here before the app's tab list names
-    /// them, and a sync built from the earlier list can land after the move,
-    /// so such a row survives until a sync lists its tab. Other worktrees'
-    /// rows, and every receipt but a re-parented tab's, are left alone.
+    /// row awaiting its tab's first listing that was last written within
+    /// `awaitingListingGrace` of `now`; their histories cascade. A scratch
+    /// promote moves surfaces here before the app's tab list names them, and
+    /// a sync built from the earlier list can land after the move, so such a
+    /// row survives until a sync lists its tab or the grace runs out. Other
+    /// worktrees' rows, and every receipt but a re-parented tab's, are left
+    /// alone.
     ///
     /// An archived worktree changes nothing and gets an empty outcome:
     /// archiving deleted its surfaces (`WorktreeStore.archive`), and a sync
@@ -620,10 +624,11 @@ public struct PanelSurfaceStore: Sendable {
             guard status != WorktreeStatus.archived.rawValue else { return outcome }
 
             let listedKeys = entries.map(\.tabID.uuidString)
+            let graceCutoff = now.addingTimeInterval(-Self.awaitingListingGrace)
             let unlisted = try WorkspaceTabSurfaceRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .filter(!listedKeys.contains(Column("id")))
-                .filter(Column("awaitingListing") == false)
+                .filter(Column("awaitingListing") == false || Column("updatedAt") < graceCutoff)
                 .order(Column("position"))
                 .fetchAll(db)
             for row in unlisted {
@@ -710,6 +715,10 @@ public struct PanelSurfaceStore: Sendable {
     private static let receiptRetentionLimit = 100
     /// Drop receipts older than this, regardless of count.
     private static let receiptMaxAge: TimeInterval = 24 * 60 * 60
+    /// An unlisting sync prunes a row awaiting its listing once this long has
+    /// passed since the row's last write. The race it guards lasts seconds;
+    /// minutes of margin keep a slow or reconnecting app from losing a moved tab.
+    static let awaitingListingGrace: TimeInterval = 10 * 60
 
     /// Shared prune body: runs INSIDE an already-open write transaction (used
     /// by `commit` and `applyReducing`) or wrapped in its own (the public
@@ -771,7 +780,7 @@ public struct PanelSurfaceStore: Sendable {
     /// runs it in the transaction that archives the worktree: an archived
     /// worktree keeps its row, so the cascade from that row never fires, and
     /// this is what reclaims its panel rows. A row awaiting its tab's first
-    /// listing goes too: a moved tab the app never lists is reclaimed here.
+    /// listing goes too.
     @discardableResult
     static func deleteSurfaces(worktreeID: UUID, in db: Database) throws -> [UUID] {
         let tabKeys = try String.fetchAll(
@@ -800,7 +809,8 @@ public struct PanelSurfaceStore: Sendable {
     /// main worktree before this move, so a `panel.syncTabs` it built from
     /// its earlier tab list, which does not name the moved tabs, can land
     /// after it; the marker keeps that sync from pruning them, until a sync
-    /// lists the tab. `WorktreeStore.archive` still deletes a marked row.
+    /// lists the tab or `awaitingListingGrace` passes. `WorktreeStore.archive`
+    /// still deletes a marked row.
     ///
     /// Returns the moved surfaces as stored, ordered by position, for a
     /// delta's `tabs`; a row that cannot be read still moves but is not

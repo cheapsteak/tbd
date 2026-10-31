@@ -1071,10 +1071,11 @@ struct PanelSurfaceStoreTests {
     }
 
     /// A main worktree holding `residentCount` surfaces, and a scratch
-    /// worktree, with one surface per entry of `scratchPaths`, just promoted
-    /// into it.
+    /// worktree, with one surface per entry of `scratchPaths`, promoted into
+    /// it at `promotedAt`.
     private func promoted(
-        _ db: TBDDatabase, residentCount: Int = 1, scratchPaths: [[String]] = [["/a.txt", "/b.txt"]]
+        _ db: TBDDatabase, residentCount: Int = 1, scratchPaths: [[String]] = [["/a.txt", "/b.txt"]],
+        at promotedAt: Date = Date()
     ) async throws -> PromotedFixture {
         let repo = try await db.repos.create(
             path: "/tmp/pss-await-repo-\(UUID())", displayName: "r", defaultBranch: "main")
@@ -1089,18 +1090,22 @@ struct PanelSurfaceStoreTests {
             db, worktreeID: scratch.id, scratchPaths.map { makeSurface(worktreeID: scratch.id, paths: $0) })
         let moved = try await db.worktrees.promoteScratchMigration(
             scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
-            tmuxServer: scratch.tmuxServer)
+            tmuxServer: scratch.tmuxServer, now: promotedAt)
         return PromotedFixture(repoID: repo.id, mainID: main.id, residents: residents, moved: moved)
     }
+
+    /// A fixed promote time, so a sync's `now` can be pinned against the
+    /// awaiting-listing grace.
+    private static let promotedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
     /// The app learns of the main worktree before a promote moves the
     /// scratch worktree's surfaces to it, so a sync built from its earlier
     /// tab list, which does not name the moved tabs, can land after the
-    /// move. That sync must not prune them, while the main worktree's own
-    /// unlisted surface still goes.
+    /// move. That sync, inside the grace, must not prune them, while the main
+    /// worktree's own unlisted surface still goes.
     @Test func syncDoesNotPruneSurfaceAwaitingListing() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let fixture = try await promoted(db, residentCount: 2)
+        let fixture = try await promoted(db, residentCount: 2, at: Self.promotedAt)
         let moved = try #require(fixture.moved.first)
         let kept = fixture.residents[0]
         let dropped = fixture.residents[1]
@@ -1108,7 +1113,8 @@ struct PanelSurfaceStoreTests {
         #expect(try await awaitingListing(db, tabID: kept.id) == false, "an import awaits nothing")
 
         let outcome = try await db.panelSurface.syncTabs(
-            worktreeID: fixture.mainID, entries: [entry(for: kept, position: 0)], now: Date())
+            worktreeID: fixture.mainID, entries: [entry(for: kept, position: 0)],
+            now: Self.promotedAt.addingTimeInterval(5))
 
         #expect(outcome == SyncOutcome(removed: [dropped.id]),
                 "only the main worktree's own unlisted surface is pruned")
@@ -1116,6 +1122,34 @@ struct PanelSurfaceStoreTests {
         #expect(try await historyRowCount(db, tabID: moved.id) == 2)
         #expect(try await awaitingListing(db, tabID: moved.id) == true,
                 "a sync that omits the tab leaves it awaiting its listing")
+    }
+
+    /// The marker expires: once `awaitingListingGrace` has passed since the
+    /// move, a sync that omits the tab prunes its surface and histories, so
+    /// a moved tab the app never lists does not linger on the main worktree.
+    /// At the grace exactly, it is still kept.
+    @Test func syncPrunesSurfaceAwaitingListingPastGrace() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let fixture = try await promoted(db, at: Self.promotedAt)
+        let moved = try #require(fixture.moved.first)
+        let resident = fixture.residents[0]
+        let grace = PanelSurfaceStore.awaitingListingGrace
+
+        let atGrace = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID, entries: [entry(for: resident, position: 0)],
+            now: Self.promotedAt.addingTimeInterval(grace))
+
+        #expect(atGrace.removed.isEmpty, "the grace has not yet passed")
+        #expect(try await db.panelSurface.surface(tabID: moved.id) == moved)
+
+        let pastGrace = try await db.panelSurface.syncTabs(
+            worktreeID: fixture.mainID, entries: [entry(for: resident, position: 0)],
+            now: Self.promotedAt.addingTimeInterval(grace + 1))
+
+        #expect(pastGrace == SyncOutcome(removed: [moved.id]))
+        #expect(try await db.panelSurface.surface(tabID: moved.id) == nil)
+        #expect(try await historyRowCount(db, tabID: moved.id) == 0)
+        #expect(try await db.panelSurface.surface(tabID: resident.id) != nil)
     }
 
     /// The first sync that lists a moved tab clears its marker, whether the
