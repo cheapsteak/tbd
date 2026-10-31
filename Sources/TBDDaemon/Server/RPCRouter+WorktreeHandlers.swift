@@ -857,6 +857,41 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Apply a sidebar drop: move every carried row to one destination group
+    /// in one transaction, all or nothing (`WorktreeStore.moveMany`). A refused
+    /// move throws its `WorktreeMoveError`, which `handle` turns into the RPC
+    /// error, and broadcasts nothing.
+    ///
+    /// `moveMany` returns only after its transaction commits, so the delta and
+    /// the reply both describe a durable move, and a `worktree.list` begun
+    /// after the reply reads it. The delta carries the whole destination group
+    /// and the request's `moveID`; it and the reply travel on different
+    /// sockets, so the app may see either first.
+    func handleWorktreeMoveMany(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeMoveManyParams.self, from: paramsData)
+        let entries = try await db.worktrees.moveMany(
+            worktreeIDs: params.worktreeIDs,
+            newParentID: params.newParentID,
+            before: params.beforeWorktreeID
+        )
+
+        // A worktree with active children isn't auto-archivable; disarm the new parent.
+        if let newParentID = params.newParentID {
+            do {
+                try await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
+            } catch {
+                logger.warning("failed to disarm auto-archive for \(newParentID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+
+        subscriptions.broadcast(delta: .worktreeSiblingsReordered(WorktreeSiblingsReorderedDelta(
+            moveID: params.moveID,
+            entries: entries
+        )))
+
+        return .ok()
+    }
+
     func handleWorktreeSetAutoArchive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeSetAutoArchiveParams.self, from: paramsData)
         try await db.worktrees.setAutoArchiveOnMerge(id: params.worktreeID, value: params.enabled)

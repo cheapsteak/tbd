@@ -772,6 +772,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeReorder(request.paramsData)
             case RPCMethod.worktreeMove:
                 return try await handleWorktreeMove(request.paramsData)
+            case RPCMethod.worktreeMoveMany:
+                return try await handleWorktreeMoveMany(request.paramsData)
             case RPCMethod.worktreeForget:
                 return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:

@@ -85,6 +85,13 @@ public enum StateDelta: Codable, Sendable {
     /// payload (mirrors `.remoteSessionsChanged`) — subscribers refetch via
     /// `server.summary` / `server.list`. An older app drops the line.
     case devServersChanged
+    /// `worktree.moveMany` committed. Carries the request's `moveID` and every
+    /// row of the destination group with its parent and new `sortOrder`, so a
+    /// client reaches the daemon's sibling order in one step — the single-row
+    /// `.worktreeMoved` leaves its siblings' old sort orders in place until the
+    /// next poll. An app build that predates this case fails to decode it and
+    /// drops the line, catching up at its next poll.
+    case worktreeSiblingsReordered(WorktreeSiblingsReorderedDelta)
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.
@@ -600,6 +607,35 @@ public struct WorktreeMovedDelta: Codable, Sendable {
         self.worktreeID = worktreeID
         self.newParentID = newParentID
         self.newSortOrder = newSortOrder
+    }
+}
+
+/// One row of a sibling group after `worktree.moveMany`: its parent (nil for a
+/// top-level row) and its new `sortOrder` within the group.
+public struct WorktreeOrderEntry: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    public let parentWorktreeID: UUID?
+    public let sortOrder: Int
+
+    public init(worktreeID: UUID, parentWorktreeID: UUID?, sortOrder: Int) {
+        self.worktreeID = worktreeID
+        self.parentWorktreeID = parentWorktreeID
+        self.sortOrder = sortOrder
+    }
+}
+
+/// Payload of `.worktreeSiblingsReordered`: the whole destination group of a
+/// committed `worktree.moveMany`, in its new order.
+public struct WorktreeSiblingsReorderedDelta: Codable, Sendable, Equatable {
+    /// The request's `moveID`, so the app can retire its own pending move and
+    /// not another writer's. Optional so a writer without one can still
+    /// broadcast a group.
+    public let moveID: UUID?
+    public let entries: [WorktreeOrderEntry]
+
+    public init(moveID: UUID?, entries: [WorktreeOrderEntry]) {
+        self.moveID = moveID
+        self.entries = entries
     }
 }
 

@@ -799,6 +799,14 @@ actor DaemonClient {
         )
     }
 
+    /// Move several worktrees to one destination group, all or nothing
+    /// (`worktree.moveMany`). Returns once the daemon has committed; the
+    /// resulting group order arrives as a `worktreeSiblingsReordered` delta
+    /// carrying `params.moveID`, which may land before or after this returns.
+    func moveWorktrees(_ params: WorktreeMoveManyParams) async throws {
+        try await callVoidAsync(method: RPCMethod.worktreeMoveMany, params: params)
+    }
+
     /// Set or clear the pin on a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async throws {
         try await callVoidAsync(
