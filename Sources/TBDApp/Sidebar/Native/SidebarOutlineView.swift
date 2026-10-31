@@ -101,6 +101,12 @@ final class SidebarOutlineView: NSOutlineView {
     /// narrow the drag's `.move` mask — ⌥ to a copy, ⌃ to a link, ⌘ to a
     /// generic operation — leaving nothing the sidebar accepts, and the drop
     /// would silently stop working.
+    ///
+    /// `NSTableView.h` declares no `ignoreModifierKeysForDraggingSession:`,
+    /// but `NSTableView` adopts `NSDraggingSource` in its `@interface`, so
+    /// Swift mirrors the protocol's members onto it and this is an
+    /// `override` — as `ComposerTextView` overrides `draggingEntered(_:)`,
+    /// which `NSView` gets only by adopting `NSDraggingDestination`.
     override func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
         true
     }
@@ -132,27 +138,35 @@ final class SidebarOutlineView: NSOutlineView {
 
     // The outline draws no drop feedback of its own
     // (`draggingDestinationFeedbackStyle = .none`); the controller draws it
-    // from the drop policy's answer, and these clear it. Each passes the
-    // message on first, when `NSOutlineView` implements it.
+    // from the drop policy's answer. A drag that leaves, concludes or ends
+    // clears it: each override passes the message on first, when
+    // `NSOutlineView` implements it, then calls `dropFeedbackEnded()`.
 
     override func draggingExited(_ sender: (any NSDraggingInfo)?) {
         if Self.inheritsDragMessage(#selector(NSDraggingDestination.draggingExited(_:))) {
             super.draggingExited(sender)
         }
-        onDropFeedbackEnded?()
+        dropFeedbackEnded()
     }
 
     override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) {
         if Self.inheritsDragMessage(#selector(NSDraggingDestination.concludeDragOperation(_:))) {
             super.concludeDragOperation(sender)
         }
-        onDropFeedbackEnded?()
+        dropFeedbackEnded()
     }
 
     override func draggingEnded(_ sender: any NSDraggingInfo) {
         if Self.inheritsDragMessage(#selector(NSDraggingDestination.draggingEnded(_:))) {
             super.draggingEnded(sender)
         }
+        dropFeedbackEnded()
+    }
+
+    /// Where every drag-ending override lands: the drop's insertion line and
+    /// nest highlight clear. Tests drive it directly, so no stand-in
+    /// `NSDraggingInfo` ever reaches `NSOutlineView`'s own handlers.
+    func dropFeedbackEnded() {
         onDropFeedbackEnded?()
     }
 

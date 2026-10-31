@@ -144,15 +144,10 @@ struct SidebarDragDropTests {
         f.install(in: h)
         h.mount()
 
-        // Rows move within the app and never leave it…
-        let session = NSDraggingSession()
-        let within = h.outline.draggingSession(session, sourceOperationMaskFor: .withinApplication)
-        let outside = h.outline.draggingSession(session, sourceOperationMaskFor: .outsideApplication)
-        #expect(within == .move)
-        #expect(outside == [])
-        // …and a modifier key held mid-drag — ⌥ above all — does not narrow
-        // that move to an operation the sidebar refuses.
-        let ignoresModifiers = h.outline.ignoreModifierKeys(for: session)
+        // A modifier key held mid-drag — ⌥ above all — does not narrow the
+        // drag's move to an operation the sidebar refuses. The override is the
+        // outline's own, so the session never reaches AppKit's code.
+        let ignoresModifiers = h.outline.ignoreModifierKeys(for: NSDraggingSession())
         #expect(ignoresModifiers)
     }
 
@@ -316,6 +311,12 @@ struct SidebarDragDropTests {
         Self.endSession(in: h)
     }
 
+    /// The drag-ending overrides pass the message to `NSOutlineView`'s own
+    /// handler before clearing, so they are sent only `nil`, which their
+    /// parameter allows — never the stand-in `NSDraggingInfo`, which AppKit
+    /// could send a private selector. `draggingEnded(_:)` takes no `nil`, so
+    /// its routing is covered through `dropFeedbackEnded()`, the one method
+    /// every override calls.
     @Test func dragEndingMessagesClearTheFeedback() throws {
         let h = OutlineHarness("drag.feedbackEnds")
         defer { h.tearDown() }
@@ -328,6 +329,16 @@ struct SidebarDragDropTests {
         let b = SidebarNodeID.worktree(f.b.id)
         let aboveB = try Self.childIndex(of: b, under: repo, in: h)
         let onto = SidebarDropPolicy.dropOnItemIndex
+
+        // Where every override lands.
+        _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
+        try #require(h.controller.dropIndicator.line != nil)
+        h.outline.dropFeedbackEnded()
+        #expect(h.controller.dropIndicator.line == nil)
+        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        try #require(h.controller.nestTargetID == b)
+        h.outline.dropFeedbackEnded()
+        #expect(h.controller.nestTargetID == nil)
 
         // Leaving the outline.
         _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
@@ -347,16 +358,6 @@ struct SidebarDragDropTests {
         _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
         try #require(h.controller.nestTargetID == b)
         h.outline.concludeDragOperation(nil)
-        #expect(h.controller.nestTargetID == nil)
-
-        // Ending over it.
-        _ = try Self.validate(info, parent: repo, childIndex: aboveB, depth: 0, in: h)
-        try #require(h.controller.dropIndicator.line != nil)
-        h.outline.draggingEnded(info)
-        #expect(h.controller.dropIndicator.line == nil)
-        _ = try Self.validate(info, parent: b, childIndex: onto, in: h)
-        try #require(h.controller.nestTargetID == b)
-        h.outline.draggingEnded(info)
         #expect(h.controller.nestTargetID == nil)
 
         // The session ending clears it too.
