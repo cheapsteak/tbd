@@ -160,8 +160,8 @@ struct SidebarWorkflowGroupsToggleTests {
             state.repos[0].expanded = false
             let reveal = state.sidebarGroupReveal(worktreeIDs: [fleet.parked.id], selection: nil)
 
-            #expect(SidebarView.revealBaseline(previous: nil, reveal: reveal, hasRevealed: false) == nil)
-            let baseline = SidebarView.revealBaseline(previous: nil, reveal: reveal, hasRevealed: true)
+            #expect(SidebarReveal.baseline(previous: nil, reveal: reveal, hasRevealed: false) == nil)
+            let baseline = SidebarReveal.baseline(previous: nil, reveal: reveal, hasRevealed: true)
             #expect(baseline == reveal)
             state.revealSidebarGroups(reveal, previous: baseline, grouped: true)
             #expect(state.expandedSidebarGroups.contains(.init(owner: .repository(fleet.repoID), kind: .hibernated)))
