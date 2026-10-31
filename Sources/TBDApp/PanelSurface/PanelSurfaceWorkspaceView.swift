@@ -14,10 +14,10 @@ import TBDShared
 /// a tab the last tab sync skipped (`panelSyncSkippedTabIDs`): the daemon
 /// could not import its legacy layout, so no load would find a surface for
 /// it, and it renders legacy until a change to its layout offers it again.
-/// Not the resubscribe either: it refetches the worktrees the copy holds
-/// itself. A struct rather than an interpolated string, so a new dimension is
-/// a compile error at the call site instead of a key that silently stays
-/// equal.
+/// Not the resubscribe either: its acknowledgement refetches every worktree
+/// with a tab list itself. A struct rather than an interpolated string, so a
+/// new dimension is a compile error at the call site instead of a key that
+/// silently stays equal.
 struct PanelSurfaceLoadKey: Equatable {
     let worktreeID: UUID
     /// The daemon reports `panel_tabs_enabled` on.

@@ -892,10 +892,11 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
-    /// How many state subscriptions the daemon has acknowledged. A
-    /// `panel.get` in flight while this changes fetches again when it lands:
-    /// the daemon may have answered it before the subscription registered.
-    @ObservationIgnored var panelSubscriptionRegistrations: UInt64 = 0
+    /// The daemon has acknowledged the subscription `startSubscription()` last
+    /// opened. Until it has, the flag turning on syncs but loads nothing: the
+    /// acknowledgement refetches every worktree itself
+    /// (`panelSubscriptionRegistered`).
+    @ObservationIgnored var panelSubscriptionAcknowledged = false
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -3035,9 +3036,9 @@ final class AppState {
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
         // And for panel surfaces: deltas sent while no subscription was up
-        // were missed, so the copy's worktrees are refetched — once the
-        // daemon has registered the new subscription, so that no change can
-        // fall between a refetch's reply and the first delta.
+        // were missed, so every worktree with a tab list is refetched — once
+        // the daemon has registered the new subscription, so that no change
+        // can fall between a refetch's reply and the first delta.
         resetPanelSurfacesForResubscribe()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }

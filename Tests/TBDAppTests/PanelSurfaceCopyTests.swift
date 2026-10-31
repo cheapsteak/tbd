@@ -416,26 +416,29 @@ struct PanelSurfaceCopyTests {
 
     // MARK: - Resubscribe
 
-    @Test("a resubscribe keeps rendering the copy and refetches only the worktrees it holds")
-    func resubscribeRefetchesHeldWorktrees() async throws {
+    @Test("an acknowledged subscription refetches every worktree with a tab list, surfaces or none, and keeps rendering the copy meanwhile")
+    func registrationRefetchesEveryLoadedWorktree() async throws {
         try await Fixture.withState(panelTabs: true) { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
-            // A worktree with tabs whose surfaces the copy never loaded.
-            let unloadedID = await Fixture.readyWorktree(
-                state, tabs: [Fixture.terminalTab(label: "other")], syncs: syncs)
+            // A worktree whose load found no surface, so the copy holds
+            // nothing for it.
+            let bareTab = Fixture.terminalTab(label: "other")
+            let bareID = await Fixture.readyWorktree(state, tabs: [bareTab], syncs: syncs)
             let held = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 7)
             state.panelSurfaces = [worktreeID: [tab.id: held]]
-            // A change the daemon made, and broadcast, while no subscription
-            // was up.
+            // Changes the daemon made, and broadcast, while no subscription
+            // was up: one to the held tab, and an import into the bare
+            // worktree.
             let missed = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 9, label: "missed")
+            let imported = Fixture.surface(tabID: bareTab.id, worktreeID: bareID, revision: 10)
             let gate = PanelCallGate()
             let gets = PanelGetCollector()
             state.panelGetFetcher = { @MainActor requested in
                 gets.record(requested)
                 await gate.wait()
-                return PanelGetResult(tabs: [missed], activeTabID: nil)
+                return PanelGetResult(tabs: [requested == worktreeID ? missed : imported], activeTabID: nil)
             }
             // `startSubscription` re-seeds program status too; answered here so
             // the test sends no RPC of its own for it.
@@ -448,19 +451,23 @@ struct PanelSurfaceCopyTests {
             subscription.register()
             await Fixture.drainMainActor()
 
-            try #require(gate.isHolding, "precondition: the refetch is in flight")
-            #expect(gets.worktreeIDs == [worktreeID], "only a worktree the copy holds is refetched")
+            try #require(gate.isHolding, "precondition: a refetch is in flight")
             #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .daemon(held),
                     "the tab keeps rendering from the copy rather than dropping to legacy")
             #expect(syncs.sent.isEmpty,
                     "readiness was cleared, so nothing is synced before both tab sources reload")
-            #expect(state.panelSyncDirty.isSuperset(of: [worktreeID, unloadedID]))
+            #expect(state.panelSyncDirty.isSuperset(of: [worktreeID, bareID]))
 
             gate.release()
             await Fixture.drainMainActor()
 
+            #expect(gets.worktreeIDs.count == 2, "observed \(gets.worktreeIDs)")
+            #expect(Set(gets.worktreeIDs) == [worktreeID, bareID],
+                    "a worktree the copy holds no surface for is refetched too")
             #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == missed,
                     "the refetch merges the change the subscription missed")
+            #expect(state.panelSurface(worktreeID: bareID, tabID: bareTab.id) == imported,
+                    "the refetch picks up the import the subscription missed")
 
             state.markPanelSyncReady(worktreeIDs: [worktreeID])
             await Fixture.drainMainActor()
@@ -474,15 +481,16 @@ struct PanelSurfaceCopyTests {
     /// The daemon registers a subscriber before it acknowledges it. A refetch
     /// answered before registration could miss a change that no delta then
     /// reports, so the refetch waits for the acknowledgement.
-    @Test("a resubscribe refetches the copy's worktrees only once the daemon registers the subscription")
+    @Test("a resubscribe refetches only once the daemon registers the subscription")
     func resubscribeRefetchesAfterSubscribing() async throws {
         try await Fixture.withState(panelTabs: true) { state in
             let worktreeID = UUID()
-            let tabID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
             state.panelSurfaces = [worktreeID: [
-                tabID: Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 4),
+                tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 4),
             ]]
-            let missed = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 6, label: "missed")
+            let missed = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 6, label: "missed")
             let gets = Fixture.collectGets(state) { _ in
                 PanelGetResult(tabs: [missed], activeTabID: nil)
             }
@@ -499,50 +507,58 @@ struct PanelSurfaceCopyTests {
             subscription.register()
             await Fixture.drainMainActor()
 
-            #expect(gets.worktreeIDs == [worktreeID], "the acknowledgement refetches the worktree the copy holds")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tabID) == missed)
+            #expect(gets.worktreeIDs == [worktreeID], "the acknowledgement refetches the worktree")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == missed)
         }
     }
 
-    /// A load issued before the subscription registered, and answered by the
-    /// daemon before it did, can miss a change; it fetches once more.
-    @Test("a get in flight when the daemon registers the subscription fetches again; one issued after does not")
-    func getInFlightAcrossRegistrationFetchesAgain() async {
-        await Fixture.withState(panelTabs: true) { state in
+    /// A get that fails while the daemon restarts leaves the worktree as it
+    /// was; nothing about the failure itself retries it, and the
+    /// acknowledgement of the new subscription refetches it like any other.
+    @Test("a get that fails across a resubscribe is refetched when the daemon acknowledges the subscription")
+    func failedGetAcrossResubscribeIsRefetchedOnRegistration() async throws {
+        try await Fixture.withState(panelTabs: true) { state in
             let worktreeID = UUID()
-            let tabID = UUID()
-            let stale = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 2, label: "stale")
-            let fresh = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 5, label: "fresh")
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            let surface = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 3)
+            state.programStatusListFetcher = { @MainActor in [] }
+            let subscription = Fixture.stubSubscription(state)
+            defer { subscription.end() }
             let gets = PanelGetCollector()
             state.panelGetFetcher = { @MainActor [weak state] requested in
                 gets.record(requested)
-                guard gets.worktreeIDs.count == 1 else {
-                    return PanelGetResult(tabs: [fresh], activeTabID: nil)
+                guard gets.worktreeIDs.count > 1 else {
+                    // The daemon restarts under the get: a new subscription
+                    // opens, and the get fails before the daemon acknowledges
+                    // it.
+                    state?.startSubscription()
+                    throw PanelTabsFixture.Rejected(message: "the daemon went away")
                 }
-                // The ack lands while the first get is in flight. The copy
-                // holds nothing yet, so the acknowledgement refetches nothing
-                // of its own.
-                state?.panelSubscriptionRegistered()
-                return PanelGetResult(tabs: [stale], activeTabID: nil)
+                return PanelGetResult(tabs: [surface], activeTabID: nil)
             }
 
             await state.loadPanelSurfaces(worktreeID: worktreeID)
             await Fixture.drainMainActor()
 
-            #expect(gets.worktreeIDs == [worktreeID, worktreeID])
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tabID) == fresh)
+            try #require(subscription.isOpen, "precondition: the new subscription is open and unacknowledged")
+            #expect(gets.worktreeIDs == [worktreeID])
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == nil,
+                    "precondition: the failed get loaded nothing")
 
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
+            subscription.register()
             await Fixture.drainMainActor()
 
-            #expect(gets.worktreeIDs.count == 3, "a get issued after the acknowledgement fetches once")
+            #expect(gets.worktreeIDs == [worktreeID, worktreeID], "the acknowledgement refetches the worktree")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == surface)
         }
     }
 
-    /// At connect the flag turns on and the subscription starts before any
-    /// load lands. The copy is still empty then, so the subscription refetches
-    /// nothing, and the flag turning on loads each worktree once.
-    @Test("launch loads each worktree's surfaces once")
+    /// At connect the flag turns on before the daemon acknowledges the
+    /// subscription. The flag turning on syncs and loads nothing; the
+    /// acknowledgement loads each worktree once, after the sync still in
+    /// flight.
+    @Test("launch loads each worktree's surfaces once, on the acknowledgement, after the sync in flight")
     func launchLoadsEachWorktreeOnce() async throws {
         try await Fixture.withState(panelTabs: nil) { state in
             let syncs = Fixture.collectSyncs(state)
@@ -550,24 +566,46 @@ struct PanelSurfaceCopyTests {
             let beta = Fixture.terminalTab(label: "beta")
             let alphaID = await Fixture.readyWorktree(state, tabs: [alpha], syncs: syncs)
             let betaID = await Fixture.readyWorktree(state, tabs: [beta], syncs: syncs)
-            let gets = Fixture.collectGets(state) { worktreeID in
+            let log = PanelEventLog()
+            let syncGate = PanelCallGate()
+            state.panelSyncTrigger = { @MainActor params in
+                log.record("sync \(params.worktreeID)")
+                await syncGate.wait()
+                return PanelTabsFixture.emptySyncResult
+            }
+            let gets = Fixture.collectGets(state, into: log) { worktreeID in
                 let tab = worktreeID == alphaID ? alpha : beta
                 return PanelGetResult(
                     tabs: [Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1)],
                     activeTabID: nil)
             }
             state.programStatusListFetcher = { @MainActor in [] }
+            let subscription = Fixture.stubSubscription(state)
+            defer { subscription.end() }
 
             // `connectAndLoadInitialState`: capabilities arrive with the flag
-            // on, then the subscription starts.
+            // on, then the subscription starts, and the daemon acknowledges it
+            // while the flag's sync is still in flight.
             state.daemonCapabilities = Fixture.capabilities(panelTabs: true)
             state.panelTabsCapabilityChanged(wasEnabled: false)
+            await Fixture.drainMainActor()
+            try #require(syncGate.isHolding, "precondition: the flag turning on sent a sync, still in flight")
             state.startSubscription()
-            state.stopSubscription()
+            await Fixture.drainMainActor()
+            #expect(gets.worktreeIDs.isEmpty, "the flag turning on before the acknowledgement loads nothing")
+
+            subscription.register()
+            await Fixture.drainMainActor()
+            #expect(gets.worktreeIDs.isEmpty, "the acknowledgement's loads wait for the sync in flight")
+
+            syncGate.release()
             await Fixture.drainMainActor()
 
             #expect(gets.worktreeIDs.count == 2, "observed \(gets.worktreeIDs)")
             #expect(Set(gets.worktreeIDs) == [alphaID, betaID])
+            let lastSync = try #require(log.events.lastIndex { $0.hasPrefix("sync") })
+            let firstGet = try #require(log.events.firstIndex { $0.hasPrefix("get") })
+            #expect(lastSync < firstGet, "every load follows the sync; observed \(log.events)")
             #expect(state.panelSurface(worktreeID: alphaID, tabID: alpha.id) != nil)
             #expect(state.panelSurface(worktreeID: betaID, tabID: beta.id) != nil)
         }

@@ -74,10 +74,11 @@ extension AppState {
     ///   change left. One adopted then is not dropped by the result's
     ///   omission, and one removed then is not put back by its listing. A
     ///   surface the guard refused changed nothing, so it does not count.
-    /// - **Registered in flight:** a get in flight when the daemon
-    ///   acknowledges a new subscription fetches once more after merging.
-    ///   The daemon may have answered it before registering the
-    ///   subscription, and a change between the two reached neither.
+    ///
+    /// So two loads of one worktree may overlap safely. A get the daemon
+    /// answered before it registered a new subscription, or one that failed,
+    /// needs nothing of its own: the acknowledgement refetches every worktree
+    /// with a tab list (`panelSubscriptionRegistered`).
     ///
     /// The result's `activeTabID` is ignored: workspace-tab selection is the
     /// app's. A failed fetch keeps the copy as it was, and a reply that
@@ -86,7 +87,6 @@ extension AppState {
         guard panelTabsActive else { return }
         let heldAtIssue = Set((panelSurfaces[worktreeID] ?? [:]).keys)
         let issuedAt = panelTouchSequence
-        let registrationsAtIssue = panelSubscriptionRegistrations
         panelLoadsInFlight += 1
         let fetched: PanelGetResult?
         do {
@@ -112,9 +112,6 @@ extension AppState {
             result, worktreeID: worktreeID, into: &surfaces,
             heldAtIssue: heldAtIssue, touchedInFlight: touchedInFlight)
         commitPanelSurfaces(surfaces)
-        if panelSubscriptionRegistrations != registrationsAtIssue {
-            await loadPanelSurfaces(worktreeID: worktreeID)
-        }
     }
 
     /// The load key for a worktree's detail view showing `activeTabID`, read
@@ -494,11 +491,14 @@ extension AppState {
     /// Keeps the copy and the sync in step with the daemon's flag after a
     /// capabilities fetch. Off clears the copy and forgets pending syncs and
     /// skipped tabs, so a daemon-rendered tab falls back to legacy at once and
-    /// nothing further is sent. Off to on marks every worktree with tabs dirty, syncs the
-    /// ready ones, then loads every worktree's surfaces — loading after the
-    /// sync, so a fetch taken before the sync's imports cannot drop them. A
-    /// flush still sending from before the flag went off is waited out
-    /// first, by `flushPanelTabSync` itself.
+    /// nothing further is sent.
+    ///
+    /// Off to on marks every worktree with tabs dirty and syncs the ready
+    /// ones. It loads their surfaces too only while the daemon has
+    /// acknowledged the current subscription — a Settings toggle at runtime.
+    /// At connect the flag turns on before the subscription is acknowledged,
+    /// and the acknowledgement refetches every worktree itself
+    /// (`panelSubscriptionRegistered`), so launch loads each worktree once.
     func panelTabsCapabilityChanged(wasEnabled: Bool) {
         guard panelTabsActive else {
             if !panelSurfaces.isEmpty {
@@ -512,22 +512,23 @@ extension AppState {
         let worktreeIDs = Array(tabs.keys)
         guard !worktreeIDs.isEmpty else { return }
         panelSyncDirty.formUnion(worktreeIDs)
-        Task { @MainActor [weak self] in
-            await self?.flushPanelTabSync()
-            for worktreeID in worktreeIDs {
-                await self?.loadPanelSurfaces(worktreeID: worktreeID)
-            }
+        if panelSubscriptionAcknowledged {
+            syncThenLoadPanelSurfaces(worktreeIDs)
+        } else {
+            schedulePanelTabSyncFlush()
         }
     }
 
     /// Called from `startSubscription()`, before the new subscription is up.
-    /// Readiness is cleared: each worktree's tab list is re-checked against
-    /// fresh fetches before it is sent, and every worktree with tabs is marked
-    /// dirty so it is sent once it is ready. The copy is kept, so
-    /// daemon-rendered tabs keep rendering rather than falling back to legacy
-    /// and rebuilding their terminal views; it is refetched once the daemon
-    /// registers the subscription (`panelSubscriptionRegistered`).
+    /// The subscription is not acknowledged yet, and readiness is cleared:
+    /// each worktree's tab list is re-checked against fresh fetches before it
+    /// is sent, and every worktree with tabs is marked dirty so it is sent
+    /// once it is ready. The copy is kept, so daemon-rendered tabs keep
+    /// rendering rather than falling back to legacy and rebuilding their
+    /// terminal views; it is refetched once the daemon registers the
+    /// subscription (`panelSubscriptionRegistered`).
     func resetPanelSurfacesForResubscribe() {
+        panelSubscriptionAcknowledged = false
         panelSyncReadyWorktrees.removeAll()
         guard panelTabsActive else { return }
         panelSyncDirty.formUnion(tabs.keys)
@@ -539,19 +540,28 @@ extension AppState {
     /// lands either in the reply or in a later delta.
     ///
     /// Deltas the daemon sent before that — while no subscription was up,
-    /// across a daemon restart or a dropped connection — were missed, so each
-    /// worktree the copy holds is refetched and merged under the usual guard,
-    /// which a restart does not disturb: revisions are daemon-wide and never
-    /// decrease. A get still in flight now fetches again when it lands (see
-    /// `loadPanelSurfaces`). A worktree the copy does not hold is not fetched
-    /// here: showing it, or the flag turning on, loads it.
+    /// across a daemon restart or a dropped connection — were missed, so
+    /// every worktree with a tab list is refetched, whether or not the copy
+    /// holds a surface for it. That one rule also recovers a get answered
+    /// before the registration, one that failed, and a worktree that loaded
+    /// with no surface. Each refetch merges under the usual guard, which a
+    /// restart does not disturb (revisions are daemon-wide and never
+    /// decrease), and overlaps any other load of the worktree safely.
     func panelSubscriptionRegistered() {
-        panelSubscriptionRegistrations &+= 1
+        panelSubscriptionAcknowledged = true
         guard panelTabsActive else { return }
-        let heldWorktreeIDs = Array(panelSurfaces.keys)
-        guard !heldWorktreeIDs.isEmpty else { return }
+        let worktreeIDs = Array(tabs.keys)
+        guard !worktreeIDs.isEmpty else { return }
+        syncThenLoadPanelSurfaces(worktreeIDs)
+    }
+
+    /// Sends any tab sync still pending, after waiting out one in flight,
+    /// then loads each worktree's surfaces in turn — loading after the sync,
+    /// so a fetch taken before the sync's imports cannot drop them.
+    private func syncThenLoadPanelSurfaces(_ worktreeIDs: [UUID]) {
         Task { @MainActor [weak self] in
-            for worktreeID in heldWorktreeIDs {
+            await self?.flushPanelTabSync()
+            for worktreeID in worktreeIDs {
                 await self?.loadPanelSurfaces(worktreeID: worktreeID)
             }
         }

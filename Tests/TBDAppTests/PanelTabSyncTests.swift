@@ -303,9 +303,14 @@ struct PanelTabSyncTests {
 
     // MARK: - The flag turning on
 
-    @Test("the flag turning on syncs every ready worktree, then loads its surfaces")
+    @Test("the flag turning on under an acknowledged subscription syncs every ready worktree, then loads its surfaces")
     func capabilityOffToOnSyncsAndLoads() async throws {
         try await Fixture.withState(panelTabs: false) { state in
+            // A Settings toggle at runtime: the daemon acknowledged the
+            // subscription while the flag was off. (Before the
+            // acknowledgement, the flag turning on loads nothing; see
+            // `launchLoadsEachWorktreeOnce`.)
+            state.panelSubscriptionRegistered()
             let log = PanelEventLog()
             let syncs = Fixture.collectSyncs(state, into: log)
             let tab = Fixture.terminalTab(label: "agent")
@@ -333,6 +338,9 @@ struct PanelTabSyncTests {
     @Test("the flag turning on while a sync is in flight loads only after that sync and its own")
     func offToOnWaitsForInFlightFlushBeforeLoading() async throws {
         try await Fixture.withState(panelTabs: true) { state in
+            // A Settings toggle at runtime: the daemon has acknowledged the
+            // subscription. No worktree has tabs yet, so this loads nothing.
+            state.panelSubscriptionRegistered()
             let log = PanelEventLog()
             let gate = PanelCallGate()
             let tab = Fixture.terminalTab(label: "agent")
