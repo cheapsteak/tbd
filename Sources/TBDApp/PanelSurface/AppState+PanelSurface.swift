@@ -371,7 +371,7 @@ extension AppState {
         panelSyncDirty.remove(worktreeID)
         panelSyncReadyWorktrees.remove(worktreeID)
         if let tabList = tabs[worktreeID] {
-            panelSyncSkippedTabIDs.subtract(tabList.map(\.id))
+            setPanelSyncSkippedTabIDs(panelSyncSkippedTabIDs.subtracting(tabList.map(\.id)))
         }
     }
 
@@ -395,6 +395,13 @@ extension AppState {
             dirty.insert(worktreeID)
         }
         markPanelSyncDirty(dirty)
+    }
+
+    /// Writes the skipped set only when it differs: it is tracked, and an
+    /// in-place mutation notifies every reader even when it changes nothing.
+    private func setPanelSyncSkippedTabIDs(_ skippedTabIDs: Set<UUID>) {
+        guard skippedTabIDs != panelSyncSkippedTabIDs else { return }
+        panelSyncSkippedTabIDs = skippedTabIDs
     }
 
     /// Marks worktrees dirty, and schedules one flush when any dirty worktree
@@ -468,8 +475,10 @@ extension AppState {
             do {
                 let result = try await panelSyncTrigger(params)
                 // This sync's verdict on the tabs it listed replaces the last.
-                panelSyncSkippedTabIDs.subtract(params.tabs.map(\.tabID))
-                panelSyncSkippedTabIDs.formUnion(result.skippedTabIDs)
+                setPanelSyncSkippedTabIDs(
+                    panelSyncSkippedTabIDs
+                        .subtracting(params.tabs.map(\.tabID))
+                        .union(result.skippedTabIDs))
                 if !result.skipped.isEmpty {
                     logger.debug("""
                         panel.syncTabs skipped \(result.skipped.count, privacy: .public) \
@@ -505,7 +514,7 @@ extension AppState {
                 panelSurfaces = [:]
             }
             panelSyncDirty.removeAll()
-            panelSyncSkippedTabIDs.removeAll()
+            setPanelSyncSkippedTabIDs([])
             return
         }
         guard !wasEnabled else { return }

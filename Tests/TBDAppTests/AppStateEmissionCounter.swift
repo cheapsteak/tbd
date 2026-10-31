@@ -129,6 +129,7 @@ final class AppStateEmissionTracker {
         _ = state.paneHistories
         _ = state.tabs
         _ = state.panelSurfaces
+        _ = state.panelSyncSkippedTabIDs
         _ = state.activeTabIndices
         _ = state.worktreeTabOrders
         _ = state.draggingTabID
@@ -255,6 +256,7 @@ final class AppStateEmissionTracker {
         "paneHistories",
         "tabs",
         "panelSurfaces",
+        "panelSyncSkippedTabIDs",
         "activeTabIndices",
         "worktreeTabOrders",
         "draggingTabID",

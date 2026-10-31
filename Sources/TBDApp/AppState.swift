@@ -881,8 +881,10 @@ final class AppState {
     /// a surface (`PanelSyncTabsResult.skippedTabIDs`): the daemon could not
     /// import their legacy layout. A change to one of these tabs' layouts is
     /// the only layout change that sends a sync. Each sync result replaces the
-    /// members among the tabs it listed.
-    @ObservationIgnored var panelSyncSkippedTabIDs: Set<UUID> = []
+    /// members among the tabs it listed. Tracked, because a detail view's
+    /// load key reads it (`panelSurfaceLoadKey`), and written only when its
+    /// value changes, because every reader is notified on any write.
+    var panelSyncSkippedTabIDs: Set<UUID> = []
     /// `panel.get` calls awaiting their reply. While any is, every delta and
     /// adopted apply reply records the tab IDs it touched in
     /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.

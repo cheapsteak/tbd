@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 import TBDShared
 @testable import TBDApp
@@ -243,6 +244,48 @@ struct PanelSurfaceCopyTests {
             await state.loadPanelSurfacesForShownTab(surfacedKey)
             await Fixture.drainMainActor()
             #expect(gets.worktreeIDs == [worktreeID], "a tab with a surface asks for no load")
+        }
+    }
+
+    /// The load key is read in a view body, and the skipped set is one of its
+    /// inputs, so a sync that changes the set must reach that view; one that
+    /// leaves it as it was must notify nobody.
+    @Test("a sync that changes the skipped set notifies a reader of the load key; one that does not notifies nobody")
+    func skippedSetChangeIsObservable() async throws {
+        try await Fixture.withState(panelTabs: true) { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            // The daemon cannot import this tab's legacy layout.
+            state.panelSyncTrigger = { @MainActor _ in Fixture.syncResult(skipping: [tab.id]) }
+            try #require(state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: tab.id).loads,
+                         "precondition: before the sync, the tab awaits a surface")
+
+            // `onChange` is `@Sendable`, so the flag lives in a reference box.
+            let keyChanged = BodyEvaluationCounter()
+            withObservationTracking {
+                _ = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: tab.id)
+            } onChange: {
+                MainActor.assumeIsolated { _ = keyChanged.bump() }
+            }
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+
+            try #require(state.panelSyncSkippedTabIDs == [tab.id], "precondition: the sync skipped the tab")
+            #expect(keyChanged.count > 0, "the view showing the tab never recomputes its load key")
+            #expect(!state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: tab.id).loads)
+
+            let setWritten = BodyEvaluationCounter()
+            withObservationTracking {
+                _ = state.panelSyncSkippedTabIDs
+            } onChange: {
+                MainActor.assumeIsolated { _ = setWritten.bump() }
+            }
+            // A second sync with the same verdict.
+            state.tabs[worktreeID]?[0].label = "renamed again"
+            await Fixture.drainMainActor()
+
+            #expect(state.panelSyncSkippedTabIDs == [tab.id])
+            #expect(setWritten.count == 0, "a sync that leaves the skipped set as it was notified its readers")
         }
     }
 
