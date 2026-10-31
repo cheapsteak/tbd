@@ -3499,6 +3499,10 @@ final class AppState {
             // The session-order rail is Codex-only.
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
         }
+        // A dropped delta left the row as it was. Writing it back would still
+        // notify every reader of `terminals` and rescan the no-status
+        // sightings, for each stale delta the two ingest paths deliver.
+        guard applied else { return }
         terminals[delta.worktreeID]?[idx] = terminal
     }
 
