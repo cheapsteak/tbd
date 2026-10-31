@@ -419,8 +419,8 @@ public enum ProgramStatusRollup {
     /// a terminal authoritative. A main entry whose state this build does not
     /// recognize says nothing TBD can display, so it takes part in no rule;
     /// its task entries still decide through rules 2 and 3, and when none
-    /// does the result is nil and the hook rail speaks rather than an opaque
-    /// `.unknown`.
+    /// does the result is nil and the activity column speaks rather than an
+    /// opaque `.unknown`.
     public static func resolve(_ snapshot: ProgramStatusSnapshot) -> ProgramStatusResolution? {
         guard let main = snapshot.main else { return nil }
         let mainRecognized: Bool

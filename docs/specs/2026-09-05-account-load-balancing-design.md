@@ -356,8 +356,9 @@ candidate exists, the `.limitReached` notification names it — "Session limit
 hit on Acme — resets 1:01pm. Personal has room (5h 12%)" — and the handler
 broadcasts a new `terminalLimitHit` delta carrying the terminal id, the reset
 instant, the limit type, and the suggested profile id. The app keeps that
-per-terminal fact in memory (cleared when the terminal starts working again,
-changes profile, or goes away) and renders a banner over the pane:
+per-terminal fact in memory (cleared by a `working` observed after the hit
+arrived, whether or not the ordering applies it, and when the terminal changes
+profile or goes away) and renders a banner over the pane:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐

@@ -979,7 +979,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the parse returns before SwiftTerm has delivered a single one of
             // the callbacks it queued, so a synchronous restore lowers the flag
             // while every reply is still in flight. Measured against the
-            // `defer` shape, 5 of the 7 tests in `QuietIngestTests` go red —
+            // `defer` shape, most of the tests in `QuietIngestTests` go red —
             // including the replies escaping into the child's stdin, which is
             // the hazard this whole method exists to prevent.
             DispatchQueue.main.async { [weak self] in
@@ -3051,11 +3051,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 modeReplyCollector?.append(contentsOf: data)
                 return
             }
-            // Ordering matters: `handleOutgoingInput` scans for 0x03/0x1b and
-            // raises a user interrupt, so this guard must precede it, not
-            // merely the routing beneath it. Anything arriving while a snapshot
-            // preamble is in flight is replayed history or a keystroke aimed at
-            // history — neither is input for the live child.
+            // This guard precedes all routing: anything arriving while a
+            // snapshot preamble is in flight is replayed history or a keystroke
+            // aimed at history — neither is input for the live child.
             guard !isIngestingSnapshot else { return }
             deliverOutgoing(data)
         }
@@ -3072,9 +3070,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// which is what `noteUserWriteOutcome` exists to say instead.
         @discardableResult
         func deliverOutgoing(_ data: ArraySlice<UInt8>) -> Bool {
-            // Interrupt detection (Ctrl-C / Esc) must keep working in every
-            // path, so run it FIRST regardless of where the bytes go next.
-            handleOutgoingInput(data)
             // Everything this panel writes goes through one queue (Task 10),
             // so a daemon injection — once one can arrive, over the fd
             // sidecar while a holder-backed session is attached — can never
@@ -3343,20 +3338,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// rather than calling `beginUserPaste()`/`endUserPaste()` directly
         /// and bypassing the classification the detection actually performs.
         var outgoingQueueForTesting: OutgoingInputQueue { outgoingQueue }
-
-        func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
-            let isCtrlC = data.contains(0x03)
-            // A standalone Escape keypress arrives as a single 0x1b byte. Arrow keys,
-            // Alt-combos, and other escape sequences arrive as multi-byte ESC sequences
-            // (0x1b 0x5b ...), so requiring count == 1 keeps navigation keys from being
-            // mistaken for a halt.
-            let isEsc = data.count == 1 && data.first == 0x1b
-            guard isCtrlC || isEsc else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.appState?.handleTerminalInterrupt(terminalID: self.panelID, viaEscape: isEsc)
-            }
-        }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             // A replayed DECCOLM (or any other size-changing sequence in a

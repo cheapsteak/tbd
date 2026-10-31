@@ -3,10 +3,11 @@ import TBDShared
 
 /// What the composer offers for one terminal.
 ///
-/// **Every input is a machine fact.** `kind`, `hibernatedAt`, `hibernateReason`
-/// and `awaitingInputReason` are columns the daemon wrote from Claude Code's
-/// hooks and the process table; the worktree's location is TBD's own record.
-/// Nothing here reads rendered text, which this codebase forbids for state.
+/// **Every input is a machine fact.** `awaitingInputReason` is the wait-reason
+/// column the daemon wrote from the agent's OSC 7501 reports; `kind`,
+/// `hibernatedAt` and `hibernateReason` come from TBD's own record and the
+/// process table, as does the worktree's location. Nothing here reads rendered
+/// text, which this codebase forbids for state.
 ///
 /// The order of the branches is the design: scope first (is there a composer at
 /// all), then whether the process is running, then whether it is blocked. Not-
@@ -26,7 +27,7 @@ enum ComposerState: Equatable {
     /// wording — a session that left on its own from one TBD parked.
     case notRunning(exited: Bool)
     /// A dialog is on screen, or an awaiting-input reason this build does not
-    /// recognize. Disabled, showing the message the daemon carried and a Reveal
+    /// recognize. Disabled, showing the reason's `displayMessage` and a Reveal
     /// Terminal action: answering in the terminal is the correct resolution,
     /// because a pasted body plus Enter would commit whichever option is
     /// highlighted.
@@ -59,7 +60,7 @@ enum ComposerState: Equatable {
         if let reason = terminal.awaitingInputReason {
             switch reason.classification {
             case .promptOnScreen, .unrecognized:
-                return .blocked(message: reason.message)
+                return .blocked(message: reason.displayMessage)
             case .doneWaiting, .informational:
                 return .running
             }

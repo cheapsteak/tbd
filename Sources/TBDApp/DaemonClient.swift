@@ -912,22 +912,6 @@ actor DaemonClient {
         try await callVoidAsync(method: RPCMethod.terminalSend, params: params)
     }
 
-    /// Publish an explicit terminal activity state transition.
-    func setTerminalActivity(
-        terminalID: UUID,
-        activityState: TerminalActivityState,
-        origin: TerminalActivityEventOrigin? = nil
-    ) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminalID,
-                activityState: activityState,
-                origin: origin
-            )
-        )
-    }
-
     /// Send a notification.
     func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil,
                 terminalID: UUID? = nil) async throws {
@@ -1902,11 +1886,14 @@ actor DaemonClient {
 
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
-    /// `onSubscribed` runs when the daemon acknowledges the subscription, which
-    /// it does only after registering it.
+    ///
+    /// `onConnected` runs once, on the first line that decodes as the
+    /// daemon's successful acknowledgment or as a delta broadcast ahead of it,
+    /// so an attempt that never reaches a live daemon never calls it, and
+    /// neither does an error response or a line this build cannot decode.
     nonisolated func subscribe(
-        onSubscribed: (@Sendable () -> Void)? = nil,
-        onDelta: @escaping DeltaHandler
+        onDelta: @escaping DeltaHandler,
+        onConnected: @escaping @Sendable () -> Void = {}
     ) async {
         guard let fd = try? makeConnectedSocket() else { return }
 
@@ -1938,6 +1925,12 @@ actor DaemonClient {
         var accumulated = Data()
         let decoder = JSONDecoder()
         let probe = RPCVolumeProbe.shared
+        var announcedConnect = false
+        func announceConnect() {
+            guard !announcedConnect else { return }
+            announcedConnect = true
+            onConnected()
+        }
 
         while !Task.isCancelled {
             let bytesRead = recv(fd, buffer, bufferSize, 0)
@@ -1971,7 +1964,7 @@ actor DaemonClient {
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
-                    onSubscribed?()
+                    announceConnect()
                     continue
                 }
 
@@ -1982,6 +1975,7 @@ actor DaemonClient {
                         type: delta.rpcVolumeTypeName,
                         bytes: lineData.count
                     )
+                    announceConnect()
                     onDelta(delta)
                 } else {
                     // Bytes that cost two failed decodes and are then dropped:

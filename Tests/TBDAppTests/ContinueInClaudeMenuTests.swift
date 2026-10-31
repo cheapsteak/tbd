@@ -9,17 +9,15 @@ struct ContinueInClaudeMenuTests {
         kind: TerminalKind = .codex,
         transcriptPath: String? = "/tmp/codex-rollout.jsonl",
         activityState: TerminalActivityState = .idle,
-        presentationActivityState: TerminalActivityState? = .idle,
         transport: TerminalTransport = .tmux
-    ) -> Terminal {
-        Terminal(
+    ) -> TBDShared.Terminal {
+        TBDShared.Terminal(
             worktreeID: UUID(),
             tmuxWindowID: transport == .tmux ? "@1" : "",
             tmuxPaneID: transport == .tmux ? "%1" : "",
             transcriptPath: transcriptPath,
             kind: kind,
             activityState: activityState,
-            presentationActivityState: presentationActivityState,
             transport: transport)
     }
 
@@ -34,44 +32,15 @@ struct ContinueInClaudeMenuTests {
         #expect(!ContinueInClaudeMenu.isVisible(for: nil))
     }
 
-    @Test("only positively idle Codex rows enable account choices")
-    func activityRail() {
-        #expect(ContinueInClaudeMenu.isEnabled(for: terminal(activityState: .idle)))
-        #expect(ContinueInClaudeMenu.isEnabled(for: terminal(activityState: .working)))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: terminal(activityState: .waitingForUser)))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: terminal(activityState: .unknown)))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: terminal(
-            activityState: .idle,
-            presentationActivityState: nil)))
-    }
-
-    @Test("a rollout task_started observation overrides stale durable idle")
-    func transcriptWorkingDisablesStaleRawIdle() {
-        let staleDurableIdle = terminal(
-            activityState: .idle,
-            presentationActivityState: .working)
-
-        #expect(WorktreeRowView.isForegroundWorking(staleDurableIdle))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: staleDurableIdle))
-    }
-
-    @Test("disabled choices explain that the turn must finish")
-    func busyCaption() {
-        #expect(ContinueInClaudeMenu.caption(
-            for: terminal(
-                activityState: .working,
-                presentationActivityState: .working)) == ContinueInClaudeMenu.busyCaption)
-        #expect(ContinueInClaudeMenu.caption(
-            for: terminal(activityState: .waitingForUser)) == ContinueInClaudeMenu.busyCaption)
-        #expect(ContinueInClaudeMenu.caption(
-            for: terminal(activityState: .unknown)) == ContinueInClaudeMenu.busyCaption)
-        #expect(ContinueInClaudeMenu.caption(for: terminal(
-            activityState: .idle,
-            presentationActivityState: .working)) == ContinueInClaudeMenu.busyCaption)
-        #expect(ContinueInClaudeMenu.caption(
-            for: terminal(activityState: .working)) == nil)
-        #expect(ContinueInClaudeMenu.caption(for: terminal(activityState: .idle)) == nil)
-        #expect(ContinueInClaudeMenu.caption(for: nil) == nil)
+    /// A tmux Codex row carries no agent status, so its column reads
+    /// `.unknown`; the daemon's rollout read is what refuses a busy turn.
+    @Test("a visible tmux Codex row at unknown activity enables account choices")
+    func continueIsEnabledForAVisibleUnknownCodexRow() {
+        let row = terminal(activityState: .unknown)
+        #expect(ContinueInClaudeMenu.isVisible(for: row))
+        #expect(ContinueInClaudeMenu.isEnabled(for: row))
+        #expect(!ContinueInClaudeMenu.isEnabled(for: terminal(transport: .holder)))
+        #expect(!ContinueInClaudeMenu.isEnabled(for: nil))
     }
 }
 
@@ -219,8 +188,7 @@ struct ContinueInClaudeReplacementDeltaTests {
             transcriptPath: "/tmp/codex-rollout.jsonl",
             sessionIncarnationID: UUID(),
             kind: .codex,
-            activityState: .idle,
-            presentationActivityState: .idle)
+            activityState: .idle)
         let replacement = Terminal(
             id: terminalID,
             worktreeID: worktreeID,

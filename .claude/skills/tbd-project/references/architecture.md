@@ -43,20 +43,22 @@ Connects to daemon on launch (starts it if not running). Stateless except for UI
 Stateless. Connects to daemon socket, sends RPC, prints result, exits.
 - POSIX socket client (not NIO — simpler for one-shot connections)
 - Auto-resolves repo/worktree from `$PWD` via `resolve.path` RPC
-- Subcommands: `repo`, `worktree`, `config`, `terminal`, `notify`, `session-event`, `terminal-activity`, `ask-user-question`, `daemon`, `hooks`, `setup-hooks` (deprecated), `cleanup`, `link`, `doctor`
-- `session-event`, `terminal-activity`, and `ask-user-question` are internal — invoked by the Claude settings-overlay hooks, not by humans
+- Subcommands: `repo`, `worktree`, `config`, `terminal`, `notify`, `session-event`, `ask-user-question`, `daemon`, `hooks`, `setup-hooks` (deprecated), `cleanup`, `link`, `doctor`
+- `session-event`, `ask-user-question` and `hooks session-title` are internal — invoked by the Claude settings-overlay hooks, not by humans
 
 ## Session Instrumentation
 
 TBD instruments the agent sessions it spawns. At `Daemon.start()`:
 
 - **`PluginDirWriter`** writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` containing `.claude-plugin/plugin.json` and `skills/tbd/SKILL.md`. The skill body is `TBDSkillContent.body`. While a session-mod feature flag is on, it also writes the session mod — the hooks module in `hooks/` and its `$.state` contract in `types/`, which the manifest names — from `SessionModContent` (generated from `SessionMod/` by `scripts/gen-session-mod-content.py`), and removes both when every flag is off. It runs after the database opens (the flags live there) and before any spawn path, writes only files whose bytes changed (each write hot-reloads the plugin in running sessions), and is skipped in mock mode. The daemon half of the mod — `spawn.json` and the other per-session files under `~/tbd/sessions/<claudeSessionID>/`, liveness, the spawn variables and the composer-draft park gate's status — lives in `Sources/TBDDaemon/SessionMod/`.
-- **`ClaudeHookOverlay`** writes `~/tbd/runtime/claude-overlay.json` registering `SessionStart`, `Stop` (×2), and `AskUserQuestion` Pre/PostToolUse hooks.
+- **`ClaudeHookOverlay`** writes `~/tbd/runtime/claude-overlay.json` registering `SessionStart`, `Stop` (×2), `StopFailure`, `UserPromptSubmit` (session title), `AskUserQuestion` Pre/PostToolUse, `PostToolUse:Bash` (PR binding) and `SessionEnd` hooks. None reports agent state.
 - **`SkillFileWriter`** drops the same skill body to a failsafe path so a session can `Read` it even with no harness skill registered.
 - **`ClaudeSpawnCommandBuilder`** (pure function) builds the `claude` command, appending `--plugin-dir` and `--settings` (each only if the file exists). It also returns `sensitiveEnv` carrying auth/routing vars (`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, ...) — passed via tmux `-e KEY=VALUE` so secrets never appear in `ps` argv.
 - **`CodexHomeManager`** does the equivalent for Codex sessions via a per-repo isolated `CODEX_HOME`.
 
 The `SessionStart` hook calls `tbd session-event`, which RPCs the daemon with the new session id + transcript path; the daemon updates the terminal record and broadcasts `terminalSessionUpdated` so the transcript pane retargets after `/clear` or `/compact`.
+
+Agent state comes only from the agents themselves. Claude Code and Codex report it over the Program Status Protocol (OSC 7501) on pty-holder sessions; whichever reader owns the pty (the app's terminal view, which forwards over `terminal.programStatusReport`, or the daemon's headless emulator) hands it to `ProgramStatusStore`. The store keeps the latest snapshot in memory and is the only writer of a terminal's `activityState` and wait-reason columns, mapped by `ProgramStatusColumn.swift`; it also raises the attention banner and stamps the PR-poll activity ledger. A session that cannot report (any agent on tmux, or an older agent) reads `unknown`: the idle sweep leaves it alone, and the sidebar shows the no-status mark (`NoStatusMark`). Design: `docs/specs/2026-10-30-osc-only-agent-status-design.md`.
 
 ## Data Model (SQLite)
 
@@ -164,7 +166,7 @@ JSON-RPC style over the Unix socket (newline-delimited). Method families (see `S
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
 - **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`
-- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.focus`, `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.activityEvent` (internal — fired by the terminal-activity hook)
+- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.focus`, `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.sessionTitle` (internal — fired by the `UserPromptSubmit` hook), `.programStatusReport` / `.programStatusList` (OSC 7501 reports forwarded by the app, and the store's snapshots)
 - **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
 - **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)
 - **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingPromptStore`
@@ -184,7 +186,7 @@ See `Sources/TBDCLI/Commands/`. Highlights:
 - `tbd worktree create [--position child|sibling|root] [--branch] [--prompt|--prompt-file] [--no-wait] [--json]`, plus `list`, `adopt`, `archive`, `revive`, `rename`, `reparent`, `forget` (untrack without removing from disk), `auto-archive` (toggle archive-on-PR-merge)
 - `tbd terminal create <worktree> [--type shell|claude|codex] [--cmd] [--prompt|--prompt-file] [--json]`, `send --terminal <id> --text <t> [--submit]`, `list`, `output`, `conversation`
 - `tbd hooks status` — show the Claude overlay + legacy hook state; `tbd hooks stop-rename-check` — internal Stop-hook
-- `tbd session-event`, `tbd terminal-activity`, `tbd ask-user-question pre|post` — internal hooks fired by the settings overlay
+- `tbd session-event`, `tbd ask-user-question pre|post`, `tbd hooks session-title` — internal hooks fired by the settings overlay
 - `tbd config get|set` — show/set global settings (e.g. auto-archive-on-merge default, env overrides)
 - `tbd link [<worktree>] [--terminal <uuid> | --this-terminal] [--https]` — print a `tbd://` deep link for a worktree (default: current), optionally anchored to one terminal's tab; `--https` prints the shareable redirector form
 - `tbd doctor [--dry-run]` — diagnose and repair the `~/.local/bin/tbd` CLI install (checks that it is a hard link to the TBDCLI binary sibling of the running daemon; repairs stale or missing links)

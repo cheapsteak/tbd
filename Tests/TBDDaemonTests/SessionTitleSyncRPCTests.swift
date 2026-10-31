@@ -6,7 +6,7 @@ import DaemonTestSupport
 import TestSupport
 
 /// Tier 2: the session-title round trip through the router — the `--name` a
-/// Claude spawn gets, and the title `terminal.activityEvent` hands back to the
+/// Claude spawn gets, and the title `terminal.sessionTitle` hands back to the
 /// `UserPromptSubmit` hook. See docs/specs/2026-10-14-session-title-sync-design.md.
 @Suite("session title sync over RPC")
 struct SessionTitleSyncRPCTests {
@@ -86,22 +86,23 @@ struct SessionTitleSyncRPCTests {
             .map { $0.joined(separator: " ") }
     }
 
-    /// Sends one `UserPromptSubmit`-shaped activity event and returns the
-    /// response. The row's own incarnation rides along so the event is
-    /// accepted rather than rejected as a stale process's.
-    private func prompt(_ terminal: Terminal, wantsTitle: Bool? = true) async throws -> RPCResponse {
+    /// Sends one `UserPromptSubmit` hook's `terminal.sessionTitle` and returns
+    /// the response. The row's own incarnation rides along unless the caller
+    /// names another, so the hook is accepted rather than refused as a stale
+    /// process's.
+    private func prompt(
+        _ terminal: Terminal, incarnationID: UUID?? = nil
+    ) async throws -> RPCResponse {
         let request = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
+            method: RPCMethod.terminalSessionTitle,
+            params: TerminalSessionTitleParams(
                 terminalID: terminal.id,
-                activityState: .working,
-                sessionIncarnationID: terminal.sessionIncarnationID,
-                wantsSessionTitle: wantsTitle))
+                sessionIncarnationID: incarnationID ?? terminal.sessionIncarnationID))
         return await router.handle(request)
     }
 
     private func title(_ response: RPCResponse) throws -> String? {
-        try response.decodeResult(TerminalActivityEventResult.self).sessionTitle
+        try response.decodeResult(TerminalSessionTitleResult.self).sessionTitle
     }
 
     /// One prompt that asks for a title, reduced to the title it got back.
@@ -123,6 +124,7 @@ struct SessionTitleSyncRPCTests {
         let (wt, path) = try await makeWorktree()
         defer { try? FileManager.default.removeItem(atPath: path) }
         _ = try await makeClaudeRow(worktreeID: wt.id)
+        await router.activityLedger.setEnabled(true)
 
         let createResponse = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -135,9 +137,10 @@ struct SessionTitleSyncRPCTests {
         let response = try await prompt(created)
         #expect(response.success)
         #expect(try title(response) == nil)
-        // The event was accepted, so the nil above is the change rule's
-        // answer rather than an identity rejection's.
-        #expect(try await db.terminals.get(id: created.id)?.activityState == .working)
+        // The hook was accepted — it stamped the PR schedule's ledger — so the
+        // nil above is the change rule's answer rather than an identity
+        // refusal's.
+        #expect(await router.activityLedger.snapshot().hooks[created.id] != nil)
     }
 
     @Test("a rename is handed to the session once, on its next prompt")
@@ -165,20 +168,22 @@ struct SessionTitleSyncRPCTests {
         #expect(try await promptTitle(terminal) == nil)
     }
 
-    @Test("an event that does not ask for a title gets none, even after a rename")
-    func noRequestNoTitle() async throws {
+    @Test("a hook from another incarnation gets no title and leaves the record for the live one")
+    func aStaleIncarnationGetsNoTitle() async throws {
         let (wt, path) = try await makeWorktree()
         defer { try? FileManager.default.removeItem(atPath: path) }
         let terminal = try await makeClaudeRow(worktreeID: wt.id)
         await router.lifecycle.sessionTitles.record(
             terminalID: terminal.id, worktreeID: wt.id, title: "acme-feature")
         try await rename(wt.id, to: "Acme Checkout Flow")
+        await router.activityLedger.setEnabled(true)
 
-        let response = try await prompt(terminal, wantsTitle: nil)
-        #expect(response.success)
-        #expect(response.result == nil)
-        // Nor did the unasked event move the record: the hook that does ask
-        // still gets the rename.
+        let stale = try await prompt(terminal, incarnationID: UUID())
+        #expect(stale.success)
+        #expect(try title(stale) == nil)
+        #expect(await router.activityLedger.snapshot().hooks[terminal.id] == nil)
+        // The refused hook did not move the record: the live session's next
+        // prompt still gets the rename.
         #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: terminal.id) == "acme-feature")
         #expect(try await promptTitle(terminal) == "Acme Checkout Flow")
     }
@@ -193,10 +198,7 @@ struct SessionTitleSyncRPCTests {
 
         let response = try await prompt(codex)
         #expect(response.success)
-        // An empty success (the event was not accepted) and a result with no
-        // title both say the same thing here: no title.
-        let sessionTitle = response.result == nil ? nil : try title(response)
-        #expect(sessionTitle == nil)
+        #expect(try title(response) == nil)
     }
 
     @Test("a successful spawn records the --name it gave the session")

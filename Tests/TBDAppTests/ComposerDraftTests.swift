@@ -168,6 +168,43 @@ struct ComposerDraftTests {
 
         #expect(reports.values == [[id]])
     }
+
+    /// The daemon keeps the last set it was given and loses it to a restart,
+    /// so each subscription the daemon answers reports the whole set again.
+    /// An attempt that never reaches the daemon reports nothing: during an
+    /// outage the poll loop starts one every cycle.
+    @Test func onlyAnAnsweredSubscriptionReportsTheSetAgain() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let reports = Recorder<Set<UUID>>()
+        state.composerDraftsSetter = { reports.values.append(Set($0)) }
+        // `startSubscription` re-seeds program status from the daemon;
+        // answered here, so the test sends no RPC of its own for it.
+        state.programStatusListFetcher = { @MainActor in [] }
+        let attempts = SubscribeAttempts(connectingFrom: 1)
+        state.deltaSubscriber = { onConnected, _ in attempts.run(onConnected: onConnected) }
+        let id = UUID()
+        state.composerDraft(for: id).text = "unsent"
+        await state.composerDraftsPush?.value
+        #expect(reports.values == [[id]])
+
+        // An attempt that never reaches the daemon.
+        state.startSubscription()
+        let failed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            attempts.count >= 1
+        }
+        #expect(failed == .satisfied, "the failed subscribe attempt never ran")
+        #expect(reports.values == [[id]], "an attempt that never connected reported the set")
+
+        // The next attempt connects.
+        state.startSubscription()
+        let reported = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { reports.values.count >= 2 }
+        }
+        #expect(reported == .satisfied, "the answered subscription never reported the set")
+        #expect(reports.values == [[id], [id]])
+        #expect(attempts.connects == 1)
+    }
 }
 
 /// A reference box for values a `@MainActor` closure appends to.

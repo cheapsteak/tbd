@@ -163,6 +163,40 @@ struct ProgramStatusAppTests {
         #expect(params.allSatisfy { $0.observedAt == observedAt })
     }
 
+    /// A wake mints a new incarnation, and the woken view's first reports are
+    /// forwarded under the cached row's: the wake's delta must carry it, and a
+    /// delta without one (an older daemon) leaves the cached value alone.
+    @Test("a report after a wake is forwarded under the incarnation the wake's delta carried")
+    func wakeDeltaIncarnationIsForwarded() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let parkedIncarnation = UUID()
+        let wokenIncarnation = UUID()
+        let id = seed(state, kind: .claude, transport: .holder, incarnation: parkedIncarnation)
+        let worktreeID = try #require(state.terminals.first { $0.value.contains { $0.id == id } }?.key)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+
+        state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+            terminalID: id, worktreeID: worktreeID, hibernated: false, keepWarm: false))
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=idle:app=claude-code".utf8), observedAt: Date())
+        state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+            terminalID: id, worktreeID: worktreeID, hibernated: false, keepWarm: false,
+            sessionIncarnationID: wokenIncarnation))
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=working:app=claude-code".utf8), observedAt: Date())
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == 2 }
+        if outcome == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let params = sent.all
+        try #require(params.count == 2)
+        #expect(params[0].incarnationID == parkedIncarnation)
+        #expect(params[1].incarnationID == wokenIncarnation)
+    }
+
     @Test("a report for an ineligible terminal is not forwarded")
     func ineligibleNotForwarded() async {
         let (state, cleanup) = makeAppState()
@@ -185,6 +219,129 @@ struct ProgramStatusAppTests {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         #expect(sent.all.map(\.payload) == ["state=done"])
+    }
+
+    // MARK: - Re-sending after a reconnect
+
+    /// A report forwarded while the daemon was unreachable is lost, and the
+    /// agent reports again only on change: once a subscription connects, the
+    /// app forwards each terminal's latest report again, in observation order,
+    /// with the incarnation and observation time it was first sent with — and
+    /// only the latest. An attempt that never connects sends nothing: during
+    /// an outage the poll loop starts one every cycle, and each would queue a
+    /// failing RPC per stored report.
+    @Test("only a subscription that connects forwards the latest reports again, once")
+    func aConnectResendsTheLatestReportsOnce() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let incarnation = UUID()
+        let claude = seed(state, kind: .claude, transport: .holder, incarnation: incarnation)
+        let codex = seed(state, kind: .codex, transport: .holder)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+        // `startSubscription` re-seeds program status from the daemon, and a
+        // connect re-reports the composer-draft set; both are answered here,
+        // so the test sends no RPC of its own for them.
+        state.programStatusListFetcher = { @MainActor in [] }
+        state.composerDraftsSetter = { _ in }
+        let attempts = SubscribeAttempts(connectingFrom: 3)
+        state.deltaSubscriber = { onConnected, _ in attempts.run(onConnected: onConnected) }
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        state.forwardProgramStatusReport(
+            terminalID: claude, payload: Array("state=blocked:app=claude-code".utf8), observedAt: t0)
+        state.forwardProgramStatusReport(
+            terminalID: claude, payload: Array("state=working:app=claude-code".utf8),
+            observedAt: t0.addingTimeInterval(1))
+        state.forwardProgramStatusReport(
+            terminalID: codex, payload: Array("state=idle:app=codex".utf8),
+            observedAt: t0.addingTimeInterval(2))
+
+        // Three attempts that never reach the daemon.
+        for _ in 0..<3 { state.startSubscription() }
+        let failed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            attempts.count >= 3
+        }
+        #expect(failed == .satisfied, "the failed subscribe attempts never ran")
+        // The forwarder is serial: once this report arrives, anything the
+        // failed attempts queued has arrived ahead of it.
+        state.forwardProgramStatusReport(
+            terminalID: codex, payload: Array("state=working:app=codex".utf8),
+            observedAt: t0.addingTimeInterval(3))
+        let drained = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            sent.count >= 4
+        }
+        if drained == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let forwardedStamps = (0..<4).map { t0.addingTimeInterval(TimeInterval($0)) }
+        #expect(sent.all.map(\.observedAt) == forwardedStamps,
+                "a subscribe attempt that never connected re-sent reports")
+
+        // The fourth attempt connects.
+        state.startSubscription()
+        let resentAll = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            sent.count >= 6
+        }
+        if resentAll == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let resent = Array(sent.all.dropFirst(4))
+        try #require(resent.count == 2)
+        #expect(resent.map(\.terminalID) == [claude, codex])
+        #expect(resent.map(\.payload) == ["state=working:app=claude-code", "state=working:app=codex"])
+        #expect(resent[0].incarnationID == incarnation)
+        #expect(resent[0].observedAt == t0.addingTimeInterval(1))
+        #expect(resent[1].observedAt == t0.addingTimeInterval(3))
+        #expect(attempts.connects == 1)
+    }
+
+    /// The memory is kept to terminals the app caches. A terminal the app
+    /// removes has its entry forgotten at once; one that leaves the cache by
+    /// any other path keeps it until the next re-send, which drops it and
+    /// re-sends nothing for it. Forwarding another report prunes nothing,
+    /// because that runs on every report. A cached terminal's report is still
+    /// re-sent. Both uncached terminals' reports were observed first, so a
+    /// re-send of either would arrive ahead of the cached one's.
+    @Test("a re-send forwards nothing for a terminal the app no longer caches")
+    func resendDropsAnUncachedTerminalsReport() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let removed = seed(state, kind: .claude, transport: .holder)
+        let dropped = seed(state, kind: .claude, transport: .holder)
+        let kept = seed(state, kind: .codex, transport: .holder)
+        let removedWorktreeID = try #require(
+            state.terminals.first { $0.value.contains { $0.id == removed } }?.key)
+        let droppedWorktreeID = try #require(
+            state.terminals.first { $0.value.contains { $0.id == dropped } }?.key)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+        let earlier = Date(timeIntervalSince1970: 1_000)
+        state.forwardProgramStatusReport(
+            terminalID: removed, payload: Array("state=working:app=claude-code".utf8), observedAt: earlier)
+        state.forwardProgramStatusReport(
+            terminalID: dropped, payload: Array("state=working:app=claude-code".utf8),
+            observedAt: earlier.addingTimeInterval(1))
+
+        state.removeDeletedTerminalFromState(terminalID: removed, worktreeID: removedWorktreeID)
+        #expect(state.lastForwardedProgramStatusReports[removed] == nil)
+        state.terminals[droppedWorktreeID] = nil
+        state.forwardProgramStatusReport(
+            terminalID: kept, payload: Array("state=idle:app=codex".utf8),
+            observedAt: earlier.addingTimeInterval(2))
+        #expect(state.lastForwardedProgramStatusReports[dropped] != nil,
+                "forwarding a report pruned another terminal's entry")
+
+        state.resendLastProgramStatusReports()
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 4 }
+        if outcome == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let params = sent.all
+        try #require(params.count == 4)
+        #expect(params[3].terminalID == kept)
+        #expect(state.lastForwardedProgramStatusReports[dropped] == nil)
+        #expect(state.lastForwardedProgramStatusReports[kept] != nil)
     }
 
     // MARK: - The view's holder-vs-tmux switch
@@ -390,6 +547,42 @@ final class SentParamsBox: @unchecked Sendable {
     }
 
     var count: Int { all.count }
+}
+
+/// A stand-in for `DaemonClient.subscribe`: each attempt before the
+/// `connectingFrom`th returns at once, as one that never reaches the daemon
+/// does; each from then on connects, and its stream ends.
+final class SubscribeAttempts: @unchecked Sendable {
+    private let lock = NSLock()
+    private let connectingFrom: Int
+    private var attempts = 0
+    private var connected = 0
+
+    init(connectingFrom: Int) {
+        self.connectingFrom = connectingFrom
+    }
+
+    func run(onConnected: @Sendable () -> Void) {
+        lock.lock()
+        let attempt = attempts
+        attempts += 1
+        let connects = attempt >= connectingFrom
+        if connects { connected += 1 }
+        lock.unlock()
+        if connects { onConnected() }
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+
+    var connects: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return connected
+    }
 }
 
 /// Carries the observed count onto the primary failure line.

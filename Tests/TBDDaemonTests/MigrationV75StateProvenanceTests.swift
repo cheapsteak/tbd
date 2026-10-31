@@ -75,7 +75,10 @@ import Testing
                 """, arguments: [terminalID, wtID, epoch])
         }
 
-        try migrator.migrate(queue)
+        // Through v76 only: a later migration resets the activity of every
+        // live row the program status store did not write, which is not what
+        // this test is about.
+        try migrator.migrate(queue, upTo: "v76_worktree_pr_observation")
 
         try queue.read { db in
             let terminals = try Int.fetchOne(

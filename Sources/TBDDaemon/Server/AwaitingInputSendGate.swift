@@ -15,20 +15,16 @@ import TBDShared
 /// is being waited on, and the second is the agent waiting for its next
 /// instruction, which is the state the composer exists to answer.
 ///
-/// **Pure.** The supersession question — has the session's own transcript shown
-/// it moved on since the prompt was recorded — is answered by
-/// `AwaitingInputSupersession`, the mechanism `terminal.list` already applies,
-/// and handed in as a Bool. Reimplementing it here would give TBD two answers to
-/// one question.
+/// **Pure.** The reason stands until the agent reports it moved on; nothing
+/// here infers that from the transcript.
 enum AwaitingInputSendGate {
     enum Decision: Equatable, Sendable {
         case allow
         case refuse(message: String)
     }
 
-    static func decide(reason: AwaitingInputReason?, superseded: Bool) -> Decision {
+    static func decide(reason: AwaitingInputReason?) -> Decision {
         guard let reason else { return .allow }
-        guard !superseded else { return .allow }
         switch reason.classification {
         case .promptOnScreen, .unrecognized:
             return .refuse(message: refusalMessage(reason))
@@ -37,9 +33,12 @@ enum AwaitingInputSendGate {
         }
     }
 
-    /// The refusal a human reads. It carries the notification message verbatim,
-    /// because that message is the question being asked, and answering it in the
-    /// terminal is the correct resolution.
+    /// The refusal a human reads. It quotes the reason's display text
+    /// (`AwaitingInputReason.displayMessage`): the reason's own message when it
+    /// carries one, and otherwise a line from the block kind the agent
+    /// reported — a reason the program status store wrote carries no message,
+    /// because the agent's text never reaches `state.db`. Answering the prompt
+    /// in the terminal is the correct resolution.
     ///
     /// TBD never *branches* on this text — that would be screen-scraping with an
     /// extra hop — it only carries it.
@@ -47,8 +46,8 @@ enum AwaitingInputSendGate {
         let kind = reason.classification == .unrecognized
             ? "an awaiting-input state this build does not recognize"
             : "a prompt on screen"
-        let quoted = reason.message.isEmpty ? "" : " — \"\(reason.message)\""
-        return "terminal.send was refused: the session has \(kind)\(quoted). Nothing was typed; "
+        return "terminal.send was refused: the session has \(kind) — \"\(reason.displayMessage)\". "
+            + "Nothing was typed; "
             + "a pasted message plus Enter would commit whichever option is highlighted. "
             + "Answer it in the terminal."
     }

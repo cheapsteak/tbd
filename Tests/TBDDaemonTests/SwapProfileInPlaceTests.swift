@@ -158,10 +158,12 @@ extension TBDHomeSerialized {
     /// The swap's SIGTERM can deliver SessionEnd before respawn. That hook
     /// must describe the predecessor, never park the row being replaced.
     ///
-    /// The hooks land while the signal ending polls for Claude to leave: the
-    /// one sleep between the SIGTERM and the respawn.
-    @Test(.clockDriven, arguments: ["permission_prompt", "idle_prompt"])
-    func sessionEndDuringTheSignalEndingDoesNotAbortSwap(notificationType: String) async throws {
+    /// The hook lands while the signal ending polls for Claude to leave: the
+    /// one sleep between the SIGTERM and the respawn. A wait reason the
+    /// predecessor reported is gone with it: the new incarnation starts with
+    /// none.
+    @Test(.clockDriven)
+    func sessionEndDuringTheSignalEndingDoesNotAbortSwap() async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let clock = EventDrivenTestClock()
@@ -170,6 +172,11 @@ extension TBDHomeSerialized {
             scratch, withConversation: true,
             recorder: { commands.record($0) }, clock: clock)
         let predecessor = fixture.terminal
+        let reason = try #require(ProgramStatusColumnValue.waitingForUser(
+            ProgramStatusBlock(kind: .permission, taskID: nil)).awaitingInputReason)
+        _ = try #require(try await fixture.db.terminals.applyProgramStatusActivity(
+            id: predecessor.id, scope: .anyLiveIncarnation, activityState: .waitingForUser,
+            awaitingInputReason: reason, observedAt: Date()))
         let task = Task { try await swap(fixture, mode: .inPlace) }
         defer { task.cancel() }
 
@@ -180,18 +187,6 @@ extension TBDHomeSerialized {
             id: predecessor.id,
             reportedIncarnationID: predecessor.sessionIncarnationID)
         #expect(!stamped, "the signalled predecessor must already be fenced")
-        // Notification predates incarnation tokens. Unlike SessionEnd it can
-        // still write during the ending, so the swap must retract its
-        // persisted reason before the successor starts.
-        let notification = try RPCRequest(
-            method: RPCMethod.terminalNotificationEvent,
-            params: TerminalNotificationEventParams(
-                terminalID: predecessor.id,
-                notificationType: notificationType,
-                message: "Predecessor prompt"))
-        #expect((await fixture.router.handle(notification)).success)
-        let interrupted = try #require(try await fixture.db.terminals.get(id: predecessor.id))
-        #expect(interrupted.awaitingInputReason != nil)
 
         try await clock.requireAdvanceWhenArmed(
             by: fixture.router.hibernationCoordinator.exitPollInterval)
@@ -205,7 +200,7 @@ extension TBDHomeSerialized {
         #expect(fixture.deltas.values.contains {
             guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
             return delta.terminalID == predecessor.id && delta.reason == nil
-        }, "successful cleanup must retract the persisted reason for subscribers")
+        }, "the swap must retract the predecessor's reason for subscribers")
         #expect(after.sessionIncarnationID != predecessor.sessionIncarnationID)
         #expect(after.claudeSessionID == predecessor.claudeSessionID)
         #expect(after.transcriptPath == predecessor.transcriptPath)
@@ -216,52 +211,6 @@ extension TBDHomeSerialized {
         #expect(!commands.values.contains { $0.contains("new-window") })
         #expect(!commands.values.contains { $0.contains("send-keys") },
                 "the swap typed into the pane it was ending")
-    }
-
-    @Test(.clockDriven)
-    func promptCleanupFailureStillStartsReplacement() async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let clock = EventDrivenTestClock()
-        let commands = FireRecorder<[String]>()
-        let fixture = try await makeFixture(
-            scratch, withConversation: true,
-            recorder: { commands.record($0) }, clock: clock)
-        let task = Task { try await swap(fixture, mode: .inPlace) }
-        defer { task.cancel() }
-
-        try await clock.requireSleeperArmed()
-        try await fixture.db.terminals.recordAwaitingInputReason(
-            id: fixture.terminal.id,
-            reason: AwaitingInputReason(message: "Predecessor prompt", hookEventName: "Notification"),
-            observedAt: Date())
-        // Fail only the post-ending metadata clear, after the replacement
-        // reservation has already committed. All reads and respawn work remain
-        // available, just as with a transient failure of this one write.
-        try await fixture.db.writerForTests.write { database in
-            try database.execute(sql: """
-                CREATE TRIGGER reject_prompt_cleanup
-                BEFORE UPDATE OF awaitingInputReason ON terminal
-                WHEN OLD.awaitingInputReason IS NOT NULL AND NEW.awaitingInputReason IS NULL
-                BEGIN
-                    SELECT RAISE(FAIL, 'injected prompt cleanup failure');
-                END
-                """)
-        }
-        try await clock.requireAdvanceWhenArmed(
-            by: fixture.router.hibernationCoordinator.exitPollInterval)
-
-        let response = try await task.value
-        #expect(response.success, "metadata cleanup must not abort respawn: \(response.error ?? "")")
-        #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
-        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(after.awaitingInputReason != nil, "the injected write failure must have fired")
-        #expect(!fixture.deltas.values.contains {
-            guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
-            return delta.terminalID == after.id && delta.reason == nil
-        }, "a failed cleanup must not tell subscribers the persisted reason was cleared")
-        #expect(after.sessionIncarnationID != fixture.terminal.sessionIncarnationID)
-        #expect(!after.isParked)
     }
 
     // MARK: - The session mod and the overlay across the swap

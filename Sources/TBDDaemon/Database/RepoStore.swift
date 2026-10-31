@@ -80,9 +80,14 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// Provides CRUD operations for repos.
 public struct RepoStore: Sendable {
     let writer: any DatabaseWriter
+    /// `TerminalStore.deletions`: deleting a repo row deletes its worktrees,
+    /// and their terminals, through the foreign-key cascade, and every
+    /// terminal-row deletion is reported.
+    let terminalDeletions: TerminalDeletionNotifier
 
-    init(writer: any DatabaseWriter) {
+    init(writer: any DatabaseWriter, terminalDeletions: TerminalDeletionNotifier) {
         self.writer = writer
+        self.terminalDeletions = terminalDeletions
     }
 
     /// Create a new repo and return it.
@@ -143,11 +148,14 @@ public struct RepoStore: Sendable {
         }
     }
 
-    /// Remove a repo by ID.
+    /// Remove a repo by ID, and with it its worktrees' terminal rows.
     public func remove(id: UUID) async throws {
-        _ = try await writer.write { db in
-            try RepoRecord.deleteOne(db, key: id.uuidString)
+        let terminalIDs = try await writer.write { db -> [UUID] in
+            let ids = try TerminalDeletionNotifier.terminalIDs(db, repoID: id)
+            _ = try RepoRecord.deleteOne(db, key: id.uuidString)
+            return ids
         }
+        await terminalDeletions.notifyDeleted(terminalIDs)
     }
 
     /// Update per-repo instruction fields.

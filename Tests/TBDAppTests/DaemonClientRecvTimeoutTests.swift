@@ -6,6 +6,8 @@ import Darwin
 import Glibc
 #endif
 @testable import TBDApp
+import TBDShared
+import TestSupport
 
 // BUG 1: the persistent subscribe() loop must unwind promptly when its Task is
 // cancelled, even if the daemon has gone silent without closing the socket
@@ -24,18 +26,16 @@ struct DaemonClientRecvTimeoutTests {
         var fd: Int32 = -1
     }
 
-    @Test("subscribe() loop unwinds promptly on cancel against a silent daemon")
-    func subscribeCancelsPromptlyWhenDaemonSilent() async throws {
-        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
-
-        // 1. Raw listener bound to the short temp path. bind() creates the
-        //    socket file, which makeConnectedSocket() requires to exist.
+    /// A raw AF_UNIX listener bound to `path`, with a backlog of one. bind()
+    /// creates the socket file, which makeConnectedSocket() requires to exist.
+    /// The caller closes the returned fd and unlinks `path`.
+    private static func makeListeningSocket(path: String) -> Int32 {
         let listenFd = socket(AF_UNIX, SOCK_STREAM, 0)
         #expect(listenFd >= 0)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        socketPath.withCString { ptr in
+        path.withCString { ptr in
             withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
                 let raw = UnsafeMutableRawPointer(pathPtr)
                 raw.copyMemory(from: ptr, byteCount: strlen(ptr) + 1)
@@ -48,6 +48,15 @@ struct DaemonClientRecvTimeoutTests {
         }
         #expect(bindResult == 0)
         #expect(listen(listenFd, 1) == 0)
+        return listenFd
+    }
+
+    @Test("subscribe() loop unwinds promptly on cancel against a silent daemon")
+    func subscribeCancelsPromptlyWhenDaemonSilent() async throws {
+        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
+
+        // 1. Raw listener bound to the short temp path.
+        let listenFd = Self.makeListeningSocket(path: socketPath)
 
         let acceptedBox = FdBox()
         defer {
@@ -92,5 +101,132 @@ struct DaemonClientRecvTimeoutTests {
         }
 
         #expect(finishedInTime, "subscribe() did not unwind within 3s after cancel — recv wedge not fixed")
+    }
+
+    /// Counts calls from whichever thread makes them.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+
+        func increment() {
+            lock.lock()
+            calls += 1
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return calls
+        }
+    }
+
+    /// Subscribe against a fake daemon that accepts one connection, reads the
+    /// subscribe request, writes `lines` and closes, and return how many times
+    /// `onConnected` ran once the stream ended.
+    ///
+    /// `lines` are framed as the daemon frames them: `SocketServer` and
+    /// `StateSubscriptionManager` encode the acknowledgment and every delta
+    /// with a default `JSONEncoder` and end each with a newline.
+    ///
+    /// The wait is a hang guard on the shared saturated-pass deadline, never a
+    /// short literal. `subscribe` reads on a cooperative thread, and the fast
+    /// parallel pass keeps a test suspended behind other runnable ones for tens
+    /// of seconds on a green run (Tests/CLAUDE.md), so a 5-second bound expired
+    /// before `subscribe` had read a byte, and recorded no connect for a daemon
+    /// that answered. The daemon runs on a thread of its own, so it waits for
+    /// no pooled one.
+    private static func connectsAfterServing(_ lines: Data) async -> Int {
+        let socketPath = "/tmp/tbd-test-\(UUID().uuidString.prefix(8)).sock"
+        let listenFd = makeListeningSocket(path: socketPath)
+        defer {
+            close(listenFd)
+            unlink(socketPath)
+        }
+        let daemon = Thread {
+            let clientFd = accept(listenFd, nil, nil)
+            guard clientFd >= 0 else { return }
+            var buf = [UInt8](repeating: 0, count: 4096)
+            _ = recv(clientFd, &buf, buf.count, 0) // read the subscribe bytes
+            lines.withUnsafeBytes { bytes in
+                _ = send(clientFd, bytes.baseAddress!, bytes.count, 0)
+            }
+            close(clientFd)
+        }
+        daemon.start()
+
+        let connects = CallCounter()
+        let finished = CallCounter()
+        let client = DaemonClient(socketPath: socketPath)
+        let task = Task {
+            await client.subscribe(onDelta: { _ in }, onConnected: { connects.increment() })
+            finished.increment()
+        }
+        let ended = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { finished.count == 1 }
+        task.cancel()
+
+        #expect(ended == .satisfied, "subscribe() did not return at the end of the stream")
+        return connects.count
+    }
+
+    /// One daemon line, framed as the daemon frames it.
+    private static func line(_ encodable: some Encodable) throws -> Data {
+        var line = try JSONEncoder().encode(encodable)
+        line.append(0x0A)
+        return line
+    }
+
+    /// `onConnected` runs once per subscription, however many lines follow:
+    /// the app re-sends its stored program-status reports from it, so a second
+    /// call would re-send them twice.
+    @Test("subscribe() calls onConnected once, on the daemon's first line")
+    func subscribeAnnouncesTheConnectOnce() async throws {
+        let ack = try Self.line(RPCResponse.ok())
+
+        let connects = await Self.connectsAfterServing(ack + ack)
+
+        #expect(connects == 1)
+    }
+
+    /// What the daemon's first line is, for `subscribeAnnouncesOnlyALiveDaemon`.
+    enum FirstLine: String, CaseIterable, Sendable {
+        case errorResponse
+        case acknowledgment
+        case delta
+        case undecodable
+
+        func encoded() throws -> Data {
+            switch self {
+            case .errorResponse:
+                return try DaemonClientRecvTimeoutTests.line(
+                    RPCResponse(error: "acme refused the subscription"))
+            case .acknowledgment:
+                return try DaemonClientRecvTimeoutTests.line(RPCResponse.ok())
+            case .delta:
+                return try DaemonClientRecvTimeoutTests.line(StateDelta.devServersChanged)
+            case .undecodable:
+                return Data("not json\n".utf8)
+            }
+        }
+
+        var announcesTheConnect: Bool {
+            switch self {
+            case .acknowledgment, .delta: return true
+            case .errorResponse, .undecodable: return false
+            }
+        }
+    }
+
+    /// The app re-sends its stored program-status reports from `onConnected`,
+    /// so it must mean a live daemon answered the subscription: its
+    /// acknowledgment, or a delta broadcast ahead of it. An error response, or
+    /// a line this build cannot decode, does not.
+    @Test("subscribe() calls onConnected only for an acknowledgment or a delta", arguments: FirstLine.allCases)
+    func subscribeAnnouncesOnlyALiveDaemon(firstLine: FirstLine) async throws {
+        let line = try firstLine.encoded()
+
+        let connects = await Self.connectsAfterServing(line)
+
+        #expect(connects == (firstLine.announcesTheConnect ? 1 : 0))
     }
 }

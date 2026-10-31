@@ -256,22 +256,3 @@ struct ContextLoadReader {
         return formatter.date(from: text)
     }
 }
-
-// MARK: - Stamping a payload with its own file's time
-
-extension FileHandle {
-    /// The modification time of the file this handle already has open.
-    ///
-    /// `fstat` on the descriptor, deliberately, rather than a second lookup by
-    /// path: a path can be re-pointed by a rename between two calls, and a
-    /// stamp taken from the new file would label the old file's bytes. A
-    /// descriptor names an inode, so the answer belongs to the payload the
-    /// caller is holding.
-    func modificationDate() -> Date? {
-        var info = stat()
-        guard fstat(fileDescriptor, &info) == 0 else { return nil }
-        let time = info.st_mtimespec
-        return Date(timeIntervalSince1970:
-            Double(time.tv_sec) + Double(time.tv_nsec) / 1_000_000_000)
-    }
-}

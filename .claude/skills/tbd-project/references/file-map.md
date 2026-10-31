@@ -38,6 +38,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `FDVendHeader.swift` — sidecar vend header: the routing identity for each descriptor the daemon vends to the app
 - `TerminalLabel.swift` — canonical terminal display-label derivation shared by daemon + app
 - `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
+- `ProgramStatus.swift` — Program Status Protocol (OSC 7501) constants, the report parser and its types, the task roll-up (`ProgramStatusRollup`), and `expectedApp(for:)` (which agent a terminal's reports must name)
 
 ## Sources/TBDAppIcon/ & Sources/IconBaker/
 - `TBDAppIcon/AppIcon.swift` — programmatic AppKit/CoreGraphics/CoreText icon drawing; per-worktree ribbon variant at runtime, shared by TBDApp and IconBaker
@@ -78,7 +79,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `CodexHomeManager.swift` — per-repo isolated `CODEX_HOME` with TBD hooks + bundled skill
 
 ### Hooks/
-- `ClaudeHookOverlay.swift` — generates `~/tbd/runtime/claude-overlay.json` (SessionStart/Stop/AskUserQuestion hooks)
+- `ClaudeHookOverlay.swift` — generates `~/tbd/runtime/claude-overlay.json` (SessionStart, Stop, StopFailure, UserPromptSubmit for the session title, AskUserQuestion, PostToolUse:Bash, SessionEnd); no entry reports agent state
 - `LegacyHookScanner.swift` — detects legacy globally-installed `tbd` hook entries in user/repo settings.json
 
 ### Lifecycle/
@@ -95,6 +96,10 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `RetiredLaunchAgent.swift` — at daemon startup, off the socket-bind path, boots out (`launchctl bootout gui/<uid>/com.nightwatch-tick`) and deletes `~/Library/LaunchAgents/com.nightwatch-tick.plist`, the job Nightwatch's removed scheduler installed, only when its label and `…/skills/nightwatch/scripts/tick-cron.sh` program match and that script is gone; `launchctl` runs through the `LaunchctlRunning` seam; skipped in mock mode
 - `ArchivedWorktreeBackfill.swift` — repairs archived worktree rows with missing branches
 - `RepoHealthValidator.swift` — flips repos with stale paths to `.missing`
+
+### ProgramStatus/
+- `ProgramStatusStore.swift` — actor holding each terminal's latest OSC 7501 snapshot (trust, liveness, task roll-up); the only writer of the `activityState` and wait-reason columns, and the source of the attention banner and the PR-poll ledger stamp
+- `ProgramStatusColumn.swift` — the pure mapping from a rolled-up state to the column value, the guarded write's request and outcome types, the store's outward `ProgramStatusEffects` seam, and the fixed banner text per agent and block kind
 
 ### SessionMod/
 - `SessionModFiles.swift` — the per-session files under `~/tbd/sessions/<claudeSessionID>/` (`spawn.json`, `alive.json`, `composer-draft.json`) and the owner-only sessions root
@@ -141,7 +146,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 ## Sources/TBDCLI/
 - `TBD.swift` — `@main`, registers subcommands
 - `SocketClient.swift` / `PathResolver.swift` / `Utilities.swift` — POSIX RPC client, `$PWD`→repo/worktree resolution, helpers
-- `Commands/` — `RepoCommands`, `WorktreeCommands` (+`WorktreePosition`), `ConfigCommands` (`tbd config get|set`), `TerminalCommands`, `NotifyCommand`, `HooksCommand`, `SetupHooksCommand` (deprecated), `SessionEventCommand`, `AskUserQuestionEventCommand`, `StopRenameCheckCommand`, `StopFailureCommand` (`tbd hooks stop-failure` — notify on API-error turn death), `LinkCommand`, `CleanupCommand`, `DaemonCommands`, `DoctorCommand` (`tbd doctor` — diagnose/repair CLI install), `TerminalActivityEventCommand` (agent hook → terminal-activity bridge)
+- `Commands/` — `RepoCommands`, `WorktreeCommands` (+`WorktreePosition`), `ConfigCommands` (`tbd config get|set`), `TerminalCommands`, `NotifyCommand`, `HooksCommand`, `SetupHooksCommand` (deprecated), `SessionEventCommand`, `AskUserQuestionEventCommand`, `StopRenameCheckCommand`, `StopFailureCommand` (`tbd hooks stop-failure` — notify on API-error turn death), `LinkCommand`, `CleanupCommand`, `DaemonCommands`, `DoctorCommand` (`tbd doctor` — diagnose/repair CLI install), `SessionTitleHookCommand` (`tbd hooks session-title` — the `UserPromptSubmit` hook that hands a Claude session its title)
 
 ## Sources/TBDApp/
 - `TBDApp.swift` — `@main` App + AppDelegate
@@ -151,7 +156,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `DaemonClient.swift` — actor, POSIX RPC client; `DeepLinkHandler.swift` — `tbd://` routing
 - `ContentView.swift` / `RepoDetailView.swift` / `RepoInstructionsView.swift` / `TabBar.swift` / `ArchivedWorktreesView.swift`
 - `CLIInstallerCoordinator.swift` / `LegacyHooksCoordinator.swift` — launch-time install + legacy-hook migration prompts
-- `Sidebar/` — repo sections, nested worktree rows/subtrees, context menu, emoji picker, inline rename, `BranchPickerView` (option-click `+` to create worktree from an existing branch), `RowStatusIndicator` (single priority-ranked status dot per row), `RowTooltipPreference` (hover-tooltip preference key + bubble)
+- `Sidebar/` — repo sections, nested worktree rows/subtrees, context menu, emoji picker, inline rename, `BranchPickerView` (option-click `+` to create worktree from an existing branch), `RowStatusIndicator` (single priority-ranked status dot per row), `RowTooltipPreference` (hover-tooltip preference key + bubble), `ProgramStatusRowPresentation` (OSC 7501 badge resolution and tooltip), `NoStatusMark` (the mark for an agent session that reports no state, with `AppState+NoStatus` keeping its per-incarnation sightings and 15-second grace)
 - `Terminal/` — TmuxBridge, TBDTerminalView, panels, split layout, LayoutNode, PaneContent, pinned dock, appearance/color schemes, WorktreePager; custom/importable terminal themes: `ThemeStore`, `UserTerminalTheme`, `AlacrittyImporter` (TOML), `ThemeDirectoryWatcher`
 - `Panes/` — code viewer, note, webview, history, `ViewerRouting` (routes file clicks to reuse/split the code viewer), `Transcript/` (per-tool cards with body/header split files, chat bubbles, context-usage badge, markdown; file-preview overlay: `TranscriptOverlayView`, `TranscriptOverlayCoordinator`, `TranscriptOverlayEnvironment`, `OverlayFileView`, `OverlayFileLinkAction`, `LocalFileLinker`)
 - `Panes/Transcript/Table/` — the #129 transcript renderer, and the only one: `NSTableView`-based (`TableTranscriptPaneView`/`TableTranscriptView`) with per-row cells (`TranscriptBubbleCellView`, `ActivityRowCellView`, `ActivityRowPresentation`) and an explicit row-height cache. Its supporting types sit one level up in `Panes/Transcript/` (siblings of `Table/`, not inside it): `TranscriptCardContext` (per-pane card environment), `TranscriptStreamPlan` (classifies each poll as noop/append/updateLast/rebuild), `TranscriptCardAttachment`/`TranscriptCardSizing` (inline SwiftUI card attachments + sizing math — reachable only from `MarkdownAttributedRenderer.render`, now a test seam)

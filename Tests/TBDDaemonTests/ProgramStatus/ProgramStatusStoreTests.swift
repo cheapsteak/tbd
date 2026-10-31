@@ -47,11 +47,12 @@ import TestSupport
         }
     }
 
-    /// Holds every terminal lookup suspended until `release()`, so a test can
-    /// run a drop while an ingest is parked on its lookup. Lookups after the
-    /// release pass straight through.
+    /// Holds the first terminal lookup suspended until `release()`, so a test
+    /// can run a drop while an ingest is parked on its lookup. Every later
+    /// lookup — the drop's own among them — passes straight through.
     fileprivate final class LookupGate: Sendable {
         private struct State: Sendable {
+            var calls = 0
             var arrived = false
             var released = false
             var waiting: CheckedContinuation<Void, Never>?
@@ -62,6 +63,11 @@ import TestSupport
         var hasArrived: Bool { state.withLock { $0.arrived } }
 
         func wait() async {
+            let isFirst: Bool = state.withLock { current in
+                current.calls += 1
+                return current.calls == 1
+            }
+            guard isFirst else { return }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let resumeNow: Bool = state.withLock { current in
                     current.arrived = true
@@ -383,6 +389,29 @@ import TestSupport
         #expect(last.terminalID == terminal.id)
     }
 
+    /// `holdsReport` answers whether the named incarnation is reporting: true
+    /// only while an entry of that incarnation is held, false for another
+    /// incarnation, for a terminal never heard from, and after a bare clear.
+    @Test func holdsReportNamesOnlyAReportingIncarnation() async {
+        let h = Harness()
+        let incarnation = UUID()
+        let terminal = holderClaude(incarnation: incarnation)
+        let silent = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        h.add(silent)
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation) == false)
+
+        _ = await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: UUID()) == false)
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: nil) == false)
+        #expect(await h.store.holdsReport(
+            terminalID: silent.id, incarnationID: silent.sessionIncarnationID) == false)
+
+        _ = await h.store.ingest(inbound(terminal, "state=clear", at: 2))
+        #expect(await h.store.holdsReport(terminalID: terminal.id, incarnationID: incarnation) == false)
+    }
+
     @Test func incarnationChangeDiscardsOldEntries() async throws {
         let h = Harness()
         let first = UUID()
@@ -512,6 +541,75 @@ import TestSupport
         h.remove(terminal.id)
         await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
         #expect(await h.store.snapshot(for: terminal.id) == nil)
+    }
+
+    /// A deleted row takes no further report, so nothing kept for it — entries,
+    /// counters, watermarks, the parked backlog, the column memo — may outlive
+    /// it. Another terminal's state is untouched.
+    @Test func forgetLeavesNothingForTheTerminal() async {
+        let dropInstant = t0.addingTimeInterval(10)
+        let h = Harness(now: { dropInstant })
+        var terminal = holderClaude(incarnation: UUID())
+        let other = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        h.add(other)
+        #expect(await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1)) == .accepted)
+        #expect(await h.store.ingest(inbound(other, "state=working:app=claude-code", at: 1)) == .accepted)
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        terminal.hibernatedAt = dropInstant
+        h.add(terminal)
+        #expect(await h.store.ingest(inbound(terminal, "state=idle:app=claude-code", at: 20))
+            == .rejected("terminal is parked"))
+        #expect(await h.store.ingest(inbound(terminal, "state=done:app=claude-code", at: 21))
+            == .rejected("terminal is parked"))
+        #expect(await h.store.keepsState(for: terminal.id))
+
+        await h.store.forget(terminalIDs: [terminal.id])
+        #expect(await h.store.keepsState(for: terminal.id) == false)
+        #expect(await h.store.snapshot(for: other.id)?.main?.state == .working)
+    }
+
+    /// An ingest whose terminal lookup read the row before it was deleted, and
+    /// that resumes after the row's `forget`, must not re-create what the
+    /// forget removed: nothing would ever forget it again.
+    @Test func anIngestRacingAForgetDoesNotResurrectTheTerminal() async {
+        let gate = LookupGate()
+        let h = Harness(lookupGate: gate)
+        let terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        let store = h.store
+        let report = inbound(terminal, "state=working:app=claude-code", at: 1)
+        let ingest = Task { await store.ingest(report) }
+
+        let reached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            gate.hasArrived
+        }
+        if reached == .timedOut {
+            Issue.record(LookupNotReached())
+        }
+        // The lookup already holds the row; the row is deleted and forgotten
+        // while it is suspended.
+        await store.forget(terminalIDs: [terminal.id])
+        gate.release()
+
+        #expect(await ingest.value == .rejected("terminal deleted"))
+        #expect(await store.keepsState(for: terminal.id) == false)
+        #expect(await store.snapshot(for: terminal.id) == nil)
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A deleted row's child exit or park reported after its `forget` keeps
+    /// nothing: no watermark, counter or ended incarnation outlives the row.
+    @Test func aDropAfterAForgetKeepsNothing() async {
+        let h = Harness()
+        let terminal = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        #expect(await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1)) == .accepted)
+        await h.store.forget(terminalIDs: [terminal.id])
+
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        #expect(await h.store.keepsState(for: terminal.id) == false)
     }
 
     @Test func revisionIsMonotonicAcrossClears() async {

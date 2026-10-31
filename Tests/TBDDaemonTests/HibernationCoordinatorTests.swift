@@ -79,6 +79,39 @@ struct HibernationCoordinatorTests {
         #expect(after?.isHibernated == true)
     }
 
+    /// A park writes `.idle` and a wake resets the column to `.unknown` for
+    /// the incarnation it mints; no activity delta announces either, so each
+    /// one's hibernation delta carries the activity columns it committed, read
+    /// back from the row.
+    @Test func parkAndWakeDeltasCarryTheCommittedActivityColumns() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let deltas = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(dryRun: true),
+            subscriptions: deltas.subscriptions(),
+            configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+        let parkActivity = try #require(deltas.snapshot().last { $0.hibernated }?.activity)
+        #expect(parkActivity.activityState == .idle)
+        #expect(parkActivity.activityStateSource == .database)
+        #expect(parkActivity.activityStateObservedAt == parked.activityStateObservedAt)
+        #expect(parkActivity.activityStateOrderObservedAt == parked.activityStateOrderObservedAt)
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+        let awake = try #require(try await db.terminals.get(id: terminalID))
+        let wakeActivity = try #require(deltas.snapshot().last { !$0.hibernated }?.activity)
+        #expect(awake.activityState == .unknown)
+        #expect(wakeActivity.activityState == .unknown)
+        #expect(wakeActivity.activityStateSource == .derived)
+        #expect(wakeActivity.activityStateObservedAt == awake.activityStateObservedAt)
+        #expect(wakeActivity.activityStateOrderObservedAt == awake.activityStateOrderObservedAt)
+    }
+
     @Test func hibernateRespawnRejectsPreReplacementSessionStart() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
@@ -2609,6 +2642,13 @@ struct HibernationCoordinatorTests {
         #expect(reconciled.claudeSessionID == parked.claudeSessionID)
         #expect(reconciled.transcriptPath == parked.transcriptPath)
         #expect(reconciled.sessionIncarnationID == parked.sessionIncarnationID)
+        // The park's `.idle` described a parked row, not the Claude found still
+        // running, and on tmux no report replaces it: the un-park resets it,
+        // so neither the idle sweep nor merge-park parks a turn in flight.
+        #expect(parked.activityState == .idle)
+        #expect(reconciled.activityState == .unknown)
+        #expect(reconciled.activityStateSource == .derived)
+        #expect(HibernationGate.decideForMerge(terminal: reconciled) == .unknownActivity)
     }
 
     @Test func reconcileOnStartupPreservesSessionStartAcceptedWhileReplacementStayedParked() async throws {
@@ -2852,6 +2892,31 @@ struct HibernationCoordinatorTests {
         #expect(delta?.hibernated == false)
         #expect(delta?.suspendedSnapshot == nil)
         #expect(delta?.hibernateReason == nil)
+    }
+
+    /// A park and a wake each mint a session incarnation, and the app forwards
+    /// Program Status reports under its cached row's: both deltas carry the
+    /// incarnation the row holds once each has committed.
+    @Test func parkAndWakeDeltasCarryTheCommittedIncarnation() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let recorder = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        let before = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        let parked = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+        #expect(parked != before)
+        #expect(recorder.snapshot().last?.sessionIncarnationID == parked)
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+        let woken = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+        #expect(woken != parked)
+        let wakeDelta = try #require(recorder.snapshot().last)
+        #expect(wakeDelta.hibernated == false)
+        #expect(wakeDelta.sessionIncarnationID == woken)
     }
 
     /// Keep-warm toggle on an ALREADY PARKED row re-broadcasts

@@ -11,8 +11,8 @@ import TestSupport
 /// emulator. This suite drives `Coordinator.feedSnapshot` on the production
 /// wiring — a real `TBDTerminalView` whose `terminalDelegate` is a real
 /// `Coordinator`, exactly as `makeNSView` wires one — and asserts on **what did
-/// not happen**: no bytes reached the child, no interrupt was raised, no ring,
-/// no pasteboard write, no `TIOCSWINSZ`, no notification.
+/// not happen**: no bytes reached the child, no ring, no pasteboard write, no
+/// `TIOCSWINSZ`, no notification.
 ///
 /// Every one of those is an assertion about an absence, so every test carries a
 /// positive control on the same path: the same bytes fed **live** must produce
@@ -36,9 +36,9 @@ import TestSupport
 /// block rather than on return, and why every assertion here runs after
 /// `settle()`.
 ///
-/// Nothing here talks to a live daemon: the interrupt path's best-effort
-/// `setTerminalActivity` RPC goes to `TBD_SOCKET_PATH`, which `scripts/test.sh`
-/// fences onto a scratch path with no listener.
+/// Nothing here talks to a live daemon: any RPC the wiring under test makes
+/// goes to `TBD_SOCKET_PATH`, which `scripts/test.sh` fences onto a scratch
+/// path with no listener.
 ///
 /// The suite limit is a hang guard — every wait here is bounded on its own, and
 /// the limit exists so a `settle()` that never settles is a named red rather
@@ -58,37 +58,6 @@ struct QuietIngestTests {
         harness.coordinator.feedSnapshot(snapshot, into: harness.terminalView)
         await harness.settle()
         #expect(harness.sentBytes.isEmpty, "replies escaped into the child's stdin")
-    }
-
-    /// The ordering guard in `send`, pinned.
-    ///
-    /// The bytes are handed to the delegate directly, and that is deliberate:
-    /// `handleOutgoingInput` reads a lone `0x1b`, or any slice containing
-    /// `0x03`, as a user interrupt, and no reply this emulator produces has
-    /// that shape — replies arrive as one multi-byte slice of printable ASCII.
-    /// What does have that shape is a **keystroke**, and a keystroke can land
-    /// here during an ingest for the same reason a reply can: the callback
-    /// arrives a main-queue turn after the feed, while the flag is still up. So
-    /// this is the real arrival shape, minus the queue.
-    @Test("An interrupt-shaped byte arriving during ingest is not read as a user interrupt")
-    func escapeIsNotAnInterrupt() async {
-        let harness = makeCoordinatorHarness()
-        defer { harness.tearDown() }
-        harness.coordinator.feedSnapshot(Data("\u{1b}[6n".utf8), into: harness.terminalView)
-        #expect(harness.coordinator.isIngestingSnapshot,
-                "the flag must still be up when a queued callback lands")
-        harness.coordinator.send(source: harness.terminalView, data: ArraySlice([0x1b]))
-        harness.coordinator.send(source: harness.terminalView, data: ArraySlice([0x03]))
-        await harness.settle()
-        #expect(harness.interruptCount == 0)
-
-        // Positive control: the very same bytes, once the flag is down, DO
-        // raise the interrupt — so the assertion above is about the guard, not
-        // about an interrupt path that never fires in this fixture.
-        #expect(!harness.coordinator.isIngestingSnapshot)
-        harness.coordinator.send(source: harness.terminalView, data: ArraySlice([0x03]))
-        let raised = await harness.waitUntil { harness.interruptCount == 1 }
-        #expect(raised, "a live Ctrl-C must still reach handleTerminalInterrupt")
     }
 
     @Test("A BEL in a snapshot does not ring")
@@ -250,7 +219,6 @@ final class QuietIngestHarness {
     let appState: AppState
     let coordinator: TerminalPanelRepresentable.Coordinator
     let terminalView: TBDTerminalView
-    let worktreeID: UUID
     let terminalID: UUID
     let childPID: pid_t
 
@@ -266,7 +234,6 @@ final class QuietIngestHarness {
         terminalView: TBDTerminalView,
         process: LocalProcess,
         outgoing: OutgoingRecorder,
-        worktreeID: UUID,
         terminalID: UUID,
         defaultsSuite: TestDefaultsSuite
     ) {
@@ -275,7 +242,6 @@ final class QuietIngestHarness {
         self.terminalView = terminalView
         self.process = process
         self.outgoing = outgoing
-        self.worktreeID = worktreeID
         self.terminalID = terminalID
         self.defaultsSuite = defaultsSuite
         self.childPID = process.shellPid
@@ -294,12 +260,6 @@ final class QuietIngestHarness {
     /// What came back off the child's tty. The line discipline echoes whatever
     /// the coordinator wrote, so a non-empty buffer means bytes escaped.
     var sentBytes: [UInt8] { outgoing.recorded }
-
-    /// `handleTerminalInterrupt` idles the seeded agent terminal, so the seeded
-    /// row's activity state is the interrupt's own record of itself.
-    var interruptCount: Int {
-        appState.terminals[worktreeID]?.first?.activityState == .idle ? 1 : 0
-    }
 
     var notificationCount: Int { notifications.value }
 
@@ -369,20 +329,7 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     let defaults = suite.defaults
     let appState = AppState(userDefaults: defaults)
 
-    let worktreeID = UUID()
     let terminalID = UUID()
-    // A Claude terminal in `.working`: `handleTerminalInterrupt` records
-    // nothing unless it can find an agent terminal, and Esc is Claude's
-    // interrupt key.
-    appState.terminals[worktreeID] = [Terminal(
-        id: terminalID,
-        worktreeID: worktreeID,
-        tmuxWindowID: "@1",
-        tmuxPaneID: "%1",
-        label: "Claude",
-        kind: .claude,
-        activityState: .working
-    )]
 
     let view = TBDTerminalView(
         frame: CGRect(x: 0, y: 0, width: 600, height: 300),
@@ -421,7 +368,6 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
         terminalView: view,
         process: process,
         outgoing: outgoing,
-        worktreeID: worktreeID,
         terminalID: terminalID,
         defaultsSuite: suite
     )

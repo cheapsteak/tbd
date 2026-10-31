@@ -406,9 +406,10 @@ public actor HibernationCoordinator {
 
     /// The Program Status Protocol (OSC 7501) store. A park or a wake drops the
     /// terminal's entries (spec "Liveness"): a parked session's program is
-    /// gone, and a SIGKILLed one never sent `state=clear`. Nil in tests that
+    /// gone, and a SIGKILLed one never sent `state=clear`. A holder park that
+    /// rolls back discards what the store kept for a wake. Nil in tests that
     /// do not exercise it.
-    private let programStatus: ProgramStatusStore?
+    let programStatus: ProgramStatusStore?
 
     /// What a person is told when a tmux-backed session cannot be woken because
     /// tmux cannot serve. Names the gesture that moves the session, **and the
@@ -1137,6 +1138,7 @@ public actor HibernationCoordinator {
         case .keepWarm: return "Terminal is pinned keep-warm"
         case .running: return "Session is actively running"
         case .waitingForUser: return "Session is waiting on a permission prompt"
+        case .unknownActivity: return "Session state is unknown — the agent is not reporting status"
         case .eligible, .featureDisabled, .notIdleLongEnough: return "Not hibernatable"
         }
     }
@@ -2391,7 +2393,7 @@ public actor HibernationCoordinator {
 
             case .featureDisabled, .notClaudeResumable,
                  .alreadyHibernated, .suspended, .keepWarm, .running,
-                 .waitingForUser:
+                 .waitingForUser, .unknownActivity:
                 // Not at rest (or ineligible): the idle clock and any armed
                 // debounce reset so a later settle starts a fresh full window.
                 idleSince[terminal.id] = nil
@@ -2494,7 +2496,7 @@ public actor HibernationCoordinator {
             // Window and process are alive, and the pane raised no identity
             // objection — clear the parked state
             do {
-                try await db.terminals.clearHibernated(id: terminal.id)
+                try await db.terminals.clearHibernated(id: terminal.id, at: now())
                 logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")
             } catch {
                 logger.warning("startup: failed to clear parked state for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -2526,7 +2528,7 @@ public actor HibernationCoordinator {
     private func liftEarlierBuildsExitStamp(_ terminal: Terminal) async {
         let kind = terminal.kind?.rawValue ?? "unrecorded"
         do {
-            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id, at: now()) {
                 logger.info("startup: lifted an earlier build's exit stamp from \(kind, privacy: .public) terminal \(terminal.id, privacy: .public) — no wake resumes Claude in it, and its shell was never stopped")
             }
         } catch {
@@ -2555,6 +2557,15 @@ public actor HibernationCoordinator {
         }
     }
 
+    /// Announce the activity columns `terminalID`'s row holds, read back after
+    /// a commit that changed them with no park or wake broadcast to carry
+    /// them: a park that rolled back before its broadcast, whose un-park reset
+    /// the intent's `.idle` to `.unknown`.
+    func broadcastActivityColumns(terminalID: UUID) async {
+        guard let row = try? await db.terminals.get(id: terminalID) else { return }
+        subscriptions?.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(columnsOf: row)))
+    }
+
     /// `suspendedSnapshot`/`hibernateReason` ride hibernate broadcasts (and
     /// keep-warm re-broadcasts on a parked row) because the app applies this
     /// delta to its cached row IN PLACE: the parked view materializes on the
@@ -2565,6 +2576,12 @@ public actor HibernationCoordinator {
     /// `isParkOrWake` is false only for a re-broadcast that changes neither
     /// (`setKeepWarm`); every other caller parks or wakes the row, which drops
     /// a holder row's Program Status entries (`dropProgramStatus`).
+    ///
+    /// A park or a wake also carries the row's session incarnation and its
+    /// activity columns, read back after the commit: both mint an incarnation,
+    /// and the app forwards Program Status reports under its cached row's; a
+    /// park writes `.idle` and a wake resets the column to `.unknown`, which
+    /// nothing else announces.
     func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
@@ -2576,6 +2593,7 @@ public actor HibernationCoordinator {
         if isParkOrWake, terminal.transport == .holder {
             await dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
         }
+        let committed = isParkOrWake ? (try? await db.terminals.get(id: terminal.id)) : nil
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
@@ -2584,7 +2602,9 @@ public actor HibernationCoordinator {
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
             suspendedSnapshot: suspendedSnapshot,
-            hibernateReason: hibernateReason
+            hibernateReason: hibernateReason,
+            sessionIncarnationID: committed?.sessionIncarnationID,
+            activity: committed.map(TerminalActivityDelta.init(columnsOf:))
         )))
     }
 

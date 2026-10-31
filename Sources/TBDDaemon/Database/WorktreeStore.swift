@@ -278,9 +278,14 @@ public struct RemoteSessionReference: Sendable, Hashable {
 /// Provides CRUD operations for worktrees.
 public struct WorktreeStore: Sendable {
     let writer: any DatabaseWriter
+    /// `TerminalStore.deletions`: deleting a worktree row deletes its
+    /// terminal rows through the foreign-key cascade, and every terminal-row
+    /// deletion is reported.
+    let terminalDeletions: TerminalDeletionNotifier
 
-    init(writer: any DatabaseWriter) {
+    init(writer: any DatabaseWriter, terminalDeletions: TerminalDeletionNotifier) {
         self.writer = writer
+        self.terminalDeletions = terminalDeletions
     }
 
     /// Create a new worktree. The displayName defaults to the name.
@@ -432,11 +437,14 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Delete a worktree by ID.
+    /// Delete a worktree by ID, and with it its terminal rows.
     public func delete(id: UUID) async throws {
-        _ = try await writer.write { db in
-            try WorktreeRecord.deleteOne(db, key: id.uuidString)
+        let terminalIDs = try await writer.write { db -> [UUID] in
+            let ids = try TerminalDeletionNotifier.terminalIDs(db, worktreeID: id)
+            _ = try WorktreeRecord.deleteOne(db, key: id.uuidString)
+            return ids
         }
+        await terminalDeletions.notifyDeleted(terminalIDs)
     }
 
     /// Delete a row and return what it held, in one write transaction — nil
@@ -445,12 +453,17 @@ public struct WorktreeStore: Sendable {
     /// transaction is what makes that safe against a concurrent park: a
     /// `setPendingPrompt` either commits before this (and its text is in the
     /// returned row) or after (and finds no row, which it reports).
+    ///
+    /// Its terminal rows go with it, as in `delete(id:)`.
     public func deleteReturning(id: UUID) async throws -> Worktree? {
-        try await writer.write { db in
-            guard let record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return nil }
+        let (deleted, terminalIDs) = try await writer.write { db -> (Worktree?, [UUID]) in
+            guard let record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return (nil, []) }
+            let ids = try TerminalDeletionNotifier.terminalIDs(db, worktreeID: id)
             _ = try WorktreeRecord.deleteOne(db, key: id.uuidString)
-            return record.toModel()
+            return (record.toModel(), ids)
         }
+        await terminalDeletions.notifyDeleted(terminalIDs)
+        return deleted
     }
 
     /// NULL out `parentWorktreeID` for rows whose parent is either missing or
@@ -1237,13 +1250,17 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Delete all worktrees for a given repo.
+    /// Delete all worktrees for a given repo, and with them their terminal
+    /// rows.
     public func deleteForRepo(repoID: UUID) async throws {
-        _ = try await writer.write { db in
-            try WorktreeRecord
+        let terminalIDs = try await writer.write { db -> [UUID] in
+            let ids = try TerminalDeletionNotifier.terminalIDs(db, repoID: repoID)
+            _ = try WorktreeRecord
                 .filter(Column("repoID") == repoID.uuidString)
                 .deleteAll(db)
+            return ids
         }
+        await terminalDeletions.notifyDeleted(terminalIDs)
     }
 
     /// Read the `tabOrder` JSON column for a worktree, decoded into UUIDs.

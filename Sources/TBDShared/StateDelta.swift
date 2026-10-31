@@ -207,10 +207,34 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// `clearHibernated`). Optional with a nil default so payloads from older
     /// daemons still decode.
     public let hibernateReason: HibernateReason?
+    /// The row's session incarnation as the park or wake committed it. Both
+    /// mint one, and the app labels every Program Status report it forwards
+    /// with its cached row's incarnation, so a cached row that kept the old
+    /// one past a wake would forward the woken agent's reports under an
+    /// incarnation the daemon no longer runs. Nil when the daemon could not
+    /// read the row back, and from daemons that predate this field: the app
+    /// then keeps its cached value. Optional with a nil default so payloads
+    /// from older daemons still decode.
+    public let sessionIncarnationID: UUID?
+    /// The row's activity columns as the park or wake committed them, read
+    /// back with `sessionIncarnationID`. A park writes `.idle` and a wake
+    /// resets the column to `.unknown` for the incarnation it mints, and no
+    /// `terminalActivityUpdated` announces either, so without this the cached
+    /// row keeps whatever it read before — a woken agent that cannot report
+    /// would keep a stale working or waiting state, and never get the
+    /// no-status mark. The app applies it under the activity ordering stamp,
+    /// as it applies `terminalActivityUpdated`. Nil on a keep-warm
+    /// re-broadcast, when the daemon could not read the row back, and from
+    /// daemons that predate this field: the app then keeps its cached values.
+    /// Optional with a nil default so payloads from older daemons still
+    /// decode.
+    public let activity: TerminalActivityDelta?
     public init(
         terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
-        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil
+        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
+        sessionIncarnationID: UUID? = nil,
+        activity: TerminalActivityDelta? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
@@ -220,6 +244,8 @@ public struct TerminalHibernationDelta: Codable, Sendable {
         self.tmuxPaneID = tmuxPaneID
         self.suspendedSnapshot = suspendedSnapshot
         self.hibernateReason = hibernateReason
+        self.sessionIncarnationID = sessionIncarnationID
+        self.activity = activity
     }
 }
 
@@ -330,6 +356,18 @@ public struct TerminalActivityDelta: Codable, Sendable {
         self.activityStateObservedAt = activityStateObservedAt
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
     }
+
+    /// The activity columns `terminal` holds, as the delta that announces
+    /// them.
+    public init(columnsOf terminal: Terminal) {
+        self.init(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            activityState: terminal.activityState,
+            activityStateSource: terminal.activityStateSource,
+            activityStateObservedAt: terminal.activityStateObservedAt,
+            activityStateOrderObservedAt: terminal.activityStateOrderObservedAt)
+    }
 }
 
 /// Delta payload for a terminal's awaiting-input reason.
@@ -338,13 +376,10 @@ public struct TerminalActivityDelta: Codable, Sendable {
 /// was retracted — the app mirrors the columns rather than deriving them, so
 /// there is exactly one place that decides what the record says.
 ///
-/// **What it promises is narrower than "every write":** a reason is pushed when
-/// it installs a prompt-on-screen or displaces one, and every retraction is
-/// pushed. The `Notification` hook carries no matcher, so it also records
-/// classes that cannot change whether a prompt is up — an `agent_completed`
-/// per finished subagent, an `idle_prompt` per idle minute — and pushing those
-/// would republish every subscriber's terminal collection for no visible
-/// change. A consumer that needs the other classes must read `terminal.list`.
+/// `ProgramStatusStore` pushes it whenever the reason it writes changes: a
+/// wait the agent reported, a wait of a different block kind, or a
+/// retraction. A park clears the reason too, and the app clears its cached
+/// one on the park's own `terminalHibernationChanged` delta.
 ///
 /// This is a *recorded reason*, not a claim about activity: nothing here
 /// asserts `activityState`, and the app must not write one from it.

@@ -306,6 +306,42 @@ struct DeltaIngestionTests {
         }
     }
 
+    /// The store's two ingest paths deliver deltas out of commit order, and one
+    /// older than the cached row is dropped. Dropped, it changes nothing, so it
+    /// must not write the row back and notify every reader of `terminals`.
+    @Test("terminalActivityUpdated: a delta older than the cached row")
+    func droppedActivityDelta() {
+        withEmissionState { state in
+            let worktreeID = UUID()
+            let terminalID = UUID()
+            let older = Date(timeIntervalSince1970: 10)
+            let newer = Date(timeIntervalSince1970: 20)
+            seatOneTerminal(
+                state,
+                worktreeID: worktreeID,
+                terminal: makeTerminal(id: terminalID, worktreeID: worktreeID, activityState: .idle)
+            )
+            state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminalID, worktreeID: worktreeID, activityState: .idle,
+                activityStateSource: .programStatus,
+                activityStateObservedAt: newer, activityStateOrderObservedAt: newer
+            )))
+            let cached = state.terminals
+
+            let count = countEmissions(of: state) {
+                state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+                    terminalID: terminalID, worktreeID: worktreeID, activityState: .working,
+                    activityStateSource: .programStatus,
+                    activityStateObservedAt: older, activityStateOrderObservedAt: older
+                )))
+            }
+
+            #expect(count == 0)
+            #expect(state.terminals == cached)
+            #expect(state.terminals[worktreeID]?.first?.activityState == .idle)
+        }
+    }
+
     /// Broadcast on every `Notification` hook of every class, plus every
     /// activity-rail retraction, so its publish cost is worth a ratchet.
     @Test("terminalAwaitingInputChanged: the same reason")

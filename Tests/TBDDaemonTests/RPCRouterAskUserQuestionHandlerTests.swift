@@ -4,8 +4,9 @@ import Foundation
 @testable import TBDShared
 
 // Tests for the AskUserQuestion RPC handlers — verifies that PreToolUse
-// flips the worktree to unread (attentionNeeded notification) and that
-// PostToolUse marks notifications read as a belt-and-suspenders cleanup.
+// flips the worktree to unread (attentionNeeded notification) on a session
+// that cannot report its own state, and that PostToolUse marks notifications
+// read as a belt-and-suspenders cleanup.
 extension RPCRouterTests {
 
     // MARK: - Helpers
@@ -81,6 +82,140 @@ extension RPCRouterTests {
         let entries = await router.pendingQuestions.entries(forTerminal: terminal.id)
         #expect(entries.count == 1)
         #expect(entries.first?.toolUseID == "toolu_test")
+    }
+
+    // MARK: - Pending: whether the session reports decides who raises the banner
+
+    /// A session whose current incarnation reports its state announces the
+    /// question itself (`blocked kind=question`) and the program status store
+    /// raises the banner for it, so the hook raises none there. A session that
+    /// is not reporting — a holder session whose agent is too old, or any tmux
+    /// session — gets the hook's banner. All three still record the pending
+    /// question for the transcript.
+    @Test("askUserQuestion.pending raises a notification unless the session's incarnation is reporting")
+    func askUserQuestionPendingNotifiesOnlyWhereTheAgentIsNotReporting() async throws {
+        let (_, reportingWorktreeID) = try await makeRepoAndWorktree()
+        let (_, silentWorktreeID) = try await makeRepoAndWorktree()
+        let (_, tmuxWorktreeID) = try await makeRepoAndWorktree()
+        let reporting = try await db.terminals.create(
+            worktreeID: reportingWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder)
+        let silent = try await db.terminals.create(
+            worktreeID: silentWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder)
+        let tmux = try await db.terminals.create(
+            worktreeID: tmuxWorktreeID, tmuxWindowID: "@mock-h", tmuxPaneID: "%mock-h",
+            kind: .claude, transport: .tmux)
+        // The reporting session's agent has reported from its current
+        // incarnation; the silent one's never has.
+        let outcome = await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: reporting.id, incarnation: .currentRow,
+            payload: Array("state=working:app=claude-code".utf8), observedAt: Date()))
+        #expect(outcome == .accepted)
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: reporting.id, inputJSON: inputJSON).success)
+        #expect(await sendPending(terminalID: silent.id, inputJSON: inputJSON).success)
+        #expect(await sendPending(terminalID: tmux.id, inputJSON: inputJSON).success)
+
+        #expect(try await db.notifications.unread(worktreeID: reportingWorktreeID).isEmpty)
+        let silentUnread = try await db.notifications.unread(worktreeID: silentWorktreeID)
+        #expect(silentUnread.map(\.type) == [.attentionNeeded])
+        let tmuxUnread = try await db.notifications.unread(worktreeID: tmuxWorktreeID)
+        #expect(tmuxUnread.map(\.type) == [.attentionNeeded])
+        #expect(await router.pendingQuestions.entries(forTerminal: reporting.id).count == 1)
+        #expect(await router.pendingQuestions.entries(forTerminal: silent.id).count == 1)
+        #expect(await router.pendingQuestions.entries(forTerminal: tmux.id).count == 1)
+    }
+
+    /// A daemon restart empties the program status store but not the column it
+    /// wrote. This router's store never saw the write below — as after a
+    /// restart — and the session is still a reporting one: its agent announces
+    /// the question itself when it reports the block, so the hook raises
+    /// nothing.
+    @Test("askUserQuestion.pending raises no notification after a restart over a column the store wrote")
+    func askUserQuestionPendingTrustsTheStoreWrittenColumnAfterARestart() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let written = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .working, awaitingInputReason: nil, observedAt: Date())
+        #expect(written != nil)
+        let reporting = await router.programStatus.holdsReport(
+            terminalID: terminal.id, incarnationID: terminal.sessionIncarnationID)
+        #expect(!reporting, "the store starts empty, as after a restart")
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        #expect(try await db.notifications.unread(worktreeID: worktreeID).isEmpty)
+        #expect(await router.pendingQuestions.entries(forTerminal: terminal.id).count == 1)
+    }
+
+    /// A bare `clear` ends the agent's reporting: the store drops what it held
+    /// and writes `.unknown` with its own source. That column is no evidence
+    /// of a reporting session — an agent relaunched by hand in the shell may
+    /// not report at all — so the hook raises the banner.
+    @Test("askUserQuestion.pending raises a notification after the agent's bare clear")
+    func askUserQuestionPendingNotifiesAfterABareClear() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let started = Date()
+        #expect(await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: terminal.id, incarnation: .currentRow,
+            payload: Array("state=working:app=claude-code".utf8),
+            observedAt: started)) == .accepted)
+        #expect(await router.programStatus.ingest(ProgramStatusStore.Inbound(
+            terminalID: terminal.id, incarnation: .currentRow,
+            payload: Array("state=clear".utf8),
+            observedAt: started.addingTimeInterval(1))) == .accepted)
+        let cleared = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(cleared.activityState == .unknown)
+        #expect(cleared.activityStateSource == .programStatus)
+        let holds = await router.programStatus.holdsReport(
+            terminalID: terminal.id, incarnationID: cleared.sessionIncarnationID)
+        #expect(!holds, "a bare clear leaves the store holding nothing")
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(unread.map(\.type) == [.attentionNeeded])
+    }
+
+    /// A wake mints a new incarnation and resets the column's source, so a
+    /// value the store wrote for the incarnation the wake ended does not make
+    /// the woken process a reporting one: until it reports, the hook raises
+    /// the banner.
+    @Test("askUserQuestion.pending raises a notification once a wake has reset the store-written column")
+    func askUserQuestionPendingNotifiesAfterAWakeResetsTheColumn() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        let written = try await db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .idle, awaitingInputReason: nil, observedAt: Date())
+        #expect(written != nil)
+        try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+        let parked = try #require(try await db.terminals.get(id: terminal.id))
+        let wokenIncarnation = try await db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked))
+        #expect(wokenIncarnation != nil)
+        try await db.terminals.clearHibernated(id: terminal.id)
+        let woken = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(woken.activityState == .unknown)
+        #expect(woken.activityStateSource == .derived)
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: terminal.id, inputJSON: inputJSON).success)
+
+        let unread = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(unread.map(\.type) == [.attentionNeeded])
     }
 
     // MARK: - Pending: terminal missing

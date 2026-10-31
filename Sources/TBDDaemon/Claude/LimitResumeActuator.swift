@@ -131,8 +131,9 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
 /// Runs one actuation attempt for a scheduled resume: eligibility checks, the
 /// send — tmux's Escape/text/Enter key sequence, or the holder transport's
 /// three writes (Escape, text, carriage return) — and post-send verification,
-/// which is the same for both because it reads hook-fed state and the
-/// transcript rather than anything the transport can see.
+/// which is the same for both because it reads the activity column — written
+/// from the agent's own OSC 7501 reports — and the transcript rather than
+/// anything the transport can see.
 public struct LimitResumeActuator: LimitResumeActuating {
 
     // MARK: - Timing constants (spec §Actuation 5-6)
@@ -799,8 +800,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         return await send(terminalID, Self.holderSubmitPayload)
     }
 
-    /// Success signal within ~20s: the activity hook reports `working`, or
-    /// the transcript file grows (spec §Actuation 6).
+    /// Success signal within ~20s: the agent reports `working`, or the
+    /// transcript file grows (spec §Actuation 6).
     private func verifyResumed(terminalID: UUID, transcriptPath: String?, preSize: Int) async -> Bool {
         for _ in 0..<Self.verifyPolls {
             if let terminal = ((try? await db.terminals.get(id: terminalID)) ?? nil),

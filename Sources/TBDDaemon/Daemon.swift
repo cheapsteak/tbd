@@ -1057,10 +1057,18 @@ public final class Daemon: Sendable {
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
         // invisible to `terminal.programStatusList`. Built in mock mode too —
-        // the router always has a store — where nothing feeds it. Memory only,
-        // so it has nothing to reconcile.
-        // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-        let programStatusStore = ProgramStatusStore.live(db: database, subscriptions: subs)
+        // the router always has a store — where nothing feeds it. Its entries
+        // are memory only; what it writes to `state.db` is the activity
+        // columns of rows that already exist, so it has nothing to reconcile.
+        //
+        // The PR-poll activity ledger is built here with it: the store stamps
+        // every accepted report into it, and the router's schedule reads the
+        // same instance.
+        // Design: docs/specs/2026-10-10-program-status-protocol-design.md,
+        // docs/specs/2026-10-30-osc-only-agent-status-design.md.
+        let activityLedger = WorktreeActivityLedger()
+        let programStatusStore = ProgramStatusStore.live(
+            db: database, subscriptions: subs, ledger: activityLedger)
         Task { await programStatusStore.run() }
 
         // The holder registry, constructed HERE rather than at step 8e where it
@@ -1313,6 +1321,7 @@ public final class Daemon: Sendable {
             profilePoolCandidateSource: profilePoolCandidateSource,
             pendingQuestions: pendingQuestions,
             programStatus: programStatusStore,
+            activityLedger: activityLedger,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,
             // Envelope suppression is authenticated against the sidecar's

@@ -62,17 +62,9 @@ struct SessionStateFactGatherer {
     func facts(
         for terminal: Terminal, programStatus: ProgramStatusSnapshot? = nil
     ) -> SessionStateFacts {
-        // One tail read serves both transcript-derived facts: the rate-limit
-        // classification and the append stamp the resolver's staleness rule
-        // compares against. Reading twice would double the cost of the pass and
-        // let the two facts describe different moments of the same file.
-        let tail = transcriptTail(for: terminal)
-        return SessionStateFacts(
+        SessionStateFacts(
             terminal: terminal,
-            transcriptRateLimit: transcriptRateLimit(tail),
-            transcriptLastAppendedAt: tail?.lastAppendedAt.map {
-                ObservedFact(value: $0, source: .transcriptTail, observedAt: tail?.readAt ?? now())
-            },
+            transcriptRateLimit: transcriptRateLimit(transcriptTail(for: terminal)),
             // Deliberately nil: nothing on this path establishes pane or
             // process liveness, and this path does not go and find out. See
             // `SessionStateResolver`'s note on `.gone`.
@@ -151,14 +143,10 @@ struct SessionStateFactGatherer {
         return .spawn(path: dir.appendingPathComponent(SessionModFiles.usageFileName).path, liveness: liveness)
     }
 
-    /// One bounded read of a session's transcript tail, and the two things the
-    /// pass learns from it.
+    /// One bounded read of a session's transcript tail, for the rate-limit
+    /// classification.
     private struct TranscriptTail {
         let data: Data
-        /// The file's modification time — when it last grew — taken from the
-        /// same open descriptor as `data`, so the stamp and the bytes describe
-        /// one file rather than two. nil when `fstat` refused.
-        let lastAppendedAt: Date?
         /// When TBD read it.
         let readAt: Date
     }
@@ -190,8 +178,7 @@ struct SessionStateFactGatherer {
         do {
             try handle.seek(toOffset: size > window ? size - window : 0)
             let data = try handle.readToEnd() ?? Data()
-            return TranscriptTail(
-                data: data, lastAppendedAt: handle.modificationDate(), readAt: now())
+            return TranscriptTail(data: data, readAt: now())
         } catch {
             return nil
         }
@@ -215,7 +202,7 @@ extension RPCRouter {
     func handleSessionStates(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionStatesParams.self, from: paramsData)
         // Agent-bearing kinds only. A plain shell has no transcript, no context
-        // window and no hook rail, so a `SessionStateReport` about one would
+        // window and no agent status, so a `SessionStateReport` about one would
         // spend a stat and a transcript-tail attempt on every call to explain
         // why a shell has no denominator. A nil kind is a pre-`kind` row, which
         // in practice is an agent terminal — included, because dropping a real

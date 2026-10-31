@@ -206,67 +206,17 @@ import Testing
         #expect(summary.contains(FactTimestamp.string(from: epoch)))
     }
 
-    /// Half a triple is not a fact here either. The wait reason's source is the
-    /// hook event that delivered it, so a reason with no event name — like a
-    /// reason with no observed-at — reports nothing rather than letting a bare
-    /// message masquerade as an observation.
-    @Test func awaitingInputFactNeedsBothItsHalves() {
-        let reason = AwaitingInputReason(
-            message: "Claude needs your permission",
-            hookEventName: "Notification",
-            notificationType: "permission_prompt")
-        func terminal(
-            reason: AwaitingInputReason?, observedAt: Date?
-        ) -> Terminal {
-            Terminal(
-                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-                awaitingInputReason: reason, awaitingInputObservedAt: observedAt)
-        }
+    // MARK: - Stored reasons
 
-        let whole = terminal(reason: reason, observedAt: epoch).observedAwaitingInput
-        #expect(whole?.value == reason)
-        #expect(whole?.source == .hookEvent("Notification"))
-        #expect(whole?.observedAt == epoch)
-
-        #expect(terminal(reason: reason, observedAt: nil).observedAwaitingInput == nil)
-        #expect(terminal(reason: nil, observedAt: epoch).observedAwaitingInput == nil)
-        let nameless = AwaitingInputReason(message: "m", hookEventName: nil)
-        #expect(terminal(reason: nameless, observedAt: epoch).observedAwaitingInput == nil)
-        // An EMPTY name names a source exactly as poorly as no name at all: it
-        // would render as the bare `hook:` and pass every "does this fact say
-        // where it came from" check while saying nothing.
-        let blank = AwaitingInputReason(message: "m", hookEventName: "")
-        #expect(terminal(reason: blank, observedAt: epoch).observedAwaitingInput == nil)
-    }
-
-    // MARK: - Transcript fingerprint
-
-    @Test func awaitingInputReasonCarriesATranscriptFingerprint() throws {
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-        let reason = AwaitingInputReason(
-            message: "Claude needs your permission",
-            hookEventName: "Notification",
-            raw: "{}",
-            notificationType: "permission_prompt",
-            transcriptFingerprint: TranscriptFingerprint(
-                path: "/tmp/a.jsonl", modifiedAt: stamp, size: 42))
-        let round = try JSONDecoder().decode(
-            AwaitingInputReason.self, from: JSONEncoder().encode(reason))
-        #expect(round.transcriptFingerprint?.path == "/tmp/a.jsonl")
-        #expect(round.transcriptFingerprint?.modifiedAt == stamp)
-        #expect(round.transcriptFingerprint?.size == 42)
-        #expect(round.classification == .promptOnScreen)
-    }
-
-    /// A row written before fingerprints existed must still decode. This is what
-    /// makes the field migration-free: the column is JSON and the key is absent.
-    @Test func aReasonWithoutAFingerprintDecodesAsAbsent() throws {
-        let legacy = #"{"message":"m","notificationType":"permission_prompt","classification":"prompt_on_screen"}"#
+    /// A row written while reasons carried a transcript fingerprint still
+    /// decodes: the key is ignored rather than failing the whole reason.
+    @Test func aReasonWrittenWithAFingerprintStillDecodes() throws {
+        let stored = #"{"message":"m","notificationType":"permission_prompt","classification":"prompt_on_screen","transcriptFingerprint":{"path":"/tmp/a.jsonl","modifiedAt":0,"size":42}}"#
         let reason = try JSONDecoder().decode(
-            AwaitingInputReason.self, from: Data(legacy.utf8))
-        #expect(reason.transcriptFingerprint == nil)
+            AwaitingInputReason.self, from: Data(stored.utf8))
         #expect(reason.classification == .promptOnScreen)
         #expect(reason.message == "m")
+        #expect(reason.notificationType == "permission_prompt")
     }
 
     /// Every program-status block is a prompt a human must answer, whatever
@@ -285,6 +235,32 @@ import Testing
         #expect(round.programStatusBlock == ProgramStatusBlock(kind: nil, taskID: nil))
     }
 
+    /// A stored reason has no message, so every surface that shows one reads
+    /// `displayMessage`: the agent's text when there is any, otherwise a line
+    /// from the block's kind — never an empty string.
+    @Test func displayMessageFallsBackToTheBlockKind() {
+        func stored(_ kind: ProgramStatusBlockKind?) -> AwaitingInputReason {
+            AwaitingInputReason(
+                message: "", programStatusBlock: ProgramStatusBlock(kind: kind, taskID: nil))
+        }
+        #expect(stored(.permission).displayMessage == "Waiting for a permission decision")
+        #expect(stored(.question).displayMessage == "Waiting for an answer to a question")
+        #expect(stored(.auth).displayMessage == "Waiting for your input")
+        #expect(stored(nil).displayMessage == "Waiting for your input")
+        #expect(stored(.unrecognized("acme")).displayMessage == "Waiting for your input")
+        #expect(AwaitingInputReason(message: "", hookEventName: "Notification")
+            .displayMessage == "Waiting for your input")
+
+        let spoken = AwaitingInputReason(
+            message: "Allow Bash?",
+            programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: nil))
+        #expect(spoken.displayMessage == "Allow Bash?")
+
+        // The composed fact line a `session.states` reader sees ends in the
+        // same text, not in an empty message.
+        #expect(stored(.question).factSummary.hasSuffix(": Waiting for an answer to a question"))
+    }
+
     @Test func aProgramStatusBlockSurvivesARoundTrip() throws {
         let reason = AwaitingInputReason(
             message: "Which file?",
@@ -301,16 +277,6 @@ import Testing
             AwaitingInputReason.self, from: Data(legacy.utf8))
         #expect(reason.programStatusBlock == nil)
         #expect(reason.classification == AwaitingInputClass(notificationType: "idle_prompt"))
-    }
-
-    @Test func fingerprintsDifferOnPathMtimeOrSize() {
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-        let base = TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10)
-        #expect(base == TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10))
-        #expect(base != TranscriptFingerprint(path: "/tmp/b.jsonl", modifiedAt: stamp, size: 10))
-        #expect(base != TranscriptFingerprint(
-            path: "/tmp/a.jsonl", modifiedAt: stamp.addingTimeInterval(1), size: 10))
-        #expect(base != TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 11))
     }
 
     // MARK: - FactSource

@@ -61,8 +61,7 @@ import Testing
         sessionOrderObservedAt: sessionOrderObservedAt,
         sessionIncarnationID: sessionIncarnationID,
         pendingSessionIncarnationID: pendingSessionIncarnationID,
-        activityState: .working,
-        presentationActivityState: .idle
+        activityState: .working
     )
     let data = try JSONEncoder().encode(terminal)
     let decoded = try JSONDecoder().decode(Terminal.self, from: data)
@@ -73,7 +72,29 @@ import Testing
     #expect(decoded.sessionIncarnationID == sessionIncarnationID)
     #expect(decoded.pendingSessionIncarnationID == pendingSessionIncarnationID)
     #expect(decoded.activityState == .working)
-    #expect(decoded.presentationActivityState == .idle)
+}
+
+/// An older daemon still sends `presentationActivityState` on a listed row.
+/// The key is ignored, the row decodes, and it is never written back.
+@Test func testTerminalIgnoresALegacyPresentationKey() throws {
+    let json = """
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "worktreeID": "22222222-2222-2222-2222-222222222222",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "label": "Codex",
+        "createdAt": 0,
+        "activityState": "idle",
+        "presentationActivityState": "working",
+        "presentationActivityObservedAt": 0
+    }
+    """.data(using: .utf8)!
+
+    let decoded = try JSONDecoder().decode(Terminal.self, from: json)
+    #expect(decoded.activityState == .idle)
+    let reencoded = try #require(String(data: try JSONEncoder().encode(decoded), encoding: .utf8))
+    #expect(!reencoded.contains("presentationActivity"))
 }
 
 @Test(arguments: [Int64?.none, Int64?.some(0), Int64?.some(4_294_967_296)])
@@ -269,7 +290,6 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
 
     let decoded = try JSONDecoder().decode(Terminal.self, from: json)
     #expect(decoded.activityState == .unknown)
-    #expect(decoded.presentationActivityState == nil)
     #expect(decoded.sessionOrderObservedAt == nil)
     #expect(decoded.codexTranscriptBoundaryOffset == nil)
     #expect(decoded.sessionIncarnationID == nil)
@@ -359,6 +379,18 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     warmTmux.keepWarm = true
     #expect(!warmTmux.isAutoHibernationEligible())
     #expect(warmTmux.isManuallyHibernatable())
+}
+
+/// A session that reports no state may be parked by hand — the user asked —
+/// but never automatically: TBD does not know whether a turn is running.
+@Test func unknownIsManuallyButNotAutomaticallyHibernatable() {
+    let unknown = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                           claudeSessionID: "s", kind: .claude, activityState: .unknown)
+    #expect(unknown.isManuallyHibernatable())
+    #expect(!unknown.isAutoHibernationEligible())
+    var idle = unknown
+    idle.activityState = .idle
+    #expect(idle.isAutoHibernationEligible())
 }
 
 @Test func testAutoHibernationEligibilityAddsKeepWarmRail() {

@@ -8,17 +8,20 @@ Claude Code (from v2.1.295) and Codex (from 0.163.0) report their own state
 to the terminal over a private OSC sequence, the Program Status Protocol,
 OSC 7501 — Claude Code once the terminal says it supports it, Codex without
 asking. On the pty-holder transport TBD's SwiftTerm *is* the terminal, so TBD
-can opt in, receive those reports, and use them as the authoritative state of
-an agent session — replacing hook inference for the states hooks get wrong,
-and covering Claude Code's background subagents that hooks cannot see at all.
+can opt in, receive those reports, and use them as the state of an agent
+session — its only source, covering Claude Code's background subagents as well
+as the main turn. What TBD writes from the reports, and how a session that
+cannot report is shown, is specified in
+[`2026-10-30-osc-only-agent-status-design.md`](2026-10-30-osc-only-agent-status-design.md).
 
 Each agent stamps its reports with its own `app` value, `claude-code` or
 `codex`, and TBD accepts a report only from a terminal whose recorded agent
 is the one that value names.
 
-The tmux transport is out of scope. tmux is the terminal there, does not
-answer the probe, and drops the sequence; tmux is being deprecated, and this
-design only promises not to break it.
+The tmux transport carries no reports. tmux is the terminal there, does not
+answer the probe, and drops the sequence, so an agent on tmux has no reported
+state; tmux is being deprecated, and this design only promises not to break
+it.
 
 ## The protocol as the agents implement it
 
@@ -99,9 +102,15 @@ states.
 - The tmux transport, in either attach mode.
 - A ticker or history of messages. Only the latest values are kept; a ticker
   can be designed separately once field use shows how often `msg` changes.
-- Persisting any of this across a daemon restart.
-- Acting on reports. They drive display and resolution only; nothing kills,
-  wakes or sends input because of one.
+- Persisting `title` or `msg`. The rolled-up state is mapped onto the
+  `activityState` and wait-reason columns, which persist; the snapshot that
+  carries `title`, `msg` and `progress` lives in daemon and app memory only,
+  because they can quote the user's work.
+- New actions keyed on a report. Reports drive the activity column, and the
+  consumers that already act on that column — the idle sweep, queued prompts,
+  the delivery verifier, rate-limit resume, PR poll pacing — read it
+  unchanged. Nothing kills, wakes or sends input because of a report in any
+  other way.
 
 ## Design
 
@@ -111,9 +120,8 @@ Parsing a pty byte stream and remembering the latest report are facts and
 mechanism, and compile: they are per-byte work inside the emulators that no
 user-land surface can reach. The precedence and roll-up rules below are a
 theory about what TBD shows. They are compiled because they are the
-resolution of an existing compiled state model, but they are gated, isolated
-in one resolver function, and covered rule by rule so they stay cheap to
-change.
+resolution of an existing compiled state model, but they are isolated in one
+resolver function and covered rule by rule so they stay cheap to change.
 
 ### Parsing
 
@@ -173,13 +181,28 @@ probe handler checks the same replay state and stays silent while it is up.
 - **Attached** – the app sends the raw OSC data to a new RPC,
   `terminal.programStatusReport`, with `{terminalID, incarnationID,
   payload, observedAt}`. Forwarding the raw payload keeps a single parser on
-  the path that decides anything.
+  the path that decides anything. `incarnationID` is the app's cached row's;
+  a park and a wake each mint an incarnation, and their broadcast carries it
+  to that row.
 
 A report that arrives during a reader hand-off or a daemon restart can be
 lost. The store keeps the last state it accepted, and the agent's next change
-corrects it. For Codex, which never probes and suppresses repeats, the next
-change is the only recovery, so the worst case is the whole span of the
-current state (for example a full `blocked` wait).
+corrects it. For a report the app forwarded while the daemon was unreachable
+— a `tbd update` handover, say — the app also keeps the latest report it
+forwarded per terminal it caches, in memory only, and forwards each one again
+once per reconnect, when the daemon answers the new subscription. An attempt
+that never reaches the daemon sends nothing, so an outage does not queue a
+failing send per stored report on every retry. The store refuses a re-sent
+report older than the newest it accepted, so a duplicate changes nothing.
+After a daemon restart it has accepted nothing, so it also refuses, while it
+holds nothing for the terminal's current incarnation, a report observed at or
+before the activity column it wrote (`.programStatus`), which outlives its
+memory and speaks for that incarnation: a report from before the restart
+would otherwise be held and published although the column is newer.
+Otherwise, and for a lost report followed by one the daemon did receive, the
+agent's next change is the only recovery — and Codex, which never probes and
+suppresses repeats, changes only when its state does, so the worst case is the
+whole span of the current state (for example a full `blocked` wait).
 
 ### Trust
 
@@ -192,16 +215,26 @@ it with a debug log:
   `codex` or the label says so, else Claude when the kind is `claude` or was
   never recorded, else none — a plain shell reports nothing;
 - the report's incarnation matches the terminal's current incarnation, so a
-  late report from a previous process cannot overwrite its successor;
+  late report from a previous process cannot overwrite its successor. A
+  report observed after an unconditional drop (see "Liveness") that claims an
+  incarnation such a drop ended is the exception: the process it names is
+  gone, so its bytes came from the replacement, and it is filed under the
+  row's current incarnation;
 - the report's `app` is the terminal's own agent's — `app=claude-code` on a
   Claude terminal, `app=codex` on a Codex one — except on a `clear`, which
   both agents write without `app`. An `app` TBD does not know is refused
   before the terminal is looked up, and a known `app` on the other agent's
   terminal, on a `clear` as on any other report, after it.
 
-A program running inside a genuine agent session — a `cat` of a file that
-contains the sequence — can still forge a report. That residual risk is
-accepted: reports drive display only.
+In a genuine agent session the agent writes these reports, but the store
+cannot tell them from the same bytes written by anything else that reaches
+the pty — a tool whose output the agent passes through unfiltered, or a
+process that writes to the terminal device directly. A forged report does
+more than change what is shown: reports write the activity column that the
+idle sweep, the send gate and the resume paths act on, so a forged `idle`
+could let the idle sweep park a turn that is still running, and a forged
+block could refuse a gated send. The agent's next change overwrites a forged
+value. That residual risk is accepted.
 
 ### Liveness
 
@@ -219,6 +252,24 @@ entry nothing ever clears. A wake drops only entries whose incarnation differs
 from the terminal's current one, because by the time it runs the replacement
 session is live and what it has already reported is its current state.
 
+A wake starts the replacement process while the row still reads parked, and
+un-parks it only once the launch is recorded. A report that process makes in
+between is refused, because the row is parked, and kept: an agent reports on
+change only, so it would not say it again. The wake's drop replays the kept
+reports against the un-parked row, under its current incarnation: each was
+observed after the drop that ended the previous process, so it is the
+replacement's whatever incarnation the app claimed for it. A park's or a
+child exit's drop discards them, since anything reported before it belongs to
+the session it ended, and so does a park that rolls back: its un-park is no
+wake, and what it kept belongs to the session it was ending.
+
+The store forgets everything it keeps for a terminal when the terminal's row
+is deleted, on every path that deletes one — including the rows a worktree's
+or a repo's delete takes with it through the foreign keys. It keeps only a
+tombstone, the deleted terminal's ID in a bounded set, so that a report or a
+drop already validating against the row when it was deleted refuses instead
+of re-creating what was forgotten.
+
 ### State model
 
 `SessionStateValue` gains three cases. Its wire form is tagged and readers
@@ -229,8 +280,9 @@ decode an unknown tag as `.unknown(why:)`, so the additions are compatible:
   lives in the store.
 - `.needsAuth` (`needs_auth`) – the user must sign in again.
 
-`AwaitingInputReason` gains a way to carry a program-status block kind
-(`permission`, `question`, or none) alongside the hook-derived reasons.
+`AwaitingInputReason` carries the program-status block a wait came from:
+its kind (`permission`, `question`, or none) and the task entry that blocked,
+and no message text.
 
 The main entry maps as follows:
 
@@ -245,8 +297,10 @@ The main entry maps as follows:
 - a state this build does not recognize → the main entry takes part in no
   roll-up rule: an unrecognized state says nothing TBD can display. Its task
   entries still decide the state through rules 2 and 3 below; when none does,
-  the terminal is not OSC-authoritative and the hook rail speaks, because the
-  hook-derived state is a better reading than an opaque unknown
+  the terminal is not OSC-authoritative and the activity column speaks. The
+  store writes nothing for such a report, so the column keeps the last state
+  the agent reported in a form TBD reads, which is a better reading than an
+  opaque unknown
 
 ### Precedence
 
@@ -254,17 +308,18 @@ A terminal is **OSC-authoritative** while the store holds a main entry for
 its current incarnation that either carries a state this build recognizes or
 stands over task entries that decide the state (a blocked or working task).
 Its resolved state then comes from the store; task entries with no main entry
-above them do not make a terminal authoritative. Hooks keep
-writing `activityState` exactly as they do now; resolution simply does not
-consult it while the terminal is OSC-authoritative. Authority ends with a
-main-entry `clear`, an incarnation change, or a liveness drop.
+above them do not make a terminal authoritative. Otherwise resolution reads
+the `activityState` column and its wait reason, which the store writes from
+the same reports and a park sets to `.idle`. Authority ends with a main-entry
+`clear`, an incarnation change, or a liveness drop.
 
 States TBD owns outrank OSC: `.parked` and `.gone` win, and so does
 `.rateLimited`.
 
-Nothing new is written to `state.db`. Holder sessions survive a daemon
-restart but the store does not, so after a restart those sessions show their
-hook-derived state until the agent's next report re-establishes authority.
+The store's snapshot is memory only and starts empty after a daemon restart,
+but the column it wrote persists. Holder sessions survive a restart, so after
+one each shows the last state its agent reported, read from the column, until
+the agent's next report re-establishes authority.
 
 ### Rolling up task entries
 
@@ -282,11 +337,8 @@ matches:
    does not draw it).
 4. Otherwise → the main entry's `.done` or `.idle`.
 
-Rule 3 closes the gap that
-[`2026-08-24-claude-delegation-activity-design.md`](2026-08-24-claude-delegation-activity-design.md)
-works around: the parent's `Stop` no longer makes a session with running
-subagents look idle. On OSC-authoritative terminals that spec's turn-boundary
-rail is not consulted.
+Rule 3 keeps a session whose main turn has ended, but whose background tasks
+or subagents still run, from reading idle.
 
 ### UI
 
@@ -319,7 +371,14 @@ existing state updates. `title` and `msg` live only in daemon and app memory
 and are never written to `state.db`, since they can carry content from the
 user's work.
 
-Terminals that are not OSC-authoritative look exactly as they do today.
+Terminals that are not OSC-authoritative are drawn from the activity column,
+with the working, idle and awaiting-input badges. A Claude or Codex terminal
+whose column reads `unknown` — one on the tmux transport, or one whose agent
+has not reported from its current incarnation — shows a "no status" mark
+beside the badges once the app has seen it that way for 15 seconds, with a
+tooltip naming the cause; see
+[`2026-10-30-osc-only-agent-status-design.md`](2026-10-30-osc-only-agent-status-design.md),
+"Sessions that cannot report".
 
 ## Flag
 
@@ -343,9 +402,9 @@ orphan.
   the daemon emulator; silent on a tmux panel and during snapshot replay.
 - **Store** – trust checks (agent, incarnation, `app`); task add,
   `clear:id`, and the 32-entry cap; the liveness drops.
-- **Resolution** – each roll-up rule in order; OSC precedence over hook state;
-  fall-back after a main `clear`; `.parked`, `.gone` and `.rateLimited`
-  outranking OSC.
+- **Resolution** – each roll-up rule in order; the snapshot over the activity
+  column, and the column after a main `clear` and after the store is emptied;
+  `.parked`, `.gone` and `.rateLimited` outranking OSC.
 - **`SessionStateValue`** – the three new tags round-trip, and a decoder that
   lacks them reads `.unknown`.
 
