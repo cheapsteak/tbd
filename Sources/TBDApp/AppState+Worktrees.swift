@@ -1559,30 +1559,7 @@ extension AppState {
         }
     }
 
-    // MARK: - Move (nested worktrees)
-
-    /// Move a worktree to a new parent (or top-level) and sortOrder.
-    /// Optimistic local update; rolls back on RPC error.
-    func moveWorktree(id: UUID, newParentID: UUID?, newSortOrder: Int) {
-        let snapshot = worktrees
-        if let repoID = repoIDForWorktree(id), var rows = worktrees[repoID] {
-            if let idx = rows.firstIndex(where: { $0.id == id }) {
-                rows[idx].parentWorktreeID = newParentID
-                rows[idx].sortOrder = newSortOrder
-                worktrees[repoID] = rows
-            }
-        }
-        Task {
-            do {
-                try await daemonClient.moveWorktree(
-                    worktreeID: id, newParentID: newParentID, newSortOrder: newSortOrder
-                )
-            } catch {
-                logger.error("moveWorktree failed: \(error.localizedDescription)")
-                await MainActor.run { self.worktrees = snapshot }
-            }
-        }
-    }
+    // MARK: - Nested worktrees
 
     /// All worktrees whose parentWorktreeID == parentID, across all repos, in sortOrder.
     /// Only active or creating worktrees are returned.
@@ -1734,14 +1711,6 @@ extension AppState {
             logger.error("Failed to set auto-hibernate: \(error, privacy: .public)")
             showAlert("Couldn't update auto-hibernate: \(error.localizedDescription)", isError: true)
         }
-    }
-
-    /// Repo ID of the repo containing the given worktree, if any.
-    private func repoIDForWorktree(_ id: UUID) -> UUID? {
-        for (rid, rows) in worktrees where rows.contains(where: { $0.id == id }) {
-            return rid
-        }
-        return nil
     }
 
     // MARK: - Keyboard Shortcut Actions

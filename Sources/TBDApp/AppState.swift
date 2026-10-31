@@ -975,6 +975,18 @@ final class AppState {
     /// resurrect the row. Value is the time the tombstone was created, used for
     /// TTL-based eviction when an archive fails or stalls.
     @ObservationIgnored var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
+    /// This app's `worktree.moveMany` calls that are applied locally and not
+    /// yet retired, in drop order. `refreshWorktrees` and the move deltas
+    /// re-apply them over whatever they assign, so a fetch that read the
+    /// daemon before a commit, or another writer's delta, cannot snap the rows
+    /// back. See `AppState+WorktreeMoves.swift`.
+    @ObservationIgnored var pendingWorktreeMoves: [PendingWorktreeMove] = []
+    /// The number the next `refreshWorktrees` fetch gets when it is sent.
+    @ObservationIgnored var nextWorktreeFetchNumber: UInt64 = 0
+    /// A fetch numbered below this was sent before a move's RPC succeeded, so
+    /// it may have read the daemon before that commit; `refreshWorktrees`
+    /// discards its result.
+    @ObservationIgnored var worktreeFetchFence: UInt64 = 0
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
@@ -2477,6 +2489,15 @@ final class AppState {
         { [daemonClient] repoID in
             try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
         }
+    /// How `moveWorktrees` sends `worktree.moveMany` — injectable for the same
+    /// reason as `terminalHibernateSender`, so a test decides when the RPC
+    /// returns and can drive the overlay, the fence and the failure restore
+    /// without a daemon.
+    @ObservationIgnored
+    lazy var worktreeMoveManySender: @MainActor (WorktreeMoveManyParams) async throws -> Void =
+        { [daemonClient] params in
+            try await daemonClient.moveWorktrees(params)
+        }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -3237,6 +3258,8 @@ final class AppState {
             applyTerminalHibernationDelta(d)
         case .worktreeMoved(let d):
             applyWorktreeMovedDelta(d)
+        case .worktreeSiblingsReordered(let d):
+            applyWorktreeSiblingsReorderedDelta(d)
         case .worktreeArchived(let d):
             applyWorktreeArchivedDelta(d)
         case .worktreeRevived(let d):
@@ -3358,16 +3381,21 @@ final class AppState {
     /// `worktree.list` poll. Searches all repos for the worktree — moves
     /// across repos aren't supported by the daemon today, so we mutate in
     /// place once we find it.
+    ///
+    /// This app's moves still in flight are re-applied on top, so a
+    /// `worktree.move` from elsewhere cannot undo one the daemon has not
+    /// answered yet (see `pendingWorktreeMoves`).
     private func applyWorktreeMovedDelta(_ delta: WorktreeMovedDelta) {
+        var updated = worktrees
         for (repoID, rows) in worktrees {
             if let idx = rows.firstIndex(where: { $0.id == delta.worktreeID }) {
-                var updated = rows
-                updated[idx].parentWorktreeID = delta.newParentID
-                updated[idx].sortOrder = delta.newSortOrder
-                worktrees[repoID] = updated
+                updated[repoID]?[idx].parentWorktreeID = delta.newParentID
+                updated[repoID]?[idx].sortOrder = delta.newSortOrder
                 break
             }
         }
+        assignWorktreeLists(
+            Self.applyingMoves(pendingWorktreeMoves, worktrees: updated, scratch: scratchWorktrees))
     }
 
     /// Daemon confirmed a worktree was archived (possibly from the CLI or another
@@ -4254,11 +4282,27 @@ final class AppState {
     /// Fetches active and main worktrees; archived rows are excluded here because
     /// the archived view has its own paginated fetch (refreshArchivedWorktrees).
     func refreshWorktrees(repoID: UUID? = nil) async {
+        // Numbered when sent, scoped or not. A result numbered below
+        // `worktreeFetchFence` was requested before a move's RPC succeeded, so
+        // it may have read the daemon before that commit: it is discarded
+        // rather than allowed to undo the move.
+        let fetchNumber = nextWorktreeFetchNumber
+        nextWorktreeFetchNumber += 1
         do {
             // Single RPC — fetch non-archived worktrees only.
             // Absent rows satisfy reconcileTombstones identically to status==.archived
             // (both confirm the tombstone), so tombstone reconciliation is unaffected.
             let allWts = try await worktreesFetcher(repoID)
+            guard fetchNumber >= worktreeFetchFence else {
+                logger.debug("Discarding worktree fetch \(fetchNumber, privacy: .public): sent before a move committed (fence \(self.worktreeFetchFence, privacy: .public))")
+                return
+            }
+            // A fetch at or above a succeeded move's fence read its commit, so
+            // that move leaves the overlay before the result is applied: the
+            // daemon's state is the truth from here, including any later
+            // writer's move of the same rows, which re-applying the move would
+            // undo.
+            retireSettledWorktreeMoves(appliedFetch: fetchNumber)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
             // Reconcile only on the unscoped path: a scoped allWts omits other repos'
@@ -4302,7 +4346,16 @@ final class AppState {
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
-                let merged = fetched + placeholders
+                var merged = fetched + placeholders
+                // Re-apply this app's moves still in flight, so a result that
+                // predates one leaves the rows where the drop put them.
+                if !pendingWorktreeMoves.isEmpty {
+                    var candidate = worktrees
+                    candidate[repoID] = merged
+                    merged = Self.applyingMoves(
+                        pendingWorktreeMoves, worktrees: candidate, scratch: scratchWorktrees
+                    ).worktrees[repoID] ?? merged
+                }
                 if merged != worktrees[repoID] ?? [] {
                     let previous = (worktrees[repoID] ?? []).map(\.id)
                     worktrees[repoID] = merged
@@ -4327,6 +4380,12 @@ final class AppState {
                         grouped[rid, default: []].append(wt)
                     }
                 }
+                // Re-apply this app's moves still in flight before comparing,
+                // so a result that predates one produces the lists the app
+                // already holds and publishes nothing.
+                let overlaid = Self.applyingMoves(pendingWorktreeMoves, worktrees: grouped, scratch: scratch)
+                grouped = overlaid.worktrees
+                scratch = overlaid.scratch
                 let previousIDs = worktrees.values.joined().map(\.id) + scratchWorktrees.map(\.id)
                 if grouped != worktrees {
                     worktrees = grouped
