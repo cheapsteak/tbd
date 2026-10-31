@@ -71,6 +71,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     // MARK: State
 
     private var items = SidebarItemCache()
+    /// Items the current update removed from the outline. Their IDs leave the
+    /// cache at the removal, so an ID that comes back in the same update — a
+    /// row nested onto a former leaf, re-created by the parent's reload — gets
+    /// a fresh item; the objects stay alive here until the update is over,
+    /// since the outline does not retain them.
+    private var releasedDuringApply: [SidebarItem] = []
     private var holds: Set<HoldReason> = []
     private var hasLoaded = false
     private var rebuildScheduled = false
@@ -340,7 +346,18 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         reconcileVanishedSelection()
     }
 
+    /// Applies the diff from the shown tree to `latest` (or, while held, to
+    /// `latest`'s content in the shown structure).
+    ///
+    /// A row nested onto a former leaf, or into a parent the outline has not
+    /// expanded, cannot be moved there: `NSOutlineView` has not loaded that
+    /// parent's children. The diff removes it and the parent's `reloadItem`
+    /// and `expand` bring it back. Its ID then gets a fresh item (see
+    /// `releasedDuringApply`), and the selection and scroll anchor restored at
+    /// the end of every apply put it back where it was, so only its row view
+    /// is new.
     private func applyUpdate(to latest: SidebarTree) {
+        defer { releasedDuringApply.removeAll() }
         let target = isHoldingStructure ? Self.content(of: latest, inStructureOf: tree) : latest
         let update = diffForTesting?(tree, target) ?? SidebarTreeDiff.update(from: tree, to: target)
         let anchor = captureScrollAnchor()
@@ -404,6 +421,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         switch step {
         case .remove(let parentID, let index):
             guard let parent = resolve(parentID) else { return }
+            if let removed = outline.child(index, ofItem: parent.item) as? SidebarItem {
+                release(removed)
+            }
             outline.removeItems(at: IndexSet(integer: index), inParent: parent.item, withAnimation: [])
         case .insert(let parentID, let index, _):
             guard let parent = resolve(parentID) else { return }
@@ -420,6 +440,24 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         case .collapse(let id):
             guard let item = resolve(id)?.item else { return }
             outline.collapseItem(item, collapseChildren: true)
+        }
+    }
+
+    /// Drops `item` and everything the outline has loaded beneath it from the
+    /// cache, keeping the objects alive until the update ends. Whatever comes
+    /// back in this update comes back as a fresh item, never one the outline
+    /// has just let go of.
+    private func release(_ item: SidebarItem) {
+        var pending = [item]
+        while let next = pending.popLast() {
+            releasedDuringApply.append(next)
+            items.evict(next)
+            guard outline.isItemExpanded(next) else { continue }
+            for index in 0..<outline.numberOfChildren(ofItem: next) {
+                if let child = outline.child(index, ofItem: next) as? SidebarItem {
+                    pending.append(child)
+                }
+            }
         }
     }
 

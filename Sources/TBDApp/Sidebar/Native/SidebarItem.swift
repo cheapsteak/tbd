@@ -46,6 +46,15 @@ struct SidebarItemCache {
         return item
     }
 
+    /// Forgets `item`, if it is still the one the cache holds for its ID, so
+    /// the next request for that ID makes a fresh item. The caller keeps the
+    /// object alive for as long as the outline may still touch it.
+    mutating func evict(_ item: SidebarItem) {
+        if items[item.id] === item {
+            items[item.id] = nil
+        }
+    }
+
     /// Keeps only the items of nodes in `tree`, each refreshed to the node's
     /// latest value. Called once the outline has finished an update, so an
     /// item it was still removing is not released under it.

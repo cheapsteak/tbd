@@ -268,6 +268,123 @@ struct SidebarOutlineControllerTests {
         #expect(h.shownIDs == h.freshTree().visibleIDs)
     }
 
+    // MARK: Diffs replayed on a real outline
+
+    // `SidebarTreeDiffTests` replays the diff on `OutlineSimulator`, a model of
+    // `NSOutlineView`. These replay it on the real thing, through the
+    // controller: each must end with the outline showing exactly a fresh
+    // build, with no fallback reload.
+
+    @Test func leafGainingChildReplaysOnTheOutline() throws {
+        let h = OutlineHarness("replay.leaf")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let leaf = Self.row("leaf", repo, order: 0)
+        let other = Self.row("other", repo, order: 1)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [leaf, other]]
+        h.mount()
+        let leafItem = try #require(h.controller.item(for: .worktree(leaf.id)))
+        try #require(!h.outline.isExpandable(leafItem))
+
+        let child = Self.row("child", repo, parent: leaf.id)
+        h.state.worktrees[repo.id]?.append(child)
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        #expect(h.shownIDs == h.freshTree().visibleIDs)
+        #expect(h.outline.isItemExpanded(leafItem), "The former leaf shows its first child")
+        #expect(h.outline.level(forRow: h.row(.worktree(child.id))) == 2)
+    }
+
+    /// A Hibernated group whose only row is reparented under a working row:
+    /// the row moves out first, keeping its view, and then the emptied group
+    /// goes.
+    @Test func groupEmptiedByMovingItsRowsOutReplaysOnTheOutline() throws {
+        let h = OutlineHarness("replay.emptied")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = Self.row("parent", repo, order: 0)
+        let working = Self.row("working", repo, parent: parent.id, order: 0)
+        let parked = Self.row("parked", repo, order: 1)
+        let shelf = SidebarGroupID(owner: .repository(repo.id), kind: .hibernated)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [parent, working, parked]]
+        h.state.terminals[parked.id] = [TBDShared.Terminal(
+            worktreeID: parked.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude,
+            hibernatedAt: Date(timeIntervalSince1970: 1_800_000_000))]
+        h.state.expandedSidebarGroups = [shelf]
+        h.mount()
+        try #require(h.controller.tree.parent(of: .worktree(parked.id)) == .group(shelf),
+                     "The parked row must start on the Hibernated shelf")
+        let parkedItem = try #require(h.controller.item(for: .worktree(parked.id)))
+        let before = try #require(h.rowView(.worktree(parked.id), make: true))
+
+        let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == parked.id })
+        h.state.worktrees[repo.id]?[index].parentWorktreeID = parent.id
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        #expect(h.shownIDs == h.freshTree().visibleIDs)
+        #expect(!h.controller.tree.contains(.group(shelf)), "The emptied shelf is gone")
+        #expect(h.controller.item(for: .group(shelf)) == nil)
+        #expect(h.controller.tree.parent(of: .worktree(parked.id)) == .worktree(parent.id))
+        #expect(h.controller.item(for: .worktree(parked.id)) === parkedItem, "The row moved rather than re-created")
+        #expect(h.rowView(.worktree(parked.id), make: false) === before)
+    }
+
+    /// The one case a moved row cannot keep its view: nested onto a former
+    /// leaf, it is removed and re-created by the leaf's reload, its own child
+    /// with it. Its ID gets a fresh item, and the selection and scroll anchor
+    /// come back.
+    @Test func nestOntoLeafWithChildrenReplaysOnTheOutline() throws {
+        let h = OutlineHarness("replay.nest")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let fillers = (0..<30).map { Self.row("filler \($0)", repo, order: $0) }
+        let leaf = Self.row("leaf", repo, order: 30)
+        let moving = Self.row("moving", repo, order: 31)
+        let movingChild = Self.row("moving child", repo, parent: moving.id)
+        let after = (0..<10).map { Self.row("after \($0)", repo, order: 32 + $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: fillers + [leaf, moving, movingChild] + after]
+        h.state.selectedWorktreeIDs = [moving.id]
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        let oldMoving = try #require(h.controller.item(for: .worktree(moving.id)))
+        let oldChild = try #require(h.controller.item(for: .worktree(movingChild.id)))
+        let movingRow = h.row(.worktree(moving.id))
+        try #require(h.outline.selectedRowIndexes == IndexSet(integer: movingRow))
+        // The moving row is the first visible one, 6 pt above the clip's top.
+        h.outline.scroll(NSPoint(x: 0, y: h.outline.rect(ofRow: movingRow).minY + 6))
+        try #require(h.clip.bounds.minY > 0, "The outline never scrolled; the anchor check would be vacuous")
+        let offsetBefore = h.outline.rect(ofRow: movingRow).minY - h.clip.bounds.minY
+
+        let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id })
+        h.state.worktrees[repo.id]?[index].parentWorktreeID = leaf.id
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        #expect(h.shownIDs == h.freshTree().visibleIDs)
+        #expect(h.controller.tree.parent(of: .worktree(moving.id)) == .worktree(leaf.id))
+        #expect(h.outline.level(forRow: h.row(.worktree(movingChild.id))) == 3)
+        // Fresh items: a removed object is never handed back to the outline.
+        let newMoving = try #require(h.controller.item(for: .worktree(moving.id)))
+        let newChild = try #require(h.controller.item(for: .worktree(movingChild.id)))
+        #expect(newMoving !== oldMoving)
+        #expect(newChild !== oldChild)
+        #expect(h.outline.row(forItem: oldMoving) == -1)
+        // The selection and the scroll anchor came back.
+        let newRow = h.row(.worktree(moving.id))
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: newRow))
+        #expect(h.state.selectedWorktreeIDs == [moving.id])
+        #expect(h.controller.appStateSelectionWriteCount == 0)
+        let offsetAfter = h.outline.rect(ofRow: newRow).minY - h.clip.bounds.minY
+        #expect(abs(offsetAfter - offsetBefore) < 0.5, "The anchor row moved on screen: \(offsetBefore) → \(offsetAfter)")
+    }
+
     // MARK: Holding structure
 
     /// Review Focus 4: the hidden-repos filter, a row's removal and the groups
