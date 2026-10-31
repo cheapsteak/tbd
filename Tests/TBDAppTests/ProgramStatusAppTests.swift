@@ -239,9 +239,11 @@ struct ProgramStatusAppTests {
         let codex = seed(state, kind: .codex, transport: .holder)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
-        // `startSubscription` re-seeds program status from the daemon;
-        // answered here, so the test sends no RPC of its own for it.
+        // `startSubscription` re-seeds program status from the daemon, and a
+        // connect re-reports the composer-draft set; both are answered here,
+        // so the test sends no RPC of its own for them.
         state.programStatusListFetcher = { @MainActor in [] }
+        state.composerDraftsSetter = { _ in }
         let attempts = SubscribeAttempts(connectingFrom: 3)
         state.deltaSubscriber = { onConnected, _ in attempts.run(onConnected: onConnected) }
         let t0 = Date(timeIntervalSince1970: 1_000)
