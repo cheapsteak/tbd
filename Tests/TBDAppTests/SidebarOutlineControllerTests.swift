@@ -171,7 +171,8 @@ struct SidebarOutlineControllerTests {
 
         let item = try #require(h.controller.item(for: .worktree(moving.id)))
         let before = try #require(h.rowView(.worktree(moving.id), make: true))
-        let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id })
+        let found = h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id }
+        let index = try #require(found)
         h.state.worktrees[repo.id]?[index].parentWorktreeID = second.id
         h.controller.flushPendingRebuild()
 
@@ -328,7 +329,8 @@ struct SidebarOutlineControllerTests {
         // On the shelf: one level of group padding, no worktree ancestor.
         try #require(before.configuration.tintLevel == 1 && before.configuration.guideCount == 0)
 
-        let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == parked.id })
+        let found = h.state.worktrees[repo.id]?.firstIndex { $0.id == parked.id }
+        let index = try #require(found)
         h.state.worktrees[repo.id]?[index].parentWorktreeID = parent.id
         h.controller.flushPendingRebuild()
 
@@ -373,7 +375,8 @@ struct SidebarOutlineControllerTests {
         try #require(h.clip.bounds.minY > 0, "The outline never scrolled; the anchor check would be vacuous")
         let offsetBefore = h.outline.rect(ofRow: movingRow).minY - h.clip.bounds.minY
 
-        let index = try #require(h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id })
+        let found = h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id }
+        let index = try #require(found)
         h.state.worktrees[repo.id]?[index].parentWorktreeID = leaf.id
         h.controller.flushPendingRebuild()
 
