@@ -4,6 +4,7 @@ import Foundation
 import SwiftTerm
 import Testing
 @testable import TBDApp
+import TestSupport
 
 // Types the suite uses, kept at file scope rather than nested: the suite is
 // `@MainActor`, and a nested `CustomStringConvertible` would raise the question
@@ -140,9 +141,9 @@ struct LocalPTYTerminalStartReportTests {
     /// `AppearanceSettings` must never read or write the developer's real
     /// `TBDApp.plist` — same idiom as `TerminalLockedAccessTests`.
     private func makeTerminalView() -> TBDTerminalView {
-        let suiteName = "TBDAppTests.LocalPTYStartReport.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.LocalPTYStartReport")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         return TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 800, height: 600),
             font: TBDTerminalView.defaultMonospaceFont,

@@ -129,6 +129,7 @@ extension RPCRouter {
         // Serialize per-repo so concurrent creates don't contend on .git/index.lock.
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
+        let db = self.db
         let initialPrompt = params.prompt
         let userSpecifiedFolder = params.folder != nil
         let userSpecifiedBranch = params.branch != nil
@@ -164,9 +165,12 @@ extension RPCRouter {
                 let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSpawnExtras: claudeSpawnExtras, rollBackOnFailure: false)
                 switch completion {
                 case .ready:
+                    // Re-read the row: a name-collision retry moves the
+                    // checkout off the path `pending` was minted with.
+                    let created = (try? await db.worktrees.get(id: pending.id)) ?? pending
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                         worktreeID: pending.id, repoID: pending.repoID,
-                        name: pending.name, path: pending.localPath
+                        name: created.name, path: created.localPath
                     )))
                 case .preSessionPending:
                     // The lifecycle already broadcast `.worktreeCreated` (and
@@ -273,12 +277,14 @@ extension RPCRouter {
         // means the CLI, hooks, scripts, and every future client get it
         // without repeating the check.
         //
-        // `params.force` is deliberately not forwarded: the repo branch below
-        // does not forward it to `beginArchiveWorktree` either, so on this door
-        // it governs only phase 2's hook skip, and the scratch body runs no
-        // phase 2. Passing it through would have made one flag bypass the
-        // active-children refusal for a scratch row while leaving it in force
-        // for a repo worktree through the same door.
+        // `params.force` is deliberately not forwarded to the scratch body. On
+        // the repo branch below it lifts the uncommitted-changes guard and
+        // skips phase 2's hook, and it never reaches `beginArchiveWorktree`'s
+        // own `force`, so the active-children refusal holds for a repo
+        // worktree through this door. A scratch archive deletes no folder and
+        // runs no phase 2, so neither of the things `force` governs exists
+        // there, and passing it through would have made one flag bypass the
+        // active-children refusal for a scratch row alone.
         //
         // What the scratch body does not do, all pre-existing and all recorded
         // in the design doc: it runs no archive hook (only the highest-priority
@@ -306,12 +312,26 @@ extension RPCRouter {
             .worktreeArchive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
 
-        // Phase 1: Fast — update DB, kill tmux, return immediately
+        // Phase 1: Fast — update DB, kill tmux, return immediately.
+        //
+        // Both flags lift the uncommitted-changes guard; only `force` skips
+        // the hook in phase 2 below. A refusal from that guard is the daemon
+        // declining before it touched anything, so it confirms the row
+        // `refused`/`not-eligible` the way a remote lane's guard refusal
+        // does, and carries a code so the CLI can append its `--force` hint
+        // and the app can offer to archive anyway without reading the
+        // sentence. Every other throw is a failure inside the act.
         let worktree: Worktree
         let repo: Repo
         do {
             (worktree, repo) = try await lifecycle.beginArchiveWorktree(
-                worktreeID: params.worktreeID)
+                worktreeID: params.worktreeID,
+                discardUncommittedChanges: params.force || (params.discardUncommittedChanges ?? false))
+        } catch WorktreeArchiveError.uncommittedChanges(let refusal) {
+            let response = RPCResponse(
+                error: refusal.message, code: RPCErrorCode.worktreeArchiveUncommitted.rawValue)
+            await finishActuation(actuationID, response: response, refusedAs: .notEligible)
+            return response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error

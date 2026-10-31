@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// An attach adopts the session it names when the registry is not reading it,
 /// and never one that is on its way out.

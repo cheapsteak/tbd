@@ -1,5 +1,8 @@
 import Foundation
 import GRDB
+import os
+
+private let cloudSessionLogger = Logger(subsystem: "com.tbd.daemon", category: "claudeCloud")
 
 /// What a create in the cloud ledger currently knows about itself.
 ///
@@ -244,7 +247,7 @@ public struct ClaudeCloudSessionStore: Sendable {
                 if let existing = try ClaudeCloudSessionRow
                     .filter(Column("id") == id).fetchOne(db),
                     let existingSessionID = existing.sessionID, existingSessionID != sessionID {
-                    claudeCloudLogger.error(
+                    cloudSessionLogger.error(
                         """
                         claude-cloud resolve refused: row \(id, privacy: .public) already names \
                         session \(existingSessionID, privacy: .public); refusing to overwrite with \

@@ -79,6 +79,51 @@ struct ProgramStatusParserTests {
         #expect(r.msg == nil)
     }
 
+    // MARK: - Codex
+
+    /// Codex 0.164.0's blocked report: `app=codex`, a kind, and none of the
+    /// keys Claude Code adds.
+    @Test func codexBlockedPermissionParses() throws {
+        let r = try #require(report("state=blocked:app=codex:kind=permission"))
+        #expect(r.state == .blocked)
+        #expect(r.app == "codex")
+        #expect(r.kind == .permission)
+        #expect(r.id == nil)
+        #expect(r.title == nil)
+        #expect(r.msg == nil)
+        #expect(r.progress == nil)
+    }
+
+    /// Codex 0.163.0 sends its states without `kind`.
+    @Test func codex0163WorkingParses() throws {
+        let r = try #require(report("state=working:app=codex"))
+        #expect(r.state == .working)
+        #expect(r.app == "codex")
+        #expect(r.kind == nil)
+    }
+
+    // MARK: - Expected app
+
+    @Test func expectedAppPerKind() {
+        let row: (TerminalKind?, String?) -> Terminal = { kind, label in
+            Terminal(
+                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                label: label, kind: kind, transport: .holder)
+        }
+        // The app follows isCodexTerminal / isClaudeTab, the identity TBD
+        // launches a row by: a Codex label or kind makes it Codex.
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, nil)) == "claude-code")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, TerminalLabel.codex)) == "codex")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.codex, nil)) == "codex")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, nil)) == nil)
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, TerminalLabel.codex)) == "codex")
+        // A row written before kinds were recorded: Claude unless its label
+        // says Codex.
+        #expect(ProgramStatusProtocol.expectedApp(for: row(nil, nil)) == "claude-code")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(nil, TerminalLabel.codex)) == "codex")
+        #expect(ProgramStatusProtocol.knownApps == ["claude-code", "codex"])
+    }
+
     @Test func clearWithID() throws {
         let r = try #require(report("state=clear:id=X"))
         #expect(r.state == .clear)
@@ -237,17 +282,5 @@ struct ProgramStatusParserTests {
         #expect(json == #"["permission","question","auth","mfa"]"#)
         let decoded = try JSONDecoder().decode([ProgramStatusBlockKind].self, from: data)
         #expect(decoded == values)
-    }
-
-    // MARK: - Gate
-
-    @Test func gateSetAndRead() {
-        let gate = ProgramStatusGate()
-        #expect(gate.isEnabled == false)
-        gate.set(true)
-        #expect(gate.isEnabled == true)
-        gate.set(false)
-        #expect(gate.isEnabled == false)
-        #expect(ProgramStatusGate(enabled: true).isEnabled == true)
     }
 }

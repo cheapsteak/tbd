@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// What the table mounts for the prompt rail: the gutter the transcript's
 /// container view keeps for each mount, the rail and card it installs, and
@@ -53,9 +54,9 @@ struct PromptRailMountTests {
     @Test("a pane-shaped mount keeps the 20pt gutter inside the table and makes its rail the presenter",
           arguments: [false, true])
     func paneShapedMount(withEarlier: Bool) async throws {
-        let suiteName = "prompt-rail-pane-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-pane")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let box = PaneBox()
         let host = Self.hostPane(box: box, defaults: defaults, withEarlier: withEarlier)
         defer { host.tearDown() }
@@ -91,9 +92,9 @@ struct PromptRailMountTests {
     /// rebuilds the rail with the table rather than keeping the old one.
     @Test("a new pane identity rebuilds the rail with the table")
     func paneIdentityRebuildsRail() async throws {
-        let suiteName = "prompt-rail-identity-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-identity")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let box = PaneBox()
         let host = Self.hostPane(box: box, defaults: defaults, withEarlier: false)
         defer { host.tearDown() }
@@ -119,9 +120,9 @@ struct PromptRailMountTests {
     /// presenter.
     @Test("the default mount builds the table with no rail, card or gutter")
     func noneMountsNothing() async throws {
-        let suiteName = "prompt-rail-none-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-none")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
         let nodes = transcriptRenderNodes(
             from: PromptRailFixtures.conversation(prompts: 3, replySentences: { _ in 2 }))

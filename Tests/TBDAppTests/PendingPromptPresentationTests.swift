@@ -266,9 +266,9 @@ struct PendingPromptPresentationTests {
     }
 
     @Test @MainActor func mergeNeverWritesSessionTranscripts() throws {
-        let suiteName = "TBDAppTests.PendingPromptMerge.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingPromptMerge")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         // Flag on, so the prompts render as cards and actually merge.
         var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
@@ -289,9 +289,9 @@ struct PendingPromptPresentationTests {
     }
 
     @Test @MainActor func localLivePromptsFollowTheFlag() throws {
-        let suiteName = "TBDAppTests.PendingPromptFlag.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingPromptFlag")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         state.pendingPrompts[Fix.terminalID] = [Fix.permissionPayload()]
 

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 /// The daemon's single owner of every live `HolderReader`.
@@ -671,8 +672,8 @@ actor HolderRegistry {
     private let exitConfirmationBudget: Duration
     private let attachAdoptionBudget: Duration
     /// Where every reader this registry builds sends its Program Status
-    /// Protocol (OSC 7501) reports, and whose gate decides whether it answers
-    /// the probe. nil (tests that do not exercise the protocol) leaves OSC 7501
+    /// Protocol (OSC 7501) reports. With a store, every reader answers the
+    /// probe; nil (tests that do not exercise the protocol) leaves OSC 7501
     /// unhandled in the daemon's emulators.
     private let programStatus: ProgramStatusStore?
     private let clock: any Clock<Duration>
@@ -3575,7 +3576,7 @@ actor HolderRegistry {
     /// staleness check sees parse order.
     private func programStatusTap(for terminalID: UUID) -> HolderProgramStatusTap? {
         guard let store = programStatus else { return nil }
-        return HolderProgramStatusTap(gate: store.gate, deliver: { payload in
+        return HolderProgramStatusTap(deliver: { payload in
             store.enqueue(ProgramStatusStore.Inbound(
                 terminalID: terminalID,
                 incarnation: .currentRow,

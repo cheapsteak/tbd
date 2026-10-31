@@ -57,7 +57,7 @@ extension TBDHomeSerialized {
     private static let command = "claude --resume s"
 
     private func commandNaming(_ path: String) -> String {
-        "\(Self.command) --settings \(SystemPromptBuilder.shellEscape(path))"
+        "\(Self.command) --settings \(shellEscape(path))"
     }
 
     // MARK: - Plan and settle
@@ -92,7 +92,7 @@ extension TBDHomeSerialized {
             profileSecret: nil, cmd: nil, shellFallback: "",
             settingsOverlayPath: overlay.path, fileExists: overlay.commandFileExists)
 
-        #expect(spawn.command.contains(" --settings \(SystemPromptBuilder.shellEscape(overlay.path))"))
+        #expect(spawn.command.contains(" --settings \(shellEscape(overlay.path))"))
         // Anything else is still asked of the disk.
         #expect(!overlay.commandFileExists("/nonexistent/\(UUID().uuidString)"))
     }
@@ -137,7 +137,7 @@ extension TBDHomeSerialized {
         // A directory where the file belongs: the atomic write cannot replace it.
         try FileManager.default.createDirectory(
             atPath: overlay.path, withIntermediateDirectories: true)
-        let planned = " --settings \(SystemPromptBuilder.shellEscape(overlay.path))"
+        let planned = " --settings \(shellEscape(overlay.path))"
 
         let launched = overlay.settle(command: commandNaming(overlay.path))
 
@@ -145,7 +145,7 @@ extension TBDHomeSerialized {
         #expect(launched.hasPrefix(Self.command))
         if FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath) {
             #expect(launched.contains(
-                " --settings \(SystemPromptBuilder.shellEscape(ClaudeHookOverlay.overlayPath))"))
+                " --settings \(shellEscape(ClaudeHookOverlay.overlayPath))"))
         } else {
             #expect(!launched.contains("--settings"))
         }
@@ -154,11 +154,11 @@ extension TBDHomeSerialized {
     @Test func repointingFollowsTheBuildersRuleForAMissingFile() {
         let from = "/runtime/claude-overlay-session-x.json"
         let to = "/runtime/claude-overlay.json"
-        let command = "claude --settings \(SystemPromptBuilder.shellEscape(from)) --name n"
+        let command = "claude --settings \(shellEscape(from)) --name n"
 
         #expect(ReplacementSpawnOverlay.repointSettings(
             in: command, from: from, to: to, fileExists: { _ in true })
-            == "claude --settings \(SystemPromptBuilder.shellEscape(to)) --name n")
+            == "claude --settings \(shellEscape(to)) --name n")
         #expect(ReplacementSpawnOverlay.repointSettings(
             in: command, from: from, to: to, fileExists: { _ in false })
             == "claude --name n")

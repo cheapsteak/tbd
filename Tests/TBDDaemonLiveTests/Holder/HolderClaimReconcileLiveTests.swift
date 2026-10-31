@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// A claim sweep against a real holder: the app says it no longer holds a
 /// session, and the daemon reads that session again.

@@ -16,10 +16,10 @@ struct RemoteTranscriptWiringTests {
     private static let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-remote-transcript-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-remote-transcript-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     private static func provider(capabilities: [String]) -> RemoteProviderStatus {
@@ -57,9 +57,9 @@ struct RemoteTranscriptWiringTests {
 
     @Test("a send's sync request reaches the registered, active driver at once")
     func syncRequestReachesRegisteredDriver() async throws {
-        let name = "tbd-remote-transcript-registry-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-remote-transcript-registry")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let clock = EventDrivenTestClock()
         let syncs = FireRecorder<Int>()

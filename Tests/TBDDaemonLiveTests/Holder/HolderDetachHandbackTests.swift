@@ -5,6 +5,7 @@ import TBDTerminalSerialization
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Taking a session back from a viewer: the mirror of the attach, and the
 /// reason a closed tab does not brick its session.

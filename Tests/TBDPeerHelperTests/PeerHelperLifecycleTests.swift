@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TBDShared
+import TBDKernel
 import Testing
 
 /// The shadow peer helper's exit paths, driven against the real binary.

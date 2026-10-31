@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
@@ -209,7 +210,6 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var db: TBDDatabase?
     public nonisolated(unsafe) var router: RPCRouter?
     public nonisolated(unsafe) var socketServer: SocketServer?
-    public nonisolated(unsafe) var httpServer: HTTPServer?
     public nonisolated(unsafe) var subscriptions: StateSubscriptionManager?
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
@@ -419,7 +419,7 @@ public final class Daemon: Sendable {
 
     /// The DB-mutating startup reconciliation, gated on mock mode. Extracted
     /// from `start()` so the mock-mode branch is unit-testable without spawning
-    /// the socket/HTTP servers or background tasks. In mock mode this is a
+    /// the socket server or background tasks. In mock mode this is a
     /// no-op so hand-seeded fixtures render exactly as authored.
     func performStartupReconciliation(
         mockMode: MockMode?, database: TBDDatabase, git: GitManager,
@@ -439,10 +439,11 @@ public final class Daemon: Sendable {
         }
         // Resolve worktree rows stranded in `.creating` by a daemon restart
         // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
-        // orphaned rows are deleted/flipped first — reconcile only sees
-        // `.active` rows and would otherwise trip the UNIQUE path constraint
-        // re-adopting a stranded checkout. Resumed waits run detached and
-        // never block startup.
+        // stranded rows are deleted, activated or resumed first: reconcile
+        // treats a checkout that has no `.active` row as unmanaged (it reports
+        // it, and never adopts it), so a terminal-less checkout TBD itself
+        // created has to be activated here to stay tracked. Resumed waits run
+        // detached and never block startup.
         await lifecycle.recoverCreatingWorktrees()
         do {
             let repos = try await database.repos.list()
@@ -556,11 +557,10 @@ public final class Daemon: Sendable {
     /// (step 9), never inside `performStartupReconciliation` (step 8d).** The
     /// pass spawns one `git` subprocess per archived row; measured on a box
     /// with 1,825 archived worktrees it ran for ~3 minutes, during which the
-    /// daemon had bound no socket, written no port file, and the app's connect
-    /// retries each spawned a daemon that exited "Another daemon is already
-    /// running". Nothing the backfill does needs to precede serving: it repairs
-    /// archived (inactive) rows, is idempotent, never deletes a row and never
-    /// throws.
+    /// daemon had bound no socket, and the app's connect retries each spawned
+    /// a daemon that exited "Another daemon is already running". Nothing the
+    /// backfill does needs to precede serving: it repairs archived (inactive)
+    /// rows, is idempotent, never deletes a row and never throws.
     ///
     /// Returns `nil` in mock mode, where the backfill is a total no-op like
     /// every other background rail.
@@ -964,14 +964,17 @@ public final class Daemon: Sendable {
                 sessionModFeatures: await Self.startupSessionModFeatures(config: database.config))
         }
 
-        // 5c. Remove runtime files no current build writes, so copies an older
-        // build left under `~/tbd/runtime` don't accumulate. Non-fatal: a
-        // removal that fails is logged and startup continues. Skipped in mock
-        // mode, like the plugin write above: a mock daemon skips live
-        // reconciliation, and its isolated `TBD_HOME` holds no older build's
-        // files.
+        // 5c. Remove files no current build writes, so copies an older build
+        // left don't accumulate: runtime files under `~/tbd/runtime`, and the
+        // `port` file in the config dir itself. Non-fatal: a runtime file that
+        // fails to go is logged and startup continues; the `port` removal is
+        // best-effort and unlogged. Skipped in mock mode, like the plugin write
+        // above: a mock daemon skips live reconciliation, and its isolated
+        // `TBD_HOME` holds no older build's files.
         if mockMode == nil {
             RetiredRuntimeFiles().removeAll()
+            // An older build published an RPC port in this file; nothing reads it now.
+            try? fm.removeItem(at: TBDConstants.configDir.appendingPathComponent("port"))
         }
 
         // 5d. Unload and remove the launch agent Nightwatch's scheduler
@@ -1053,17 +1056,11 @@ public final class Daemon: Sendable {
         // The Program Status Protocol (OSC 7501) store, built first because the
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
-        // invisible to `terminal.programStatusList` and the flag's setter would
-        // drive a gate no reader consults. Its gate starts at the persisted
-        // flag, read fresh here; `config.setProgramStatusEnabled` moves it
-        // afterwards. Built in mock mode too — the router always has a store —
-        // where nothing feeds it. Memory only, so it has nothing to reconcile.
+        // invisible to `terminal.programStatusList`. Built in mock mode too —
+        // the router always has a store — where nothing feeds it. Memory only,
+        // so it has nothing to reconcile.
         // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-        let programStatusEnabledAtBoot: Bool =
-            (try? await database.config.get())?.programStatusEnabled
-            ?? Config.programStatusEnabledDefault
-        let programStatusStore = ProgramStatusStore.live(
-            db: database, subscriptions: subs, enabled: programStatusEnabledAtBoot)
+        let programStatusStore = ProgramStatusStore.live(db: database, subscriptions: subs)
         Task { await programStatusStore.run() }
 
         // The holder registry, constructed HERE rather than at step 8e where it
@@ -1542,9 +1539,9 @@ public final class Daemon: Sendable {
         }
 
         // 8f. Build the dev-server monitor and install the router's hooks
-        // into it BEFORE the socket and HTTP servers serve (steps 9, 10): the
-        // hooks are plain `nonisolated(unsafe)` vars a request handler reads,
-        // so assigning them while requests run would race, and a
+        // into it BEFORE the socket server serves (step 9): the hooks are
+        // plain `nonisolated(unsafe)` vars a request handler reads, so
+        // assigning them while requests run would race, and a
         // `server.start`/`server.stop` served before the assignment would
         // skip its refresh. `refresh()` works before `start()` (step
         // 11a-dev-servers); until then the summary is empty.
@@ -1648,7 +1645,7 @@ public final class Daemon: Sendable {
             daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
         }
 
-        // Every throw from here through step 10 leaves the sidecar bound
+        // Every throw from here through step 9a leaves the sidecar bound
         // (step 8h), and a failed start ends in `main.swift`'s `exit(1)`
         // without `stop()`. One cleanup covers them all, so no failed start
         // leaves a vend.sock nobody serves: stopping the sidecar removes the
@@ -1668,9 +1665,9 @@ public final class Daemon: Sendable {
             // The durable row remains Codex throughout the pass. It is NOT run
             // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
             // for that hook, serially, so awaiting it would hold every later boot
-            // step (the HTTP server among them) behind N × 15 s. The maintenance
-            // task in step 11a-gc runs the same pass immediately after boot, off the
-            // critical path, and then hourly.
+            // step behind N × 15 s. The maintenance task in step 11a-gc runs the
+            // same pass immediately after boot, off the critical path, and then
+            // hourly.
 
             // 9a. Finish the holder sessions the startup budget did not reach.
             //
@@ -1709,11 +1706,6 @@ public final class Daemon: Sendable {
                 let remaining = deferredHolderAdoptions
                 Task { await holderRegistry.adoptRemaining(remaining) }
             }
-
-            // 10. Start HTTP server
-            let http = HTTPServer(router: rpcRouter)
-            self.httpServer = http
-            try await http.start()
         } catch {
             await fdVendingServer.stop()
             throw error
@@ -1953,9 +1945,9 @@ public final class Daemon: Sendable {
             // 5min background — GitPollCadence.fetchInterval).
             self.gitFetchTask = Task {
                 while !Task.isCancelled {
-                    await Daemon.sleepThroughGatedInterval {
+                    await sleepThroughGatedInterval({
                         GitPollCadence.fetchInterval(isForeground: await effectivelyForeground())
-                    }
+                    }, tick: GitPollCadence.pollTick)
                     guard !Task.isCancelled else { break }
                     let allRepos = (try? await database.repos.list()) ?? []
                     // Skip .missing repos so we don't spam errors against stale paths
@@ -2218,9 +2210,9 @@ public final class Daemon: Sendable {
                     for repo in allRepos where repo.status != .missing {
                         await lifecycle.refreshGitStatuses(repoID: repo.id)
                     }
-                    await Daemon.sleepThroughGatedInterval {
+                    await sleepThroughGatedInterval({
                         GitPollCadence.statusInterval(isForeground: await effectivelyForeground())
-                    }
+                    }, tick: GitPollCadence.pollTick)
                 }
             }
 
@@ -2264,41 +2256,6 @@ public final class Daemon: Sendable {
         }
 
         daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
-    }
-
-    /// Sleep in `tick`-sized steps (default `GitPollCadence.pollTick`) until the
-    /// gated interval has elapsed. `interval` is re-evaluated every tick, so a foreground
-    /// transition or app disconnect changes the effective cadence within one
-    /// tick instead of one full background interval (e.g. after a daemon
-    /// restart under a foregrounded app, the first fetch still lands at ~60s
-    /// rather than the 5min sampled before the app reconnected). Returns
-    /// promptly on task cancellation.
-    ///
-    /// - Parameters:
-    ///   - tick: how long to wait between re-evaluations of `interval`.
-    ///     Injectable so a test can cross a threshold in two or three clock
-    ///     advances instead of a production-sized chain.
-    ///   - clock: delay seam (`Tests/CLAUDE.md`, "Clock and date seams"). This
-    ///     loop is pure `Duration` accumulation, so the existential's inability
-    ///     to express `Instant` math never bites.
-    static func sleepThroughGatedInterval(
-        _ interval: @Sendable () async -> Duration,
-        tick: Duration = GitPollCadence.pollTick,
-        clock: any Clock<Duration> = ContinuousClock()
-    ) async {
-        var waited = Duration.zero
-        while !Task.isCancelled {
-            // `try?` swallows the cancellation error rather than checking for it;
-            // the loop head is what observes cancellation. A cancelled sleep
-            // therefore costs one extra `interval()` evaluation, which is
-            // side-effect-free today. That stops holding if `interval` ever gains
-            // side effects or if the `while` condition stops re-checking
-            // `Task.isCancelled`.
-            try? await clock.sleep(for: tick)
-            waited += tick
-            let due = await interval()
-            if waited >= due { return }
-        }
     }
 
     /// Stop the daemon: shut down servers, remove PID and socket files.
@@ -2424,9 +2381,6 @@ public final class Daemon: Sendable {
         if let sock = socketServer {
             await sock.stop()
         }
-        if let http = httpServer {
-            await http.stop()
-        }
         if let modServer = modChannelServer {
             await modServer.stop()
         }
@@ -2446,22 +2400,7 @@ public final class Daemon: Sendable {
         // handover the successor has already written its own pid over it, and
         // deleting that claim would reopen the spawn race the successor-first
         // write exists to close.
-        let ownedPIDFile = pidFile.removeIfOwned()
-
-        // The port file holds a port, not a pid, so it cannot answer "is this
-        // mine?" on its own. The pid file is the proxy for it: one daemon
-        // writes both and one daemon removes both, so a pid file that was still
-        // ours means the port file beside it was ours too.
-        //
-        // When the pid file has already been claimed by a successor, this
-        // leaves a port file naming a port nobody is listening on — for the few
-        // moments until the successor binds and overwrites it. That stale
-        // window is the deliberately cheaper failure: deleting the file instead
-        // would race the successor's own write and could leave the app with no
-        // address at all for a daemon that is up and serving.
-        if ownedPIDFile {
-            try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
-        }
+        pidFile.removeIfOwned()
 
         daemonLogger.info("Stopped.")
         Foundation.exit(0)

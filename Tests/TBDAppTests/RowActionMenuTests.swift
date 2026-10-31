@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // MARK: - Helpers
 
@@ -304,6 +305,38 @@ struct RowActionMenuRemoteArchiveTests {
                                         provider: "acme",
                                         providerCapabilities: ["stop"],
                                         isGone: false)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
+        #expect(archive?.isEnabled == false)
+    }
+
+    /// A lane whose provider is retired (no longer configured) takes the same
+    /// exemption as `gone`: the daemon files it row-only, so the menu must not
+    /// disable the gesture.
+    @Test func archiveEnabledForALaneWhoseProviderIsRetired() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: [],
+                                        isGone: false,
+                                        providerRetired: true)
+        let archive = RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+        #expect(archive?.disabledHelp == nil)
+    }
+
+    /// The other branch: a configured provider that does not declare `archive`
+    /// and has not lost the session is not retired and stays disabled.
+    @Test func archiveStaysDisabledForAConfiguredProviderWithoutArchive() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["stop"],
+                                        isGone: false,
+                                        providerRetired: false)
         let archive = RowActionMenu.items(context: ctx)
             .compactMap(\.action).first { $0.kind == .archive }
         #expect(archive?.title == RowActionMenu.archiveProviderCannotArchiveLabel)
@@ -741,9 +774,9 @@ struct RowActionMenuPinTests {
 struct RowActionMenuCallSiteTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RowActionMenuCallSite.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RowActionMenuCallSite")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

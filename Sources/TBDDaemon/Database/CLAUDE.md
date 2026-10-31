@@ -253,7 +253,11 @@ instead of failing. The loader instead searches an ordered candidate list — th
 executable's own directory, the directory of the bundle owning a marker type,
 and that directory's parent, which is where the resource bundle sits under the
 test harness — and throws an error naming every path it searched when the list
-is exhausted.
+is exhausted. In each candidate it accepts both bundle layouts SwiftPM emits:
+the native build system's flat `TBD_TBDDaemonLib.bundle/Migrations` and the
+`swiftbuild` backend's macOS-style
+`TBD_TBDDaemonLib.bundle/Contents/Resources/Migrations`. Neither backend is
+pinned, so the loader has to tolerate whichever one built it.
 
 Refusal has two gates, and only the first of them refuses.
 

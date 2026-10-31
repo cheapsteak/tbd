@@ -26,6 +26,63 @@ public enum WorktreeReviveCompletion: Sendable {
     }
 }
 
+extension UncommittedArchiveRefusal {
+    /// The most porcelain lines a dirty refusal lists before summarizing the
+    /// rest as "… and N more".
+    static let listedChangeLimit = 5
+
+    /// The refusal for a folder at `path` whose `git status --porcelain` run
+    /// produced `status`, or `nil` when the status lists nothing archiving
+    /// would lose. Pure, so the wording and the line cap are unit-tested
+    /// without git; `WorktreeLifecycle.uncommittedArchiveRefusal(for:)` runs
+    /// the status and decides that a missing folder needs no check at all.
+    public static func evaluate(
+        displayName: String, path: String, status: Result<String, any Error>
+    ) -> UncommittedArchiveRefusal? {
+        let output: String
+        switch status {
+        case .failure(let error):
+            return UncommittedArchiveRefusal(
+                kind: .unverifiable,
+                message: """
+                    Could not check \(path) for uncommitted changes \
+                    (\(statusFailureDetail(error))). Archiving deletes the directory.
+                    """)
+        case .success(let porcelain):
+            output = porcelain
+        }
+        // Leading spaces are part of the porcelain status code (" M file"),
+        // so a line is skipped only when it is blank, never trimmed.
+        let changes = output.split(separator: "\n").filter {
+            !$0.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        guard !changes.isEmpty else { return nil }
+        let shown = changes.prefix(listedChangeLimit).map { "  \($0)" }.joined(separator: "\n")
+        let more = changes.count > listedChangeLimit
+            ? "\n  … and \(changes.count - listedChangeLimit) more"
+            : ""
+        return UncommittedArchiveRefusal(
+            kind: .dirty(count: changes.count),
+            message: """
+                \(displayName) has \(changes.count) uncommitted change(s) that archiving \
+                would delete:
+                \(shown)\(more)
+                Commit or remove them first.
+                """)
+    }
+
+    /// A one-line account of why the status could not be read. `GitError`'s
+    /// own description spans lines and repeats the whole command, which reads
+    /// badly inside the sentence; its exit code and stderr are what say why.
+    static func statusFailureDetail(_ error: any Error) -> String {
+        if let gitError = error as? GitError {
+            let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "git status exited \(gitError.exitCode)" + (stderr.isEmpty ? "" : ": \(stderr)")
+        }
+        return "\(error)"
+    }
+}
+
 /// Reorders `stored` so `preferred` is first, preserving the relative order of
 /// the rest. Returns `stored` unchanged when `preferred` is nil, when `stored`
 /// is nil, or when `stored` does not contain `preferred`.
@@ -39,12 +96,27 @@ extension WorktreeLifecycle {
 
     /// Archives a worktree, cleaning up tmux windows and removing the git worktree.
     ///
-    /// - Parameters:
-    ///   - worktreeID: The worktree to archive.
-    ///   - force: If true, skip running the archive hook.
     /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
     /// Returns the worktree and repo for phase 2.
-    public func beginArchiveWorktree(worktreeID: UUID, force: Bool = false) async throws -> (Worktree, Repo) {
+    ///
+    /// Refuses, before it changes anything, a worktree whose folder holds
+    /// uncommitted changes or whose `git status` cannot be read, by throwing
+    /// `WorktreeArchiveError.uncommittedChanges`. Phase 2 deletes the folder
+    /// and a revive restores only the branch, so the guard lives here, where
+    /// every caller passes through it: the RPC from the app and the CLI,
+    /// auto-archive on merge, and any script or client that sends the RPC.
+    ///
+    /// - Parameters:
+    ///   - worktreeID: The worktree to archive.
+    ///   - force: If true, skip the active-children check, for cascade flows
+    ///     like repo removal. The archive hook is phase 2's decision, made by
+    ///     `completeArchiveWorktree`'s own `force`.
+    ///   - discardUncommittedChanges: If true, skip the uncommitted-changes
+    ///     check and archive whatever the folder holds. Off by default, so a
+    ///     caller that names neither flag is guarded.
+    public func beginArchiveWorktree(
+        worktreeID: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async throws -> (Worktree, Repo) {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -71,6 +143,20 @@ extension WorktreeLifecycle {
         }
         guard let repo = try await db.repos.get(id: rid) else {
             throw WorktreeLifecycleError.repoNotFound(rid)
+        }
+
+        // The last refusal, and the only one that runs a subprocess: after
+        // the cheap DB-only guards, ahead of the branch sync, the SHA capture,
+        // the status flip, the dev-server stop and the session teardown, so a
+        // refused archive leaves the worktree exactly as it found it.
+        if !discardUncommittedChanges,
+           let refusal = await uncommittedArchiveRefusal(for: worktree) {
+            archiveLogger.notice("""
+                archive refused for \(worktreeID, privacy: .public) \
+                (\(String(describing: refusal.kind), privacy: .public)): \
+                \(refusal.message, privacy: .public)
+                """)
+            throw WorktreeArchiveError.uncommittedChanges(refusal)
         }
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
@@ -207,6 +293,25 @@ extension WorktreeLifecycle {
         return (worktree.worktree, repo)
     }
 
+    /// The uncommitted-changes refusal `beginArchiveWorktree` throws, or `nil`
+    /// when archiving would lose nothing. A folder that is already gone has
+    /// nothing to lose, so it is not checked. Otherwise this runs
+    /// `GitManager.uncommittedStatus` and lets
+    /// `UncommittedArchiveRefusal.evaluate` judge the output, a failed run
+    /// included.
+    func uncommittedArchiveRefusal(for worktree: LocalWorktree) async -> UncommittedArchiveRefusal? {
+        let path = worktree.localPath
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let status: Result<String, any Error>
+        do {
+            status = .success(try await git.uncommittedStatus(worktreePath: path))
+        } catch {
+            status = .failure(error)
+        }
+        return UncommittedArchiveRefusal.evaluate(
+            displayName: worktree.displayName, path: path, status: status)
+    }
+
     /// Archive's dev-server stop, shared by `beginArchiveWorktree` and
     /// reconcile's archive of a vanished worktree: signals the process groups
     /// of servers running in TBD tabs only (no repo command runs, no running
@@ -306,7 +411,7 @@ extension WorktreeLifecycle {
             // `worktree.archive`, `repo.remove`'s cascade, and auto-archive on
             // merge — invokes it from a detached task, so draining here blocks
             // nothing an RPC is waiting on. The synchronous
-            // `archiveWorktree(worktreeID:force:)` wrapper (tests, and any
+            // `archiveWorktree(worktreeID:)` wrapper (tests, and any
             // future CLI use) deliberately blocks until the drain finishes —
             // archive completion is meant to mean "the bytes are gone" there.
             // An interrupted drain leaves a queue entry the GC sweep finishes.
@@ -342,9 +447,18 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Legacy all-in-one archive (used by CLI).
-    public func archiveWorktree(worktreeID: UUID, force: Bool = false) async throws {
-        let (worktree, repo) = try await beginArchiveWorktree(worktreeID: worktreeID, force: force)
+    /// Legacy all-in-one archive, used by tests. Its flags mean what
+    /// `worktree.archive`'s do — `force` lifts the uncommitted-changes guard
+    /// and skips the archive hook, while `discardUncommittedChanges` lifts
+    /// only the uncommitted-changes guard, so the hook still runs — with one
+    /// addition: `force` here also skips the active-children check, as the
+    /// cascade flows do.
+    public func archiveWorktree(
+        worktreeID: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async throws {
+        let (worktree, repo) = try await beginArchiveWorktree(
+            worktreeID: worktreeID, force: force,
+            discardUncommittedChanges: force || discardUncommittedChanges)
         await completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
     }
 

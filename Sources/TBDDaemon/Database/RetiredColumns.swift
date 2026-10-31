@@ -31,14 +31,18 @@ enum RetiredColumns {
         RetiredColumn(table: "config", column: "hibernate_input_veto_enabled", epoch: 2),
         // Fleet supervision's brake, added by `v77_config_supervision_enabled` as `BOOLEAN`.
         RetiredColumn(table: "config", column: "supervision_enabled", epoch: 3),
+        // The Program Status Protocol's soak flag, added by
+        // `20261010043448_config_program_status` as `INTEGER` with no default.
+        // OSC 7501 is always on.
+        RetiredColumn(table: "config", column: "program_status_enabled", epoch: 4),
         // The v1 panel store's master switch, added by the frozen `v59_panel_surface`
         // as `BOOLEAN DEFAULT 0`. `panel_tabs_enabled` replaces it.
-        RetiredColumn(table: "config", column: "daemon_panel_surface_enabled", epoch: 4),
+        RetiredColumn(table: "config", column: "daemon_panel_surface_enabled", epoch: 5),
         // The v1 agent panel-control gate, added by the frozen `v59_panel_surface`
         // as `BOOLEAN DEFAULT 0`. `panel_tabs_enabled` covers agent control too.
-        RetiredColumn(table: "config", column: "agent_panel_control_enabled", epoch: 4),
+        RetiredColumn(table: "config", column: "agent_panel_control_enabled", epoch: 5),
         // The legacy-layout import stamp, added by the frozen `v59_panel_surface`
         // as `DATETIME`. The tab sync imports any tab without a surface instead.
-        RetiredColumn(table: "worktree", column: "panel_surface_imported_at", epoch: 4),
+        RetiredColumn(table: "worktree", column: "panel_surface_imported_at", epoch: 5),
     ]
 }

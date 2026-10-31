@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// `AgentReaper`'s holder leg against the kernel's own answers about real pids.
 ///

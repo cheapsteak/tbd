@@ -102,7 +102,10 @@ extension RemoteLaneLifecycle {
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let payload = row?.decodedPayload
         let capabilities = await manager.declaredCapabilities(provider: provider)
-        switch Self.archivePlan(capabilities: capabilities, isGone: row?.gone ?? false) {
+        let retired = await manager.isRetired(provider: provider)
+        switch Self.archivePlan(
+            capabilities: capabilities, isGone: row?.gone ?? false, providerRetired: retired
+        ) {
         case .refused(let message):
             return .refused("Cannot archive \(worktree.name): \(message)")
         case .rowOnlyGone:
@@ -499,7 +502,8 @@ extension RemoteLaneLifecycle {
         let result: ProviderResult
         do {
             result = try await manager.invoke(
-                providerName: provider, verb: [verb, sessionID], stdin: nil, timeout: 30)
+                providerName: provider, verb: [verb, sessionID], stdin: nil, timeout: 30,
+                healthNeutralErrorCodes: ["not_found"])
         } catch let error as ProviderRunError {
             remoteLaneLogger.error(
                 "\(verb, privacy: .public) provider=\(provider, privacy: .public) timed out")

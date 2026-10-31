@@ -491,8 +491,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState.closeFocusedTab()
         }
         // Program Status Protocol (OSC 7501) reports go to the app, which
-        // forwards only a holder Claude session's; the probe gate is set
-        // below, once the coordinator knows this panel.
+        // forwards only a holder Claude or Codex session's; the probe gate
+        // is set below, once the coordinator knows this panel.
         let programStatusAppState = appState
         let programStatusTerminalID = terminalID
         tv.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in
@@ -518,11 +518,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
         // Program Status Protocol (OSC 7501): the probe is answered only by a
-        // holder-transport panel with the flag on — whatever agent the session
-        // runs, exactly as the daemon's reader answers — so a tmux panel never
-        // answers. Set before any byte is fed; re-evaluated in `updateNSView`.
+        // holder-transport panel — whatever agent the session runs, exactly as
+        // the daemon's reader answers — so a tmux panel never answers. Set
+        // before any byte is fed; re-evaluated in `updateNSView`.
         tv.programStatusGate.set(
-            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -612,7 +612,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
         nsView.programStatusGate.set(
-            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
         Self.applyMouseRouting(to: nsView, transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance

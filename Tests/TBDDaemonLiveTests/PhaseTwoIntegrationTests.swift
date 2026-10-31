@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// Proves the full Phase 2 data path against a real tmux server: live tmux
 /// output → control-mode connection (reader thread) → PaneFanout pipe →

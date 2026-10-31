@@ -9,7 +9,7 @@ struct SidebarGroupID: Hashable {
         case provider(String)
         case scratch
     }
-    enum Kind: Hashable { case remote, exited, hibernated }
+    enum Kind: Hashable { case remote, exited, hibernated, ended }
     let owner: Owner
     let kind: Kind
 }

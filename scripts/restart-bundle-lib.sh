@@ -65,8 +65,8 @@ BUILD_IDENTITY_PATHSPECS=(
 # and that graceful path is exactly how a never-built helper went unnoticed;
 # building it as a warning would put the same silent degradation one scroll
 # above the "Daemon ready" line. The holder and peer helper depend on
-# TBDShared and nothing else, and the CLI on TBDShared plus packages the
-# daemon also links, so a helper that
+# TBDKernel and nothing else, and the CLI on TBDShared, TBDKernel and packages
+# the daemon also links, so a helper that
 # fails while the daemon builds is a broken tree, and a broken tree is what a
 # restart should refuse.
 #

@@ -235,8 +235,8 @@ struct HolderWriteOutboxTests {
 
         // Isolated defaults: `AppearanceSettings` must never read or write the
         // developer's real TBDApp.plist.
-        let suiteName = "TBDAppTests.HolderWriteOutbox.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let suite = TestDefaultsSuite("TBDAppTests.HolderWriteOutbox")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -253,7 +253,7 @@ struct HolderWriteOutboxTests {
 
         return HolderPanel(
             state: state, coordinator: coordinator, view: view, terminalID: terminalID,
-            pty: pty, defaults: defaults, suiteName: suiteName)
+            pty: pty, defaults: defaults, suite: suite)
     }
 
     /// Stands in for the daemon's two attach RPCs, handing over a descriptor
@@ -288,12 +288,12 @@ struct HolderWriteOutboxTests {
         /// session end a test closed early.
         let pty: RawPTYPair
         let defaults: UserDefaults
-        let suiteName: String
+        let suite: TestDefaultsSuite
 
         func tearDown() {
             coordinator.cleanup()
             pty.close()
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("ThemeStore")
@@ -296,9 +297,9 @@ struct ThemeStoreTests {
     func activeThemeVanishesFallsBack() async throws {
         let themesDir = try makeIsolatedThemesDir()
 
-        let suiteName = "tbd.test.fallback.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("tbd.test.fallback")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appearance = AppearanceSettings(defaults: defaults)
         let store = ThemeStore(themesDirectory: themesDir)
         appearance.themeStore = store

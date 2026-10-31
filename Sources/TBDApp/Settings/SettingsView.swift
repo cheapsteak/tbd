@@ -44,6 +44,8 @@ struct GeneralSettingsTab: View {
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var sidebarWorkflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
+    @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
+    private var sidebarCollapseEndedSessions: Bool = AppState.sidebarCollapseEndedSessionsDefault
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
@@ -177,6 +179,9 @@ struct GeneralSettingsTab: View {
                 Toggle("Group hibernated, remote and exited worktrees", isOn: $sidebarWorkflowGroups)
                     .help("Off: every worktree and remote session stays in its usual place in the sidebar. On: remote and exited work files under a collapsible Remote group, and wholly parked worktrees under a Hibernated group, in each project and in Scratch, and remote workers nested under a worktree file under a Remote group beneath it. Groups you expand stay expanded across restarts.")
 
+                Toggle("Collapse ended remote sessions", isOn: $sidebarCollapseEndedSessions)
+                    .help("Off: every remote session stays inline in its project or provider. On: sessions that exited or that their provider no longer reports move under one collapsed Ended row at the end of each project and provider, so a long history of finished sessions does not slow the sidebar. Has no effect while worktrees are grouped.")
+
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
 
@@ -272,7 +277,6 @@ struct GeneralSettingsTab: View {
                 sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
-                programStatusToggle
                 panelTabsToggle
                 updateModePicker
             }
@@ -572,23 +576,6 @@ struct GeneralSettingsTab: View {
     static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
         + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
         + "while TBD is in front, and every 5 minutes otherwise."
-
-    /// Program Status Protocol (OSC 7501) on pty-holder sessions. Reads the
-    /// persisted flag from `daemon.capabilities` and writes via
-    /// `config.setProgramStatusEnabled`. Off by default (soaking).
-    @ViewBuilder
-    private var programStatusToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Read Claude's own session status (holder sessions)", isOn: Binding(
-            get: { capabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault },
-            set: { newValue in Task { await appState.setProgramStatusEnabled(newValue) } }
-        ))
-        .help(Self.programStatusHelp)
-    }
-
-    static let programStatusHelp = "Lets Claude Code report its state to TBD over the terminal on "
-        + "pty-holder sessions: permission prompts, failed turns, sign-in problems and "
-        + "background tasks. Applies to Claude sessions started after you turn it on."
 
     /// Auto-close the setup-hook tab after a clean run. Reads the persisted
     /// flag from `daemon.capabilities` and writes via

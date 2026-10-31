@@ -65,7 +65,7 @@ Session state is three independent axes:
 Other fields:
 
 - `exit_code` is present if and only if `state` is `"exited"` and the code is known.
-- `archived` is optional on the wire; an absent `archived` MUST be read as `false`. What a provider owes when enumerating archived sessions is specified under Archived sessions stay in the inventory below.
+- `archived` is optional on the wire; an absent `archived` MUST be read as `false`. What a provider owes when enumerating archived sessions is specified under Archived sessions stay in the inventory and Archive horizon below.
 - Every field but `id` is optional to a caller in practice, whatever this document requires of a provider: a value of the wrong JSON type is read as though the field were absent, so `state` and `agent_state` fall back to `"unknown"` and the rest simply go unset. Only `id` is load-bearing enough to cost the session, since without it there is no identity to file the session under. This is a caller's degradation rule, not a licence — a provider that emits a wrong-typed field is violating the contract, and TBD records what it dropped in its own diagnostics.
 - `meta` is a flat string-to-string map of provider-defined display pairs. The keys `repo`, `branch`, and `profile` are well-known: a caller MAY interpret them (for example, to look up PR status for that repo/branch pair, or to show which identity a session is currently running as) when present — mirroring how `create_params` already designates well-known field names below. Providers are not required to supply `repo`, `branch`, or `profile`, and a caller MUST degrade gracefully when any are absent (simply showing nothing extra). A caller reads the latest sighting's `branch` as the session's current branch — for PR lookup, for example — while the branch recorded when the caller first adopted the session remains the identity of the row that represents it (see Worktree identity keys below). Further well-known keys, `location` and `prs`, are specified under Location and PR keys below, and `tbd_worktree_id` and `tbd_parent_worktree_id` under Worktree identity keys. A caller shows only the keys it uses and never interprets arbitrary `meta` keys or values beyond this well-known set. TBD does not render unrecognized `meta` keys in the session pane; the keys it uses appear where it uses them — `repo` and `branch` on the provider desk, for example. When present, `meta.profile` is the display name of the profile the session is currently running as (a plain string — the profile's `name`, not the full profile object below) — a provider that supports the `profile` and/or `set-profile` capabilities SHOULD keep it current across `create` and any later swap, so any other client of the same backend can see which identity a session runs as without maintaining its own state. The map's values are strings; a value that is not one is a contract violation whose cost stops at its own key. TBD keeps a number or boolean in its literal string form, since a display map can show either unambiguously, and drops an object, an array, or a null, which it cannot. `meta` itself not being an object is the one case that costs more: there are no keys to salvage, so the whole map is lost — including `repo`, which is what resolves the session to a repository, so such a session never gets a worktree row. What TBD never does is fail the session — nor, because a malformed session is skipped rather than fatal to the array that holds it, the rest of the inventory. A session skipped that way is simply absent from that snapshot, and absence is read as the drift rule reads any absence.
 
@@ -109,14 +109,43 @@ A provider that populates these keys is describing TBD-side facts it was told, n
 
 ### Archived sessions stay in the inventory
 
-**A provider MUST return archived sessions from `list` and in the `events` snapshot, exactly as it returns active ones, and MUST NOT filter them out.** Archiving changes a field on the Session object; it never changes whether the session is enumerated.
+**A provider MUST return archived sessions from `list` and in the `events` snapshot, exactly as it returns active ones, and MUST NOT filter them out.** Archiving changes a field on the Session object; it never changes whether the session is enumerated. The one exception is a declared archive horizon (below), which lets a provider leave out one narrow class of archived sessions and tells the caller how to read their absence.
 
 Two things break if a provider filters them:
 
 - **The drift rule misfires.** A session that vanishes from successive snapshots is, per Identity & drift below, a session that no longer exists. An archived session filtered out of `list` is indistinguishable from a deleted one, so archiving would silently mark work gone.
 - **The caller loses the archived inventory.** Browsing archived sessions — to find one and revive it — requires that they be enumerable. A caller cannot browse what the provider refuses to name.
 
-Which archived sessions a human actually sees is the caller's decision, not the provider's: a caller typically shows active sessions by default and archived ones behind a filter. That is display policy applied to a complete inventory, and it is the only place archived sessions are hidden.
+Which archived sessions a human actually sees is the caller's decision, not the provider's: a caller typically shows active sessions by default and archived ones behind a filter. That is display policy applied to a complete inventory, and apart from a declared archive horizon it is the only place archived sessions are hidden.
+
+### Archive horizon (optional)
+
+A provider that keeps every session's record, and never deletes one on its own, has an inventory that only grows. Every archived session then adds its cost to every `list` and every snapshot for as long as the provider exists. Once the inventory outgrows what one bounded call can carry, the provider has two choices. It can report `complete: false` on every listing, which leaves the caller unable to retire anything and its mirror never fresh. Or it can stop enumerating sessions that nobody is working with. The archive horizon is the second choice, made in a way the caller can see, so that neither harm above follows from it.
+
+**Declaring it.** `describe` carries `"archive_horizon_seconds": <integer>`, which MUST be at least `86400` (one day). It is static configuration, answered without the network like the rest of `describe`. When it is absent the provider has no horizon, and the section above holds without exception. A value that is not an integer of at least `86400` is read as absent.
+
+**What the provider may leave out.** A session is *beyond the horizon* when all three of these hold:
+
+- **Archived** – it reports `archived: true`.
+- **Exited** – its `state` is `exited`. A session still starting or running is always listed, however long ago it was archived.
+- **Archived long enough ago** – it was archived at least `archive_horizon_seconds` ago.
+
+A provider MAY leave sessions beyond the horizon out of `list` and the `events` snapshot, and MUST list every other session as the section above requires. The clock is the provider's own record of when each session was archived. For a session it has no such record of, a provider may use a stand-in time only if the stand-in can be later than the true archive time and never earlier. That way a session leaves the listing late rather than early.
+
+**Every verb that takes an id still serves a session beyond the horizon.** The horizon governs enumeration and nothing else. `unarchive` in particular MUST succeed on such a session, and the session is listed again from then on, because an unarchived session is never beyond the horizon. That is how a caller brings one back. `delete`, `transcript read`, `land` and the other per-session verbs answer for it exactly as they would for a listed session.
+
+**Counting what was left out.** A `list` envelope or `snapshot` event that leaves out sessions beyond the horizon SHOULD carry `"hidden_archived": <count>`, the number it left out. The count is informational: a caller MAY show it, for example as "12 older archived sessions not listed". An absent `hidden_archived` reads as `0`.
+
+**`complete` under a horizon.** When a provider that declares a horizon reports `complete: true`, it means it enumerated every session except those beyond the horizon. Leaving those out does not make a view partial, and a provider MUST NOT report `complete: false` for that reason alone.
+
+**How a caller reads an absence.** A caller talking to a provider that declares a horizon MUST NOT advance toward `gone` a session whose most recent sighting had `archived: true`. Its absence is exactly what the horizon predicts, so the caller keeps it as an archived session. The rule needs no clock: the caller never has to judge whether the horizon has passed, only what the session looked like the last time it was seen. Two edge cases follow from it:
+
+- **A session archived from elsewhere while the caller saw no complete snapshot.** If such a session also passes the horizon before the caller's next complete snapshot, the caller last saw it unarchived, so its absence reads as `gone`. The one-day floor limits this to a caller that has gone at least a day without a complete snapshot. A provider SHOULD choose a horizon well beyond how long its callers usually go without one.
+- **A session deleted from elsewhere after it passed the horizon.** It stays archived in the caller's mirror until a verb on its id answers `not_found`.
+
+**What the caller can still browse.** The caller keeps every session it saw archived, so browsing those and reviving one works from its own mirror. A session archived from elsewhere that passed the horizon before the caller ever saw it archived cannot be browsed through this contract. A provider that wants such sessions reachable offers that on its own surface.
+
+**TBD's caller does not read `archive_horizon_seconds` yet.** It counts a session beyond the horizon toward `gone` like any other absence. A lane TBD has archived stays revivable even so: the mirror keeps a gone row with its last payload, and revive calls `unarchive` for a session that payload reports archived.
 
 ### Pending question (optional)
 
@@ -291,13 +320,15 @@ Why credentials never travel, by kind:
   ],
   "profile_kinds": ["oauth", "api_key", "bedrock"],
   "credential_ref_hint": "acme-vault path, e.g. acme-vault://oauth/<name>",
-  "identity": {"account": "acme-prod-1234", "environment": "staging", "region": "us-east-1"}
+  "identity": {"account": "acme-prod-1234", "environment": "staging", "region": "us-east-1"},
+  "archive_horizon_seconds": 172800
 }
 ```
 
 - `contract_versions` — every contract major version this provider supports (see Versioning).
 - `name` — a stable machine identifier for the provider's KIND, not for this registration of it. Two registry entries running the same executable against different backends report the same `name`, so a caller MUST NOT use it as the identity of a registration: the caller's own registry key is that identity, and is what it keys sessions, mirrors, and attach targets on.
 - `identity` (optional) — see Provider identity below.
+- `archive_horizon_seconds` (optional) — how long a session stays listed after it is archived and has exited; see Archive horizon under the Session object above. Absent means archived sessions are always listed.
 - `capabilities` — which optional verbs/features (`stop`, `log`, `transcript.read`, `transcript.tail`, `send`, `send-submit`, `answer`, `attach`, `events`, `messages`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `delete`, `transcript.retain`, `transcript.import`, `transcript.recall`, `seed`, `land`) this provider implements. Every capability string except `profile`, `seed`, `send-submit`, and `transcript.tail` names the verb of the same name, and every other `transcript.<sub>` string names the `transcript <sub>` subcommand: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` and `seed` are two of the exceptions — each gates whether `create` honors the stdin field of the same name (see `create` and Format scope below, and the Profile object above) rather than admitting a verb — while `set-profile` gates the verb of the same name. `send-submit` and `transcript.tail` gate flags rather than admitting verbs: `send-submit` gates `--submit` on `send` (see `send` below), and `transcript.tail` gates `--tail` and `--before` on `transcript read` (see `transcript read` below); there is no `transcript tail` subcommand.
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `slug`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present, and for `slug` a caller may generate a lane identifier of its own choosing. Well-known is a caller-side prefill convention and nothing more: it obliges a provider to nothing, changes no validation, and a provider that declares any of these names is simply one whose form a caller can fill in without asking. A caller that can answer every `required` field this way may skip the form entirely and create straight away; one that cannot must ask rather than guess.
 - `profile_kinds` and `credential_ref_hint` are meaningful only when `capabilities` includes `profile`; a provider without that capability SHOULD omit both, and a caller MUST ignore them if present without it. `profile_kinds` lists which `kind` values (from the Profile object above) this provider can actually realize. `credential_ref_hint` is placeholder text — not validation — describing the shape of a `credential_ref` this provider expects; a caller shows it as placeholder text in its credential-reference input.
@@ -350,13 +381,13 @@ The caller may retry a timed-out `create` call using the **same** `idempotency_k
 
 ## `list`
 
-Returns `{"complete": true, "sessions": [Session, ...]}`.
+Returns `{"complete": true, "sessions": [Session, ...]}`, plus `"hidden_archived": <count>` when a declared archive horizon left sessions out.
 
-The `sessions` array carries every session the provider knows about, archived ones included (see Archived sessions stay in the inventory, above).
+The `sessions` array carries every session the provider knows about, archived ones included, apart from any beyond a declared archive horizon (see Archived sessions stay in the inventory and Archive horizon, above).
 
-Providers SHOULD keep exited sessions listable for at least 24 hours (with `state: "exited"`) rather than dropping them from the list immediately. A session disappearing from the list is indistinguishable from transport drift unless exited sessions stick around long enough to be told apart from a genuine loss.
+Providers SHOULD keep exited sessions listable for at least 24 hours (with `state: "exited"`) rather than dropping them from the list immediately. A session disappearing from the list is indistinguishable from transport drift unless exited sessions stick around long enough to be told apart from a genuine loss. A session beyond a declared archive horizon is exempt: a caller that honors the horizon does not read its absence as a loss.
 
-A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale; an empty successful complete snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
+A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale once a second consecutive poll misses (a single missed poll is tolerated); an empty successful complete snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
 
 ### Snapshot completeness
 
@@ -370,7 +401,7 @@ A transport-overload or unreachable failure MUST be returned as a transient erro
 
 **What a caller MUST NOT do with one.** It MUST NOT retire anything on the strength of an incomplete snapshot: no session may be advanced toward `gone`, marked removed, or dropped from the mirror because it is missing from a snapshot that never claimed to see everything (see Identity & drift below). And it MUST NOT treat an incomplete snapshot as **refreshing freshness** — the snapshot does not update the caller's "last successful snapshot" timestamp, does not clear a staleness indicator, and does not re-open any mutation gate that staleness had closed. A partial inventory presented as current would show a half-blind view as if it were the whole truth, and would re-enable mutations against sessions the caller cannot currently see.
 
-**`complete` means complete with respect to the full set, archived sessions included.** A provider that can enumerate its active sessions but not its archived ones reports `complete: false`, even though the active half is exhaustive. Completeness is a claim about the inventory this contract mirrors, not about whichever subset was easiest to reach.
+**`complete` means complete with respect to the full set, archived sessions included.** A provider that can enumerate its active sessions but not its archived ones reports `complete: false`, even though the active half is exhaustive. Completeness is a claim about the inventory this contract mirrors, not about whichever subset was easiest to reach. The one carve-out is a declared archive horizon: sessions beyond it are outside the set `complete` speaks for, and leaving them out never makes a listing incomplete (see Archive horizon, above).
 
 Reporting `complete: false` is always safe and never a failure: a provider whose discovery path is degraded, rate-limited, or partially unavailable SHOULD return what it can with `complete: false` in preference to either failing the whole call or passing a truncated list off as complete.
 
@@ -391,7 +422,7 @@ The verb is optional and declared via the `stop` capability. Not every backend e
 **Normative semantics:**
 
 - Both verbs are idempotent. Archiving an already-archived session, or unarchiving one that isn't archived, exits 0 and returns the session unchanged.
-- Neither verb removes the session from `list` or from the `events` snapshot. Archiving is a field change, not a deletion.
+- Neither verb removes the session from `list` or from the `events` snapshot. Archiving is a field change, not a deletion. An archived session may later pass a declared archive horizon and leave the listing then, but it still exists, and `unarchive` brings it back.
 - Neither verb is a statement about liveness. Archiving MAY have side effects the provider considers part of retiring a session (a platform whose archived sessions refuse new messages, for instance, is behaving correctly), but a caller MUST read liveness off `state` as always, and MUST NOT infer that an archived session is stopped or that an active session is unarchived.
 - The `id` in each response MUST be the same `<id>` passed on the invocation line.
 
@@ -681,11 +712,11 @@ A long-running NDJSON stream: one JSON object per line, connection held open ind
 {"event": "ping"}
 ```
 
-- Every connection MUST open with a `hello` event immediately followed by a `snapshot` event carrying the current session list, archived sessions included.
-- The `snapshot` event carries `complete` with exactly the meaning and the caller rules specified for `list` above, including that an absent `complete` reads as `true` and that an incomplete snapshot neither retires sessions nor refreshes freshness.
+- Every connection MUST open with a `hello` event immediately followed by a `snapshot` event carrying the current session list, archived sessions included, apart from any beyond a declared archive horizon.
+- The `snapshot` event carries `complete` with exactly the meaning and the caller rules specified for `list` above, including that an absent `complete` reads as `true` and that an incomplete snapshot neither retires sessions nor refreshes freshness. It carries `hidden_archived` on the same terms as `list`.
 - **Snapshot-on-connect is the entire resync mechanism — there are no cursors, sequence numbers, or replay-from-offset.** If a caller misses a transition, the cost is one reconnect, which re-establishes full state via the next snapshot.
 - `session` events carry the complete session object, never a partial diff. This makes them idempotent and safely replayable in any order relative to other `session` events.
-- `removed` means the session should no longer be tracked at all. It is distinct both from the session reaching `state: "exited"` and from it becoming `archived: true` — those are ordinary changes to a session that still exists, and both are delivered as `session` events.
+- `removed` means the session should no longer be tracked at all. It is distinct both from the session reaching `state: "exited"` and from it becoming `archived: true` — those are ordinary changes to a session that still exists, and both are delivered as `session` events. A session passing a declared archive horizon still exists too, so a provider MUST NOT emit `removed` for it; it is simply absent from the next snapshot.
 - The provider MUST emit `ping` at least every 30 seconds while otherwise idle. A caller that sees 90 seconds of silence should treat the stream as dead, terminate the process, and reconnect.
 - If the stream capability is absent, or a stream repeatedly fails to stay up, the caller falls back to polling `list` on an interval (on the order of 60s). Every provider gets at least this floor of freshness for free, whether or not it implements `events`.
 
@@ -851,6 +882,8 @@ Within a major version: providers may add new response fields at any time — a 
 
 **`delete`, `transcript retain`, `transcript import`, `transcript recall`, and `seed` are additive within major 2 on exactly those terms, and require no bump.** Four are capability-gated verbs, admitted by their capability strings the way `rename` and `messages` are; `seed` is a capability-gated field on `create`, admitted the way `profile` is. No required verb changes, no existing field is removed or renamed, and no existing verb's semantics move, so a provider that declares none of the five behaves precisely as it always has. `send --submit` and the `reset` and `more` fields of the `transcript read` envelope are additive on the same terms: the flag is admitted only by the `send-submit` capability and leaves `send` without it untouched, and both envelope fields are optional, an absent one reading as `false`. `transcript.tail` is additive the same way: its `--tail` and `--before` flags are admitted only by that capability, the `before` envelope field appears only in answer to them, and `cursor_expired` is returned only by `--before`. The `transcript` hint on the Session object is an optional response field, readable at either major. **None of this changes `stop`'s status.** `delete`'s obligation to end a running session's compute is a statement about `delete` alone: it neither requires nor implies the `stop` capability, and the pairing rule above — a provider that implements `stop` and declares major 2 MUST declare the `stop` capability — is untouched by it.
 
+**The archive horizon is additive within major 2, and requires no bump.** `archive_horizon_seconds` is an optional `describe` field, and `hidden_archived` an optional envelope field, each with a defined reading when absent: no horizon, and nothing left out. A provider that declares no horizon behaves exactly as it always has. A caller that does not read the field sees a session beyond the horizon as absent and applies the ordinary drift rule to it, so the session becomes a gone row instead of an archived one. That changes how a retired session is labelled, never whether a live one is tracked, because only exited, archived sessions are ever left out.
+
 **The `transcript` subcommand names are an exception to the rename rule.** `transcript read`, `transcript retain`, `transcript import`, and `transcript recall`, with their `transcript.<sub>` capability strings, are adopted in place within the current majors, although a rename ordinarily requires a new major. The rule protects implementers the contract's owner cannot coordinate with, and this contract has none: every provider that implements it is maintained alongside TBD, and that alone is what justifies the exception. A provider that still declares the bare `transcript`, `retain`, `import`, or `recall` strings keeps working in every other respect; those operations are simply not offered, because a caller ignores capability strings it does not recognize. A major bump would cost more, since a provider declaring only an older major would fail negotiation and become unusable rather than losing only these operations. This is not a precedent: any later rename requires a new major, as the rule says.
 
 ## Identity & drift
@@ -859,6 +892,7 @@ Within a major version: providers may add new response fields at any time — a 
 - The provider — via `list` and the `events` snapshot — is the source of truth for which sessions exist and their state. Any local record the caller keeps is a mirror, never authoritative.
 - A session that is absent from **two consecutive** successful **complete** snapshots is considered gone by the caller — a distinct, visible state, not a silent deletion. A single absence is not enough to conclude this, since transports occasionally flake.
 - **Incomplete snapshots (`complete: false`) never contribute to that conclusion.** Absence from a snapshot that never claimed to see everything is not evidence of anything: it does not advance a session toward `gone`, and it does not count as one of the two consecutive absences. Presence still counts for what it is worth — a session observed in an incomplete snapshot has been positively seen, so its accrued absences reset exactly as they would after a complete snapshot. An unbroken run of incomplete snapshots therefore leaves the mirror where it stands, neither retiring sessions nor refreshing the caller's freshness.
-- An archived session is not a gone session. `archived: true` is a field on a session the provider still enumerates; `gone` is the caller's conclusion about a session the provider stopped enumerating. A caller MUST NOT collapse the two, and a provider MUST NOT produce the second when it means the first.
+- **A declared archive horizon is the other exception.** Against a provider that declares one, absence never advances toward `gone` a session whose most recent sighting had `archived: true`; the caller keeps it as archived (see Archive horizon under the Session object).
+- An archived session is not a gone session. `archived: true` is a field on a session the provider still enumerates, or has declared it may stop enumerating once it passes an archive horizon; `gone` is the caller's conclusion about a session the provider stopped enumerating without any such declaration. A caller MUST NOT collapse the two, and a provider MUST NOT produce the second when it means the first.
 - If a caller observes a session id it has never seen before, it should adopt it — sessions created from elsewhere (another machine, or directly against the provider) are real and should be shown, not discarded.
 - If the provider is unreachable, the caller's mirror goes stale-but-shown, with a staleness indicator. Unreachability of the provider is never equivalent to "the sessions are dead" — those are independent facts.

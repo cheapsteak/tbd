@@ -7,8 +7,7 @@ Three components, one SPM package. All daemon-managed paths live under `~/tbd/` 
 ### tbdd (Daemon)
 Long-running headless process. Owns all state and logic.
 - **SQLite** at `~/tbd/state.db` — worktree ledger, repo list, terminals, notes, tabs, model profiles (WAL mode, GRDB)
-- **Unix socket** at `~/tbd/sock` — primary RPC interface
-- **HTTP** on localhost (port in `~/tbd/port`) — for debugging/curl
+- **Unix socket** at `~/tbd/sock` — the RPC interface
 - **Tmux manager** — one tmux server per repo (`tbd-<djb2-hash-of-repo-path>`), creates/destroys windows
 - **Git manager** — fetch, worktree add/remove/list, conflict check, headSHA, merge-base ancestry
 - **Hook resolver** — resolves and runs worktree lifecycle hooks per priority chain
@@ -136,13 +135,13 @@ Split across files: base struct (`WorktreeLifecycle.swift`), `+Create`, `+Archiv
 **Phase 2 (completeCreateWorktree):** Best-effort fetch → create base dir (`~/tbd/worktrees/<repo>/`) → git worktree add (retries with a new name on collision) → ensure tmux server → create windows with `TBD_*` env vars → insert terminals → status `.active`. On failure, deletes the DB row.
 
 ### Archive (two-phase async)
-**Phase 1:** Validate not `.main`/`.creating` → status `.archived` + `archivedAt` → kill tmux windows → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
+**Phase 1:** Validate not `.main`/`.creating` → refuse a folder with uncommitted changes or an unreadable `git status` (`WorktreeArchiveError.uncommittedChanges`, RPC code `worktreeArchiveUncommitted`; lifted by `force`, which also skips the hook, or by `discardUncommittedChanges`, which does not; auto-archive on merge keeps the worktree and notifies) → status `.archived` + `archivedAt` → kill tmux windows → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
 
 ### Revive / Adopt
 Revive recreates a worktree from an archived branch. Adopt (`worktree.adopt`) registers an existing on-disk git worktree into TBD (idempotent).
 
 ### Conflict Detection & Reconcile
-Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, adopts unknown ones, fixes stale tmux server names, and prunes dead terminal records. `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
+Per-repo merge-tree conflict scan against the default branch updates `hasConflicts`. On startup, `reconcile` compares `git worktree list` against the DB, marks missing worktrees archived, logs (but does not adopt) git worktrees under TBD's worktree directories that have no row (`tbd worktree adopt <path>` opts one in), fixes stale tmux server names, and prunes dead terminal records. `breakCyclicParents` runs once at startup to repair any parent-pointer cycles.
 
 ## System Prompt Layers
 
@@ -161,7 +160,7 @@ Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH age
 
 ## RPC Protocol
 
-JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`. Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
+JSON-RPC style over the Unix socket (newline-delimited). Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
 - **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`

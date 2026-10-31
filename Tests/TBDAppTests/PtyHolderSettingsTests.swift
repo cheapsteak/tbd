@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings surface for the pty-holder transport gate — the flag that had
 /// no user-facing control at all, so its soak could not be started by any
@@ -16,10 +17,10 @@ import TBDShared
 struct PtyHolderSettingsTests {
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-pty-holder-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-pty-holder-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     // MARK: - The setter, both directions and both branches

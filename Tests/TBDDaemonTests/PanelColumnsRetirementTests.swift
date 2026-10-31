@@ -4,7 +4,7 @@ import TBDShared
 import Testing
 @testable import TBDDaemonLib
 
-/// The v1 panel model's three columns are retired at schema epoch 4, replaced
+/// The v1 panel model's three columns are retired at schema epoch 5, replaced
 /// by `config.panel_tabs_enabled` (docs/specs/2026-10-30-panel-tabs-design.md,
 /// "Flag and rollout"): the store's master switch
 /// `config.daemon_panel_surface_enabled`, the agent gate
@@ -16,13 +16,13 @@ import Testing
 @Suite struct PanelColumnsRetirementTests {
 
     private static let retired = [
-        RetiredColumn(table: "config", column: "daemon_panel_surface_enabled", epoch: 4),
-        RetiredColumn(table: "config", column: "agent_panel_control_enabled", epoch: 4),
-        RetiredColumn(table: "worktree", column: "panel_surface_imported_at", epoch: 4),
+        RetiredColumn(table: "config", column: "daemon_panel_surface_enabled", epoch: 5),
+        RetiredColumn(table: "config", column: "agent_panel_control_enabled", epoch: 5),
+        RetiredColumn(table: "worktree", column: "panel_surface_imported_at", epoch: 5),
     ]
 
-    @Test func theColumnsAreRetiredAtEpochFour() throws {
-        #expect(SchemaEpoch.current >= 4)
+    @Test func theColumnsAreRetiredAtEpochFive() throws {
+        #expect(SchemaEpoch.current >= 5)
         for column in Self.retired {
             let index = try #require(RetiredColumns.all.firstIndex(of: column),
                                      "\(column) is not listed in RetiredColumns.all")

@@ -25,23 +25,111 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/stress-test.XXXXXX"; }
 
 mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
-# A copy of the script with one guard deliberately weakened. Echoes its path.
+# Only this shell may delete MUTANT_DIR. A child that bash forks for `sleep 30 &`
+# keeps a copy of this trap until it execs `sleep`, and bash runs the EXIT trap
+# when a signal kills it in that window. The kill-discipline cases below kill
+# their sleeps microseconds after spawning them. Without the check, the child
+# deleted the directory and every later `mutant_of` wrote into one that no longer
+# existed. `${BASHPID:-$$}` because bash 3.2 has no BASHPID; the comment above
+# test_only_the_harness_shell_deletes_the_mutant_dir says why that is safe.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
-trap 'rm -rf "$MUTANT_DIR"' EXIT
+MUTANT_DIR_OWNER="${BASHPID:-$$}"
+trap '[[ "${BASHPID:-$$}" == "$MUTANT_DIR_OWNER" ]] && rm -rf "$MUTANT_DIR"' EXIT
+
+# mutant_of NAME FUNCTION SED_EXPR: write a copy of the script with one guard
+# deliberately weakened by SED_EXPR, and set NAME to its path. FUNCTION is the
+# one the caller is about to run in the copy.
+#
+# Each copy gets a file of its own from mktemp. A counter cannot do it: a caller
+# that runs this inside `$(...)` never hands the bump back, so every mutant would
+# share one file. And the copy is checked before anyone sources it, because a
+# caller that sources a missing or unmutated copy gets a bare 127 — or the
+# verdict it expected, for the wrong reason. A copy that fails a check fails the
+# run with a line naming why, and NAME is left empty. That line goes to stderr
+# because judge_mutated's callers capture stdout.
 mutant_of() {
-  local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
-  sed -E "$sed_expr" "$SCRIPT" > "$out"
-  echo "$out"
+  local _name="$1" _fn="$2" _expr="$3" _out _why=""
+  printf -v "$_name" '%s' ""
+  if ! _out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX" 2>/dev/null)"; then
+    _why="cannot create a file in MUTANT_DIR ($MUTANT_DIR)"
+  elif ! sed -E "$_expr" "$SCRIPT" > "$_out"; then
+    _why="sed failed"
+  elif [[ ! -s "$_out" ]]; then
+    _why="the copy is empty"
+  elif cmp -s "$SCRIPT" "$_out"; then
+    _why="the expression changed nothing"
+  elif ! bash -n "$_out" 2>/dev/null; then
+    _why="the copy does not parse"
+  elif ! grep -q "^$_fn() {" "$_out"; then
+    _why="the copy no longer defines $_fn"
+  fi
+  if [[ -n "$_why" ]]; then
+    echo "FAIL - mutant_of: $_why [sed: $_expr]" >&2
+    FAIL=1
+    return 1
+  fi
+  printf -v "$_name" '%s' "$_out"
 }
 
 # Run judge_iteration inside a MUTATED copy of the script, to prove a given
-# verdict is actually produced by the guard it is attributed to.
+# verdict is actually produced by the guard it is attributed to. A copy that
+# mutant_of refuses prints no verdict, so the caller's assertion fails alongside
+# the FAIL line.
 judge_mutated() {
-  local sed_expr="$1" rc="$2" log="$3" floor="$4"
-  bash -c "source '$(mutant_of "$sed_expr")'; judge_iteration '$rc' '$log' '$floor'"
+  local sed_expr="$1" rc="$2" log="$3" floor="$4" mutant
+  mutant_of mutant judge_iteration "$sed_expr" || return 1
+  bash -c "source '$mutant'; judge_iteration '$rc' '$log' '$floor'"
+}
+
+# ---------------------------------------------------------------------------
+# The mutant scaffolding — it can come out wrong without saying so
+# ---------------------------------------------------------------------------
+
+test_two_mutants_get_two_files() {
+  # Made the way every caller once made them, each inside `$(...)`: a counter
+  # bumped there never reached the next call, so the second mutant overwrote the
+  # first and both paths named one file.
+  local a b
+  a="$(mutant_of m judge_iteration 's/^(SCRIPT_DIR=.*)$/\1 # mutant A/' && echo "$m")"
+  b="$(mutant_of m judge_iteration 's/^(SCRIPT_DIR=.*)$/\1 # mutant B/' && echo "$m")"
+  assert_eq "two calls get two paths" "different" \
+    "$([[ -n "$a" && "$a" != "$b" ]] && echo different || echo "the same [$a]")"
+  assert_eq "the first holds its own mutation and not the second's" "1 0" \
+    "$(grep -c 'mutant A' "$a") $(grep -c 'mutant B' "$a")"
+  assert_eq "and the second its own" "0 1" "$(grep -c 'mutant A' "$b") $(grep -c 'mutant B' "$b")"
+}
+
+# A mutant_of refusal, with this run's FAIL saved and restored around it so the
+# refusal it provokes does not fail the run. FAIL starts clear and NAME starts
+# holding a stale path, so each case shows that the refusal fails a run AND
+# leaves nothing for a caller to source by mistake.
+refusal_of() {
+  local saved_fail="$FAIL" m=/previous rc=0
+  FAIL=0
+  mutant_of m judge_iteration "$1" 2>&1 || rc=$?
+  echo "rc=$rc FAIL=$FAIL m=[$m]"
+  FAIL="$saved_fail"
+}
+
+test_mutant_of_names_a_copy_it_cannot_vouch_for() {
+  local d out; d="$(mktmpd)"
+  out="$(refusal_of 's/THIS TEXT IS IN NO LINE OF THE SCRIPT//')"
+  assert_contains "a mutation that does not apply is named" "$out" "the expression changed nothing"
+  assert_contains "and refused" "$out" "rc=1 FAIL=1 m=[]"
+  out="$(refusal_of 's/^judge_iteration\(\) \{/judge_iteration_renamed() {/')"
+  assert_contains "a copy without the function the caller runs is named" "$out" "the copy no longer defines judge_iteration"
+  assert_contains "and refused" "$out" "rc=1 FAIL=1 m=[]"
+  out="$(refusal_of 's/^(SCRIPT_DIR=.*)$/\1; if/')"
+  assert_contains "a copy that does not parse is named" "$out" "the copy does not parse"
+  assert_contains "and refused" "$out" "rc=1 FAIL=1 m=[]"
+  out="$(refusal_of 's/unterminated')"
+  assert_contains "a sed expression sed rejects is named" "$out" "sed failed"
+  assert_contains "and refused" "$out" "rc=1 FAIL=1 m=[]"
+  # The failure this file actually had: the directory gone under a later mutant.
+  out="$(MUTANT_DIR="$d/gone"; refusal_of 's/^(SCRIPT_DIR=.*)$/\1 # mutant/')"
+  assert_contains "a missing mutant directory is named" "$out" "cannot create a file in MUTANT_DIR ($d/gone)"
+  assert_contains "and refused" "$out" "rc=1 FAIL=1 m=[]"
+  rm -rf "$d"
 }
 
 # ---------------------------------------------------------------------------
@@ -174,7 +262,7 @@ test_assertion_lines_survive_a_flood_of_failing_suites() {
   # the exact loss the ledger suffered, reproduced on demand.
   local mutant unpartitioned
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
-  mutant="$(mutant_of 's#^  detail=.*#  detail="$(head -12 <<< "$all")"#; s#^  suites=.*#  suites=""#')"
+  mutant_of mutant failing_tests_from 's#^  detail=.*#  detail="$(head -12 <<< "$all")"#; s#^  suites=.*#  suites=""#' || { rm -rf "$d"; return; }
   unpartitioned="$(bash -c "source '$mutant'; failing_tests_from '$d/floody.log'")"
   assert_eq "mutation: with one shared cap the assertion line is cut" "0" \
     "$(printf '%s\n' "$unpartitioned" | grep -c 'reapsItsPTYChild')"
@@ -229,6 +317,67 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
   kill -9 "$stubborn" 2>/dev/null
   wait "$stubborn" 2>/dev/null
   SPINNER_PIDS=()
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. The two cases above kill their
+# sleeps microseconds after spawning them. A child that bash forks for
+# `sleep 30 &` keeps a copy of every trap until it execs `sleep`, so a SIGTERM in
+# that window ran this harness's EXIT trap in the CHILD. The child deleted
+# MUTANT_DIR, and the mutation cases that sort after these failed now and then
+# on CI with "mutant.1.sh: No such file or directory". No case can win that race
+# on demand, so this one runs the trap's own code in a subshell, which is a
+# forked child exactly as `sleep 30 &` is until its exec.
+#
+# The guard needs BASHPID, which bash 3.2 lacks. On bash 3.2 it always passes,
+# and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
+# in a child that had not exec'd yet. It dropped the signal instead.
+#
+# The script's own `trap cleanup EXIT INT TERM` gets no such guard, on purpose.
+# The flake bot runs it under bash 3.2, where the guard could not tell a child
+# from its parent and no pre-exec child runs a trap anyway. It signals its
+# spinners and deadline commands long after they exec. And the bash 3.2 lint
+# (scripts/flake-bash32.test.sh) forbids BASHPID in it. Here, a pre-exec child
+# that runs `cleanup` finds no spinners in its copy of SPINNER_PIDS and exits.
+
+dir_state() { if [[ -d "$1" ]]; then echo present; else echo gone; fi; }
+
+# Run trap command $1 in this shell with MUTANT_DIR aimed at directory $2, so no
+# case can delete the real one. Wrap the call in ( ) to run it the way a forked
+# child would.
+run_trap_aimed_at() {
+  local MUTANT_DIR="$2"
+  eval "$1"
+}
+
+test_only_the_harness_shell_deletes_the_mutant_dir() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap guard is not checked here"
+    return 0
+  fi
+  local spec body unguarded decoy
+  spec="$(trap -p EXIT)"
+  eval "set -- $spec"
+  body="${3:-}"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_contains "the EXIT trap removes the mutant dir" "$body" 'rm -rf "$MUTANT_DIR"'
+
+  # A guard that never deletes anything would pass the child check below, so
+  # first the owner has to get through.
+  decoy="$(mktmpd)"
+  run_trap_aimed_at "$body" "$decoy"
+  assert_eq "the harness shell itself deletes it" "gone" "$(dir_state "$decoy")"
+
+  decoy="$(mktmpd)"
+  ( run_trap_aimed_at "$body" "$decoy" )
+  assert_eq "a forked child running the trap leaves the directory alone" "present" "$(dir_state "$decoy")"
+
+  # MUTATION: the trap as it was before the guard, run by the same child.
+  unguarded="${body#*&& }"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_eq "the mutant really is the bare rm" 'rm -rf "$MUTANT_DIR"' "$unguarded"
+  ( run_trap_aimed_at "$unguarded" "$decoy" )
+  assert_eq "mutation: without the guard, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
+  rm -rf "$decoy"
 }
 
 test_run_with_deadline_kills_an_overrunning_command() {
@@ -376,7 +525,7 @@ test_disabling_the_valve_is_load_bearing() {
   local d; d="$(mktmpd)"
   local record="$d/record" mutant
   mk_stub_wrapper "$d/scripts" test.sh
-  mutant="$(mutant_of 's/^NO_VALVE_ENV=\(TBD_REMOTE_VERIFY=0 TBD_SWIFT_QUEUE_YIELD_SECONDS=\)$/NO_VALVE_ENV=(TBD_STRESS_MUTANT=1)/')"
+  mutant_of mutant run_governed_fenced 's/^NO_VALVE_ENV=\(TBD_REMOTE_VERIFY=0 TBD_SWIFT_QUEUE_YIELD_SECONDS=\)$/NO_VALVE_ENV=(TBD_STRESS_MUTANT=1)/' || { rm -rf "$d"; return; }
 
   STUB_RECORD="$record" TBD_REMOTE_VERIFY=1 TBD_SWIFT_QUEUE_YIELD_SECONDS=5 \
     bash -c "source '$mutant'; SCRIPT_DIR='$d/scripts'; \
@@ -453,7 +602,7 @@ test_filters_are_never_glob_expanded() {
   # MUTATION: the unquoted word-split this replaced. The file in the cwd wins.
   local mutant
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
-  mutant="$(mutant_of 's/read -r -a parts <<< "\$1"/parts=($1)/')"
+  mutant_of mutant filter_args_of 's/read -r -a parts <<< "\$1"/parts=($1)/' || { rm -rf "$d"; return; }
   ( cd "$d" && bash -c "source '$mutant'; filter_args_of '--parallel --filter ^TBDDaemonTests\.[A-O]'" ) > "$d/mutant.out"
   assert_contains "mutation: an unquoted split expands the filter into the file name" \
     "$(cat "$d/mutant.out")" "^TBDDaemonTests.A"
@@ -525,11 +674,12 @@ test_run_target_wires_every_structured_output() {
 
   # MUTATION: drop the pre-create, and an iteration whose test process never
   # wrote a record leaves no file at all.
-  local e; e="$(mktmpd)"
+  local e mutant; e="$(mktmpd)"
   mk_stub_wrapper "$e/scripts" test.sh
   mkdir -p "$e/reports" "$e/x" "$e/m" "$e/logs" "$e/work"
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
-  run_one_stub_iteration "$(mutant_of '/: > "\$ITER_METRICS_PATH"/d')" "$e"
+  mutant_of mutant run_target '/: > "\$ITER_METRICS_PATH"/d' || { rm -rf "$d" "$e"; return; }
+  run_one_stub_iteration "$mutant" "$e"
   assert_eq "mutation: without the pre-create the metrics file is absent" "absent" \
     "$([[ -e "$e/m/Stub-1.jsonl" ]] && echo present || echo absent)"
   rm -rf "$d" "$e"
@@ -570,11 +720,11 @@ test_exact_id_filter_escapes_the_id() {
   assert_eq "but not a test whose name extends it" "no" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
   # MUTATION: stop escaping `(`, and the filter is no longer the ID.
   local mutant
-  mutant="$(mutant_of 's/\+\?\(/+?/')"
+  mutant_of mutant exact_id_filter 's/\+\?\(/+?/' || return
   assert_eq "mutation: without the ( escape the filter changes" \
     '^M\.S/f(x:\)(/|$)' "$(bash -c "source '$mutant'; exact_id_filter 'M.S/f(x:)'")"
   # MUTATION: drop the trailing group, and testFooBar matches.
-  mutant="$(mutant_of "s/printf '\\^%s\\(\\/\\|\\\$\\)'/printf '^%s'/")"
+  mutant_of mutant exact_id_filter "s/printf '\\^%s\\(\\/\\|\\\$\\)'/printf '^%s'/" || return
   re="$(bash -c "source '$mutant'; exact_id_filter 'M.S/testFoo'")"
   assert_eq "mutation: without the trailing group testFooBar matches" "yes" "$([[ 'M.S/testFooBar' =~ $re ]] && echo yes || echo no)"
 }
@@ -615,7 +765,7 @@ test_pass_of_maps_each_target_to_its_ci_pass() {
   # would send it to fast pass 2, where CI never runs it.
   local mutant
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
-  mutant="$(mutant_of 's/^  form="\$\(filter_form_of "\$id"\)"/  form="${id%\/*}"/')"
+  mutant_of mutant pass_spec_of 's/^  form="\$\(filter_form_of "\$id"\)"/  form="${id%\/*}"/' || return
   assert_eq "mutation: matching the classname misplaces a suite-less test" "Pass-fast-pass-app" \
     "$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests/nilPreferredKeepsOrder()'" | cut -d'|' -f1)"
 }
@@ -644,13 +794,13 @@ test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
   # MUTATION: widen 1a to every letter. SessionStatesRPCTests is then run by
   # 1a AND 1b, and the harness must refuse rather than pick one.
   local mutant out rc=0
-  mutant="$(mutant_of 's/^(  "fast-pass-daemon-a.*)\[A-O\]/\1[A-Z]/')"
+  mutant_of mutant pass_spec_of 's/^(  "fast-pass-daemon-a.*)\[A-O\]/\1[A-Z]/' || return
   assert_contains "the mutant really widened 1a" "$(grep fast-pass-daemon-a "$mutant" | head -1)" "[A-Z]"
   out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SessionStatesRPCTests/a()'" 2>&1)" || rc=$?
   assert_eq "mutation: a 1a widened to [A-Z] no longer maps the P-Z suite" "1" "$rc"
   assert_contains "and says it is run by two passes" "$out" "two CI passes"
   # MUTATION: drop the quiet pass. A live test then lands in no pass.
-  mutant="$(mutant_of '/^  "quiet-pass\|/d')"
+  mutant_of mutant pass_spec_of '/^  "quiet-pass\|/d' || return
   rc=0
   out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonLiveTests.GitManagerTimeoutTests/a()'" 2>&1)" || rc=$?
   assert_eq "mutation: without the quiet pass a live test is unmatched" "1" "$rc"
@@ -690,7 +840,7 @@ test_the_pass_table_drops_skip_build() {
   assert_eq "and none of CI_PASSES does" "0" \
     "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -e '--skip-build')"
   # MUTATION: stop dropping --skip-build. The real test.yml then disagrees.
-  mutant="$(mutant_of 's/--fingerprint\|--skip-build\|/--fingerprint|/')"
+  mutant_of mutant check_pass_table 's/--fingerprint\|--skip-build\|/--fingerprint|/' || return
   assert_contains "the mutant really stopped dropping it" \
     "$(grep -e '--fingerprint|' "$mutant" | head -1)" "--fingerprint|--experimental"
   rc=0
@@ -703,7 +853,7 @@ test_the_pass_table_drops_skip_build() {
 # would test the cache's bundle instead of the commit — and could go green. Every
 # step that forwards the flag must therefore name the build step's success in its
 # own `if:`. It lives here because this harness already reads test.yml's pass
-# invocations and owns the drop above, and `plans-guard` runs it.
+# invocations and owns the drop above, and the `script-harnesses` job runs it.
 #
 # One line per step that forwards `--skip-build` as an argument: `gated <name>`
 # or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
@@ -764,7 +914,7 @@ test_the_pass_table_drops_the_ci_build_flags() {
     "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -F -e 'swiftpm_flags')"
   # MUTATION: stop dropping the flags word. The real test.yml then disagrees.
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
-  mutant="$(mutant_of '/^ *"\$CI_SWIFTPM_FLAGS_WORD"\) ;;$/d')"
+  mutant_of mutant check_pass_table '/^ *"\$CI_SWIFTPM_FLAGS_WORD"\) ;;$/d' || return
   # shellcheck disable=SC2016 # the script's own text, matched literally
   assert_eq "the mutant really stopped dropping them" "0" \
     "$(grep -c -F -e '"$CI_SWIFTPM_FLAGS_WORD") ;;' "$mutant")"
@@ -778,8 +928,8 @@ test_the_pass_table_drops_the_ci_build_flags() {
 # pass, which re-plans the build graph from its own command line. A step that
 # leaves them out builds or plans with SwiftPM's defaults, and nothing red says
 # so. This lives here for the reason `skip_build_gates` does: this harness
-# already reads test.yml's pass invocations and owns the drop above, and
-# `plans-guard` runs it.
+# already reads test.yml's pass invocations and owns the drop above, and the
+# `script-harnesses` job runs it.
 #
 # One line per command in the `test` job that runs `scripts/swift-safe`,
 # `scripts/test.sh` or `scripts/ci/watched-test-pass.sh`, continuation lines

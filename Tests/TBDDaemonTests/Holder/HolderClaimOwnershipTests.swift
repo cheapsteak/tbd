@@ -3,6 +3,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// **An app's death takes back that app's sessions, and nobody else's.**
 ///

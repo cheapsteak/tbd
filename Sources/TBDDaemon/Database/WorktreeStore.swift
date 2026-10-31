@@ -250,9 +250,18 @@ public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
 
 public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     case hasActiveChildren
+    /// The worktree's folder holds changes git has not committed, or
+    /// `git status` could not show it clean. Archiving deletes the folder and
+    /// a revive restores only the branch, so these are the files an archive
+    /// destroys for good. Thrown by `WorktreeLifecycle.beginArchiveWorktree`
+    /// before it changes anything; `discardUncommittedChanges` lifts it.
+    case uncommittedChanges(UncommittedArchiveRefusal)
 
     public var description: String {
-        "Archive nested worktrees first."
+        switch self {
+        case .hasActiveChildren: return "Archive nested worktrees first."
+        case .uncommittedChanges(let refusal): return refusal.message
+        }
     }
 
     public var errorDescription: String? { description }
@@ -802,6 +811,34 @@ public struct WorktreeStore: Sendable {
                 record.archivedClaudeSessions = nil
                 record.archivedClaudeSpawnExtras = nil
             }
+            try record.update(db)
+        }
+    }
+
+    /// Flip a recovered `.creating` row to `.active` and drop its parked first
+    /// message in one write, so a crash between the two cannot leave an active
+    /// row still holding a message that was meant for a create that never
+    /// spawned. `archivedAt` is cleared and `archivedClaudeSessions` and
+    /// `archivedClaudeSpawnExtras` are kept, which for a mid-revive row is
+    /// `revive(clearSessions: false)`, and for an
+    /// ordinary create changes nothing but the status and the prompt.
+    ///
+    /// It leaves `foreign_head` as it is. A recovered row that has a PR number
+    /// and no stamp must be stamped (`markForeignHead`) before this is called,
+    /// because recovery cannot tell whether its create checked out a fork's PR
+    /// head; if that stamp cannot be written the row must stay `.creating`
+    /// rather than come here, so no active row lets folder trust be
+    /// pre-answered for fork-authored contents
+    /// (`WorktreeLifecycle.activateTerminalLessCreate`).
+    public func activateRecoveredCreate(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.status = WorktreeStatus.active.rawValue
+            record.archivedAt = nil
+            record.pending_prompt = nil
+            record.pending_prompt_submit = nil
             try record.update(db)
         }
     }

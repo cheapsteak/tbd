@@ -131,6 +131,12 @@ struct LocalizedErrorPayloadTests {
             ("WorktreeMoveError.parentIsArchived", WorktreeMoveError.parentIsArchived),
             ("WorktreeArchiveError.hasActiveChildren", WorktreeArchiveError.hasActiveChildren),
             (
+                "WorktreeArchiveError.uncommittedChanges",
+                WorktreeArchiveError.uncommittedChanges(UncommittedArchiveRefusal(
+                    kind: .dirty(count: 1),
+                    message: "acme-wt has 1 uncommitted change(s) that archiving would delete."))
+            ),
+            (
                 "WorktreeDeletionQueueError.renameFailed",
                 WorktreeDeletionQueueError.renameFailed(
                     from: "/private/tmp/acme/wt-7",

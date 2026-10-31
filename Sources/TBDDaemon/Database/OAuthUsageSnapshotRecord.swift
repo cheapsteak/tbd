@@ -75,8 +75,8 @@ public struct OAuthUsageSnapshotStore: Sendable {
                 }
                 var cleaned = snapshot
                 cleaned.buckets.removeAll {
-                    ClaudeUsagePayloadParser.isModelScoped(kind: $0.kind,
-                                                           modelDisplayName: $0.modelDisplayName)
+                    ClaudeUsageBucketScope.isModelScoped(kind: $0.kind,
+                                                         modelDisplayName: $0.modelDisplayName)
                 }
                 byProfileID[uuid] = cleaned
             }

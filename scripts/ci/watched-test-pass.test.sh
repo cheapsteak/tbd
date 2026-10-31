@@ -5,9 +5,9 @@
 # under test drives BSD `ps`, BSD `script(1)` and `/usr/bin/sample`, all of
 # which take different arguments or do not exist on Linux — which is why this
 # harness runs in the macOS `lint` job rather than joining the Linux collection
-# in `plans-guard`. A developer with Homebrew's bash first on `PATH` is running
-# 5.x, where constructs 3.2 cannot parse work fine and fail at RUN time from
-# inside a command substitution, where `bash -n` on 5.x never sees them.
+# in `script-harnesses`. A developer with Homebrew's bash first on `PATH` is
+# running 5.x, where constructs 3.2 cannot parse work fine and fail at RUN time
+# from inside a command substitution, where `bash -n` on 5.x never sees them.
 #
 # ZERO BUILDS, ZERO SwiftPM, AND NOTHING REAL IS TOUCHED. Every case runs the
 # script against a fixture directory holding a STUB `scripts/test.sh` this file
@@ -197,11 +197,11 @@ run_pass() {
 # one is. A green mutant means the assertion above it was not testing that guard.
 # It is written NEXT TO the fixture's faithful copy, because the script resolves
 # `scripts/test.sh` relative to its own directory.
-MUTANT_SEQ=0
 mutant_of() {
   local fix="$1" sed_expr="$2" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$fix/scripts/ci/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$fix/scripts/ci/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   chmod +x "$out"
   echo "$out"

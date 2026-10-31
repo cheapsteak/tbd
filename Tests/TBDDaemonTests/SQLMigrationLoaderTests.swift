@@ -449,10 +449,49 @@ import Testing
     @Test func locatorResolvesTheMigrationsDirectoryUnderTheTestHarness() throws {
         let directory = try SQLMigrationLoader.locateMigrationsDirectory()
         #expect(directory.lastPathComponent == "Migrations")
-        #expect(directory.deletingLastPathComponent().lastPathComponent == "TBD_TBDDaemonLib.bundle")
+        #expect(directory.pathComponents.contains("TBD_TBDDaemonLib.bundle"))
         var isDirectory: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory))
         #expect(isDirectory.boolValue)
+    }
+
+    /// SwiftPM's native backend emits a flat resource bundle; the `swiftbuild`
+    /// backend nests resources under `Contents/Resources`. Both must resolve.
+    @Test(arguments: [[String](), ["Contents", "Resources"]])
+    func locatorAcceptsEitherBundleLayout(layout: [String]) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sql-migration-locator-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let empty = root.appendingPathComponent("empty")
+        let container = root.appendingPathComponent("container")
+        let migrations = layout
+            .reduce(container.appendingPathComponent("TBD_TBDDaemonLib.bundle")) {
+                $0.appendingPathComponent($1)
+            }
+            .appendingPathComponent("Migrations")
+        try FileManager.default.createDirectory(at: migrations, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+
+        let found = try SQLMigrationLoader.locateMigrationsDirectory(in: [empty, container])
+        #expect(found.standardizedFileURL.path == migrations.standardizedFileURL.path)
+    }
+
+    @Test func locatorSearchesBothLayoutsInEveryContainerBeforeFailing() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sql-migration-locator-\(UUID().uuidString)")
+        let one = root.appendingPathComponent("one")
+        let two = root.appendingPathComponent("two")
+        do {
+            _ = try SQLMigrationLoader.locateMigrationsDirectory(in: [one, two])
+            Issue.record("expected resourceBundleNotFound")
+        } catch SQLMigrationLoaderError.resourceBundleNotFound(let searched) {
+            #expect(searched == [
+                one.path + "/TBD_TBDDaemonLib.bundle/Migrations",
+                one.path + "/TBD_TBDDaemonLib.bundle/Contents/Resources/Migrations",
+                two.path + "/TBD_TBDDaemonLib.bundle/Migrations",
+                two.path + "/TBD_TBDDaemonLib.bundle/Contents/Resources/Migrations",
+            ])
+        }
     }
 
     @Test func locatorSearchesAtLeastThreeDistinctCandidates() {
@@ -522,6 +561,7 @@ import Testing
             "20261010025458_config_transcript_prompt_answer",
             "20261010043448_config_program_status",
             "20261011235918_dev_server_columns",
+            "20261016070721_terminal_codex_launch_options",
             "20261019174758_config_composer_draft",
             "20261020170000_config_session_mod_usage",
             "20261021120000_config_start_admission",

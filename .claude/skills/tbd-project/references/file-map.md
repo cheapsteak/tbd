@@ -3,7 +3,20 @@
 Key source files and what they do. Not exhaustive — see the directory listing for the rest.
 
 ## Package
-- `Package.swift` — SPM manifest. Targets: TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+- `Package.swift` — SPM manifest. Targets: TBDKernel, TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+
+## Sources/TBDKernel/
+The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelper` depend on it alone. What may go in is in its `CLAUDE.md`.
+- `HolderProtocol.swift` — holder wire messages and protocol version
+- `HolderFraming.swift` — length-prefixed JSON framing
+- `HolderRendezvous.swift` — socket, lock and log paths per session
+- `HolderLock.swift` — per-session creation lock
+- `FDChannel.swift` — descriptor passing over `SCM_RIGHTS`
+- `PeerBridgeFrame.swift` — peer helper frame codec
+- `ShadowPeerRecord.swift` — shadow peer registry record and store
+- `ProcessStartTime.swift` — kernel process start time, `procStart` format
+- `CloseOnExecPipe.swift` — `Pipe.closeOnExec()`
+- `KernelPaths.swift` — config, holders and host Claude store paths
 
 ## Sources/TBDShared/
 - `Constants.swift` — paths under `~/tbd/` (configDir, socket, db, pid, port, repos), version; honors `TBD_HOME`/`TBD_SOCKET_PATH`
@@ -22,6 +35,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `ClaudeEnvRegistry.swift` — registry of user-configurable spawn-time Claude env settings (`ClaudeEnvValue`: bool/int/string, frozen JSON format; `ClaudeEnvRegistry.all` is the single source of truth)
 - `EnvOverridesCoding.swift` — JSON encode/decode for the free-form env-override `[String: String]` maps (config/repo/profile scopes)
 - `NewlineFrameScanner.swift` — incremental newline-delimited frame scanner for socket recv buffers
+- `FDVendHeader.swift` — sidecar vend header: the routing identity for each descriptor the daemon vends to the app
 - `TerminalLabel.swift` — canonical terminal display-label derivation shared by daemon + app
 - `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
 
@@ -36,11 +50,27 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `Daemon.swift` — top-level orchestrator: initializes subsystems, writes session-instrumentation files, starts servers, reconciles, runs background tasks
 - `PIDFile.swift` — PID file management + stale detection
 
+### Base/
+The bottom folder: code that several daemon folders share and that uses no other daemon folder (rule in `Sources/TBDDaemon/CLAUDE.md`).
+- `StateSubscription.swift` — `StateSubscriptionManager`: `StateDelta` broadcasting to subscribed clients
+- `ShutdownLatch.swift` — runs a server's async shutdown once and lets every caller await that run
+- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
+- `ModChannelToken.swift` — the HMAC token a session mod presents to the daemon's channel socket
+- `ContinuationGuard.swift` — one-shot claim that keeps a shared `CheckedContinuation` resumed exactly once
+- `SocketFileIdentity.swift` — a socket file's `(st_dev, st_ino)`, so a server unlinks only the socket it bound
+- `ListeningSocket.swift` — `bindListeningSocket(at:)`, which creates and binds an owner-only `AF_UNIX` socket, and `SocketServerStartError`; the RPC and mod-channel servers share both
+- `ShadowPeerPermissionClass.swift` — the permission class (`bypass` / `prompting`) a cross-session message attests
+- `RepoTOML.swift` — the name and path of a repository's committed `tbd.toml`
+- `ShellEscape.swift` — `shellEscape(_:)`, which single-quotes a string for a shell command line
+- `GatedIntervalSleep.swift` — `sleepThroughGatedInterval`, which sleeps in ticks until an interval it re-reads every tick has elapsed; the git fetch, git status and PR poll loops wait through it
+- `ClaudeUsageBucketScope.swift` — whether a Claude usage bucket is model-scoped rather than a plan-wide limit; the usage parser and the snapshot store both drop such buckets
+
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
 - `ClaudeProfileConfigDirManager.swift` — isolates a model profile's Claude config dir under `~/tbd/profiles/<id>/claude/`
 - `ClaudeSessionScanner.swift` — locates Claude JSONL session files for a worktree cwd
 - `TranscriptParser.swift` — parses Claude JSONL (incl. subagent transcripts) into transcript items
+- `ClaudeStateDetector.swift` — idle detection + session-id capture
 - `UserMessageClassifier.swift` — distinguishes real user messages from system-injected lines
 - `ClaudeUsageFetcher.swift` / `ClaudeUsagePoller.swift` / `PollerClock.swift` — Claude OAuth usage polling
 
@@ -54,7 +84,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
-- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
+- `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
@@ -80,6 +110,8 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `RepoStore` / `WorktreeStore` / `TerminalStore` / `NotificationStore` / `NoteStore` / `TabStore` — GRDB CRUD stores
 - `ConfigStore.swift` — global config
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records
+- `PRUndeterminedCause.swift` — the closed vocabulary of reasons a PR lookup produced no answer; PR's status manager reports them, and `WorktreeStore` names one for a record it cannot read
+- `UncommittedArchiveRefusal.swift` — the stored shape of an archive refused for uncommitted work, which `WorktreeArchiveError` carries; Lifecycle's extension (`WorktreeLifecycle+Archive.swift`) evaluates it
 
 ### ModelProfile/
 - `ModelProfileResolver.swift` — picks a profile per spawn (terminal → repo → global default)
@@ -89,17 +121,18 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ### Process/
 - `AgentReaper.swift` — detects and reaps orphaned agent child processes
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
+- `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
+- `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
-- `SocketServer.swift` / `HTTPServer.swift` — NIO Unix-socket + HTTP RPC servers
-- `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
+- `SocketServer.swift` — NIO Unix-socket RPC server
 - `RepoSerializer.swift` — repo serialization for RPC results
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture; `Tmux/ClaudeStateDetector.swift` — idle detection + session-id capture
+- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript
@@ -132,13 +165,13 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `FileViewer/FileViewerPanel.swift` — git status file viewer
 
 ## Tests/
-Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDAppTests/` (layout, pane content).
+Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).
 
 ## SessionMod/
 The session mod's TypeScript source: `hooks/register.ts` (entry point), `hooks/shared/session.ts` (environment, per-session directory, heartbeat), `hooks/features/composer-draft.tsx`, `types/index.d.ts` (the `$.state` contract) and `tests/` (`claude plugin test SessionMod`). Validate with `claude plugin validate --strict SessionMod`; regenerate `Sources/TBDShared/SessionModContent.swift` after every change.
 
 ## Scripts & Docs
 - `scripts/gen-session-mod-content.py` — embeds `SessionMod/` into `Sources/TBDShared/SessionModContent.swift`; `--check` (CI) fails when it is stale
-- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `recipe-check.sh`; `git-hooks/`; `mock.sh` — isolated seeded daemon+app for UI work; `claude-stub.py` — runs the real `claude` against the fake model API (zero tokens); `dev/dummy-remote-provider.sh` — file-backed fake remote provider
+- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `git-hooks/`; `mock.sh` — isolated seeded daemon+app for UI work; `claude-stub.py` — runs the real `claude` against the fake model API (zero tokens); `dev/dummy-remote-provider.sh` — file-backed fake remote provider
 - `.github/workflows/claude-review-v2/tests/e2e/stub_server.py` — the fake model API itself (stdlib `POST /v1/messages`, SSE, canned turns); shared by the review-gate e2e tests and `scripts/claude-stub.py`
 - `docs/` — `tmux-integration.md`, `diagnostics-strategy.md`, `worktree-hooks.md`, `worktree-location-design.md`, `transcript-context-usage.md`, `env-overrides.md`, `tcc-signing.md`, `test-doubles.md` (index of the fakes), `fake-model-api.md`, `mock-harness.md`, plus `specs/`, `plans/` & `perf/`

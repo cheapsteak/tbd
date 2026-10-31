@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Revive completion gating around the blocking `preSession` hook:
 /// `beginReviveWorktree` returns promptly with the row still `.creating`
@@ -16,9 +17,9 @@ struct ReviveStateGatingTests {
     /// Build an isolated AppState (never `UserDefaults.standard` — that's the
     /// developer's real TBDApp.plist) and tear the suite down afterward.
     private func withAppState(_ body: (AppState) throws -> Void) rethrows {
-        let suiteName = "ReviveStateGatingTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ReviveStateGatingTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try body(AppState(userDefaults: defaults))
     }
 

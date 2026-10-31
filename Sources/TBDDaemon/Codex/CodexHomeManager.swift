@@ -496,18 +496,27 @@ enum CodexSpawnCommandBuilder {
         build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
     }
 
-    static func command(executablePath: String) -> String {
+    /// The bare Codex command, with the options a tab was launched with (see
+    /// `Terminal.codexLaunchOptions`) reapplied when there are any.
+    static func command(
+        executablePath: String, launchOptions: CodexLaunchOptions? = nil
+    ) -> String {
         let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
             commandOutput(arguments: arguments, timeout: 3)
         }
-        return baseCommand(executablePath: executablePath, profileFlag: profileFlag)
+        return baseCommand(
+            executablePath: executablePath,
+            profileFlag: profileFlag,
+            model: launchOptions?.model,
+            disabledFeatures: launchOptions?.disabledFeatures ?? [])
     }
 
     static func build(
         initialPrompt: String?,
         resumeThreadID: String? = nil,
         executablePath: String,
-        model: String? = nil
+        model: String? = nil,
+        disabledFeatures: [String] = []
     ) -> String {
         let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
             commandOutput(arguments: arguments, timeout: 3)
@@ -517,7 +526,8 @@ enum CodexSpawnCommandBuilder {
             resumeThreadID: resumeThreadID,
             executablePath: executablePath,
             profileFlag: profileFlag,
-            model: model
+            model: model,
+            disabledFeatures: disabledFeatures
         )
     }
 
@@ -527,14 +537,16 @@ enum CodexSpawnCommandBuilder {
         codexVersionOutput: String? = nil,
         resumeThreadID: String? = nil,
         executablePath: String = "codex",
-        model: String? = nil
+        model: String? = nil,
+        disabledFeatures: [String] = []
     ) -> String {
         build(
             initialPrompt: initialPrompt,
             resumeThreadID: resumeThreadID,
             executablePath: executablePath,
             profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput),
-            model: model
+            model: model,
+            disabledFeatures: disabledFeatures
         )
     }
 
@@ -543,7 +555,7 @@ enum CodexSpawnCommandBuilder {
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
-        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+        return "\(command) \(shellEscape(initialPrompt))"
     }
 
     static func build(
@@ -551,17 +563,19 @@ enum CodexSpawnCommandBuilder {
         resumeThreadID: String?,
         executablePath: String,
         profileFlag: String,
-        model: String? = nil
+        model: String? = nil,
+        disabledFeatures: [String] = []
     ) -> String {
         let command = baseCommand(
             executablePath: executablePath,
             profileFlag: profileFlag,
             resumeThreadID: resumeThreadID,
-            model: model)
+            model: model,
+            disabledFeatures: disabledFeatures)
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
-        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+        return "\(command) \(shellEscape(initialPrompt))"
     }
 
     /// The execution-mode flags every TBD-launched Codex carries. Hook trust is
@@ -581,16 +595,22 @@ enum CodexSpawnCommandBuilder {
         executablePath: String,
         profileFlag: String,
         resumeThreadID: String? = nil,
-        model: String? = nil
+        model: String? = nil,
+        disabledFeatures: [String] = []
     ) -> String {
-        let executable = SystemPromptBuilder.shellEscape(executablePath)
+        let executable = shellEscape(executablePath)
         // A per-terminal model rides Codex's own `-c key=value` override, which
         // layers over the `tbd` profile for this process only. The whole
         // assignment is escaped as one argument so the identifier stays opaque.
         let modelOverride = modelOverrideArgument(model).map { " -c \($0)" } ?? ""
-        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride) \(executionModeFlags)"
+        // `--disable <feature>` is a global Codex option (it equals
+        // `-c features.<name>=false`), so it precedes any `resume` subcommand.
+        let featureOverrides = disabledFeatures
+            .map { " --disable \(shellEscape($0))" }
+            .joined()
+        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride)\(featureOverrides) \(executionModeFlags)"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
-        return "\(base) resume \(SystemPromptBuilder.shellEscape(resumeThreadID))"
+        return "\(base) resume \(shellEscape(resumeThreadID))"
     }
 
     /// The shell-escaped `model="<id>"` assignment for Codex's `-c`, or nil
@@ -600,7 +620,7 @@ enum CodexSpawnCommandBuilder {
     /// string keeps every identifier a string without TBD interpreting it.
     static func modelOverrideArgument(_ model: String?) -> String? {
         guard let model, !model.isEmpty else { return nil }
-        return SystemPromptBuilder.shellEscape("model=\(tomlBasicString(model))")
+        return shellEscape("model=\(tomlBasicString(model))")
     }
 
     static func tomlBasicString(_ value: String) -> String {

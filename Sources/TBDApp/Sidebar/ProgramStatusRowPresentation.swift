@@ -5,21 +5,20 @@ import TBDShared
 /// sidebar worktree row: whether a snapshot speaks for a terminal, and the
 /// plain-text tooltip the row's status badge carries.
 ///
-/// A terminal this returns nothing for — flag off, not OSC-authoritative,
-/// parked, or a snapshot from another incarnation — keeps today's hook-rail
-/// presentation unchanged.
+/// A terminal this returns nothing for — not OSC-authoritative, parked, or a
+/// snapshot from another incarnation — keeps today's hook-rail presentation
+/// unchanged.
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`, "UI".
 enum ProgramStatusRowPresentation {
-    /// The OSC-authoritative state of `terminal`, or nil unless the flag is on
-    /// and `snapshot` speaks for this process: a parked terminal's process is
-    /// gone, and a snapshot accepted for another incarnation describes a
-    /// process that no longer runs in this row.
+    /// The OSC-authoritative state of `terminal`, or nil unless `snapshot`
+    /// speaks for this process: a parked terminal's process is gone, and a
+    /// snapshot accepted for another incarnation describes a process that no
+    /// longer runs in this row.
     static func resolution(
         terminal: TBDShared.Terminal,
-        snapshot: ProgramStatusSnapshot?,
-        enabled: Bool
+        snapshot: ProgramStatusSnapshot?
     ) -> ProgramStatusResolution? {
-        guard enabled, let snapshot else { return nil }
+        guard let snapshot else { return nil }
         guard !terminal.isParked else { return nil }
         guard snapshot.incarnationID == terminal.sessionIncarnationID else { return nil }
         return ProgramStatusRollup.resolve(snapshot)
@@ -57,10 +56,11 @@ enum ProgramStatusRowPresentation {
         return oscTooltip
     }
 
-    /// The label a terminal goes by in the tooltip.
+    /// The label a terminal goes by in the tooltip: its own label, else its
+    /// agent's name.
     static func tooltipLabel(for terminal: TBDShared.Terminal) -> String {
         if let label = terminal.label, !label.isEmpty { return label }
-        return "Claude"
+        return terminal.isCodexTerminal ? TerminalLabel.codex : "Claude"
     }
 
     /// The tooltip text, one block per OSC-authoritative terminal:

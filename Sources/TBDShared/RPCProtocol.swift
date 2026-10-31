@@ -136,6 +136,15 @@ public enum RPCErrorCode: String, Sendable {
     /// the fact alone; the CLI appends the `--force` hint and the app offers
     /// "Archive anyway". A refusal no retry gets past carries no code.
     case remoteLaneArchiveGuarded
+    /// A local worktree's `worktree.archive` was refused because its folder
+    /// holds uncommitted changes (tracked edits, or untracked files that are
+    /// not ignored), or because `git status` could not show it clean. The
+    /// daemon refused before changing anything, because archiving deletes the
+    /// folder and a revive restores only what is committed on the branch. The
+    /// message states the fact alone; the CLI appends its `--force` hint and
+    /// the app offers to archive anyway with
+    /// `WorktreeArchiveParams.discardUncommittedChanges`.
+    case worktreeArchiveUncommitted
 }
 
 // MARK: - RPC Method Names
@@ -156,6 +165,9 @@ public enum RPCMethod {
     public static let worktreeMove = "worktree.move"
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
+    /// A distinct method so an older daemon cannot silently ignore the new
+    /// codexHome field and launch an unguarded terminal instead.
+    public static let terminalCreateGuardedCodex = "terminal.createGuardedCodex"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalContinueInClaude = "terminal.continueInClaude"
     public static let terminalList = "terminal.list"
@@ -230,12 +242,6 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
-
-    /// Methods served only on the daemon's Unix socket, never on its loopback
-    /// HTTP transport. The socket's mode admits only its owner; a loopback port
-    /// answers any local process, under any user. A method whose result carries
-    /// a secret belongs here.
-    public static let socketOnly: Set<String> = [modelProfileExecEnvironment]
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
@@ -250,7 +256,7 @@ public enum RPCMethod {
     /// daemon rejects is debug-logged and the app must not retry.
     public static let terminalProgramStatusReport = "terminal.programStatusReport"
     /// Every terminal's current program-status snapshot (main entry and task
-    /// entries). Empty while `program_status_enabled` is off.
+    /// entries).
     public static let terminalProgramStatusList = "terminal.programStatusList"
     /// `prompt.answer` – the app answers a local prompt
     /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
@@ -345,12 +351,6 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
-    /// The Program Status Protocol gate (`program_status_enabled`): whether
-    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
-    /// accepts its status reports. Applies to Claude processes started after
-    /// the change. Reading needs no method of its own: `config.get` and
-    /// `daemon.capabilities` carry the resolved value.
-    public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
     /// The transcript prompt-answer gate (`transcript_prompt_answer_enabled`).
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
@@ -1130,9 +1130,8 @@ public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
 /// a token profile is shown only by its masked tail. This result exists so
 /// `tbd profile exec` can put the credential into a child process's
 /// environment, which is where a spawned session's credential goes too. It is
-/// served only on the daemon's Unix socket (`RPCMethod.socketOnly`), whose mode
-/// admits only its owner: the same boundary as the 0600 file the daemon reads
-/// it from. The loopback HTTP transport refuses it. `description`,
+/// served on the daemon's Unix socket, whose mode admits only its owner: the
+/// same boundary as the 0600 file the daemon reads it from. `description`,
 /// `debugDescription` and `customMirror` name the keys only, so printing,
 /// interpolating or dumping the value cannot reveal the secret.
 public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
@@ -1565,8 +1564,9 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Codex model for the new worktree's primary terminal when that primary
     /// resolves to Codex, passed as `-c model=<id>`. Ignored for Claude and
     /// shell primaries; it never selects the agent kind. Distinct from the
-    /// Claude-only `model`. Not persisted. Optional/defaulted for backward
-    /// compatibility.
+    /// Claude-only `model`. Recorded on the primary's row
+    /// (`Terminal.codexLaunchOptions`) so a relaunch of Codex in that tab keeps
+    /// it. Optional/defaulted for backward compatibility.
     public let codexModel: String?
     /// Claude Code plugin folders for the primary Claude terminal — a plugin, a
     /// folder of plugins, or a `.zip`, whatever `--plugin-dir` accepts — each
@@ -1652,9 +1652,22 @@ public struct WorktreeListParams: Codable, Sendable {
 
 public struct WorktreeArchiveParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// On a local worktree, lifts the uncommitted-changes guard
+    /// (`RPCErrorCode.worktreeArchiveUncommitted`) AND skips the archive hook;
+    /// this is what `tbd worktree archive --force` sends. On a remote lane, it
+    /// lifts the three guards `RPCErrorCode.remoteLaneArchiveGuarded` names.
+    /// A scratch space's archive deletes nothing and runs no hook, so it
+    /// changes nothing there.
     public let force: Bool
-    public init(worktreeID: UUID, force: Bool = false) {
+    /// On a local worktree, lifts only the uncommitted-changes guard, so the
+    /// archive hook still runs: what the app sends once the user confirms
+    /// deleting the changes. Ignored on a remote lane and a scratch space.
+    /// Optional so a payload from a client that predates it still decodes,
+    /// and `nil` reads as `false`.
+    public let discardUncommittedChanges: Bool?
+    public init(worktreeID: UUID, force: Bool = false, discardUncommittedChanges: Bool? = nil) {
         self.worktreeID = worktreeID; self.force = force
+        self.discardUncommittedChanges = discardUncommittedChanges
     }
 }
 
@@ -2699,10 +2712,17 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let claudeSettingsOverlay: String?
     /// Codex model for this fresh Codex terminal, passed to Codex as
     /// `-c model=<id>`. An opaque identifier: Codex owns the vocabulary and
-    /// reports unsupported values. Honored only for `type == .codex`; not
-    /// persisted, so a later recreate falls back to the profile's model.
-    /// Optional/defaulted for backward compatibility.
+    /// reports unsupported values. Honored only for `type == .codex`, and
+    /// recorded on the row (`Terminal.codexLaunchOptions`) so a relaunch of
+    /// Codex in this tab keeps it. Optional/defaulted for backward compatibility.
     public let model: String?
+    /// Codex feature keys (for example `computer_use`) to turn off for this
+    /// fresh Codex terminal only, each passed to Codex as `--disable <key>`.
+    /// Honored only for `type == .codex`, and recorded on the row with `model`
+    /// (`Terminal.codexLaunchOptions`). Validate with
+    /// `normalizedCodexDisabledFeatures(_:)`. Optional/defaulted for backward
+    /// compatibility (old clients omit it; nil = none).
+    public let codexDisabledFeatures: [String]?
     /// Claude Code plugin folders for this terminal — a plugin, a folder of
     /// plugins, or a `.zip`, whatever `--plugin-dir` accepts — each passed as
     /// `--plugin-dir` after TBD's own. Each path must be absolute or start
@@ -2712,13 +2732,20 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// terminals only: any other kind with a non-empty list is refused.
     /// Optional/defaulted for backward compatibility.
     public let pluginDirs: [String]?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, pluginDirs: [String]? = nil) {
+    /// Explicit Codex home for this one terminal. The daemon validates its guard
+    /// before spawn and records it on the row with `model`
+    /// (`Terminal.codexLaunchOptions`), so a relaunch of Codex in this tab
+    /// re-validates and keeps it, or refuses. Nil keeps the shared Codex home.
+    public let codexHome: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil, pluginDirs: [String]? = nil, codexHome: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.model = model
+        self.codexDisabledFeatures = codexDisabledFeatures
         self.pluginDirs = pluginDirs
+        self.codexHome = codexHome
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
@@ -2730,6 +2757,44 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// by the CLI's `--plugin-dir` validation and the daemon for the same
     /// reason as `modelRequiresCodexMessage`.
     public static let pluginDirsRequireClaudeMessage = "pluginDirs require a Claude terminal"
+
+    public static let codexDisableRequiresCodexMessage =
+        "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
+
+    public static let codexHomeRequiresCodexMessage =
+        "--codex-home requires --type codex: only Codex terminals use CODEX_HOME."
+
+    /// Guarded requests use a new RPC method: an older daemon must reject the
+    /// unknown method instead of ignoring an unknown `codexHome` JSON field.
+    public var rpcMethod: String {
+        codexHome == nil ? RPCMethod.terminalCreate : RPCMethod.terminalCreateGuardedCodex
+    }
+
+    /// Validates and de-duplicates (first occurrence wins) Codex feature keys.
+    /// A key is lowercase letters, digits and underscores, like
+    /// `computer_use`; anything else, surrounding whitespace included, is
+    /// refused rather than repaired or passed on to Codex.
+    public static func normalizedCodexDisabledFeatures(_ features: [String]) throws -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for feature in features {
+            let isValid = !feature.isEmpty && feature.utf8.allSatisfy {
+                ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5F
+            }
+            guard isValid else {
+                throw CodexDisabledFeatureError(feature: feature)
+            }
+            if seen.insert(feature).inserted { result.append(feature) }
+        }
+        return result
+    }
+}
+
+public struct CodexDisabledFeatureError: Error, LocalizedError, Equatable, Sendable {
+    public let feature: String
+    public var errorDescription: String? {
+        "Invalid Codex feature name \"\(feature)\": use lowercase letters, digits and underscores, for example computer_use."
+    }
 }
 
 public struct TerminalContinueInCodexParams: Codable, Sendable {
@@ -3558,14 +3623,6 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setProgramStatusEnabled` — the gate for the Program
-/// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
-/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
-public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setTranscriptPromptAnswerEnabled` — the gate for
 /// answering Claude's question and permission dialogs from the transcript
 /// (default OFF during soak). Design:
@@ -4088,13 +4145,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
-    /// Whether the Program Status Protocol is on (`program_status_enabled`).
-    /// Default OFF while it soaks. Resolved through
-    /// `Config.programStatusEnabledDefault`.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives.
-    public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
     /// Whether answering prompts from the transcript is on
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
@@ -4251,11 +4301,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
-        // New field for the Program Status Protocol gate. A daemon that does
-        // not send it does not speak the protocol, so fall through to the
-        // shipped default.
-        programStatusEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(

@@ -147,11 +147,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` means "never chose". Resolve it through
     /// `Config.prPollScheduleDefault`, never through `?? false`.
     var pr_poll_schedule_enabled: Bool?
-    /// Program Status Protocol (OSC 7501) gate. **Genuinely tri-state**: the
-    /// `20261010043448_config_program_status` migration carries no SQL default,
-    /// so `nil` means "never chose". Resolve it through
-    /// `Config.programStatusEnabledDefault`, never through `?? false`.
-    var program_status_enabled: Bool?
     /// Answering question and permission prompts from the transcript.
     /// **Genuinely tri-state**: the
     /// `20261010025458_config_transcript_prompt_answer` migration carries no SQL
@@ -275,8 +270,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
     ///   `remote_transcript_live_sync_enabled` — the live remote transcript
     ///   sync's soak gate.
-    /// - Parameter programStatusDefault: same shape again, for
-    ///   `program_status_enabled` — the Program Status Protocol's soak gate.
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
@@ -308,7 +301,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         holderClaimReconcileDefault: Bool = Config.holderClaimReconcileEnabledDefault,
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
-        programStatusDefault: Bool = Config.programStatusEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
         panelTabsDefault: Bool = Config.panelTabsDefault,
         worktreeParksOnMerge: Bool = false
@@ -429,10 +421,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Live remote transcript sync gate — NOT `?? false`.
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
-        // Program Status Protocol gate — NOT `?? false`. Assigned after
-        // construction, like the fields around it, to keep the initializer
-        // call inside the type-checker's budget.
-        config.programStatusEnabled = program_status_enabled ?? programStatusDefault
         // Side panel with tabs gate — NOT `?? false`.
         config.panelTabsEnabled = panel_tabs_enabled ?? panelTabsDefault
         return config
@@ -929,18 +917,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET pr_poll_schedule_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the Program Status Protocol (OSC 7501) gate. Written on every
-    /// call, so either value is the explicit gesture that lifts the column out
-    /// of NULL.
-    public func setProgramStatusEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET program_status_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

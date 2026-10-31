@@ -2,6 +2,7 @@ import Foundation
 import os
 import Security
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 

@@ -154,6 +154,51 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(try fixture.actuationRows().last?["result"] as? String == "dispatched")
     }
 
+    /// `not_found` is filed as success, so it must not also be recorded as a
+    /// provider failure: that would mark the inventory stale and refuse every
+    /// other archive on the provider until the next good poll.
+    @Test("a not_found from the archive verb leaves the provider's health alone")
+    func notFoundIsHealthNeutral() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "not_found", "message": "gone"}}"#.utf8),
+                stderr: "")],
+            tag: "archive-notfound-health")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.manager.apply(snapshot: [], provider: "fake")
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(response.success, "not_found should not surface as an error: \(response.error ?? "")")
+        #expect(try await fixture.status(of: lane) == .archived)
+        #expect(await fixture.manager.hasStaleSnapshot(provider: "fake") == false)
+        #expect(await fixture.manager.providerStatuses().first?.health == .ok)
+    }
+
+    @Test("any other permanent archive error still marks the provider unhealthy")
+    func otherPermanentErrorsStillRecordHealth() async throws {
+        let fixture = try await RemoteLaneFixture.make(
+            capabilities: ["archive"],
+            verbs: [ProviderResult(
+                exitCode: 1,
+                stdout: Data(#"{"error": {"code": "internal", "message": "boom"}}"#.utf8),
+                stderr: "")],
+            tag: "archive-internal-health")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+        try await fixture.manager.apply(snapshot: [], provider: "fake")
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(!response.success)
+        #expect(try await fixture.status(of: lane) == .active)
+        #expect(await fixture.manager.providerStatuses().first?.health == .error)
+        #expect(await fixture.manager.hasStaleSnapshot(provider: "fake"))
+    }
+
     @Test("a failing archive verb leaves the row alone and records transport-failed")
     func failingVerbLeavesTheRowAlone() async throws {
         let fixture = try await RemoteLaneFixture.make(
@@ -176,6 +221,73 @@ struct WorktreeArchiveRemoteLaneTests {
         let rows = try fixture.actuationRows()
         #expect(rows.count == 2)
         #expect(rows.last?["result"] as? String == "transport-failed")
+    }
+
+    // MARK: - A retired provider
+
+    /// The provider was removed from the registry. Nothing enumerates its
+    /// lanes and no mirror row will ever be marked gone, so the lane takes the
+    /// row-only route with no `--force`.
+    @Test("a lane whose provider is retired is filed row-only, without force")
+    func retiredProviderLaneIsFiledWithoutTheProvider() async throws {
+        let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "archive-retired")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(provider: "retired-acme", withMirrorRow: false)
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(response.success, "the archive was refused: \(response.error ?? "no error")")
+        #expect(fixture.invoker.calls == [["describe"]], "no verb may run")
+        #expect(try await fixture.status(of: lane) == .archived)
+    }
+
+    @Test("a retired-provider archive revives row-only")
+    func retiredProviderArchiveRevives() async throws {
+        let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "archive-retired-revive")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(provider: "retired-acme", withMirrorRow: false)
+        let router = fixture.router()
+        _ = try await archive(router, lane)
+
+        let revived = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: lane.id),
+            actor: .app))
+
+        #expect(revived.success, "the revive was refused: \(revived.error ?? "no error")")
+        #expect(fixture.invoker.calls == [["describe"]], "no verb may run")
+        #expect(try await fixture.status(of: lane) == .active)
+    }
+
+    @Test("an unloadable registry never reads a provider as retired")
+    func unloadableRegistryFailsClosed() async throws {
+        let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "archive-bad-registry")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane(provider: "retired-acme", withMirrorRow: false)
+        // Duplicate names make the registry fail to load.
+        try fixture.writeRegistry(
+            #"[{"name": "dup", "exec": "/x"}, {"name": "dup", "exec": "/y"}]"#)
+
+        let response = try await archive(fixture.router(), lane)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("\"archive\" capability") == true,
+                "expected the capability refusal, got: \(response.error ?? "none")")
+        #expect(try await fixture.status(of: lane) == .active)
+    }
+
+    @Test("a configured provider whose describe failed is still refused")
+    func configuredProviderWithoutDescribeIsRefused() async throws {
+        // Capabilities empty (as after a failed describe), provider IS in the
+        // registry ("fake"), mirror row present and not gone.
+        let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "archive-not-retired")
+        defer { fixture.cleanup() }
+        let lane = try await fixture.seedLane()
+
+        let response = try await archive(fixture.router(), lane, force: true)
+
+        #expect(!response.success)
+        #expect(try await fixture.status(of: lane) == .active)
     }
 
     // MARK: - The gone exemption

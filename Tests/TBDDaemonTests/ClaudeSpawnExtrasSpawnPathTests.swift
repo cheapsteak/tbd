@@ -235,7 +235,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
     /// TBD's own `--plugin-dir` flag, present only when its folder exists on
     /// this machine. Assertions about a terminal's extra folders strip it.
     static var ownPluginFlag: String {
-        " --plugin-dir \(SystemPromptBuilder.shellEscape(PluginDirWriter.pluginDirPath))"
+        " --plugin-dir \(shellEscape(PluginDirWriter.pluginDirPath))"
     }
 
     /// `gitRepo` makes the repo a real git repository, which `worktree.create`
@@ -328,11 +328,11 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         #expect(guardCommand == "acme-guard")
 
         let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminalID.uuidString)
-        #expect(command.contains(" --settings \(SystemPromptBuilder.shellEscape(path))"), "\(command)")
+        #expect(command.contains(" --settings \(shellEscape(path))"), "\(command)")
     }
 
     private static func pluginFlag(_ dir: String) -> String {
-        " --plugin-dir \(SystemPromptBuilder.shellEscape(dir))"
+        " --plugin-dir \(shellEscape(dir))"
     }
 
     // MARK: - Starts that take the values
@@ -352,7 +352,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
             let command = try #require(f.recorder.newWindowCommands.last)
             #expect(command.contains("claude --session-id"), "\(command)")
-            let extraFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(plug))"
+            let extraFlag = " --plugin-dir \(shellEscape(plug))"
             #expect(command.contains(extraFlag), "\(command)")
             // TBD's own folder, when it is there, comes first.
             if let own = command.range(of: Self.ownPluginFlag),
@@ -389,7 +389,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let command = try #require(f.recorder.newWindowCommands.last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminal.id.uuidString)
-            #expect(command.contains(" --settings \(SystemPromptBuilder.shellEscape(path))"), "\(command)")
+            #expect(command.contains(" --settings \(shellEscape(path))"), "\(command)")
         }
     }
 
@@ -526,7 +526,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
             let command = try #require(
                 f.recorder.newWindowCommands.first { $0.contains("claude --session-id") })
-            let extraFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(plug))"
+            let extraFlag = " --plugin-dir \(shellEscape(plug))"
             #expect(command.contains(extraFlag), "\(command)")
             if let own = command.range(of: Self.ownPluginFlag),
                let extra = command.range(of: extraFlag) {
@@ -875,7 +875,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         #expect(command.contains(Self.pluginFlag(session.pluginDir)), "\(command)")
         #expect(!command.contains(other.pluginDir), "\(command)")
         let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: restored.id.uuidString)
-        #expect(command.contains(" --settings \(SystemPromptBuilder.shellEscape(path))"), "\(command)")
+        #expect(command.contains(" --settings \(shellEscape(path))"), "\(command)")
         let settings = try perSessionSettings(restored.id)
         #expect(settings["acmeSession"] as? String == session.name)
         #expect(settings["hooks"] != nil)
@@ -899,7 +899,11 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 label: TerminalLabel.preSession, claudeSessionID: shellSession, kind: .shell,
                 claudeSpawnExtras: ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay))
 
-            _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktree.id)
+            // The fixture's worktree folder is a plain directory, not a git
+            // checkout, so the uncommitted-changes guard could not read it and
+            // would refuse; it is not what this test is about.
+            _ = try await f.lifecycle.beginArchiveWorktree(
+                worktreeID: f.worktree.id, discardUncommittedChanges: true)
 
             let archived = try #require(try await f.db.worktrees.get(id: f.worktree.id))
             #expect(archived.status == .archived)

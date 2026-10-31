@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// A holder started the way the daemon starts one — through the real
 /// `HolderSpawner`, with a real `posix_spawn` — plus everything needed to take

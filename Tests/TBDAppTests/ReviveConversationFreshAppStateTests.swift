@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tier 1 state-action tests. The injected reviver replaces the external
 /// daemon boundary; all selection, alert, and revive-state behavior remains
@@ -16,9 +17,9 @@ struct ReviveConversationFreshAppStateTests {
     private func withAppState(
         _ body: @MainActor (AppState, UserDefaults) async throws -> Void
     ) async rethrows {
-        let suiteName = "TBDAppTests.ReviveConversationFresh.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ReviveConversationFresh")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults), defaults)
     }
 

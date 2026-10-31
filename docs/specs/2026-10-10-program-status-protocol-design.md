@@ -1,26 +1,31 @@
 # Program Status Protocol (OSC 7501) for holder sessions
 
-Status: design, default-off behind `program_status_enabled`.
+Status: design. On for every pty-holder session; there is no flag.
 
 ## Summary
 
-Claude Code (from v2.1.295) reports its own state to the terminal over a
-private OSC sequence, the Program Status Protocol, OSC 7501, once the terminal
-says it supports it. On the pty-holder transport TBD's SwiftTerm *is* the
-terminal, so TBD can opt in, receive those reports, and use them as the
-authoritative state of a Claude session — replacing hook inference for the
-states hooks get wrong, and covering background subagents that hooks cannot
-see at all.
+Claude Code (from v2.1.295) and Codex (from 0.163.0) report their own state
+to the terminal over a private OSC sequence, the Program Status Protocol,
+OSC 7501 — Claude Code once the terminal says it supports it, Codex without
+asking. On the pty-holder transport TBD's SwiftTerm *is* the terminal, so TBD
+can opt in, receive those reports, and use them as the authoritative state of
+an agent session — replacing hook inference for the states hooks get wrong,
+and covering Claude Code's background subagents that hooks cannot see at all.
+
+Each agent stamps its reports with its own `app` value, `claude-code` or
+`codex`, and TBD accepts a report only from a terminal whose recorded agent
+is the one that value names.
 
 The tmux transport is out of scope. tmux is the terminal there, does not
 answer the probe, and drops the sequence; tmux is being deprecated, and this
 design only promises not to break it.
 
-## The protocol as Claude Code implements it
+## The protocol as the agents implement it
 
-Everything here was read from the shipped Claude Code bundle (v2.1.295). No
-published specification was found; the behaviors below are what the client
-does, and the parser must tolerate drift from them.
+Claude Code's behavior was read from its shipped bundle (v2.1.295), and
+Codex's from its source (0.164.0, which added `done`, `error` and `kind` to the reports of 0.163.0). No published specification was found; the
+behaviors below are what the clients do, and the parser must tolerate drift
+from them.
 
 **Probe.** At startup, alongside its XTVERSION and DA1 queries, Claude Code
 writes `ESC ] 7501 ; ? BEL`. It enables the protocol only if the terminal
@@ -30,8 +35,8 @@ reply settles it off for the life of the process. It is forced off by
 (`CLAUDE_CODE_SESSION_KIND=bg`). There is no env var that forces it on, and
 the sequence is never wrapped in tmux/screen DCS passthrough.
 
-**Reports.** `ESC ] 7501 ; key=value:key=value… BEL` (`ESC \` instead of BEL
-when Claude Code believes the terminal is kitty). Keys:
+**Reports.** Claude Code writes `ESC ] 7501 ; key=value:key=value… BEL`
+(`ESC \` instead of BEL when it believes the terminal is kitty). Keys:
 
 - **`state`** – `working`, `blocked`, `done`, `idle`, `error`, or `clear`.
 - **`app`** – `claude-code` on every state report; absent on both forms of
@@ -65,6 +70,18 @@ and sends a bare `state=clear` on exit and when restoring terminal modes.
 - `error` – the last turn failed for a non-auth reason. `msg` is the failure.
 - Task entries are `working`, or `blocked` when paused or waiting on input.
 
+**Codex.** Codex sends no probe and needs no answer: it reports whenever its
+output is a terminal, unless that terminal is VTE older than 0.54. A report is
+`ESC ] 7501 ; state=<idle|working|blocked|done|error>:app=codex ESC \`, with
+`:kind=<permission|question|auth>` added when blocked, and its clear is
+`ESC ] 7501 ; state=clear ESC \`, with no `app`. Codex sends no `id`,
+`title`, `msg` or `progress`, so a Codex terminal has a main entry and never a
+task entry. It computes its status on every draw but writes it only when it
+changes (its own cache suppresses repeats), and the cache starts empty, so its
+first draw reports `idle`. Codex 0.163.0 sends `working`, `idle` and
+`blocked` without `kind`; TBD accepts that form, which lacks only the richer
+states.
+
 ## Goals
 
 - Show permission and question blocks the moment they happen, and clear them
@@ -81,11 +98,10 @@ and sends a bare `state=clear` on exit and when restoring terminal modes.
 
 - The tmux transport, in either attach mode.
 - A ticker or history of messages. Only the latest values are kept; a ticker
-  can be designed separately once the soak shows how often `msg` changes.
+  can be designed separately once field use shows how often `msg` changes.
 - Persisting any of this across a daemon restart.
 - Acting on reports. They drive display and resolution only; nothing kills,
   wakes or sends input because of one.
-- Agents other than Claude Code.
 
 ## Design
 
@@ -117,8 +133,8 @@ data.
 
 ### Answering the probe
 
-When `program_status_enabled` resolves true, whichever reader owns the holder
-pty answers a `?` query with `ESC ] 7501 ; ? BEL`:
+Whichever reader owns a holder session's pty answers a `?` query with
+`ESC ] 7501 ; ? BEL`. A tmux panel never answers.
 
 The reply must be written synchronously, while SwiftTerm parses the probe.
 Claude Code writes the probe before its DA1 query and treats DA1's reply as
@@ -138,18 +154,16 @@ preempt), never from the asynchronous `observeOscEvents` stream.
 Both readers must answer identically, because Claude Code asks once at
 startup: a probe answered only by the app would make the feature depend on
 whether the app happened to be attached when Claude launched. Both therefore
-answer for any holder session while the flag is on, whatever its agent;
-ingestion, not the probe, filters to Claude, and a panel created before the
-daemon's capabilities reach the app does not answer, so a Claude started in
-that window runs without the protocol (an accepted gap).
+answer for any holder session, whatever its agent; ingestion, not the probe,
+filters by agent.
+
+Codex needs no answer. It sends without probing, so its reports reach
+whichever reader owns the pty whether or not that reader ever answered
+anything.
 
 A snapshot replay must never answer a probe or ingest a report. Reports are
 read from `observeOscEvents`, which is already suspended during replay; the
 probe handler checks the same replay state and stays silent while it is up.
-
-When the flag resolves false, neither reader answers, Claude Code never
-enables the protocol, and behavior is identical to a build without this
-feature. Turning the flag on affects only Claude processes started afterwards.
 
 ### Delivering reports to the daemon
 
@@ -161,36 +175,45 @@ feature. Turning the flag on affects only Claude processes started afterwards.
   payload, observedAt}`. Forwarding the raw payload keeps a single parser on
   the path that decides anything.
 
-A report that arrives during a reader hand-off can be lost. The store keeps
-the last state it accepted, and Claude Code's next change corrects it.
+A report that arrives during a reader hand-off or a daemon restart can be
+lost. The store keeps the last state it accepted, and the agent's next change
+corrects it. For Codex, which never probes and suppresses repeats, the next
+change is the only recovery, so the worst case is the whole span of the
+current state (for example a full `blocked` wait).
 
 ### Trust
 
 The store accepts a report only when all of these hold; otherwise it drops
 it with a debug log:
 
-- the flag resolves true;
-- the terminal is a live holder session whose recorded agent is Claude;
+- the terminal is a live holder session whose recorded agent reports:
+  Claude or Codex. The agent is the identity TBD launches and relaunches the
+  row by (`isCodexTerminal`, then `isClaudeTab`): Codex when the kind is
+  `codex` or the label says so, else Claude when the kind is `claude` or was
+  never recorded, else none — a plain shell reports nothing;
 - the report's incarnation matches the terminal's current incarnation, so a
   late report from a previous process cannot overwrite its successor;
-- `app=claude-code`, except on a `clear`, which Claude Code writes without
-  `app`; a `clear` naming another app is still refused.
+- the report's `app` is the terminal's own agent's — `app=claude-code` on a
+  Claude terminal, `app=codex` on a Codex one — except on a `clear`, which
+  both agents write without `app`. An `app` TBD does not know is refused
+  before the terminal is looked up, and a known `app` on the other agent's
+  terminal, on a `clear` as on any other report, after it.
 
-A program running inside a genuine Claude session — a `cat` of a file that
+A program running inside a genuine agent session — a `cat` of a file that
 contains the sequence — can still forge a report. That residual risk is
 accepted: reports drive display only.
 
 ### Liveness
 
-Claude Code sends `clear` when it exits cleanly, but a SIGKILLed process sends
+An agent sends `clear` when it exits cleanly, but a SIGKILLed process sends
 nothing. The store therefore drops a terminal's entries — main and tasks —
 when the holder session's child exits, when the terminal is hibernated or
-parked, when its incarnation changes, and when the flag is turned off.
+parked, and when its incarnation changes.
 
-A child exit, a park, or the flag turning off is an unconditional end, so its
-drop also records a per-terminal watermark: a report observed at or before it
-is refused, and so is a report whose validation was suspended on the terminal
-lookup while the drop ran. Otherwise a backlog already in flight — the
+A child exit or a park is an unconditional end, so its drop also records a
+per-terminal watermark: a report observed at or before it is refused, and so
+is a report whose validation was suspended on the terminal lookup while the
+drop ran. Otherwise a backlog already in flight — the
 daemon's inbox, or the app's forwarder — would land after the drop and hold an
 entry nothing ever clears. A wake drops only entries whose incarnation differs
 from the terminal's current one, because by the time it runs the replacement
@@ -241,7 +264,7 @@ States TBD owns outrank OSC: `.parked` and `.gone` win, and so does
 
 Nothing new is written to `state.db`. Holder sessions survive a daemon
 restart but the store does not, so after a restart those sessions show their
-hook-derived state until Claude Code's next change re-establishes authority.
+hook-derived state until the agent's next report re-establishes authority.
 
 ### Rolling up task entries
 
@@ -267,7 +290,7 @@ rail is not consulted.
 
 ### UI
 
-For OSC-authoritative terminals only, with the flag on:
+For OSC-authoritative terminals only:
 
 - **Worktree row** – `.error` and `.needsAuth` get badges of their own.
   The existing working, idle and awaiting-input badges are unchanged. A
@@ -287,6 +310,9 @@ For OSC-authoritative terminals only, with the flag on:
 - **Tooltip** – hovering the row's status badge lists, per OSC-authoritative
   terminal in the worktree, the main entry's state, `title`, `msg` and
   `progress`, then one line per task entry with its title, state and `msg`.
+  Each terminal goes by its label, or by its agent's name, "Claude" or
+  "Codex", when it has none. A Codex terminal sends a main entry and nothing
+  else, so its block is the one line naming its state.
 
 The daemon pushes a `ProgramStatusSnapshot` per terminal to the app with its
 existing state updates. `title` and `msg` live only in daemon and app memory
@@ -297,21 +323,10 @@ Terminals that are not OSC-authoritative look exactly as they do today.
 
 ## Flag
 
-`program_status_enabled` is a `config` column added with no SQL default, so
-NULL means nobody chose. The shipped default lives in
-`Config.programStatusEnabledDefault = false` and is applied in
-`ConfigRecord.toModel()`. A Settings toggle sets it.
-
-The flag gates every piece: answering the probe in both readers, accepting
-reports, resolution, and UI. Off means neither reader answers, so Claude Code
-never emits anything.
-
-- **Soak** – enable the toggle on a development machine running holder
-  sessions, and compare the sidebar against what the sessions are visibly
-  doing, especially permission prompts and sessions with background agents.
-- **Graduation** – flip the default constant. Users who never touched the
-  toggle follow it; explicit opt-outs are preserved. Delete the flag once the
-  default has held.
+None. Both readers answer the probe on every holder session, and the store
+accepts every report that passes "Trust"; no setting turns the protocol off.
+See [`2026-10-30-osc-only-agent-status-design.md`](2026-10-30-osc-only-agent-status-design.md),
+"Flag".
 
 ## Reconciler
 
@@ -324,15 +339,13 @@ orphan.
 - **Parser** – every key; base64 decode and the byte caps on a UTF-8
   boundary; malformed and empty payloads; unknown `state` and `kind`; the
   probe form; missing `state`.
-- **Probe reply** – answered with the flag on and silent with it off, in both
-  the app observer and the daemon emulator; silent during snapshot replay.
-- **Store** – trust checks (flag, agent, incarnation, `app`); task add,
+- **Probe reply** – answered on a holder session by both the app observer and
+  the daemon emulator; silent on a tmux panel and during snapshot replay.
+- **Store** – trust checks (agent, incarnation, `app`); task add,
   `clear:id`, and the 32-entry cap; the liveness drops.
 - **Resolution** – each roll-up rule in order; OSC precedence over hook state;
   fall-back after a main `clear`; `.parked`, `.gone` and `.rateLimited`
   outranking OSC.
-- **Flag column** – a pre-migration row reads NULL rather than `0`; NULL
-  follows the default constant; an explicit `false` survives a change to it.
 - **`SessionStateValue`** – the three new tags round-trip, and a decoder that
   lacks them reads `.unknown`.
 
@@ -347,7 +360,7 @@ orphan.
   UI.
 - **Latest-wins reconciliation with hooks.** Reports arrive in-band and hooks
   arrive over CLI→RPC, so ordering between them is not reliable, and
-  latest-wins would flicker. Claude Code computes its state from its own
+  latest-wins would flicker. An agent computes its state from its own
   internals, so once it reports, it is the better source.
 - **Using OSC only to fill gaps hooks leave.** Keeps two sources racing on the
   states both can express, for no gain in accuracy.

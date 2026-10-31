@@ -661,6 +661,57 @@ public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
     }
 }
 
+/// The per-terminal options a Codex tab was launched with: its model override,
+/// the Codex features turned off for it, and its dedicated Codex home.
+///
+/// Recorded on the terminal row at spawn, because every later relaunch of
+/// Codex in that same tab — recreating a dead window, or restoring Codex after
+/// a failed continue-in-Claude — has nothing else to read them from, and a
+/// relaunch without them would quietly start the tab on the default model with
+/// those features back on, or on the shared home without its guard.
+public struct CodexLaunchOptions: Codable, Sendable, Equatable {
+    /// Passed to Codex as `-c model="<id>"`. Nil when the tab took the `tbd`
+    /// Codex profile's model.
+    public var model: String?
+    /// Passed to Codex as `--disable <feature>`, in launch order.
+    public var disabledFeatures: [String]
+    /// The dedicated Codex home the tab was created with
+    /// (`tbd terminal create --codex-home`), or nil for the shared home. A
+    /// relaunch validates this home again and launches in it, or refuses; it
+    /// never falls back to the shared home.
+    public var codexHome: String?
+
+    public init(model: String? = nil, disabledFeatures: [String] = [], codexHome: String? = nil) {
+        self.model = model
+        self.disabledFeatures = disabledFeatures
+        self.codexHome = codexHome
+    }
+
+    /// The options worth recording for a launch, or nil when it used none, so
+    /// a tab started without options keeps a NULL column and relaunches with
+    /// the default command. An empty model is no override, matching
+    /// `CodexSpawnCommandBuilder.modelOverrideArgument`.
+    public static func recorded(
+        model: String?, disabledFeatures: [String], codexHome: String? = nil
+    ) -> CodexLaunchOptions? {
+        let model = model.flatMap { $0.isEmpty ? nil : $0 }
+        guard model != nil || !disabledFeatures.isEmpty || codexHome != nil else { return nil }
+        return CodexLaunchOptions(
+            model: model, disabledFeatures: disabledFeatures, codexHome: codexHome)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case model, disabledFeatures, codexHome
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        disabledFeatures = try c.decodeIfPresent([String].self, forKey: .disabledFeatures) ?? []
+        codexHome = try c.decodeIfPresent(String.self, forKey: .codexHome)
+    }
+}
+
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -784,6 +835,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// decode.
     public var claudeSpawnExtras: ClaudeSpawnExtras?
 
+    /// The options this tab's Codex was launched with, or nil when it was
+    /// launched with none — every non-Codex tab, every Codex tab started
+    /// without a model or disabled features, and every row older than the
+    /// column. Stamped at spawn, reapplied whenever Codex is relaunched in this
+    /// tab, and cleared when the tab stops running Codex.
+    public var codexLaunchOptions: CodexLaunchOptions?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -904,6 +962,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case serverName
         case startHeldReason, startHeldAt
         case claudeSpawnExtras
+        case codexLaunchOptions
     }
 
     public init(from decoder: Decoder) throws {
@@ -962,6 +1021,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         startHeldAt = try c.decodeIfPresent(Date.self, forKey: .startHeldAt)
         // Absent in JSON from a daemon that predates the column.
         claudeSpawnExtras = try c.decodeIfPresent(ClaudeSpawnExtras.self, forKey: .claudeSpawnExtras)
+        codexLaunchOptions = try c.decodeIfPresent(
+            CodexLaunchOptions.self, forKey: .codexLaunchOptions)
     }
 }
 
@@ -1714,10 +1775,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
-    /// Program Status Protocol (OSC 7501) on pty-holder sessions: whether TBD
-    /// answers Claude Code's probe and accepts its status reports. Resolved as
-    /// `program_status_enabled ?? Config.programStatusEnabledDefault`.
-    public var programStatusEnabled: Bool
     /// Answering question and permission prompts from the transcript. Resolved
     /// as `transcript_prompt_answer_enabled ?? Config.transcriptPromptAnswerDefault`.
     /// Assigned after construction by the daemon, so it is a stored property
@@ -1886,9 +1943,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
-    /// The shipped default for `programStatusEnabled`, and the single place it
-    /// lives. Ships off; graduation is a change to this constant.
-    public static let programStatusEnabledDefault = false
     /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
     /// place it lives. Graduation flips this constant.
     public static let transcriptPromptAnswerDefault = false
@@ -1960,7 +2014,6 @@ public struct Config: Codable, Sendable, Equatable {
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
-                programStatusEnabled: Bool = Config.programStatusEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1997,7 +2050,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.profileBalancingEnabled = profileBalancingEnabled
         self.prPollScheduleEnabled = prPollScheduleEnabled
-        self.programStatusEnabled = programStatusEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2106,8 +2158,6 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
-        programStatusEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(

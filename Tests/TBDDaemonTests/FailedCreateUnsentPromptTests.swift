@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
@@ -37,6 +38,19 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         return try await db.worktrees.create(
             repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
             path: "/tmp/fcup-wt-\(UUID())", tmuxServer: "srv", status: .creating)
+    }
+
+    /// A real git repo with a real linked worktree, for the recovery paths that
+    /// only activate a row whose path `git worktree list` names.
+    private func makeRepoWithCheckout(
+        _ db: TBDDatabase
+    ) async throws -> (repo: Repo, checkout: URL, cleanup: () -> Void) {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "r", defaultBranch: "main")
+        let checkout = tempDir.appendingPathComponent("checkout-\(UUID().uuidString.prefix(8))")
+        try await shell("git worktree add -b tbd/brave-otter '\(checkout.path)'", at: repoDir)
+        return (repo, checkout, { try? FileManager.default.removeItem(at: tempDir) })
     }
 
     @Test func aParkedPromptIsSavedAndNamedInTheDelta() async throws {
@@ -111,6 +125,149 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(files.count == 1)
         let path = dir.appendingPathComponent(try #require(files.first)).path
         #expect(try String(contentsOfFile: path, encoding: .utf8) == "kept across a restart\n")
+    }
+
+    /// A `.creating` row whose checkout exists but which has no terminals is
+    /// kept and activated, not deleted. Its parked first message is saved the
+    /// way a failed create saves it and then cleared, so it can never be
+    /// delivered into whatever terminal the row gets later.
+    @Test func activatingATerminalLessRowSavesThenClearsItsParkedPrompt() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
+            path: checkout.path, tmuxServer: "srv", status: .creating)
+        try await db.worktrees.setPendingPrompt(
+            worktreeID: row.id, text: "kept across a restart", submit: true)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.pendingPrompt == nil, "a stale first message must not wait in an active row")
+        let dir = reposDir.appendingPathComponent(repo.id.uuidString)
+            .appendingPathComponent(TBDConstants.unsentPromptsDirName)
+        let files = try fm.contentsOfDirectory(atPath: dir.path)
+        #expect(files.count == 1)
+        let saved = dir.appendingPathComponent(try #require(files.first)).path
+        #expect(try String(contentsOfFile: saved, encoding: .utf8) == "kept across a restart\n")
+    }
+
+    /// A terminal-less row that was mid-revive keeps its archived Claude
+    /// sessions (there is no terminal to restore them into) and drops its
+    /// archive stamp, the same outcome as a revive with `skipClaude`.
+    @Test func activatingATerminalLessMidReviveRowKeepsItsArchivedSessions() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
+            path: checkout.path, tmuxServer: "srv", status: .active)
+        try await db.worktrees.archive(id: row.id, claudeSessionIDs: ["session-a", "session-b"])
+        try await db.worktrees.updateStatus(id: row.id, status: .creating)
+        #expect(try await db.worktrees.get(id: row.id)?.archivedAt != nil)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.archivedAt == nil)
+        #expect(after.archivedClaudeSessions == ["session-a", "session-b"])
+    }
+
+    // MARK: - A recovered PR row is never activated with trust pre-answerable
+
+    /// A terminal-less `.creating` row on a checkout git lists, with the given
+    /// PR number and, when `stamped`, a foreign-head stamp already written.
+    private func makeTerminalLessCreatingRow(
+        _ db: TBDDatabase, repo: Repo, checkout: URL, prNumber: Int?, stamped: Bool
+    ) async throws -> Worktree {
+        let row = try await db.worktrees.create(
+            repoID: repo.id, name: "brave-otter", branch: "tbd/brave-otter",
+            path: checkout.path, tmuxServer: "srv", status: .creating, prNumber: prNumber)
+        if stamped {
+            try await db.worktrees.markForeignHead(id: row.id)
+        }
+        return row
+    }
+
+    /// A fork-PR create writes its stamp after `git worktree add`, so a daemon
+    /// that died in between leaves a PR row with no stamp. Recovery cannot tell
+    /// whether the PR head was checked out, so it stamps the row as it
+    /// activates it.
+    @Test func recoveryStampsATerminalLessPullRequestRowAsItActivatesIt() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await makeTerminalLessCreatingRow(
+            db, repo: repo, checkout: checkout, prNumber: 7, stamped: false)
+        #expect(try await db.worktrees.get(id: row.id)?.foreignHead == false)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.foreignHead == true,
+                "a recovered PR row must not be active with folder trust pre-answerable")
+    }
+
+    /// Control: a row with no PR number is not stamped.
+    @Test func recoveryLeavesATerminalLessRowWithoutAPullRequestUnstamped() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await makeTerminalLessCreatingRow(
+            db, repo: repo, checkout: checkout, prNumber: nil, stamped: false)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.foreignHead == false)
+    }
+
+    /// A PR row whose create already wrote the stamp keeps it.
+    @Test func recoveryKeepsTheStampOfAnAlreadyStampedTerminalLessRow() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await makeTerminalLessCreatingRow(
+            db, repo: repo, checkout: checkout, prNumber: 7, stamped: true)
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .active)
+        #expect(after.foreignHead == true)
+    }
+
+    /// If the stamp cannot be written, the row is not activated unstamped: it
+    /// stays `.creating` with its parked first message, for the next startup.
+    @Test func recoveryLeavesAPullRequestRowCreatingWhenItsStampCannotBeWritten() async throws {
+        let (lifecycle, db) = try makeLifecycle()
+        let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
+        defer { cleanup() }
+        let row = try await makeTerminalLessCreatingRow(
+            db, repo: repo, checkout: checkout, prNumber: 7, stamped: false)
+        try await db.worktrees.setPendingPrompt(
+            worktreeID: row.id, text: "wait for the next startup", submit: true)
+        // Installed last, so only recovery's stamp write trips it.
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER induced_stamp_failure
+                BEFORE UPDATE OF foreign_head ON worktree
+                BEGIN SELECT RAISE(ABORT, 'induced stamp failure'); END
+                """)
+        }
+
+        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+
+        let after = try #require(try await db.worktrees.get(id: row.id))
+        #expect(after.status == .creating, "an unstamped PR row must not be activated")
+        #expect(after.foreignHead == false)
+        #expect(after.pendingPrompt == "wait for the next startup",
+                "the row is left as it was, so the next startup retries all of it")
     }
 
     @Test func aParkedPromptInARepolessRowIsReportedLost() async throws {

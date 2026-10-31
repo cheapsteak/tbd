@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 /// Tests for the default-off RPC volume probe, covering both branches of the
 /// gate per the repo rule for gating conditionals.
@@ -9,7 +10,7 @@ import TBDShared
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home —
 /// the SAME domain a running production TBDApp reads. Every test below builds
-/// a per-test `UserDefaults(suiteName:)` and tears the domain down, so
+/// a per-test `TestDefaultsSuite` and tears the domain down, so
 /// `.standard` is never touched.
 @Suite("RPC volume probe")
 struct RPCVolumeProbeTests {
@@ -43,9 +44,9 @@ struct RPCVolumeProbeTests {
     }
 
     private func withIsolatedDefaults(seed: Bool?, _ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.RPCVolume.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RPCVolume")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         if let seed { defaults.set(seed, forKey: RPCVolumeDiagnosticPreferences.enabledKey) }
         body(defaults)
     }

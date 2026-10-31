@@ -4,6 +4,7 @@ import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
+/// Tier 2 — real (temp-directory) filesystem, no clocks, no subprocesses.
 @Suite("ClaudeProfileConfigDirManager")
 struct ClaudeProfileConfigDirManagerTests {
 
@@ -529,11 +530,11 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Pre-create host projects with a collision file
         try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-Users-test-cwd", isDirectory: true), withIntermediateDirectories: true)
-        let hostFile = tempHost.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
+        let hostFile = tempHost.appendingPathComponent("projects/-Users-test-cwd/sess-X.md")
         try "HOST".write(to: hostFile, atomically: true, encoding: .utf8)
 
         // Pre-create profile projects with same cwd-hash dir but different session files:
-        // - sess-X.jsonl (collides with host, should not be migrated)
+        // - sess-X.md (collides with host, should not be migrated)
         // - profile-unique-sess.jsonl (unique to profile, should be preserved)
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
@@ -542,7 +543,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
         let profileProjectsDir = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd", isDirectory: true)
         try fm.createDirectory(at: profileProjectsDir, withIntermediateDirectories: true)
-        let profileFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
+        let profileFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/sess-X.md")
         try "PROFILE".write(to: profileFile, atomically: true, encoding: .utf8)
         let profileUniqueFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/profile-unique-sess.jsonl")
         try "PROFILE UNIQUE".write(to: profileUniqueFile, atomically: true, encoding: .utf8)
@@ -660,7 +661,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Pre-create host projects with cwd-hash A with a specific session file (collision point)
         try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A", isDirectory: true), withIntermediateDirectories: true)
-        let hostFileCollide = tempHost.appendingPathComponent("projects/-cwd-A/sess-collide.jsonl")
+        let hostFileCollide = tempHost.appendingPathComponent("projects/-cwd-A/sess-collide.md")
         try "HOST".write(to: hostFileCollide, atomically: true, encoding: .utf8)
 
         // Pre-create profile projects with:
@@ -676,7 +677,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // cwd-hash A with collision file
         try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-cwd-A", isDirectory: true), withIntermediateDirectories: true)
-        let profileFileCollide = profileProjectsBaseDir.appendingPathComponent("-cwd-A/sess-collide.jsonl")
+        let profileFileCollide = profileProjectsBaseDir.appendingPathComponent("-cwd-A/sess-collide.md")
         try "PROFILE".write(to: profileFileCollide, atomically: true, encoding: .utf8)
 
         // cwd-hash B with clean content (but should not be migrated due to atomic abort)
@@ -706,6 +707,288 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Verify: profile projects/ is still a real directory (NOT a symlink)
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBaseDir.path)) == nil)
+    }
+
+    // MARK: - projects resolve-then-link
+
+    /// Host and profile `projects/` trees seeded from `relativePath → content`
+    /// maps, plus the manager that mirrors between them.
+    private struct ProjectsFixture {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-profile-cfg-test-\(UUID().uuidString)", isDirectory: true)
+        let tempHost = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
+        let manager: ClaudeProfileConfigDirManager
+        let profileID = UUID()
+        var profileClaudeDir: URL { manager.configDirectory(forProfileID: profileID) }
+        var hostProjects: URL { tempHost.appendingPathComponent("projects", isDirectory: true) }
+        var profileProjects: URL { profileClaudeDir.appendingPathComponent("projects", isDirectory: true) }
+
+        init(host: [String: String] = [:], profile: [String: String] = [:]) throws {
+            manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+            let fm = FileManager.default
+            try fm.createDirectory(at: hostProjects, withIntermediateDirectories: true)
+            try fm.createDirectory(at: profileProjects, withIntermediateDirectories: true)
+            for (path, content) in host { try Self.write(content, to: hostProjects.appendingPathComponent(path)) }
+            for (path, content) in profile { try Self.write(content, to: profileProjects.appendingPathComponent(path)) }
+        }
+
+        static func write(_ content: String, to url: URL) throws {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try content.write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        func cleanup() {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        func run() async throws {
+            _ = try await manager.ensureOAuthDir(forProfileID: profileID)
+        }
+
+        func host(_ path: String) -> String? {
+            try? String(contentsOf: hostProjects.appendingPathComponent(path), encoding: .utf8)
+        }
+
+        func profile(_ path: String) -> String? {
+            try? String(contentsOf: profileProjects.appendingPathComponent(path), encoding: .utf8)
+        }
+
+        var profileProjectsIsSymlinkToHost: Bool {
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: profileProjects.path) else { return false }
+            return URL(fileURLWithPath: dest).resolvingSymlinksInPath() == hostProjects.resolvingSymlinksInPath()
+        }
+
+        var profileProjectsIsRealDir: Bool {
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: profileProjects.path)) == nil
+                && FileManager.default.fileExists(atPath: profileProjects.path)
+        }
+    }
+
+    @Test("projects: byte-identical file on both sides is dropped from the profile and the profile links")
+    func projectsIdenticalFileDropped() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/a.jsonl": "SAME"], profile: ["-cwd/a.jsonl": "SAME", "-cwd/b.jsonl": "ONLY PROFILE"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/a.jsonl") == "SAME")
+        #expect(fx.host("-cwd/b.jsonl") == "ONLY PROFILE")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: differing transcripts, profile longer, keeps profile bytes and backs up the host copy")
+    func projectsProfileLongerWins() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/s.jsonl": "short"], profile: ["-cwd/s.jsonl": "short plus more"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "short plus more")
+        #expect(fx.host("-cwd/s.jsonl.backup") == "short")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: differing transcripts, host longer, keeps host bytes and backs up the profile copy")
+    func projectsHostLongerWins() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/s.jsonl": "short plus more"], profile: ["-cwd/s.jsonl": "short"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "short plus more")
+        #expect(fx.host("-cwd/s.jsonl.backup") == "short")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: a taken backup name moves on to .backup-2 and leaves the existing backup alone")
+    func projectsBackupNameTaken() async throws {
+        let fx = try ProjectsFixture(
+            host: ["-cwd/s.jsonl": "short plus more", "-cwd/s.jsonl.backup": "OLD BACKUP"],
+            profile: ["-cwd/s.jsonl": "short"]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "short plus more")
+        #expect(fx.host("-cwd/s.jsonl.backup") == "OLD BACKUP")
+        #expect(fx.host("-cwd/s.jsonl.backup-2") == "short")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: a backup name the profile folder also holds is skipped, so the profile's own file moves in and the profile links")
+    func projectsBackupNameHeldByProfile() async throws {
+        let fx = try ProjectsFixture(
+            host: ["-cwd/s.jsonl": "short plus more"],
+            profile: [
+                "-cwd/s.jsonl": "short",
+                "-cwd/s.jsonl.backup": "PROFILE BACKUP",
+                "-cwd/s.jsonl.backup-2": "PROFILE BACKUP 2",
+            ]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "short plus more")
+        #expect(fx.host("-cwd/s.jsonl.backup") == "PROFILE BACKUP")
+        #expect(fx.host("-cwd/s.jsonl.backup-2") == "PROFILE BACKUP 2")
+        #expect(fx.host("-cwd/s.jsonl.backup-3") == "short")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: equal-size differing transcript is a conflict and nothing changes anywhere")
+    func projectsEqualSizeTranscriptConflicts() async throws {
+        let fx = try ProjectsFixture(
+            host: ["-cwd/s.jsonl": "AAAA", "-cwd/dup.jsonl": "SAME"],
+            profile: ["-cwd/s.jsonl": "BBBB", "-cwd/dup.jsonl": "SAME", "-other/x.jsonl": "X"]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "AAAA")
+        #expect(fx.profile("-cwd/s.jsonl") == "BBBB")
+        #expect(fx.profile("-cwd/dup.jsonl") == "SAME")  // resolvable, but atomic abort leaves it
+        #expect(fx.profile("-other/x.jsonl") == "X")
+        #expect(fx.host("-other/x.jsonl") == nil)
+        #expect(fx.host("-cwd/s.jsonl.backup") == nil)
+        #expect(fx.profileProjectsIsRealDir)
+    }
+
+    @Test("projects: differing non-transcript file is a conflict and nothing changes anywhere")
+    func projectsDifferingNoteConflicts() async throws {
+        let fx = try ProjectsFixture(
+            host: ["-cwd/memory/note.md": "host note", "-cwd/dup.jsonl": "SAME"],
+            profile: ["-cwd/memory/note.md": "profile note, longer", "-cwd/dup.jsonl": "SAME", "-other/x.jsonl": "X"]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/memory/note.md") == "host note")
+        #expect(fx.profile("-cwd/memory/note.md") == "profile note, longer")
+        #expect(fx.profile("-cwd/dup.jsonl") == "SAME")
+        #expect(fx.profile("-other/x.jsonl") == "X")
+        #expect(fx.host("-other/x.jsonl") == nil)
+        #expect(fx.profileProjectsIsRealDir)
+    }
+
+    @Test("projects: a profile symlink to its host counterpart is unlinked; the host target survives")
+    func projectsAliasLinkDropped() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/memory/note.md": "host note", "-cwd/memory/other.md": "other"])
+        defer { fx.cleanup() }
+        let fm = FileManager.default
+        try fm.createDirectory(at: fx.profileProjects.appendingPathComponent("-cwd"), withIntermediateDirectories: true)
+        let link = fx.profileProjects.appendingPathComponent("-cwd/memory")
+        try fm.createSymbolicLink(at: link, withDestinationURL: fx.hostProjects.appendingPathComponent("-cwd/memory"))
+        try await fx.run()
+        #expect(fx.host("-cwd/memory/note.md") == "host note")
+        #expect(fx.host("-cwd/memory/other.md") == "other")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+        #expect(fm.fileExists(atPath: fx.hostProjects.appendingPathComponent("-cwd/memory").path))
+    }
+
+    @Test("projects: an alias link whose host counterpart is absent is dropped, never moved into a self-loop")
+    func projectsAliasLinkToAbsentCounterpart() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/keep.jsonl": "K"])
+        defer { fx.cleanup() }
+        let fm = FileManager.default
+        let hostMemory = fx.hostProjects.appendingPathComponent("-cwd/memory")
+        try fm.createDirectory(at: fx.profileProjects.appendingPathComponent("-cwd"), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: fx.profileProjects.appendingPathComponent("-cwd/memory"), withDestinationURL: hostMemory)
+        try await fx.run()
+        #expect((try? fm.attributesOfItem(atPath: hostMemory.path)) == nil, "no entry (and so no self-loop) at the host path")
+        #expect(fx.host("-cwd/keep.jsonl") == "K")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: an alias link inside a profile directory whose host counterpart is absent is dropped, not moved into a self-loop")
+    func projectsAliasLinkInsideFreshDirectory() async throws {
+        let fx = try ProjectsFixture(profile: ["-cwd/other.jsonl": "O"])
+        defer { fx.cleanup() }
+        let fm = FileManager.default
+        let hostMemory = fx.hostProjects.appendingPathComponent("-cwd/memory")
+        try fm.createSymbolicLink(at: fx.profileProjects.appendingPathComponent("-cwd/memory"), withDestinationURL: hostMemory)
+        #expect(!fm.fileExists(atPath: fx.hostProjects.appendingPathComponent("-cwd").path))
+        try await fx.run()
+        #expect(fx.host("-cwd/other.jsonl") == "O")
+        #expect((try? fm.attributesOfItem(atPath: hostMemory.path)) == nil, "no self-loop at the host path")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: a profile symlink pointing elsewhere onto an occupied host path is a conflict")
+    func projectsForeignLinkConflicts() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/memory/note.md": "host note"])
+        defer { fx.cleanup() }
+        let fm = FileManager.default
+        let elsewhere = fx.tempBase.appendingPathComponent("elsewhere", isDirectory: true)
+        try fm.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        try fm.createDirectory(at: fx.profileProjects.appendingPathComponent("-cwd"), withIntermediateDirectories: true)
+        let link = fx.profileProjects.appendingPathComponent("-cwd/memory")
+        try fm.createSymbolicLink(at: link, withDestinationURL: elsewhere)
+        try await fx.run()
+        #expect(fx.host("-cwd/memory/note.md") == "host note")
+        #expect(fx.profileProjectsIsRealDir)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil, "link left in place")
+    }
+
+    @Test("projects: a top-level regular file moves to a free host path and the profile links")
+    func projectsTopLevelFileMoves() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/a.jsonl": "A"], profile: ["notes.md": "TOP LEVEL"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("notes.md") == "TOP LEVEL")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: a differing top-level regular file is a conflict and nothing changes anywhere")
+    func projectsTopLevelFileConflicts() async throws {
+        let fx = try ProjectsFixture(
+            host: ["notes.md": "host notes"],
+            profile: ["notes.md": "profile notes, longer", "-other/x.jsonl": "X"]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("notes.md") == "host notes")
+        #expect(fx.profile("notes.md") == "profile notes, longer")
+        #expect(fx.profile("-other/x.jsonl") == "X")
+        #expect(fx.host("-other/x.jsonl") == nil)
+        #expect(fx.profileProjectsIsRealDir)
+    }
+
+    @Test("projects: a top-level .DS_Store is dropped even when the host's differs, and the profile links")
+    func projectsTopLevelDSStoreDropped() async throws {
+        let fx = try ProjectsFixture(host: [".DS_Store": "host finder"], profile: [".DS_Store": "profile finder", "-cwd/a.jsonl": "A"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host(".DS_Store") == "host finder")
+        #expect(fx.host("-cwd/a.jsonl") == "A")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("keybindings.json: mirrored when the host has it, skipped when it does not, sidecar when the profile has its own")
+    func keybindingsSlot() async throws {
+        let fm = FileManager.default
+        // Host has it: symlink.
+        do {
+            let fx = try ProjectsFixture()
+            defer { fx.cleanup() }
+            let hostFile = fx.tempHost.appendingPathComponent("keybindings.json")
+            try "{}".write(to: hostFile, atomically: true, encoding: .utf8)
+            try await fx.run()
+            let link = fx.profileClaudeDir.appendingPathComponent("keybindings.json")
+            #expect(URL(fileURLWithPath: try fm.destinationOfSymbolicLink(atPath: link.path)).resolvingSymlinksInPath()
+                    == hostFile.resolvingSymlinksInPath())
+        }
+        // Host lacks it: no profile entry.
+        do {
+            let fx = try ProjectsFixture()
+            defer { fx.cleanup() }
+            try await fx.run()
+            #expect((try? fm.attributesOfItem(atPath: fx.profileClaudeDir.appendingPathComponent("keybindings.json").path)) == nil)
+        }
+        // Profile has a real one and host has one: sidecar then link.
+        do {
+            let fx = try ProjectsFixture()
+            defer { fx.cleanup() }
+            try "{\"host\":1}".write(to: fx.tempHost.appendingPathComponent("keybindings.json"), atomically: true, encoding: .utf8)
+            try fm.createDirectory(at: fx.profileClaudeDir, withIntermediateDirectories: true)
+            let real = fx.profileClaudeDir.appendingPathComponent("keybindings.json")
+            try "{\"profile\":1}".write(to: real, atomically: true, encoding: .utf8)
+            try await fx.run()
+            let sidecar = fx.profileClaudeDir.appendingPathComponent("keybindings.json.profile-local")
+            #expect(try String(contentsOf: sidecar, encoding: .utf8) == "{\"profile\":1}")
+            #expect((try? fm.destinationOfSymbolicLink(atPath: real.path)) != nil)
+        }
     }
 
     @Test("AC2.1: non-projects directory with content gets sidecar + symlink")
@@ -1530,7 +1813,7 @@ struct ClaudeProfileConfigDirManagerTests {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
-        for slot in ["projects", "plugins", "skills", "agents", "commands", "hooks", "CLAUDE.md", "settings.json"] {
+        for slot in ["projects", "plugins", "skills", "agents", "commands", "hooks", "CLAUDE.md", "settings.json", "keybindings.json"] {
             #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent(slot).path),
                     "host slot \(slot) must not be created")
             #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent(slot).path)) == nil,

@@ -43,22 +43,49 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
+    var codexDisable: [String] = []
+
+    @Option(name: .long, help: "Existing Codex home for this terminal only (relative paths use the current directory). Requires --type codex and a readable PreToolUse hook; does not change ordinary Codex terminals.")
+    var codexHome: String?
+
     @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
     var pluginDirs: [String] = []
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
-    /// The params this invocation sends, with each `--plugin-dir` made
-    /// absolute against `cwd`, or none sent when the flag was not given.
-    func createParams(worktreeID: UUID, prompt: String?, cwd: String) -> TerminalCreateParams {
+    /// The params this invocation sends, with each `--plugin-dir` and a
+    /// relative `--codex-home` made absolute against `cwd`, or none sent when
+    /// the flag was not given. `codexDisabledFeatures` is the
+    /// already-normalized `--codex-disable` list, nil when the flag was not
+    /// given.
+    func createParams(
+        worktreeID: UUID, prompt: String?, cwd: String,
+        codexDisabledFeatures: [String]? = nil
+    ) -> TerminalCreateParams {
         TerminalCreateParams(
             worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
             claudeSettingsOverlay: claudeSettings, model: model,
-            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd))
+            codexDisabledFeatures: codexDisabledFeatures,
+            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd),
+            codexHome: Self.normalizedCodexHomePath(codexHome, currentDirectoryPath: cwd))
     }
 
     mutating func validate() throws {
+        if !codexDisable.isEmpty {
+            guard type == .codex else {
+                throw ValidationError(TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                _ = try TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+            } catch {
+                throw ValidationError(error.localizedDescription)
+            }
+        }
+        if codexHome != nil, type != .codex {
+            throw ValidationError(TerminalCreateParams.codexHomeRequiresCodexMessage)
+        }
         if !pluginDirs.isEmpty {
             // The daemon's rule: a Claude type, or any resume, is a Claude
             // terminal. This command sends no resume id, so only `--type
@@ -81,12 +108,17 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
+        let disabledFeatures: [String]? = try codexDisable.isEmpty
+            ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+
+        let params = createParams(
+            worktreeID: worktreeID,
+            prompt: try resolvePrompt(inline: prompt, file: promptFile),
+            cwd: FileManager.default.currentDirectoryPath,
+            codexDisabledFeatures: disabledFeatures)
         let terminal: Terminal = try client.call(
-            method: RPCMethod.terminalCreate,
-            params: createParams(
-                worktreeID: worktreeID,
-                prompt: try resolvePrompt(inline: prompt, file: promptFile),
-                cwd: FileManager.default.currentDirectoryPath),
+            method: params.rpcMethod,
+            params: params,
             resultType: Terminal.self
         )
 
@@ -98,6 +130,17 @@ struct TerminalCreate: AsyncParsableCommand {
             print("  Window: \(terminal.tmuxWindowID)")
             print("  Pane:   \(terminal.tmuxPaneID)")
         }
+    }
+
+    /// The daemon accepts only canonical absolute paths. Resolve a relative
+    /// CLI argument against this process's cwd without resolving symlinks;
+    /// the daemon still checks the resulting path and directory strictly.
+    static func normalizedCodexHomePath(
+        _ path: String?, currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+    ) -> String? {
+        guard let path, !path.isEmpty, !path.hasPrefix("/") else { return path }
+        let cwd = URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
+        return URL(fileURLWithPath: path, relativeTo: cwd).standardizedFileURL.path
     }
 }
 
@@ -177,7 +220,8 @@ struct TerminalSend: AsyncParsableCommand {
               --keys "Escape Enter"  whitespace-separated key names, sent one
                                   at a time. Interrupt is a keys payload
                                   (--keys "C-c"). Enter is itself a key, so
-                                  --submit does not apply here.
+                                  --submit does not apply here. One printable
+                                  character is its own key: --keys 4 presses 4.
 
             A non-empty text payload sent to an AGENT session is delivered
             behind a one-line attribution envelope carrying the send's record id
@@ -204,7 +248,7 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String?
 
-    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\", \"C-c\" or \"4\"")
     var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")

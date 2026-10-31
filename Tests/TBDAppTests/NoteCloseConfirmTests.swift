@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Closing a note tab hard-deletes the note row, so `closeTab` asks for
 /// confirmation when the note has content (empty notes close silently).
@@ -21,12 +22,12 @@ import TBDShared
 struct NoteCloseConfirmTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.NoteCloseConfirm.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.NoteCloseConfirm")
+        let defaults = suite.defaults
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-note-close-\(UUID().uuidString)")
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
             try? FileManager.default.removeItem(at: dir)
         }
         let state = AppState(userDefaults: defaults)

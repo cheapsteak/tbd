@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 extension SidebarSectionLayout {
     /// Group headers the section views mount for this layout, in render
@@ -26,10 +27,9 @@ extension SidebarSectionLayout {
 @Suite("Sidebar workflow groups toggle")
 struct SidebarWorkflowGroupsToggleTests {
     private func withDefaults(_ body: (UserDefaults, String) -> Void) {
-        let suite = "SidebarWorkflowGroupsToggleTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        body(defaults, suite)
+        let suite = TestDefaultsSuite("SidebarWorkflowGroupsToggleTests")
+        defer { suite.tearDown() }
+        body(suite.defaults, suite.name)
     }
 
     private func park(_ row: Worktree, in state: AppState) {
@@ -105,7 +105,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             let fleet = makeFleet(in: state)
             let layout = state.sidebarRepositoryLayout(
-                repoID: fleet.repoID, grouped: false, matchedSessions: matched(state, fleet.repoID))
+                repoID: fleet.repoID, grouped: false, collapseEnded: false, matchedSessions: matched(state, fleet.repoID))
             #expect(layout.groupKinds.isEmpty)
             #expect(layout.remoteGroups == nil)
             #expect(layout.hibernation == nil)
@@ -121,7 +121,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             _ = makeFleet(in: state)
             state.remoteSessions.append(SidebarGroupFixtures.session("unmatched-ended", state: .exited))
-            let provider = state.sidebarProviderLayout(provider: "acme", grouped: false)
+            let provider = state.sidebarProviderLayout(provider: "acme", grouped: false, collapseEnded: false)
             #expect(provider.groupKinds.isEmpty)
             #expect(provider.inlineSessions.map(\.payload.id) == ["unmatched", "unmatched-ended"])
 
@@ -179,7 +179,7 @@ struct SidebarWorkflowGroupsToggleTests {
             let state = AppState(userDefaults: defaults)
             let fleet = makeFleet(in: state)
             let layout = state.sidebarRepositoryLayout(
-                repoID: fleet.repoID, grouped: true, matchedSessions: matched(state, fleet.repoID))
+                repoID: fleet.repoID, grouped: true, collapseEnded: false, matchedSessions: matched(state, fleet.repoID))
             #expect(layout.groupKinds == [.remote, .exited, .hibernated])
             #expect(layout.inlineRoots.map(\.id) == [fleet.working.id])
             #expect(layout.inlineSessions.isEmpty)
@@ -190,7 +190,7 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(layout.remoteGroups?.exitedSessions.map(\.payload.id) == ["loose-ended"])
             #expect(layout.hibernation?.hibernatedRoots.map(\.id) == [fleet.parked.id])
 
-            let provider = state.sidebarProviderLayout(provider: "acme", grouped: true)
+            let provider = state.sidebarProviderLayout(provider: "acme", grouped: true, collapseEnded: false)
             #expect(provider.groupKinds == [.remote])
             #expect(provider.inlineSessions.isEmpty)
 
@@ -283,9 +283,9 @@ struct SidebarWorkflowGroupsToggleTests {
 
     /// `refreshRepos` prunes repository groups only on a successful fetch.
     @Test func refreshReposPrunesOnlyOnASuccessfulFetch() async {
-        let suite = "SidebarWorkflowGroupsToggleTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarWorkflowGroupsToggleTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let kept = Repo(path: "/tmp/acme", displayName: "acme")
         let goneID = UUID()
@@ -304,9 +304,9 @@ struct SidebarWorkflowGroupsToggleTests {
     /// `refreshRemote` prunes provider groups only on a successful roster:
     /// a disabled-backend refusal and a genuine RPC failure both keep them.
     @Test func refreshRemotePrunesOnlyOnASuccessfulRoster() async {
-        let suite = "SidebarWorkflowGroupsToggleTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarWorkflowGroupsToggleTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let retired = SidebarGroupID(owner: .provider("retired"), kind: .remote)
         state.expandedSidebarGroups = [retired]

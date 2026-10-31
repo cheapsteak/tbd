@@ -26,16 +26,10 @@ struct ProgramStatusAppTests {
     private static var replyBytes: [UInt8] { Array(ProgramStatusProtocol.probeReply.utf8) }
 
     private func makeAppState() -> (AppState, () -> Void) {
-        let suiteName = "TBDAppTests.ProgramStatus.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.ProgramStatus")
+        let defaults = suite.defaults
         let state = AppState(userDefaults: defaults)
-        return (state, { defaults.removePersistentDomain(forName: suiteName) })
-    }
-
-    private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
-        caps.programStatusEnabled = programStatus
-        return caps
+        return (state, { suite.tearDown() })
     }
 
     private func seed(
@@ -62,47 +56,31 @@ struct ProgramStatusAppTests {
 
     // MARK: - Eligibility
 
-    @Test("a holder row with the flag on answers the probe")
+    @Test("a holder row answers the probe")
     func holderClaudeAnswers() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .holder)
         #expect(state.answersProgramStatusProbe(terminalID: id))
-        #expect(state.answersProgramStatusProbe(transport: .holder))
-    }
-
-    @Test("the flag off answers nothing, explicitly off or capabilities not loaded")
-    func flagOffAnswersNothing() {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        let id = seed(state, kind: .claude, transport: .holder)
-        state.daemonCapabilities = nil
-        #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .holder))
-        state.daemonCapabilities = capabilities(programStatus: false)
-        #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .holder))
+        #expect(AppState.answersProgramStatusProbe(transport: .holder))
     }
 
     @Test("a tmux-transport panel answers nothing")
     func tmuxRowAnswersNothing() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = seed(state, kind: .claude, transport: .tmux)
         #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .tmux))
-        #expect(!state.answersProgramStatusProbe(transport: nil))
+        #expect(!AppState.answersProgramStatusProbe(transport: .tmux))
+        #expect(!AppState.answersProgramStatusProbe(transport: nil))
     }
 
-    /// The probe rule is the daemon reader's: flag and holder transport, blind
-    /// to the agent. Ingestion, not the probe, filters to Claude.
+    /// The probe rule is the daemon reader's: holder transport, blind to the
+    /// agent. Ingestion, not the probe, filters by agent.
     @Test("a holder row answers whatever its agent: Codex, shell, or no kind")
     func holderRowAnswersRegardlessOfKind() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let codexByKind = seed(state, kind: .codex, transport: .holder)
         let codexByLabel = seed(state, kind: nil, label: TerminalLabel.codex, transport: .holder)
         let shell = seed(state, kind: .shell, transport: .holder)
@@ -116,11 +94,10 @@ struct ProgramStatusAppTests {
     func unknownTerminalAnswersNothing() {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         #expect(!state.answersProgramStatusProbe(terminalID: UUID()))
     }
 
-    @Test("forwarding stays filtered to holder Claude rows, including a legacy row with no kind")
+    @Test("forwarding is filtered to holder Claude and Codex rows, including legacy rows with no kind")
     func forwardingEligibility() {
         let holder: (TerminalKind?, String?) -> TBDShared.Terminal = { kind, label in
             TBDShared.Terminal(
@@ -129,60 +106,76 @@ struct ProgramStatusAppTests {
         }
         #expect(AppState.isProgramStatusEligible(holder(.claude, nil)))
         #expect(AppState.isProgramStatusEligible(holder(nil, nil)))
-        #expect(!AppState.isProgramStatusEligible(holder(.codex, nil)))
-        #expect(!AppState.isProgramStatusEligible(holder(nil, TerminalLabel.codex)))
+        #expect(AppState.isProgramStatusEligible(holder(.codex, nil)))
+        #expect(AppState.isProgramStatusEligible(holder(nil, TerminalLabel.codex)))
+        #expect(AppState.isProgramStatusEligible(holder(.claude, TerminalLabel.codex)))
+        #expect(AppState.isProgramStatusEligible(holder(.shell, TerminalLabel.codex)))
         #expect(!AppState.isProgramStatusEligible(holder(.shell, nil)))
         #expect(!AppState.isProgramStatusEligible(TBDShared.Terminal(
             worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
             kind: .claude, transport: .tmux)))
+        #expect(!AppState.isProgramStatusEligible(TBDShared.Terminal(
+            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: .codex, transport: .tmux)))
     }
 
     // MARK: - Forwarding
 
     @Test("an eligible report is forwarded with the row's incarnation, in order")
     func forwardsInOrder() async throws {
+        try await assertForwardsInOrder(
+            kind: .claude, payloads: ["state=working", "state=blocked;kind=permission"])
+    }
+
+    @Test("a Codex holder row's report is forwarded with the row's incarnation")
+    func codexReportForwarded() async throws {
+        try await assertForwardsInOrder(
+            kind: .codex, payloads: ["state=blocked:app=codex:kind=permission"])
+    }
+
+    /// Seeds a holder row of `kind`, sends each payload through
+    /// `forwardProgramStatusReport`, and asserts they arrive in order carrying
+    /// the row's id, incarnation and observation time.
+    private func assertForwardsInOrder(kind: TerminalKind, payloads: [String]) async throws {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let incarnation = UUID()
-        let id = seed(state, kind: .claude, transport: .holder, incarnation: incarnation)
+        let id = seed(state, kind: kind, transport: .holder, incarnation: incarnation)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
 
         let observedAt = Date(timeIntervalSince1970: 1_000)
-        state.forwardProgramStatusReport(
-            terminalID: id, payload: Array("state=working".utf8), observedAt: observedAt)
-        state.forwardProgramStatusReport(
-            terminalID: id, payload: Array("state=blocked;kind=permission".utf8), observedAt: observedAt)
+        for payload in payloads {
+            state.forwardProgramStatusReport(
+                terminalID: id, payload: Array(payload.utf8), observedAt: observedAt)
+        }
 
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == 2 }
+        let expected = payloads.count
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == expected }
         if outcome == .timedOut {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         let params = sent.all
-        try #require(params.count == 2)
-        #expect(params.map(\.payload) == ["state=working", "state=blocked;kind=permission"])
+        try #require(params.count == expected)
+        #expect(params.map(\.payload) == payloads)
         #expect(params.allSatisfy { $0.terminalID == id })
         #expect(params.allSatisfy { $0.incarnationID == incarnation })
         #expect(params.allSatisfy { $0.observedAt == observedAt })
     }
 
-    @Test("a report for an ineligible terminal, or with the flag off, is not forwarded")
+    @Test("a report for an ineligible terminal is not forwarded")
     func ineligibleNotForwarded() async {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         let holder = seed(state, kind: .claude, transport: .holder)
         let tmux = seed(state, kind: .claude, transport: .tmux)
-        let codex = seed(state, kind: .codex, transport: .holder)
+        let shell = seed(state, kind: .shell, transport: .holder)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
 
-        state.daemonCapabilities = capabilities(programStatus: false)
-        state.forwardProgramStatusReport(terminalID: holder, payload: Array("state=idle".utf8), observedAt: Date())
-        state.daemonCapabilities = capabilities(programStatus: true)
         state.forwardProgramStatusReport(terminalID: tmux, payload: Array("state=idle".utf8), observedAt: Date())
-        // A Codex holder panel answers the probe but its reports stay local.
-        state.forwardProgramStatusReport(terminalID: codex, payload: Array("state=idle".utf8), observedAt: Date())
+        // A shell holder panel answers the probe but its reports stay local.
+        state.forwardProgramStatusReport(terminalID: shell, payload: Array("state=idle".utf8), observedAt: Date())
 
         // Positive control on the same forwarder: an eligible report behind
         // them arrives, and being serial, it arrives after anything they sent.
@@ -192,6 +185,18 @@ struct ProgramStatusAppTests {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         #expect(sent.all.map(\.payload) == ["state=done"])
+    }
+
+    // MARK: - The view's holder-vs-tmux switch
+
+    @Test("the gate starts off, and set turns it on and back off")
+    func gateSetAndRead() {
+        let gate = ProgramStatusGate()
+        #expect(gate.isEnabled == false)
+        gate.set(true)
+        #expect(gate.isEnabled == true)
+        gate.set(false)
+        #expect(gate.isEnabled == false)
     }
 
     // MARK: - The view: probe answer

@@ -16,7 +16,8 @@
 # `/bin/bash scripts/test.test.sh`, not `bash scripts/test.test.sh`.
 #
 # ZERO BUILDS, ZERO CPU LOAD, AND IT NEVER TOUCHES THE REAL ~/tbd, ~/.claude,
-# ~/.codex, ~/Library/Logs/TBD OR THE REAL TMUX SOCKET DIRECTORY. Every case
+# ~/.codex, ~/Library/Logs/TBD, ~/Library/Preferences OR THE REAL TMUX SOCKET
+# DIRECTORY. Every case
 # here drives the wrapper against a synthetic home under a throwaway fixture
 # directory, with a stub
 # standing in for `swift`, so the whole file runs in seconds on a shared box
@@ -104,10 +105,15 @@ rmfix()           { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }
 # swift. Echoes the fixture root.
 mkfix() {
   local d; d="$(mktmpd)"
+  # `Library/Preferences` holds an unrelated domain because the real one is
+  # full of plists nothing in this repo owns, and an arm that reddened on those
+  # would be reporting the machine rather than the run.
   mkdir -p "$d/home/tbd/worktrees/slot" \
            "$d/home/.claude/projects/-acme-repo" \
            "$d/home/.codex/plugins/cache" \
+           "$d/home/Library/Preferences" \
            "$d/tmp" "$d/bin"
+  : > "$d/home/Library/Preferences/com.acme.unrelated.plist"
   : > "$d/home/tbd/state.db"
   mkdir -p "$d/home/tbd/worktrees/slot/existing-worktree"
   cat > "$d/bin/fake-swift" <<'STUB'
@@ -148,6 +154,14 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
 if [ -n "${FAKE_SWIFT_DISARM:-}" ]; then chmod 755 "$HOME/$FAKE_SWIFT_DISARM"; fi
 # Write into the fixture's real home, as a leak that escaped the fence would.
 if [ -n "${FAKE_SWIFT_LEAK:-}" ]; then mkdir -p "$FAKE_SWIFT_LEAK"; fi
+# The same for a leak that is a FILE — a suite plist is one, and `mkdir -p`
+# would model it as a directory. Space-separated absolute paths; parents made.
+if [ -n "${FAKE_SWIFT_LEAK_FILE:-}" ]; then
+  for leaked_file in $FAKE_SWIFT_LEAK_FILE; do
+    mkdir -p "$(dirname "$leaked_file")"
+    : > "$leaked_file"
+  done
+fi
 # Leave sockets where the run's tmux servers would leave them. tmux creates
 # `$TMUX_TMPDIR/tmux-<uid>` itself and never unlinks a socket on server exit,
 # so this is what the directory looks like when the suite finishes — dead
@@ -275,7 +289,10 @@ run_script() {
                  -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
-                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
+                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_LEAK_FILE -u FAKE_SWIFT_RC \
+                 -u FAKE_LATE_WRITE_CONTAINER -u FAKE_LATE_WRITE_LOG -u FAKE_LATE_WRITES \
+                 -u FAKE_LATE_WRITE_SHAPE -u FAKE_SLEEP_LOG -u FAKE_RM_FAIL_ON \
+                 -u FAKE_LATE_WRITE_AT_POLLS \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u FAKE_SWIFT_HOLDERS -u FAKE_SWIFT_DEAD_HOLDER_SOCKETS \
                  -u FAKE_HOLDER_START -u FAKE_SWIFT_COPY_RUN_CLAIM \
@@ -304,21 +321,28 @@ run_wrapper() { run_script "$SCRIPT" "$@"; }
 # up their fixtures, but a case that fails early would otherwise leave a mutant
 # behind on every run.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
 trap 'rm -rf "$MUTANT_DIR"' EXIT
 # A mutant of scripts/test.sh sources its libraries from beside itself, as the
 # real one does, so they have to be beside it here too.
 cp "$HERE/dsym-prune-lib.sh" "$MUTANT_DIR/"
 mutant_of() {
   local source_script="$1" sed_expr="$2" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$source_script" > "$out"
   echo "$out"
 }
 
 dump_of()      { cat "$1/swift-invocation" 2>/dev/null; }
 fake_home_of() { echo "$1/tmp/tbd-test-fakehome.$(id -u)"; }
+
+# The preferences container under the fixture's "real" home — where `cfprefsd`
+# would write. `run_script` points `HOME` there, so the wrapper's reclaim and
+# the fingerprint's arm both resolve exactly this path. Spelled out rather than
+# read from either script, so a case cannot agree with a rename by construction.
+prefs_container_of() { echo "$1/home/Library/Preferences/TBDTests.suites"; }
+exists_of()          { if [ -e "$1" ] || [ -L "$1" ]; then echo true; else echo false; fi; }
 
 # How many times the fenced invocation actually ran. The valve's fallback is
 # the only thing that makes this exceed 1, and asserting the COUNT is what
@@ -357,6 +381,75 @@ exit 0
 STUB
   chmod +x "$fix/tmuxbin/tmux"
 }
+
+# Stub `rm` and `sleep` on PATH, for the preferences settle.
+#
+# EVERY LATE WRITE IS ORDERED BY CONSTRUCTION, NOT BY TIMING. A background
+# writer that waits for the container to vanish and then rewrites it would race
+# the wrapper's very next line — the after-snapshot — and under a heavy load
+# average it could lose either way. So the writes come from the stubs the
+# wrapper itself calls, at a known point in its sequence, and no process is
+# left behind to outlive the case. All of it keys on one exact path,
+# `FAKE_LATE_WRITE_CONTAINER`; every other call passes straight through.
+#
+# `rm` logs each removal of that path to `FAKE_LATE_WRITE_LOG` and then:
+#   - on removal number `FAKE_RM_FAIL_ON`, stands in for a write landing while
+#     `rm -rf` walks the directory — the container is back with a file in it,
+#     and `rm` exits 1 saying "Directory not empty";
+#   - on each of the first `FAKE_LATE_WRITES` removals otherwise, writes the
+#     container back straight after a successful removal: the trailing write an
+#     instant sweeper loses to. `FAKE_LATE_WRITE_SHAPE=file` writes a regular
+#     file at the path instead of a directory.
+#
+# `sleep` returns at once and logs its argument to `FAKE_SLEEP_LOG`, so the
+# settle's polls are countable and cost nothing. On each poll number listed in
+# `FAKE_LATE_WRITE_AT_POLLS` it writes the container back before returning — a
+# write that lands after some quiet polls, which is what restarts the window.
+# Nothing else the wrapper runs calls `sleep`.
+mk_stub_settle_tools() {
+  local fix="$1"
+  mkdir -p "$fix/settlebin"
+  cat > "$fix/settlebin/rm" <<'STUB'
+#!/usr/bin/env bash
+for target; do :; done
+if [ -z "${FAKE_LATE_WRITE_CONTAINER:-}" ] || [ "${target:-}" != "$FAKE_LATE_WRITE_CONTAINER" ]; then
+  exec /bin/rm "$@"
+fi
+echo "$target" >> "$FAKE_LATE_WRITE_LOG"
+removals="$(wc -l < "$FAKE_LATE_WRITE_LOG" | tr -d ' ')"
+/bin/rm "$@"; rc=$?
+if [ "$removals" = "${FAKE_RM_FAIL_ON:-}" ]; then
+  /bin/mkdir -p "$target"; : > "$target/Midway.$removals.plist"
+  echo "rm: $target: Directory not empty" >&2
+  exit 1
+fi
+if [ "$removals" -le "${FAKE_LATE_WRITES:-0}" ]; then
+  if [ "${FAKE_LATE_WRITE_SHAPE:-dir}" = file ]; then
+    : > "$target"
+  else
+    /bin/mkdir -p "$target"; : > "$target/Late.$removals.plist"
+  fi
+fi
+exit "$rc"
+STUB
+  cat > "$fix/settlebin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "${FAKE_SLEEP_LOG:-/dev/null}"
+if [ -n "${FAKE_LATE_WRITE_AT_POLLS:-}" ] && [ -n "${FAKE_SLEEP_LOG:-}" ]; then
+  polls="$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')"
+  for at in $FAKE_LATE_WRITE_AT_POLLS; do
+    if [ "$polls" = "$at" ]; then
+      /bin/mkdir -p "$FAKE_LATE_WRITE_CONTAINER"; : > "$FAKE_LATE_WRITE_CONTAINER/Poll.$polls.plist"
+    fi
+  done
+fi
+exit 0
+STUB
+  chmod +x "$fix/settlebin/rm" "$fix/settlebin/sleep"
+}
+
+# Lines in a stub's log, 0 when it was never written.
+log_lines() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 
 # The longest socket path the fence can produce: its directory, the `tmux-<uid>`
 # subdirectory tmux appends, and a socket name at the budgeted maximum.
@@ -649,6 +742,13 @@ test_decoy_replaced_by_a_symlink_during_the_run_fails_the_run() {
 # 3. Fingerprint diffing, through the wrapper
 # ---------------------------------------------------------------------------
 
+# THE REPORT'S BANNER, COMPOSED WHOLE. It wraps onto two lines, and a case that
+# matched only the first would stay green if the second — and the roots it
+# names — were dropped. Every case that asserts the banner goes through this.
+LEAK_BANNER="$(printf '%s\n%s' \
+  "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," \
+  "  ~/Library/Logs/TBD, ~/Library/Preferences OR /tmp/tmux-<uid>")"
+
 # Each arm leaks one entry into the fixture's real home — the shape a leak that
 # got past the fence would take — and must be named in the diff.
 _assert_leak_is_detected() {
@@ -657,7 +757,7 @@ _assert_leak_is_detected() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "$label fails the run" "$RUN_RC"
-  assert_contains "$label is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex, ~/Library/Logs/TBD OR /tmp/tmux-<uid>"
+  assert_contains "$label is reported" "$RUN_OUT" "$LEAK_BANNER"
   # `+  ` — the two spaces are the rendering: `sed 's/^>/  + /'` over a diff
   # line that already carries `> `. Pinned as-is so a reformat is visible.
   assert_contains "$label names the entry" "$RUN_OUT" "+  $expected"
@@ -696,6 +796,417 @@ test_fingerprint_detects_a_new_hang_stack() {
   _assert_leak_is_detected "a new hang stack" \
     "Library/Logs/TBD/hang-stacks/hang-leaked.txt" \
     "~/Library/Logs/TBD/hang-stacks/hang-leaked.txt"
+}
+
+# THE SIXTH ROOT, `~/Library/Preferences`: the only one no fence variable
+# reaches, and the only one with a reclaimer instead of a fence. `cfprefsd`
+# resolves `UserDefaults(suiteName:)` over XPC, and a suite's backing file
+# reappears after the test process exits, so the suite helper makes the files
+# COLLECTABLE (one container, `TBDTests.suites/<label>.<uuid>`) and the wrapper
+# collects them. These cases drive both halves: the reclaim and its settle
+# keeping the count at zero, and the arm seeing what they could not take. The
+# leaks are files, because a plist is one; see `FAKE_SWIFT_LEAK_FILE` in the
+# stub.
+
+# A run whose suite files all landed in the container leaves nothing behind
+# and says nothing.
+test_the_container_is_reclaimed_after_the_run() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_ok "a run whose suite files landed in the container is green" "$RUN_RC"
+  assert_missing "and reports nothing" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the post-run reclaim and the same fixture goes red, with the
+# container's count naming what was left.
+test_the_post_run_reclaim_is_load_bearing() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mutant="$(mutant_of "$SCRIPT" '/^reclaim_preferences_container "\$preferences_container" "after the run"$/d')"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist")
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "MUTANT: without the post-run reclaim the run fails" "$RUN_RC"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
+  assert_contains "the container count before is named" "$RUN_OUT" \
+    "-  <preferences>/TBDTests.suites count=0"
+  assert_contains "the container count after is named" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  assert_contains "the remediation reads the container line" "$RUN_OUT" \
+    "If the entry is <preferences>/TBDTests.suites, test suites were"
+  assert_contains "and says an unlink in a teardown would not have helped" "$RUN_OUT" \
+    "Unlinking them in a teardown is NOT"
+  assert_eq "the files are still there to be read" "true" \
+    "$(exists_of "$container/AppState.6F2C1A.plist")"
+  rmfix "$fix"
+}
+
+# `--no-fingerprint` TURNS OFF THE REPORT, NEVER THE RECLAIM — developer boxes,
+# where detection is off by default, are where the files piled up. It DOES turn
+# off the settle, whose only job is a clean after-snapshot: ungated, on a shared
+# box a sibling's live container would keep it polling to the cap and removing
+# that container every 0.2 s.
+test_no_fingerprint_still_reclaims_the_container() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
+           FAKE_SLEEP_LOG="$fix/sleeps")
+  run_wrapper "$fix" --no-fingerprint
+  assert_ok "the run is green" "$RUN_RC"
+  assert_eq "the container is reclaimed with detection off" "false" "$(exists_of "$container")"
+  assert_eq "but not settled with detection off" "0" "$(log_lines "$fix/sleeps")"
+
+  # MUTATION. Drop the detection gate and the same run settles anyway.
+  local mutant; mutant="$(mutant_of "$SCRIPT" 's/^\[ "\$fingerprint" -eq 0 \] \|\| (settle_preferences_container)/\1/')"
+  run_script "$mutant" "$fix" --no-fingerprint
+  RUN_ENV=()
+  assert_eq "MUTANT: ungated, the settle polls with detection off" \
+    "$PREFERENCES_SETTLE_QUIET_POLLS" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+}
+
+# MUTATION. Gate the post-run reclaim on detection and the same run leaves the
+# container behind — the shape of moving the call below the `fingerprint -eq 0`
+# exit.
+test_the_post_run_reclaim_is_not_gated_on_detection() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mutant="$(mutant_of "$SCRIPT" 's/^reclaim_preferences_container "\$preferences_container" "after the run"$/[ "$fingerprint" -eq 0 ] || &/')"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist")
+  run_script "$mutant" "$fix" --no-fingerprint
+  RUN_ENV=()
+  assert_ok "the mutant run is green (the report is off)" "$RUN_RC"
+  assert_eq "MUTANT: gated on detection, the container survives" "true" \
+    "$(exists_of "$container/AppState.6F2C1A.plist")"
+  rmfix "$fix"
+}
+
+# THE PRE-RUN RECLAIM'S OWN CASE. A run's files can reappear after that run
+# has exited, so another run's leftovers are a legitimate starting state and
+# must not be charged to this run.
+test_a_previous_runs_leftovers_do_not_redden_this_run() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mkdir -p "$container"; : > "$container/Leftover.CAFE.plist"
+  run_wrapper "$fix" --fingerprint
+  assert_ok "leftovers from a previous run do not fail this one" "$RUN_RC"
+  assert_missing "and are not reported" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  assert_eq "they are swept rather than tolerated" "false" "$(exists_of "$container")"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the pre-run reclaim and the leftovers are counted before the
+# run and swept after it, so the diff reports a REMOVAL — a red run over files
+# this run never created.
+test_the_pre_run_reclaim_is_load_bearing() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mutant="$(mutant_of "$SCRIPT" '/^reclaim_preferences_container "\$preferences_container" "before the run"$/d')"
+  mkdir -p "$container"; : > "$container/Leftover.CAFE.plist"
+  run_script "$mutant" "$fix" --fingerprint
+  assert_nonzero "MUTANT: without the pre-run reclaim the leftovers fail this run" "$RUN_RC"
+  assert_contains "the count they were counted at is named" "$RUN_OUT" \
+    "-  <preferences>/TBDTests.suites count=1"
+  assert_contains "and the zero they were swept to" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=0"
+  rmfix "$fix"
+}
+
+# THE NEGATIVE HALF. Every other domain on the box is rewritten while a run is
+# in flight; an arm that reddened on those would report the machine.
+test_fingerprint_ignores_an_unrelated_preferences_plist() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$fix/home/Library/Preferences/com.acme.someapp.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_ok "a plist outside the container passes with detection on" "$RUN_RC"
+  assert_missing "and reports nothing" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  rmfix "$fix"
+}
+
+# THE RECLAIM'S THREE REFUSALS. It is the only thing in this wrapper that
+# deletes inside a real store, so each guard is driven directly through the
+# sourced helper — the way the uid arm is — and each is shown going the other
+# way with just that guard deleted. Each case uses a target the OTHER guards
+# let through, so no deletion can be masked by a neighbour.
+
+# A path one component short of the container: a real directory, so only the
+# name guard stands between it and `rm -rf`.
+test_the_reclaim_refuses_a_path_outside_the_container() {
+  local fix victim out rc; fix="$(mkfix)"
+  victim="$fix/home/Library/Preferences"
+  out="$(reclaim_preferences_container "$victim" "a direct call" 2>&1)"; rc=$?
+  assert_ok "a refusal is not a failure" "$rc"
+  assert_contains "a path outside the container is refused" "$out" \
+    "refusing to reclaim '$victim' a direct call — it does not end in TBDTests.suites"
+  assert_eq "the directory survives" "true" "$(exists_of "$victim")"
+  assert_eq "and so does what was in it" "true" \
+    "$(exists_of "$victim/com.acme.unrelated.plist")"
+
+  # MUTATION. Widen the pattern to accept anything and the same call takes the
+  # whole of `~/Library/Preferences` with it.
+  local mutant; mutant="$(mutant_of "$SCRIPT" 's|^    \*/"\$PREFERENCES_CONTAINER_NAME"\) ;;$|    *) ;;|')"
+  # shellcheck source=/dev/null
+  ( source "$mutant"; reclaim_preferences_container "$victim" "a direct call" ) >/dev/null 2>&1
+  assert_eq "MUTANT: without the name guard the same call removes it" "false" "$(exists_of "$victim")"
+  rmfix "$fix"
+}
+
+# A symlink at the container path, pointing at a DIRECTORY so the
+# non-directory guard (`-d` follows links) lets it through.
+test_the_reclaim_refuses_a_symlinked_container() {
+  local fix link target out rc; fix="$(mkfix)"
+  link="$(prefs_container_of "$fix")"; target="$fix/elsewhere"
+  mkdir -p "$target"; : > "$target/keep.plist"; ln -s "$target" "$link"
+  out="$(reclaim_preferences_container "$link" "a direct call" 2>&1)"; rc=$?
+  assert_ok "a refusal is not a failure" "$rc"
+  assert_contains "a symlinked container is refused" "$out" \
+    "refusing to reclaim '$link' a direct call — it is a SYMLINK"
+  assert_eq "the link survives" "true" "$([ -L "$link" ] && echo true || echo false)"
+  assert_eq "and so does what it points at" "true" "$(exists_of "$target/keep.plist")"
+
+  # MUTATION. Delete the `-L` guard and the same call removes the link.
+  local mutant; mutant="$(mutant_of "$SCRIPT" '/^  \[ -L "\$container" \] && /d')"
+  # shellcheck source=/dev/null
+  out="$( ( source "$mutant"; reclaim_preferences_container "$link" "a direct call" ) 2>&1 )"
+  assert_missing "MUTANT: nothing is refused" "$out" "refusing to reclaim"
+  assert_eq "MUTANT: without the -L guard the link itself is removed" "false" "$(exists_of "$link")"
+  rmfix "$fix"
+}
+
+# A regular file at the container path: not a link, and it passes the name
+# guard, so only the non-directory guard stands between it and `rm -rf`. The
+# reclaim leaves it for a human, and its refusal is what says so.
+test_the_reclaim_refuses_a_container_that_is_not_a_directory() {
+  local fix file out rc; fix="$(mkfix)"
+  file="$(prefs_container_of "$fix")"; : > "$file"
+  out="$(reclaim_preferences_container "$file" "a direct call" 2>&1)"; rc=$?
+  assert_ok "a refusal is not a failure" "$rc"
+  assert_contains "a non-directory container is refused" "$out" \
+    "refusing to reclaim '$file' a direct call — it is not a directory"
+  assert_eq "the file survives" "true" "$([ -f "$file" ] && echo true || echo false)"
+
+  # MUTATION. Delete the non-directory guard and the same call removes the file.
+  local mutant; mutant="$(mutant_of "$SCRIPT" '/^  \[ -d "\$container" \] \|\| /d')"
+  # shellcheck source=/dev/null
+  out="$( ( source "$mutant"; reclaim_preferences_container "$file" "a direct call" ) 2>&1 )"
+  assert_missing "MUTANT: nothing is refused" "$out" "refusing to reclaim"
+  assert_eq "MUTANT: without the non-directory guard the file is removed" "false" "$(exists_of "$file")"
+  rmfix "$fix"
+}
+
+# THE SETTLE. A sweeper started the instant the test process exited still lost
+# 1 in 10 to a trailing write, so with detection on, after a post-run reclaim
+# that found a container, the wrapper keeps watching the path. These cases use
+# `mk_stub_settle_tools`: every late write lands at a fixed point in the
+# wrapper's own sequence, and the polls are counted rather than slept.
+
+# The environment every settle case shares; extra assignments go after it.
+settle_run_env() {
+  local fix="$1" container="$2"
+  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
+           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
+           FAKE_SLEEP_LOG="$fix/sleeps")
+}
+
+# Two late writes: one straight after the post-run removal, seen on the first
+# poll, and one landing on poll 4, after two quiet polls. Each is reclaimed and
+# restarts the quiet window, so the watch is 4 polls plus one whole window.
+test_a_late_write_after_the_post_run_reclaim_is_settled() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "late writes after the post-run reclaim leave the run green" "$RUN_RC"
+  assert_missing "and nothing is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  assert_eq "it was reclaimed after the run and once per late write" "3" "$(log_lines "$fix/late-writes")"
+  assert_eq "each reappearance restarted the quiet window" \
+    "$((4 + PREFERENCES_SETTLE_QUIET_POLLS))" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+
+  # MUTATION. Keep the quiet count across a reappearance and the watch ends two
+  # polls early — the window no longer means "absent for this long".
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^      quiet=0$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
+  run_script "$mutant" "$fix" --fingerprint
+  assert_eq "MUTANT: without the reset the window is cut short" \
+    "$((2 + PREFERENCES_SETTLE_QUIET_POLLS))" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+
+  # MUTATION. Delete the settle and the first late write is still there when
+  # the after-snapshot is taken.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^\[ "\$fingerprint" -eq 0 \] \|\| settle_preferences_container "\$preferences_container"$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "MUTANT: without the settle the run fails" "$RUN_RC"
+  assert_contains "MUTANT: the late write is counted" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  assert_eq "MUTANT: and left on disk" "true" "$(exists_of "$container/Late.1.plist")"
+  rmfix "$fix"
+}
+
+# A FAILED REMOVAL IS THE RACE ITSELF, NOT A REASON TO STOP. A write landing
+# while `rm -rf` walks the directory makes it fail with "Directory not empty"
+# and leaves the container there. That can happen to the post-run reclaim —
+# the settle must still start — or to a reclaim inside the watch — the watch
+# must carry on. Each half has its own mutation: the behaviour that let a
+# failure skip or end the settle.
+test_a_failed_removal_does_not_end_the_settle() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_RM_FAIL_ON=1)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "a failed post-run removal is settled, and the run is green" "$RUN_RC"
+  assert_contains "the failure is reported" "$RUN_OUT" "could not remove '$container' after the run"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  assert_eq "it was retried once" "2" "$(log_lines "$fix/late-writes")"
+  rmfix "$fix"
+
+  # MUTATION. Enter the settle only on a successful removal, and a failed
+  # post-run removal skips it, leaving the container for the after-snapshot.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" 's/^  case "\$PREFERENCES_RECLAIM_OUTCOME" in removed\|failed\) /  case "$PREFERENCES_RECLAIM_OUTCOME" in removed) /')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_RM_FAIL_ON=1)
+  run_script "$mutant" "$fix" --fingerprint
+  assert_nonzero "MUTANT: a failed post-run removal skips the settle and fails the run" "$RUN_RC"
+  assert_contains "MUTANT: what it left is counted" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  rmfix "$fix"
+
+  # The same race inside the watch: the post-run removal succeeds and is
+  # followed by a late write, and the reclaim of that write fails.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_RM_FAIL_ON=2)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "a failed removal inside the watch is retried, and the run is green" "$RUN_RC"
+  assert_contains "the failure is reported" "$RUN_OUT" "could not remove '$container' after a late write"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  assert_eq "it was retried on the next poll" "3" "$(log_lines "$fix/late-writes")"
+  rmfix "$fix"
+
+  # MUTATION. End the watch on anything but a successful removal and the
+  # failed one is the last word.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" 's/^      \[ "\$PREFERENCES_RECLAIM_OUTCOME" != refused \]/      [ "$PREFERENCES_RECLAIM_OUTCOME" = removed ]/')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_RM_FAIL_ON=2)
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "MUTANT: a failed removal ends the watch and fails the run" "$RUN_RC"
+  assert_contains "MUTANT: what it left is counted" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  rmfix "$fix"
+}
+
+# A run whose post-run reclaim finds no container does not poll.
+test_the_settle_is_skipped_when_nothing_was_reclaimed() {
+  local fix mutant; fix="$(mkfix)"
+  mk_stub_settle_tools "$fix"
+  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SLEEP_LOG="$fix/sleeps")
+  run_wrapper "$fix" --fingerprint
+  assert_ok "the run is green" "$RUN_RC"
+  assert_eq "it never polls" "0" "$(log_lines "$fix/sleeps")"
+
+  # MUTATION. Drop the entry check and the same run watches an empty path for a
+  # whole quiet window.
+  mutant="$(mutant_of "$SCRIPT" '/^  case "\$PREFERENCES_RECLAIM_OUTCOME" in /d')"
+  /bin/rm -f "$fix/sleeps"
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_eq "MUTANT: without the entry check it polls for nothing" \
+    "$PREFERENCES_SETTLE_QUIET_POLLS" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+}
+
+# A container that never stops coming back: the watch ends at the cap and the
+# arm reports what is left — the settle is a reclaimer, not a wait.
+test_the_settle_gives_up_at_its_cap() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=100000)
+  run_wrapper "$fix" --fingerprint
+  assert_nonzero "a container that keeps coming back is reported" "$RUN_RC"
+  assert_contains "with its count" "$RUN_OUT" "+  <preferences>/TBDTests.suites count=1"
+  assert_contains "and the remediation says the settle gave up" "$RUN_OUT" \
+    "settle gave up after"
+  assert_eq "after exactly the cap" "$PREFERENCES_SETTLE_MAX_POLLS" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+
+  # MUTATION. Lower the cap and the watch ends there instead — the count above
+  # is the cap's, not a coincidence of the stub. (Removing the cap outright
+  # would never return against this stub, so it is moved rather than deleted.)
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" 's/^PREFERENCES_SETTLE_MAX_POLLS=[0-9]+$/PREFERENCES_SETTLE_MAX_POLLS=3/')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=100000)
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_eq "MUTANT: with a cap of 3 the watch ends at 3" "3" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+}
+
+# Something the reclaim refuses appears during the watch — here a regular file
+# at the container's path. A refusal is a property of the path, which polling
+# cannot change, so the watch ends on the first one; and the run is not failed
+# for it: a reclaimer, not a gate.
+test_a_refusal_ends_the_settle() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "a refusal during the settle does not fail the run" "$RUN_RC"
+  assert_eq "it is refused once" "1" \
+    "$(printf '%s\n' "$RUN_OUT" | grep -c "after a late write — it is not a directory")"
+  assert_eq "and the watch ends there" "1" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+
+  # MUTATION. Drop the in-loop stop and the same refusal repeats on every poll
+  # until the cap.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^      \[ "\$PREFERENCES_RECLAIM_OUTCOME" != refused \] \|\| return 0$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file)
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_eq "MUTANT: without the stop it polls to the cap" \
+    "$PREFERENCES_SETTLE_MAX_POLLS" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+}
+
+# THE NAME IS A CONTRACT BETWEEN THREE FILES. `TestDefaults.containerName`
+# decides where `cfprefsd` writes; the wrapper deletes that path; the
+# fingerprint counts inside it. A rename in one place alone is silent in the
+# worst way — the reclaim removes an empty path, the arm counts an empty path,
+# every case stays green and the files pile up. A reformat of the Swift
+# declaration reddens this too; that is the cheap direction.
+test_the_container_name_matches_the_swift_helper() {
+  local swift_helper="$HERE/../Tests/TestSupport/UserDefaultsTestSupport.swift"
+  local swift_source; swift_source="$(cat "$swift_helper" 2>/dev/null)"
+  assert_contains "the Swift helper names the container" "$swift_source" \
+    'containerName = "TBDTests.suites"'
+  assert_contains "the wrapper reclaims that name" "$(cat "$SCRIPT")" \
+    'PREFERENCES_CONTAINER_NAME="TBDTests.suites"'
+  assert_contains "and the fingerprint counts inside that name" "$(cat "$FINGERPRINT")" \
+    "prefs_container_name='TBDTests.suites'"
 }
 
 test_fingerprint_passes_on_an_unchanged_tree() {
@@ -745,11 +1256,11 @@ test_fingerprint_comparison_is_load_bearing() {
 fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
-# mistake. There are five roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
-# socket dir, `~/Library/Logs/TBD/hang-stacks`) but SEVEN arms, because
-# `~/.claude` and `~/.codex` are each read
-# twice: a `-maxdepth 1` pass over the store itself, then a second pass at a
-# nested directory the depth limit puts out of the first one's reach. An arm
+# mistake. There are six roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
+# socket dir, `~/Library/Logs/TBD/hang-stacks`, `~/Library/Preferences`) but
+# EIGHT arms, because `~/.claude` and `~/.codex` are each read twice: a
+# `-maxdepth 1` pass over the store itself, then a second pass at a nested
+# directory the depth limit puts out of the first one's reach. An arm
 # with no assertion here can be deleted wholesale and this file stays green —
 # that is how the `~/.codex/plugins/cache` arm went untested — so the
 # enumeration IS the coverage. Count in arms, and add a line when you add one.
@@ -764,6 +1275,11 @@ test_fingerprint_script_covers_every_arm() {
   assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
   assert_contains "absent hang-stacks is a marker" "$out" \
     "~/Library/Logs/TBD/hang-stacks <absent>"
+  # THE PREFERENCES ARM COUNTS INSTEAD OF MARKING, and absent reads `count=0`:
+  # the reclaim's success IS the container being gone, so `<absent>` would be
+  # the steady state and an empty container would differ from it.
+  assert_contains "an absent container counts zero" "$out" \
+    "<preferences>/TBDTests.suites count=0"
   rmfix "$d"
 }
 
@@ -799,6 +1315,62 @@ test_fingerprint_script_sees_a_claude_projects_entry() {
   assert_contains "projects entry present after" "$after" "~/.claude/projects/-acme-leaked"
   assert_contains "the depth-1 arm lists projects either way" "$mutant_after" "~/.claude/projects"
   assert_eq "without the projects arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
+# THE PREFERENCES ARM ON ITS OWN. The end-to-end cases cannot say which arm
+# caught a leak — one over-broad arm would satisfy them all — so this one is
+# disabled here and the two snapshots must become identical without it. An
+# unrelated domain beside the container must not move it either.
+test_fingerprint_script_sees_a_file_in_the_container() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  # MUTATION: this arm's existence test points at a path that never exists, so
+  # it always takes the zero branch.
+  local no_arm; no_arm="$(mutant_of "$FINGERPRINT" 's|-d "\$prefs_container"|-d "/no/such/path"|')"
+  local before mutant_before
+  before="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_before="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  # An empty container is not a leak: a concurrent run mints the directory and
+  # leaves nothing in it.
+  mkdir -p "$container"
+  local empty; empty="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  # Narrowed to `*.plist`, so a temp file a writer is midway through is not
+  # read as a leak. The reclaim removes it regardless.
+  : > "$container/half-written.plist.tmp"
+  local nonplist; nonplist="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  : > "$fix/home/Library/Preferences/com.acme.another.plist"
+  local unrelated; unrelated="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  : > "$container/SomeSuite.0F1E2D.plist"
+  local after mutant_after
+  after="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_after="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  assert_contains "an absent container reads count=0" "$before" \
+    "<preferences>/TBDTests.suites count=0"
+  assert_eq "an empty container reads the same as an absent one" "$before" "$empty"
+  assert_eq "a non-plist entry does not move the count" "$before" "$nonplist"
+  assert_eq "nor does an unrelated domain beside the container" "$before" "$unrelated"
+  assert_contains "a suite plist in the container reads count=1" "$after" \
+    "<preferences>/TBDTests.suites count=1"
+  assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
+# THE CONTAINER CAN VANISH BETWEEN THE `-d` TEST AND THE `find` — a sibling run
+# reclaims it — and `find` then exits non-zero. Under `set -euo pipefail` that
+# would kill the script, and the wrapper with it, silently. An unreadable
+# container makes the same `find` fail deterministically, so it stands in for
+# the race here.
+test_fingerprint_script_survives_a_container_find_cannot_read() {
+  local fix container out rc mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mkdir -p "$container"; : > "$container/SomeSuite.0F1E2D.plist"; chmod 000 "$container"
+  out="$(fingerprint_with_home "$fix/home" "$FINGERPRINT" 2>&1)"; rc=$?
+  assert_ok "a failing find does not abort the fingerprint" "$rc"
+  assert_contains "and reads count=0" "$out" "<preferences>/TBDTests.suites count=0"
+
+  # MUTATION. Drop the `|| :` and the same call aborts.
+  mutant="$(mutant_of "$FINGERPRINT" 's/ \|\| :; \} \| wc -l/; } | wc -l/')"
+  fingerprint_with_home "$fix/home" "$mutant" >/dev/null 2>&1; rc=$?
+  assert_nonzero "MUTANT: without the tolerance the fingerprint aborts" "$rc"
   rmfix "$fix"
 }
 
@@ -1186,8 +1758,7 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "a leaked tmux socket fails the run" "$RUN_RC"
-  assert_contains "it is reported" "$RUN_OUT" \
-    "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex, ~/Library/Logs/TBD OR /tmp/tmux-<uid>"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
   rmfix "$fix"

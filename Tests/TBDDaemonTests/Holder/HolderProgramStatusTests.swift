@@ -27,8 +27,8 @@ import TBDShared
 
     // MARK: - Probe
 
-    @Test func flagOnAnswersProbeTerminatedByBEL() async throws {
-        let harness = try Harness(enabled: true)
+    @Test func answersProbeTerminatedByBEL() async throws {
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(Data(Self.probeBEL.utf8))
@@ -37,38 +37,13 @@ import TBDShared
         #expect(harness.delivered.isEmpty, "a probe is answered, never delivered as a report")
     }
 
-    @Test func flagOnAnswersProbeTerminatedByST() async throws {
-        let harness = try Harness(enabled: true)
+    @Test func answersProbeTerminatedByST() async throws {
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(Data(Self.probeST.utf8))
 
         #expect(harness.readReplies() == Array(ProgramStatusProtocol.probeReply.utf8))
-        #expect(harness.delivered.isEmpty)
-    }
-
-    @Test func flagOffAnswersNothingAndDeliversNothing() async throws {
-        let harness = try Harness(enabled: false)
-        defer { harness.tearDown() }
-
-        await harness.reader.feedChildOutputForTesting(Data(Self.probeBEL.utf8))
-        await harness.reader.feedChildOutputForTesting(
-            Data("\(Self.esc)]7501;\(Self.reportPayload)\(Self.bel)".utf8))
-
-        #expect(harness.readReplies().isEmpty)
-        #expect(harness.delivered.isEmpty)
-    }
-
-    @Test func gateTurnedOffAfterConstructionSilencesTheHandler() async throws {
-        let harness = try Harness(enabled: true)
-        defer { harness.tearDown() }
-
-        harness.gate.set(false)
-        await harness.reader.feedChildOutputForTesting(Data(Self.probeBEL.utf8))
-        await harness.reader.feedChildOutputForTesting(
-            Data("\(Self.esc)]7501;\(Self.reportPayload)\(Self.bel)".utf8))
-
-        #expect(harness.readReplies().isEmpty)
         #expect(harness.delivered.isEmpty)
     }
 
@@ -82,7 +57,7 @@ import TBDShared
     }
 
     @Test func probeReplyPrecedesDA1Reply() async throws {
-        let harness = try Harness(enabled: true)
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         // One feed, probe first: the order Claude Code writes them in.
@@ -100,7 +75,7 @@ import TBDShared
     // MARK: - Reports
 
     @Test func reportIsDeliveredWithExactPayloadAndNotAnswered() async throws {
-        let harness = try Harness(enabled: true)
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(
@@ -111,7 +86,7 @@ import TBDShared
     }
 
     @Test func reportsAreDeliveredInParseOrder() async throws {
-        let harness = try Harness(enabled: true)
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         let first = "state=working:app=claude-code"
@@ -125,7 +100,7 @@ import TBDShared
     // MARK: - Preamble (replay)
 
     @Test func preambleNeitherAnswersNorDelivers() async throws {
-        let harness = try Harness(enabled: true)
+        let harness = try Harness()
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Data(
@@ -166,22 +141,19 @@ import TBDShared
     /// program-status tap whose `deliver` records into a box.
     private struct Harness {
         let reader: HolderReader
-        let gate: ProgramStatusGate
         private let box: DeliveryBox
         private let ours: Int32
 
-        init(enabled: Bool = true, tap: Bool = true) throws {
+        init(tap: Bool = true) throws {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
             let flags = fcntl(ours, F_GETFL, 0)
             _ = fcntl(ours, F_SETFL, flags | O_NONBLOCK)
-            let gate = ProgramStatusGate(enabled: enabled)
             let box = DeliveryBox()
-            self.gate = gate
             self.box = box
             let programStatus: HolderProgramStatusTap? = tap
-                ? HolderProgramStatusTap(gate: gate, deliver: { payload in box.append(payload) })
+                ? HolderProgramStatusTap(deliver: { payload in box.append(payload) })
                 : nil
             // The reader owns `pair[0]` and closes it in its `deinit`.
             reader = HolderReader(

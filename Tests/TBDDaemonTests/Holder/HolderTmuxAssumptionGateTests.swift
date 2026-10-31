@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Every argv the dry-run `TmuxManager` was handed. "Nothing was recorded" is
 /// the assertion that a guard sat ahead of the whole tmux mechanic, not merely
@@ -180,6 +181,11 @@ struct HolderTmuxAssumptionGateTests {
     /// In-memory DB plus a worktree whose path exists on disk — both the wake
     /// and the recreate paths refuse to respawn into a missing directory, and
     /// that refusal would mask the one under test.
+    ///
+    /// The worktree's folder is a plain directory, not a git checkout, so
+    /// archive's uncommitted-changes guard cannot read it and would refuse;
+    /// the archive tests here pass `discardUncommittedChanges: true` to reach
+    /// the teardown they are about.
     private func seedWorktree(_ db: TBDDatabase) async throws -> (Worktree, URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-holdergate-repo-\(UUID().uuidString)", isDirectory: true)
@@ -2514,6 +2520,37 @@ struct HolderTmuxAssumptionGateTests {
         #expect(recorded.snapshot().isEmpty)
     }
 
+    @Test("terminal.send --keys types a digit as a keypress, unwrapped even under bracketed paste")
+    func sendKeysTypesDigitAsKeypress() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        // The child has bracketed paste on, as Claude Code does. A `--text 4`
+        // would arrive inside the paste markers, which a numbered dialog
+        // ignores; a key must not.
+        rpc.holderModeOracle = oracle(bracketedPaste: true, applicationCursor: false)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "4")))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // One write of `0x34` and nothing around it: no `ESC [ 200 ~` paste
+        // start, no carriage return.
+        #expect(writes.all == [Data([0x34])],
+                "expected the single byte 0x34, got \(writes.all.map({ Array($0) }))")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
     @Test("terminal.send --keys refuses an unknown key name, having written nothing")
     func sendKeysRefusesUnknownKeyName() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -2633,7 +2670,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil,
                 "archive is supposed to delete the row; the gate is about what goes with it")
@@ -2659,7 +2696,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [])
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
         let argv = recorded.snapshot()
@@ -2721,7 +2758,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
         try await expectHolderEntryWithoutCapture(db, terminal: terminal, path: "archive")
