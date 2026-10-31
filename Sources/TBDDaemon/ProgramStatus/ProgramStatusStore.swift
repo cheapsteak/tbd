@@ -160,7 +160,7 @@ public actor ProgramStatusStore {
     public static func live(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
-        ledger: WorktreeActivityLedger,
+        ledger: any AgentEventRecording,
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> ProgramStatusStore {
         let store = ProgramStatusStore(
@@ -713,7 +713,7 @@ extension ProgramStatusEffects {
     public static func live(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
-        ledger: WorktreeActivityLedger
+        ledger: any AgentEventRecording
     ) -> ProgramStatusEffects {
         ProgramStatusEffects(
             writeColumns: { write in

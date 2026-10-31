@@ -94,3 +94,6 @@ public actor WorktreeActivityLedger {
         lastSignalAt = lastSignalAt.filter { worktreeIDs.contains($0.key) }
     }
 }
+
+/// The ledger `ProgramStatusStore` stamps every accepted report into.
+extension WorktreeActivityLedger: AgentEventRecording {}

@@ -58,16 +58,6 @@ public struct ProgramStatusColumnValue: Sendable, Equatable {
     }
 }
 
-/// Which incarnation a column write may land on.
-public enum ProgramStatusWriteScope: Sendable, Equatable {
-    /// Only while the row's `sessionIncarnationID` is this one: a report
-    /// belongs to the process that sent it.
-    case incarnation(UUID?)
-    /// Whatever incarnation is live: the child exited, so no process of any
-    /// incarnation is left to report.
-    case anyLiveIncarnation
-}
-
 /// What a column write did.
 public enum ProgramStatusColumnOutcome: Sendable, Equatable {
     /// Nothing was written: the row is gone, parked, staged for another
@@ -105,6 +95,14 @@ public struct ProgramStatusColumnWrite: Sendable, Equatable {
         self.observedAt = observedAt
         self.source = source
     }
+}
+
+/// Where `ProgramStatusEffects.live` stamps each accepted report: the PR-poll
+/// activity ledger, `WorktreeActivityLedger`, which conforms in `PR`. Taken
+/// through this protocol because `PR` sits above `ProgramStatus` in the
+/// daemon's layer order.
+public protocol AgentEventRecording: Sendable {
+    func recordAgentEvent(terminalID: UUID, worktreeID: UUID, at date: Date) async
 }
 
 /// Everything `ProgramStatusStore` does outside its own memory: the column

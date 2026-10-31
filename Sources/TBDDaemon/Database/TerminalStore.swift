@@ -277,6 +277,18 @@ enum ClaudeSpawnExtrasColumn {
     }
 }
 
+/// Which incarnation a column write may land on. Declared beside the
+/// writer that enforces it, `applyProgramStatusActivity`, so `Database`
+/// names nothing from `ProgramStatus`, the layer above it.
+public enum ProgramStatusWriteScope: Sendable, Equatable {
+    /// Only while the row's `sessionIncarnationID` is this one: a report
+    /// belongs to the process that sent it.
+    case incarnation(UUID?)
+    /// Whatever incarnation is live: the child exited, so no process of any
+    /// incarnation is left to report.
+    case anyLiveIncarnation
+}
+
 /// What `applyProgramStatusActivity` did to an accepted row.
 public struct ProgramStatusActivityWrite: Sendable, Equatable {
     /// The row's worktree, for the deltas and the banner.
