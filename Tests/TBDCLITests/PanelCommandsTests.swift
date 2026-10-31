@@ -470,3 +470,50 @@ struct PanelSideRegionRenderingTests {
         #expect(describe(content) == "file /a.md (rendered)")
     }
 }
+
+/// `tbd panel list`: the unscoped `panel.get` reply, narrowed to `--tab`
+/// when given. Only the unscoped reply names the active tab, so narrowing it
+/// keeps the `[ACTIVE]` mark that a tab-scoped get would lose.
+@Suite("tbd panel list rendering")
+struct PanelListRenderingTests {
+    private let activeTabID = UUID()
+    private let otherTabID = UUID()
+
+    private var all: PanelGetResult {
+        PanelGetResult(
+            tabs: [
+                WorkspaceTabSurface(
+                    id: activeTabID, worktreeID: UUID(), label: "Active",
+                    primary: .terminal(terminalID: UUID()), revision: 3),
+                WorkspaceTabSurface(
+                    id: otherTabID, worktreeID: UUID(), label: "Other",
+                    primary: .terminal(terminalID: UUID()), revision: 5),
+            ],
+            activeTabID: activeTabID)
+    }
+
+    @Test func tabOptionMarksTheActiveTab() {
+        let lines = panelListLines(panelListResult(all, tabID: activeTabID))
+        #expect(lines.first == "Tab \(activeTabID) [ACTIVE] — Active")
+        #expect(!lines.contains(where: { $0.contains("\(otherTabID)") }), "only the requested tab is listed")
+    }
+
+    @Test func tabOptionOnAnInactiveTabListsItUnmarked() {
+        let lines = panelListLines(panelListResult(all, tabID: otherTabID))
+        #expect(lines.first == "Tab \(otherTabID) — Other")
+        #expect(!lines.contains(where: { $0.contains("\(activeTabID)") }))
+    }
+
+    @Test func noTabOptionListsEveryTabWithABlankLineBetween() {
+        let lines = panelListLines(panelListResult(all, tabID: nil))
+        let headers = lines.filter { $0.hasPrefix("Tab ") }
+        #expect(headers == ["Tab \(activeTabID) [ACTIVE] — Active", "Tab \(otherTabID) — Other"])
+        let second = lines.firstIndex(of: "Tab \(otherTabID) — Other")
+        #expect(second.map { $0 > 0 && lines[$0 - 1].isEmpty } == true,
+                "a blank line separates one tab from the next")
+    }
+
+    @Test func aTabTheWorktreeDoesNotHoldListsNothing() {
+        #expect(panelListLines(panelListResult(all, tabID: UUID())) == ["No tabs found."])
+    }
+}

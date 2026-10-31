@@ -47,27 +47,45 @@ struct PanelList: AsyncParsableCommand {
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
         // `panel.get` is ungated, so `list` answers while the flag is off.
-        let result: PanelGetResult = try client.call(
+        // Unscoped even with `--tab`: only the unscoped get reports the
+        // worktree's active tab (see `panelListResult`).
+        let all: PanelGetResult = try client.call(
             method: RPCMethod.panelGet,
-            params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
+            params: PanelGetParams(worktreeID: worktreeID),
             resultType: PanelGetResult.self
         )
+        let result = panelListResult(all, tabID: tabID)
 
         if json {
             printJSON(result)
         } else {
-            if result.tabs.isEmpty {
-                print("No tabs found.")
-                return
-            }
-            for (index, tab) in result.tabs.enumerated() {
-                if index > 0 { print() }
-                for line in tabLines(tab, activeTabID: result.activeTabID) {
-                    print(line)
-                }
+            for line in panelListLines(result) {
+                print(line)
             }
         }
     }
+}
+
+/// What `tbd panel list` shows: the worktree's unscoped `panel.get` reply,
+/// narrowed to `tabID` when one is given. A tab-scoped get reports no active
+/// tab, so `list --tab` narrows the unscoped reply instead, which keeps the
+/// worktree's real `activeTabID` and with it the requested tab's `[ACTIVE]`
+/// mark.
+func panelListResult(_ all: PanelGetResult, tabID: UUID?) -> PanelGetResult {
+    guard let tabID else { return all }
+    return PanelGetResult(tabs: all.tabs.filter { $0.id == tabID }, activeTabID: all.activeTabID)
+}
+
+/// The text `tbd panel list` prints for `result`: each tab's lines with a
+/// blank line between tabs, or a note when there is no tab.
+func panelListLines(_ result: PanelGetResult) -> [String] {
+    guard !result.tabs.isEmpty else { return ["No tabs found."] }
+    var lines: [String] = []
+    for (index, tab) in result.tabs.enumerated() {
+        if index > 0 { lines.append("") }
+        lines.append(contentsOf: tabLines(tab, activeTabID: result.activeTabID))
+    }
+    return lines
 }
 
 // MARK: - Arrange verbs
