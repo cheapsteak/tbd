@@ -21,10 +21,10 @@ legacy `LayoutNode` tree, and `AppState.handleDelta` drops
 `panelSurfaceChanged` in its `default: break`. An agent that runs
 `tbd panel open` commits a change the user never sees.
 
-The model the daemon owns also carries a design that no longer fits. Spec C
-kept a free-form split tree: any panel can split on any edge, nested to any
-depth, with a ratio list per split. That freedom came from a time when TBD was
-shaped like tmux. In use, it causes two problems:
+Spec C's model is a free-form split tree: any panel can split on any edge,
+nested to any depth, with a ratio list per split. That freedom suits a
+terminal multiplexer, where the user arranges panes by hand; TBD's panels are
+viewers beside an agent's terminal, and there it causes two problems:
 
 - **Files and transcripts fight over the same slot.** The transcript button
   takes over a file viewer, and a file link clicked inside a transcript takes
@@ -404,8 +404,8 @@ shared with agents (experimental)", through a new `config.setPanelTabsEnabled`
 RPC; `tbd config` gains the matching key. It turns on the store, the tab sync,
 app rendering and agent control together.
 
-Retired in the same change, through the column-retire checklist in
-`Sources/TBDDaemon/Database/CLAUDE.md` (one epoch bump): `config.daemon_panel_surface_enabled`,
+The one flag replaces three columns, retired through the column-retire
+checklist in `Sources/TBDDaemon/Database/CLAUDE.md` (one epoch bump): `config.daemon_panel_surface_enabled`,
 `config.agent_panel_control_enabled`, and `worktree.panel_surface_imported_at`.
 The shadow comparator (`PanelShadowCompare.swift`) is deleted: it compared the
 legacy tree against the daemon's, and a tabbed region cannot be compared with a
@@ -620,7 +620,8 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   agents pick edges and shares, and lets files and transcripts fight over one
   slot.
 - **Express the new layout as a limited split tree.** Less churn, but the types
-  would keep anchors, edges and ratio lists that the layout no longer has.
+  would carry anchors, edges and ratio lists that the fixed layout does not
+  have.
 - **Adapt the daemon surface into the legacy `LayoutNode` and reuse
   `SplitLayoutView`.** The legacy tree has a terminal case in every pane, which
   the new model forbids outside the primary, and its synchronous `@Binding`
