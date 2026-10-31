@@ -416,6 +416,38 @@ struct PanelCoordinatorTests {
         #expect(stored?.side.panels.count == 2)
     }
 
+    /// An operation ID already applied to one tab, sent again for another, is
+    /// a caller bug: it neither replays the first tab's result nor applies to
+    /// the second tab.
+    @Test func reusedOperationIDForAnotherTabIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let firstTab = try await seedTab(db, worktreeID: wtID)
+        let secondTab = try await seedTab(db, worktreeID: wtID, position: 1)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let opID = UUID()
+
+        let applied = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: firstTab.id, operationID: opID,
+            .open(content: Self.file("/b.txt"), newPanel: true)))
+        #expect(applied.replayed == false)
+        #expect(recorder.count == 1)
+
+        let reused = envelope(
+            worktreeID: wtID, tabID: secondTab.id, operationID: opID,
+            .open(content: Self.file("/c.txt"), newPanel: true))
+        await #expect(throws: PanelCoordinatorError.operationIDReused(opID)) {
+            _ = try await coordinator.apply(reused)
+        }
+        #expect(recorder.count == 1, "a refused operation broadcasts nothing")
+        #expect(try await db.panelSurface.surface(tabID: secondTab.id) == secondTab)
+        #expect(try await db.panelSurface.surface(tabID: firstTab.id) == applied.tab)
+        #expect(try await db.panelSurface.receipt(operationID: opID) == applied,
+                "the first tab's receipt is untouched")
+    }
+
     // MARK: - tabNotFound
 
     @Test func missingTabIsTabNotFound() async throws {

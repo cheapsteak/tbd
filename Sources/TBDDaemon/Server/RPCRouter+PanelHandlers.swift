@@ -29,8 +29,8 @@ extension RPCRouter {
             return RPCResponse(error: panelTabsDisabledError)
         }
         // Every other `PanelCoordinatorError` case (tabNotFound, staleTarget,
-        // invalidResource, operation) has no stable-string requirement — it
-        // propagates to `RPCRouter.handle`'s generic catch.
+        // invalidResource, operation, operationIDReused) has no stable-string
+        // requirement — it propagates to `RPCRouter.handle`'s generic catch.
     }
 
     /// Imports, re-parents, updates and deletes the worktree's surfaces to

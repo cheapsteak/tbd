@@ -447,9 +447,48 @@ public struct PanelSurfaceStore: Sendable {
     public enum ApplyOutcome: Sendable, Equatable {
         /// A fresh commit — the reducer ran and its result was persisted.
         case applied(PanelApplyResult)
-        /// `operationID` already had a receipt — the stored result is
-        /// replayed, nothing was re-applied.
+        /// `operationID` already had a receipt for this tab — the stored
+        /// result is replayed, nothing was re-applied.
         case replayed(PanelApplyResult)
+        /// `operationID` already had a receipt for another tab: the caller
+        /// reused an operation ID. Nothing was applied, and the other tab's
+        /// receipt is untouched.
+        case operationIDReused
+    }
+
+    /// What `operationID`'s receipt decides for an operation on `tabID`,
+    /// against an open transaction: `.replayed` with the stored result when
+    /// the receipt is this tab's, `.operationIDReused` when it is another
+    /// tab's, and nil when there is no receipt, or this tab's receipt holds a
+    /// result that cannot be read, which the operation then replaces by
+    /// applying anew. Never `.applied`.
+    ///
+    /// Only the tab is compared, not the worktree. Tab IDs are global, and a
+    /// tab's receipts move with it when a sync re-parents it or a scratch
+    /// promote moves it, so a retry that still names the worktree the tab
+    /// left replays that tab's own result.
+    private static func replayOutcome(
+        operationID: UUID, tabID: UUID, in db: GRDB.Database
+    ) throws -> ApplyOutcome? {
+        guard let existing = try PanelOperationReceiptRecord.fetchOne(db, key: operationID.uuidString) else {
+            return nil
+        }
+        guard UUID(uuidString: existing.tabID) == tabID else {
+            return .operationIDReused
+        }
+        guard let prior = decodeJSON(PanelApplyResult.self, from: existing.result) else {
+            return nil
+        }
+        return .replayed(prior)
+    }
+
+    /// The idempotency check `applyReducing` makes first, as a read on its
+    /// own, for a caller's fast path: `.replayed`, `.operationIDReused`, or
+    /// nil when the operation would apply. Never `.applied`.
+    public func replayOutcome(operationID: UUID, tabID: UUID) async throws -> ApplyOutcome? {
+        try await writer.read { db in
+            try Self.replayOutcome(operationID: operationID, tabID: tabID, in: db)
+        }
     }
 
     /// Transactional apply: idempotency check, surface load, reducer run, and
@@ -467,9 +506,11 @@ public struct PanelSurfaceStore: Sendable {
     /// `reduce` is the pure synchronous shared reducer plus whatever error
     /// mapping the caller needs. Returns nil when the tab has no readable
     /// surface under `worktreeID` (the caller maps that to its not-found
-    /// error). The reduced surface is stored at the revision counter's next
-    /// value, whatever revision the reducer gave it. The row keeps its
-    /// position; the receipt stores the result.
+    /// error), and `.operationIDReused` without running `reduce` when
+    /// `operationID`'s receipt is another tab's. The reduced surface is
+    /// stored at the revision counter's next value, whatever revision the
+    /// reducer gave it. The row keeps its position; the receipt stores the
+    /// result.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
         reduce: @Sendable (WorkspaceTabSurface) throws -> WorkspaceTabSurface
@@ -477,10 +518,10 @@ public struct PanelSurfaceStore: Sendable {
         try await writer.write { db -> ApplyOutcome? in
             // Idempotency, authoritative under concurrency: a receipt committed
             // by a racing duplicate is visible here (same write lock), so the
-            // second caller replays instead of double-applying.
-            if let existing = try PanelOperationReceiptRecord.fetchOne(db, key: operationID.uuidString),
-               let prior = decodeJSON(PanelApplyResult.self, from: existing.result) {
-                return .replayed(prior)
+            // second caller replays instead of double-applying, and a reused
+            // ID for another tab is refused here too.
+            if let prior = try Self.replayOutcome(operationID: operationID, tabID: tabID, in: db) {
+                return prior
             }
 
             guard let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabID.uuidString),

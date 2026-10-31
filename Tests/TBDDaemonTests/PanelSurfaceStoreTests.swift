@@ -260,6 +260,41 @@ struct PanelSurfaceStoreTests {
         #expect(stored?.side.collapsed == true)
     }
 
+    /// The in-transaction check refuses an operation ID whose receipt is
+    /// another tab's, without running the reducer or touching that receipt.
+    @Test func applyReducingRefusesAnOperationIDReusedForAnotherTab() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let seeded = try await seed(
+            db, worktreeID: wtID, [makeSurface(worktreeID: wtID), makeSurface(worktreeID: wtID)])
+        let firstTab = seeded[0]
+        let secondTab = seeded[1]
+        let operationID = UUID()
+        let firstOutcome = try await db.panelSurface.applyReducing(
+            operationID: operationID, tabID: firstTab.id, worktreeID: wtID, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+        }
+        guard case .applied(let applied)? = firstOutcome else {
+            Issue.record("expected .applied, got \(String(describing: firstOutcome))")
+            return
+        }
+
+        let reused = try await db.panelSurface.applyReducing(
+            operationID: operationID, tabID: secondTab.id, worktreeID: wtID, now: Date()
+        ) { _ in
+            throw ReduceMustNotRun()
+        }
+
+        #expect(reused == .operationIDReused)
+        #expect(try await db.panelSurface.replayOutcome(operationID: operationID, tabID: secondTab.id)
+                == .operationIDReused)
+        #expect(try await db.panelSurface.replayOutcome(operationID: operationID, tabID: firstTab.id)
+                == .replayed(applied))
+        #expect(try await db.panelSurface.surface(tabID: secondTab.id) == secondTab)
+        #expect(try await db.panelSurface.receipt(operationID: operationID) == applied)
+    }
+
     @Test func applyReducingReturnsNilForUnknownTabOrOtherWorktree() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)

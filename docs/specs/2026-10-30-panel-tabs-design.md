@@ -242,8 +242,9 @@ zero.
 - `panel_history` keeps one row per panel. The store joins histories into
   `ViewerPanel.history` when it reads a surface and splits them out when it
   writes one, inside the same transaction.
-- `panel_operation_receipt` keeps idempotent replay unchanged; its stored
-  result is a v2 `PanelApplyResult`.
+- `panel_operation_receipt` keeps idempotent replay, for the tab the receipt
+  names (see "Coordinator and gating"); its stored result is a v2
+  `PanelApplyResult`.
 
 `PanelSurfaceStore.applyReducing` keeps its shape: load, reduce and persist
 inside one write transaction, so concurrent applies to one tab cannot lose an
@@ -255,6 +256,14 @@ update.
 resource-existence check for `open` and `navigate`, reduce, persist, broadcast.
 The gate reads one flag, `panel_tabs_enabled`, for every mutating origin, app
 and agent alike. `panel.get` stays ungated.
+
+A receipt replays only for the tab it names. An operation ID whose receipt
+names another tab is refused with `operationIDReused` and applies nothing:
+reusing an ID is a caller bug, a replay would answer with the other tab's
+result, and applying anew would overwrite that tab's receipt. The worktree is
+not compared. Tab IDs are global and a tab's receipts move with it when a sync
+re-parents it or a scratch promote moves it, so a retry that still names the
+worktree the tab left replays that tab's own result.
 
 ### Tab sync
 

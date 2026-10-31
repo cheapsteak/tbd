@@ -19,6 +19,11 @@ public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
     case invalidResource(String)
     /// The reducer rejected the operation against current state.
     case operation(PanelOperationError)
+    /// The envelope's `operationID` already has a receipt for another tab.
+    /// Reusing an operation ID is a caller bug: a replay would answer with
+    /// the other tab's result, and applying anew would overwrite its receipt,
+    /// so nothing is applied.
+    case operationIDReused(UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -33,6 +38,9 @@ public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
             return "the operation referenced a resource that does not exist in this worktree: \(detail)"
         case .operation(let underlying):
             return "the panel operation was rejected: " + (underlying.errorDescription ?? "\(underlying)")
+        case .operationIDReused(let operationID):
+            return "operation ID \(operationID.uuidString) was already applied to another panel tab; "
+                + "each operation needs a fresh ID"
         }
     }
 }
@@ -86,13 +94,15 @@ public actor PanelCoordinator {
         // 1. Gating: one flag for every origin. `origin` is diagnostics only.
         try await requireEnabled()
 
-        // 2. Idempotency fast path: a prior committed result replays verbatim
-        // — no re-application, no re-persist, no broadcast, and no resource
-        // check below. The authoritative check also runs inside
+        // 2. Idempotency fast path: a prior committed result for this tab
+        // replays verbatim — no re-application, no re-persist, no broadcast,
+        // and no resource check below — and a receipt for another tab refuses
+        // the reused ID. The authoritative check also runs inside
         // `applyReducing`'s transaction to cover a concurrent duplicate; this
         // early read handles the common reconnect/retry replay.
-        if let priorResult = try await db.panelSurface.receipt(operationID: envelope.operationID) {
-            return PanelApplyResult(tab: priorResult.tab, replayed: true)
+        if let prior = try await db.panelSurface.replayOutcome(
+            operationID: envelope.operationID, tabID: envelope.tabID) {
+            return try reply(to: prior, for: envelope)
         }
 
         // 3. Resource existence for open/navigate destinations. It reads other
@@ -132,14 +142,24 @@ public actor PanelCoordinator {
             // No readable surface row for this tab under the claimed worktree.
             throw PanelCoordinatorError.tabNotFound(envelope.tabID)
         }
+        return try reply(to: outcome, for: envelope)
+    }
 
+    /// `apply`'s reply to a store outcome. A replay — from the fast path, or
+    /// a concurrent duplicate that committed first — returns the stored
+    /// result without broadcasting; a reused operation ID is refused; and a
+    /// fresh commit is broadcast (step 5), AFTER the commit, never before: a
+    /// thrown reduce or persist rolls the transaction back and never gets
+    /// here.
+    private func reply(
+        to outcome: PanelSurfaceStore.ApplyOutcome, for envelope: PanelOperationEnvelope
+    ) throws -> PanelApplyResult {
         switch outcome {
         case .replayed(let prior):
-            // A concurrent duplicate committed first; return its result, no broadcast.
             return PanelApplyResult(tab: prior.tab, replayed: true)
+        case .operationIDReused:
+            throw PanelCoordinatorError.operationIDReused(envelope.operationID)
         case .applied(let result):
-            // 5. Broadcast AFTER commit, never before: a thrown reduce or
-            // persist rolls the transaction back and returns before this.
             broadcast(.panelSurfaceChanged(PanelSurfaceDelta(
                 worktreeID: envelope.worktreeID,
                 tabs: [result.tab],
