@@ -580,10 +580,13 @@ extension SidebarOutlineController: SidebarMenuHost {
 
 /// The needs-auth popover lets go of itself once it closes.
 extension SidebarOutlineController: NSPopoverDelegate {
+    /// Only the closed popover's identity crosses into the main-actor
+    /// closure: `Notification` is not `Sendable`.
     nonisolated func popoverDidClose(_ notification: Notification) {
+        let closedID = (notification.object as AnyObject?).map(ObjectIdentifier.init)
         MainActor.assumeIsolated {
-            if let popover = notification.object as? NSPopover, popover === authPopover {
-                authPopover = nil
+            if let closedID, let authPopover, ObjectIdentifier(authPopover) == closedID {
+                self.authPopover = nil
             }
         }
     }
