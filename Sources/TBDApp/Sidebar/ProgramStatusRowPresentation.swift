@@ -56,10 +56,11 @@ enum ProgramStatusRowPresentation {
         return oscTooltip
     }
 
-    /// The label a terminal goes by in the tooltip.
+    /// The label a terminal goes by in the tooltip: its own label, else its
+    /// agent's name.
     static func tooltipLabel(for terminal: TBDShared.Terminal) -> String {
         if let label = terminal.label, !label.isEmpty { return label }
-        return "Claude"
+        return terminal.isCodexTerminal ? TerminalLabel.codex : "Claude"
     }
 
     /// The tooltip text, one block per OSC-authoritative terminal:

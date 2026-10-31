@@ -12,9 +12,10 @@ extension AppState {
     /// Whether a panel on `transport` should answer the OSC 7501 probe: only a
     /// pty-holder panel does, and a tmux panel never does. The same rule the
     /// daemon's headless reader applies, so the answer never depends on which
-    /// reader owns the pty when Claude asks. Deliberately blind to the agent
-    /// kind: answering for a non-Claude session is harmless, because the
-    /// store accepts reports only from Claude sessions.
+    /// reader owns the pty when the agent asks. Deliberately blind to the
+    /// agent kind: answering for a shell is harmless, because the store
+    /// accepts reports only from an agent session, and Codex reports without
+    /// asking.
     nonisolated static func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
         transport == .holder
     }
@@ -26,11 +27,12 @@ extension AppState {
     }
 
     /// Forward one raw OSC 7501 report (the data after `7501;`) read off this
-    /// terminal's live output, when the cached row is a holder Claude
-    /// session — the store filters to Claude again, so this only saves an
-    /// RPC. Re-checked here because the row can change between the parse and
-    /// this main-queue turn. The daemon parses and validates; the app only
-    /// carries the bytes, in order.
+    /// terminal's live output, when the cached row is a holder Claude or
+    /// Codex session — the store filters by agent again, and checks the
+    /// report's `app` against it, so this only saves an RPC. Re-checked here
+    /// because the row can change between the parse and this main-queue turn.
+    /// The daemon parses and validates; the app only carries the bytes, in
+    /// order.
     func forwardProgramStatusReport(terminalID: UUID, payload: [UInt8], observedAt: Date) {
         guard let terminal = programStatusTerminal(terminalID),
               Self.isProgramStatusEligible(terminal) else { return }
@@ -47,11 +49,12 @@ extension AppState {
     }
 
     /// The same eligibility rule the daemon's `ProgramStatusStore` applies:
-    /// holder transport, and Claude (an explicit `.claude` kind, or a legacy
-    /// row with no kind that is not Codex).
+    /// holder transport, and an agent that reports — Claude or Codex, by
+    /// `ProgramStatusProtocol.expectedApp(for:)`, which reads a legacy row
+    /// with no kind as Codex when its label says so and Claude otherwise.
     nonisolated static func isProgramStatusEligible(_ terminal: Terminal) -> Bool {
         guard terminal.transport == .holder else { return false }
-        return terminal.kind == .claude || (terminal.kind == nil && !terminal.isCodexTerminal)
+        return ProgramStatusProtocol.expectedApp(for: terminal) != nil
     }
 
     private func programStatusTerminal(_ terminalID: UUID) -> Terminal? {

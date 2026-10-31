@@ -358,7 +358,7 @@ func isPromptFreeResumeInvocation(_ command: String, forkSession: Bool) -> Bool 
     return invocation.range(of: permitted, options: .regularExpression) != nil
 }
 
-/// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
+/// A single-quoted word as `shellEscape` actually emits
 /// it: an apostrophe inside the value closes the quote, escapes the
 /// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
 /// match a legitimate command whose display name contains one. The guard

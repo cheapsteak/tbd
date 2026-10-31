@@ -64,7 +64,7 @@ final class ModChannelServer: Sendable {
                 }
             }
 
-        let boundFD = try SocketServer.bindListeningSocket(at: socketPath)
+        let boundFD = try bindListeningSocket(at: socketPath)
         // Before NIO listens, so nothing can connect at a wider mode. A socket
         // left at the umask's mode is not served at all.
         guard chmod(socketPath, 0o600) == 0 else {

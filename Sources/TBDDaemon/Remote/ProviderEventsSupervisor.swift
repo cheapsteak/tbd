@@ -10,7 +10,7 @@ private let remoteLogger = Logger(subsystem: "com.tbd.daemon", category: "remote
 /// thread synchronously until the child exits. Calling that from an actor
 /// method blocks the actor's executor for the child's full lifetime — the
 /// exact starvation class `BoundedProcessRunner`'s dedicated watchdog thread
-/// (see `Sources/TBDDaemon/Tmux/BoundedProcessRunner.swift`) exists to avoid
+/// (see `Sources/TBDDaemon/Process/BoundedProcessRunner.swift`) exists to avoid
 /// elsewhere in this codebase. `terminationHandler` fires asynchronously off
 /// a Foundation-managed queue regardless of whether `waitUntilExit` is ever
 /// called, so awaiting this gate observes the same event without blocking.

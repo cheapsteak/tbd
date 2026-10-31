@@ -463,7 +463,7 @@ struct CodexActivityReconciliationTests {
             "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
         let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
         #expect(launchRecorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
         launchRecorder.releaseCodexLaunch()
 
         let recreateResponse = await recreateTask.value

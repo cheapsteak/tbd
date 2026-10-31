@@ -224,12 +224,12 @@ run_sweep() {
 # the failure mode this exists to prevent — and on a script that deletes refs on
 # a shared remote, the guard rotting silently is the expensive outcome.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
 trap 'rm -rf "$MUTANT_DIR"' EXIT
 mutant_of() {
   local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SWEEP" > "$out"
   echo "$out"
 }

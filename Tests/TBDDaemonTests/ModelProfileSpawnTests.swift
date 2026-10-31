@@ -1434,7 +1434,7 @@ struct ModelProfileSpawnTests {
             "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
         let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
         #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
 
         let gapEvent = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,

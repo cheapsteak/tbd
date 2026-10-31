@@ -555,7 +555,7 @@ enum CodexSpawnCommandBuilder {
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
-        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+        return "\(command) \(shellEscape(initialPrompt))"
     }
 
     static func build(
@@ -575,7 +575,7 @@ enum CodexSpawnCommandBuilder {
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
-        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+        return "\(command) \(shellEscape(initialPrompt))"
     }
 
     /// The execution-mode flags every TBD-launched Codex carries. Hook trust is
@@ -598,7 +598,7 @@ enum CodexSpawnCommandBuilder {
         model: String? = nil,
         disabledFeatures: [String] = []
     ) -> String {
-        let executable = SystemPromptBuilder.shellEscape(executablePath)
+        let executable = shellEscape(executablePath)
         // A per-terminal model rides Codex's own `-c key=value` override, which
         // layers over the `tbd` profile for this process only. The whole
         // assignment is escaped as one argument so the identifier stays opaque.
@@ -610,7 +610,7 @@ enum CodexSpawnCommandBuilder {
             .joined()
         let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride)\(featureOverrides) \(executionModeFlags)"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
-        return "\(base) resume \(SystemPromptBuilder.shellEscape(resumeThreadID))"
+        return "\(base) resume \(shellEscape(resumeThreadID))"
     }
 
     /// The shell-escaped `model="<id>"` assignment for Codex's `-c`, or nil
@@ -620,7 +620,7 @@ enum CodexSpawnCommandBuilder {
     /// string keeps every identifier a string without TBD interpreting it.
     static func modelOverrideArgument(_ model: String?) -> String? {
         guard let model, !model.isEmpty else { return nil }
-        return SystemPromptBuilder.shellEscape("model=\(tomlBasicString(model))")
+        return shellEscape("model=\(tomlBasicString(model))")
     }
 
     static func tomlBasicString(_ value: String) -> String {

@@ -68,7 +68,7 @@ public enum GitPollCadence {
 /// converges to the right cadence as soon as an app is talking to it.
 ///
 /// The timer loops re-evaluate this every `GitPollCadence.pollTick` while
-/// waiting (see `Daemon.sleepThroughGatedInterval`), so a transition takes
+/// waiting (see `sleepThroughGatedInterval`), so a transition takes
 /// effect within ~one tick — no sleep-cancellation plumbing needed.
 public actor AppForegroundState {
     public private(set) var isForeground: Bool

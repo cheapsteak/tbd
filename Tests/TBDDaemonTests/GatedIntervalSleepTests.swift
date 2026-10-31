@@ -25,7 +25,7 @@ import Testing
 //
 // DEFECT UNDER TEST: the gated interval stops being re-evaluated, so a
 // foreground/background transition no longer shortens an in-flight wait.
-// `Daemon.sleepThroughGatedInterval`'s doc comment — and `AppForegroundState`'s,
+// `sleepThroughGatedInterval`'s doc comment — and `AppForegroundState`'s,
 // which cites it — claim that per-tick re-evaluation is what *replaces*
 // sleep-cancellation plumbing. Before this suite, nothing proved it: an
 // implementation that sampled `interval()` once and slept it out whole would
@@ -79,7 +79,7 @@ struct GatedIntervalSleepTests {
         let returned = FireRecorder<Int>()
 
         let waiter = Task {
-            await Daemon.sleepThroughGatedInterval(
+            await sleepThroughGatedInterval(
                 { await probe.next() }, tick: Self.tick, clock: clock)
             await probe.markReturned()
             returned.record(await probe.callCount)
@@ -130,7 +130,7 @@ struct GatedIntervalSleepTests {
         let returned = FireRecorder<Int>()
 
         let waiter = Task {
-            await Daemon.sleepThroughGatedInterval(
+            await sleepThroughGatedInterval(
                 { await probe.next() }, tick: Self.tick, clock: clock)
             await probe.markReturned()
             returned.record(await probe.callCount)
@@ -173,7 +173,7 @@ struct GatedIntervalSleepTests {
         let returned = FireRecorder<Int>()
 
         let waiter = Task {
-            await Daemon.sleepThroughGatedInterval(
+            await sleepThroughGatedInterval(
                 { await probe.next() }, tick: Self.tick, clock: clock)
             await probe.markReturned()
             returned.record(await probe.callCount)

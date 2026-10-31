@@ -30,6 +30,9 @@ struct RemoteSectionView: View {
     /// See `AppState.sidebarWorkflowGroupsKey`.
     @AppStorage(AppState.sidebarWorkflowGroupsKey)
     private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
+    /// See `AppState.sidebarCollapseEndedSessionsKey`.
+    @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
+    private var collapseEnded: Bool = AppState.sidebarCollapseEndedSessionsDefault
 
     var body: some View {
         let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
@@ -57,10 +60,19 @@ struct RemoteSectionView: View {
     /// its header; grouped, they file under Remote and Exited disclosures.
     @ViewBuilder
     private func providerSessionGroups(_ provider: String) -> some View {
-        let layout = appState.sidebarProviderLayout(provider: provider, grouped: workflowGroups)
+        let layout = appState.sidebarProviderLayout(
+            provider: provider, grouped: workflowGroups, collapseEnded: collapseEnded)
         let remoteID = SidebarGroupID(owner: .provider(provider), kind: .remote)
         let exitedID = SidebarGroupID(owner: .provider(provider), kind: .exited)
         sessionRows(layout.inlineSessions, depth: 0)
+        if let ended = layout.ended {
+            let endedID = SidebarGroupID(owner: .provider(provider), kind: .ended)
+            SidebarGroupHeader(id: endedID, title: "Ended", summary: ended.summary)
+                .listRowInsets(childInsets)
+            if appState.expandedSidebarGroups.contains(endedID) {
+                sessionRows(ended.ended, depth: 1)
+            }
+        }
         if let groups = layout.remoteGroups {
             SidebarGroupHeader(id: remoteID, title: "Remote", summary: groups.summary)
                 .listRowInsets(childInsets)
