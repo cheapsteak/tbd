@@ -363,6 +363,248 @@ struct SidebarOutlineControllerTests {
         #expect(h.cellText(.worktree(keep.id)) == "renamed")
     }
 
+    // MARK: Selection, header actions, expansion and reveal
+
+    @Test func pureRemoteSelectionRoutesToSelectRemoteSession() throws {
+        let h = OutlineHarness("pureRemote")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = Self.row("work", repo)
+        let lane = SidebarGroupFixtures.session("lane")
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.state.remoteSessions = [lane]
+        h.state.selectedWorktreeIDs = [row.id]
+        h.mount()
+        try #require(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(row.id))))
+
+        let laneRow = h.row(.remoteSession(lane.id))
+        try #require(laneRow >= 0)
+        h.outline.selectRowIndexes(IndexSet(integer: laneRow), byExtendingSelection: false)
+
+        // `selectedWorktreeIDs`' didSet stripped the session's ID and routed
+        // the pure-remote selection through `selectRemoteSession`.
+        #expect(h.controller.appStateSelectionWriteCount == 1)
+        #expect(h.state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "lane"))
+        #expect(h.state.selectedWorktreeIDs.isEmpty)
+        // The session's row stays selected, now and after the rebuild.
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: laneRow))
+        h.controller.flushPendingRebuild()
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.remoteSession(lane.id))))
+        #expect(h.controller.appStateSelectionWriteCount == 1)
+    }
+
+    @Test func modelSelectionNotEchoedDuringApply() throws {
+        let h = OutlineHarness("noEcho")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = Self.row("first", repo, order: 0)
+        let second = Self.row("second", repo, order: 1)
+        let third = Self.row("third", repo, order: 2)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [first, second, third]]
+        h.state.selectedWorktreeIDs = [first.id]
+        h.mount()
+        try #require(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(first.id))))
+
+        // One batch: the selected row goes, and AppState selects another. The
+        // outline drops the removed row from its selection mid-apply and says
+        // so; written back, that empty selection would clobber `third`.
+        h.state.worktrees[repo.id]?.removeAll { $0.id == first.id }
+        h.state.selectedWorktreeIDs = [third.id]
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.appStateSelectionWriteCount == 0, "The apply wrote the outline's interim selection back")
+        #expect(h.state.selectedWorktreeIDs == [third.id])
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(third.id))))
+    }
+
+    /// Review Focus 2: a selected row disappears during an apply.
+    @Test func selectedRowArchivedDuringApplyDropsFromSelection() throws {
+        let h = OutlineHarness("vanished")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = Self.row("first", repo, order: 0)
+        let second = Self.row("second", repo, order: 1)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [first, second]]
+        h.state.selectedWorktreeIDs = [first.id, second.id]
+        h.mount()
+        try #require(h.outline.selectedRowIndexes.count == 2)
+
+        // The daemon drops `first` without anything pruning the selection.
+        h.state.worktrees[repo.id]?.removeAll { $0.id == first.id }
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.item(for: .worktree(first.id)) == nil)
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))))
+        #expect(h.state.selectedWorktreeIDs == [second.id])
+        #expect(h.controller.appStateSelectionWriteCount == 1, "AppState must be told exactly once")
+        // Converged: the rebuild that write schedules writes nothing more.
+        h.controller.flushPendingRebuild()
+        #expect(h.controller.appStateSelectionWriteCount == 1)
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))))
+
+        // A selected row that is only out of view stays selected, as in the List.
+        h.state.repos[0].expanded = false
+        h.controller.flushPendingRebuild()
+        #expect(!h.shownIDs.contains(.worktree(second.id)))
+        #expect(h.state.selectedWorktreeIDs == [second.id])
+        #expect(h.controller.appStateSelectionWriteCount == 1)
+    }
+
+    @Test func headerClickSelectsRepo() throws {
+        let h = OutlineHarness("headerClick")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarCollapseEndedSessionsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = Self.row("work", repo)
+        let done = SidebarGroupFixtures.session("done", state: .exited, repoID: repo.id)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.state.remoteSessions = [done]
+        h.state.selectedWorktreeIDs = [row.id]
+        h.mount()
+
+        #expect(h.outline.target === h.controller)
+        #expect(h.outline.action == #selector(SidebarOutlineController.outlineClicked(_:)))
+        let header = SidebarNodeID.repoHeader(repo.id)
+        let headerItem = try #require(h.controller.item(for: header))
+        let rowItem = try #require(h.controller.item(for: .worktree(row.id)))
+        #expect(!h.controller.outlineView(h.outline, shouldSelectItem: headerItem), "Headers take no selection")
+        #expect(h.controller.outlineView(h.outline, shouldSelectItem: rowItem))
+
+        h.controller.handleClick(row: h.row(header))
+        #expect(h.state.selectedRepoID == repo.id)
+        #expect(h.state.selectedWorktreeIDs.isEmpty)
+        h.controller.flushPendingRebuild()
+        #expect(h.outline.selectedRowIndexes.isEmpty, "Selecting the repo clears the row selection")
+        guard case .repoHeader(let model)? = h.controller.tree.node(header)?.kind else {
+            Issue.record("The repo header is missing")
+            return
+        }
+        #expect(model.isSelected, "The selected repo's header draws selected")
+
+        // Each other header runs its own action.
+        h.controller.handleClick(row: h.row(.providerHeader("acme")))
+        #expect(h.state.selectedRemoteProvider == "acme")
+        h.controller.handleClick(row: h.row(.scratchHeader))
+        #expect(h.state.selectedScratchSection)
+        let ended = SidebarGroupID(owner: .repository(repo.id), kind: .ended)
+        try #require(h.row(.group(ended)) >= 0, "The fixture must show an Ended disclosure")
+        h.controller.handleClick(row: h.row(.group(ended)))
+        #expect(h.state.expandedSidebarGroups.contains(ended))
+        h.controller.flushPendingRebuild()
+        #expect(h.shownIDs.contains(.remoteSession(done.id)), "The opened group shows its rows")
+    }
+
+    @Test func chevronClickPersistsRepoExpanded() async throws {
+        let h = OutlineHarness("chevron")
+        defer { h.tearDown() }
+        // Before the title the chevron is always shown, so there is a button
+        // to click without a pointer over the header.
+        h.defaults.set(true, forKey: AppState.chevronBeforeProjectNameKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let row = Self.row("work", repo)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [row]]
+        h.mount()
+
+        let header = SidebarNodeID.repoHeader(repo.id)
+        let headerItem = try #require(h.controller.item(for: header))
+        try #require(h.outline.isItemExpanded(headerItem))
+        let cell = try #require(
+            h.outline.view(atColumn: 0, row: h.row(header), makeIfNecessary: true) as? SectionHeaderCell)
+        try #require(!cell.chevronButton.isHidden)
+        #expect(cell.chevronButton.target === h.controller)
+
+        cell.chevronButton.performClick(nil)
+        let state = h.state
+        let persisted = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { state.repos.first?.expanded == false }
+        }
+        #expect(persisted == .satisfied, "The chevron never wrote Repo.expanded")
+        h.controller.flushPendingRebuild()
+        #expect(!h.outline.isItemExpanded(headerItem))
+        #expect(!h.shownIDs.contains(.worktree(row.id)))
+
+        // The Scratch section's chevron writes its @AppStorage key.
+        try #require(h.shownIDs.contains(.scratchPrompt))
+        let scratchCell = try #require(
+            h.outline.view(atColumn: 0, row: h.row(.scratchHeader), makeIfNecessary: true) as? SectionHeaderCell)
+        scratchCell.chevronButton.performClick(nil)
+        #expect(h.defaults.object(forKey: AppState.scratchSectionExpandedKey) as? Bool == false)
+        h.controller.flushPendingRebuild()
+        #expect(!h.shownIDs.contains(.scratchPrompt))
+    }
+
+    @Test func pendingScrollExpandsRepoThenCentersRow() throws {
+        let h = OutlineHarness("pendingScroll")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme", expanded: false)
+        let rows = (0..<60).map { Self.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.mount(size: NSSize(width: 320, height: 200))
+        let header = SidebarNodeID.repoHeader(repo.id)
+        try #require(h.shownIDs == [header], "The repo must start collapsed")
+
+        let target = rows[30]
+        h.state.navigateToActiveWorktree(target.id)
+        h.controller.flushPendingRebuild()
+
+        let headerItem = try #require(h.controller.item(for: header))
+        #expect(h.outline.isItemExpanded(headerItem), "The target's section expanded in the same pass")
+        #expect(h.state.pendingScrollToWorktreeID == nil, "The scroll request was consumed")
+        let targetRow = h.row(.worktree(target.id))
+        try #require(targetRow >= 0)
+        let rowMid = h.outline.rect(ofRow: targetRow).midY
+        let clipMid = h.clip.bounds.midY
+        #expect(abs(rowMid - clipMid) <= 1, "The target is not centred: row \(rowMid), clip \(clipMid)")
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: targetRow))
+
+        // A later rebuild leaves the scroll where it is.
+        let settled = h.clip.bounds.minY
+        h.state.devServerRunningWorktreeIDs = [rows[0].id]
+        h.controller.flushPendingRebuild()
+        #expect(abs(h.clip.bounds.minY - settled) < 0.5)
+    }
+
+    @Test func arrowKeyFromRemoteRowMovesSelection() throws {
+        let h = OutlineHarness("arrowKey")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        let one = SidebarGroupFixtures.session("one")
+        let two = SidebarGroupFixtures.session("two")
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.state.remoteSessions = [one, two]
+        h.mount()
+        let oneRow = h.row(.remoteSession(one.id))
+        let twoRow = h.row(.remoteSession(two.id))
+        try #require(oneRow >= 0 && twoRow >= 0 && abs(oneRow - twoRow) == 1)
+        let (upper, lower) = oneRow < twoRow ? (one, two) : (two, one)
+
+        h.state.selectRemoteSession(provider: "acme", sessionID: upper.payload.id)
+        h.controller.flushPendingRebuild()
+        try #require(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.remoteSession(upper.id))),
+                     "A remote selection must rest on its row for the keys to move from it")
+
+        let window = try #require(h.host?.window)
+        window.makeFirstResponder(h.outline)
+        let down = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil,
+            characters: "\u{F701}", charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125))
+        h.outline.keyDown(with: down)
+
+        #expect(h.state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: lower.payload.id))
+        #expect(h.state.selectedWorktreeIDs.isEmpty)
+        #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.remoteSession(lower.id))))
+    }
+
     // MARK: Fixtures
 
     static func row(_ name: String, _ repo: Repo, parent: UUID? = nil, order: Int = 0,

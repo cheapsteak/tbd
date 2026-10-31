@@ -28,6 +28,14 @@ private let outlineLogger = Logger(subsystem: "com.tbd.app", category: "native-s
 /// The outline is the only writer of its own structure and expansion: the
 /// delegate refuses every expand and collapse the controller did not ask for,
 /// so the outline never drifts from the tree the next diff starts from.
+/// Expanded state lives where the SwiftUI sidebar keeps it, and chevron clicks
+/// write it there.
+///
+/// Selection (spec "Selection"): a user's selection goes to
+/// `AppState.selectedWorktreeIDs` through `SidebarSelectionBridge`, whose
+/// `didSet` routes it; every apply ends by selecting the rows `AppState`
+/// names, under a guard that keeps the outline's own notifications from being
+/// echoed back. Each rebuild starts with `SidebarView`'s reveals.
 @MainActor
 final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Why structural changes are being held.
@@ -75,6 +83,30 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// its chevron sits on, and with it the column every title and row uses.
     /// Layout only, so a change reconfigures the cells instead of rebuilding.
     private var chevronBeforeTitle: Bool
+
+    /// True for the whole of an apply, and while the controller mirrors
+    /// `AppState`'s selection: the outline's selection notifications then are
+    /// the controller's own doing and are not written back.
+    private var isApplyingModelSelection = false
+    /// Writes the outline made to `AppState.selectedWorktreeIDs`.
+    private(set) var appStateSelectionWriteCount = 0
+
+    /// `SidebarView`'s reveal state, mirrored: the selection reveal's last
+    /// value and whether the first one has run, the Ended reveal's last key,
+    /// and a pending scroll target taken from `AppState` for this apply.
+    private var lastSelectionReveal: SidebarGroupReveal?
+    private var hasSeenSelectionReveal = false
+    private var hasRevealedInitialSelection = false
+    private var lastEndedRevealKey: EndedRevealKey?
+    private var hasSeenEndedRevealKey = false
+    private var pendingScrollTarget: UUID?
+
+    /// What re-evaluates the Ended reveal: a new selection event, or the
+    /// option turning on. `SidebarView.EndedRevealKey`'s twin.
+    private struct EndedRevealKey: Equatable {
+        let generation: UInt64
+        let selection: RemoteSessionSelection?
+    }
 
     /// Whether each unpromoted scratch row's directory exists, read on a
     /// background task so no rebuild touches the disk. A path not yet probed
@@ -153,6 +185,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         outline.backgroundColor = .clear
         outline.dataSource = self
         outline.delegate = self
+        // A click on a header runs the header's action; rows select natively.
+        outline.target = self
+        outline.action = #selector(outlineClicked(_:))
 
         scrollView.documentView = outline
         scrollView.hasVerticalScroller = true
@@ -167,6 +202,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         super.viewDidLoad()
         // Never load inside the SwiftUI update pass that mounted the view.
         scheduleRebuild()
+    }
+
+    /// The one column spans the sidebar's width, so cells and row views do.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        outline.sizeLastColumnToFit()
     }
 
     // MARK: Public surface
@@ -230,8 +271,14 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         var scratchPaths: Set<String> = []
         var options = self.options
         let latest: SidebarTree = withObservationTracking { () -> SidebarTree in
+            // Reveals write `AppState` before the tracking is installed, so
+            // their writes schedule nothing, and the build below sees them.
+            self.performReveals(options: SidebarBuildOptions(defaults: store))
             options = SidebarBuildOptions(defaults: store)
             scratchPaths = SidebarOutlineController.unpromotedScratchPaths(state.scratchWorktrees)
+            // The selection the apply mirrors into the outline.
+            _ = state.selectedWorktreeIDs
+            _ = state.selectedRemoteSession
             return SidebarTreeBuilder.build(state, options: options, directoryExists: { exists[$0] ?? true })
         } onChange: { [weak self] in
             guard let self else { return }
@@ -275,13 +322,25 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
 
     // MARK: Apply
 
+    /// Applies `latest`, then mirrors `AppState`'s selection into the outline.
+    /// The selection guard covers the whole apply, through `endUpdates`: the
+    /// selection changes the outline posts while rows move are not echoed.
     private func apply(_ latest: SidebarTree) {
         let interval = Self.signposter.beginInterval("apply")
         defer { Self.signposter.endInterval("apply", interval) }
-        guard hasLoaded else {
+        isApplyingModelSelection = true
+        if hasLoaded {
+            applyUpdate(to: latest)
+        } else {
             loadFully(latest)
-            return
         }
+        applyModelSelection()
+        scrollPendingTargetToCenter()
+        isApplyingModelSelection = false
+        reconcileVanishedSelection()
+    }
+
+    private func applyUpdate(to latest: SidebarTree) {
         let target = isHoldingStructure ? Self.content(of: latest, inStructureOf: tree) : latest
         let update = diffForTesting?(tree, target) ?? SidebarTreeDiff.update(from: tree, to: target)
         let anchor = captureScrollAnchor()
@@ -468,6 +527,177 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         scrollView.reflectScrolledClipView(clip)
     }
 
+    // MARK: Selection
+
+    /// Selects the rows `AppState` names: its selected worktrees and its
+    /// selected remote session. A row the outline does not show is skipped.
+    private func applyModelSelection() {
+        let remote = appState.selectedRemoteSession.map {
+            RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
+        }
+        let wanted = SidebarSelectionBridge.outlineIDs(
+            selectedWorktreeIDs: appState.selectedWorktreeIDs, selectedRemoteSession: remote)
+        var rows = IndexSet()
+        for id in wanted {
+            guard let item = items.existing(id) else { continue }
+            let row = outline.row(forItem: item)
+            if row >= 0 { rows.insert(row) }
+        }
+        if rows != outline.selectedRowIndexes {
+            outline.selectRowIndexes(rows, byExtendingSelection: false)
+        }
+    }
+
+    /// Tells `AppState`, once, when a selected worktree left the model during
+    /// the apply — the daemon dropped it without `AppState` pruning the
+    /// selection. A row merely out of view (a collapsed section, a filter)
+    /// stays selected, as it does in the `List`.
+    private func reconcileVanishedSelection() {
+        let selected = appState.selectedWorktreeIDs
+        let unshown = selected.filter { !tree.contains(.worktree($0)) }
+        guard !unshown.isEmpty else { return }
+        let known = Set(appState.allWorktrees.map(\.id))
+        let vanished = unshown.filter { !known.contains($0) }
+        guard !vanished.isEmpty else { return }
+        writeSelection(selected.subtracting(vanished))
+    }
+
+    private func writeSelection(_ ids: Set<UUID>) {
+        guard ids != appState.selectedWorktreeIDs else { return }
+        appStateSelectionWriteCount += 1
+        appState.selectedWorktreeIDs = ids
+    }
+
+    // MARK: Header actions and chevrons
+
+    /// The outline's click action: a header runs what the SwiftUI header's tap
+    /// runs. Row clicks select through the outline and need nothing here.
+    @objc func outlineClicked(_ sender: Any?) {
+        handleClick(row: outline.clickedRow)
+    }
+
+    func handleClick(row: Int) {
+        guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem else { return }
+        switch item.id {
+        case .repoHeader(let repoID):
+            appState.selectRepo(id: repoID)
+        case .scratchHeader:
+            appState.selectScratchSection()
+        case .providerHeader(let name):
+            appState.selectRemoteProvider(name)
+        case .group(let groupID):
+            appState.toggleSidebarGroup(groupID)
+        case .scratchPrompt:
+            appState.createScratch()
+        case .worktree, .remoteSession:
+            break
+        }
+    }
+
+    /// A section header's chevron.
+    @objc func chevronClicked(_ sender: NSView) {
+        let row = outline.row(for: sender)
+        guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem else { return }
+        toggleExpansion(of: item.id)
+    }
+
+    /// Flips a section's or group's expanded state where it lives — the repo
+    /// record, the Scratch section's `@AppStorage` key, or
+    /// `expandedSidebarGroups` — and lets the next rebuild apply it. The
+    /// outline's own expansion notifications are never read for this.
+    func toggleExpansion(of id: SidebarNodeID) {
+        switch id {
+        case .repoHeader(let repoID):
+            guard let repo = appState.repos.first(where: { $0.id == repoID }) else { return }
+            let state = appState
+            let expanded = !repo.expanded
+            Task { await state.setRepoExpanded(id: repoID, expanded: expanded) }
+        case .scratchHeader:
+            let expanded = SidebarBuildOptions(defaults: defaults).scratchExpanded
+            defaults.set(!expanded, forKey: AppState.scratchSectionExpandedKey)
+        case .group(let groupID):
+            appState.toggleSidebarGroup(groupID)
+        case .worktree, .remoteSession, .providerHeader, .scratchPrompt:
+            break
+        }
+    }
+
+    /// A missing repo's Locate… link: the SwiftUI header's panel and relocate.
+    @objc func locateClicked(_ sender: NSView) {
+        let row = outline.row(for: sender)
+        guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem,
+              case .repoHeader(let repoID) = item.id,
+              let repo = appState.repos.first(where: { $0.id == repoID }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Select the new location of \(repo.displayName)"
+        panel.prompt = "Relocate"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let state = appState
+        Task { await state.relocateRepo(id: repoID, newPath: url.path) }
+    }
+
+    // MARK: Reveal
+
+    /// `SidebarView`'s three `onChange` handlers, run at the top of every
+    /// rebuild: the pending scroll's reveal, the selection reveal with its
+    /// baseline rule, and the Ended reveal. They call the same `AppState`
+    /// methods, so the two paths reveal alike.
+    private func performReveals(options: SidebarBuildOptions) {
+        let grouped = options.workflowGroups
+        if let target = appState.pendingScrollToWorktreeID {
+            appState.revealSidebarGroups(
+                appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil), grouped: grouped)
+            // Taken now and cleared before the tracking is installed; the
+            // apply that follows scrolls to it.
+            pendingScrollTarget = target
+            appState.pendingScrollToWorktreeID = nil
+        }
+
+        let reveal: SidebarGroupReveal? = grouped ? appState.sidebarSelectionReveal : nil
+        if !hasSeenSelectionReveal || reveal != lastSelectionReveal {
+            // The first evaluation sees the value as both old and new, as
+            // `onChange(of:initial: true)` hands it over.
+            let previous = hasSeenSelectionReveal ? lastSelectionReveal : reveal
+            hasSeenSelectionReveal = true
+            lastSelectionReveal = reveal
+            if let reveal {
+                appState.revealSidebarGroups(
+                    reveal,
+                    previous: SidebarReveal.baseline(
+                        previous: previous, reveal: reveal, hasRevealed: hasRevealedInitialSelection),
+                    grouped: grouped)
+            }
+            hasRevealedInitialSelection = true
+        }
+
+        // Nil, reading nothing, unless the option is on and groups are off.
+        let key: EndedRevealKey? = !grouped && options.collapseEnded
+            ? EndedRevealKey(generation: appState.sidebarSelectionGeneration, selection: appState.selectedRemoteSession)
+            : nil
+        if !hasSeenEndedRevealKey || key != lastEndedRevealKey {
+            hasSeenEndedRevealKey = true
+            lastEndedRevealKey = key
+            if let key {
+                appState.expandedSidebarGroups.formUnion(appState.sidebarEndedRevealGroups(selection: key.selection))
+            }
+        }
+    }
+
+    /// Centres the pending scroll target in the apply that expanded its
+    /// section. A target with no row by then is dropped, as the `List` drops it.
+    private func scrollPendingTargetToCenter() {
+        guard let target = pendingScrollTarget else { return }
+        pendingScrollTarget = nil
+        guard let item = items.existing(.worktree(target)) else { return }
+        let row = outline.row(forItem: item)
+        guard row >= 0 else { return }
+        outline.tile()
+        scroll(toY: outline.rect(ofRow: row).midY - scrollView.contentView.bounds.height / 2)
+    }
+
     // MARK: Scratch directories
 
     private static func unpromotedScratchPaths(_ scratches: [Worktree]) -> Set<String> {
@@ -559,6 +789,24 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         false
     }
 
+    /// Headers run an action from a click instead of taking the selection.
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        guard let item = item as? SidebarItem, item !== Self.orphan else { return false }
+        return SidebarSelectionBridge.isSelectable(item.id)
+    }
+
+    /// A user's selection: written to `AppState.selectedWorktreeIDs` as the
+    /// `List`'s tags would write it, then mirrored straight back, since the
+    /// `didSet` may route it — a remote row's ID never rests in that set.
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !isApplyingModelSelection else { return }
+        let selected = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? SidebarItem)?.id }
+        writeSelection(SidebarSelectionBridge.appStateIDs(for: selected))
+        isApplyingModelSelection = true
+        applyModelSelection()
+        isApplyingModelSelection = false
+    }
+
     // MARK: Cells
 
     private func dequeueCell(for kind: SidebarNodeKind) -> NSTableCellView {
@@ -602,6 +850,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             if case .scratchHeader = kind { cell.style = .scratch } else { cell.style = .repo }
             cell.chevronBeforeTitle = chevronBeforeTitle
             cell.leadingInset = SidebarNativeMetrics.headerContentInset
+            cell.chevronButton.target = self
+            cell.chevronButton.action = #selector(chevronClicked(_:))
+            cell.locateButton.target = self
+            cell.locateButton.action = #selector(locateClicked(_:))
             cell.configure(model)
         case .providerHeader(let model):
             guard let cell = cell as? ProviderHeaderCell else { return }
