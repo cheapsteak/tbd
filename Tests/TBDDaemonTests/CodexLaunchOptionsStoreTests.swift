@@ -60,8 +60,8 @@ struct CodexLaunchOptionsStoreTests {
                 == Self.options)
     }
 
-    /// An unreadable blob must cost only the options, never the row: the
-    /// relaunch then falls back to the default command.
+    /// An unreadable blob must cost only the options, never the row. A
+    /// relaunch reads it strictly instead and refuses (next test).
     @Test func anUnreadableColumnReadsNilWithoutLosingTheRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db)
@@ -75,6 +75,29 @@ struct CodexLaunchOptionsStoreTests {
         let read = try #require(try await db.terminals.get(id: t.id))
         #expect(read.kind == .codex)
         #expect(read.codexLaunchOptions == nil)
+    }
+
+    /// The value may name a dedicated Codex home, so a relaunch must not read
+    /// an unreadable one as "none" and run on the shared home.
+    @Test func theRelaunchReaderRefusesAnUnreadableColumn() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wt = try await makeWorktree(db)
+        let none = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .codex)
+        #expect(try await db.terminals.codexLaunchOptionsForRelaunch(id: none.id) == nil)
+        let guarded = CodexLaunchOptions(codexHome: "/synthetic/home")
+        let some = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.codex, kind: .codex, codexLaunchOptions: guarded)
+        #expect(try await db.terminals.codexLaunchOptionsForRelaunch(id: some.id) == guarded)
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE terminal SET codex_launch_options = 'not json' WHERE id = ?",
+                arguments: [some.id.uuidString])
+        }
+        await #expect(throws: UnreadableCodexLaunchOptions.self) {
+            _ = try await db.terminals.codexLaunchOptionsForRelaunch(id: some.id)
+        }
     }
 
     /// A Codex tab recreated as a plain shell launches no Codex, so it must
