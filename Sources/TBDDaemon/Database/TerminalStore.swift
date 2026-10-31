@@ -296,7 +296,17 @@ public struct ProgramStatusActivityWrite: Sendable, Equatable {
     public let cancelledPendingResume: Bool
 
     /// Whether the write changed anything a reader of the columns sees.
-    public var changed: Bool { stateChanged || reasonChanged || sourceChanged }
+    public var changed: Bool {
+        Self.changesValue(
+            stateChanged: stateChanged, reasonChanged: reasonChanged, sourceChanged: sourceChanged)
+    }
+
+    /// The one rule for what changes the columns' value: the state, the wait
+    /// reason or the source. `applyProgramStatusActivity` decides by it whether
+    /// to write, and `changed` reports it.
+    static func changesValue(stateChanged: Bool, reasonChanged: Bool, sourceChanged: Bool) -> Bool {
+        stateChanged || reasonChanged || sourceChanged
+    }
 }
 
 struct AppliedTerminalSessionStart: Sendable {
@@ -1710,7 +1720,8 @@ public struct TerminalStore: Sendable {
             let stateChanged = previousState != activityState
             let reasonChanged = storedReason != awaitingInputReason
             let sourceChanged = storedSource != source
-            let valueChanged = stateChanged || reasonChanged || sourceChanged
+            let valueChanged = ProgramStatusActivityWrite.changesValue(
+                stateChanged: stateChanged, reasonChanged: reasonChanged, sourceChanged: sourceChanged)
             // Ordered against the stamp whoever wrote it — a report, a park, a
             // wake's reset — so a report older than the value standing can
             // never land over it. A tie is not newer: it is refused unless it
