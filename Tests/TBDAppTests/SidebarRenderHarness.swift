@@ -248,6 +248,10 @@ struct SidebarRenderHarness {
                 host.layout()
             }
             nativeImage = try Self.bitmap(of: host.window, scale: 2)
+            let root = try #require(host.window.contentView)
+            let native = OffscreenHost<EmptyView>.Capture(rep: nativeImage, root: root, scale: 2)
+            try #require(native.luminanceVariance() >= OffscreenHostDefaults.minLuminanceVariance,
+                         "Native sidebar capture was blank")
             let name = "\(label)-native.png"
             try Self.writePNG(nativeImage, to: directory.appendingPathComponent(name))
         }
