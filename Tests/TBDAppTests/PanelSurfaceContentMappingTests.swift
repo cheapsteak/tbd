@@ -85,4 +85,33 @@ struct PanelSurfaceContentMappingTests {
             #expect(Self.panelContent(of: mapped.entries[index]) == history.entries[index])
         }
     }
+
+    @Test("a tab's icon and title for each viewer kind, the same in the tab bar and the side region's strip")
+    func tabAppearanceForEachKind() {
+        let noteID = UUID()
+        let titled: (UUID) -> String? = { $0 == noteID ? "Plan" : nil }
+        let untitled: (UUID) -> String? = { _ in "" }
+        let file = PanelContent.file(FileReference(path: "/repo/src/a.swift"))
+        let web = PanelContent.web(Self.pageURL)
+        let note = PanelContent.note(noteID: noteID)
+        let transcript = PanelContent.transcript(terminalID: UUID())
+
+        #expect(file.kind.tabSystemImage == "doc.text")
+        #expect(web.kind.tabSystemImage == "globe")
+        #expect(note.kind.tabSystemImage == "note.text")
+        #expect(transcript.kind.tabSystemImage == "text.bubble")
+
+        #expect(file.tabTitle(noteTitle: titled, untitledNote: "Note") == "a.swift")
+        #expect(web.tabTitle(noteTitle: titled, untitledNote: "Note") == "example.com")
+        #expect(PanelContent.web(URL(string: "about:blank")!)
+            .tabTitle(noteTitle: titled, untitledNote: "Note") == "Web")
+        #expect(note.tabTitle(noteTitle: titled, untitledNote: "Note") == "Plan")
+        #expect(transcript.tabTitle(noteTitle: titled, untitledNote: "Note") == "Transcript")
+
+        // The one deliberate difference: an untitled note is numbered in the
+        // tab bar and plain in the strip.
+        #expect(note.tabTitle(noteTitle: untitled, untitledNote: "Note 2") == "Note 2")
+        #expect(SideRegionStrip.title(for: note, noteTitle: untitled) == "Note")
+        #expect(SideRegionStrip.title(for: file, noteTitle: untitled) == "a.swift")
+    }
 }

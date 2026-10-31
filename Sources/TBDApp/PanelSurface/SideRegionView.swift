@@ -18,15 +18,8 @@ struct SideRegionTab: Equatable, Identifiable {
     /// The content as the leaf view, and the file menu, take it.
     var paneContent: PaneContent { content.paneContent(panelID: id) }
 
-    /// The same symbols the workspace tab bar uses for these kinds.
-    var systemImage: String {
-        switch content.kind {
-        case .file: return "doc.text"
-        case .web: return "globe"
-        case .note: return "note.text"
-        case .transcript: return "text.bubble"
-        }
-    }
+    /// The symbol the workspace tab bar shows for the same kind.
+    var systemImage: String { content.kind.tabSystemImage }
 }
 
 enum SideRegionStrip {
@@ -54,20 +47,11 @@ enum SideRegionStrip {
         }
     }
 
-    /// A file's name, a page's host, a note's title, or "Transcript" — the
-    /// titles the workspace tab bar gives the same kinds.
+    /// The title the workspace tab bar gives the same content
+    /// (`PanelContent.tabTitle`), except that a note with no title shows
+    /// "Note": a side-region tab has no position number to give it.
     static func title(for content: PanelContent, noteTitle: (UUID) -> String?) -> String {
-        switch content {
-        case .file(let reference):
-            return URL(fileURLWithPath: reference.path).lastPathComponent
-        case .web(let url):
-            return url.host ?? "Web"
-        case .note(let noteID):
-            if let title = noteTitle(noteID), !title.isEmpty { return title }
-            return "Note"
-        case .transcript:
-            return "Transcript"
-        }
+        content.tabTitle(noteTitle: noteTitle, untitledNote: "Note")
     }
 }
 
