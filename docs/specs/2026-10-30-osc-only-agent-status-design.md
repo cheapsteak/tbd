@@ -206,8 +206,9 @@ restoring terminal modes around an external editor, or a clean Codex exit —
 and one a child exit wrote (`.processLiveness`), whose process is gone. The
 upgrade reset, which records no source, and a wake's or respawn's reset
 (`.derived`) do draw it. The grace period keeps a starting session from
-flashing the mark before its first report. The app keeps the first-seen time in memory per incarnation; a new
-incarnation restarts it. The wait uses an injected clock.
+flashing the mark before its first report. The app keeps the first-seen time
+in memory per incarnation; a new incarnation restarts it. The wait uses an
+injected clock.
 
 The mark's tooltip names the cause from the terminal's transport:
 
