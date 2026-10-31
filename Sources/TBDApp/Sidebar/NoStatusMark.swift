@@ -10,7 +10,8 @@ struct NoStatusSighting: Equatable, Sendable {
 }
 
 /// Pure presentation of the sidebar's no-status mark: an agent session whose
-/// state TBD does not know, because nothing has reported it.
+/// state TBD does not know, because its agent has not reported since the
+/// session started.
 ///
 /// The mark is drawn for a Claude or Codex terminal whose activity column reads
 /// `.unknown`, that is neither parked nor gone, once the app has seen its
@@ -18,9 +19,14 @@ struct NoStatusSighting: Equatable, Sendable {
 /// session from flashing the mark before its first report; the first accepted
 /// report moves the column off `.unknown` and clears it. A terminal the app no
 /// longer lists is gone, and an exit-stamped row is parked, so neither shows
-/// it. Nor does a row whose `.unknown` the daemon stamped `.processLiveness`:
-/// that is a child exit, an agent whose process is gone, which the version
-/// tooltip would misexplain. Shell terminals never show it.
+/// it. Nor does a `.unknown` that came after this incarnation's agent
+/// reported, which the version tooltip would misexplain: one stamped
+/// `.programStatus` is the agent's own bare `clear` (Claude Code restoring
+/// terminal modes around an external editor, or a clean Codex exit), and one
+/// stamped `.processLiveness` is a child exit, an agent whose process is gone.
+/// Every other `.unknown` — the upgrade reset (no source), a wake's or a
+/// respawn's reset (`.derived`) — is a session that has not reported. Shell
+/// terminals never show it.
 /// Design: `docs/specs/2026-10-30-osc-only-agent-status-design.md`, "Sessions
 /// that cannot report".
 enum NoStatusMark {
@@ -40,14 +46,20 @@ enum NoStatusMark {
         + "after it is relaunched."
 
     /// Whether `terminal` is the kind of row the mark is for: an agent that
-    /// reports (Claude or Codex), not parked, with no state in its column for
-    /// a reason other than its process having exited.
+    /// reports (Claude or Codex), not parked, with no state in its column
+    /// because its agent has not reported — not because it reported and then
+    /// cleared, or its process exited.
     static func isCandidate(_ terminal: TBDShared.Terminal) -> Bool {
         ProgramStatusProtocol.expectedApp(for: terminal) != nil
             && !terminal.isParked
             && terminal.activityState == .unknown
-            && terminal.activityStateSource != .processLiveness
+            && !explainedSources.contains(terminal.activityStateSource)
     }
+
+    /// The `.unknown` provenances that explain themselves, and that the
+    /// version tooltip would misexplain: the agent's own bare `clear`, and
+    /// its process's exit.
+    private static let explainedSources: Set<FactSource?> = [.programStatus, .processLiveness]
 
     /// The mark's tooltip for `terminal`, or nil when it shows no mark: not a
     /// candidate, no sighting of its current incarnation, or the grace still

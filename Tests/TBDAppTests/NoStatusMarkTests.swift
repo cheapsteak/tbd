@@ -75,19 +75,29 @@ struct NoStatusMarkTests {
         #expect(NoStatusMark.help(for: Self.terminal(), sighting: nil) == nil)
     }
 
-    /// A child exit writes `.unknown` stamped `.processLiveness`: the agent's
-    /// process is gone, which "needs a newer version" would misexplain. The
-    /// other ways a row reads `.unknown` — a wake's or respawn's reset
-    /// (`.derived`), the upgrade reset (no source), an agent's bare clear
-    /// (`.programStatus`) — still show the mark.
-    @Test func aChildExitsUnknownShowsNoMark() {
-        let exited = Self.terminal(transport: .holder, source: .processLiveness)
-        #expect(!NoStatusMark.isCandidate(exited))
-        #expect(NoStatusMark.help(for: exited, sighting: Self.elapsed) == nil)
-
-        let sources: [FactSource?] = [.derived, nil, .programStatus]
+    /// The mark is for a session that has not reported since it started, so
+    /// a `.unknown` that came after its agent reported shows none — "needs a
+    /// newer version" would misexplain it: a child exit (`.processLiveness`),
+    /// whose process is gone, and the agent's own bare clear
+    /// (`.programStatus`), as when Claude Code restores terminal modes around
+    /// an external editor or Codex exits cleanly.
+    @Test func anUnknownAfterTheAgentReportedShowsNoMark() {
+        let sources: [FactSource] = [.processLiveness, .programStatus]
         for source in sources {
             let row = Self.terminal(transport: .holder, source: source)
+            #expect(!NoStatusMark.isCandidate(row), "\(source)")
+            #expect(NoStatusMark.help(for: row, sighting: Self.elapsed) == nil, "\(source)")
+        }
+    }
+
+    /// Every other way a row reads `.unknown` is a session that has not
+    /// reported, and shows the mark: the upgrade reset (no source), a wake's
+    /// or respawn's reset (`.derived`), and any other provenance.
+    @Test func anUnknownWithNoReportShowsTheMark() {
+        let sources: [FactSource?] = [nil, .derived, .database, .hookEvent("SessionStart")]
+        for source in sources {
+            let row = Self.terminal(transport: .holder, source: source)
+            #expect(NoStatusMark.isCandidate(row), "\(String(describing: source))")
             #expect(NoStatusMark.help(for: row, sighting: Self.elapsed) == NoStatusMark.holderHelp,
                     "\(String(describing: source))")
         }

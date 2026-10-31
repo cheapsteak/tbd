@@ -193,13 +193,17 @@ its existing checks and is unaffected.
 
 ### Sessions that cannot report
 
-The sidebar row draws a small "no status" mark for a Claude or Codex terminal
-whose `activityState` is `.unknown`, that is neither parked nor gone, once the
-app has seen its current incarnation in that state for 15 seconds. A
-`.unknown` a child exit wrote (`.processLiveness`) draws no mark: that agent's
-process is gone, which the tooltip below would misexplain. The grace
-period keeps a starting session from flashing the mark before its first
-report. The app keeps the first-seen time in memory per incarnation; a new
+The sidebar row draws a small "no status" mark for a session that has not
+reported since it started: a Claude or Codex terminal whose `activityState` is
+`.unknown`, that is neither parked nor gone, once the app has seen its current
+incarnation in that state for 15 seconds. A `.unknown` that came after the
+agent reported draws no mark, because the tooltip below would misexplain it:
+one the agent's own bare `clear` wrote (`.programStatus`) — Claude Code
+restoring terminal modes around an external editor, or a clean Codex exit —
+and one a child exit wrote (`.processLiveness`), whose process is gone. The
+upgrade reset, which records no source, and a wake's or respawn's reset
+(`.derived`) do draw it. The grace period keeps a starting session from
+flashing the mark before its first report. The app keeps the first-seen time in memory per incarnation; a new
 incarnation restarts it. The wait uses an injected clock.
 
 The mark's tooltip names the cause from the terminal's transport:
@@ -358,7 +362,8 @@ Each branch of each new conditional gets a test.
   no report.
 - **No-status mark** – absent before 15 seconds and present after; tooltip text
   by transport; cleared by a report; restarted by a new incarnation; never on a
-  shell terminal.
+  shell terminal; absent for a `.unknown` the agent's `clear` or a child exit
+  wrote, and present for the upgrade and wake resets.
 - **Upgrade migration** – a hook-written live row becomes `unknown` with no
   wait reason; a store-written row, a parked row and a suspended row keep
   their values.
