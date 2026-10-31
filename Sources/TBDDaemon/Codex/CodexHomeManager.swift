@@ -606,7 +606,7 @@ enum CodexSpawnCommandBuilder {
         // `--disable <feature>` is a global Codex option (it equals
         // `-c features.<name>=false`), so it precedes any `resume` subcommand.
         let featureOverrides = disabledFeatures
-            .map { " --disable \(SystemPromptBuilder.shellEscape($0))" }
+            .map { " --disable \(shellEscape($0))" }
             .joined()
         let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride)\(featureOverrides) \(executionModeFlags)"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
