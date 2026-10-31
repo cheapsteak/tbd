@@ -1,9 +1,6 @@
 import AppKit
 import SwiftUI
 import TBDShared
-import os
-
-private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote")
 
 /// Sidebar section listing every registered remote-agent provider and its
 /// UNMATCHED sessions — ones whose `meta["repo"]` didn't resolve to a
@@ -717,27 +714,11 @@ struct RemoteSessionRowView: View {
             appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
         }
         .contextMenu {
-            let provider = appState.remoteProviders.first { $0.config.name == session.provider }
-            let capabilities = provider?.describe?.capabilities ?? []
-            let items = RemoteSessionActionMenu.items(
-                capabilities: capabilities, gone: session.gone,
-                snapshotFresh: provider?.hasStaleSnapshot != true,
-                // Read from the mirror rather than this row's captured
-                // `session`, so a dock copy and a section copy of the same
-                // session always offer the same verb.
-                isPinned: appState.remoteSessionIsPinned(
-                    provider: session.provider, sessionID: session.payload.id),
-                exited: session.payload.state == .exited,
-                deleteEnabled: appState.remoteDeleteEnabled,
-                isAttached: appState.attachedRemoteSelections.contains(
-                    RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)),
-                liveAttachUnavailable: !appState.remoteSessionAttachesWhenSelected(
-                    RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
-            )
-            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+            let actions = menuActions
+            ForEach(Array(actions.items().enumerated()), id: \.offset) { _, item in
                 switch item {
                 case let .action(action):
-                    actionButton(action)
+                    actionButton(action, actions: actions)
                 case .divider:
                     Divider()
                 }
@@ -745,74 +726,22 @@ struct RemoteSessionRowView: View {
         }
     }
 
+    /// The menu's items and side effects, shared with the native sidebar.
+    private var menuActions: RemoteSessionActionMenuActions {
+        RemoteSessionActionMenuActions(appState: appState, session: session, onRename: { isEditing = true })
+    }
+
     @ViewBuilder
-    private func actionButton(_ action: RemoteSessionActionMenu.Action) -> some View {
+    private func actionButton(
+        _ action: RemoteSessionActionMenu.Action, actions: RemoteSessionActionMenuActions
+    ) -> some View {
         Button(role: action.role == .destructive ? .destructive : nil) {
-            runAction(action.kind)
+            actions.run(action.kind)
         } label: {
             Text(action.title)
         }
         .disabled(!action.isEnabled)
         .help(action.disabledHelp ?? "")
-    }
-
-    /// Dispatches a `RemoteSessionActionMenu.Kind` to its side effect. Kept
-    /// inline (unlike `RowActionMenuActions`) since a remote row has far
-    /// fewer actions and none of the context-building complexity that
-    /// justified splitting the worktree version out.
-    private func runAction(_ kind: RemoteSessionActionMenu.Kind) {
-        switch kind {
-        case .rename:
-            isEditing = true
-        case .attach:
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id, reattach: true)
-        case .reconnect:
-            appState.reconnectRemoteSession(
-                RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id))
-        case .sendText:
-            // Offered only when the session's pane shows no live attached
-            // terminal; selecting it brings up the pane whose send footer
-            // takes the text.
-            appState.selectRemoteSession(provider: session.provider, sessionID: session.payload.id)
-        case .copySessionID:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(session.payload.id, forType: .string)
-        case .stop:
-            Task {
-                do {
-                    try await appState.daemonClient.remoteStop(
-                        provider: session.provider, sessionID: session.payload.id)
-                } catch {
-                    remoteRowLogger.error(
-                        "remoteStop failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
-                }
-            }
-        case .dismiss:
-            Task {
-                do {
-                    try await appState.daemonClient.remoteDismiss(
-                        provider: session.provider, sessionID: session.payload.id)
-                } catch {
-                    remoteRowLogger.error(
-                        "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
-                }
-            }
-        case .delete:
-            // The confirmation, the retain decision and the error toast all
-            // live in `AppState.deleteRemoteSession` — the lane row's menu
-            // reaches the same method, so the two surfaces cannot come to
-            // different conclusions about the same session.
-            Task {
-                await appState.deleteRemoteSession(
-                    provider: session.provider, sessionID: session.payload.id)
-            }
-        case .pin, .unpin:
-            let pinned = kind == .pin
-            Task {
-                await appState.setRemoteSessionPinned(
-                    provider: session.provider, sessionID: session.payload.id, pinned: pinned)
-            }
-        }
     }
 
     private func updateNameTruncation(availableWidth: CGFloat) {
