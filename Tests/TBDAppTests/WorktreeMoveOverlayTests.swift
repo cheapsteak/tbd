@@ -43,7 +43,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
 
         // Still inside the drop's main-actor turn: the task that sends the
         // RPC has not even run, and the rows have already moved.
@@ -77,7 +77,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let moved = state.worktrees
 
         // The daemon has not committed: the poll answers with the rows as
@@ -104,7 +104,7 @@ struct WorktreeMoveOverlayTests {
         wire(state, rpc: rpc, fetch: fetch)
 
         // Nest d under b.
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: top.b.id, before: nil)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: top.b.id, before: nil)
         #expect(childOrder(state, repo: top.repo, parent: top.b.id) == ["d"])
 
         // Meanwhile the CLI moves c to the front. The daemon has not committed
@@ -137,7 +137,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: [a, b, c])
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [c.id], newParentID: nil, before: a.id)
+        let moveID = expectMove(state, ids: [c.id], newParentID: nil, before: a.id)
         #expect(topLevelOrder(state, repo: repo) == ["c", "a", "b"])
 
         // The daemon commits and its delta arrives before the reply.
@@ -170,7 +170,7 @@ struct WorktreeMoveOverlayTests {
         wire(state, rpc: rpc, fetch: fetch)
 
         // Nest d under b.
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: top.b.id, before: nil)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: top.b.id, before: nil)
 
         // `worktree.move` from elsewhere puts d back at the top level, which
         // the daemon wrote before this app's move, and nests c under a.
@@ -197,7 +197,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let moved = state.worktrees
 
         // A fetch scoped to the moved rows' repo, answered before the commit.
@@ -224,7 +224,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: [s1, s2, s0])
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [s2.id], newParentID: nil, before: s0.id)
+        let moveID = expectMove(state, ids: [s2.id], newParentID: nil, before: s0.id)
 
         // The scratch list is kept in `sortOrder` order, as a refresh leaves it.
         #expect(state.scratchWorktrees.map(\.name) == ["s2", "s0", "s1"])
@@ -258,7 +258,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let own = daemonDelta(
             group: top.rows.map(\.id), carried: [top.d.id], before: top.b.id,
             parent: nil, moveID: moveID)
@@ -283,7 +283,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let another = daemonDelta(
             group: top.rows.map(\.id), carried: [top.c.id], before: top.a.id,
             parent: nil, moveID: UUID())
@@ -308,7 +308,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let committed = applying(
             daemonDelta(
                 group: top.rows.map(\.id), carried: [top.d.id], before: top.b.id,
@@ -348,7 +348,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         let moved = state.worktrees
 
         // A poll goes out while the RPC is in flight and reads the daemon
@@ -388,7 +388,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         await rpc.succeed(moveID)
         await waitUntil("the reply is recorded") { state.pendingWorktreeMoves.first?.rpcSucceeded == true }
 
@@ -429,7 +429,7 @@ struct WorktreeMoveOverlayTests {
         wire(state, rpc: rpc, fetch: fetch)
 
         // Move c from under a to under b, ahead of e.
-        let moveID = state.moveWorktrees(ids: [c.id], newParentID: b.id, before: e.id)
+        let moveID = expectMove(state, ids: [c.id], newParentID: b.id, before: e.id)
         #expect(childOrder(state, repo: r, parent: b.id) == ["c", "e"])
 
         // While the RPC is out, a poll brings two other changes: d (in the
@@ -475,7 +475,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
         #expect(topLevelOrder(state, repo: top.repo) == ["a", "d", "b", "c"])
 
         // The daemon is gone: the RPC fails, and so does the refresh after it.
@@ -506,7 +506,7 @@ struct WorktreeMoveOverlayTests {
         let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
         wire(state, rpc: rpc, fetch: fetch)
 
-        let moveID = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
 
         // A poll that reads the daemon before the commit.
         fetch.holdNext = true
@@ -541,14 +541,17 @@ struct WorktreeMoveOverlayTests {
         wire(state, rpc: rpc, fetch: fetch)
         let untouched = state.worktrees
 
-        state.moveWorktrees(ids: [top.d.id], newParentID: UUID(), before: nil)
-        state.moveWorktrees(ids: [top.d.id], newParentID: mainRow.id, before: nil)
+        let unlisted = state.moveWorktrees(ids: [top.d.id], newParentID: UUID(), before: nil)
+        let underMain = state.moveWorktrees(ids: [top.d.id], newParentID: mainRow.id, before: nil)
 
+        // Each refusal says so: no move ID, since no move was made.
+        #expect(unlisted == nil)
+        #expect(underMain == nil)
         #expect(state.worktrees == untouched)
         #expect(state.pendingWorktreeMoves.isEmpty)
 
         // A valid move made afterwards is the only one the daemon hears about.
-        let valid = state.moveWorktrees(ids: [top.d.id], newParentID: top.b.id, before: nil)
+        let valid = expectMove(state, ids: [top.d.id], newParentID: top.b.id, before: nil)
         await rpc.succeed(valid)
         #expect(rpc.sent.map(\.moveID) == [valid])
         #expect(childOrder(state, repo: top.repo, parent: top.b.id) == ["d"])
@@ -575,8 +578,8 @@ struct WorktreeMoveOverlayTests {
         wire(state, rpc: rpc, fetch: fetch)
 
         // Drop d before b, then a at the end.
-        let first = state.moveWorktrees(ids: [d.id], newParentID: nil, before: b.id)
-        let second = state.moveWorktrees(ids: [a.id], newParentID: nil, before: nil)
+        let first = expectMove(state, ids: [d.id], newParentID: nil, before: b.id)
+        let second = expectMove(state, ids: [a.id], newParentID: nil, before: nil)
         #expect(topLevelOrder(state, repo: repo) == ["d", "b", "c", "a"])
         #expect(state.pendingWorktreeMoves.map(\.moveID) == [first, second])
         let composed = state.worktrees
@@ -754,6 +757,21 @@ private func waitUntil(
         }
         try? await Task.sleep(for: .milliseconds(2))
     }
+}
+
+/// `state.moveWorktrees` for a move the test expects to go ahead: its ID.
+/// A refusal records an issue and returns a fresh ID that names no move, so
+/// the assertions that follow fail instead of the test stopping short.
+@MainActor
+private func expectMove(
+    _ state: AppState, ids: [UUID], newParentID: UUID?, before: UUID?,
+    sourceLocation: SourceLocation = #_sourceLocation
+) -> UUID {
+    guard let moveID = state.moveWorktrees(ids: ids, newParentID: newParentID, before: before) else {
+        Issue.record("moveWorktrees refused a move the test expected to go ahead", sourceLocation: sourceLocation)
+        return UUID()
+    }
+    return moveID
 }
 
 /// Stands in for `worktree.moveMany`: records each request and holds it

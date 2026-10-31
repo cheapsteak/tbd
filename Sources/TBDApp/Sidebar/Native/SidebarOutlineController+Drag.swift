@@ -147,7 +147,8 @@ extension SidebarOutlineController {
 
     /// The drop: the decision `validateDrop` showed, checked against
     /// `AppState` as it stands now, goes to `moveWorktrees`. A nest becomes
-    /// `newParentID: id, before: nil`; a place maps field for field.
+    /// `newParentID: id, before: nil`; a place maps field for field. A move
+    /// `moveWorktrees` refuses fails the drop.
     ///
     /// AppKit hands over the position `validateDrop` last showed, retargets
     /// included, so the pointer is not read again: the gap's depth is pinned
@@ -168,7 +169,19 @@ extension SidebarOutlineController {
                 "Native sidebar drop of \(carried.count, privacy: .public) row(s) rejected: the rows or the destination changed during the drag")
             return false
         }
-        appState.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        let moveID: UUID?
+        if let moveWorktreesForTesting {
+            moveID = moveWorktreesForTesting(move)
+        } else {
+            moveID = appState.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        // `AppState` refuses a parent it does not list, or a main row, and
+        // then moves nothing: the drop failed.
+        guard moveID != nil else {
+            dragLogger.info(
+                "Native sidebar drop of \(carried.count, privacy: .public) row(s) refused by AppState: nothing moved")
+            return false
+        }
         return true
     }
 

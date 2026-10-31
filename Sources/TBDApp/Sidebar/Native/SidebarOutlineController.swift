@@ -72,6 +72,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// Stands in for `SidebarTreeDiff.update` so a test can apply a wrong
     /// update and watch the fallback catch it.
     var diffForTesting: ((SidebarTree, SidebarTree) -> OutlineUpdate)?
+    /// Stands in for `AppState.moveWorktrees(ids:newParentID:before:)` at a
+    /// drop, so a test can make `AppState` refuse a move the shown tree
+    /// allows.
+    var moveWorktreesForTesting: ((SidebarDropMove) -> UUID?)?
     /// The update the last structural apply ran, for a failing test to print.
     var lastAppliedUpdate: OutlineUpdate?
     /// Each row view configured since the last apply began, and the row it

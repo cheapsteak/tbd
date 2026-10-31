@@ -555,6 +555,54 @@ struct SidebarDragDropTests {
         #expect(recorder.sent.isEmpty)
     }
 
+    /// `AppState` refuses a parent it does not list, or a main row, and moves
+    /// nothing. The shown tree never offers such a drop, so the test stands in
+    /// for the call and has `AppState` refuse the move as it would were the
+    /// parent no longer listed: the drop fails and no RPC goes out.
+    @Test func refusedMoveFailsTheDrop() async throws {
+        let h = OutlineHarness("drag.refused")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        let state = h.state
+        let unlisted = UUID()
+        let asked = FireRecorder<SidebarDropMove>()
+        h.controller.moveWorktreesForTesting = { move in
+            asked.record(move)
+            return state.moveWorktrees(ids: move.ids, newParentID: unlisted, before: move.before)
+        }
+        let b = SidebarNodeID.worktree(f.b.id)
+        let onto = SidebarDropPolicy.dropOnItemIndex
+
+        let info = try Self.startDrag(pressing: .worktree(f.c.id), in: h)
+        defer { info.release() }
+        let operation = try Self.validate(info, parent: b, childIndex: onto, in: h)
+        #expect(operation == .move)
+        let accepted = try Self.accept(info, parent: b, childIndex: onto, in: h)
+        #expect(!accepted, "A drop AppState refused must report failure")
+        let moves = asked.values
+        #expect(moves == [SidebarDropMove(ids: [f.c.id], newParentID: f.b.id, before: nil)])
+        // `moveWorktrees` refuses before it starts the RPC's task, so nothing
+        // can be sent later either.
+        #expect(h.state.pendingWorktreeMoves.isEmpty)
+        #expect(recorder.sent.isEmpty)
+
+        // Control: passed through unchanged, the same drop goes ahead.
+        h.controller.moveWorktreesForTesting = { move in
+            state.moveWorktrees(ids: move.ids, newParentID: move.newParentID, before: move.before)
+        }
+        let control = try Self.accept(info, parent: b, childIndex: onto, in: h)
+        #expect(control)
+        #expect(h.state.pendingWorktreeMoves.count == 1)
+        Self.endSession(in: h)
+        await recorder.waitForCount(1)
+        let sent = recorder.sent.first
+        #expect(sent?.newParentID == f.b.id)
+    }
+
     // MARK: The session
 
     @Test func structureHeldDuringDragAppliedAtEnd() throws {
@@ -904,7 +952,9 @@ private final class StubDraggingInfo: NSObject, NSDraggingInfo {
 
     func slideDraggedImage(to screenPoint: NSPoint) {}
 
-    nonisolated func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    // `namesOfPromisedFilesDropped(atDestination:)` is not declared here:
+    // `NSObject` already has it, from AppKit's `NSDraggingSourceDeprecated`
+    // category, and that inherited method satisfies the requirement.
 
     func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?,
                                 classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
