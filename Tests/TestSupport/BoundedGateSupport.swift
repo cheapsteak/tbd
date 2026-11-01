@@ -167,8 +167,8 @@ public enum TestDeadlines {
     /// outlive every wait that checks it: five `saturatedPass` budgets, so a
     /// child that is gone inside such a wait was ended rather than having
     /// finished its sleep, and one that has to be alive afterwards still is.
-    /// Derived from `saturatedPassSeconds`, so it moves with it. The test that
-    /// spawns the child still kills it by pid when it is done.
+    /// Derived from `saturatedPassSeconds`, so it moves with it. The lifetime is
+    /// a backstop: ending the child is still the spawning test's job.
     public static let outlivingChildSeconds: Int = Int(saturatedPassSeconds) * 5
 }
 

@@ -18,15 +18,22 @@ import TestSupport
 ///
 /// These tests wedge a write for real: a stub "tmux" holds the pty replica
 /// open and never reads its stdin, and a 1 MB `sendCommand` from a background
-/// thread parks in `write()`. Each stub records its own pid, and the cleanup
-/// kills by that pid on every exit path, and only while it still names the
-/// stub, so it can never reach another process.
+/// thread parks in `write()`. Each stub process records its own pid in a file
+/// of its own, and the cleanup kills by those pids on every exit path, and
+/// only while each still names its stub, so it can never reach another process.
 @Suite("TmuxControlConnection wedged-write teardown (R7-H1)")
 struct TmuxControlConnectionWedgedWriteTests {
 
     /// Executable stub "tmux" that ignores its args, records its pid, holds the
     /// pty replica open, and never reads stdin — so a big master-side write
     /// wedges.
+    ///
+    /// Each process running the script writes `stub.<pid>.pid` beside it: a
+    /// successor connection runs the same script, and a shared file would be
+    /// overwritten, leaving the earlier stub out of reach of the cleanup.
+    /// `$$` is the shell's pid, and `exec` keeps it, so each file names the
+    /// `sleep` itself, and each has its own write time, which
+    /// `RecordedChild.killIfStartedBeforeWriting(pidFile:)` needs.
     ///
     /// It sleeps `TestDeadlines.outlivingChildSeconds`, past every wait before
     /// and including the last one that checks the write was unwedged — three
@@ -38,26 +45,24 @@ struct TmuxControlConnectionWedgedWriteTests {
             .appendingPathComponent("tbd-wedge-stub-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("stub-tmux.sh").path
-        let pidFile = Self.pidFile(forStub: path)
-        try "#!/bin/sh\necho $$ > '\(pidFile)'\nexec sleep \(TestDeadlines.outlivingChildSeconds)\n"
+        try "#!/bin/sh\necho $$ > \"\(dir.path)/stub.$$.pid\"\nexec sleep \(TestDeadlines.outlivingChildSeconds)\n"
             .write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
         return path
     }
 
-    /// Where the stub at `stub` records its pid: `$$` is the shell's, and
-    /// `exec` keeps it, so this is the pid of the `sleep` itself.
-    private static func pidFile(forStub stub: String) -> String {
-        ((stub as NSString).deletingLastPathComponent as NSString).appendingPathComponent("stub.pid")
-    }
-
-    /// Kills a leftover stub. A no-op on the green path, where `stop()` has
-    /// already killed and reaped it; on the red/failure path this is what
-    /// unwedges the parked write so leaked threads can exit. By pid, never by
-    /// name pattern — another worktree running this suite has a stub with the
-    /// same command line — and only while the pid still names this stub.
+    /// Kills every leftover stub process the script at `stub` started. A no-op
+    /// on the green path, where `stop()` has already killed and reaped them; on
+    /// the red/failure path this is what unwedges the parked write so leaked
+    /// threads can exit. By pid, never by name pattern — another worktree
+    /// running this suite has a stub with the same command line — and only
+    /// while each pid still names its stub.
     private func killStub(_ stub: String) {
-        RecordedChild.killIfStartedBeforeWriting(pidFile: Self.pidFile(forStub: stub))
+        let dir = (stub as NSString).deletingLastPathComponent
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        for name in names where name.hasPrefix("stub.") && name.hasSuffix(".pid") {
+            RecordedChild.killIfStartedBeforeWriting(pidFile: (dir as NSString).appendingPathComponent(name))
+        }
     }
 
     /// Park a background thread inside `sendCommand` and confirm it is wedged

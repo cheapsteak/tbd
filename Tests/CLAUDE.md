@@ -588,16 +588,18 @@ and a `gateHoldingTask { }` all read medium (21), measured on the 3-core CI
 runner and pinned by `TaskPriorityParityTests`
 (`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
 is queued *behind higher-priority work* — the pool's queue is FIFO among the
-~5,000 tasks the pass keeps runnable, and one suspension hop costs the pass's
-own per-test latency: p50 65.6 s and p99 92.1 s on a green fast pass 1. A
-handshake that needs *k* hops therefore costs *k* × that, and the uninjected
-latch needs three or four — each caller starting, reaching the latch and
-awaiting the run; the run's own unstructured task starting; then every caller
-resuming. That is why CI measured 0 of 8 callers back after 90 s while the
-test's own polling task, already runnable, kept reporting on time: 90 s is one
-hop's worth of budget for a four-hop handshake. **A bound cannot buy a hop its
-turn** — sizing one to fit four hops taxes every healthy run, while injecting
-the executor removes the hops from the shared queue and costs nothing. (The one
+thousands of tasks the pass keeps runnable, and one suspension hop on a green
+run can cost up to about the pass's own per-test tail, around 100 s in fast
+pass 2 (p99 100.5 s; see "Population is the scheduler" for why pass 2 is the
+measure). A handshake that needs *k* hops therefore costs up to *k* × that, and
+the uninjected latch needs three or four — each caller starting, reaching the
+latch and awaiting the run; the run's own unstructured task starting; then
+every caller resuming. Measured against a 90 s bound, CI saw 0 of 8 callers
+back after 90 s while the test's own polling task, already runnable, kept
+reporting on time: 90 s was one hop's worth of budget for a four-hop
+handshake. **A bound cannot buy a hop its turn** — sizing one to fit four hops
+taxes every healthy run, while injecting the executor removes the hops from the
+shared queue and costs nothing. (The one
 deliberate exception to the single priority is swift-clocks' `megaYield`, which
 creates background-QoS tasks on purpose; see "Clock and date seams".)
 
