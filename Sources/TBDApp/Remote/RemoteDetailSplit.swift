@@ -99,9 +99,10 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     /// Without the transcript the terminal side and the live terminal span the
     /// whole width and `transcriptLeads` changes nothing. With it, the right
     /// half is `rightWidth` wide (already clamped), the divider sits just left
-    /// of it, and the left half takes what remains. The right half never
-    /// extends past the pane: in a pane narrower than `rightWidth` plus the
-    /// divider, it takes what the divider leaves and the left half is empty.
+    /// of it, and the left half takes what remains. As a last guard the right
+    /// half never extends past the pane: in a pane narrower than `rightWidth`
+    /// plus the divider, it takes what the divider leaves and the left half is
+    /// empty. (`clamp` already keeps the left half's minimum before this.)
     /// The terminal side takes the right half when `transcriptLeads`, the left
     /// half otherwise. The live terminal takes the left half either way, which
     /// is where the terminal side is drawn while attached.
@@ -127,10 +128,8 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     }
 
     /// The stored right-half width, clamped for a pane `totalWidth` wide (see
-    /// `clamp`): the left half keeps `leftMinWidth` whenever the pane is wide
-    /// enough for both minimums and the divider; otherwise the right half
-    /// keeps `rightMinWidth` and the left half shrinks. `columns` then keeps
-    /// the right half inside the pane.
+    /// `clamp`). The left half is the main side, so it keeps `leftMinWidth`
+    /// and the right half gives way first in a narrow pane.
     private func clampedRightWidth(totalWidth: CGFloat) -> CGFloat {
         Self.clamp(
             rightWidth, totalWidth: totalWidth,
@@ -138,17 +137,16 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     }
 
     /// Clamps the right half's width to at least `rightMin`, and to at most
-    /// what leaves `leftMin` for the left half once the divider has its
-    /// `dividerWidth`. So the left half keeps `leftMin` whenever the pane is
-    /// wide enough for both minimums and the divider. In a narrower pane the
-    /// lower bound wins: the right half keeps `rightMin` and the left half
-    /// shrinks. The result can still exceed what the pane has room for;
-    /// `columns` caps the right half at the pane.
+    /// what leaves `leftMin` for the left half beside the divider. The left
+    /// half is the main side (the live terminal while attached, the transcript
+    /// while not), so in a pane narrower than `leftMin + rightMin +
+    /// dividerWidth` the upper bound wins: the right half shrinks, down to 0,
+    /// and the left half keeps `leftMin`. The left half shrinks only once the
+    /// pane is narrower than `leftMin + dividerWidth`.
     nonisolated static func clamp(
         _ width: CGFloat, totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
     ) -> CGFloat {
-        let upper = max(rightMin, totalWidth - leftMin - dividerWidth)
-        return min(max(width, rightMin), upper)
+        max(0, min(max(width, rightMin), totalWidth - leftMin - dividerWidth))
     }
 
     private func divider(totalWidth: CGFloat) -> some View {

@@ -331,11 +331,23 @@ struct RemoteDetailSplitTests {
         let aboveMaximumExpected: CGFloat = 754
         #expect(aboveMaximum == aboveMaximumExpected)
 
-        // Too narrow for both minimums and the divider: the right minimum
-        // wins, and the left half shrinks.
+        // Too narrow for both minimums and the divider: the left half keeps
+        // its minimum and the right half takes the rest: 400 − 240 − 6.
         let tooNarrow: CGFloat = Split.clamp(
             500, totalWidth: 400, leftMin: 240, rightMin: 280, dividerWidth: 6)
-        let tooNarrowExpected: CGFloat = 280
+        let tooNarrowExpected: CGFloat = 154
         #expect(tooNarrow == tooNarrowExpected)
+
+        // Narrower than the left minimum plus the divider: nothing is left.
+        let belowLeftMinimum: CGFloat = Split.clamp(
+            500, totalWidth: 200, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let belowLeftMinimumExpected: CGFloat = 0
+        #expect(belowLeftMinimum == belowLeftMinimumExpected)
+
+        // Exactly both minimums and the divider.
+        let exactFit: CGFloat = Split.clamp(
+            526, totalWidth: 526, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let exactFitExpected: CGFloat = 280
+        #expect(exactFit == exactFitExpected)
     }
 }

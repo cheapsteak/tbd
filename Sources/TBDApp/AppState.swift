@@ -1663,7 +1663,7 @@ final class AppState {
         guard attachEligibleRemoteSelections.contains(selection) else { return false }
         let wasDetached = explicitlyDetachedRemoteSessions[selection] != nil
             || pendingReconnectRemoteSessions[selection] != nil
-        guard wasDetached || attachedRemoteSelections.contains(selection) else { return false }
+        guard wasDetached || remoteSessionIsAttached(selection) else { return false }
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
         // `startedAt: nil` — the replacement child reports its own spawn time
