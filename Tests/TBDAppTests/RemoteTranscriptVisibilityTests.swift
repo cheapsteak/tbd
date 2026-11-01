@@ -14,8 +14,11 @@ import TBDShared
 /// where the spec says.
 ///
 /// "Attached" is made the way the Attach button makes it: select the session,
-/// then `reattachRemoteSession`. Where `RemoteSessionDetailView` would report
-/// its shown attach slot, the test calls `setRemoteAttachSlotShown` itself.
+/// then `reattachRemoteSession`. A hide ends on the selection moving and on
+/// the pager's own lifecycle reports, `markRemoteSessionDetached` and
+/// `markRemoteAttachUnmounted`, which the tests call where the pager would.
+/// The detail view's attach-slot report (`setRemoteAttachSlotShown`) never
+/// ends a hide, and the tests that call it pin exactly that.
 ///
 /// Every test constructs `AppState(userDefaults:)` against a throwaway
 /// `TestDefaultsSuite`: `UserDefaults.standard` on this unbundled executable
@@ -79,16 +82,28 @@ struct RemoteTranscriptVisibilityTests {
         state.reattachRemoteSession(selection)
     }
 
-    /// The presentation as the separate wrappers report it, field by field —
-    /// the answers the AppKit toolbar reads one at a time.
-    private func presentationFromWrappers(
-        _ state: AppState, _ selection: RemoteSessionSelection
-    ) -> RemoteTranscriptPresentation {
-        RemoteTranscriptPresentation(
+    /// The presentation fields that have a single-answer name of their own.
+    private struct SingleAnswers: Equatable {
+        let attached: Bool
+        let showsToggle: Bool
+        let showsPane: Bool
+    }
+
+    /// The single-answer names' answers for `selection`, as a toolbar that
+    /// builds each item on its own reads them.
+    private func singleAnswers(_ state: AppState, _ selection: RemoteSessionSelection) -> SingleAnswers {
+        SingleAnswers(
             attached: state.remoteSessionIsAttached(selection),
             showsToggle: state.remoteSessionShowsTranscriptToggle(selection),
-            showsPane: state.remoteSessionShowsTranscriptPane(selection),
-            transcriptLeads: state.remoteSessionTranscriptLeads(selection))
+            showsPane: state.remoteSessionShowsTranscriptPane(selection))
+    }
+
+    /// The same three fields, read from one presentation.
+    private func singleAnswers(of presentation: RemoteTranscriptPresentation) -> SingleAnswers {
+        SingleAnswers(
+            attached: presentation.attached,
+            showsToggle: presentation.showsToggle,
+            showsPane: presentation.showsPane)
     }
 
     // MARK: - Which half leads, and when the toggle is offered
@@ -102,7 +117,7 @@ struct RemoteTranscriptVisibilityTests {
 
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(state.remoteSessionTranscriptLeads(s1))
+            #expect(state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
 
             // The toggle is not offered, so its action records no hide.
@@ -124,7 +139,7 @@ struct RemoteTranscriptVisibilityTests {
             #expect(state.daemonCapabilities == nil)
             #expect(state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(!state.remoteSessionTranscriptLeads(s1))
+            #expect(!state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(state.remoteSessionShowsTranscriptToggle(s1))
         }
     }
@@ -138,13 +153,13 @@ struct RemoteTranscriptVisibilityTests {
             state.selectedRemoteSession = s1
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
-            #expect(!state.remoteSessionTranscriptLeads(s1))
+            #expect(!state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
 
             state.reattachRemoteSession(s1)
             #expect(state.remoteSessionIsAttached(s1))
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
-            #expect(!state.remoteSessionTranscriptLeads(s1))
+            #expect(!state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
 
             state.toggleRemoteTranscript(s1)
@@ -160,7 +175,6 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
 
             state.toggleRemoteTranscript(s1)
             #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
@@ -185,20 +199,16 @@ struct RemoteTranscriptVisibilityTests {
             attach(state, s2)
 
             state.selectedRemoteSession = s1
-            state.setRemoteAttachSlotShown(s1)
             #expect(state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionIsAttached(s2))
             state.toggleRemoteTranscript(s1)
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
 
-            // The selection change alone drops the hide, before the view
-            // reports anything.
+            // The selection change alone ends the hide.
             state.selectedRemoteSession = s2
             #expect(state.remoteTranscriptHiddenAttach == nil)
-            state.setRemoteAttachSlotShown(s2)
 
             state.selectedRemoteSession = s1
-            state.setRemoteAttachSlotShown(s1)
             #expect(state.remoteSessionShowsTranscriptPane(s1))
         }
     }
@@ -209,7 +219,6 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
             #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
 
@@ -228,7 +237,6 @@ struct RemoteTranscriptVisibilityTests {
             let s2 = sel("s2")
             attach(state, s2)
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             #expect(state.remoteSessionIsAttached(s2))
 
             state.toggleRemoteTranscript(s1)
@@ -243,7 +251,6 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
 
             state.selectedRemoteSession = s1
@@ -258,46 +265,44 @@ struct RemoteTranscriptVisibilityTests {
         }
     }
 
+    /// The clean exit is what ends the hide. The reattach that follows
+    /// mounts under the same generation 0, so a hide the exit left behind
+    /// would hide the new connection's transcript.
     @Test func reattachingShowsItAgain() {
         withState { state in
             seedProvider(state)
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
 
-            // A clean detach ends the connection, and its hide with it,
-            // before the view reports its slot hidden. Not attached, the
-            // transcript shows and leads.
+            // A clean detach ends the connection, and its hide with it. Not
+            // attached, the transcript shows and leads.
             state.markRemoteSessionDetached(s1, exitCode: 0)
             #expect(state.remoteTranscriptHiddenAttach == nil)
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(state.remoteSessionTranscriptLeads(s1))
-
-            state.setRemoteAttachSlotShown(nil)
-            #expect(state.remoteTranscriptHiddenAttach == nil)
+            #expect(state.remoteTranscriptPresentation(for: s1).transcriptLeads)
 
             state.reattachRemoteSession(s1)
-            state.setRemoteAttachSlotShown(s1)
+            #expect(state.remoteAttachGeneration(for: s1) == 0)
             #expect(state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(!state.remoteSessionTranscriptLeads(s1))
+            #expect(!state.remoteTranscriptPresentation(for: s1).transcriptLeads)
         }
     }
 
     /// Reconnect replaces the attach child under a new generation while the
-    /// session stays attached, so neither selection hook runs. The new
-    /// connection shows the transcript anyway.
+    /// session stays attached and selected. The new connection shows the
+    /// transcript at once, and the pager's unmount of the replaced
+    /// connection then ends the old hide.
     @Test func reconnectingShowsItAgain() {
         withState { state in
             seedProvider(state)
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
 
@@ -305,19 +310,22 @@ struct RemoteTranscriptVisibilityTests {
             #expect(reconnected)
             #expect(state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
+
+            state.markRemoteAttachUnmounted(s1, generation: 0)
+            #expect(state.remoteTranscriptHiddenAttach == nil)
+            #expect(state.remoteSessionShowsTranscriptPane(s1))
         }
     }
 
-    /// An unexpected exit ends the hide itself, with no slot hook. A
-    /// reattach then mounts under the same generation, so only the clear
-    /// keeps the old hide from matching the new connection.
+    /// An unexpected exit ends the hide itself. A reattach then mounts under
+    /// the same generation, so only the clear keeps the old hide from
+    /// matching the new connection.
     @Test func anExitEndsTheHide() {
         withState { state in
             seedProvider(state)
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
             #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
 
@@ -343,7 +351,6 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             let reconnected = state.reconnectRemoteSession(s1)
             #expect(reconnected)
             state.toggleRemoteTranscript(s1)
@@ -356,8 +363,56 @@ struct RemoteTranscriptVisibilityTests {
         }
     }
 
-    /// The detail view reports its shown slot on every change it sees, often
-    /// for the same session. A repeat report keeps the hide.
+    /// The pager tears a tab down without an exit when the session leaves
+    /// eligibility — here its provider needs sign-in — and reports the
+    /// unmount. That ends the hide. The session is then re-admitted under the
+    /// same generation 0, so a hide the unmount left behind would hide the
+    /// new connection's transcript.
+    @Test func anUnmountEndsTheHide() {
+        withState { state in
+            seedProvider(state)
+            seedSession(state, id: "s1")
+            let s1 = sel("s1")
+            attach(state, s1)
+            state.toggleRemoteTranscript(s1)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
+
+            seedProvider(state, health: .needsAuth)
+            #expect(!state.remoteSessionIsAttached(s1))
+            state.markRemoteAttachUnmounted(s1, generation: 0)
+            #expect(state.remoteTranscriptHiddenAttach == nil)
+
+            seedProvider(state)
+            #expect(state.remoteAttachGeneration(for: s1) == 0)
+            #expect(state.remoteSessionIsAttached(s1))
+            #expect(state.remoteSessionShowsTranscriptPane(s1))
+        }
+    }
+
+    /// After a reconnect the pager unmounts the replaced generation-0 tab.
+    /// That report names the old connection, so it leaves alone a hide on the
+    /// generation-1 connection that replaced it.
+    @Test func anUnmountOfAnOldConnectionKeepsTheHide() {
+        withState { state in
+            seedProvider(state)
+            seedSession(state, id: "s1")
+            let s1 = sel("s1")
+            attach(state, s1)
+            let reconnected = state.reconnectRemoteSession(s1)
+            #expect(reconnected)
+            #expect(state.remoteAttachGeneration(for: s1) == 1)
+            state.toggleRemoteTranscript(s1)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1, generation: 1))
+
+            state.markRemoteAttachUnmounted(s1, generation: 0)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1, generation: 1))
+            #expect(state.remoteSessionIsAttached(s1))
+            #expect(!state.remoteSessionShowsTranscriptPane(s1))
+        }
+    }
+
+    /// The detail view reports its shown attach slot on every change it
+    /// sees, often for the same session. A repeat report keeps the hide.
     @Test func reportingTheSameSlotKeepsTheHide() {
         withState { state in
             seedProvider(state)
@@ -367,6 +422,27 @@ struct RemoteTranscriptVisibilityTests {
             state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
 
+            state.setRemoteAttachSlotShown(s1)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
+            #expect(!state.remoteSessionShowsTranscriptPane(s1))
+        }
+    }
+
+    /// The slot report drives focus only. Even reporting no slot and then
+    /// the session again, as a view that briefly draws the not-attached
+    /// state would, leaves the hide to the selection and the pager's
+    /// lifecycle reports.
+    @Test func reportingTheAttachSlotNeverEndsTheHide() {
+        withState { state in
+            seedProvider(state)
+            seedSession(state, id: "s1")
+            let s1 = sel("s1")
+            attach(state, s1)
+            state.toggleRemoteTranscript(s1)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
+
+            state.setRemoteAttachSlotShown(nil)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
             state.setRemoteAttachSlotShown(s1)
             #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
             #expect(!state.remoteSessionShowsTranscriptPane(s1))
@@ -385,7 +461,6 @@ struct RemoteTranscriptVisibilityTests {
             let s2 = sel("s2")
             attach(state, s2)
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             #expect(state.selectedRemoteSession == s1)
             #expect(state.remoteSessionIsAttached(s2))
             #expect(state.remoteSessionShowsTranscriptToggle(s2))
@@ -409,7 +484,7 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1", processState: .exited)
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(state.remoteSessionTranscriptLeads(s1))
+            #expect(state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
         }
     }
@@ -425,7 +500,7 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1", gone: true)
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(state.remoteSessionTranscriptLeads(s1))
+            #expect(state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
         }
     }
@@ -443,17 +518,17 @@ struct RemoteTranscriptVisibilityTests {
             #expect(state.recentlyAttachedRemoteSessions.contains(s1))
             #expect(!state.remoteSessionIsAttached(s1))
             #expect(state.remoteSessionShowsTranscriptPane(s1))
-            #expect(state.remoteSessionTranscriptLeads(s1))
+            #expect(state.remoteTranscriptPresentation(for: s1).transcriptLeads)
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
         }
     }
 
     // MARK: - One presentation per evaluation
 
-    /// The views read `remoteTranscriptPresentation(for:)` once; the AppKit
-    /// toolbar reads the wrappers. Each state is pinned to its expected
-    /// value as well, so the comparison cannot pass by both sides being
-    /// wrong the same way.
+    /// The views read `remoteTranscriptPresentation(for:)` once; a toolbar
+    /// that builds each item on its own reads the single-answer names. Each
+    /// state is pinned to its expected value as well, so the comparison
+    /// cannot pass by both sides being wrong the same way.
     @Test func presentationMatchesTheWrappers() {
         withState { state in
             seedProvider(state)
@@ -462,37 +537,40 @@ struct RemoteTranscriptVisibilityTests {
             state.selectedRemoteSession = s1
 
             let notAttached: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
-            let notAttachedWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let notAttachedAnswers: SingleAnswers = singleAnswers(of: notAttached)
+            let notAttachedWrappers: SingleAnswers = singleAnswers(state, s1)
             let notAttachedExpected = RemoteTranscriptPresentation(
                 attached: false, showsToggle: false, showsPane: true, transcriptLeads: true)
-            #expect(notAttached == notAttachedWrappers)
+            #expect(notAttachedAnswers == notAttachedWrappers)
             #expect(notAttached == notAttachedExpected)
 
             state.reattachRemoteSession(s1)
-            state.setRemoteAttachSlotShown(s1)
             let attached: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
-            let attachedWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let attachedAnswers: SingleAnswers = singleAnswers(of: attached)
+            let attachedWrappers: SingleAnswers = singleAnswers(state, s1)
             let attachedExpected = RemoteTranscriptPresentation(
                 attached: true, showsToggle: true, showsPane: true, transcriptLeads: false)
-            #expect(attached == attachedWrappers)
+            #expect(attachedAnswers == attachedWrappers)
             #expect(attached == attachedExpected)
 
             state.toggleRemoteTranscript(s1)
             let hidden: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
-            let hiddenWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let hiddenAnswers: SingleAnswers = singleAnswers(of: hidden)
+            let hiddenWrappers: SingleAnswers = singleAnswers(state, s1)
             let hiddenExpected = RemoteTranscriptPresentation(
                 attached: true, showsToggle: true, showsPane: false, transcriptLeads: false)
-            #expect(hidden == hiddenWrappers)
+            #expect(hiddenAnswers == hiddenWrappers)
             #expect(hidden == hiddenExpected)
 
             // The provider stops declaring `transcript.read`; it can still
             // attach, so only the transcript answers change.
             seedProvider(state, capabilities: ["attach", "log"])
             let noCapability: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
-            let noCapabilityWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let noCapabilityAnswers: SingleAnswers = singleAnswers(of: noCapability)
+            let noCapabilityWrappers: SingleAnswers = singleAnswers(state, s1)
             let noCapabilityExpected = RemoteTranscriptPresentation(
                 attached: true, showsToggle: false, showsPane: false, transcriptLeads: false)
-            #expect(noCapability == noCapabilityWrappers)
+            #expect(noCapabilityAnswers == noCapabilityWrappers)
             #expect(noCapability == noCapabilityExpected)
         }
     }
@@ -505,7 +583,6 @@ struct RemoteTranscriptVisibilityTests {
             seedSession(state, id: "s1")
             let s1 = sel("s1")
             attach(state, s1)
-            state.setRemoteAttachSlotShown(s1)
             state.toggleRemoteTranscript(s1)
             #expect(state.remoteTranscriptHiddenAttach == mountKey(s1))
 

@@ -478,10 +478,8 @@ final class AppState {
             if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
                 sidebarSelectionGeneration &+= 1
             }
-            // A transcript hide belongs to the session on screen and its
-            // current connection. Moving to another session or off remote
-            // sessions altogether shows it again; reselecting the same
-            // session keeps it.
+            // Leaving a session ends its transcript hide; reselecting the
+            // same session keeps it (`remoteTranscriptHiddenAttach`).
             clearRemoteTranscriptHide(unlessFor: selectedRemoteSession)
         }
     }
@@ -833,17 +831,28 @@ final class AppState {
     /// or nil when no transcript is hidden. In memory only and never
     /// persisted: the transcript opens by default, every time.
     ///
-    /// A hide belongs to one connection. It hides the pane only while that
-    /// session is attached under exactly this key, so a new connection —
-    /// Reconnect, or a restart after a network change, both of which bump the
-    /// generation — shows the transcript again with no clearing call. Three
-    /// writes end a hide outright: `selectedRemoteSession` when the selection
-    /// moves to any other session, `setRemoteAttachSlotShown` when the detail
-    /// view stops showing that session's attach slot, and
-    /// `markRemoteSessionDetached` when that session's connection exits. So
-    /// switching sessions, reattaching or reconnecting shows the transcript
-    /// again. Written only by `toggleRemoteTranscript`,
-    /// `clearRemoteTranscriptHide(unlessFor:)` and `markRemoteSessionDetached`.
+    /// A hide ends when the user leaves its session, or when its connection
+    /// ends: an exit, an unmount, or a replacement.
+    ///
+    /// - **Leaving** – `selectedRemoteSession` moves to any other session, or
+    ///   to none. Reselecting the same session keeps the hide.
+    /// - **An exit** – `markRemoteSessionDetached` records the hidden
+    ///   connection's child exiting.
+    /// - **An unmount** – `markRemoteAttachUnmounted` reports the pager
+    ///   tearing down the hidden connection's tab, whatever the reason: an
+    ///   explicit detach, the session leaving eligibility (its provider needs
+    ///   sign-in, say), the session vanishing, or a superseded generation. It
+    ///   covers the teardowns no exit reports.
+    /// - **A replacement** – Reconnect, or a restart after a network change,
+    ///   bumps the generation. The pane is hidden only while the session is
+    ///   attached under exactly this key, so the new connection shows its
+    ///   transcript at once, and the pager's unmount of the replaced key then
+    ///   clears the value.
+    ///
+    /// Set only by `toggleRemoteTranscript`. Cleared by
+    /// `clearRemoteTranscriptHide(unlessFor:)` on leaving and
+    /// `clearRemoteTranscriptHide(ofConnection:)` on an exit or unmount, each
+    /// of which writes only when the value changes.
     var remoteTranscriptHiddenAttach: RemoteAttachMountKey? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
@@ -1454,9 +1463,10 @@ final class AppState {
     /// `reconnectRemoteSession` has since superseded is dropped: that child
     /// was killed on purpose, and recording its exit would detach — or put
     /// into backoff — the fresh child that replaced it. `nil` skips the check.
-    /// An exit that is not dropped also ends a transcript hide on `selection`
-    /// (`remoteTranscriptHiddenAttach`); a dropped one leaves the hide, which
-    /// may belong to the replacement, alone.
+    /// An exit that is not dropped ends a transcript hide on the connection
+    /// that exited (`remoteTranscriptHiddenAttach`). A dropped one leaves any
+    /// hide alone, because its connection was already replaced and a hide on
+    /// the replacement belongs to a connection still running.
     ///
     /// `now` is the instant the backoff window is measured from — the date
     /// seam, defaulted so no production call site changes, so a test can
@@ -1471,14 +1481,10 @@ final class AppState {
         if let generation, generation != remoteAttachGeneration(for: selection) {
             return
         }
-        // This connection has ended, and a transcript hide belongs to one
-        // connection, so whatever connects next shows the transcript again.
-        // Cleared here rather than left to the detail view: an exit that
-        // recovers before SwiftUI draws the not-attached state never reports
-        // its attach slot hidden. Written only when there is a hide to drop.
-        if remoteTranscriptHiddenAttach?.selection == selection {
-            remoteTranscriptHiddenAttach = nil
-        }
+        // Past the guard, the exit belongs to the current generation, so the
+        // connection that ended is the one under the current key, and a
+        // transcript hide on it ends with it (`remoteTranscriptHiddenAttach`).
+        clearRemoteTranscriptHide(ofConnection: remoteAttachMountKey(for: selection))
         // The child that reported this exit is gone, so its spawn time must
         // not outlive it. `handleNetworkChange` reads a recorded start as "a
         // live child has been running since then" and restarts the pane; an
@@ -1562,10 +1568,16 @@ final class AppState {
     /// explicit detach, the session vanishing, or a superseded generation. The
     /// pager's dismantle terminates the child with its exit callback
     /// suppressed, so this is the only way `startedAt` learns the child is
-    /// gone. A report for a generation that is no longer current is dropped,
-    /// so the old key's removal after a reconnect cannot clear the replacement
-    /// child's start. The generation itself is kept.
+    /// gone. A report for a generation that is no longer current leaves the
+    /// start alone, so the old key's removal after a reconnect cannot clear
+    /// the replacement child's start. The generation itself is kept.
+    ///
+    /// Every report, current or not, ends a transcript hide on the connection
+    /// it names (`remoteTranscriptHiddenAttach`). The comparison is by the
+    /// whole key, so the old key's removal after a reconnect cannot end a
+    /// hide on the replacement.
     func markRemoteAttachUnmounted(_ selection: RemoteSessionSelection, generation: Int) {
+        clearRemoteTranscriptHide(ofConnection: RemoteAttachMountKey(selection: selection, generation: generation))
         guard generation == remoteAttachGeneration(for: selection) else { return }
         remoteAttachGenerations[selection]?.startedAt = nil
     }
