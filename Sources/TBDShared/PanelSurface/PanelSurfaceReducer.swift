@@ -44,9 +44,7 @@ public enum PanelOperationError: LocalizedError, Equatable, Sendable {
 /// `open` of it selects the worktree panel already showing it or appends
 /// one, and `close` of a worktree panel removes it from the list. The panel
 /// in front, collapse and recency stay this tab's, and recency covers only
-/// the tab's own panels. Closing the tab's last own panel while it is in
-/// front collapses the region onto the first worktree panel, so the region
-/// hides as it does when no worktree panel is left to show.
+/// the tab's own panels.
 public enum PanelSurfaceReducer {
     public static func apply(
         _ operation: PanelOperation, to surface: WorkspaceTabSurface,
@@ -253,27 +251,18 @@ public enum PanelSurfaceReducer {
         side.collapsed = false
     }
 
-    /// Removes the tab's own panel and its history. Closing a panel behind
-    /// another changes neither the front nor `collapsed`. Closing the panel
-    /// in front:
-    ///
-    /// - makes the most recent remaining own panel active;
-    /// - with no own panel left, makes the first worktree panel active and
-    ///   collapses the region, so closing the last own panel hides the
-    ///   region as it does in a worktree with no worktree panels, and the
-    ///   worktree's panels wait one toggle away;
-    /// - with no panel of either kind left, leaves the region empty, which
-    ///   hides it.
+    /// Removes the tab's own panel and its history. Closing the active panel
+    /// makes the most recent remaining own panel active, else the first
+    /// worktree panel; closing the last panel of either kind leaves the
+    /// region empty, which hides it. It never changes `collapsed`.
     private static func close(_ panelID: PanelID, in surface: inout WorkspaceTabSurface) throws {
         guard let index = surface.side.panels.firstIndex(where: { $0.id == panelID }) else {
             throw PanelOperationError.panelNotFound(panelID)
         }
         surface.side.panels.remove(at: index)
         surface.side.recency.removeAll { $0 == panelID }
-        guard surface.side.activePanelID == panelID else { return }
-        surface.side.activePanelID = surface.side.recency.first ?? surface.worktreePanels.first?.id
-        if surface.side.panels.isEmpty, !surface.worktreePanels.isEmpty {
-            surface.side.collapsed = true
+        if surface.side.activePanelID == panelID {
+            surface.side.activePanelID = surface.side.recency.first ?? surface.worktreePanels.first?.id
         }
     }
 

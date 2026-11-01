@@ -283,8 +283,6 @@ struct PanelSurfaceReducerTests {
             activePanelID: Fixture.a, recency: [Fixture.a, Fixture.c]))
     }
 
-    /// With no worktree panels, closing the last panel leaves the region
-    /// empty, which hides it, and changes no collapse.
     @Test func closeLastLeavesEmptyRegion() throws {
         let side = SideRegion(
             panels: [Fixture.panel(Fixture.a, entries: [Fixture.file("/b"), Fixture.file("/a")])],
@@ -647,58 +645,21 @@ struct PanelSurfaceReducerTests {
     }
 
     /// Closing the tab's last own panel while it is in front fronts the
-    /// first worktree panel and collapses the region, so the region hides
-    /// rather than stay open on the worktree's note.
-    @Test func closeLastOwnPanelInFrontCollapsesOntoWorktreePanel() throws {
+    /// first worktree panel, and leaves `collapsed` as it was: an open
+    /// region stays open on the worktree panel, a collapsed one stays
+    /// collapsed.
+    @Test(arguments: [false, true])
+    func closeLastOwnPanelFrontsWorktreePanelLeavingCollapse(collapsed: Bool) throws {
         let side = SideRegion(
             panels: [Fixture.panel(Fixture.t, Fixture.transcript(Fixture.terminal1))],
-            activePanelID: Fixture.t, recency: [Fixture.t], width: 0.3)
+            activePanelID: Fixture.t, recency: [Fixture.t], collapsed: collapsed, width: 0.3)
         let worktreePanels = [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]
         let out = try applySurface(
             .close(panelID: Fixture.t), to: Fixture.surface(side, worktreePanels: worktreePanels))
-        #expect(out.side == SideRegion(activePanelID: Fixture.n1, collapsed: true, width: 0.3))
+        #expect(out.side == SideRegion(activePanelID: Fixture.n1, collapsed: collapsed, width: 0.3))
         #expect(out.worktreePanels == worktreePanels)
-        #expect(!out.isSideVisible)
+        #expect(out.isSideVisible == !collapsed)
         #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
-    }
-
-    /// Only closing the last own panel in front collapses. Closing the last
-    /// own panel behind a worktree panel, closing the own panel in front
-    /// while another own panel remains, and closing a worktree panel each
-    /// leave `collapsed` as it was.
-    @Test(arguments: [false, true])
-    func closeLeavesCollapseAloneUnlessLastOwnPanelInFront(collapsed: Bool) throws {
-        let worktreePanels = [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]
-
-        // The last own panel, behind the note's worktree panel.
-        let behind = SideRegion(
-            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))],
-            activePanelID: Fixture.n1, recency: [Fixture.a], collapsed: collapsed)
-        let behindOut = try applySurface(
-            .close(panelID: Fixture.a), to: Fixture.surface(behind, worktreePanels: worktreePanels))
-        #expect(behindOut.side == SideRegion(activePanelID: Fixture.n1, collapsed: collapsed))
-        #expect(behindOut.worktreePanels == worktreePanels)
-        #expect(PanelSurfaceValidator.violations(in: behindOut).isEmpty)
-
-        // The own panel in front, with another own panel left.
-        let withAnother = SideRegion(
-            panels: [Fixture.panel(Fixture.a, Fixture.file("/a")), Fixture.panel(Fixture.b, Fixture.file("/b"))],
-            activePanelID: Fixture.a, recency: [Fixture.a, Fixture.b], collapsed: collapsed)
-        let withAnotherOut = try applySurface(
-            .close(panelID: Fixture.a), to: Fixture.surface(withAnother, worktreePanels: worktreePanels))
-        #expect(withAnotherOut.side == SideRegion(
-            panels: [Fixture.panel(Fixture.b, Fixture.file("/b"))],
-            activePanelID: Fixture.b, recency: [Fixture.b], collapsed: collapsed))
-        #expect(PanelSurfaceValidator.violations(in: withAnotherOut).isEmpty)
-
-        // A worktree panel in front, with no own panels.
-        let worktreeOnly = SideRegion(activePanelID: Fixture.n1, collapsed: collapsed)
-        let worktreeOut = try applySurface(
-            .close(panelID: Fixture.n1), to: Fixture.surface(worktreeOnly, worktreePanels: worktreePanels))
-        #expect(worktreeOut.side == SideRegion(activePanelID: Fixture.ch, collapsed: collapsed))
-        let remaining = [Fixture.changesPanel(Fixture.ch)]
-        #expect(worktreeOut.worktreePanels == remaining)
-        #expect(PanelSurfaceValidator.violations(in: worktreeOut).isEmpty)
     }
 
     @Test func historyAndNavigateOnWorktreePanelRefused() throws {
