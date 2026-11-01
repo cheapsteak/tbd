@@ -9,12 +9,13 @@ import SwiftUI
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
 /// - **The toolbar.** A `MainToolbarController` made for the split, which it
-///   serves for its whole life, with the title cluster in a hosting view. It
-///   is installed on the window the main-actor turn after the split's
-///   `onViewDidAppear`: AppKit can deliver that from inside SwiftUI's
-///   insertion of the representable, and the toolbar never changes inside a
-///   SwiftUI update. The coordinator holds the controller, so it lives as
-///   long as the split; the toolbar holds its delegate only weakly.
+///   serves for its whole life, with the title cluster in a hosting view
+///   (`makeTitleView(_:)`). It is installed on the window the main-actor
+///   turn after the split's `onViewDidAppear`: AppKit can deliver that from
+///   inside SwiftUI's insertion of the representable, and the toolbar never
+///   changes inside a SwiftUI update. The coordinator holds the controller,
+///   so it lives as long as the split; the toolbar holds its delegate only
+///   weakly.
 /// - **The divider.** It autosaves only when `AppState` uses
 ///   `UserDefaults.standard`, the store `NSSplitView` writes it to.
 /// - **Hosting.** The hosting controllers and the title's hosting view have
@@ -62,8 +63,7 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
             sidebar: hostingController(SidebarView()),
             content: hostingController(MainDetailArea()),
             autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
-        let titleView = NSHostingView(rootView: withAppEnvironment(ToolbarTitleCluster(appState: appState)))
-        titleView.sceneBridgingOptions = []
+        let titleView = Self.makeTitleView(withAppEnvironment(ToolbarTitleCluster(appState: appState)))
         let toolbarController = MainToolbarController(
             appState: appState, split: split, titleView: titleView, requestRemoteStop: requestRemoteStop)
         // Weak both ways: this closure holds the controller weakly, as the
@@ -81,6 +81,33 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         }
         context.coordinator.toolbarController = toolbarController
         return split
+    }
+
+    /// The title item's view: `root` in a hosting view whose width never
+    /// follows the text, so the cluster stays put when the title changes.
+    ///
+    /// - **Width.** The root's ideal width is a constant, and the hosting view
+    ///   reports only an intrinsic size, so it installs no minimum or maximum
+    ///   that tracks the content. `MainToolbarController` gives the view the
+    ///   width constraints that make the item flexible.
+    /// - **Placement.** The content hugs the leading edge of whatever width
+    ///   the toolbar gives the item, so it starts just past the tracking
+    ///   separator and does not move as the width changes.
+    /// - **Overflow.** A title wider than the item is cut at the item's
+    ///   trailing edge. Nothing past the leading, top or bottom edge is cut,
+    ///   so the notes button's hover label, which reaches below the cluster
+    ///   and left of its leading edge, still shows.
+    /// - **Hosting.** `sceneBridgingOptions = []`, so the view never claims
+    ///   the window's toolbar or title.
+    static func makeTitleView<Root: View>(_ root: Root) -> NSView {
+        let content = root
+            .frame(minWidth: 0, idealWidth: MainToolbarMetrics.titleIdealWidth, maxWidth: .infinity,
+                   alignment: .leading)
+            .clipShape(TrailingEdgeClip())
+        let view = NSHostingView(rootView: content)
+        view.sceneBridgingOptions = []
+        view.sizingOptions = [.intrinsicContentSize]
+        return view
     }
 
     /// The divider's autosave name, only for `UserDefaults.standard`:
@@ -125,6 +152,21 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         controller.sceneBridgingOptions = []
         controller.sizingOptions = []
         return controller
+    }
+}
+
+/// A clip at the trailing edge only: the shape stops exactly there and
+/// reaches far past the leading, top and bottom edges, so nothing drawn
+/// beyond those is cut. Its path is drawn for left-to-right layout and
+/// mirrors under right-to-left, so it cuts the trailing edge in both.
+private struct TrailingEdgeClip: Shape {
+    var layoutDirectionBehavior: LayoutDirectionBehavior { .mirrors }
+
+    func path(in rect: CGRect) -> Path {
+        let reach: CGFloat = 1_000
+        return Path(CGRect(
+            x: rect.minX - reach, y: rect.minY - reach,
+            width: rect.width + reach, height: rect.height + 2 * reach))
     }
 }
 

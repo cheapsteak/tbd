@@ -4,6 +4,9 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
+// Tier 1: snapshots made from an in-memory `AppState`, with no window and no
+// waits.
+
 @MainActor
 @Suite("Main toolbar snapshot")
 struct MainToolbarSnapshotTests {
@@ -217,6 +220,33 @@ struct MainToolbarSnapshotTests {
         #expect(full.layoutState(sidebarCollapsed: true) == MainToolbarLayoutState(
             sidebarCollapsed: true, showsServers: true, showsTranscript: true,
             showsReconnect: false, showsStop: true))
+    }
+
+    /// The title is the title cluster's main title: the selected worktree's
+    /// name, which wins over a selected remote session; the session's name
+    /// when the selection names no worktree it can find; and none with
+    /// neither.
+    @Test func titleFollowsTheSelection() {
+        withState { state, _, worktrees in
+            #expect(MainToolbarSnapshot.make(from: state).title == nil)
+
+            state.selectedWorktreeIDs = [worktrees[1].id]
+            #expect(MainToolbarSnapshot.make(from: state).title == "feature")
+
+            let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+            state.remoteProviders = [provider(capabilities: ["attach"])]
+            state.remoteSessions = [runningSession()]
+            state.selectedRemoteSession = selection
+            #expect(MainToolbarSnapshot.make(from: state).title == "feature")
+
+            state.selectedWorktreeIDs = []
+            let sessionName = state.remoteSessionDisplayName(for: selection)
+            #expect(MainToolbarSnapshot.make(from: state).title == sessionName)
+            #expect(sessionName == "s1")
+
+            state.selectedRemoteSession = nil
+            #expect(MainToolbarSnapshot.make(from: state).title == nil)
+        }
     }
 
     @Test func backForwardMirrorHistory() {

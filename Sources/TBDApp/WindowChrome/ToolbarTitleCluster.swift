@@ -11,14 +11,29 @@ import TBDShared
 struct ToolbarTitleCluster: View {
     let appState: AppState
 
-    private var selectedWorktree: Worktree? {
+    /// The worktree the cluster names: the first selected one.
+    private static func selectedWorktree(in appState: AppState) -> Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
         // findWorktree also resolves scratch spaces (repo-less worktrees).
         return appState.findWorktree(id: id)
     }
 
+    /// The text the cluster shows as its main title: the selected worktree's
+    /// name, as `WorktreeTitleView` shows it, or the selected remote
+    /// session's. `nil` when it shows neither. The AppKit toolbar's overflow
+    /// row for the title shows the same text.
+    static func mainTitle(in appState: AppState) -> String? {
+        if let worktree = selectedWorktree(in: appState) {
+            return worktree.displayName
+        }
+        if let selection = appState.selectedRemoteSession {
+            return appState.remoteSessionDisplayName(for: selection)
+        }
+        return nil
+    }
+
     var body: some View {
-        if let worktree = selectedWorktree {
+        if let worktree = Self.selectedWorktree(in: appState) {
             WorktreeTitleView(
                 appState: appState,
                 worktree: worktree,

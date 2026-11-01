@@ -225,16 +225,72 @@ struct ToolbarLayoutSync {
     }
 }
 
-/// Section widths the sidebar's minimum thickness is derived from. AppKit
-/// drops a toolbar item that does not fit its section, silently, so the
-/// sidebar can never be narrower than the window buttons, three icon items and
-/// the filter. The running app confirms these numbers.
+/// The sizes the toolbar's layout rests on: the compact leading buttons, the
+/// sidebar's minimum thickness derived from them, and the title item's
+/// flexible width.
+///
+/// AppKit moves a toolbar item that does not fit its section into the
+/// toolbar's overflow menu, out of its place, so the sidebar can never be
+/// narrower than the items over it. AppKit publishes
+/// neither its spacing between items nor where it places the first item after
+/// the window buttons, so `interItemSpacing` and `firstItemLeadingInset` are
+/// estimates, taken from a reference macOS 27 toolbar whose window buttons,
+/// sidebar toggle, back and forward sit 28 pt apart. The running app confirms
+/// or tightens them.
 enum MainToolbarMetrics {
-    static let windowButtonsWidth: CGFloat = 80
-    static let iconItemWidth: CGFloat = 30
+    /// The distance from one leading button's centre to the next: the
+    /// reference toolbar's 28 pt, split into `iconButtonWidth` and
+    /// `interItemSpacing`.
+    static let iconButtonPitch: CGFloat = 28
+    /// AppKit's spacing between adjacent toolbar items. It is not public, so
+    /// this is an estimate the running app confirms: when the buttons it
+    /// shows are not `iconButtonPitch` apart, this is the constant to tune.
+    static let interItemSpacing: CGFloat = 8
+    /// A leading button's width: the pitch less AppKit's spacing, so adjacent
+    /// buttons sit `iconButtonPitch` apart.
+    static let iconButtonWidth: CGFloat = iconButtonPitch - interItemSpacing
+    /// A leading button's height. AppKit centres items vertically in the
+    /// toolbar, which puts the glyphs on the window buttons' line.
+    static let iconButtonHeight: CGFloat = 28
+    /// The point size of a leading button's symbol, drawn at regular weight.
+    static let iconGlyphPointSize: CGFloat = 13
+    /// From the window's leading edge to the first item's leading edge: where
+    /// AppKit places the first item after the window buttons. Estimated from
+    /// the reference toolbar, whose toggle is centred 97.8 pt from the edge,
+    /// less half a button.
+    static let firstItemLeadingInset: CGFloat = 88
+    /// The repo filter's widest, past which a long repo name truncates.
     static let filterMaxWidth: CGFloat = 110
+    /// The margin the sidebar's section keeps before the tracking separator.
     static let sectionPadding: CGFloat = 20
+    /// The sidebar's section at its narrowest, left to right: the leading
+    /// inset; toggle, back and forward, each followed by one spacing; the
+    /// flexible space, empty at this width but still spaced on both sides,
+    /// so one more spacing before the filter; the filter at its widest; and
+    /// the margin before the separator. 310 pt with the estimates above.
+    /// Three buttons and four spacings are three pitches and one more
+    /// spacing, so the thickness grows with the spacing estimate.
     static let sidebarMinimumThickness: CGFloat =
-        windowButtonsWidth + 3 * iconItemWidth + filterMaxWidth + sectionPadding
+        firstItemLeadingInset + 3 * iconButtonWidth + 4 * interItemSpacing + filterMaxWidth + sectionPadding
     static let sidebarMaximumThickness: CGFloat = 400
+
+    /// The title item's narrowest, which the title view holds as a required
+    /// minimum: when AppKit measures the item's range through its
+    /// constraints, the item can shrink this far before the right-hand items
+    /// overflow. A title wider than the space it gets is cut at the trailing
+    /// edge. A choice, not a measurement.
+    static let titleMinimumWidth: CGFloat = 80
+    /// The width a fitting measurement gives the title item: the title
+    /// cluster's hosting view reports it as its intrinsic width, and its
+    /// compression resistance outweighs a fitting measurement's pull, so the
+    /// measurement lands here whatever the text says. When AppKit measures
+    /// the item's range through its constraints, the item can still shrink
+    /// toward the minimum or grow toward the maximum. A choice, not a
+    /// measurement.
+    static let titleIdealWidth: CGFloat = 240
+    /// The title item's widest. The title view prefers it at a low priority,
+    /// so the item fills the space up to the right-hand items on any window
+    /// a person uses; a wider window leaves the rest to the flexible space
+    /// after it. A choice, not a measurement.
+    static let titleMaximumWidth: CGFloat = 2000
 }
