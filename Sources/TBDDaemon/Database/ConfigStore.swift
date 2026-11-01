@@ -187,11 +187,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.cloneCheckoutDefault`, never through `?? false`.
     var clone_checkout_enabled: Bool?
-    /// The side panel with tabs, shared with agents. **Genuinely tri-state**:
-    /// the `panel_tabs` migration carries no SQL default, so `nil` means
-    /// "never chose". Resolve it through `Config.panelTabsDefault`, never
-    /// through `?? false`.
-    var panel_tabs_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -273,8 +268,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
-    /// - Parameter panelTabsDefault: same shape again, for
-    ///   `panel_tabs_enabled` — the side panel with tabs' soak gate.
     /// - Parameter worktreeParksOnMerge: whether a worktree that is not
     ///   archived overrides park-on-merge to true. It lives in the `worktree`
     ///   table, so `ConfigStore.get()` reads it with one query beside this row;
@@ -302,7 +295,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
-        panelTabsDefault: Bool = Config.panelTabsDefault,
         worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -421,8 +413,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Live remote transcript sync gate — NOT `?? false`.
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
-        // Side panel with tabs gate — NOT `?? false`.
-        config.panelTabsEnabled = panel_tabs_enabled ?? panelTabsDefault
         return config
     }
 }
@@ -1068,19 +1058,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_streaming_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the side panel with tabs gate (default OFF, soaking). Written
-    /// on every call, so either value is the explicit gesture that lifts the
-    /// column out of NULL. It turns on the panel store, the tab sync, app
-    /// rendering and agent control together.
-    public func setPanelTabsEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET panel_tabs_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

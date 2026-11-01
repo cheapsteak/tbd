@@ -1800,12 +1800,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
     /// Read on every create, so a change takes effect at the next one.
     public var cloneCheckoutEnabled: Bool = Config.cloneCheckoutDefault
-    /// The side panel with tabs, shared with agents
-    /// (docs/specs/2026-10-30-panel-tabs-design.md): one switch for the
-    /// daemon's panel store, the tab sync, app rendering and agent control.
-    /// Resolved as `panel_tabs_enabled ?? Config.panelTabsDefault`. Assigned
-    /// after construction by the daemon, like `composerDraftEnabled`.
-    public var panelTabsEnabled: Bool = Config.panelTabsDefault
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1952,10 +1946,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `cloneCheckoutEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let cloneCheckoutDefault = false
-    /// The shipped default for `panelTabsEnabled`, and the single place it
-    /// lives. Ships off; graduation is a change to this constant, with no
-    /// forcing `UPDATE` migration and every explicit opt-out left alone.
-    public static let panelTabsDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -2155,10 +2145,6 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
-        // Absent means the sender knew nothing about the flag, the NULL
-        // column's situation — follow the shipped default.
-        panelTabsEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .panelTabsEnabled) ?? Config.panelTabsDefault
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
