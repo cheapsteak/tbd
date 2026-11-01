@@ -48,16 +48,33 @@ struct OpenWithApp: Identifiable, Equatable, Sendable {
 /// no apps are registered — callers omit the submenu in that case.
 /// Nonisolated, and it touches the disk and Launch Services, so views reach it
 /// through `lookUpOpenWithApps(forPath:)`, off the main actor.
-func openWithApps(forPath path: String) -> [OpenWithApp] {
-    guard FileManager.default.fileExists(atPath: path) else { return [] }
-    let fileURL = URL(fileURLWithPath: path)
-    return NSWorkspace.shared.urlsForApplications(toOpen: fileURL).map(OpenWithApp.init)
+///
+/// The task it runs in being cancelled skips each step not yet reached — the
+/// file check, then the query — and returns an empty list, which a cancelled
+/// caller drops. `fileExists` and `applicationsToOpen` are the disk and
+/// Launch Services, unless a test stands in for them.
+func openWithApps(
+    forPath path: String,
+    fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+    applicationsToOpen: (URL) -> [URL] = { NSWorkspace.shared.urlsForApplications(toOpen: $0) }
+) -> [OpenWithApp] {
+    guard !Task.isCancelled, fileExists(path) else { return [] }
+    guard !Task.isCancelled else { return [] }
+    return applicationsToOpen(URL(fileURLWithPath: path)).map(OpenWithApp.init)
 }
 
 /// `openWithApps(forPath:)` on a detached task at utility priority, so the
 /// file check and the Launch Services query never run on the main thread.
+/// Cancelling the caller cancels the detached task too, so a lookup the view
+/// abandoned (`OpenWithAppsLookup.stop`, or a newer lookup replacing it)
+/// skips whatever query it has not started.
 func lookUpOpenWithApps(forPath path: String) async -> [OpenWithApp] {
-    await Task.detached(priority: .utility) { openWithApps(forPath: path) }.value
+    let lookup = Task.detached(priority: .utility) { openWithApps(forPath: path) }
+    return await withTaskCancellationHandler {
+        await lookup.value
+    } onCancel: {
+        lookup.cancel()
+    }
 }
 
 /// One view's Open With list (`apps`) for the file its menu acts on, looked
