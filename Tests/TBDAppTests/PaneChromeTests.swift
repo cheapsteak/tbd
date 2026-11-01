@@ -30,7 +30,7 @@ struct PaneChromeTests {
     func copyShowsTheCheckmarkForOneAndAHalfSeconds() async throws {
         let clock = EventDrivenTestClock()
         let written = FireRecorder<String>()
-        let state = PaneChromeState(clock: clock, pasteboard: { written.record($0) })
+        let state = PaneChromeState(pasteboard: { written.record($0) }, clock: clock)
         let url = try #require(URL(string: "https://example.com/docs/page?section=2"))
 
         state.copyAddress(url)
@@ -51,7 +51,7 @@ struct PaneChromeTests {
     func aSecondCopyRestartsTheCheckmark() async throws {
         let clock = EventDrivenTestClock()
         let written = FireRecorder<String>()
-        let state = PaneChromeState(clock: clock, pasteboard: { written.record($0) })
+        let state = PaneChromeState(pasteboard: { written.record($0) }, clock: clock)
         let first = try #require(URL(string: "https://example.com/first"))
         let second = try #require(URL(string: "https://example.com/second"))
 
@@ -76,7 +76,7 @@ struct PaneChromeTests {
 
     @Test("a fresh chrome state shows the rendered view and knows of no renderable content")
     func aFreshStateStartsRenderedWithNothingCopied() {
-        let state = PaneChromeState(clock: EventDrivenTestClock(), pasteboard: { _ in })
+        let state = PaneChromeState(pasteboard: { _ in }, clock: EventDrivenTestClock())
 
         #expect(state.showSourceCode == false)
         #expect(state.hasRenderableContent == false)

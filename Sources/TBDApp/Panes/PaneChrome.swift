@@ -42,12 +42,12 @@ final class PaneChromeState {
     @ObservationIgnored private var copyReset: Task<Void, Never>?
 
     /// - Parameters:
-    ///   - clock: times the checkmark's reset.
     ///   - pasteboard: receives each copied address; the general pasteboard
     ///     by default.
+    ///   - clock: times the checkmark's reset.
     init(
-        clock: any Clock<Duration> = ContinuousClock(),
-        pasteboard: @escaping @MainActor (String) -> Void = { copyToPasteboard($0) }
+        pasteboard: @escaping @MainActor (String) -> Void = { copyToPasteboard($0) },
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.webviewState = WebviewState()
         self.clock = clock
@@ -77,8 +77,15 @@ final class PaneChromeState {
 
 /// One `PaneChromeState` per ID, for a view whose leaves change under one
 /// tab row: the workspace view's primary, keyed by workspace tab, or the side
-/// region's panels, keyed by panel. Each ID keeps its own state for as long
-/// as it is kept, so no leaf shows another's toggle, address or checkmark.
+/// region's panels, keyed by panel. What it guarantees is one state per ID,
+/// the same instance for as long as the ID is kept, so a leaf's web view and
+/// copy checkmark never see another leaf's.
+///
+/// It does not keep a leaf's rendered/source choice across a rebuild. A
+/// leaf's teardown resets its `HasRenderableContentKey` report into the
+/// state (`PanePlaceholder`), so the rebuilt leaf's first report that its
+/// file can render turns source view off: the toggle starts on the rendered
+/// view again whenever its leaf is rebuilt.
 ///
 /// Not observed: views observe the states it hands out, never the store, so
 /// creating a state while a body is evaluated invalidates nothing.
