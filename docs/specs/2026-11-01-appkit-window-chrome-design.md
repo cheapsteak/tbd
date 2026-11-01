@@ -90,9 +90,9 @@ A `MainToolbarController` owns an `NSToolbar`, is its delegate, and installs it
 on the main window when the split appears, with `toolbarStyle = .unified`.
 Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
 
-1. **Sidebar toggle** – a borderless item (`isBordered = false`) whose action is
-   the split controller's `toggleSidebar(_:)`.
-2. **Back** and 3. **Forward** – borderless items, enabled from
+1. **Sidebar toggle** – a compact button (see "Compact buttons") whose action
+   is the split controller's `toggleSidebar(_:)`.
+2. **Back** and 3. **Forward** – compact buttons, enabled from
    `AppState.canGoBack` and `canGoForward`. They are not `isNavigational`, which
    would move them after the separator.
 4. **Flexible space.**
@@ -107,7 +107,12 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    item for that identifier finds a divider on its own, and re-binding it
    afterwards raises a KVO exception.
 7. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
-   a borderless item.
+   a borderless item. Its width does not follow its text: the item fills the
+   space between the tracking separator and the right-hand items, within a
+   constant minimum and maximum, and the cluster sits at its leading edge. So
+   the cluster starts just past the separator and stays put when back,
+   forward or a new selection changes the title. A title wider than the item
+   is cut at the item's trailing edge.
 8. **Flexible space.**
 9. **The right-hand items,** with today's behavior: the Servers split button
    and the remote session buttons (Reconnect, Stop with its confirmation, and
@@ -124,12 +129,60 @@ state. The controller observes `AppState` with
 `withObservationTracking` and applies a changed result on the next main-actor
 turn, never during a SwiftUI update, which can re-enter layout.
 
+### Compact buttons
+
+The toggle, back and forward match the leading buttons of a macOS 27 toolbar
+whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
+
+- **View** – each is a view item whose view is a borderless `NSButton`, 20 pt
+  wide and 28 pt tall, held by required constraints. AppKit centres items
+  vertically, which puts the glyphs on the window buttons' line.
+- **Pitch** – 28 pt: the 20 pt button plus AppKit's spacing between items,
+  which is not public and is estimated at 8 pt.
+- **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt and
+  regular weight. Back and forward draw grey while disabled.
+- **Hover** – the button draws its bezel only while the pointer is over it, so
+  it highlights on hover and shows no border at rest.
+- **No capsule** – AppKit has no public API to remove a view item's Liquid
+  Glass background, so the live check confirms that none shows.
+
+### The overflow menu
+
+An item that does not fit goes to the toolbar's overflow menu (») as its menu
+form. AppKit's default form for a view item is a row titled with the item's
+label that sends the view's action from an `NSMenuItem`, so every view item has
+an explicit form:
+
+- **Toggle, back and forward** – a row acting as the button does; back and
+  forward are disabled when history has nowhere to go.
+- **Repo filter** – "Filter", with a submenu of "All Repos" and each repo, the
+  current choice checked, kept in step with the popup.
+- **Title cluster** – an inert row showing the title, hidden when nothing is
+  selected.
+
+Every action the toolbar wires takes any sender and checks its class, so a row
+sending it from an `NSMenuItem` never meets a method typed for another sender.
+The Servers item's menu is its form, and the remote session buttons, image
+items whose actions take any sender, keep AppKit's default.
+
 ### Width
 
-AppKit drops a toolbar item that does not fit its section, silently, with no
-overflow. So the sidebar's minimum thickness is at least the width of the
-window buttons, the three icons and the filter. The running app confirms the
-number.
+AppKit moves a toolbar item that does not fit its section into the overflow
+menu, out of its place. So the sidebar's minimum thickness is the sidebar's
+section at its narrowest, left to right:
+
+- **Leading inset** – 88 pt from the window's edge to the first item, where
+  AppKit places it after the window buttons, estimated from the reference
+  toolbar.
+- **Buttons** – 3 × 20 pt.
+- **Spacing** – 3 × 8 pt: one after each button, the third before the filter,
+  as the flexible space between them is empty at this width.
+- **Filter** – 110 pt, its maximum width.
+- **Margin** – 20 pt before the tracking separator.
+
+That is 88 + 3 × 20 + 3 × 8 + 110 + 20 = 302 pt, below the 400 pt maximum. The
+spacing and the inset are estimates: the running app confirms them, and the
+spacing is the one constant to tune if the buttons do not sit 28 pt apart.
 
 ### Shortcuts
 
@@ -165,16 +218,26 @@ No durable resource is added.
   false after setup and after a layout pass; both separator styles `.none`.
 - **The toggle survives a collapse:** in a hosted window, the toggle and arrows
   are still toolbar items after the sidebar collapses.
+- **Compact buttons:** each is a view item whose button holds 20 × 28 pt, with
+  its tool tip, target and action; the sidebar's minimum thickness is the
+  "Width" formula.
+- **Overflow rows:** every item's menu form, or AppKit's default where it has
+  none, sends its action from a menu item without raising; the filter's form
+  mirrors the popup and sets the filter.
+- **Title width:** the title item keeps its frame as the title goes from short
+  to long and back, and starts at or after the divider.
 - **Shortcuts:** the three commands exist on both paths.
 - **Live, before merge,** on the owner's machine: positions with the sidebar
   shown and collapsed and in full screen, no separator line, the filter hiding,
-  nothing dropped at the minimum width, and no collapse after waking from sleep.
+  nothing overflowing at the minimum width, the leading buttons 28 pt apart
+  with no glass behind them and a hover highlight, the title staying put across
+  back and forward, and no collapse after waking from sleep.
 
 ## Risks
 
 - **Two toolbars to keep in step** until the SwiftUI path is deleted.
 - **macOS 27 reportedly draws a bar behind toolbar buttons;** unverified for
-  borderless items.
+  the compact buttons, whose glass AppKit gives no public way to remove.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.

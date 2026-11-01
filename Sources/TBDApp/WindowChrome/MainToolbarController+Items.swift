@@ -40,7 +40,8 @@ extension MainToolbarController {
     func makeItem(_ identifier: NSToolbarItem.Identifier, willBeInserted: Bool) -> NSToolbarItem? {
         switch identifier {
         case MainToolbarItemID.toggleSidebar:
-            return makeToggleItem()
+            return makeIconButtonItem(identifier, symbol: "sidebar.left", tip: "Toggle Sidebar",
+                                      target: split, action: #selector(NSSplitViewController.toggleSidebar(_:)))
         case MainToolbarItemID.back:
             return makeHistoryItem(identifier, symbol: "chevron.left", tip: "Back",
                                    action: #selector(navigateBack(_:)))
@@ -70,15 +71,52 @@ extension MainToolbarController {
         }
     }
 
-    private func makeToggleItem() -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.toggleSidebar)
-        item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
-        item.label = "Toggle Sidebar"
-        item.toolTip = "Toggle Sidebar"
-        item.isBordered = false
-        item.target = split
-        item.action = #selector(NSSplitViewController.toggleSidebar(_:))
+    /// A compact leading button: a view item whose view is an accessory-bar
+    /// `NSButton`, `iconButtonWidth` by `iconButtonHeight`, with the symbol at
+    /// `iconGlyphPointSize`. The button draws its bezel only while the pointer
+    /// is over it, so it highlights on hover and shows no border at rest. A
+    /// view item's target and action are its view's, and its overflow row is
+    /// an explicit menu form carrying the same target and action.
+    private func makeIconButtonItem(
+        _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
+    ) -> NSToolbarItem {
+        let button = NSButton(frame: NSRect(
+            x: 0, y: 0, width: MainToolbarMetrics.iconButtonWidth, height: MainToolbarMetrics.iconButtonHeight))
+        button.bezelStyle = .accessoryBar
+        button.isBordered = true
+        button.showsBorderOnlyWhileMouseInside = true
+        button.title = ""
+        button.image = Self.iconGlyph(symbol, description: tip)
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.toolTip = tip
+        button.setAccessibilityLabel(tip)
+        button.target = target
+        button.action = action
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth),
+            button.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight),
+        ])
+
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.view = button
+        item.label = tip
+        item.toolTip = tip
+        let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")
+        form.target = target
+        item.menuFormRepresentation = form
         return item
+    }
+
+    /// `symbol` at the leading buttons' point size and regular weight,
+    /// carrying `description` for accessibility.
+    private static func iconGlyph(_ symbol: String, description: String) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: MainToolbarMetrics.iconGlyphPointSize, weight: .regular)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(configuration)
+        image?.accessibilityDescription = description
+        return image
     }
 
     /// The tracking separator, bound to the split's first divider as it is
@@ -96,29 +134,27 @@ extension MainToolbarController {
             identifier: MainToolbarItemID.sidebarSeparator, splitView: split.splitView, dividerIndex: 0)
     }
 
-    /// Back or Forward. Not `isNavigational`, which would move it after the
-    /// tracking separator. `autovalidates` is off because validation would
-    /// enable it whenever its target answers the action; `canGoBack` and
-    /// `canGoForward` decide instead.
+    /// Back or Forward, a compact leading button. Not `isNavigational`, which
+    /// would move it after the tracking separator. `autovalidates` is off
+    /// because validation would enable it whenever its target answers the
+    /// action; `canGoBack` and `canGoForward` decide instead, through
+    /// `updateContent(_:)`, and `validateMenuItem(_:)` for its overflow row.
+    /// It starts disabled, as do its button, which `isEnabled` forwards to,
+    /// and its overflow row.
     private func makeHistoryItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, action: Selector
     ) -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
-        item.label = tip
-        item.toolTip = tip
-        item.isBordered = false
+        let item = makeIconButtonItem(identifier, symbol: symbol, tip: tip, target: self, action: action)
         item.autovalidates = false
         item.isEnabled = false
-        item.target = self
-        item.action = action
+        item.menuFormRepresentation?.isEnabled = false
         return item
     }
 
     /// The repo filter: a popup whose width is capped and whose compression
     /// resistance is low, so a long repo name truncates the title rather than
-    /// widening the item past the sidebar's section, where AppKit would drop
-    /// it without a trace.
+    /// widening the item past the sidebar's section, where AppKit would move
+    /// it into the overflow menu.
     private func makeFilterItem() -> NSToolbarItem {
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
         popup.bezelStyle = .toolbar
@@ -138,19 +174,89 @@ extension MainToolbarController {
         item.view = popup
         item.label = "Filter"
         item.toolTip = "Filter sidebar by repository"
+        item.menuFormRepresentation = makeFilterForm()
         return item
     }
 
-    /// The title cluster. Its compression resistance sits below the
-    /// right-hand items', so a long title truncates before they are dropped.
+    /// The filter's overflow row: "Filter", with a submenu of the popup's
+    /// rows, each choosing its repo through `filterChosen(_:)`.
+    /// `updateFilter` fills and checks the rows alongside the popup's. Without
+    /// it, AppKit's default row would send the popup's action from a bare
+    /// menu item. The submenu reports its opening to `filterMenuTracker`, so
+    /// its rows are not rebuilt under the pointer either.
+    private func makeFilterForm() -> NSMenuItem {
+        let form = NSMenuItem(title: "Filter", action: nil, keyEquivalent: "")
+        let rows = NSMenu(title: "Filter")
+        rows.autoenablesItems = false
+        rows.delegate = filterMenuTracker
+        form.submenu = rows
+        return form
+    }
+
+    /// The title cluster, in the shared title view, whose width constraints
+    /// `prepareTitleView(_:)` set once. Its visibility priority stays
+    /// standard, below the right-hand items' `.high`, so a long title gives
+    /// way before they overflow. Its overflow row is inert, showing the
+    /// title; `updateContent(_:)` fills it in.
     private func makeTitleItem(withView: Bool) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.title)
         item.isBordered = false
-        guard withView else { return item }
-        titleView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        item.view = titleView
+        item.menuFormRepresentation = Self.makeTitleForm()
+        if withView {
+            item.view = titleView
+        }
         return item
     }
+
+    /// An inert overflow row for the title: disabled, with no action, and
+    /// hidden until there is a title to show. AppKit's default would be a
+    /// clickable row titled with the item's label, which is empty.
+    private static func makeTitleForm() -> NSMenuItem {
+        let form = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        form.isEnabled = false
+        form.isHidden = true
+        return form
+    }
+
+    /// Makes `view` a flexible toolbar item view whose width never follows
+    /// its content. The toolbar measures a view item through its
+    /// constraints, so the view holds a required minimum and maximum and
+    /// prefers the maximum, which fills the space up to the right-hand items.
+    /// Its own hugging and compression resistance sit below
+    /// `.fittingSizeCompression`, and the preference for the maximum sits
+    /// between the two, so a fitting-size measurement reaches the minimum
+    /// and the content's width never decides the item's. Called once, from
+    /// `init`: the view is shared by every title item.
+    static func prepareTitleView(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.setContentHuggingPriority(titleContentPriority, for: .horizontal)
+        view.setContentCompressionResistancePriority(titleContentPriority, for: .horizontal)
+        let minimum = view.widthAnchor.constraint(greaterThanOrEqualToConstant: MainToolbarMetrics.titleMinimumWidth)
+        minimum.identifier = titleMinimumWidthID
+        let maximum = view.widthAnchor.constraint(lessThanOrEqualToConstant: MainToolbarMetrics.titleMaximumWidth)
+        maximum.identifier = titleMaximumWidthID
+        let fill = view.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.titleMaximumWidth)
+        fill.priority = titleFillPriority
+        fill.identifier = titleFillWidthID
+        NSLayoutConstraint.activate([minimum, maximum, fill])
+    }
+
+    /// The identifiers of the title view's width constraints, which name them
+    /// in a layout log and let a test find them among any others.
+    static let titleMinimumWidthID = "tbd.toolbar.title.minimumWidth"
+    static let titleMaximumWidthID = "tbd.toolbar.title.maximumWidth"
+    static let titleFillWidthID = "tbd.toolbar.title.fillWidth"
+
+    /// The title view's horizontal hugging and compression resistance: the
+    /// lowest there is, so its content's width never holds the item open or
+    /// shut.
+    static let titleContentPriority = NSLayoutConstraint.Priority(rawValue: 1)
+
+    /// The title view's preference for `titleMaximumWidth`: above its
+    /// hugging, so in layout it fills, and below `.fittingSizeCompression`,
+    /// so a fitting-size measurement still compresses it to the minimum.
+    static let titleFillPriority = NSLayoutConstraint.Priority(
+        rawValue: NSLayoutConstraint.Priority.fittingSizeCompression.rawValue - 1)
 
     private func makeServersItem() -> NSMenuToolbarItem {
         let item = NSMenuToolbarItem(itemIdentifier: MainToolbarItemID.servers)
@@ -187,14 +293,17 @@ extension MainToolbarController {
     /// value is set only when it differs from what the item holds, so an
     /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let back = item(MainToolbarItemID.back), back.isEnabled != snapshot.canGoBack {
-            back.isEnabled = snapshot.canGoBack
+        if let back = item(MainToolbarItemID.back) {
+            updateEnabled(back, snapshot.canGoBack)
         }
-        if let forward = item(MainToolbarItemID.forward), forward.isEnabled != snapshot.canGoForward {
-            forward.isEnabled = snapshot.canGoForward
+        if let forward = item(MainToolbarItemID.forward) {
+            updateEnabled(forward, snapshot.canGoForward)
         }
-        if let popup = item(MainToolbarItemID.repoFilter)?.view as? NSPopUpButton {
-            updateFilter(popup, snapshot.filter)
+        if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
+            updateFilter(popup, form: filterItem.menuFormRepresentation?.submenu, snapshot.filter)
+        }
+        if let titleForm = item(MainToolbarItemID.title)?.menuFormRepresentation {
+            updateTitleForm(titleForm, snapshot.title)
         }
         if let servers = snapshot.servers,
            let serversItem = item(MainToolbarItemID.servers) as? NSMenuToolbarItem {
@@ -202,6 +311,29 @@ extension MainToolbarController {
         }
         if let remote = snapshot.remote, let transcript = item(MainToolbarItemID.remoteTranscript) {
             updateTranscript(transcript, remote)
+        }
+    }
+
+    /// Enables or disables `item`, and with it its button and its overflow
+    /// row, setting each only when it differs. The overflow menu may or may
+    /// not validate its rows, so the row's own flag follows too.
+    private func updateEnabled(_ item: NSToolbarItem, _ enabled: Bool) {
+        if item.isEnabled != enabled {
+            item.isEnabled = enabled
+        }
+        if let form = item.menuFormRepresentation, form.isEnabled != enabled {
+            form.isEnabled = enabled
+        }
+    }
+
+    /// Shows `title` in the title's overflow row, hidden when there is none.
+    private func updateTitleForm(_ form: NSMenuItem, _ title: String?) {
+        let text = title ?? ""
+        if form.title != text {
+            form.title = text
+        }
+        if form.isHidden != text.isEmpty {
+            form.isHidden = text.isEmpty
         }
     }
 
@@ -226,30 +358,55 @@ extension MainToolbarController {
         }
     }
 
-    private func updateFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
+    /// Brings the popup and the filter's overflow rows, `form`, to `filter`.
+    /// The two are built from one list of options, so their rows match.
+    private func updateFilter(_ popup: NSPopUpButton, form: NSMenu?, _ filter: RepoFilterPresentation) {
         // Never under the pointer: the menu's close schedules an apply that
         // catches up.
         guard !filterMenuTracker.isOpen else { return }
         if popup !== builtFilterPopup || filter.options != builtFilterOptions {
-            rebuildFilterItems(popup, options: filter.options)
+            rebuildFilterItems(popup, form: form, options: filter.options)
         }
         selectFilter(popup, filter)
+        if let form {
+            checkFilterRow(in: form, filter)
+        }
     }
 
-    /// "All Repos", a separator, then each repo. Rows are added to the menu
-    /// directly: `addItem(withTitle:)` drops a row whose title repeats, and two
-    /// repos can share a display name.
-    private func rebuildFilterItems(_ popup: NSPopUpButton, options: [RepoFilterPresentation.Option]) {
+    /// Rebuilds the popup's rows and the overflow rows. The popup's rows have
+    /// no action, as the popup sends its own; each overflow row sends
+    /// `filterChosen(_:)` itself. They are rebuilt together because they are
+    /// made together, in `makeFilterItem()`.
+    private func rebuildFilterItems(
+        _ popup: NSPopUpButton, form: NSMenu?, options: [RepoFilterPresentation.Option]
+    ) {
         popup.removeAllItems()
-        guard let menu = popup.menu else { return }
+        if let menu = popup.menu {
+            fillFilterRows(menu, options: options, action: nil)
+        }
+        if let form {
+            fillFilterRows(form, options: options, action: #selector(filterChosen(_:)))
+        }
+        builtFilterPopup = popup
+        builtFilterOptions = options
+    }
+
+    /// "All Repos", a separator, then each repo, each row carrying its repo's
+    /// ID, or none for "All Repos", and sending `action` to the controller
+    /// when one is given. Rows are added to the menu directly:
+    /// `addItem(withTitle:)` drops a row whose title repeats, and two repos
+    /// can share a display name.
+    private func fillFilterRows(_ menu: NSMenu, options: [RepoFilterPresentation.Option], action: Selector?) {
+        menu.removeAllItems()
         for (index, option) in options.enumerated() {
-            let row = NSMenuItem(title: option.title, action: nil, keyEquivalent: "")
+            let row = NSMenuItem(title: option.title, action: action, keyEquivalent: "")
+            if action != nil {
+                row.target = self
+            }
             row.representedObject = option.id
             menu.addItem(row)
             if index == 0 { menu.addItem(.separator()) }
         }
-        builtFilterPopup = popup
-        builtFilterOptions = options
     }
 
     /// Checks the row the filter names, or none when it names a repo that is
@@ -257,7 +414,7 @@ extension MainToolbarController {
     /// Only when that differs from the popup's selection: an apply that finds
     /// the popup already showing the filter sets nothing.
     private func selectFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
-        let target = Self.filterRow(in: popup, for: filter)
+        let target = Self.filterRow(in: popup.itemArray, for: filter)
         guard popup.indexOfSelectedItem != target else { return }
         if target < 0 {
             popup.select(nil)
@@ -268,11 +425,25 @@ extension MainToolbarController {
         itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public): row \(target, privacy: .public)")
     }
 
-    /// The index of the row `filter` names, or -1, the popup's "no
-    /// selection", when it names a repo that is gone.
-    private static func filterRow(in popup: NSPopUpButton, for filter: RepoFilterPresentation) -> Int {
+    /// Puts the check on the overflow row the filter names and takes it off
+    /// the rest, or checks none when it names a repo that is gone, as
+    /// `selectFilter` does for the popup. Sets only the rows whose state
+    /// differs.
+    private func checkFilterRow(in menu: NSMenu, _ filter: RepoFilterPresentation) {
+        let target = Self.filterRow(in: menu.items, for: filter)
+        for (index, row) in menu.items.enumerated() where !row.isSeparatorItem {
+            let state: NSControl.StateValue = index == target ? .on : .off
+            if row.state != state {
+                row.state = state
+            }
+        }
+    }
+
+    /// The index among `rows` of the row `filter` names, or -1, the popup's
+    /// "no selection", when it names a repo that is gone.
+    private static func filterRow(in rows: [NSMenuItem], for filter: RepoFilterPresentation) -> Int {
         guard filter.selectedIsKnown else { return -1 }
-        let index = popup.itemArray.firstIndex { row in
+        let index = rows.firstIndex { row in
             !row.isSeparatorItem && (row.representedObject as? UUID) == filter.selected
         }
         return index ?? -1
@@ -384,6 +555,12 @@ extension MainToolbarController {
 
     // MARK: Actions
 
+    // Every action the toolbar wires takes `Any?` and checks the sender's
+    // class itself. A view item's overflow row sends the item's action from
+    // an `NSMenuItem`, and Swift does not check the class of an `@objc`
+    // argument: a method typed for another sender would message the menu item
+    // with a selector it does not answer, which raises.
+
     @objc func navigateBack(_ sender: Any?) {
         appState.navigateBack()
     }
@@ -392,8 +569,13 @@ extension MainToolbarController {
         appState.navigateForward()
     }
 
-    @objc func filterChosen(_ sender: NSPopUpButton) {
-        let chosen = sender.selectedItem?.representedObject as? UUID
+    /// Sets the filter to the row chosen: the popup's selected row, or the
+    /// overflow row that sent it. Its repo ID, or none for "All Repos", is
+    /// the row's represented object. A sender that is neither changes
+    /// nothing.
+    @objc func filterChosen(_ sender: Any?) {
+        guard let row = (sender as? NSPopUpButton)?.selectedItem ?? (sender as? NSMenuItem) else { return }
+        let chosen = row.representedObject as? UUID
         guard appState.repoFilter != chosen else { return }
         appState.repoFilter = chosen
     }
@@ -403,8 +585,8 @@ extension MainToolbarController {
         appState.openDevServerURL(url)
     }
 
-    @objc func serversMenuItemChosen(_ sender: NSMenuItem) {
-        guard let box = sender.representedObject as? ServersMenuCommandBox else { return }
+    @objc func serversMenuItemChosen(_ sender: Any?) {
+        guard let box = (sender as? NSMenuItem)?.representedObject as? ServersMenuCommandBox else { return }
         runServersCommand(box.command, worktreeID: box.worktreeID)
     }
 

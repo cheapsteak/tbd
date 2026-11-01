@@ -46,11 +46,19 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   and installs leave the window's toolbar alone, so the two never
 ///   ping-pong. When it ends, the controller schedules the apply that puts
 ///   the toolbar back if the window is visible and shows another or none.
+/// - **Overflow.** An item that does not fit goes to the toolbar's overflow
+///   menu as its menu form. Every view item has an explicit one that acts as
+///   the item does, or for the title shows it inertly, and every action the
+///   toolbar wires takes `Any?`, so a row sending it from an `NSMenuItem`
+///   never meets a method typed for another sender. `validateMenuItem(_:)`
+///   disables the Back and Forward rows when history has nowhere to go.
+/// - **Title.** The title view is shared by every title item, so its width
+///   constraints are set once, at init (`prepareTitleView(_:)`).
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width".
 @MainActor
-final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
+final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, NSMenuItemValidation {
     /// Each toolbar's identifier is this plus a UUID. Toolbars that share an
     /// identifier mirror each other's item changes; with autosave and
     /// customization off, that mirroring is the identifier's only effect, and
@@ -73,7 +81,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     let toolbar: NSToolbar
     let appState: AppState
-    /// The title cluster's view, placed in the title item as it is.
+    /// The title cluster's view, placed in the title item as it is. Its width
+    /// constraints are set once, at init.
     let titleView: NSView
     /// Raises the Stop confirmation, which `ContentView` owns.
     var requestRemoteStop: (RemoteSessionSelection) -> Void
@@ -155,8 +164,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     // MARK: Item state, kept here so `+Items` can reach it
 
-    /// Whether the repo filter's menu is open, so its items are not rebuilt
-    /// under the pointer.
+    /// Whether one of the repo filter's menus is open, so its rows are not
+    /// rebuilt under the pointer.
     let filterMenuTracker: FilterMenuTracker
     /// The popup the filter options were last built into, and the options.
     weak var builtFilterPopup: NSPopUpButton?
@@ -194,6 +203,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         toolbar.autosavesConfiguration = false
         toolbar.delegate = self
         filterMenuTracker.onClose = { [weak self] in self?.scheduleApply() }
+        Self.prepareTitleView(titleView)
     }
 
     // MARK: Install
@@ -551,9 +561,27 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         rebuildServersMenu(menu)
     }
+
+    // MARK: NSMenuItemValidation (overflow rows)
+
+    /// Enables the Back and Forward overflow rows only when history has
+    /// somewhere to go, as their buttons are; every other row targeting the
+    /// controller stays enabled.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let action = menuItem.action else { return true }
+        switch action {
+        case #selector(navigateBack(_:)):
+            return appState.canGoBack
+        case #selector(navigateForward(_:)):
+            return appState.canGoForward
+        default:
+            return true
+        }
+    }
 }
 
-/// Follows whether the repo filter's menu is open.
+/// Follows whether one of the repo filter's menus is open: the popup's, or
+/// the submenu of its overflow row.
 @MainActor
 final class FilterMenuTracker: NSObject, NSMenuDelegate {
     private(set) var isOpen = false

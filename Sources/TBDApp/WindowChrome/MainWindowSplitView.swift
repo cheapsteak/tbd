@@ -9,12 +9,13 @@ import SwiftUI
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
 /// - **The toolbar.** A `MainToolbarController` made for the split, which it
-///   serves for its whole life, with the title cluster in a hosting view. It
-///   is installed on the window the main-actor turn after the split's
-///   `onViewDidAppear`: AppKit can deliver that from inside SwiftUI's
-///   insertion of the representable, and the toolbar never changes inside a
-///   SwiftUI update. The coordinator holds the controller, so it lives as
-///   long as the split; the toolbar holds its delegate only weakly.
+///   serves for its whole life, with the title cluster in a hosting view
+///   (`makeTitleView(_:)`). It is installed on the window the main-actor
+///   turn after the split's `onViewDidAppear`: AppKit can deliver that from
+///   inside SwiftUI's insertion of the representable, and the toolbar never
+///   changes inside a SwiftUI update. The coordinator holds the controller,
+///   so it lives as long as the split; the toolbar holds its delegate only
+///   weakly.
 /// - **The divider.** It autosaves only when `AppState` uses
 ///   `UserDefaults.standard`, the store `NSSplitView` writes it to.
 /// - **Hosting.** The hosting controllers and the title's hosting view have
@@ -62,8 +63,7 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
             sidebar: hostingController(SidebarView()),
             content: hostingController(MainDetailArea()),
             autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
-        let titleView = NSHostingView(rootView: withAppEnvironment(ToolbarTitleCluster(appState: appState)))
-        titleView.sceneBridgingOptions = []
+        let titleView = Self.makeTitleView(withAppEnvironment(ToolbarTitleCluster(appState: appState)))
         let toolbarController = MainToolbarController(
             appState: appState, split: split, titleView: titleView, requestRemoteStop: requestRemoteStop)
         // Weak both ways: this closure holds the controller weakly, as the
@@ -81,6 +81,32 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         }
         context.coordinator.toolbarController = toolbarController
         return split
+    }
+
+    /// The title item's view: `root` in a hosting view whose width never
+    /// follows the text, so the cluster stays put when the title changes.
+    ///
+    /// - **Width.** The root's ideal width is a constant, and the hosting view
+    ///   reports only an intrinsic size, so it installs no minimum or maximum
+    ///   that tracks the content. `MainToolbarController` gives the view the
+    ///   width constraints that make the item flexible.
+    /// - **Placement.** The content hugs the leading edge of whatever width
+    ///   the toolbar gives the item, so it starts just past the tracking
+    ///   separator and does not move as the width changes.
+    /// - **Overflow.** A title wider than the item is cut at the item's
+    ///   trailing edge, and only there: the notes button's hover label draws
+    ///   below the cluster.
+    /// - **Hosting.** `sceneBridgingOptions = []`, so the view never claims
+    ///   the window's toolbar or title.
+    static func makeTitleView<Root: View>(_ root: Root) -> NSView {
+        let content = root
+            .frame(minWidth: 0, idealWidth: MainToolbarMetrics.titleIdealWidth, maxWidth: .infinity,
+                   alignment: .leading)
+            .clipShape(HorizontalEdgeClip())
+        let view = NSHostingView(rootView: content)
+        view.sceneBridgingOptions = []
+        view.sizingOptions = [.intrinsicContentSize]
+        return view
     }
 
     /// The divider's autosave name, only for `UserDefaults.standard`:
@@ -125,6 +151,15 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         controller.sceneBridgingOptions = []
         controller.sizingOptions = []
         return controller
+    }
+}
+
+/// A clip at the leading and trailing edges only: the shape reaches well
+/// past the top and bottom, so nothing drawn above or below the content is
+/// cut.
+private struct HorizontalEdgeClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: 0, dy: -rect.height - 100))
     }
 }
 

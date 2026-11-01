@@ -215,6 +215,70 @@ struct MainWindowChromeMountTests {
         #expect(!mount.toolbarIdentifiers.contains(standard))
     }
 
+    // MARK: - The title
+
+    /// The title view's width never follows its text: the hosting view
+    /// `makeTitleView(_:)` builds reports the constant ideal width as its
+    /// intrinsic width, and the same fitting width, for a short title and a
+    /// long one. The same two titles in plain hosting views differ widely,
+    /// so a width that followed the text would show.
+    @Test func titleViewWidthDoesNotFollowItsText() throws {
+        let short = Text("main")
+        let long = Text(String(repeating: "acme-widgets-", count: 8))
+        let shortPlain = NSHostingView(rootView: short).fittingSize.width
+        let longPlain = NSHostingView(rootView: long).fittingSize.width
+        try #require(shortPlain > 0)
+        try #require(longPlain > shortPlain + 100)
+
+        let shortView = MainWindowSplitView.makeTitleView(short)
+        let longView = MainWindowSplitView.makeTitleView(long)
+        #expect(shortView.intrinsicContentSize.width == MainToolbarMetrics.titleIdealWidth)
+        #expect(longView.intrinsicContentSize.width == MainToolbarMetrics.titleIdealWidth)
+        #expect(shortView.fittingSize.width == longView.fittingSize.width)
+    }
+
+    /// In the mounted window, with the production title view, the title item
+    /// keeps its frame as the selected worktree's title goes from short to
+    /// long and back, and starts at or after the divider the tracking
+    /// separator follows. Each step waits for the toolbar to take the new
+    /// title, then gives the hosted title a few turns to draw it: a title
+    /// item sized to its text would have changed width by then. The server
+    /// fetch answers an empty list, so no Servers item comes and goes beside
+    /// it.
+    @Test func titleStaysPutAsTheTitleChanges() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "titleStaysPut")
+        defer { mount.tearDown() }
+        mount.state.devServerListFetcher = { worktreeID, _ in
+            DevServerListResult(worktreeID: worktreeID, servers: [], parseErrors: [], runningFileDiagnostics: [])
+        }
+        let controller = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        let shortWorktree = mount.worktrees[0]
+        let longWorktree = Worktree(
+            repoID: mount.repo.id, name: "long", displayName: String(repeating: "acme-widgets-", count: 5) + "panel",
+            branch: "long", path: "/tmp/acme-long", tmuxServer: "acme")
+        mount.state.worktrees[mount.repo.id, default: []].append(longWorktree)
+
+        let shortFound = try await mount.placedTitleFrame(
+            selecting: shortWorktree.id, titled: shortWorktree.displayName, controller: controller)
+        let shortFrame = try #require(shortFound)
+        let longFound = try await mount.placedTitleFrame(
+            selecting: longWorktree.id, titled: longWorktree.displayName, controller: controller)
+        let longFrame = try #require(longFound)
+        let backFound = try await mount.placedTitleFrame(
+            selecting: shortWorktree.id, titled: shortWorktree.displayName, controller: controller)
+        let backFrame = try #require(backFound)
+
+        #expect(longFrame.width == shortFrame.width)
+        #expect(backFrame.width == shortFrame.width)
+        #expect(longFrame.minX == shortFrame.minX)
+        #expect(backFrame.minX == shortFrame.minX)
+        let pane = try #require(split.splitView.arrangedSubviews.first)
+        let dividerX = pane.convert(pane.bounds, to: nil).maxX
+        #expect(dividerX <= shortFrame.minX)
+        #expect(dividerX <= longFrame.minX)
+    }
+
     // MARK: - The selection's server refresh, on both chromes
 
     /// The `.task(id:)` that fetches a selected worktree's servers hangs on
@@ -406,6 +470,25 @@ private final class ChromeMount {
         let controller = try #require(toolbarController)
         readyController = controller
         return controller
+    }
+
+    /// Selects `worktreeID`, waits for the toolbar to take `title` and gives
+    /// the hosted title a few turns to draw it, then returns the title view's
+    /// frame in window coordinates after a layout pass, or nil when it is not
+    /// placed in the window.
+    func placedTitleFrame(
+        selecting worktreeID: UUID, titled title: String, controller: MainToolbarController
+    ) async throws -> NSRect? {
+        state.selectedWorktreeIDs = [worktreeID]
+        let taken = try await waitForMainActorCondition("the toolbar to take the title \(title)") {
+            controller.appliedSnapshot?.title == title
+        }
+        try #require(taken)
+        await host.pump(times: 10)
+        host.window.layoutIfNeeded()
+        let view = controller.titleView
+        guard view.window === host.window, view.frame.width > 0 else { return nil }
+        return view.convert(view.bounds, to: nil)
     }
 
     /// Answers the selection's server fetch with one running server, and

@@ -65,12 +65,21 @@ struct MainToolbarControllerTests {
         try await fixture.ready()
         try #require(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
 
+        let constraintsBefore = TitleWidthConstraints(of: fixture.titleView)
         let throwaway = fixture.controller.toolbar(
             fixture.controller.toolbar, itemForItemIdentifier: MainToolbarItemID.title,
             willBeInsertedIntoToolbar: false)
         #expect(throwaway != nil)
         #expect(throwaway?.view == nil)
         #expect(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
+        // Its overflow row is the title's inert one, and the shared view's
+        // width constraints, set once at init, are neither added to nor lost.
+        let form = try #require(throwaway?.menuFormRepresentation)
+        #expect(form.action == nil)
+        #expect(!form.isEnabled)
+        let constraintsAfter = TitleWidthConstraints(of: fixture.titleView)
+        #expect(constraintsAfter == constraintsBefore)
+        #expect(constraintsAfter.isTheFlexibleSet)
     }
 
     /// The split nested in a container, as SwiftUI's hosting view nests it in
@@ -156,18 +165,16 @@ struct MainToolbarControllerTests {
     /// separator, and stay visible beside the window buttons with the sidebar
     /// shown, collapsed and shown again.
     ///
-    /// - **Position.** AppKit gives an image item, such as the toggle or an
-    ///   arrow, no view and no frame through any public API, so those three
-    ///   are placed by order: they open `toolbar.items`, before the
-    ///   separator, and are visible. The view-based items do have frames,
-    ///   checked in window coordinates against the zoom button and the
-    ///   divider the separator tracks. Shown, the filter sits right of the
-    ///   zoom button and left of the divider, and the title right of the
-    ///   divider. Collapsed, the title sits right of the zoom button and left
-    ///   of where the shown sidebar ended, so the toolbar followed the
-    ///   collapse, which a stale sidebar section would fail. AppKit lays
-    ///   visible items out in order, so the toggle and arrows lie between the
-    ///   zoom button and the item after them.
+    /// - **Position.** Every item here is a view item, so each is checked
+    ///   by its frame in window coordinates against the zoom button and the
+    ///   divider the separator tracks, as well as by order: the toggle and
+    ///   arrows open `toolbar.items`, before the separator. Shown, the toggle
+    ///   and arrows sit in order right of the zoom button, each its compact
+    ///   width, then the filter left of the divider, and the title right of
+    ///   it. Collapsed, the toggle and arrows still sit right of the zoom
+    ///   button, and the title after them and left of where the shown
+    ///   sidebar ended, so the toolbar followed the collapse, which a stale
+    ///   sidebar section would fail.
     @Test func toggleAndArrowsSurviveACollapse() async throws {
         let fixture = ToolbarFixture(label: "toggleAndArrowsSurviveACollapse")
         defer { fixture.tearDown() }
@@ -176,7 +183,8 @@ struct MainToolbarControllerTests {
         let toggle = try #require(fixture.controller.item(MainToolbarItemID.toggleSidebar))
         #expect(toggle.target === fixture.split)
         #expect(toggle.action == #selector(NSSplitViewController.toggleSidebar(_:)))
-        #expect(toggle.isBordered == false)
+        #expect(toggle.view is NSButton)
+        let compactWidths = [CGFloat](repeating: MainToolbarMetrics.iconButtonWidth, count: 3)
         let leading: [NSToolbarItem.Identifier] = [
             MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
         ]
@@ -190,7 +198,9 @@ struct MainToolbarControllerTests {
         #expect(fixture.showsAll(leading))
         let shown = try #require(fixture.edges())
         let shownFilter = try #require(shown.filter)
-        #expect(shown.buttonsMaxX <= shownFilter.minX)
+        #expect(shown.leadingPlaced(before: shownFilter.minX))
+        let shownWidths = shown.leading.map(\.width)
+        #expect(shownWidths == compactWidths)
         #expect(shownFilter.maxX <= shown.dividerX)
         #expect(shown.dividerX <= shown.title.minX)
         let shownDividerX = shown.dividerX
@@ -211,7 +221,7 @@ struct MainToolbarControllerTests {
         #expect(collapsedPlaced)
         #expect(fixture.showsAll(leading))
         let collapsed = try #require(fixture.edges())
-        #expect(collapsed.buttonsMaxX <= collapsed.title.minX)
+        #expect(collapsed.leadingPlaced(before: collapsed.title.minX))
         #expect(collapsed.title.minX < shownDividerX)
 
         // Shown again.
@@ -233,13 +243,95 @@ struct MainToolbarControllerTests {
         #expect(fixture.showsAll(leading))
         let reshown = try #require(fixture.edges())
         let reshownFilter = try #require(reshown.filter)
-        #expect(reshown.buttonsMaxX <= reshownFilter.minX)
+        #expect(reshown.leadingPlaced(before: reshownFilter.minX))
         #expect(reshownFilter.maxX <= reshown.dividerX)
         #expect(reshown.dividerX <= reshown.title.minX)
 
         // No `visibleItems` drop control: narrowing the sidebar does not take
         // in the offscreen harness, so no item can be made to drop. The test
         // pins placement through the view items' frames and the order instead.
+    }
+
+    // MARK: - Compact leading buttons
+
+    /// The toggle, back and forward are view items, each a borderless button
+    /// held at the compact size by required constraints, highlighting only
+    /// under the pointer, with its tool tip, label and accessibility
+    /// description, and its target and action on the button, on the item,
+    /// which forwards them, and on its overflow row.
+    @Test func leadingButtonsAreCompactViewItems() async throws {
+        let fixture = ToolbarFixture(label: "leadingButtonsAreCompactViewItems")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let expectedWidth: [CGFloat] = [MainToolbarMetrics.iconButtonWidth]
+        let expectedHeight: [CGFloat] = [MainToolbarMetrics.iconButtonHeight]
+
+        let buttons: [(NSToolbarItem.Identifier, String, AnyObject?, Selector)] = [
+            (MainToolbarItemID.toggleSidebar, "Toggle Sidebar", fixture.split,
+             #selector(NSSplitViewController.toggleSidebar(_:))),
+            (MainToolbarItemID.back, "Back", controller, #selector(MainToolbarController.navigateBack(_:))),
+            (MainToolbarItemID.forward, "Forward", controller,
+             #selector(MainToolbarController.navigateForward(_:))),
+        ]
+        for (identifier, tip, target, action) in buttons {
+            let item = try #require(controller.item(identifier))
+            let button = try #require(item.view as? NSButton)
+            #expect(item.label == tip)
+            #expect(item.toolTip == tip)
+            #expect(button.toolTip == tip)
+            #expect(button.image?.accessibilityDescription == tip)
+            #expect(button.imagePosition == .imageOnly)
+            #expect(button.bezelStyle == .accessoryBar)
+            #expect(button.isBordered)
+            #expect(button.showsBorderOnlyWhileMouseInside)
+            #expect(button.target === target)
+            #expect(button.action == action)
+            #expect(item.target === target)
+            #expect(item.action == action)
+            #expect(button.translatesAutoresizingMaskIntoConstraints == false)
+            let widths = ToolbarFixture.requiredConstants(of: button, .width)
+            let heights = ToolbarFixture.requiredConstants(of: button, .height)
+            #expect(widths == expectedWidth)
+            #expect(heights == expectedHeight)
+            let row = try #require(item.menuFormRepresentation)
+            #expect(row.title == tip)
+            #expect(row.target === target)
+            #expect(row.action == action)
+        }
+        let leading: [NSToolbarItem.Identifier] = [
+            MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
+        ]
+        #expect(fixture.leadsBeforeTheSeparator(leading))
+    }
+
+    /// Each leading glyph, as its button carries it, against the size the
+    /// same glyph draws at in the reference toolbar: about 16 by 13 pt for
+    /// the sidebar toggle and 6 by 11 pt for each chevron. A glyph outside
+    /// the tolerance records its measured size, so the failure carries the
+    /// real numbers.
+    @Test func leadingGlyphsMatchTheReferenceSizes() async throws {
+        let fixture = ToolbarFixture(label: "leadingGlyphsMatchTheReferenceSizes")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let tolerance: CGFloat = 2
+        let references: [(NSToolbarItem.Identifier, String, NSSize)] = [
+            (MainToolbarItemID.toggleSidebar, "sidebar.left", NSSize(width: 16, height: 13)),
+            (MainToolbarItemID.back, "chevron.left", NSSize(width: 6, height: 11)),
+            (MainToolbarItemID.forward, "chevron.right", NSSize(width: 6, height: 11)),
+        ]
+        for (identifier, symbol, reference) in references {
+            let button = try #require(fixture.controller.item(identifier)?.view as? NSButton)
+            let glyph = try #require(button.image)
+            let measured = glyph.size
+            let widthOff = abs(measured.width - reference.width) > tolerance
+            let heightOff = abs(measured.height - reference.height) > tolerance
+            if widthOff || heightOff {
+                Issue.record(GlyphSizeOutsideReference(
+                    symbol: symbol, measured: measured, reference: reference, tolerance: tolerance,
+                    alignment: glyph.alignmentRect))
+            }
+        }
     }
 
     // MARK: - Back and forward
@@ -255,18 +347,63 @@ struct MainToolbarControllerTests {
         fixture.controller.apply(snapshot)
         let back = try #require(fixture.controller.item(MainToolbarItemID.back))
         let forward = try #require(fixture.controller.item(MainToolbarItemID.forward))
+        let backButton = try #require(back.view as? NSButton)
+        let forwardButton = try #require(forward.view as? NSButton)
+        let backRow = try #require(back.menuFormRepresentation)
+        let forwardRow = try #require(forward.menuFormRepresentation)
         #expect(back.isEnabled == true)
+        #expect(backButton.isEnabled == true)
+        #expect(backRow.isEnabled == true)
         #expect(forward.isEnabled == false)
+        #expect(forwardButton.isEnabled == false)
+        #expect(forwardRow.isEnabled == false)
         #expect(back.isNavigational == false)
         #expect(forward.isNavigational == false)
-        #expect(back.isBordered == false)
-        #expect(forward.isBordered == false)
+        #expect(back.autovalidates == false)
+        #expect(forward.autovalidates == false)
 
         snapshot.canGoBack = false
         snapshot.canGoForward = true
         fixture.controller.apply(snapshot)
         #expect(back.isEnabled == false)
+        #expect(backButton.isEnabled == false)
+        #expect(backRow.isEnabled == false)
         #expect(forward.isEnabled == true)
+        #expect(forwardButton.isEnabled == true)
+        #expect(forwardRow.isEnabled == true)
+    }
+
+    /// The Back and Forward overflow rows validate against history, as their
+    /// buttons are enabled from it; any other row targeting the controller,
+    /// or one with no action, is enabled.
+    @Test func historyRowsValidateAgainstHistory() async throws {
+        let fixture = ToolbarFixture(label: "historyRowsValidateAgainstHistory")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let state = fixture.state
+        let backRow = try #require(controller.item(MainToolbarItemID.back)?.menuFormRepresentation)
+        let forwardRow = try #require(controller.item(MainToolbarItemID.forward)?.menuFormRepresentation)
+
+        try #require(!state.canGoBack && !state.canGoForward)
+        #expect(controller.validateMenuItem(backRow) == false)
+        #expect(controller.validateMenuItem(forwardRow) == false)
+
+        state.recordNavigation(.worktrees([fixture.worktrees[0].id]))
+        state.recordNavigation(.worktrees([fixture.worktrees[1].id]))
+        try #require(state.canGoBack && !state.canGoForward)
+        #expect(controller.validateMenuItem(backRow))
+        #expect(controller.validateMenuItem(forwardRow) == false)
+
+        state.navigateBack()
+        try #require(state.canGoForward)
+        #expect(controller.validateMenuItem(forwardRow))
+
+        let other = NSMenuItem(
+            title: "acme", action: #selector(MainToolbarController.filterChosen(_:)), keyEquivalent: "")
+        #expect(controller.validateMenuItem(other))
+        let inert = NSMenuItem(title: "inert", action: nil, keyEquivalent: "")
+        #expect(controller.validateMenuItem(inert))
     }
 
     // MARK: - Repo filter
@@ -369,6 +506,276 @@ struct MainToolbarControllerTests {
         try #require(laidOut)
         #expect(popup.frame.width <= MainToolbarMetrics.filterMaxWidth)
         #expect(popup.fittingSize.width <= MainToolbarMetrics.filterMaxWidth)
+    }
+
+    // MARK: - Overflow menu
+
+    /// Every item the layout can show, with the Servers item and every remote
+    /// item present, sends its overflow row's action from that row, as the
+    /// overflow menu does: the item's own menu form, or AppKit's documented
+    /// default, a row titled with the label carrying the item's target and
+    /// action. A form with a submenu sends each row's. An action that
+    /// assumed another sender would raise, ending the test process, which is
+    /// the regression this guards. The filter's rows run in order, so the
+    /// last repo is the filter after them, and Stop asks for its
+    /// confirmation.
+    ///
+    /// The Servers item has no main URL, so it carries no action that would
+    /// open one, and its rows are sent from a bare menu item: run, each
+    /// would start or stop servers through the daemon.
+    @Test func everyOverflowRowToleratesAMenuItemSender() async throws {
+        let fixture = ToolbarFixture(label: "everyOverflowRowToleratesAMenuItemSender")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        fixture.showServers(url: nil)
+        let selection = fixture.showRemoteSession()
+        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let items = fixture.controller.toolbar.items
+        let shownIDs = Set(items.map(\.itemIdentifier))
+        let missing = MainToolbarItemID.custom.filter { !shownIDs.contains($0) }
+        try #require(missing.isEmpty)
+
+        var unsent: [String] = []
+        var sent = 0
+        for item in items where ToolbarFixture.hasOverflowRow(item) {
+            let form = ToolbarFixture.effectiveMenuForm(of: item)
+            if let action = form.action {
+                sent += 1
+                if !NSApplication.shared.sendAction(action, to: form.target, from: form) {
+                    unsent.append(form.title)
+                }
+            }
+            for row in form.submenu?.items ?? [] where !row.isSeparatorItem {
+                guard let action = row.action else { continue }
+                sent += 1
+                let sender = ToolbarFixture.harmlessSender(for: row)
+                if !NSApplication.shared.sendAction(action, to: row.target, from: sender) {
+                    unsent.append(row.title)
+                }
+            }
+        }
+
+        #expect(unsent.isEmpty)
+        // Toggle, Back, Forward, three filter rows, Transcript, Reconnect
+        // and Stop at least.
+        #expect(sent >= 9)
+        #expect(fixture.state.repoFilter == fixture.repos[1].id)
+        let expectedStops: [RemoteSessionSelection] = [selection]
+        #expect(fixture.stopRequests == expectedStops)
+    }
+
+    /// The filter's overflow row is "Filter" with a submenu of the popup's
+    /// rows. It checks the current choice, or none for a repo that is gone;
+    /// choosing a row sets the filter; and it follows the options as they
+    /// change, rebuilt in the same row.
+    @Test func filterOverflowRowMirrorsThePopup() async throws {
+        let fixture = ToolbarFixture(label: "filterOverflowRowMirrorsThePopup")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let chooseAction = #selector(MainToolbarController.filterChosen(_:))
+
+        fixture.state.repoFilter = fixture.repos[1].id
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let filterItem = try #require(controller.item(MainToolbarItemID.repoFilter))
+        let form = try #require(filterItem.menuFormRepresentation)
+        let rows = try #require(form.submenu)
+        #expect(form.title == "Filter")
+        #expect(form.action == nil)
+        #expect(rows.autoenablesItems == false)
+        #expect(rows.delegate === controller.filterMenuTracker)
+        let titles = Self.describeFilterRows(rows)
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        #expect(titles == expectedTitles)
+        let checkedWidgets = Self.checkedTitles(rows)
+        let expectedWidgets: [String] = ["widgets"]
+        #expect(checkedWidgets == expectedWidgets)
+
+        let choosable = rows.items.filter { !$0.isSeparatorItem }
+        try #require(choosable.count == 3)
+        let ids = choosable.map { $0.representedObject as? UUID }
+        let expectedIDs: [UUID?] = [nil, fixture.repos[0].id, fixture.repos[1].id]
+        #expect(ids == expectedIDs)
+        let wired = choosable.allSatisfy { $0.target === controller && $0.action == chooseAction }
+        #expect(wired)
+
+        // Choosing a row sets the filter, and the next apply checks it.
+        let chose = NSApplication.shared.sendAction(chooseAction, to: controller, from: choosable[1])
+        #expect(chose)
+        #expect(fixture.state.repoFilter == fixture.repos[0].id)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let checkedAcme = Self.checkedTitles(rows)
+        let expectedAcme: [String] = ["acme"]
+        #expect(checkedAcme == expectedAcme)
+
+        // A filter naming a repo that is gone checks none.
+        fixture.state.repoFilter = UUID()
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let checkedMissing = Self.checkedTitles(rows)
+        #expect(checkedMissing.isEmpty)
+
+        // A new repo is rebuilt into the same row, and checked when chosen.
+        let gadgets = Repo(path: "/tmp/gadgets", displayName: "gadgets")
+        fixture.state.repos.append(gadgets)
+        fixture.state.repoFilter = gadgets.id
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(filterItem.menuFormRepresentation === form)
+        #expect(form.submenu === rows)
+        let grownTitles = Self.describeFilterRows(rows)
+        let expectedGrown: [String] = ["All Repos", "-", "acme", "widgets", "gadgets"]
+        #expect(grownTitles == expectedGrown)
+        let checkedGadgets = Self.checkedTitles(rows)
+        let expectedGadgets: [String] = ["gadgets"]
+        #expect(checkedGadgets == expectedGadgets)
+        let popup = try #require(fixture.filterPopup)
+        #expect(popup.titleOfSelectedItem == "gadgets")
+    }
+
+    /// While one of the filter's menus is open its rows are not rebuilt
+    /// under the pointer; the close catches the overflow rows up, with no
+    /// apply but the one it schedules.
+    @Test func filterOverflowRowsWaitForAnOpenMenuToClose() async throws {
+        let fixture = ToolbarFixture(label: "filterOverflowRowsWaitForAnOpenMenuToClose")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let rows = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation?.submenu)
+        let before = Self.describeFilterRows(rows)
+
+        controller.filterMenuTracker.menuWillOpen(rows)
+        fixture.state.repos.append(Repo(path: "/tmp/gadgets", displayName: "gadgets"))
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let whileOpen = Self.describeFilterRows(rows)
+        #expect(whileOpen == before)
+
+        controller.filterMenuTracker.menuDidClose(rows)
+        let caughtUp = try await waitForMainActorCondition("the filter's overflow rows to catch up once it closes") {
+            let shown = controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation?.submenu
+            return shown.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
+        }
+        #expect(caughtUp)
+    }
+
+    /// `filterChosen(_:)` reads its sender's class rather than assuming it.
+    /// A bare menu item, as AppKit's default overflow row for the filter
+    /// would send, carries no repo, which is "All Repos". A sender that is
+    /// neither a popup nor a menu item, a popup with no selected row, and no
+    /// sender at all change nothing. The popup sender is
+    /// `filterPopupShowsAndSetsTheFilter`'s.
+    @Test func filterChosenToleratesAnySender() async throws {
+        let fixture = ToolbarFixture(label: "filterChosenToleratesAnySender")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let action = #selector(MainToolbarController.filterChosen(_:))
+        let acme = fixture.repos[0].id
+        fixture.state.repoFilter = acme
+
+        let fromButton = NSApplication.shared.sendAction(action, to: controller, from: NSButton())
+        #expect(fromButton)
+        #expect(fixture.state.repoFilter == acme)
+        let emptyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        let fromEmptyPopup = NSApplication.shared.sendAction(action, to: controller, from: emptyPopup)
+        #expect(fromEmptyPopup)
+        #expect(fixture.state.repoFilter == acme)
+        controller.filterChosen(nil)
+        #expect(fixture.state.repoFilter == acme)
+
+        let bare = NSMenuItem(title: "Filter", action: action, keyEquivalent: "")
+        let fromBareRow = NSApplication.shared.sendAction(action, to: controller, from: bare)
+        #expect(fromBareRow)
+        #expect(fixture.state.repoFilter == nil)
+    }
+
+    /// `serversMenuItemChosen(_:)` runs only a row that carries a command: a
+    /// bare menu item, another control and no sender at all run nothing.
+    @Test func serversMenuItemChosenToleratesAnySender() async throws {
+        let fixture = ToolbarFixture(label: "serversMenuItemChosenToleratesAnySender")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let action = #selector(MainToolbarController.serversMenuItemChosen(_:))
+        let worktreeID = fixture.worktrees[0].id
+
+        let bare = NSMenuItem(title: "Start", action: action, keyEquivalent: "")
+        let fromBareRow = NSApplication.shared.sendAction(action, to: controller, from: bare)
+        #expect(fromBareRow)
+        let fromButton = NSApplication.shared.sendAction(action, to: controller, from: NSButton())
+        #expect(fromButton)
+        controller.serversMenuItemChosen(nil)
+        #expect(fixture.state.devServerActionMessages[worktreeID] == nil)
+    }
+
+    // MARK: - Title
+
+    /// The title's overflow row is inert and shows the cluster's main title:
+    /// hidden with nothing selected, the worktree's name, a remote session's
+    /// name when only it is selected, and hidden again once neither is.
+    @Test func titleOverflowRowShowsTheTitle() async throws {
+        let fixture = ToolbarFixture(label: "titleOverflowRowShowsTheTitle")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let form = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        #expect(form.isHidden)
+        #expect(form.isEnabled == false)
+        #expect(form.action == nil)
+
+        fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(form.title == "feature")
+        #expect(form.isHidden == false)
+
+        fixture.state.selectedWorktreeIDs = []
+        let selection = fixture.showRemoteSession()
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let sessionName = fixture.state.remoteSessionDisplayName(for: selection)
+        #expect(form.title == sessionName)
+        #expect(form.isHidden == false)
+
+        fixture.state.selectedRemoteSession = nil
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(form.isHidden)
+        #expect(controller.item(MainToolbarItemID.title)?.menuFormRepresentation === form)
+        #expect(form.isEnabled == false)
+    }
+
+    /// The shared title view holds a flexible width set once at init: a
+    /// required minimum and maximum, a preference for the maximum below a
+    /// fitting-size measurement's pull, and hugging and compression
+    /// resistance below that. So its fitting width is the minimum whatever
+    /// its text says, where a plain label's follows the text.
+    @Test func titleViewHoldsAFlexibleWidth() async throws {
+        let fixture = ToolbarFixture(label: "titleViewHoldsAFlexibleWidth")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let titleView = fixture.titleView
+        #expect(titleView.translatesAutoresizingMaskIntoConstraints == false)
+        let constraints = TitleWidthConstraints(of: titleView)
+        #expect(constraints.isTheFlexibleSet)
+        let hugging = titleView.contentHuggingPriority(for: .horizontal)
+        let resistance = titleView.contentCompressionResistancePriority(for: .horizontal)
+        #expect(hugging == MainToolbarController.titleContentPriority)
+        #expect(resistance == MainToolbarController.titleContentPriority)
+        let content = MainToolbarController.titleContentPriority.rawValue
+        let fill = MainToolbarController.titleFillPriority.rawValue
+        let fitting = NSLayoutConstraint.Priority.fittingSizeCompression.rawValue
+        #expect(content < fill)
+        #expect(fill < fitting)
+
+        // Measured on fresh labels outside the toolbar, so nothing AppKit
+        // holds the item's view to enters the measurement. The plain label
+        // is the control: its fitting width follows the long text past the
+        // minimum.
+        let longText = String(repeating: "acme-widgets-", count: 8)
+        let plain = NSTextField(labelWithString: longText)
+        try #require(plain.fittingSize.width > MainToolbarMetrics.titleMinimumWidth)
+        let short = NSTextField(labelWithString: "x")
+        let long = NSTextField(labelWithString: longText)
+        MainToolbarController.prepareTitleView(short)
+        MainToolbarController.prepareTitleView(long)
+        #expect(short.fittingSize.width == MainToolbarMetrics.titleMinimumWidth)
+        #expect(long.fittingSize.width == MainToolbarMetrics.titleMinimumWidth)
     }
 
     // MARK: - Servers
@@ -1137,6 +1544,16 @@ struct MainToolbarControllerTests {
 
     // MARK: - Menu projections
 
+    /// The filter rows' titles, "-" for a separator.
+    static func describeFilterRows(_ menu: NSMenu) -> [String] {
+        menu.items.map { $0.isSeparatorItem ? "-" : $0.title }
+    }
+
+    /// The titles of the rows carrying a check.
+    static func checkedTitles(_ menu: NSMenu) -> [String] {
+        menu.items.filter { $0.state == .on }.map(\.title)
+    }
+
     /// A Servers menu row as text: kind, title, enablement and command.
     private static func describeRow(_ row: NSMenuItem) -> String {
         if row.isSeparatorItem { return "separator" }
@@ -1399,16 +1816,24 @@ private final class ToolbarFixture {
     }
 
     /// The toolbar's public frames after a layout pass, or nil until the
-    /// window has a zoom button, the split a sidebar pane, and the title
-    /// view a place in the window.
+    /// window has a zoom button, the split a sidebar pane, and the toggle,
+    /// the arrows and the title view a place in the window.
     func edges() -> ToolbarEdges? {
         window.layoutIfNeeded()
+        let leadingIDs: [NSToolbarItem.Identifier] = [
+            MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
+        ]
+        let leading = leadingIDs.compactMap { identifier in
+            controller.item(identifier)?.view.flatMap { Self.placedFrame(of: $0, in: window) }
+        }
         guard let zoom = window.standardWindowButton(.zoomButton),
               let pane = sidebarPane,
+              leading.count == leadingIDs.count,
               let title = Self.placedFrame(of: titleView, in: window) else { return nil }
         return ToolbarEdges(
             buttonsMaxX: zoom.convert(zoom.bounds, to: nil).maxX,
             dividerX: pane.convert(pane.bounds, to: nil).maxX,
+            leading: leading,
             filter: filterPopup.flatMap { Self.placedFrame(of: $0, in: window) },
             title: title)
     }
@@ -1418,6 +1843,45 @@ private final class ToolbarFixture {
     static func placedFrame(of view: NSView, in window: NSWindow) -> NSRect? {
         guard view.window === window, view.frame.width > 0 else { return nil }
         return view.convert(view.bounds, to: nil)
+    }
+
+    /// The constants of `view`'s required, equal constraints on its own
+    /// `attribute`, such as a fixed width.
+    static func requiredConstants(of view: NSView, _ attribute: NSLayoutConstraint.Attribute) -> [CGFloat] {
+        view.constraints
+            .filter { constraint in
+                constraint.firstItem === view && constraint.secondItem == nil
+                    && constraint.firstAttribute == attribute && constraint.relation == .equal
+                    && constraint.priority == .required
+            }
+            .map(\.constant)
+    }
+
+    // MARK: Overflow rows
+
+    /// Whether `item` is one of TBD's own, which the overflow menu can show:
+    /// not a standard space and not the tracking separator.
+    static func hasOverflowRow(_ item: NSToolbarItem) -> Bool {
+        MainToolbarItemID.custom.contains(item.itemIdentifier) && !(item is NSTrackingSeparatorToolbarItem)
+    }
+
+    /// The row AppKit puts in the overflow menu for `item`: its menu form, or,
+    /// when it has none, the default `NSToolbarItem.h` documents, a row
+    /// titled with the item's label carrying its target and action. For a
+    /// view item those are its view's.
+    static func effectiveMenuForm(of item: NSToolbarItem) -> NSMenuItem {
+        if let form = item.menuFormRepresentation { return form }
+        let row = NSMenuItem(title: item.label, action: item.action, keyEquivalent: "")
+        row.target = item.target
+        return row
+    }
+
+    /// The sender to send `row`'s action from: `row` itself, except for a
+    /// Servers row carrying a command, which is sent from a bare menu item
+    /// so that no server is started or stopped and no URL opened.
+    static func harmlessSender(for row: NSMenuItem) -> NSMenuItem {
+        guard row.representedObject is ServersMenuCommandBox else { return row }
+        return NSMenuItem(title: row.title, action: row.action, keyEquivalent: "")
     }
 
     // MARK: State
@@ -1473,29 +1937,106 @@ private final class ToolbarFixture {
     }
 }
 
-/// Where the toolbar's publicly framed parts sit, in window coordinates: the
-/// window buttons' trailing edge, the divider the tracking separator follows,
-/// and the two view-based items. An image item, such as the toggle or an
-/// arrow, has no public frame, so it is placed against these by order.
+/// Where the toolbar's parts sit, in window coordinates: the window buttons'
+/// trailing edge, the divider the tracking separator follows, and the view
+/// items' frames.
 private struct ToolbarEdges {
     /// The zoom button's trailing edge, where the window buttons end.
     var buttonsMaxX: CGFloat
     /// The sidebar pane's trailing edge, where the first divider sits.
     var dividerX: CGFloat
+    /// The toggle, back and forward buttons, in toolbar order.
+    var leading: [NSRect]
     /// The filter popup, while it is in the toolbar and laid out.
     var filter: NSRect?
     var title: NSRect
 
-    /// The sidebar shown: the filter right of the window buttons and left of
-    /// the divider, and the title right of the divider.
-    var placedOverAShownSidebar: Bool {
-        guard let filter else { return false }
-        return buttonsMaxX <= filter.minX && filter.maxX <= dividerX && dividerX <= title.minX
+    /// Whether the toggle and arrows sit right of the window buttons, left to
+    /// right without overlapping, and end at or before `next`, where the item
+    /// after them starts.
+    func leadingPlaced(before next: CGFloat) -> Bool {
+        guard let first = leading.first, let last = leading.last else { return false }
+        let inOrder = zip(leading, leading.dropFirst()).allSatisfy { pair in pair.0.maxX <= pair.1.minX }
+        return buttonsMaxX <= first.minX && inOrder && last.maxX <= next
     }
 
-    /// The sidebar collapsed: the title right of the window buttons and left
-    /// of `shownDividerX`, where the shown sidebar ended.
+    /// The sidebar shown: the toggle and arrows right of the window buttons,
+    /// then the filter, left of the divider, and the title right of it.
+    var placedOverAShownSidebar: Bool {
+        guard let filter else { return false }
+        return leadingPlaced(before: filter.minX) && filter.maxX <= dividerX && dividerX <= title.minX
+    }
+
+    /// The sidebar collapsed: the toggle and arrows right of the window
+    /// buttons, then the title, left of `shownDividerX`, where the shown
+    /// sidebar ended.
     func placedBesideTheWindowButtons(shownDividerX: CGFloat) -> Bool {
-        buttonsMaxX <= title.minX && title.minX < shownDividerX
+        leadingPlaced(before: title.minX) && title.minX < shownDividerX
+    }
+}
+
+/// The title view's own width constraints, found by their identifiers: each
+/// one's identifier, relation, priority and constant, in identifier order.
+private struct TitleWidthConstraints: Equatable {
+    struct Entry: Equatable {
+        var identifier: String
+        var relation: NSLayoutConstraint.Relation
+        var priority: Float
+        var constant: CGFloat
+    }
+
+    var entries: [Entry]
+
+    @MainActor
+    init(of view: NSView) {
+        let identifiers: Set<String> = [
+            MainToolbarController.titleMinimumWidthID, MainToolbarController.titleMaximumWidthID,
+            MainToolbarController.titleFillWidthID,
+        ]
+        entries = view.constraints
+            .filter { constraint in
+                constraint.identifier.map { identifiers.contains($0) } ?? false
+                    && constraint.firstItem === view && constraint.secondItem == nil
+                    && constraint.firstAttribute == .width
+            }
+            .map { constraint in
+                Entry(identifier: constraint.identifier ?? "", relation: constraint.relation,
+                      priority: constraint.priority.rawValue, constant: constraint.constant)
+            }
+            .sorted { $0.identifier < $1.identifier }
+    }
+
+    /// One of each: the fill at the maximum and its low priority, the
+    /// required maximum, and the required minimum.
+    @MainActor
+    var isTheFlexibleSet: Bool {
+        let required = NSLayoutConstraint.Priority.required.rawValue
+        let expected: [Entry] = [
+            Entry(identifier: MainToolbarController.titleFillWidthID, relation: .equal,
+                  priority: MainToolbarController.titleFillPriority.rawValue,
+                  constant: MainToolbarMetrics.titleMaximumWidth),
+            Entry(identifier: MainToolbarController.titleMaximumWidthID, relation: .lessThanOrEqual,
+                  priority: required, constant: MainToolbarMetrics.titleMaximumWidth),
+            Entry(identifier: MainToolbarController.titleMinimumWidthID, relation: .greaterThanOrEqual,
+                  priority: required, constant: MainToolbarMetrics.titleMinimumWidth),
+        ]
+        return entries == expected
+    }
+}
+
+/// A leading glyph whose size lies outside the reference's tolerance, as the
+/// error its issue records, so the summary carries the measured size.
+private struct GlyphSizeOutsideReference: Error, CustomStringConvertible {
+    let symbol: String
+    let measured: NSSize
+    let reference: NSSize
+    let tolerance: CGFloat
+
+    let alignment: NSRect
+
+    var description: String {
+        "\(symbol) measures \(measured.width) × \(measured.height) pt (alignment rect "
+            + "\(alignment.width) × \(alignment.height) pt), outside ±\(tolerance) pt of the "
+            + "reference \(reference.width) × \(reference.height) pt"
     }
 }

@@ -52,6 +52,9 @@ struct MainToolbarSnapshot: Equatable {
     var filter: RepoFilterPresentation
     var servers: ServersPresentation?
     var remote: RemotePresentation?
+    /// The title cluster's main title (`ToolbarTitleCluster.mainTitle(in:)`),
+    /// which the title item's overflow row shows. `nil` with nothing selected.
+    var title: String?
 
     func layoutState(sidebarCollapsed: Bool) -> MainToolbarLayoutState {
         MainToolbarLayoutState(
@@ -109,6 +112,7 @@ struct MainToolbarSnapshot: Equatable {
             canGoForward: appState.canGoForward,
             filter: filter,
             servers: servers,
-            remote: remote)
+            remote: remote,
+            title: ToolbarTitleCluster.mainTitle(in: appState))
     }
 }
