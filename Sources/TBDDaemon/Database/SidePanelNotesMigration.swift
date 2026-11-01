@@ -16,7 +16,8 @@ import os
 /// - Each note of a worktree that is not archived gets a worktree panel,
 ///   unless one already shows it: first the notes the worktree's tab order
 ///   lists, in that order, then the rest by creation, after any panel the
-///   worktree already has.
+///   worktree already has. An archived worktree's notes get theirs, in
+///   creation order, when it is revived (`WorktreeStore.revive`).
 /// - A surface whose primary is a note is deleted, with its panels'
 ///   histories.
 /// - Every other surface loses its own panels on notes, with their

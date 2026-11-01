@@ -107,7 +107,9 @@ revision guard needs nothing new.
   unless the main worktree has one, and deletes its note panels, because a
   promote leaves the notes themselves with the archived scratch worktree, and
   a note's content file is keyed by that worktree; the cascade covers a
-  deleted row.
+  deleted row. Archiving keeps the notes. A revive reopens a worktree panel
+  for each of the worktree's notes, in creation order, in the transaction
+  that takes the row out of archived.
 - **Notes follow their panels.** `note.delete` deletes the note's worktree panel
   in the same transaction and broadcasts the change.
 - **New worktrees.** Worktree creation makes the initial "Notes" note as
@@ -221,7 +223,8 @@ tabs, so they are reached through the side panel's + menu until one does.
     a fresh revision, in one delta.
   - `note.delete` removes the note's panel.
   - Archive deletes the worktree's panels, and promote moves the Changes
-    panel and deletes the note panels.
+    panel and deletes the note panels. A revive reopens a panel for each
+    note, in creation order, and duplicates none.
   - Creation opens the initial note as a panel, in front of an open region in
     the main tab, when `auto_create_notes_enabled` is on, and opens none when
     it is off.

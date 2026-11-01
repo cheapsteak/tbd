@@ -654,8 +654,10 @@ extension WorktreeLifecycle {
             // Flip to .creating AFTER the pre-session terminal exists so a
             // daemon crash in between leaves the row .archived (re-revivable)
             // rather than a terminal-less .creating row the recovery sweep
-            // would discard.
-            try await db.worktrees.updateStatus(id: worktreeID, status: .creating)
+            // would discard. Leaving .archived reopens the note panels, so
+            // the tabs a sync imports while the hook runs carry them.
+            let reopened = try await db.worktrees.updateStatus(id: worktreeID, status: .creating)
+            subscriptions?.broadcastPanelSurfacesChanged(worktreeID: worktreeID, surfaces: reopened)
             let phase3 = Task.detached { [self] in
                 await runPreSessionPhase3(
                     preSession: preSession,
@@ -688,10 +690,11 @@ extension WorktreeLifecycle {
             preSessionTerminalID: nil
         )
 
-        // Update status to active.
+        // Update status to active, which reopens the note panels.
         // Only clear archivedClaudeSessions if Claude was actually restored —
         // otherwise preserve them so a subsequent revive (without skipClaude) can use them.
-        try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
+        let reopened = try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
+        subscriptions?.broadcastPanelSurfacesChanged(worktreeID: worktreeID, surfaces: reopened)
 
         // Deliberate revive: disarm auto-archive AND auto-hibernate so a
         // still-merged PR doesn't immediately re-archive or re-park the

@@ -143,6 +143,39 @@ extension PanelSurfaceStore {
             worktreeID: worktreeID, worktreePanels: remaining, except: nil, db: db, now: now)
     }
 
+    /// Appends a worktree panel for each of the worktree's notes that no
+    /// panel shows, after the worktree's existing panels and ordered by the
+    /// note's `createdAt`, inside a caller's write transaction, then
+    /// rewrites every readable surface of the worktree with the new list.
+    /// A note whose ID does not parse gets no panel. Returns the surfaces it
+    /// rewrote, in position order; none when every note already had a
+    /// panel.
+    ///
+    /// A revive runs it (side panel notes spec, "Daemon → Reclamation"):
+    /// archiving deleted the worktree's panels and kept its notes, and
+    /// `WorktreeStore` runs this in the transaction that takes the row out
+    /// of `archived`. The archive also deleted the worktree's surfaces, so
+    /// it usually rewrites none, and the next tab sync imports the tabs
+    /// with this list.
+    static func reopenNotePanels(
+        worktreeID: UUID, now: Date, in db: GRDB.Database
+    ) throws -> [WorkspaceTabSurface] {
+        let worktreeKey = worktreeID.uuidString
+        let noteIDs = try String.fetchAll(
+            db, sql: "SELECT id FROM note WHERE worktreeID = ? ORDER BY createdAt, id",
+            arguments: [worktreeKey]
+        ).compactMap(UUID.init(uuidString:))
+        var panels = try storedWorktreePanels(worktreeKey: worktreeKey, db: db)
+        let storedCount = panels.count
+        for noteID in noteIDs where !panels.contains(where: { $0.content == .note(noteID: noteID) }) {
+            panels.append(WorktreePanel(id: UUID(), content: .note(noteID: noteID)))
+        }
+        guard panels.count != storedCount else { return [] }
+        try writeWorktreePanels(panels, worktreeID: worktreeID, db: db)
+        return try rewriteSurfaces(
+            worktreeID: worktreeID, worktreePanels: panels, except: nil, db: db, now: now)
+    }
+
     /// The panels of the worktree whose ID is `worktreeKey`, ordered by
     /// position, against an open transaction. A malformed row is skipped
     /// with a logged warning, and so is a row repeating an earlier row's
