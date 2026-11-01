@@ -33,7 +33,7 @@ struct ServersButtonLabel: View {
         runningCount > 0 ? "\(runningCount) running" : "Servers"
     }
 
-    static func menuTitle(for server: DevServerInfo) -> String {
+    nonisolated static func menuTitle(for server: DevServerInfo) -> String {
         let state: String
         switch server.state {
         case .running: state = "running"
@@ -50,7 +50,7 @@ struct ServersButtonLabel: View {
     /// or not, which the daemon clears by closing that tab. Without it, an
     /// exited server whose declaration is gone could not be cleared from the
     /// menu at all. A live running file always reads as running.
-    static func stopItemTitle(for server: DevServerInfo) -> String? {
+    nonisolated static func stopItemTitle(for server: DevServerInfo) -> String? {
         switch server.state {
         case .running, .unknown: return "Stop"
         case .exited, .stopped: return server.terminalID != nil ? "Close" : nil
@@ -59,7 +59,7 @@ struct ServersButtonLabel: View {
 
     /// The servers "Stop all" acts on: every server that offers a stop item.
     /// Empty disables the item.
-    static func stopAllNames(_ list: DevServerListResult) -> [String] {
+    nonisolated static func stopAllNames(_ list: DevServerListResult) -> [String] {
         list.servers.filter { stopItemTitle(for: $0) != nil }.map { $0.name }
     }
 
@@ -83,7 +83,7 @@ struct ServersButtonLabel: View {
 
     /// The menu's first item (decision D4): present whenever a running
     /// server has reported a main URL, in both toolbar shapes.
-    static func leadItemTitle(primaryURL: String?) -> String? {
+    nonisolated static func leadItemTitle(primaryURL: String?) -> String? {
         primaryURL.map { "Open \($0)" }
     }
 
