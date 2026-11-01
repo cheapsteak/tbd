@@ -624,8 +624,9 @@ public struct WorktreeOrderEntry: Codable, Sendable, Equatable {
     }
 }
 
-/// Payload of `.worktreeSiblingsReordered`: the whole destination group of a
-/// committed `worktree.moveMany`, in its new order.
+/// Payload of `.worktreeSiblingsReordered`: the destination group of a
+/// committed `worktree.moveMany`, in its new order. Archived rows are left
+/// out: the daemon renumbers them with the rest, and no client lists them.
 public struct WorktreeSiblingsReorderedDelta: Codable, Sendable, Equatable {
     /// The request's `moveID`, so the app can retire its own pending move and
     /// not another writer's. Optional so a writer without one can still

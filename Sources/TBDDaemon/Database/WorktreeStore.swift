@@ -293,6 +293,22 @@ public struct RemoteSessionReference: Sendable, Hashable {
     public let sessionID: String
 }
 
+/// What a committed `WorktreeStore.moveMany` did.
+public struct WorktreeMoveManyOutcome: Sendable, Equatable {
+    /// The destination group's unarchived rows, each with its parent and new
+    /// `sortOrder`, in the new order. Archived rows were renumbered too, and
+    /// are left out because no client lists them.
+    public let entries: [WorktreeOrderEntry]
+    /// Some carried row's parent changed. A reorder among a parent's own
+    /// children changes none.
+    public let reparented: Bool
+
+    public init(entries: [WorktreeOrderEntry], reparented: Bool) {
+        self.entries = entries
+        self.reparented = reparented
+    }
+}
+
 /// Provides CRUD operations for worktrees.
 public struct WorktreeStore: Sendable {
     let writer: any DatabaseWriter
@@ -1138,7 +1154,7 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Move several worktrees at once to one destination group, all or
-    /// nothing, and return every row of that group in its new order.
+    /// nothing, and return that group's unarchived rows in their new order.
     ///
     /// The sidebar's drop path. The caller names the destination by IDs — a
     /// parent (nil for the top level of the rows' own group) and the row to
@@ -1156,11 +1172,14 @@ public struct WorktreeStore: Sendable {
     ///   own group;
     /// - `before`, when given, is in the destination group and is not carried.
     ///
-    /// The destination group is ordered by `sortOrder`, `SiblingPlacement.place`
-    /// computes the new order, and the group is renumbered 0…n−1. The group
-    /// includes archived rows, which the app does not list; placement keeps
-    /// the relative order of the rows it does not carry, so the app, running
-    /// the same placement on its own list, agrees on every row it shows.
+    /// The destination group is ordered by `sortOrder`, `createdAt`, then ID,
+    /// `SiblingPlacement.place` computes the new order, and the group is
+    /// renumbered 0…n−1. The group includes archived rows, which the app does
+    /// not list; placement keeps the relative order of the rows it does not
+    /// carry, so the app, running the same placement on its own list, agrees
+    /// on every row it shows. Archived rows are renumbered with the rest but
+    /// left out of the result: no client lists them, and a group can hold
+    /// thousands of them.
     ///
     /// A carried remote row whose parent changes spends its adoption
     /// assignment (`remote_parent_assigned = 1`), exactly as `move` does; a
@@ -1171,7 +1190,7 @@ public struct WorktreeStore: Sendable {
     /// only once the move is durable.
     public func moveMany(
         worktreeIDs: [UUID], newParentID: UUID?, before: UUID?
-    ) async throws -> [WorktreeOrderEntry] {
+    ) async throws -> WorktreeMoveManyOutcome {
         try await writer.write { db in
             var seen = Set<UUID>()
             let carriedIDs = worktreeIDs.filter { seen.insert($0).inserted }
@@ -1256,10 +1275,18 @@ public struct WorktreeStore: Sendable {
                 }
             }
 
-            return ordered.enumerated().map { sortOrder, worktreeID in
-                WorktreeOrderEntry(
+            // Renumbered above, but no client lists an archived row.
+            let archivedRaw = WorktreeStatus.archived.rawValue
+            let archived = Set((group + carried)
+                .filter { $0.status == archivedRaw }
+                .compactMap { UUID(uuidString: $0.id) })
+            let entries = ordered.enumerated().compactMap { sortOrder, worktreeID -> WorktreeOrderEntry? in
+                guard !archived.contains(worktreeID) else { return nil }
+                return WorktreeOrderEntry(
                     worktreeID: worktreeID, parentWorktreeID: newParentID, sortOrder: sortOrder)
             }
+            let reparented = carried.contains { $0.parentWorktreeID != parentArg }
+            return WorktreeMoveManyOutcome(entries: entries, reparented: reparented)
         }
     }
 

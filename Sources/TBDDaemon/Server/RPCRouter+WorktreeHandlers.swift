@@ -864,19 +864,24 @@ extension RPCRouter {
     ///
     /// `moveMany` returns only after its transaction commits, so the delta and
     /// the reply both describe a durable move, and a `worktree.list` begun
-    /// after the reply reads it. The delta carries the whole destination group
-    /// and the request's `moveID`; it and the reply travel on different
-    /// sockets, so the app may see either first.
+    /// after the reply reads it. The delta carries the destination group's
+    /// unarchived rows and the request's `moveID`; it and the reply travel on
+    /// different sockets, so the app may see either first.
+    ///
+    /// A row nested under a new parent disarms that parent's auto-archive, as
+    /// `worktree.move` does. A reorder among a parent's own children gives it
+    /// no new child, so a parent the user re-armed stays armed.
     func handleWorktreeMoveMany(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeMoveManyParams.self, from: paramsData)
-        let entries = try await db.worktrees.moveMany(
+        let outcome = try await db.worktrees.moveMany(
             worktreeIDs: params.worktreeIDs,
             newParentID: params.newParentID,
             before: params.beforeWorktreeID
         )
 
-        // A worktree with active children isn't auto-archivable; disarm the new parent.
-        if let newParentID = params.newParentID {
+        // A worktree with active children isn't auto-archivable; disarm the
+        // new parent, when a carried row actually joined it.
+        if let newParentID = params.newParentID, outcome.reparented {
             do {
                 try await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
             } catch {
@@ -886,7 +891,7 @@ extension RPCRouter {
 
         subscriptions.broadcast(delta: .worktreeSiblingsReordered(WorktreeSiblingsReorderedDelta(
             moveID: params.moveID,
-            entries: entries
+            entries: outcome.entries
         )))
 
         return .ok()

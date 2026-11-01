@@ -5,9 +5,10 @@ import DaemonTestSupport
 @testable import TBDShared
 
 /// Handler-level coverage for `worktree.moveMany`: a committed move broadcasts
-/// the whole destination group with the request's `moveID`, a refused move
-/// answers with the error and broadcasts nothing, and a new parent is disarmed
-/// for auto-archive exactly as `worktree.move` disarms it.
+/// the destination group's unarchived rows with the request's `moveID`, a
+/// refused move answers with the error and broadcasts nothing, and a parent a
+/// carried row joins is disarmed for auto-archive exactly as `worktree.move`
+/// disarms it, while a reorder among its own children leaves it armed.
 @Suite struct WorktreeMoveManyRPCTests {
 
     /// Router whose handlers broadcast into one manager, with every delta it
@@ -64,6 +65,9 @@ import DaemonTestSupport
         let repo = try await makeRepo(db)
         let parent = try await makeWT(db, repo: repo, name: "parent")
         let existing = try await makeWT(db, repo: repo, name: "existing", parent: parent.id)
+        // Renumbered with the group, but no client lists it.
+        let gone = try await makeWT(db, repo: repo, name: "gone", parent: parent.id)
+        try await db.worktrees.updateStatus(id: gone.id, status: .archived)
         let a = try await makeWT(db, repo: repo, name: "a")
         let b = try await makeWT(db, repo: repo, name: "b")
         let moveID = UUID()
@@ -77,7 +81,10 @@ import DaemonTestSupport
         #expect(reordered.count == 1)
         let delta = try #require(reordered.first)
         #expect(delta.moveID == moveID)
-        // The whole destination group, as the database now holds it.
+        // The archived row took the group's last place, and the delta leaves
+        // it out.
+        #expect(try await db.worktrees.get(id: gone.id)?.sortOrder == 3)
+        // The destination group's unarchived rows, as the database now holds them.
         var stored: [WorktreeOrderEntry] = []
         for id in [b.id, a.id, existing.id] {
             let row = try #require(try await db.worktrees.get(id: id))
@@ -124,6 +131,29 @@ import DaemonTestSupport
         #expect(response.success)
         #expect(try await db.worktrees.get(id: parent.id)?.autoArchiveOnMerge == false,
                 "a parent armed for auto-archive is disarmed when a row is nested under it")
+    }
+
+    /// A reorder among a parent's own children gives it no new child: a
+    /// parent the user re-armed stays armed.
+    @Test func moveManyReorderAmongChildrenKeepsParentArmed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (router, _) = makeRouter(db: db)
+        let repo = try await makeRepo(db)
+        let parent = try await makeWT(db, repo: repo, name: "parent")
+        let first = try await makeWT(db, repo: repo, name: "first", parent: parent.id)
+        let second = try await makeWT(db, repo: repo, name: "second", parent: parent.id)
+        try await db.worktrees.setAutoArchiveOnMerge(id: parent.id, value: true)
+
+        let response = try await moveMany(router, WorktreeMoveManyParams(
+            moveID: UUID(), worktreeIDs: [second.id],
+            newParentID: parent.id, beforeWorktreeID: first.id))
+
+        #expect(response.success, "worktree.moveMany must succeed: \(response.error ?? "")")
+        // The reorder landed, so the check below is not vacuous.
+        #expect(try await db.worktrees.get(id: second.id)?.sortOrder == 0)
+        #expect(try await db.worktrees.get(id: first.id)?.sortOrder == 1)
+        #expect(try await db.worktrees.get(id: parent.id)?.autoArchiveOnMerge == true,
+                "a reorder among a parent's own children must not disarm it")
     }
 
     /// The other branch: a move to the top level names no new parent, so the
