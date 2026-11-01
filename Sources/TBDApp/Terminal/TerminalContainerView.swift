@@ -17,8 +17,9 @@ import TBDShared
 /// resize broadcast, so tmux pane dimensions follow what SwiftTerm renders.
 /// What each path posts:
 /// - **A tab on the daemon path:** `PanelSurfaceWorkspaceView`'s full width,
-///   the side region included, and its height below the tab row and the
-///   divider under it, and below the pre-session banner while that shows.
+///   the side region included, and the measured height of its primary leaf's
+///   slot, below the tab row, the pre-session banner while that shows, and
+///   their dividers.
 /// - **Every other single-worktree path:** the active tab's slot inside
 ///   SingleWorktreeView, below the full-width tab bar, the pre-session banner
 ///   while that shows, and their dividers; a legacy split's panes all sit
@@ -28,10 +29,11 @@ import TBDShared
 /// None includes the pinned-terminal dock.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
-    /// Three views can post this key: `PanelSurfaceWorkspaceView` for a tab on
-    /// the daemon path, SingleWorktreeView's `layoutContent` on every other
-    /// path, or the first cell of MultiWorktreeView's grid. Exactly one of
-    /// them is rendered at a time, so taking the latest value is fine.
+    /// Three views can post this key: `PanelSurfaceWorkspaceView`'s primary
+    /// leaf for a tab on the daemon path, SingleWorktreeView's
+    /// `layoutContent` on every other path, or the first cell of
+    /// MultiWorktreeView's grid. Exactly one of them is rendered at a time,
+    /// so taking the latest value is fine.
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
@@ -171,8 +173,8 @@ struct SingleWorktreeView: View {
                 // size goes to MainAreaSizeKey so the daemon-side tmux resize
                 // matches the actual SwiftTerm pane area (tab bar + divider
                 // above and the resume banner below are excluded). On it,
-                // `PanelSurfaceWorkspaceView` posts the key itself, below its
-                // own tab row and banner, so exactly one view posts it.
+                // `PanelSurfaceWorkspaceView` posts the key itself, measured
+                // at its primary leaf, so exactly one view posts it.
                 layoutContent(
                     worktree: localWorktree, daemonTab: daemonTab,
                     showsPreSessionBanner: showsPreSessionBanner)

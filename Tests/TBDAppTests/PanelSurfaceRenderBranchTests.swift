@@ -718,35 +718,17 @@ struct PanelSurfaceRenderBranchTests {
         #expect(unselected == nil)
     }
 
-    @Test("the daemon path measures the main area below its tab row and the divider")
-    func mainAreaExcludesTheTabRow() {
-        let rowAndDivider: CGFloat = TabRowMetrics.height + 1
-        let measured = PanelSurfaceWorkspaceView.mainAreaSize(of: CGSize(width: 800, height: 600))
-        let expected = CGSize(width: 800, height: 600 - rowAndDivider)
-        #expect(measured == expected)
-        // Shorter than the row: nothing to measure, rather than a negative height.
-        let squashed = PanelSurfaceWorkspaceView.mainAreaSize(of: CGSize(width: 800, height: 10))
-        #expect(squashed.height == 0)
-    }
-
-    /// The banner sits under the bar in the primary's column, inside the
-    /// view's own measure, so the measure leaves it out as the legacy path's
-    /// does, which is taken below it.
-    @Test("while the pre-session banner shows, the main area is measured below it and its divider too")
-    func mainAreaExcludesThePreSessionBanner() {
-        let size = CGSize(width: 800, height: 600)
-        let bannerHeight: CGFloat = 29
-        let aboveContent: CGFloat = TabRowMetrics.height + 1 + bannerHeight + 1
-
-        let withBanner = PanelSurfaceWorkspaceView.mainAreaSize(of: size, bannerHeight: bannerHeight)
-        let withoutBanner = PanelSurfaceWorkspaceView.mainAreaSize(of: size, bannerHeight: nil)
-
-        let expectedWithBanner = CGSize(width: 800, height: 600 - aboveContent)
-        #expect(withBanner == expectedWithBanner)
-        #expect(withoutBanner == PanelSurfaceWorkspaceView.mainAreaSize(of: size))
-        let squashed = PanelSurfaceWorkspaceView.mainAreaSize(
-            of: CGSize(width: 800, height: 40), bannerHeight: bannerHeight)
-        #expect(squashed.height == 0)
+    /// The height is measured at the primary leaf's slot, below the tab row,
+    /// the pre-session banner while it shows, and their dividers, at whatever
+    /// height those lay out; the width is the whole view's, side region
+    /// included.
+    @Test("the daemon path posts its full width and the primary leaf's measured height")
+    func mainAreaIsTheFullWidthAndTheLeafsHeight() {
+        let fullWidth: CGFloat = 800
+        let leafHeight: CGFloat = 541
+        let posted = PanelSurfaceWorkspaceView.mainAreaSize(width: fullWidth, primaryLeafHeight: leafHeight)
+        let expected = CGSize(width: fullWidth, height: leafHeight)
+        #expect(posted == expected)
     }
 
     // MARK: - Collapse and expand

@@ -64,9 +64,10 @@ struct PanelSurfaceLoadKey: Equatable {
 /// none for the tab (`surface` nil), so a new tab draws this same view before
 /// and after its surface arrives.
 ///
-/// This view posts `MainAreaSizeKey` for its tab: its full width, and its
-/// height below the tab row and the divider under it, and below the
-/// pre-session banner and its divider while that shows.
+/// This view posts `MainAreaSizeKey` for its tab: its full width, and the
+/// measured height of the primary leaf's slot, which lies below the tab row,
+/// the divider under it and, while it shows, the pre-session banner and its
+/// divider.
 ///
 /// A divider drag, the expand button and the transcript control each send one
 /// panel operation through `AppState.applyPanelOperation` and adopt the tab
@@ -100,9 +101,6 @@ struct PanelSurfaceWorkspaceView: View {
     /// whether its file can render, its web page's address and the copy
     /// checkmark. Pruned to the worktree's tabs as they change.
     @State private var primaryChromes = PaneChromeStore()
-    /// The pre-session banner's height as last laid out, which the main-area
-    /// measure leaves out while the banner shows.
-    @State private var bannerHeight: CGFloat = 0
     @AppStorage(AppState.enableTranscriptKey)
     private var transcriptViewEnabled = AppState.enableTranscriptDefault
 
@@ -130,9 +128,8 @@ struct PanelSurfaceWorkspaceView: View {
         let tabID = tab.id
         let chrome = primaryChromes.state(for: tabID)
         // Read here, not in the `GeometryReader` closure, so what the bar's
-        // trailing items and the measure read is a dependency of this body.
+        // trailing items read is a dependency of this body.
         let trailing = trailingItems(side: side, chrome: chrome)
-        let measuredBannerHeight: CGFloat? = showsPreSessionBanner ? bannerHeight : nil
         GeometryReader { geometry in
             let showsSide = side.isVisible
             let thickness = SplitDividerMetrics.lineThickness
@@ -143,7 +140,7 @@ struct PanelSurfaceWorkspaceView: View {
             // region does, so showing or hiding the region never rebuilds the
             // primary's terminal view.
             HStack(spacing: 0) {
-                primaryColumn(trailing: trailing, chrome: chrome)
+                primaryColumn(trailing: trailing, chrome: chrome, mainAreaWidth: geometry.size.width)
                     .frame(width: showsSide ? shares[0] * availableSpace : geometry.size.width)
 
                 if showsSide, let surface {
@@ -166,9 +163,6 @@ struct PanelSurfaceWorkspaceView: View {
                         .frame(width: shares[1] * availableSpace)
                 }
             }
-            .preference(
-                key: MainAreaSizeKey.self,
-                value: Self.mainAreaSize(of: geometry.size, bannerHeight: measuredBannerHeight))
         }
         .onChange(of: tabIDs) { _, tabIDs in
             primaryChromes.prune(keeping: Set(tabIDs))
@@ -188,7 +182,13 @@ struct PanelSurfaceWorkspaceView: View {
     /// terminal view and web view, the latter reporting to that tab's
     /// `chrome`. The banner coming or going leaves the leaf where it is in
     /// the column, so it rebuilds nothing.
-    private func primaryColumn(trailing: TabBarTrailingItems, chrome: PaneChromeState) -> some View {
+    ///
+    /// A reader behind the leaf measures its slot and posts the slot's height
+    /// as `MainAreaSizeKey`, with `mainAreaWidth`, this view's full width: the
+    /// one producer of the key on this path.
+    private func primaryColumn(
+        trailing: TabBarTrailingItems, chrome: PaneChromeState, mainAreaWidth: CGFloat
+    ) -> some View {
         VStack(spacing: 0) {
             makeTabBar(trailing)
 
@@ -196,11 +196,6 @@ struct PanelSurfaceWorkspaceView: View {
 
             if showsPreSessionBanner {
                 PreSessionSetupBanner()
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        bannerHeight = height
-                    }
 
                 Divider()
             }
@@ -214,6 +209,13 @@ struct PanelSurfaceWorkspaceView: View {
                 chrome: chrome
             )
             .id(tab.id)
+            .background {
+                GeometryReader { leaf in
+                    Color.clear.preference(
+                        key: MainAreaSizeKey.self,
+                        value: Self.mainAreaSize(width: mainAreaWidth, primaryLeafHeight: leaf.size.height))
+                }
+            }
         }
     }
 
@@ -337,17 +339,13 @@ struct PanelSurfaceWorkspaceView: View {
         return .resize(width: width)
     }
 
-    /// The size this view posts as `MainAreaSizeKey`: all of `size` but the
-    /// tab row and the divider under it and, while the pre-session banner
-    /// shows, the banner (`bannerHeight`; nil while none shows) and its
-    /// divider. So the measure excludes the tab bar and the banner as it
-    /// does on every other path.
-    static func mainAreaSize(of size: CGSize, bannerHeight: CGFloat? = nil) -> CGSize {
-        var above = TabRowMetrics.height + 1
-        if let bannerHeight {
-            above += bannerHeight + 1
-        }
-        return CGSize(width: size.width, height: max(size.height - above, 0))
+    /// The size this view posts as `MainAreaSizeKey`: its full `width`, the
+    /// side region included, and the measured height of the primary leaf's
+    /// slot. Measured rather than derived from this view's height, so the
+    /// tab row, the banner and their dividers are left out at whatever height
+    /// they lay out, as the slot every other path measures leaves them out.
+    static func mainAreaSize(width: CGFloat, primaryLeafHeight: CGFloat) -> CGSize {
+        CGSize(width: width, height: primaryLeafHeight)
     }
 
     /// The expand button shows while the region is collapsed and has panels to
