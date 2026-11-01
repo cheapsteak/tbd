@@ -272,7 +272,8 @@ struct MainToolbarControllerTests {
     /// The host's button is an accessory-bar button, bordered but showing its
     /// border only under the pointer, image-only, with its tool tip and
     /// accessibility description, its target and action, which the item
-    /// carries too, since the host forwards neither, and pinned to the
+    /// does not keep (an item with a custom view keeps none the view does not
+    /// answer, so it reads nil), and pinned to the
     /// host's four edges by required constraints, so once laid out its frame
     /// is the host's bounds. The host holds the compact size by required
     /// constraints, found by their identifiers among its edge constraints,
@@ -315,9 +316,9 @@ struct MainToolbarControllerTests {
             #expect(button.showsBorderOnlyWhileMouseInside)
             #expect(button.target === target)
             #expect(button.action == action)
-            let itemSharesTarget = item.target === button.target
-            #expect(itemSharesTarget)
-            #expect(item.action == button.action)
+            let itemHasNoTarget = item.target == nil
+            #expect(itemHasNoTarget)
+            #expect(item.action == nil)
             #expect(host.translatesAutoresizingMaskIntoConstraints == false)
             #expect(button.translatesAutoresizingMaskIntoConstraints == false)
             let pinnedEdges = ToolbarFixture.pinnedEdges(of: button, in: host)

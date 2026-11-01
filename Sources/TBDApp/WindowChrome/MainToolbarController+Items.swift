@@ -173,11 +173,11 @@ extension MainToolbarController {
     /// bezel at rest. The item is not bordered, and the host answers none of
     /// the properties an item forwards to its view, so the item has no Liquid
     /// Glass background (see `ToolbarIconButtonHost`). The target and action
-    /// are set on the button and on the item: the host answers neither, so
-    /// the item stores its own, which keeps AppKit paths that send the item's
-    /// action, such as a text-only display mode, working. Glass follows
-    /// `isBordered`, not these. The item's overflow row is an explicit menu
-    /// form carrying the same target and action. The item is a
+    /// are set on the button and on the overflow row, an explicit menu form,
+    /// and the item keeps neither: an item with a custom view forwards them
+    /// to the view or drops them, and the host does not answer them
+    /// (measured on CI), so the item reads nil. Glass follows `isBordered`,
+    /// not these. The item is a
     /// `ToolbarIconButtonItem`, so it reports its button's state, and setting
     /// its flag sets the button and the row. It does not autovalidate:
     /// `NSToolbarItem.h` documents that `validate` does nothing for an item
@@ -214,8 +214,6 @@ extension MainToolbarController {
         item.view = host
         item.isBordered = false
         item.autovalidates = false
-        item.target = target
-        item.action = action
         item.label = tip
         item.toolTip = tip
         let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")

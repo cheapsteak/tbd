@@ -155,10 +155,10 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   those, so the item keeps its own `isBordered = false`, set explicitly, and
   shows no glass, as the title item does. The bordered button one level down
   keeps its own hover highlight.
-- **Wiring** – the target and action are set on the item and the button; the
-  host forwards neither, so each keeps its own. The item's pair keeps AppKit
-  paths that send the item's own action, such as a text-only display mode,
-  working; glass follows `isBordered`, not these. For the same reason the
+- **Wiring** – the target and action are set on the button and the overflow
+  row. An item with a custom view keeps no target or action its view does
+  not answer, so the item reads nil (measured on CI); glass follows
+  `isBordered`, not these. For the same reason the
   item is a `ToolbarIconButtonItem`, an `NSToolbarItem` subclass that
   reports its button's state: setting the item's flag sets the button and the
   overflow row, and the setter compares the item's own flag, the button and
@@ -267,7 +267,7 @@ No durable resource is added.
 - **Compact buttons:** each is an unbordered `ToolbarIconButtonItem` that does
   not autovalidate, whose host answers none of the selectors an item forwards
   and holds 20 × 28 pt, and whose button fills the host, with its tool tip,
-  target and action, which the item carries too; back and forward start
+  target and action, which the item does not keep (it reads nil); back and forward start
   disabled, button included, and an apply brings back a row that drifted;
   setting the toggle item's `isEnabled` moves its button and row; a copy keeps
   the subclass, the host, its layout and the button's glyph and action, and
