@@ -877,19 +877,18 @@ final class AppState {
     }
     /// The app's copy of the daemon-owned panel surfaces: worktree → workspace
     /// tab → surface. Filled by `panel.get` and kept current by
-    /// `panelSurfaceChanged` deltas while `panel_tabs_enabled` is on; empty
-    /// otherwise. Carries no tab order — the renderer looks tabs up by ID.
+    /// `panelSurfaceChanged` deltas. Carries no tab order — the renderer looks
+    /// tabs up by ID.
     /// Written only when a value actually changes, because every reader of a
     /// dictionary-keyed tracked property is notified on any write.
     var panelSurfaces: [UUID: [WorkspaceTabID: WorkspaceTabSurface]] = [:]
     /// Worktrees whose workspace tabs changed since their last `panel.syncTabs`.
     @ObservationIgnored var panelSyncDirty: Set<UUID> = []
     /// Each worktree's tab list — every field the sync sends: IDs, order,
-    /// labels and contents — as the `tabs` observer last marked it, taken
-    /// while the flag is on and empty while it is off. The observer compares
-    /// `tabs` against this rather than against `oldValue`. It shares each
-    /// worktree's array with `tabs`, never the dictionary itself, so an
-    /// in-place edit with the flag on copies at most that worktree's tabs.
+    /// labels and contents — as the `tabs` observer last marked it. The
+    /// observer compares `tabs` against this rather than against `oldValue`.
+    /// It shares each worktree's array with `tabs`, never the dictionary
+    /// itself, so an in-place edit copies at most that worktree's tabs.
     @ObservationIgnored var panelTabSignatures: [UUID: [TBDShared.Tab]] = [:]
     /// The legacy layouts of the tabs in `panelSyncSkippedTabIDs`, as the
     /// `layouts` observer last saw them; empty when nothing is skipped.
@@ -927,11 +926,6 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
-    /// The daemon has acknowledged the subscription `startSubscription()` last
-    /// opened. Until it has, the flag turning on syncs but loads nothing: the
-    /// acknowledgement refetches every worktree itself
-    /// (`panelSubscriptionRegistered`).
-    @ObservationIgnored var panelSubscriptionAcknowledged = false
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -2129,10 +2123,6 @@ final class AppState {
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
-    /// How `setPanelTabsEnabled` persists the panel tabs soak flag —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var panelTabsFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setPanelTabsEnabled(enabled) }
     /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
     /// the same reason as `controlModeSetter`, so the sweep's cadence and its
     /// answers are testable without a daemon.
@@ -2597,27 +2587,22 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
-            let wasPanelTabsEnabled = panelTabsActive
             daemonCapabilities = capabilities
-            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
         }
     }
 
     /// The capability fetch `connectAndLoadInitialState` makes before its
     /// first `refreshAll`. Keeps the last known value on failure, as
     /// `refreshDaemonCapabilities` does: a transient hiccup at connect must
-    /// not switch panel tabs off for the session by clearing the copy. Runs
-    /// the panel-tabs hook only after a successful fetch. A failure with
+    /// not switch every capability flag off for the session. A failure with
     /// nothing to keep is retried on the poll
     /// (`retryDaemonCapabilitiesIfMissing`).
     func fetchDaemonCapabilitiesAtConnect() async {
-        let wasPanelTabsEnabled = panelTabsActive
         guard let capabilities = await daemonCapabilitiesFetcher() else {
             logger.warning("Daemon capabilities fetch failed at connect; keeping the last known value")
             return
         }
         daemonCapabilities = capabilities
-        panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
     }
 
     /// Run on each poll cycle: while the app is connected and holds no

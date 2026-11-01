@@ -26,26 +26,13 @@ enum PanelTabsFixture {
         var errorDescription: String? { message }
     }
 
-    static func capabilities(panelTabs: Bool) -> DaemonCapabilitiesResult {
-        var result = DaemonCapabilitiesResult(controlModeEnabled: false)
-        result.panelTabsEnabled = panelTabs
-        return result
-    }
-
-    /// Runs `body` against an `AppState` on a throwaway defaults suite. The
-    /// daemon reports `panel_tabs_enabled` as `panelTabs` (nil: capabilities
-    /// not fetched). Assigning capabilities here is a seed, not a transition —
-    /// `panelTabsCapabilityChanged` runs only from the fetch sites.
+    /// Runs `body` against an `AppState` on a throwaway defaults suite.
     static func withState(
-        panelTabs: Bool?,
         _ body: @MainActor (AppState) async throws -> Void
     ) async rethrows {
         let suite = TestDefaultsSuite("PanelTabsTests")
         defer { suite.tearDown() }
         let state = AppState(userDefaults: suite.defaults)
-        if let panelTabs {
-            state.daemonCapabilities = capabilities(panelTabs: panelTabs)
-        }
         state.panelApplyTrigger = { @MainActor _ in
             Issue.record("unexpected panel.apply")
             throw UnstubbedSeam(seam: "panel.apply")

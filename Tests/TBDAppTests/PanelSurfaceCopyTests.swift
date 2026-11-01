@@ -7,44 +7,19 @@ import TBDShared
 // Tier 1: deterministic, in-process state only (see `PanelTabsTestSupport`).
 
 /// The app's copy of the daemon-owned panel surfaces (panel tabs spec, "The
-/// app's copy of the surface" and "Round trip and conflicts"): its gate on
-/// `panel_tabs_enabled`, the revision guard, removals, the full-get merge, the
-/// resubscribe refetch, and the `panel.apply` chokepoint.
+/// app's copy of the surface" and "Round trip and conflicts"): the revision
+/// guard, removals, the full-get merge, the resubscribe refetch, and the
+/// `panel.apply` chokepoint.
 @Suite("Panel surface copy")
 @MainActor
 struct PanelSurfaceCopyTests {
     private typealias Fixture = PanelTabsFixture
 
-    // MARK: - The gate
-
-    @Test("flag off: a delta and a load both leave the copy as it was")
-    func flagOffLeavesCopyUntouched() async {
-        await Fixture.withState(panelTabs: false) { state in
-            let worktreeID = UUID()
-            let heldID = UUID()
-            // The copy can only be non-empty with the flag off if something
-            // seeded it; seeding makes "untouched" observable, not just "empty".
-            let held = Fixture.surface(tabID: heldID, worktreeID: worktreeID, revision: 3)
-            let seeded: PanelSurfaceCopy = [worktreeID: [heldID: held]]
-            state.panelSurfaces = seeded
-
-            state.handleDelta(.panelSurfaceChanged(Fixture.delta(
-                worktreeID: worktreeID,
-                tabs: [Fixture.surface(tabID: UUID(), worktreeID: worktreeID, revision: 1)],
-                removed: [heldID])))
-            #expect(state.panelSurfaces == seeded, "a delta with the flag off must change nothing")
-
-            // The unstubbed `panel.get` records an issue if the load fetches.
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
-            #expect(state.panelSurfaces == seeded, "a load with the flag off must not even fetch")
-        }
-    }
-
     // MARK: - Deltas
 
     @Test("a delta upserts its tabs and leaves the others alone")
     func deltaUpserts() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let keptID = UUID()
             let updatedID = UUID()
@@ -69,7 +44,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("an older revision is refused, by a delta and by a full get")
     func olderRevisionRefused() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let tabID = UUID()
             let current = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 9, label: "current")
@@ -95,7 +70,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a removal applies whatever revision the copy holds")
     func removalAppliedWhateverRevision() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let removedID = UUID()
             let keptID = UUID()
@@ -123,7 +98,7 @@ struct PanelSurfaceCopyTests {
     /// to, still reaches it.
     @Test("a removal drops the tab under whichever worktree the copy holds it")
     func removalDropsTabUnderAnyWorktree() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let scratchID = UUID()
             let mainID = UUID()
             let movedID = UUID()
@@ -157,7 +132,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a full get drops tabs it does not list")
     func fullGetDropsAbsentTabs() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let listedID = UUID()
             let goneID = UUID()
@@ -181,9 +156,9 @@ struct PanelSurfaceCopyTests {
 
     // MARK: - Loading the shown tab
 
-    @Test("a shown tab asks for a load only while the flag is on and the copy holds no surface for it")
+    @Test("a shown tab asks for a load only while the copy holds no surface for it")
     func loadKeyAsksForALoadOnlyForAShownTabWithoutASurface() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let surfaced = Fixture.terminalTab(label: "surfaced")
             let alsoSurfaced = Fixture.terminalTab(label: "also surfaced")
@@ -210,17 +185,12 @@ struct PanelSurfaceCopyTests {
             #expect(onSurfaced == onAlsoSurfaced, "switching between tabs with surfaces reruns nothing")
             #expect(onSkipped == onSurfaced, "switching to or from a skipped tab reruns nothing")
             #expect(onSurfaced != onBare, "switching to a tab without one reruns the load task")
-
-            state.daemonCapabilities = Fixture.capabilities(panelTabs: false)
-            let flagOff = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: bare.id)
-            #expect(!flagOff.loads)
-            #expect(flagOff != onBare, "the flag turning on reruns the load task")
         }
     }
 
     @Test("a shown tab without a surface loads after the pending sync; one with a surface loads nothing")
     func shownTabWithoutSurfaceLoadsAfterThePendingSync() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
             let log = PanelEventLog()
@@ -252,7 +222,7 @@ struct PanelSurfaceCopyTests {
     /// leaves it as it was must notify nobody.
     @Test("a sync that changes the skipped set notifies a reader of the load key; one that does not notifies nobody")
     func skippedSetChangeIsObservable() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
             // The daemon cannot import this tab's legacy layout.
@@ -291,7 +261,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a full get keeps a tab a delta adopted while it was in flight")
     func getKeepsTabAdoptedFromDeltaInFlight() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let keptID = UUID()
             let droppedID = UUID()
@@ -325,7 +295,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a full get does not put back a tab a delta removed while it was in flight")
     func getDoesNotRestoreTabRemovedInFlight() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let removedID = UUID()
             let otherID = UUID()
@@ -354,7 +324,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a full get that lists a tab held under another worktree moves it there; an older listing does not")
     func mergeEvictsTabFromOtherWorktree() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let scratchID = UUID()
             let mainID = UUID()
             let movedID = UUID()
@@ -390,7 +360,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a delta's activeTabID does not move the selected workspace tab")
     func deltaActiveTabIDIgnored() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let first = Fixture.terminalTab(label: "first")
             let second = Fixture.terminalTab(label: "second")
@@ -412,7 +382,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("an archived worktree drops out of the copy, though it keeps its tabs entry")
     func archivedWorktreeDropsItsCopyEntry() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let archivedID = UUID()
             let keptID = UUID()
             let archivedTab = Fixture.terminalTab(label: "archived")
@@ -436,7 +406,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("archiving a worktree forgets its pending tab sync and its readiness")
     func forgetClearsDirtyAndReadiness() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let archivedID = await Fixture.readyWorktree(
                 state, tabs: [Fixture.terminalTab(label: "archived")], syncs: syncs)
@@ -461,7 +431,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("an acknowledged subscription refetches every worktree with a tab list, surfaces or none, and keeps rendering the copy meanwhile")
     func registrationRefetchesEveryLoadedWorktree() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
@@ -496,7 +466,7 @@ struct PanelSurfaceCopyTests {
 
             try #require(gate.isHolding, "precondition: a refetch is in flight")
             #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .daemon(held),
-                    "the tab keeps rendering from the copy rather than dropping to legacy")
+                    "the tab keeps rendering its side region from the copy rather than an empty one")
             #expect(syncs.sent.isEmpty,
                     "readiness was cleared, so nothing is synced before both tab sources reload")
             #expect(state.panelSyncDirty.isSuperset(of: [worktreeID, bareID]))
@@ -526,7 +496,7 @@ struct PanelSurfaceCopyTests {
     /// reports, so the refetch waits for the acknowledgement.
     @Test("a resubscribe refetches only once the daemon registers the subscription")
     func resubscribeRefetchesAfterSubscribing() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let worktreeID = UUID()
             let tab = Fixture.terminalTab(label: "agent")
             state.tabs[worktreeID] = [tab]
@@ -560,7 +530,7 @@ struct PanelSurfaceCopyTests {
     /// acknowledgement of the new subscription refetches it like any other.
     @Test("a get that fails across a resubscribe is refetched when the daemon acknowledges the subscription")
     func failedGetAcrossResubscribeIsRefetchedOnRegistration() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let worktreeID = UUID()
             let tab = Fixture.terminalTab(label: "agent")
             state.tabs[worktreeID] = [tab]
@@ -597,18 +567,18 @@ struct PanelSurfaceCopyTests {
         }
     }
 
-    /// At connect the flag turns on before the daemon acknowledges the
-    /// subscription. The flag turning on syncs and loads nothing; the
+    /// At connect the first refresh delivers each worktree's tab list and
+    /// reconciles both of its tab sources, so a sync goes out before the
+    /// subscription starts. The subscription starting loads nothing; the
     /// acknowledgement loads each worktree once, after the sync still in
     /// flight.
     @Test("launch loads each worktree's surfaces once, on the acknowledgement, after the sync in flight")
     func launchLoadsEachWorktreeOnce() async throws {
-        try await Fixture.withState(panelTabs: nil) { state in
-            let syncs = Fixture.collectSyncs(state)
+        try await Fixture.withState { state in
             let alpha = Fixture.terminalTab(label: "alpha")
             let beta = Fixture.terminalTab(label: "beta")
-            let alphaID = await Fixture.readyWorktree(state, tabs: [alpha], syncs: syncs)
-            let betaID = await Fixture.readyWorktree(state, tabs: [beta], syncs: syncs)
+            let alphaID = UUID()
+            let betaID = UUID()
             let log = PanelEventLog()
             let syncGate = PanelCallGate()
             state.panelSyncTrigger = { @MainActor params in
@@ -626,17 +596,18 @@ struct PanelSurfaceCopyTests {
             let subscription = Fixture.stubSubscription(state)
             defer { subscription.end() }
 
-            // `connectAndLoadInitialState`: capabilities arrive with the flag
-            // on, then the subscription starts, and the daemon acknowledges it
-            // while the flag's sync is still in flight.
-            let on = Fixture.capabilities(panelTabs: true)
-            state.daemonCapabilitiesFetcher = { @MainActor in on }
-            await state.fetchDaemonCapabilitiesAtConnect()
+            // `connectAndLoadInitialState`: the first refresh lands both tab
+            // lists, which the `tabs` observer marks dirty, and marks both
+            // worktrees ready, which sends a sync; the subscription starts
+            // while it is in flight, and the daemon acknowledges it.
+            state.tabs[alphaID] = [alpha]
+            state.tabs[betaID] = [beta]
+            state.markPanelSyncReady(worktreeIDs: [alphaID, betaID])
             await Fixture.drainMainActor()
-            try #require(syncGate.isHolding, "precondition: the flag turning on sent a sync, still in flight")
+            try #require(syncGate.isHolding, "precondition: readiness sent a sync, still in flight")
             state.startSubscription()
             await Fixture.drainMainActor()
-            #expect(gets.worktreeIDs.isEmpty, "the flag turning on before the acknowledgement loads nothing")
+            #expect(gets.worktreeIDs.isEmpty, "nothing loads before the acknowledgement")
 
             subscription.register()
             await Fixture.drainMainActor()
@@ -659,7 +630,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("apply sends the held revision as its base and adopts the reply")
     func applyAdoptsReplyTab() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let worktreeID = UUID()
             let tabID = UUID()
             state.panelSurfaces = [worktreeID: [
@@ -684,7 +655,7 @@ struct PanelSurfaceCopyTests {
 
     @Test("a failed apply shows a toast and refetches the worktree")
     func applyFailureToastsAndRefetches() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let worktreeID = UUID()
             let tabID = UUID()
             state.panelSurfaces = [worktreeID: [
@@ -729,22 +700,18 @@ struct PanelSurfaceCopyTests {
 
     @Test("a failed capability fetch at connect keeps the previous value, and the poll retries while none is held")
     func failedConnectCapabilityFetchKeepsPreviousAndRetries() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             state.programStatusListFetcher = { @MainActor in [] }
             state.isConnected = true
-            let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = UUID()
-            let surface = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 2)
-            state.panelSurfaces = [worktreeID: [tab.id: surface]]
+            state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: true)
             let fetch = CapabilitiesFetchStub()
             fetch.install(on: state)
 
-            // A reconnect whose fetch fails keeps the capabilities it held, and
-            // the copy with them.
+            // A reconnect whose fetch fails keeps the capabilities it held.
             await state.fetchDaemonCapabilitiesAtConnect()
             #expect(fetch.count == 1)
-            #expect(state.panelTabsActive, "a transient failure must not switch panel tabs off")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == surface)
+            #expect(state.daemonCapabilities?.controlModeEnabled == true,
+                    "a transient failure must not switch a capability off")
 
             // Held capabilities need no retry.
             await state.retryDaemonCapabilitiesIfMissing()
@@ -767,45 +734,13 @@ struct PanelSurfaceCopyTests {
             #expect(fetch.count == 3)
             #expect(state.daemonCapabilities == nil)
 
-            fetch.result = Fixture.capabilities(panelTabs: true)
+            fetch.result = DaemonCapabilitiesResult(controlModeEnabled: true)
             await state.retryDaemonCapabilitiesIfMissing()
             #expect(fetch.count == 4)
-            #expect(state.panelTabsActive)
+            #expect(state.daemonCapabilities?.controlModeEnabled == true)
 
             await state.retryDaemonCapabilitiesIfMissing()
             #expect(fetch.count == 4, "a successful retry ends the retries")
-        }
-    }
-
-    // MARK: - The flag turning off
-
-    @Test("the flag turning off clears the copy and stops every apply and sync")
-    func flagOffClearsCopyAndStopsSync() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let syncs = Fixture.collectSyncs(state)
-            let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
-            state.panelSurfaces = [worktreeID: [
-                tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 2),
-            ]]
-            let off = Fixture.capabilities(panelTabs: false)
-            state.daemonCapabilitiesFetcher = { @MainActor in off }
-
-            await state.refreshDaemonCapabilities()
-
-            #expect(state.panelTabsActive == false)
-            #expect(state.panelSurfaces.isEmpty, "a daemon-rendered tab must fall back to legacy at once")
-            #expect(state.panelSyncDirty.isEmpty)
-
-            state.tabs[worktreeID]?.append(Fixture.terminalTab(label: "new"))
-            await Fixture.drainMainActor()
-            #expect(syncs.sent.isEmpty, "no panel.syncTabs goes out with the flag off")
-
-            // The unstubbed `panel.apply` records an issue if the apply sends.
-            let returned = await state.applyPanelOperation(
-                worktreeID: worktreeID, tabID: tab.id, .setCollapsed(true))
-            #expect(returned == nil)
-            #expect(state.panelSurfaces.isEmpty)
         }
     }
 }

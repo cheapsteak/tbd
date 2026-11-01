@@ -2,32 +2,29 @@ import SwiftUI
 import TBDShared
 
 /// The `.task(id:)` key for loading a worktree's surfaces into the app's copy
-/// (`AppState.panelSurfaceLoadKey`). A load runs while the flag is on and the
-/// shown tab has no surface in the copy, so one starts when such a tab is
-/// shown — in a newly shown worktree, or by a tab switch — and when the flag
-/// turns on. That is the backstop for a tab a failed `panel.get`, or an
-/// import delta missed while the subscription was down, left without a
-/// surface: it loads again when it is shown, instead of rendering legacy
-/// until the user picks another worktree. A shown tab with a surface asks for
-/// no load: one load fills every tab of the worktree and deltas keep the copy
-/// current, so switching between such tabs costs no `panel.get`. Neither does
-/// a tab the last tab sync skipped (`panelSyncSkippedTabIDs`): the daemon
-/// could not import its legacy layout, so no load would find a surface for
-/// it, and it renders legacy until a change to its layout offers it again.
-/// Not the resubscribe either: its acknowledgement refetches every worktree
-/// with a tab list itself. A struct rather than an interpolated string, so a
-/// new dimension is a compile error at the call site instead of a key that
-/// silently stays equal.
+/// (`AppState.panelSurfaceLoadKey`). A load runs while the shown tab has no
+/// surface in the copy, so one starts when such a tab is shown — in a newly
+/// shown worktree, or by a tab switch. That is the backstop for a tab a
+/// failed `panel.get`, or an import delta missed while the subscription was
+/// down, left without a surface: it loads again when it is shown, instead of
+/// drawing an empty side region until the user picks another worktree. A
+/// shown tab with a surface asks for no load: one load fills every tab of the
+/// worktree and deltas keep the copy current, so switching between such tabs
+/// costs no `panel.get`. Neither does a tab the last tab sync skipped
+/// (`panelSyncSkippedTabIDs`): the daemon could not import its legacy layout,
+/// so no load would find a surface for it, and it renders legacy until a
+/// change to its layout offers it again. Not the resubscribe either: its
+/// acknowledgement refetches every worktree with a tab list itself. A struct
+/// rather than an interpolated string, so a new dimension is a compile error
+/// at the call site instead of a key that silently stays equal.
 struct PanelSurfaceLoadKey: Equatable {
     let worktreeID: UUID
-    /// The daemon reports `panel_tabs_enabled` on.
-    let active: Bool
     /// A tab is shown, the copy holds no surface for it, and the last tab
     /// sync did not skip it.
     let activeTabAwaitsSurface: Bool
 
     /// Whether the task this key starts loads the worktree's surfaces.
-    var loads: Bool { active && activeTabAwaitsSurface }
+    var loads: Bool { activeTabAwaitsSurface }
 }
 
 // MARK: - PanelSurfaceWorkspaceView
@@ -39,14 +36,17 @@ struct PanelSurfaceLoadKey: Equatable {
 /// The primary comes from the app's tab, not from the surface: it is
 /// app-owned like the tab itself (panel tabs spec, "Tab sync"), and the
 /// surface's copy of it only catches up after a `panel.syncTabs` round trip.
-/// The side region comes from the surface.
+/// The side region comes from the surface, and is empty while the copy holds
+/// none for the tab (`surface` nil), so a new tab draws this same view before
+/// and after its surface arrives.
 ///
 /// Every gesture here sends one panel operation through
 /// `AppState.applyPanelOperation` and adopts the tab the daemon returns; the
 /// only local state is the divider's overlay while a drag is committing.
 struct PanelSurfaceWorkspaceView: View {
     let tab: TBDShared.Tab
-    let surface: WorkspaceTabSurface
+    /// The copy's surface for this tab, or nil while it holds none yet.
+    let surface: WorkspaceTabSurface?
     let worktree: LocalWorktree
     @Environment(AppState.self) var appState
 
@@ -55,15 +55,18 @@ struct PanelSurfaceWorkspaceView: View {
     /// width another client set, resets them from the surface.
     @State private var ratios: [CGFloat]
 
-    init(tab: TBDShared.Tab, surface: WorkspaceTabSurface, worktree: LocalWorktree) {
+    init(tab: TBDShared.Tab, surface: WorkspaceTabSurface?, worktree: LocalWorktree) {
         self.tab = tab
         self.surface = surface
         self.worktree = worktree
-        _ratios = State(initialValue: Self.ratios(forWidth: surface.side.width))
+        _ratios = State(initialValue: Self.ratios(forWidth: Self.sideRegion(of: surface).width))
     }
 
+    /// The side region drawn: the surface's, or an empty one without it.
+    private var side: SideRegion { Self.sideRegion(of: surface) }
+
     var body: some View {
-        let side = surface.side
+        let side = self.side
         GeometryReader { geometry in
             let showsSide = side.isVisible
             let thickness = SplitDividerMetrics.lineThickness
@@ -82,7 +85,7 @@ struct PanelSurfaceWorkspaceView: View {
                         }
                     }
 
-                if showsSide {
+                if showsSide, let surface {
                     SplitDivider(
                         direction: .horizontal,
                         thickness: thickness,
@@ -98,7 +101,7 @@ struct PanelSurfaceWorkspaceView: View {
                 }
             }
         }
-        .onChange(of: surface.side.width) { _, width in
+        .onChange(of: side.width) { _, width in
             ratios = Self.ratios(forWidth: width)
         }
     }
@@ -113,9 +116,9 @@ struct PanelSurfaceWorkspaceView: View {
         PanePlaceholder(
             content: primaryContent,
             worktree: worktree,
-            tabID: surface.id,
+            tabID: tab.id,
             actions: .daemon(
-                appState: appState, worktreeID: surface.worktreeID, tabID: surface.id, panelID: nil)
+                appState: appState, worktreeID: worktree.id, tabID: tab.id, panelID: nil)
         )
     }
 
@@ -127,7 +130,7 @@ struct PanelSurfaceWorkspaceView: View {
     private var expandButton: some View {
         Button {
             appState.sendPanelOperation(
-                worktreeID: surface.worktreeID, tabID: surface.id, .setCollapsed(false))
+                worktreeID: worktree.id, tabID: tab.id, .setCollapsed(false))
         } label: {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 10))
@@ -148,9 +151,9 @@ struct PanelSurfaceWorkspaceView: View {
     /// copy where it was.
     private func commitWidth() {
         let appState = appState
-        let worktreeID = surface.worktreeID
-        let tabID = surface.id
-        let heldWidth = surface.side.width
+        let worktreeID = worktree.id
+        let tabID = tab.id
+        let heldWidth = side.width
         guard let operation = Self.resizeOperation(ratios: ratios, currentWidth: heldWidth) else {
             ratios = Self.ratios(forWidth: heldWidth)
             return
@@ -163,6 +166,11 @@ struct PanelSurfaceWorkspaceView: View {
     }
 
     // MARK: - Pure helpers
+
+    /// A surface's side region, or `SideRegion.empty` for none.
+    static func sideRegion(of surface: WorkspaceTabSurface?) -> SideRegion {
+        surface?.side ?? .empty
+    }
 
     /// The divider's `[primary, side]` shares for a side-region width, clamped
     /// by `SideRegion.clamp`, the divider's own limit.

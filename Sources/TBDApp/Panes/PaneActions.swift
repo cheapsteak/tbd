@@ -62,8 +62,8 @@ extension PaneActions {
     /// The app-side layout tree: mutate the `LayoutNode` behind `layout` and
     /// keep `AppState`'s pane bookkeeping (slot histories, tabs, notes) in
     /// step. This is the whole of the legacy split layout's behaviour for a
-    /// leaf, and so the rollback path while the panel tabs flag is off.
-    /// Closing the last pane finds its tab by pane ID.
+    /// leaf, which serves the multi-worktree grid and a tab the tab sync
+    /// skipped. Closing the last pane finds its tab by pane ID.
     @MainActor
     static func legacy(
         layout: Binding<LayoutNode>,

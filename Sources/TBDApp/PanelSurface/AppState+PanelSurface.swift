@@ -12,8 +12,7 @@ import os
 /// (declared in `AppState.swift`, because extensions cannot hold stored
 /// properties) current from `panel.get` and `panelSurfaceChanged` deltas, and
 /// sends the app's tab list to the daemon with `panel.syncTabs` whenever it
-/// changes. Everything here is inert while the daemon reports
-/// `panel_tabs_enabled` off.
+/// changes.
 private let logger = Logger(subsystem: "com.tbd.app", category: "panelSurface")
 
 /// A worktree → tab → surface map, the shape of `AppState.panelSurfaces`.
@@ -22,35 +21,32 @@ typealias PanelSurfaceCopy = [UUID: [WorkspaceTabID: WorkspaceTabSurface]]
 /// Which renderer draws one workspace tab (panel tabs spec, "The render
 /// branch").
 enum WorkspaceRenderPath: Equatable {
-    /// `SplitLayoutView` over the app-side `LayoutNode` tree, unchanged.
+    /// `SplitLayoutView` over the app-side `LayoutNode` tree, unchanged: a tab
+    /// the last tab sync skipped, whose layout still splits off a terminal.
     case legacy
-    /// `PanelSurfaceWorkspaceView` over this surface from the app's copy.
-    case daemon(WorkspaceTabSurface)
+    /// `PanelSurfaceWorkspaceView` over the copy's surface for the tab, or
+    /// over none yet — nil draws the same layout with an empty side region
+    /// until the surface arrives.
+    case daemon(WorkspaceTabSurface?)
 }
 
 extension AppState {
 
-    // MARK: - The switch
-
-    /// Whether the daemon reports `panel_tabs_enabled` on. False until
-    /// capabilities have been fetched.
-    var panelTabsActive: Bool {
-        daemonCapabilities?.panelTabsEnabled == true
-    }
+    // MARK: - Reading the copy
 
     /// The copy's surface for one workspace tab, or nil when it holds none.
     func panelSurface(worktreeID: UUID, tabID: UUID) -> WorkspaceTabSurface? {
         panelSurfaces[worktreeID]?[tabID]
     }
 
-    /// The renderer for one workspace tab. The daemon path needs both the flag
-    /// and a surface in the copy: the copy fills asynchronously, so a tab with
-    /// nothing loaded yet renders legacy rather than blank.
+    /// The renderer for one workspace tab: legacy only for a tab the last tab
+    /// sync skipped (`panelSyncSkippedTabIDs`), the daemon path for every
+    /// other. The copy fills asynchronously, so a tab with no surface yet
+    /// takes the daemon path with none — the same view as once its surface
+    /// arrives, so the primary's terminal view is never rebuilt.
     func workspaceRenderPath(worktreeID: UUID, tabID: UUID) -> WorkspaceRenderPath {
-        guard panelTabsActive,
-              let surface = panelSurface(worktreeID: worktreeID, tabID: tabID)
-        else { return .legacy }
-        return .daemon(surface)
+        guard !panelSyncSkippedTabIDs.contains(tabID) else { return .legacy }
+        return .daemon(panelSurface(worktreeID: worktreeID, tabID: tabID))
     }
 
     // MARK: - Loading
@@ -81,10 +77,8 @@ extension AppState {
     /// with a tab list (`panelSubscriptionRegistered`).
     ///
     /// The result's `activeTabID` is ignored: workspace-tab selection is the
-    /// app's. A failed fetch keeps the copy as it was, and a reply that
-    /// crossed the flag turning off is discarded.
+    /// app's. A failed fetch keeps the copy as it was.
     func loadPanelSurfaces(worktreeID: UUID) async {
-        guard panelTabsActive else { return }
         let heldAtIssue = Set((panelSurfaces[worktreeID] ?? [:]).keys)
         let issuedAt = panelTouchSequence
         panelLoadsInFlight += 1
@@ -101,12 +95,6 @@ extension AppState {
         let touchedInFlight = panelTabsTouched(since: issuedAt)
         endPanelLoad()
         guard let result = fetched else { return }
-        // Turning the flag off cleared the copy; a reply issued before it
-        // must not refill it.
-        guard panelTabsActive else {
-            logger.debug("discarded a panel.get reply that crossed the flag turning off")
-            return
-        }
         var surfaces = panelSurfaces
         Self.merge(
             result, worktreeID: worktreeID, into: &surfaces,
@@ -119,7 +107,6 @@ extension AppState {
     func panelSurfaceLoadKey(worktreeID: UUID, activeTabID: UUID?) -> PanelSurfaceLoadKey {
         PanelSurfaceLoadKey(
             worktreeID: worktreeID,
-            active: panelTabsActive,
             activeTabAwaitsSurface: activeTabID.map {
                 panelSurface(worktreeID: worktreeID, tabID: $0) == nil
                     && !panelSyncSkippedTabIDs.contains($0)
@@ -127,9 +114,9 @@ extension AppState {
     }
 
     /// The load a shown tab asks for when its key `loads`: any tab sync still
-    /// pending goes out first, as before the flag's own load, so a tab that
-    /// sync imports is in the snapshot even if its delta reaches no
-    /// subscription. Nothing when the key does not load.
+    /// pending goes out first, so a tab that sync imports is in the snapshot
+    /// even if its delta reaches no subscription. Nothing when the key does
+    /// not load.
     func loadPanelSurfacesForShownTab(_ key: PanelSurfaceLoadKey) async {
         guard key.loads else { return }
         await flushPanelTabSync()
@@ -218,7 +205,6 @@ extension AppState {
     /// IDs are global, and a copy that missed a re-parent while disconnected
     /// still holds the tab under the worktree it left.
     func applyPanelSurfaceDelta(_ delta: PanelSurfaceDelta) {
-        guard panelTabsActive else { return }
         // A removal counts as a change whether or not the copy held the tab:
         // a get in flight may list it from before the removal.
         notePanelTabsTouched(delta.removedTabIDs)
@@ -291,15 +277,21 @@ extension AppState {
     /// `panel.apply` (a fresh operation ID, origin `.appUser`, the copy's
     /// revision as `baseRevision`) and adopts the tab the daemon returns.
     ///
-    /// Returns the daemon's tab, or nil when the flag is off, the apply failed,
-    /// or the reply crossed the flag turning off (it is then not adopted). A failure is logged, shown as an error toast, and
-    /// followed by a refetch of the worktree, so the copy snaps to the
-    /// daemon's truth.
+    /// A tab with no surface in the copy may be one the daemon has not
+    /// imported yet, so any tab sync still pending goes out first
+    /// (`flushPanelTabSync`), and the apply after it. A worktree not ready to
+    /// sync sends nothing then, and the apply still goes out once.
+    ///
+    /// Returns the daemon's tab, or nil when the apply failed. A failure is
+    /// logged, shown as an error toast, and followed by a refetch of the
+    /// worktree, so the copy snaps to the daemon's truth.
     @discardableResult
     func applyPanelOperation(
         worktreeID: UUID, tabID: UUID, _ operation: PanelOperation
     ) async -> WorkspaceTabSurface? {
-        guard panelTabsActive else { return nil }
+        if panelSurface(worktreeID: worktreeID, tabID: tabID) == nil {
+            await flushPanelTabSync()
+        }
         let envelope = PanelOperationEnvelope(
             operationID: UUID(),
             worktreeID: worktreeID,
@@ -309,12 +301,6 @@ extension AppState {
             operation: operation)
         do {
             let result = try await panelApplyTrigger(envelope)
-            // Same reason as in `loadPanelSurfaces`: the flag going off
-            // cleared the copy.
-            guard panelTabsActive else {
-                logger.debug("discarded a panel.apply reply that crossed the flag turning off")
-                return nil
-            }
             adoptPanelTab(result.tab)
             return result.tab
         } catch {
@@ -350,10 +336,10 @@ extension AppState {
     /// Hung off the property rather than its call sites because tabs are
     /// created, closed, reordered, relabelled and re-pointed from many places
     /// (terminal and note reconciliation, notes, the PR tab, the file viewer,
-    /// terminal revival). Does nothing, not even a comparison, while the flag
-    /// is off.
+    /// terminal revival). A worktree's list arriving for the first time —
+    /// at connect, or for a new worktree — differs from the absent signature,
+    /// so it is marked dirty too.
     func notePanelTabsChanged() {
-        guard panelTabsActive else { return }
         var dirty = Set<UUID>()
         for (worktreeID, tabList) in tabs where panelTabSignatures[worktreeID] != tabList {
             dirty.insert(worktreeID)
@@ -365,13 +351,6 @@ extension AppState {
             panelTabSignatures = panelTabSignatures.filter { tabs[$0.key] != nil }
         }
         markPanelSyncDirty(dirty)
-    }
-
-    /// Takes `panelTabSignatures` from `tabs` as they are, sharing each
-    /// worktree's array rather than the dictionary, so the next in-place edit
-    /// of `tabs` does not copy it whole.
-    private func snapshotPanelTabSignatures() {
-        panelTabSignatures = tabs.mapValues { $0 }
     }
 
     /// Drops an archived worktree from the copy. Archiving deletes its
@@ -392,10 +371,10 @@ extension AppState {
     }
 
     /// The observer on `layouts`, for the one tab whose legacy layout still
-    /// matters while the flag is on: one the daemon skipped, because its
-    /// layout holds a terminal outside the primary. It has no surface and
-    /// renders legacy, and closing that extra terminal edits `layouts`, not
-    /// `tabs`, so without this nothing would offer it to the daemon again.
+    /// matters: one the daemon skipped, because its layout holds a terminal
+    /// outside the primary. It has no surface and renders legacy, and closing
+    /// that extra terminal edits `layouts`, not `tabs`, so without this
+    /// nothing would offer it to the daemon again.
     ///
     /// Marks dirty the worktree of each tab the last sync skipped
     /// (`panelSyncSkippedTabIDs`) whose layout differs from
@@ -403,9 +382,9 @@ extension AppState {
     /// other. A tab with a surface is the daemon's, and its legacy layout is
     /// no longer read; a tab the copy has merely not loaded would otherwise
     /// send a sync on every ordinary legacy layout write. Does nothing, not
-    /// even a comparison, while the flag is off or nothing is skipped.
+    /// even a comparison, while nothing is skipped.
     func notePanelLayoutsChanged() {
-        guard panelTabsActive, !panelSyncSkippedTabIDs.isEmpty else { return }
+        guard !panelSyncSkippedTabIDs.isEmpty else { return }
         var changedTabIDs = Set<UUID>()
         for tabID in panelSyncSkippedTabIDs where layouts[tabID] != panelSkippedTabLayouts[tabID] {
             changedTabIDs.insert(tabID)
@@ -459,7 +438,7 @@ extension AppState {
     /// made in this turn — several worktrees, several edits each — goes out
     /// as one sync per worktree.
     func schedulePanelTabSyncFlush() {
-        guard panelTabsActive, !panelSyncFlushScheduled else { return }
+        guard !panelSyncFlushScheduled else { return }
         panelSyncFlushScheduled = true
         Task { @MainActor [weak self] in
             await Task.yield()
@@ -496,8 +475,7 @@ extension AppState {
     /// The body of one flush: keeps going until nothing ready is dirty.
     private func sendDirtyPanelTabSyncs() async {
         defer { panelSyncFlushScheduled = false }
-        while panelTabsActive,
-              let worktreeID = panelSyncDirty.first(where: { panelSyncReadyWorktrees.contains($0) }) {
+        while let worktreeID = panelSyncDirty.first(where: { panelSyncReadyWorktrees.contains($0) }) {
             panelSyncDirty.remove(worktreeID)
             // nil: the worktree's tab list is gone. Nothing is sent — an empty
             // list would delete every surface of a worktree that may only be
@@ -526,55 +504,16 @@ extension AppState {
         }
     }
 
-    // MARK: - Capability transitions and resubscribe
-
-    /// Keeps the copy and the sync in step with the daemon's flag after a
-    /// capabilities fetch. Off clears the copy and forgets pending syncs,
-    /// skipped tabs and the observers' snapshots, so a daemon-rendered tab
-    /// falls back to legacy at once and nothing further is sent.
-    ///
-    /// Off to on takes the `tabs` observer's snapshot afresh, since edits made
-    /// while the flag was off went unrecorded, then marks every worktree with
-    /// tabs dirty and syncs the ready ones. It loads their surfaces too only
-    /// while the daemon has acknowledged the current subscription — a
-    /// Settings toggle at runtime. At connect the flag turns on before the
-    /// subscription is acknowledged, and the acknowledgement refetches every
-    /// worktree itself (`panelSubscriptionRegistered`), so launch loads each
-    /// worktree once.
-    func panelTabsCapabilityChanged(wasEnabled: Bool) {
-        guard panelTabsActive else {
-            if !panelSurfaces.isEmpty {
-                panelSurfaces = [:]
-            }
-            panelSyncDirty.removeAll()
-            panelTabSignatures.removeAll()
-            setPanelSyncSkippedTabIDs([])
-            return
-        }
-        guard !wasEnabled else { return }
-        snapshotPanelTabSignatures()
-        let worktreeIDs = Array(tabs.keys)
-        guard !worktreeIDs.isEmpty else { return }
-        panelSyncDirty.formUnion(worktreeIDs)
-        if panelSubscriptionAcknowledged {
-            syncThenLoadPanelSurfaces(worktreeIDs)
-        } else {
-            schedulePanelTabSyncFlush()
-        }
-    }
+    // MARK: - Resubscribe
 
     /// Called from `startSubscription()`, before the new subscription is up.
-    /// The subscription is not acknowledged yet, and readiness is cleared:
-    /// each worktree's tab list is re-checked against fresh fetches before it
-    /// is sent, and every worktree with tabs is marked dirty so it is sent
-    /// once it is ready. The copy is kept, so daemon-rendered tabs keep
-    /// rendering rather than falling back to legacy and rebuilding their
-    /// terminal views; it is refetched once the daemon registers the
-    /// subscription (`panelSubscriptionRegistered`).
+    /// Readiness is cleared: each worktree's tab list is re-checked against
+    /// fresh fetches before it is sent, and every worktree with tabs is
+    /// marked dirty so it is sent once it is ready. The copy is kept, so side
+    /// regions stay on screen through a reconnect; it is refetched once the
+    /// daemon registers the subscription (`panelSubscriptionRegistered`).
     func resetPanelSurfacesForResubscribe() {
-        panelSubscriptionAcknowledged = false
         panelSyncReadyWorktrees.removeAll()
-        guard panelTabsActive else { return }
         panelSyncDirty.formUnion(tabs.keys)
     }
 
@@ -592,8 +531,6 @@ extension AppState {
     /// restart does not disturb (revisions are daemon-wide and never
     /// decrease), and overlaps any other load of the worktree safely.
     func panelSubscriptionRegistered() {
-        panelSubscriptionAcknowledged = true
-        guard panelTabsActive else { return }
         let worktreeIDs = Array(tabs.keys)
         guard !worktreeIDs.isEmpty else { return }
         syncThenLoadPanelSurfaces(worktreeIDs)

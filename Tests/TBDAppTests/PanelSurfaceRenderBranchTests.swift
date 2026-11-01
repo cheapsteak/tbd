@@ -28,40 +28,82 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - The render branch
 
-    @Test("flag off (capabilities not fetched): legacy, even with a surface in the copy")
-    func flagOffRendersLegacy() async {
-        await Fixture.withState(panelTabs: nil) { state in
-            #expect(!state.panelTabsActive, "precondition: the switch is off")
+    @Test("a tab the last sync skipped renders legacy, even with a surface in the copy")
+    func skippedTabRendersLegacy() async {
+        await Fixture.withState { state in
             let surface = Self.seed(state)
+            state.panelSyncSkippedTabIDs = [surface.id]
+
             #expect(state.workspaceRenderPath(worktreeID: surface.worktreeID, tabID: surface.id) == .legacy)
         }
     }
 
-    @Test("flag on with no surface for the tab: legacy, never a blank tab")
-    func flagOnWithoutSurfaceRendersLegacy() async {
-        await Fixture.withState(panelTabs: true) { state in
-            #expect(state.workspaceRenderPath(worktreeID: UUID(), tabID: UUID()) == .legacy)
-
-            // A sibling tab of a worktree the copy does hold still falls back.
+    @Test("a tab with a surface renders the daemon path with it")
+    func surfacedTabRendersDaemon() async {
+        await Fixture.withState { state in
             let surface = Self.seed(state)
-            #expect(state.workspaceRenderPath(worktreeID: surface.worktreeID, tabID: UUID()) == .legacy)
-        }
-    }
 
-    @Test("flag on with a surface for the tab: the daemon path, carrying that surface")
-    func flagOnWithSurfaceRendersDaemon() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let surface = Self.seed(state)
             #expect(state.workspaceRenderPath(worktreeID: surface.worktreeID, tabID: surface.id)
                 == .daemon(surface))
         }
     }
 
-    @Test("the daemon reporting the flag off: legacy, even with a surface in the copy")
-    func daemonFlagOffRendersLegacy() async {
-        await Fixture.withState(panelTabs: false) { state in
-            let surface = Self.seed(state)
-            #expect(state.workspaceRenderPath(worktreeID: surface.worktreeID, tabID: surface.id) == .legacy)
+    @Test("a tab with no surface yet renders the daemon path with an empty side region, and keeps that path when the surface arrives")
+    func surfacelessTabRendersDaemonUntilAndAfterItsSurfaceArrives() async {
+        await Fixture.withState { state in
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            #expect(state.workspaceRenderPath(worktreeID: UUID(), tabID: UUID()) == awaitingSurface)
+            // A sibling tab of a worktree the copy does hold.
+            let held = Self.seed(state)
+            #expect(state.workspaceRenderPath(worktreeID: held.worktreeID, tabID: UUID()) == awaitingSurface)
+            let drawnSide = PanelSurfaceWorkspaceView.sideRegion(of: nil)
+            #expect(drawnSide == SideRegion.empty, "with no surface the view draws an empty side region")
+
+            let tabID = UUID()
+            let before = state.workspaceRenderPath(worktreeID: held.worktreeID, tabID: tabID)
+            let arrived = Fixture.surface(tabID: tabID, worktreeID: held.worktreeID, revision: 0)
+            state.adoptPanelTab(arrived)
+            let after = state.workspaceRenderPath(worktreeID: held.worktreeID, tabID: tabID)
+
+            // Both are the daemon case, so `layoutContent` builds the same view
+            // type at the same position with the same `.id(tab.id)`, and the
+            // primary's terminal view is not rebuilt when the surface arrives.
+            let arrivedPath: WorkspaceRenderPath = .daemon(arrived)
+            #expect(before == awaitingSurface)
+            #expect(after == arrivedPath)
+        }
+    }
+
+    /// The daemon skips a tab whose legacy layout holds a terminal outside the
+    /// primary. Closing that terminal changes `layouts`, which offers the tab
+    /// again, and the sync that imports it takes it off the skipped set.
+    @Test("a skipped tab returns to the daemon path once a sync result drops it from the skipped set")
+    func skippedTabReturnsToDaemonOnceASyncImportsIt() async throws {
+        try await Fixture.withState { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let split = LayoutNode.split(
+                id: UUID(), direction: .horizontal,
+                children: [.pane(tab.content), .pane(.terminal(terminalID: UUID()))],
+                ratios: [0.5, 0.5])
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                let stillSplit = params.tabs.contains { $0.tabID == tab.id && $0.layout == split }
+                return Fixture.syncResult(skipping: stillSplit ? [tab.id] : [])
+            }
+            state.layouts[tab.id] = split
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            try #require(state.panelSyncSkippedTabIDs == [tab.id], "precondition: the first sync skipped it")
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .legacy)
+
+            // The user closes the extra terminal.
+            state.layouts[tab.id] = .pane(tab.content)
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.count == 1, "observed \(syncs.sent.map(\.worktreeID))")
+            #expect(state.panelSyncSkippedTabIDs.isEmpty)
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
         }
     }
 
@@ -81,8 +123,10 @@ struct PanelSurfaceRenderBranchTests {
             primary: .file(FileReference(path: "/w/old.swift")), revision: 3)
 
         let view = PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
+        let awaitingSurface = PanelSurfaceWorkspaceView(tab: tab, surface: nil, worktree: worktree)
 
         #expect(view.primaryContent == repointed)
+        #expect(awaitingSurface.primaryContent == repointed, "the primary does not wait for the surface")
     }
 
     // MARK: - The side region's strip

@@ -273,9 +273,9 @@ struct SingleWorktreeView: View {
             }
             .task(id: panelSurfaceLoadKey) {
                 // Fill the app's copy of this worktree's panel surfaces when
-                // the shown tab has none, so it can render from the daemon.
+                // the shown tab has none, so its side region can render.
                 // Deltas keep the copy current after that, a sync's imports
-                // included. Inert while `panel_tabs_enabled` is off.
+                // included.
                 await appState.loadPanelSurfacesForShownTab(panelSurfaceLoadKey)
             }
         } else {
@@ -295,9 +295,9 @@ struct SingleWorktreeView: View {
             HistoryPaneView(worktreeID: worktreeID)
         } else if let tab = activeTab, let worktree,
                   case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) {
-            // The daemon-owned surface: only with `panel_tabs_enabled` on and
-            // this tab in the app's copy. Every other case falls through to
-            // the legacy branch below, unchanged.
+            // The daemon-owned surface, nil until the copy holds the tab's:
+            // every tab but one the last tab sync skipped, which falls through
+            // to the legacy branch below, unchanged.
             PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
                 .id(tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {

@@ -10,7 +10,8 @@ import TBDShared
 /// IDs, order, labels or primaries change, and one `panel.syncTabs` per dirty
 /// worktree goes out on the next main-actor turn — but only once that
 /// worktree's tab list is complete, because a sync deletes the surface of
-/// every tab it does not list.
+/// every tab it does not list. A gesture on a tab with no surface yet sends
+/// that pending sync before it applies.
 @Suite("Panel tab sync")
 @MainActor
 struct PanelTabSyncTests {
@@ -20,7 +21,7 @@ struct PanelTabSyncTests {
 
     @Test("creating a tab sends one sync listing every tab")
     func tabCreateSendsOneSync() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let first = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [first], syncs: syncs)
@@ -37,7 +38,7 @@ struct PanelTabSyncTests {
 
     @Test("a relabelled tab and a re-pointed primary each send a sync")
     func labelOrPrimaryChangeSendsSync() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = TBDShared.Tab(
                 id: UUID(), content: .codeViewer(id: UUID(), path: "/repo/a.swift"), label: "a.swift")
@@ -60,7 +61,7 @@ struct PanelTabSyncTests {
 
     @Test("reordering tabs sends a sync in the new order")
     func reorderSendsSync() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let first = Fixture.terminalTab(label: "first")
             let second = Fixture.terminalTab(label: "second")
@@ -76,7 +77,7 @@ struct PanelTabSyncTests {
 
     @Test("several changes in one turn send one sync per worktree, with the final tabs")
     func twoChangesInOneTurnSendOneSyncPerWorktree() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let alpha = Fixture.terminalTab(label: "alpha")
             let beta = Fixture.terminalTab(label: "beta")
@@ -102,7 +103,7 @@ struct PanelTabSyncTests {
 
     @Test("a change made while a sync is in flight goes out after it, not beside it")
     func changeDuringSyncIsSentAfterIt() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = PanelSyncCollector()
             let first = Fixture.terminalTab(label: "first")
             let late = Fixture.terminalTab(label: "late")
@@ -131,7 +132,7 @@ struct PanelTabSyncTests {
 
     @Test("state that is not the tab list sends no sync")
     func unrelatedStateChangeSendsNoSync() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
@@ -152,56 +153,6 @@ struct PanelTabSyncTests {
         }
     }
 
-    @Test("flag off: tab changes send no sync")
-    func flagOffSendsNoSync() async {
-        await Fixture.withState(panelTabs: false) { state in
-            let syncs = Fixture.collectSyncs(state)
-            let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
-
-            state.tabs[worktreeID]?.append(Fixture.terminalTab(label: "shell"))
-            state.tabs[worktreeID]?[0].label = "renamed"
-            await Fixture.drainMainActor()
-
-            #expect(syncs.sent.isEmpty)
-            #expect(state.panelSyncDirty.isEmpty, "the observer does no work with the flag off")
-        }
-    }
-
-    @Test("flag off: tab and layout edits leave the observers' snapshots untouched and schedule nothing")
-    func flagOffTabsEditDoesNoPanelWork() async {
-        await Fixture.withState(panelTabs: false) { state in
-            let syncs = Fixture.collectSyncs(state)
-            let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
-            // Sentinels an observer that compared anything would overwrite.
-            state.panelTabSignatures = [worktreeID: []]
-            state.panelSyncSkippedTabIDs = [tab.id]
-            #expect(state.panelSkippedTabLayouts.isEmpty, "precondition: the skipped tab has no layout yet")
-
-            state.tabs[worktreeID]?.append(Fixture.terminalTab(label: "shell"))
-            state.tabs[worktreeID]?[0].label = "renamed"
-            state.layouts[tab.id] = .pane(tab.content)
-            await Fixture.drainMainActor()
-
-            #expect(state.panelTabSignatures == [worktreeID: []], "the tabs observer compared or recorded")
-            #expect(state.panelSkippedTabLayouts.isEmpty, "the layouts observer compared or recorded")
-            #expect(state.panelSyncDirty.isEmpty)
-            #expect(!state.panelSyncFlushScheduled)
-            #expect(syncs.sent.isEmpty)
-
-            // Control: with the flag on, the same edits are recorded.
-            state.daemonCapabilities = Fixture.capabilities(panelTabs: true)
-            state.tabs[worktreeID]?[0].label = "renamed again"
-            state.layouts[tab.id] = .pane(.terminal(terminalID: UUID()))
-            #expect(state.panelTabSignatures[worktreeID] == state.tabs[worktreeID])
-            #expect(state.panelSkippedTabLayouts[tab.id] == state.layouts[tab.id])
-            #expect(state.panelSyncDirty.contains(worktreeID) || state.panelSyncFlushScheduled)
-            await Fixture.drainMainActor()
-            #expect(syncs.sent.map(\.worktreeID) == [worktreeID])
-        }
-    }
-
     // MARK: - Legacy layouts
 
     /// A tab the daemon skipped: its legacy layout holds a second terminal
@@ -217,7 +168,7 @@ struct PanelTabSyncTests {
 
     @Test("a layout change of a tab the sync skipped sends a sync carrying the new layout")
     func layoutChangeOfSurfacelessTabSendsSync() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let (tab, split) = Self.skippedTab()
             // The daemon skips the tab while its layout holds the second
             // terminal, and imports it once that terminal is gone.
@@ -248,7 +199,7 @@ struct PanelTabSyncTests {
 
     @Test("a layout change of a tab no sync skipped sends no sync, though the copy holds no surface for it")
     func layoutChangeOfUnloadedTabSendsNoSync() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
@@ -270,7 +221,7 @@ struct PanelTabSyncTests {
 
     @Test("a layout change of a tab with a surface sends no sync")
     func layoutChangeOfSurfacedTabSendsNoSync() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let (tab, split) = Self.skippedTab()
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
@@ -292,7 +243,7 @@ struct PanelTabSyncTests {
 
     @Test("a worktree whose tab sources have not both reconciled sends no sync")
     func notReadyWorktreeSendsNoSync() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let worktreeID = UUID()
 
@@ -310,7 +261,7 @@ struct PanelTabSyncTests {
 
     @Test("becoming ready flushes the worktree that was waiting dirty, once")
     func becomingReadyFlushesTheDirtyWorktree() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
+        try await Fixture.withState { state in
             let syncs = Fixture.collectSyncs(state)
             let worktreeID = UUID()
             let agent = Fixture.terminalTab(label: "agent")
@@ -335,85 +286,108 @@ struct PanelTabSyncTests {
         }
     }
 
-    // MARK: - The flag turning on
+    // MARK: - A gesture on a tab with no surface
 
-    @Test("the flag turning on under an acknowledged subscription syncs every ready worktree, then loads its surfaces")
-    func capabilityOffToOnSyncsAndLoads() async throws {
-        try await Fixture.withState(panelTabs: false) { state in
-            // A Settings toggle at runtime: the daemon acknowledged the
-            // subscription while the flag was off. (Before the
-            // acknowledgement, the flag turning on loads nothing; see
-            // `launchLoadsEachWorktreeOnce`.)
-            state.panelSubscriptionRegistered()
+    @Test("a gesture on a tab with no surface sends the worktree's pending tab sync before it applies")
+    func gestureOnSurfacelessTabSyncsFirst() async throws {
+        try await Fixture.withState { state in
+            let first = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [first], syncs: Fixture.collectSyncs(state))
             let log = PanelEventLog()
-            let syncs = Fixture.collectSyncs(state, into: log)
-            let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
-            let imported = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 0)
-            let gets = Fixture.collectGets(state, into: log) { _ in
-                PanelGetResult(tabs: [imported], activeTabID: nil)
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                log.record("sync")
+                return Fixture.emptySyncResult
             }
-            let on = Fixture.capabilities(panelTabs: true)
-            state.daemonCapabilitiesFetcher = { @MainActor in on }
+            let created = Fixture.terminalTab(label: "shell")
+            let reply = Fixture.surface(tabID: created.id, worktreeID: worktreeID, revision: 1)
+            state.panelApplyTrigger = { @MainActor _ in
+                log.record("apply")
+                return PanelApplyResult(tab: reply, replayed: false)
+            }
+            // A tab just created: its sync has not gone out, so the daemon has
+            // no surface for it yet, and neither does the copy.
+            state.tabs[worktreeID]?.append(created)
+            try #require(state.panelSurface(worktreeID: worktreeID, tabID: created.id) == nil,
+                         "precondition: the copy holds no surface for the tab")
 
-            await state.refreshDaemonCapabilities()
+            let returned = await state.applyPanelOperation(
+                worktreeID: worktreeID, tabID: created.id, .setCollapsed(false))
             await Fixture.drainMainActor()
 
+            let expectedEvents: [String] = ["sync", "apply"]
+            #expect(log.events == expectedEvents, "the apply follows the sync that imports the tab")
             let sent = try Fixture.single(syncs.sent)
-            #expect(sent.worktreeID == worktreeID)
-            #expect(gets.worktreeIDs == [worktreeID])
-            let expectedEvents: [String] = ["sync \(worktreeID)", "get \(worktreeID)"]
-            #expect(log.events == expectedEvents,
-                    "the load follows the sync, so a fetch cannot drop the tabs the sync imports")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == imported)
+            let sentTabIDs: [UUID] = sent.tabs.map(\.tabID)
+            let expectedTabIDs: [UUID] = [first.id, created.id]
+            #expect(sentTabIDs == expectedTabIDs, "the sync carries the tab the gesture is on")
+            #expect(returned == reply)
         }
     }
 
-    @Test("the flag turning on while a sync is in flight loads only after that sync and its own")
-    func offToOnWaitsForInFlightFlushBeforeLoading() async throws {
-        try await Fixture.withState(panelTabs: true) { state in
-            // A Settings toggle at runtime: the daemon has acknowledged the
-            // subscription. No worktree has tabs yet, so this loads nothing.
-            state.panelSubscriptionRegistered()
-            let log = PanelEventLog()
-            let gate = PanelCallGate()
+    /// A pending sync makes the two branches observable: a gesture that
+    /// flushed first would send it before the apply.
+    @Test("a gesture on a tab with a surface sends no sync first")
+    func gestureOnSurfacedTabSendsNoSyncFirst() async {
+        await Fixture.withState { state in
             let tab = Fixture.terminalTab(label: "agent")
-            let worktreeID = UUID()
-            state.panelSyncTrigger = { @MainActor params in
-                log.record("sync \(params.worktreeID)")
-                await gate.wait()
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            state.panelSurfaces = [worktreeID: [
+                tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 2),
+            ]]
+            let log = PanelEventLog()
+            state.panelSyncTrigger = { @MainActor _ in
+                log.record("sync")
                 return Fixture.emptySyncResult
             }
-            let imported = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 0)
-            let gets = Fixture.collectGets(state, into: log) { _ in
-                PanelGetResult(tabs: [imported], activeTabID: nil)
+            let reply = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 3)
+            state.panelApplyTrigger = { @MainActor _ in
+                log.record("apply")
+                return PanelApplyResult(tab: reply, replayed: false)
             }
-            let off = Fixture.capabilities(panelTabs: false)
-            let on = Fixture.capabilities(panelTabs: true)
+            // A change whose sync has not gone out yet.
+            state.tabs[worktreeID]?[0].label = "renamed"
+            #expect(state.panelSyncDirty.contains(worktreeID), "precondition: a sync is pending")
 
-            // A sync goes out and stays in flight.
+            await state.applyPanelOperation(worktreeID: worktreeID, tabID: tab.id, .setCollapsed(true))
+            let eventsAtReturn = log.events
+            await Fixture.drainMainActor()
+
+            let applyOnly: [String] = ["apply"]
+            #expect(eventsAtReturn == applyOnly, "the apply went out without sending the pending sync")
+            let expectedEvents: [String] = ["apply", "sync"]
+            #expect(log.events == expectedEvents, "the pending sync still goes out on its own turn")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == reply)
+        }
+    }
+
+    @Test("a gesture on a tab with no surface, in a worktree not ready to sync, still applies once")
+    func gestureOnSurfacelessTabInUnreadyWorktreeStillApplies() async {
+        await Fixture.withState { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = UUID()
+            // Terminal-backed tabs landed; the notes fetch has not, so the
+            // worktree is dirty but not ready, and the flush sends nothing.
+            // `panel.syncTabs` stays the fixture's unstubbed seam.
             state.tabs[worktreeID] = [tab]
-            state.markPanelSyncReady(worktreeIDs: [worktreeID])
-            await Fixture.drainMainActor()
-            try #require(gate.isHolding, "precondition: the first sync is in flight")
+            #expect(state.panelSyncDirty.contains(worktreeID), "precondition: a sync is pending")
+            #expect(!state.panelSyncReadyWorktrees.contains(worktreeID), "precondition: not ready")
+            let log = PanelEventLog()
+            let reply = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1)
+            state.panelApplyTrigger = { @MainActor _ in
+                log.record("apply")
+                return PanelApplyResult(tab: reply, replayed: false)
+            }
 
-            // The flag goes off and comes back on while it is.
-            state.daemonCapabilitiesFetcher = { @MainActor in off }
-            await state.refreshDaemonCapabilities()
-            state.daemonCapabilitiesFetcher = { @MainActor in on }
-            await state.refreshDaemonCapabilities()
-            await Fixture.drainMainActor()
-            #expect(gets.worktreeIDs.isEmpty,
-                    "a load issued now could land before the in-flight sync's imports and drop them")
-
-            gate.release()
+            let returned = await state.applyPanelOperation(
+                worktreeID: worktreeID, tabID: tab.id, .setCollapsed(false))
             await Fixture.drainMainActor()
 
-            let expectedEvents: [String] = ["sync \(worktreeID)", "sync \(worktreeID)", "get \(worktreeID)"]
-            #expect(log.events == expectedEvents,
-                    "the load waits for the in-flight sync, and for the sync the flag turning on asked for")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == imported)
-            #expect(state.panelSyncFlushTask == nil)
+            let applyOnly: [String] = ["apply"]
+            #expect(log.events == applyOnly, "the apply goes out once, waiting on no sync")
+            #expect(returned == reply)
+            #expect(state.panelSyncDirty.contains(worktreeID), "the sync waits until the worktree is ready")
         }
     }
 }

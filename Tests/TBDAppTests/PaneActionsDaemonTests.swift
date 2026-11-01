@@ -96,7 +96,7 @@ struct PaneActionsDaemonTests {
 
     @Test("history steps send history for the leaf's own panel")
     func historyStepSendsHistory() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
             let surface = Self.seed(state, side: Self.side([file], active: file.id))
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -121,7 +121,7 @@ struct PaneActionsDaemonTests {
 
     @Test("choosing the entry already shown sends nothing; another entry still sends a jump")
     func jumpToCurrentEntrySendsNothing() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let first = PanelContent.file(FileReference(path: "/w/a.md"))
             let second = PanelContent.file(FileReference(path: "/w/b.md"))
             let history: PanelHistory = {
@@ -149,7 +149,7 @@ struct PaneActionsDaemonTests {
 
     @Test("a link inside a side panel's document navigates that panel")
     func navigateInPaneSendsNavigate() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
             let surface = Self.seed(state, side: Self.side([file], active: file.id))
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -167,7 +167,7 @@ struct PaneActionsDaemonTests {
 
     @Test("a link inside the primary's document opens in the side region")
     func navigateInPrimaryOpensInTheSide() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let surface = Self.seed(state)
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
 
@@ -182,7 +182,7 @@ struct PaneActionsDaemonTests {
 
     @Test("every file-opening action sends one open, reusing a panel without the modifier")
     func fileOpeningActionsSendOpen() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let surface = Self.seed(state, terminalID: terminalID)
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -205,7 +205,7 @@ struct PaneActionsDaemonTests {
 
     @Test("holding the new-panel modifier asks every file-opening action for a new panel")
     func newPanelModifierAsksForANewPanel() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let surface = Self.seed(state, terminalID: terminalID)
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -230,7 +230,7 @@ struct PaneActionsDaemonTests {
 
     @Test("close sends close for the leaf's own panel")
     func closeSendsClose() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
             let surface = Self.seed(state, side: Self.side([file], active: file.id))
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -248,7 +248,7 @@ struct PaneActionsDaemonTests {
 
     @Test("a note panel's actions name its panel ID, not the note ID its content carries")
     func notePanelActionsCarryThePanelID() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let noteID = UUID()
             let note = ViewerPanel(id: UUID(), content: .note(noteID: noteID))
             let surface = Self.seed(state, side: Self.side([note], active: note.id))
@@ -273,7 +273,7 @@ struct PaneActionsDaemonTests {
 
     @Test("the primary cannot close, has no history, and sends nothing for either")
     func primaryCannotClose() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let surface = Self.seed(state, terminalID: terminalID)
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -292,7 +292,7 @@ struct PaneActionsDaemonTests {
 
     @Test("a side panel's history is its own, read from the copy")
     func historyComesFromTheCopy() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let first = PanelContent.file(FileReference(path: "/w/a.md"))
             let second = PanelContent.file(FileReference(path: "/w/b.md"))
             let history: PanelHistory = {
@@ -316,7 +316,7 @@ struct PaneActionsDaemonTests {
 
     @Test("the transcript button is on whenever the terminal's transcript panel exists")
     func isTranscriptOpenReadsTheCopy() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
             let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
@@ -333,7 +333,7 @@ struct PaneActionsDaemonTests {
 
     @Test("the transcript button on a hidden transcript sends select")
     func toggleOnAHiddenTranscriptSendsSelect() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
             let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
@@ -354,7 +354,7 @@ struct PaneActionsDaemonTests {
 
     @Test("two toggles before any reply is adopted send two opens; the reducer keeps one panel")
     func toggleBeforeReplyAdoptedSendsOpenTwice() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let surface = Self.seed(state, terminalID: terminalID)
             let envelopes = Fixture.collectEnvelopes(state, replying: surface)
@@ -374,7 +374,7 @@ struct PaneActionsDaemonTests {
 
     @Test("once the open reply is adopted, the next toggle closes the transcript")
     func toggleAfterOpenAdoptedCloses() async {
-        await Fixture.withState(panelTabs: true) { state in
+        await Fixture.withState { state in
             let terminalID = UUID()
             let surface = Self.seed(state, terminalID: terminalID)
             let transcriptPanelID = UUID()
