@@ -62,7 +62,7 @@ struct MainSplitViewControllerTests {
         defer { Self.unmount(window) }
 
         let settled = Self.settle(split, in: window)
-        try #require(settled)
+        try #require(settled, "the split's panes never laid out in the window")
 
         #expect(split.sidebarItem.canCollapse == true)
         #expect(split.sidebarItem.canCollapseFromWindowResize == false)
@@ -76,15 +76,17 @@ struct MainSplitViewControllerTests {
         defer { Self.unmount(window) }
 
         let settled = Self.settle(split, in: window)
-        try #require(settled)
+        try #require(settled, "the split's panes never laid out in the window")
         // A split that opens expanded has nothing to report.
         let nothing: [Bool] = []
         #expect(reports.values == nothing)
 
         split.sidebarItem.isCollapsed = true
         window.contentView?.layoutSubtreeIfNeeded()
-        RunLoopPump.until { !reports.values.isEmpty }
-        // A resize while still collapsed must not report it again.
+        let collapseReported = RunLoopPump.until { !reports.values.isEmpty }
+        try #require(collapseReported, "the collapse was never reported")
+        // A resize while still collapsed must not report it again, from the
+        // resize hook or from KVO.
         window.setContentSize(NSSize(width: Self.windowSize.width + 40, height: Self.windowSize.height))
         window.contentView?.layoutSubtreeIfNeeded()
         RunLoopPump.turn()
@@ -94,10 +96,36 @@ struct MainSplitViewControllerTests {
 
         split.sidebarItem.isCollapsed = false
         window.contentView?.layoutSubtreeIfNeeded()
-        RunLoopPump.until { reports.values.count >= 2 }
+        let expansionReported = RunLoopPump.until { reports.values.count >= 2 }
+        try #require(expansionReported, "the expansion was never reported")
         let collapsedThenExpanded: [Bool] = [true, false]
         #expect(reports.values == collapsedThenExpanded)
         #expect(split.isSidebarCollapsed == false)
+    }
+
+    /// The KVO source on its own. The split's view is never loaded, so its
+    /// split view holds no panes and no resize can happen: the resize hook
+    /// alone reports nothing here, and this test fails without KVO. A
+    /// non-animated set flips the value inside the setter, so the report is
+    /// expected at once, with no layout pass and no run-loop turn.
+    @Test func collapseIsReportedAsTheValueFlips() {
+        let split = Self.makeSplit()
+        let reports = Recorder<Bool>()
+        split.onSidebarCollapsedChange = { reports.values.append($0) }
+
+        split.sidebarItem.isCollapsed = true
+        let collapsed: [Bool] = [true]
+        #expect(reports.values == collapsed)
+        // The premise that makes this a test of KVO alone.
+        #expect(split.isViewLoaded == false, "collapsing loaded the split's view, so a resize could have reported it")
+
+        // Setting the same value again reports nothing new.
+        split.sidebarItem.isCollapsed = true
+        #expect(reports.values == collapsed)
+
+        split.sidebarItem.isCollapsed = false
+        let collapsedThenExpanded: [Bool] = [true, false]
+        #expect(reports.values == collapsedThenExpanded)
     }
 
     @Test func viewDidAppearHandsOverTheWindow() {

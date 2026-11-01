@@ -14,7 +14,12 @@ private let splitLogger = Logger(subsystem: "com.tbd.app", category: "window-chr
 ///
 /// The toolbar hangs off two hooks: `onViewDidAppear` hands over the window
 /// once the split is in one, and `onSidebarCollapsedChange` reports each
-/// collapse and each expansion once.
+/// collapse and each expansion once. Two sources feed that report through one
+/// dedup: KVO on the item's `isCollapsed`, which fires the moment the value
+/// flips, and `splitViewDidResizeSubviews`. The resize alone could not be
+/// relied on: AppKit documents no order between an animated toggle's flip and
+/// its last resize, so a flip that lands after it would wait for the next
+/// unrelated one.
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window
 /// structure".
@@ -36,8 +41,12 @@ final class MainSplitViewController: NSSplitViewController {
 
     /// The state last passed to `onSidebarCollapsedChange`. A new sidebar item
     /// starts expanded, so a split that opens expanded reports nothing, and
-    /// one whose saved state is collapsed reports it at its first resize.
+    /// one whose saved state is collapsed reports it once it is restored.
     private var lastReportedCollapsed = false
+
+    /// KVO on `sidebarItem.isCollapsed`, which `NSSplitViewItem` documents
+    /// as KVO compliant. Released, and so unregistered, with the controller.
+    private var collapseObservation: NSKeyValueObservation?
 
     /// - Parameter autosaveName: the defaults key the divider position is
     ///   saved under. `nil` saves nothing, which keeps a test's split out of
@@ -65,6 +74,13 @@ final class MainSplitViewController: NSSplitViewController {
 
         addSplitViewItem(sidebarItem)
         addSplitViewItem(contentItem)
+
+        // The handler is `@Sendable`, but KVO calls it synchronously on the
+        // thread that set the value, and AppKit sets it on the main thread.
+        // It reads nothing from its arguments; the report reads the item.
+        collapseObservation = sidebarItem.observe(\.isCollapsed) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.reportCollapsedStateIfChanged() }
+        }
     }
 
     @available(*, unavailable)
@@ -85,6 +101,12 @@ final class MainSplitViewController: NSSplitViewController {
 
     override func splitViewDidResizeSubviews(_ notification: Notification) {
         super.splitViewDidResizeSubviews(notification)
+        reportCollapsedStateIfChanged()
+    }
+
+    /// Calls `onSidebarCollapsedChange` when the sidebar's collapsed state
+    /// differs from the last one reported, from either source.
+    private func reportCollapsedStateIfChanged() {
         let collapsed = sidebarItem.isCollapsed
         guard collapsed != lastReportedCollapsed else { return }
         lastReportedCollapsed = collapsed
