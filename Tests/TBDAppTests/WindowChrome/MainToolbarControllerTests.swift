@@ -620,6 +620,75 @@ struct MainToolbarControllerTests {
         #expect(fixture.controller.appliedSnapshot?.filter.selected == repoID)
     }
 
+    /// The snapshot reads the whole dev-server dictionary, so a list landing
+    /// for a worktree other than the selected one is observed and queues an
+    /// apply. That apply finds the snapshot, the collapse and the appearance
+    /// as the toolbar shows them and does no layout or content work. It still
+    /// re-arms the tracking: a change to the selected worktree's list is
+    /// applied after it.
+    @Test func anotherWorktreesServersDoNotReapply() async throws {
+        let fixture = ToolbarFixture(label: "anotherWorktreesServersDoNotReapply")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+
+        fixture.showServers(url: "http://localhost:3000")
+        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
+            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
+        }
+        try #require(shown)
+
+        let appliesBefore = controller.applyCount
+        let changesBefore = controller.observedChangeCount
+        let other = fixture.worktrees[1].id
+        try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
+        fixture.state.devServerLists[other] = fixture.list(
+            [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+        let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
+            controller.observedChangeCount > changesBefore && !controller.applyScheduled
+        }
+        try #require(ran)
+        #expect(controller.observedChangeCount == changesBefore + 1)
+        #expect(controller.applyCount == appliesBefore)
+
+        fixture.showServers(url: nil)
+        let applied = try await waitForMainActorCondition("the apply for the selected worktree's change") {
+            controller.applyCount > appliesBefore
+        }
+        try #require(applied)
+        #expect(controller.appliedSnapshot?.servers?.isRunning == false)
+    }
+
+    /// An apply asked for by anything but an observed change runs in full
+    /// with nothing changed: a repeated install, as a second `viewDidAppear`
+    /// makes, and `scheduleApply()`, through which the replacement and
+    /// appearance watches, the cooldown's end and the filter menu's close
+    /// all ask.
+    @Test func requestedAppliesRunWithNothingChanged() async throws {
+        let fixture = ToolbarFixture(label: "requestedAppliesRunWithNothingChanged")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+
+        let beforeInstall = controller.applyCount
+        controller.install(on: fixture.window, split: fixture.split)
+        try #require(controller.applyScheduled)
+        let installRan = try await waitForMainActorCondition("the apply a repeated install queued") {
+            !controller.applyScheduled
+        }
+        try #require(installRan)
+        #expect(controller.applyCount == beforeInstall + 1)
+
+        let beforeRequest = controller.applyCount
+        controller.scheduleApply()
+        try #require(controller.applyScheduled)
+        let requestRan = try await waitForMainActorCondition("the apply scheduleApply() queued") {
+            !controller.applyScheduled
+        }
+        try #require(requestRan)
+        #expect(controller.applyCount == beforeRequest + 1)
+    }
+
     // MARK: - Content
 
     /// An apply that changes nothing sets nothing: the Transcript and Servers

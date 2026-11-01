@@ -39,10 +39,13 @@ struct RemotePresentation: Equatable {
 }
 
 /// Everything the AppKit main toolbar reads from `AppState`, as plain values.
-/// Each apply makes one, and the controller never compares two of them: it
-/// diffs the items against the layout, then sets each item property only when
-/// it differs from what the item shows (`MainToolbarController.updateContent`).
-/// The rules mirror the SwiftUI toolbar in `ContentView`.
+/// Each apply makes one. The controller compares it with the one it last
+/// applied only to skip an apply an observed change asked for when nothing
+/// the toolbar shows changed, since making it reads more than it shows, such
+/// as every worktree's dev-server list. An apply that runs diffs the items
+/// against the layout, then sets each item property only when it differs from
+/// what the item shows (`MainToolbarController.updateContent`). The rules
+/// mirror the SwiftUI toolbar in `ContentView`.
 struct MainToolbarSnapshot: Equatable {
     var canGoBack: Bool
     var canGoForward: Bool

@@ -18,7 +18,11 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
 ///   runs inside `withObservationTracking`, and a change schedules one apply on
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
-///   registration acts on a change (see `observedChange(generation:)`).
+///   registration acts on a change (see `observedChange(generation:)`). The
+///   snapshot reads more than it shows, such as every worktree's dev-server
+///   list, so an apply only an observed change asked for does nothing when
+///   the snapshot, the collapse and the appearance are what the last apply
+///   showed and our toolbar is on the window. Every other apply runs in full.
 /// - **Apply.** Re-installs the toolbar if something replaced it on the window,
 ///   diffs the items against `MainToolbarLayout.identifiers(for:)` through
 ///   `ToolbarLayoutSync`, with inserts and removes only, so the items both
@@ -80,15 +84,30 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// from it, such as the Servers button's main URL.
     private(set) var appliedSnapshot: MainToolbarSnapshot?
 
-    /// Applies run so far, for the debug log and for tests.
+    /// Applies run so far, for the debug log and for tests. An apply that
+    /// found nothing to do is not counted.
     private(set) var applyCount = 0
     /// Observed `AppState` changes that scheduled an apply, for the debug log
     /// and for tests: a stale registration's change is not counted.
     private(set) var observedChangeCount = 0
 
-    /// Whether an apply is queued. `scheduleApply()` sets it and enqueues one
+    /// Whether an apply is queued. `enqueueApply()` sets it and enqueues one
     /// apply; `applyNow()` clears it.
     private(set) var applyScheduled = false
+    /// Whether the queued apply runs in full. `scheduleApply()` sets it; an
+    /// apply only an observed change asked for leaves it clear.
+    private var queuedApplyRunsInFull = false
+    /// What the last apply whose layout landed showed. An apply an observed
+    /// change asked for, finding all of it as it was, has nothing to do.
+    private var appliedInputs: AppliedInputs?
+
+    /// What an apply shows: the snapshot, the collapse its layout is for and
+    /// the appearance its icons are baked for.
+    private struct AppliedInputs: Equatable {
+        var snapshot: MainToolbarSnapshot
+        var sidebarCollapsed: Bool
+        var colorScheme: ColorScheme
+    }
 
     /// Bumped by each apply, which arms a fresh observation registration.
     private var observationGeneration = 0
@@ -220,6 +239,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         windowShowsOurToolbar = false
         // A registration still armed is stale from here on.
         observationGeneration &+= 1
+        appliedInputs = nil
         layoutSync.reset()
     }
 
@@ -298,21 +318,35 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     // MARK: The update loop
 
-    /// Schedules one apply on the next main-loop turn; further calls before it
-    /// runs are covered by it. Does nothing while the toolbar is not
-    /// installed, such as after `uninstall`.
+    /// Schedules one apply on the next main-loop turn, which runs in full
+    /// whatever it finds; further calls before it runs are covered by it.
+    /// Install, a replaced toolbar, the cooldown's end, an appearance or
+    /// collapse change and the filter menu's close all come through here,
+    /// since each asks for something the snapshot does not hold. Does
+    /// nothing while the toolbar is not installed, such as after `uninstall`.
     func scheduleApply() {
-        guard isInstalled, !applyScheduled else { return }
+        guard isInstalled else { return }
+        queuedApplyRunsInFull = true
+        enqueueApply()
+    }
+
+    /// Queues the apply, unless one is queued already.
+    private func enqueueApply() {
+        guard !applyScheduled else { return }
         applyScheduled = true
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated { self?.applyNow() }
         }
     }
 
-    /// The scheduled apply. `scheduleApply()` enqueues it only while none is
+    /// The scheduled apply. `enqueueApply()` enqueues it only while none is
     /// queued, and only this clears the flag, so the flag is always set here.
-    /// After `uninstall`, a queued apply does nothing.
+    /// After `uninstall`, a queued apply does nothing. Every apply that gets
+    /// past that re-arms the tracking, including one that then finds nothing
+    /// to do.
     private func applyNow() {
+        let runsInFull = queuedApplyRunsInFull
+        queuedApplyRunsInFull = false
         guard isInstalled else {
             applyScheduled = false
             return
@@ -330,6 +364,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // Anything scheduled while reading is covered by this apply; a change
         // after the tracking re-armed schedules afresh.
         applyScheduled = false
+        if !runsInFull, window?.toolbar === toolbar, appliedInputs == inputs(for: snapshot) {
+            toolbarLogger.debug("Main toolbar apply skipped: nothing it shows changed")
+            return
+        }
         apply(snapshot)
     }
 
@@ -337,11 +375,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Every apply arms one, including the applies observation did not
     /// trigger, and a one-shot registration cannot be cancelled, so only the
     /// newest acts: the older ones track the same reads and would only
-    /// schedule again.
+    /// schedule again. `uninstall` makes every armed one stale, so none acts
+    /// after it. The apply it queues may find nothing to do.
     private func observedChange(generation: Int) {
         guard generation == observationGeneration else { return }
         observedChangeCount += 1
-        scheduleApply()
+        enqueueApply()
+    }
+
+    private func inputs(for snapshot: MainToolbarSnapshot) -> AppliedInputs {
+        AppliedInputs(snapshot: snapshot, sidebarCollapsed: sidebarCollapsed, colorScheme: currentColorScheme)
     }
 
     /// Runs `body` on the main actor: at once when already on the main thread,
@@ -367,14 +410,19 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
             toolbarLogger.info("Main toolbar was replaced on its window; re-installing it")
             attach(to: window)
         }
-        applyLayout(MainToolbarLayout.identifiers(for: snapshot.layoutState(sidebarCollapsed: sidebarCollapsed)))
+        let landed = applyLayout(
+            MainToolbarLayout.identifiers(for: snapshot.layoutState(sidebarCollapsed: sidebarCollapsed)))
         updateContent(snapshot)
+        // A layout that stopped short is never taken as shown, so the next
+        // apply re-diffs whatever asked for it.
+        appliedInputs = landed ? inputs(for: snapshot) : nil
     }
 
-    /// Brings the items to `target` through `layoutSync`. A pass that stops
-    /// short logs, and when the next pass would get further, schedules the
-    /// apply that re-diffs against the items as they then stand.
-    private func applyLayout(_ target: [NSToolbarItem.Identifier]) {
+    /// Brings the items to `target` through `layoutSync`, and returns whether
+    /// they landed there, less any item the delegate could not serve. A pass
+    /// that stops short logs, and when the next pass would get further,
+    /// schedules the apply that re-diffs against the items as they then stand.
+    private func applyLayout(_ target: [NSToolbarItem.Identifier]) -> Bool {
         let toolbar = self.toolbar
         // On a copy, so no access to the stored value is held while AppKit
         // calls into the delegate for the inserts.
@@ -391,6 +439,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
             if edits > 0 {
                 toolbarLogger.debug("Main toolbar applied \(edits, privacy: .public) edits")
             }
+            return true
         case .stopped(let stop, let retry):
             let shown = toolbar.items.map(\.itemIdentifier.rawValue).joined(separator: ",")
             let wanted = target.map(\.rawValue).joined(separator: ",")
@@ -403,6 +452,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
             if retry {
                 scheduleApply()
             }
+            return false
         }
     }
 
