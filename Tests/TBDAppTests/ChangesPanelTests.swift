@@ -10,7 +10,8 @@ import TestSupport
 
 /// The Changes list as a side-panel tab (side panel notes and Changes spec,
 /// "Changes", "⌘⇧E"): what a file click sends, ⌘⇧E's three states and its
-/// target, the strip's refresh control, and the retired column's keys.
+/// target, the strip's refresh control and loading flag, the per-worktree
+/// cache of the list, and the retired column's keys.
 @Suite("Changes panel")
 @MainActor
 struct ChangesPanelTests {
