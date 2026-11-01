@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-private enum FilePanelStorageKey {
+enum FilePanelStorageKey {
     static let isVisible = "filePanel.isVisible"
     static let width = "filePanel.width"
 }
@@ -115,7 +115,6 @@ struct ContentView: View {
                     }
                     .disabled(!appState.canGoBack)
                     .help("Back")
-                    .keyboardShortcut("[", modifiers: .command)
 
                     Button {
                         appState.navigateForward()
@@ -124,7 +123,6 @@ struct ContentView: View {
                     }
                     .disabled(!appState.canGoForward)
                     .help("Forward")
-                    .keyboardShortcut("]", modifiers: .command)
                 }
 
                 if #available(macOS 26.0, *) {
@@ -401,7 +399,6 @@ struct ContentView: View {
                         Image(systemName: "sidebar.right")
                     }
                     .help("Toggle file panel (⌘⇧E)")
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
             }
             // The Servers button's list whenever a single worktree becomes

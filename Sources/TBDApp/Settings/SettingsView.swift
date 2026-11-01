@@ -373,7 +373,8 @@ struct GeneralSettingsTab: View {
 
     static let panelTabsHelp = "Shows files, pages, notes and transcripts in a side panel with tabs beside "
         + "each tab's main content, and lets agents open and arrange its panels with tbd panel. "
-        + "Off by default while it soaks."
+        + "Off by default while it soaks. "
+        + "The window's sidebar split and toolbar follow this setting at the next launch."
 
     /// Native sidebar opt-in. App-side `UserDefaults` through `@AppStorage`,
     /// the same key `SidebarView` reads, so flipping it swaps the sidebar

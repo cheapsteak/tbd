@@ -52,6 +52,38 @@ enum TextFinderCommand {
     }
 }
 
+/// The main window's navigation and panel commands. They live in the menu bar,
+/// not on toolbar buttons, so the shortcuts work the same on the SwiftUI and
+/// AppKit toolbars.
+enum MainWindowCommand: CaseIterable {
+    case back
+    case forward
+    case toggleFilePanel
+
+    var title: String {
+        switch self {
+        case .back: "Back"
+        case .forward: "Forward"
+        case .toggleFilePanel: "Toggle File Panel"
+        }
+    }
+
+    var key: KeyEquivalent {
+        switch self {
+        case .back: "["
+        case .forward: "]"
+        case .toggleFilePanel: "e"
+        }
+    }
+
+    var modifiers: EventModifiers {
+        switch self {
+        case .back, .forward: .command
+        case .toggleFilePanel: [.command, .shift]
+        }
+    }
+}
+
 /// Menu commands providing keyboard shortcuts for the app.
 struct TBDCommands: Commands {
     var appState: AppState
@@ -94,6 +126,10 @@ struct TBDCommands: Commands {
             .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
+        CommandGroup(after: .sidebar) {
+            FilePanelCommandContent()
+        }
+
         // Worktree commands
         CommandMenu("Worktree") {
             WorktreeCommandsContent().environment(appState)
@@ -106,6 +142,10 @@ struct TBDCommands: Commands {
 
         // Worktree selection by index (Cmd-1 through Cmd-9)
         CommandMenu("Go") {
+            NavigationCommandsContent().environment(appState)
+
+            Divider()
+
             Button("Jump to Worktree…") {
                 Task { @MainActor in
                     JumpMenuController.shared.toggle()
@@ -218,5 +258,46 @@ private struct TerminalCommandsContent: View {
         }
         .keyboardShortcut("/", modifiers: [.command, .option])
         .disabled(appState.composerCommandTerminalID == nil)
+    }
+}
+
+/// Back and Forward are gated on `AppState`, so they live in a nested `View`
+/// for the reason `WorktreeCommandsContent` gives.
+private struct NavigationCommandsContent: View {
+    @Environment(AppState.self) var appState
+
+    var body: some View {
+        Button(MainWindowCommand.back.title) {
+            Task { @MainActor in
+                appState.navigateBack()
+            }
+        }
+        .keyboardShortcut(MainWindowCommand.back.key, modifiers: MainWindowCommand.back.modifiers)
+        .disabled(!appState.canGoBack)
+
+        Button(MainWindowCommand.forward.title) {
+            Task { @MainActor in
+                appState.navigateForward()
+            }
+        }
+        .keyboardShortcut(MainWindowCommand.forward.key, modifiers: MainWindowCommand.forward.modifiers)
+        .disabled(!appState.canGoForward)
+    }
+}
+
+private struct FilePanelCommandContent: View {
+    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
+
+    var body: some View {
+        Button(MainWindowCommand.toggleFilePanel.title) {
+            // Deferred one run-loop tick, as the toolbar button does: toggling
+            // during an in-flight NavigationSplitView selection change blew the
+            // per-window constraint-update budget.
+            DispatchQueue.main.async { showFilePanel.toggle() }
+        }
+        .keyboardShortcut(
+            MainWindowCommand.toggleFilePanel.key,
+            modifiers: MainWindowCommand.toggleFilePanel.modifiers
+        )
     }
 }
