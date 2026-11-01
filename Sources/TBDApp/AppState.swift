@@ -983,17 +983,19 @@ final class AppState {
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
     /// Worktree → its Changes list as the last load left it, with when that
-    /// load finished (`loadChangesSnapshot`). The list is made anew whenever
-    /// it comes to the front or another workspace tab is selected, so it
-    /// shows this at once, and loads again on appearing only when this is
-    /// missing or old (`ChangesSnapshotCache.needsLoad`). In memory only.
+    /// load began and finished (`loadChangesSnapshot`). The list is made
+    /// anew whenever it comes to the front or another workspace tab is
+    /// selected, so it shows this at once, and loads again on appearing only
+    /// when this is missing or old (`ChangesSnapshotCache.needsLoad`). In
+    /// memory only.
     /// Dropped when the worktree is archived or removed with its repo
     /// (`forgetChangesSnapshot`). A cache no view observes: the list reads it
     /// when it is made and when it appears.
     @ObservationIgnored var changesSnapshots: [UUID: ChangesSnapshotCache.Entry] = [:]
-    /// The current time, as `loadChangesSnapshot` stamps a finished load and
-    /// `changesSnapshotNeedsLoad` ages a cached one. Injectable so a test can
-    /// set how old a cached list is.
+    /// The current time, as `loadChangesSnapshot` stamps a load as it begins
+    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
+    /// Injectable so a test can set how old a cached list is and the order
+    /// loads began in.
     @ObservationIgnored var now: @Sendable () -> Date = { Date() }
     /// How `loadChangesSnapshot` reads a worktree's Changes list, given the
     /// checkout and the default branch its branch diff compares against: git

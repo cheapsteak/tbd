@@ -204,9 +204,10 @@ enum ChangesSnapshotCache {
     static let maxAge: TimeInterval = 10
 
     /// A worktree's Changes list as the cache holds it, with when the load
-    /// that read it finished.
+    /// that read it began and when it finished.
     struct Entry {
         let snapshot: ChangesSnapshot
+        let startedAt: Date
         let loadedAt: Date
     }
 
@@ -244,18 +245,31 @@ extension AppState {
 
     /// Loads the worktree's Changes list through `changesLoader`, against its
     /// repo's default branch ("main" when the repo is not known), stores it
-    /// in `changesSnapshots` stamped with `now()` as the load finishes, and
-    /// returns it.
+    /// in `changesSnapshots` stamped with `now()` as the load begins and as
+    /// it finishes, and returns it.
     ///
-    /// A load whose task was cancelled by the time it returned stores nothing
-    /// and returns nil. The list cancels its load when a refresh begins a
-    /// newer one or the list goes away, and a newer load may already have
-    /// stored a fresher reading than the cancelled one's.
+    /// When its git reads return, a load stores nothing and returns nil if
+    /// the cache already holds a list from a load that began at or after
+    /// this one began: that newer load won. A list whose load began after
+    /// this one finished does not count, since only a clock set back
+    /// produces one.
+    ///
+    /// Whether the task running the load was cancelled does not matter. The
+    /// list cancels its load when it goes away or a refresh begins a newer
+    /// one, and the git reads run on regardless; a reading no newer load
+    /// replaced is the freshest there is, so it is kept, and the list shows
+    /// it when it comes back instead of running git again.
     func loadChangesSnapshot(worktree: LocalWorktree) async -> ChangesSnapshot? {
         let defaultBranch = repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
+        let startedAt = now()
         let snapshot = await changesLoader(worktree, defaultBranch)
-        guard !Task.isCancelled else { return nil }
-        changesSnapshots[worktree.id] = ChangesSnapshotCache.Entry(snapshot: snapshot, loadedAt: now())
+        let finishedAt = now()
+        if let stored = changesSnapshots[worktree.id],
+           stored.startedAt >= startedAt, stored.startedAt <= finishedAt {
+            return nil
+        }
+        changesSnapshots[worktree.id] = ChangesSnapshotCache.Entry(
+            snapshot: snapshot, startedAt: startedAt, loadedAt: finishedAt)
         return snapshot
     }
 
@@ -358,15 +372,18 @@ struct ChangesPanelView: View {
     /// (`AppState.changesSnapshotNeedsLoad`); any other run loads the list
     /// (`AppState.loadChangesSnapshot`) and shows the result, with the
     /// strip's spinner up meanwhile. A load cancelled before it returns shows
-    /// nothing, and leaves the spinner to the load that superseded it, if
-    /// any.
+    /// nothing, though the cache may keep its list. Cancelled or not, it
+    /// lowers the spinner once its git reads return, unless a newer load
+    /// took the spinner over, so a list that went away leaves no spinner
+    /// running.
     private func load() async {
         let refresh = loadTaskHasRun
         loadTaskHasRun = true
         guard appState.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: refresh) else { return }
         let token = chrome.beginRefresh()
         defer { chrome.endRefresh(token) }
-        guard let loaded = await appState.loadChangesSnapshot(worktree: worktree) else { return }
+        guard let loaded = await appState.loadChangesSnapshot(worktree: worktree),
+              !Task.isCancelled else { return }
         snapshot = loaded
     }
 }

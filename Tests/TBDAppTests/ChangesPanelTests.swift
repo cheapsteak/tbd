@@ -341,6 +341,8 @@ struct ChangesPanelTests {
     func cachedSnapshotShowsBeforeLoadCompletes() async throws {
         try await Fixture.withState { state in
             let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
             let gate = PanelCallGate()
             let loads = PanelEventLog()
             let first = Self.snapshot(unstaged: "first.swift")
@@ -357,6 +359,7 @@ struct ChangesPanelTests {
 
             // The list comes to the front again: its own load is in flight,
             // and the cache still holds the first load's list for it to show.
+            dates.advance(by: 1)
             let reload = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
             await Fixture.drainMainActor()
             try #require(gate.isHolding, "precondition: the second load is in flight")
@@ -372,10 +375,48 @@ struct ChangesPanelTests {
         }
     }
 
-    @Test("a load cancelled before it returns stores nothing, so a newer load's list stays")
-    func cancelledLoadKeepsNewerSnapshot() async throws {
+    @Test("a load whose list went away before it returned keeps its list when no newer load stored one")
+    func cancelledLoadWithNothingNewerIsStored() async throws {
         try await Fixture.withState { state in
             let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let gate = PanelCallGate()
+            let loads = PanelEventLog()
+            let loaded = Self.snapshot(unstaged: "a.swift")
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                await gate.wait()
+                return loaded
+            }
+            let leftBehind = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the load is in flight")
+
+            // The list goes away, which cancels its load; the git reads run on.
+            leftBehind.cancel()
+            dates.advance(by: 2)
+            gate.release()
+            let leftBehindResult = await leftBehind.value
+
+            let expected: [String] = ["a.swift"]
+            let returned = Self.unstagedPaths(leftBehindResult)
+            let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            #expect(returned == expected)
+            #expect(stored == expected, "nothing newer was stored, so the cancelled load's list is kept")
+            let loadsOnReturn = state.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: false)
+            #expect(!loadsOnReturn, "the list coming back shows the kept list and runs no git")
+            let expectedLoads: [String] = ["load"]
+            #expect(loads.events == expectedLoads)
+        }
+    }
+
+    @Test("a load that began before another and returns after it stores nothing, so the newer load's list stays")
+    func olderLoadReturningLastKeepsNewerSnapshot() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
             let gate = PanelCallGate()
             let loads = PanelEventLog()
             let older = Self.snapshot(unstaged: "older.swift")
@@ -386,21 +427,98 @@ struct ChangesPanelTests {
                 await gate.wait()
                 return older
             }
-            let superseded = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            // Neither task is cancelled: the order the loads began in decides.
+            let slower = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
             await Fixture.drainMainActor()
             try #require(gate.isHolding, "precondition: the first load is in flight")
 
-            // A refresh cancels the first load and runs a newer one, which
-            // lands before the first one's git reads return.
-            superseded.cancel()
+            // A newer load begins later and lands before the first one's git
+            // reads return.
+            dates.advance(by: 1)
             let newest = await state.loadChangesSnapshot(worktree: worktree)
+            dates.advance(by: 1)
             gate.release()
-            let supersededResult = await superseded.value
+            let slowerResult = await slower.value
 
-            let supersededReturnedList = supersededResult != nil
-            #expect(!supersededReturnedList, "the cancelled load hands the list nothing to show")
+            let slowerReturnedList = slowerResult != nil
+            #expect(!slowerReturnedList, "the older load hands the list nothing to show")
             let expected: [String] = ["newer.swift"]
             let returned = Self.unstagedPaths(newest)
+            let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            #expect(returned == expected)
+            #expect(stored == expected)
+        }
+    }
+
+    @Test("a load that began after another stores its list even when the other stored first")
+    func newerLoadReturningLastReplacesOlderSnapshot() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let olderGate = PanelCallGate()
+            let newerGate = PanelCallGate()
+            let loads = PanelEventLog()
+            let older = Self.snapshot(unstaged: "older.swift")
+            let newer = Self.snapshot(unstaged: "newer.swift")
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                if loads.events.count == 1 {
+                    await olderGate.wait()
+                    return older
+                }
+                await newerGate.wait()
+                return newer
+            }
+            let olderLoad = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(olderGate.isHolding, "precondition: the older load is in flight")
+            dates.advance(by: 1)
+            let newerLoad = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(newerGate.isHolding, "precondition: the newer load is in flight")
+
+            // The older load returns first, after the newer one began.
+            dates.advance(by: 1)
+            olderGate.release()
+            _ = await olderLoad.value
+            let storedFirst = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            let expectedFirst: [String] = ["older.swift"]
+            #expect(storedFirst == expectedFirst, "no newer load had stored yet")
+
+            dates.advance(by: 1)
+            newerGate.release()
+            let newerResult = await newerLoad.value
+
+            let expected: [String] = ["newer.swift"]
+            let returned = Self.unstagedPaths(newerResult)
+            let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            #expect(returned == expected)
+            #expect(stored == expected, "the load that began later wins, whichever stored first")
+        }
+    }
+
+    @Test("a cached list whose load began after a later load finished, as only a clock set back makes, is replaced")
+    func clockSetBackDoesNotPinCachedSnapshot() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let loads = PanelEventLog()
+            let first = Self.snapshot(unstaged: "first.swift")
+            let second = Self.snapshot(unstaged: "second.swift")
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                return loads.events.count == 1 ? first : second
+            }
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+
+            // The clock goes back an hour before the next load.
+            dates.advance(by: -3600)
+            let secondResult = await state.loadChangesSnapshot(worktree: worktree)
+
+            let expected: [String] = ["second.swift"]
+            let returned = Self.unstagedPaths(secondResult)
             let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
             #expect(returned == expected)
             #expect(stored == expected)
