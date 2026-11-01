@@ -14,18 +14,17 @@ enum MainToolbarItemID {
     static let remoteReconnect = NSToolbarItem.Identifier("tbd.toolbar.remoteReconnect")
     static let remoteStop = NSToolbarItem.Identifier("tbd.toolbar.remoteStop")
 
-    /// TBD's own items.
-    static let custom: Set<NSToolbarItem.Identifier> = [
+    /// TBD's own items, in toolbar order: the one list of them.
+    static let custom: [NSToolbarItem.Identifier] = [
         toggleSidebar, back, forward, repoFilter, title,
         servers, remoteTranscript, remoteReconnect, remoteStop,
     ]
 
+    /// The standard identifiers the layout uses.
+    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace, .space, .sidebarTrackingSeparator]
+
     /// Every identifier the toolbar delegate may be asked for.
-    static let allowed: [NSToolbarItem.Identifier] = [
-        toggleSidebar, back, forward, repoFilter, title,
-        servers, remoteTranscript, remoteReconnect, remoteStop,
-        .flexibleSpace, .space, .sidebarTrackingSeparator,
-    ]
+    static let allowed: [NSToolbarItem.Identifier] = custom + standard
 }
 
 /// The inputs that decide which items the toolbar shows.
@@ -124,19 +123,32 @@ enum MainToolbarLayout {
         return result
     }
 
-    /// Applies `edits` to `items`.
+    /// Carries out `edits` in order through `remove` and `insert`: the one
+    /// loop both the toolbar and `applying(_:to:)` run.
+    static func perform(
+        _ edits: [ToolbarEdit],
+        remove: (Int) -> Void,
+        insert: (NSToolbarItem.Identifier, Int) -> Void
+    ) {
+        for edit in edits {
+            switch edit {
+            case .remove(let index):
+                remove(index)
+            case .insert(let identifier, let index):
+                insert(identifier, index)
+            }
+        }
+    }
+
+    /// `items` after `edits`, through `perform`.
     static func applying(
         _ edits: [ToolbarEdit], to items: [NSToolbarItem.Identifier]
     ) -> [NSToolbarItem.Identifier] {
         var working = items
-        for edit in edits {
-            switch edit {
-            case .remove(let index):
-                working.remove(at: index)
-            case .insert(let id, let index):
-                working.insert(id, at: index)
-            }
-        }
+        perform(
+            edits,
+            remove: { index in _ = working.remove(at: index) },
+            insert: { identifier, index in working.insert(identifier, at: index) })
         return working
     }
 }

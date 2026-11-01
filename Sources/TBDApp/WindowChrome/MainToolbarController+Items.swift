@@ -18,6 +18,14 @@ final class ServersMenuCommandBox: NSObject {
     }
 }
 
+/// The key a toolbar item's image was last derived from, such as its symbol
+/// name, and the item it was set on: an item rebuilt since then gets its image
+/// whatever the key says.
+struct ToolbarImageKey {
+    weak var item: NSToolbarItem?
+    var key: String
+}
+
 extension MainToolbarController {
     // MARK: Item construction
 
@@ -168,14 +176,20 @@ extension MainToolbarController {
 
     // MARK: Content
 
-    /// Updates the present items to `snapshot` without replacing any.
+    /// Updates the present items to `snapshot` without replacing any. Each
+    /// value is set only when it differs from what the item holds, so an
+    /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let split {
-            item(MainToolbarItemID.toggleSidebar)?.target = split
+        if let split, let toggle = item(MainToolbarItemID.toggleSidebar), toggle.target !== split {
+            toggle.target = split
         }
         bindTrackingSeparator()
-        item(MainToolbarItemID.back)?.isEnabled = snapshot.canGoBack
-        item(MainToolbarItemID.forward)?.isEnabled = snapshot.canGoForward
+        if let back = item(MainToolbarItemID.back), back.isEnabled != snapshot.canGoBack {
+            back.isEnabled = snapshot.canGoBack
+        }
+        if let forward = item(MainToolbarItemID.forward), forward.isEnabled != snapshot.canGoForward {
+            forward.isEnabled = snapshot.canGoForward
+        }
         if let popup = item(MainToolbarItemID.repoFilter)?.view as? NSPopUpButton {
             updateFilter(popup, snapshot.filter)
         }
@@ -184,9 +198,28 @@ extension MainToolbarController {
             updateServers(serversItem, servers)
         }
         if let remote = snapshot.remote, let transcript = item(MainToolbarItemID.remoteTranscript) {
-            transcript.image = NSImage(
-                systemSymbolName: remote.transcriptSymbolName, accessibilityDescription: remote.transcriptHelp)
-            transcript.toolTip = remote.transcriptHelp
+            updateTranscript(transcript, remote)
+        }
+    }
+
+    /// Sets `item`'s image from `make` when `key`, what the image is derived
+    /// from, differs from the key it was last set from, or the item is not
+    /// the one it was set on. Compared by key rather than by image, since an
+    /// image made afresh is a new object for the same picture.
+    private func setImage(_ item: NSToolbarItem, key: String, _ make: () -> NSImage?) {
+        if let shown = shownImageKeys[item.itemIdentifier], shown.item === item, shown.key == key { return }
+        item.image = make()
+        shownImageKeys[item.itemIdentifier] = ToolbarImageKey(item: item, key: key)
+    }
+
+    private func updateTranscript(_ item: NSToolbarItem, _ remote: RemotePresentation) {
+        let symbol = remote.transcriptSymbolName
+        let help = remote.transcriptHelp
+        setImage(item, key: "\(symbol)|\(help)") {
+            NSImage(systemSymbolName: symbol, accessibilityDescription: help)
+        }
+        if item.toolTip != help {
+            item.toolTip = help
         }
     }
 
@@ -250,15 +283,25 @@ extension MainToolbarController {
     }
 
     private func updateServers(_ item: NSMenuToolbarItem, _ servers: ServersPresentation) {
-        item.title = servers.title
-        item.image = serversImage(servers, colorScheme: currentColorScheme)
-        item.toolTip = servers.help
-        if servers.primaryURL != nil {
-            item.target = self
-            item.action = #selector(openPrimaryServerURL(_:))
-        } else {
-            item.target = nil
-            item.action = nil
+        if item.title != servers.title {
+            item.title = servers.title
+        }
+        let colorScheme = currentColorScheme
+        setImage(item, key: Self.serversImageKey(servers, colorScheme: colorScheme)) {
+            serversImage(servers, colorScheme: colorScheme)
+        }
+        if item.toolTip != servers.help {
+            item.toolTip = servers.help
+        }
+        // With a main URL a click opens it; without one the item has no
+        // action, and a click opens the menu.
+        let action: Selector? = servers.primaryURL == nil ? nil : #selector(openPrimaryServerURL(_:))
+        let target: AnyObject? = action == nil ? nil : self
+        if item.action != action {
+            item.action = action
+        }
+        if item.target !== target {
+            item.target = target
         }
         // An empty menu is seeded once; every open rebuilds it anyway.
         if item.menu.numberOfItems == 0 {
@@ -266,11 +309,17 @@ extension MainToolbarController {
         }
     }
 
+    /// What a Servers icon is baked from: the running state, the appearance
+    /// and the accessibility label.
+    private static func serversImageKey(_ servers: ServersPresentation, colorScheme: ColorScheme) -> String {
+        "\(servers.isRunning)-\(colorScheme)-\(servers.accessibilityLabel)"
+    }
+
     /// The baked Servers icon for the appearance, copied so the copy can carry
     /// the accessibility label (`NSToolbarItem` has none of its own) without
     /// touching the image the SwiftUI label shares.
     private func serversImage(_ servers: ServersPresentation, colorScheme: ColorScheme) -> NSImage {
-        let key = "\(servers.isRunning)-\(colorScheme)-\(servers.accessibilityLabel)"
+        let key = Self.serversImageKey(servers, colorScheme: colorScheme)
         if let cached = serversImages[key] { return cached }
         let baked = ServersButtonLabel.bakedIcon(running: servers.isRunning, colorScheme: colorScheme)
         guard let image = baked.copy() as? NSImage else { return baked }

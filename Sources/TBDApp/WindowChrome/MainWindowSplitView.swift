@@ -86,14 +86,11 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
     /// Takes the toolbar off the window, if the window still shows it, so
     /// nothing of the split outlives it. A toolbar something else put there
-    /// stays.
+    /// stays. The controller stops watching the window first, so the removal
+    /// is not put back as a replacement.
     static func dismantleNSViewController(_ split: MainSplitViewController, coordinator: Coordinator) {
         split.onViewDidAppear = nil
-        if let toolbarController = coordinator.toolbarController,
-           let window = toolbarController.window ?? split.view.window,
-           window.toolbar === toolbarController.toolbar {
-            window.toolbar = nil
-        }
+        coordinator.toolbarController?.uninstall(fallbackWindow: split.viewIfLoaded?.window)
         coordinator.toolbarController = nil
     }
 

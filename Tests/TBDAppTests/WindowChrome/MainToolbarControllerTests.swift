@@ -70,8 +70,10 @@ struct MainToolbarControllerTests {
     }
 
     /// The split nested in a container, as SwiftUI's hosting view nests it in
-    /// the app, so AppKit's own sidebar discovery cannot stand in for the
-    /// controller's binding.
+    /// the app. The nesting is meant to keep AppKit's own sidebar discovery
+    /// from standing in for the controller's binding, but AppKit may still
+    /// find a split nested as a child view controller, so this pins the
+    /// binding's outcome without proving discovery would have missed it.
     @Test func trackingSeparatorFollowsANestedSplit() async throws {
         let fixture = ToolbarFixture(label: "trackingSeparatorFollowsANestedSplit", nested: true)
         defer { fixture.tearDown() }
@@ -330,20 +332,171 @@ struct MainToolbarControllerTests {
 
     // MARK: - Re-install
 
+    /// The replacement alone brings the toolbar back, through KVO on the
+    /// window's `toolbar`: `ready()` leaves no apply queued and nothing here
+    /// schedules one, so no other apply can stand in for the watch.
     @Test func reinstallsAReplacedToolbar() async throws {
         let fixture = ToolbarFixture(label: "reinstallsAReplacedToolbar")
         defer { fixture.tearDown() }
         try await fixture.ready()
+        try #require(fixture.controller.applyScheduled == false)
 
-        fixture.window.toolbar = NSToolbar()
+        fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.replacement")
         try #require(fixture.window.toolbar !== fixture.controller.toolbar)
-        fixture.controller.scheduleApply()
 
         let back = try await waitUntil("our toolbar to come back") {
             fixture.window.toolbar === fixture.controller.toolbar
         }
         #expect(back)
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
+    }
+
+    /// A window that keeps replacing the toolbar gets it back
+    /// `maxReinstallBurst` times within one burst and then keeps the
+    /// replacement; a replacement after a quiet spell starts a new burst and
+    /// is put back again. The date seam places the attempts: frozen, every
+    /// one is inside the burst window; advanced past it, the next one is not.
+    @Test func stopsReinstallingAToolbarThatKeepsBeingReplaced() async throws {
+        let dates = TestDateSource()
+        let fixture = ToolbarFixture(label: "stopsReinstallingAToolbarThatKeepsBeingReplaced", now: dates.provider)
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let cap = MainToolbarController.maxReinstallBurst
+        try #require(cap > 0)
+
+        for attempt in 1...cap {
+            fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.burst.\(attempt)")
+            let back = try await waitUntil("re-install \(attempt) of \(cap) in one burst") {
+                fixture.window.toolbar === fixture.controller.toolbar
+            }
+            try #require(back)
+        }
+
+        // One more inside the same burst: the apply it schedules runs, and
+        // leaves the replacement in place.
+        let kept = NSToolbar(identifier: "MainToolbarControllerTests.burst.kept")
+        let appliesBefore = fixture.controller.applyCount
+        fixture.window.toolbar = kept
+        let applied = try await waitUntil("the apply the replacement past the cap scheduled") {
+            fixture.controller.applyCount > appliesBefore
+        }
+        try #require(applied)
+        #expect(fixture.window.toolbar === kept)
+        #expect(fixture.controller.isInstalled)
+
+        // After a quiet spell, a replacement is put back again.
+        dates.advance(by: MainToolbarController.reinstallBurstWindow + 1)
+        fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterQuiet")
+        let backAfterQuiet = try await waitUntil("a re-install after the burst window passed") {
+            fixture.window.toolbar === fixture.controller.toolbar
+        }
+        #expect(backAfterQuiet)
+    }
+
+    /// Uninstalling takes the toolbar off for good: its own removal is not
+    /// read as a replacement by the watch, and a later apply does not put it
+    /// back either.
+    @Test func uninstallTakesTheToolbarOffForGood() async throws {
+        let fixture = ToolbarFixture(label: "uninstallTakesTheToolbarOffForGood")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+
+        fixture.controller.uninstall()
+        #expect(fixture.window.toolbar == nil)
+        #expect(fixture.controller.isInstalled == false)
+        // KVO reports synchronously, so a watch that took the removal for a
+        // replacement would have queued an apply by now.
+        #expect(fixture.controller.applyScheduled == false)
+
+        // The apply runs, which is what makes its leaving the window without
+        // a toolbar mean something.
+        let appliesBefore = fixture.controller.applyCount
+        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(fixture.controller.applyCount == appliesBefore + 1)
+        #expect(fixture.window.toolbar == nil)
+    }
+
+    // MARK: - The update loop
+
+    /// Applies that observation did not trigger each arm a registration of
+    /// their own, and a one-shot registration cannot be cancelled. A later
+    /// `AppState` change must still act once, through the newest
+    /// registration, rather than once per registration left outstanding.
+    ///
+    /// The apply count alone cannot tell: the stale registrations' calls
+    /// coalesce into the one queued apply. `observedChangeCount` counts the
+    /// registrations that acted, and is what goes wrong without the
+    /// generation check.
+    @Test func oneObservedChangeActsOnce() async throws {
+        let fixture = ToolbarFixture(label: "oneObservedChangeActsOnce")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+
+        // Each collapse and expansion schedules an apply of its own, which
+        // arms tracking again with no change observed.
+        let collapses: [Bool] = [true, false, true, false]
+        for collapsed in collapses {
+            let before = fixture.controller.applyCount
+            fixture.split.sidebarItem.isCollapsed = collapsed
+            let applied = try await waitUntil("the apply after collapsed = \(collapsed)") {
+                fixture.controller.applyCount > before
+            }
+            try #require(applied)
+        }
+        let settled = try await waitUntil("no apply queued after the collapses") {
+            !fixture.controller.applyScheduled
+        }
+        try #require(settled)
+
+        let changesBefore = fixture.controller.observedChangeCount
+        let appliesBefore = fixture.controller.applyCount
+        let repoID = fixture.repos[1].id
+        fixture.state.repoFilter = repoID
+        let applied = try await waitUntil("the apply the filter change scheduled") {
+            fixture.controller.applyCount > appliesBefore
+        }
+        try #require(applied)
+        #expect(fixture.controller.observedChangeCount == changesBefore + 1)
+        #expect(fixture.controller.applyCount == appliesBefore + 1)
+        #expect(fixture.controller.appliedSnapshot?.filter.selected == repoID)
+    }
+
+    // MARK: - Content
+
+    /// An apply that changes nothing sets nothing: the Transcript and Servers
+    /// images are the same objects afterwards. A changed Transcript symbol
+    /// does set a new image and tool tip.
+    @Test func unchangedContentIsNotSetAgain() async throws {
+        let fixture = ToolbarFixture(label: "unchangedContentIsNotSetAgain")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+
+        fixture.showServers(url: "http://localhost:3000")
+        fixture.showRemoteSession()
+        var snapshot = MainToolbarSnapshot.make(from: fixture.state)
+        let remote = try #require(snapshot.remote)
+        try #require(remote.showsTranscript)
+        fixture.controller.apply(snapshot)
+        let transcript = try #require(fixture.controller.item(MainToolbarItemID.remoteTranscript))
+        let servers = try #require(fixture.controller.item(MainToolbarItemID.servers))
+        let transcriptImage = try #require(transcript.image)
+        let serversImage = try #require(servers.image)
+        let transcriptTip = transcript.toolTip
+
+        fixture.controller.apply(snapshot)
+        #expect(transcript.image === transcriptImage)
+        #expect(servers.image === serversImage)
+        #expect(transcript.toolTip == transcriptTip)
+
+        snapshot.remote?.transcriptOpen = !remote.transcriptOpen
+        let toggledHelp = try #require(snapshot.remote?.transcriptHelp)
+        try #require(toggledHelp != remote.transcriptHelp)
+        fixture.controller.apply(snapshot)
+        let toggled = try #require(transcript.image)
+        #expect(toggled !== transcriptImage)
+        #expect(toggled.accessibilityDescription == toggledHelp)
+        #expect(transcript.toolTip == toggledHelp)
+        #expect(servers.image === serversImage)
     }
 
     // MARK: - Remote
@@ -456,10 +609,12 @@ private final class ToolbarFixture {
     let window: NSWindow
     var stopRequests: [RemoteSessionSelection] = []
 
-    /// - Parameter nested: puts the split inside a plain container controller,
-    ///   which is the window's `contentViewController`, instead of making the
-    ///   split the content itself.
-    init(label: String, nested: Bool = false) {
+    /// - Parameters:
+    ///   - nested: puts the split inside a plain container controller, which
+    ///     is the window's `contentViewController`, instead of making the
+    ///     split the content itself.
+    ///   - now: the controller's date seam, which times its re-installs.
+    init(label: String, nested: Bool = false, now: @escaping @Sendable () -> Date = { Date() }) {
         _ = NSApplication.shared
         let suite = TestDefaultsSuite("MainToolbarControllerTests.\(label)")
         self.suite = suite
@@ -487,7 +642,8 @@ private final class ToolbarFixture {
             content: ToolbarFixture.makePane(width: size.width - sidebarWidth),
             autosaveName: nil)
         let titleView = NSTextField(labelWithString: "feature")
-        let controller = MainToolbarController(appState: state, titleView: titleView, requestRemoteStop: { _ in })
+        let controller = MainToolbarController(
+            appState: state, titleView: titleView, requestRemoteStop: { _ in }, now: now)
         split.onViewDidAppear = { [weak controller, weak split] window in
             guard let controller, let split else { return }
             controller.install(on: window, split: split)
@@ -527,19 +683,25 @@ private final class ToolbarFixture {
     }
 
     /// Installs the toolbar directly as well, so only `installsOnAppear`
-    /// depends on `viewDidAppear` arriving, then waits for the first apply.
+    /// depends on `viewDidAppear` arriving, then waits for the first apply
+    /// and for no further apply to be queued, so a test starts with nothing
+    /// pending that could stand in for the trigger it is about.
     func ready() async throws {
         controller.install(on: window, split: split)
         let controller = self.controller
         let window = self.window
-        let applied = try await waitUntil("the first apply") {
+        let applied = try await waitUntil("the first apply, with none queued after it") {
             controller.appliedSnapshot != nil && window.toolbar === controller.toolbar
+                && !controller.applyScheduled
         }
         try #require(applied)
     }
 
+    /// Uninstalls first, so the controller's watch on `window.toolbar` does
+    /// not put back the toolbar the lines after it take off.
     func tearDown() {
         split.onViewDidAppear = nil
+        controller.uninstall()
         window.orderOut(nil)
         window.toolbar = nil
         window.contentViewController = nil

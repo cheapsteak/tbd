@@ -294,6 +294,9 @@ private final class ChromeMount {
     let repo: Repo
     let worktrees: [Worktree]
     let host: OffscreenHost<AnyView>
+    /// The AppKit toolbar's controller once `appKitReady()` found it, kept so
+    /// `tearDown()` reaches it even when another toolbar is on the window.
+    private weak var readyController: MainToolbarController?
 
     /// - Parameter sceneBridgingOptions: for the root hosting view; `nil`
     ///   keeps `NSHostingView`'s default.
@@ -337,7 +340,10 @@ private final class ChromeMount {
 
     /// Takes the toolbar off the window before the host goes, so the window
     /// shell AppKit keeps holds none of ours whatever SwiftUI's teardown does.
+    /// The AppKit toolbar's controller is uninstalled first, so its watch on
+    /// `window.toolbar` does not put the toolbar back.
     func tearDown() {
+        (readyController ?? toolbarController)?.uninstall()
         host.window.toolbar = nil
         host.tearDown()
         suite.tearDown()
@@ -352,7 +358,9 @@ private final class ChromeMount {
             self.toolbarController?.appliedSnapshot != nil
         }
         try #require(installed)
-        return try #require(toolbarController)
+        let controller = try #require(toolbarController)
+        readyController = controller
+        return controller
     }
 
     /// Answers the selection's server fetch with one running server, and

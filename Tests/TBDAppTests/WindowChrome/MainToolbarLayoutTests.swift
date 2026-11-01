@@ -126,6 +126,10 @@ struct MainToolbarLayoutTests {
 
     @Test func noPRAndNoFilePanelItem() {
         #expect(ItemID.custom.count == 9)
+        let distinct = Set(ItemID.custom)
+        #expect(distinct.count == ItemID.custom.count)
+        let allowed: [NSToolbarItem.Identifier] = ItemID.custom + ItemID.standard
+        #expect(ItemID.allowed == allowed)
         for id in ItemID.custom {
             let raw = id.rawValue.lowercased()
             #expect(!raw.hasSuffix(".pr"))
@@ -145,6 +149,7 @@ struct MainToolbarLayoutTests {
         }
     }
 
+    /// Run through `MainToolbarLayout.perform`, the loop the toolbar runs.
     @Test func editsNeverTouchTheLeadingItems() {
         let protected: Set<NSToolbarItem.Identifier> = [
             ItemID.toggleSidebar, ItemID.back, ItemID.forward, .sidebarTrackingSeparator,
@@ -154,15 +159,13 @@ struct MainToolbarLayoutTests {
             for b in all {
                 var working = Self.ids(a)
                 let edits = MainToolbarLayout.edits(from: working, to: Self.ids(b))
-                for edit in edits {
-                    switch edit {
-                    case .remove(let index):
-                        let removed = working.remove(at: index)
-                        #expect(!protected.contains(removed))
-                    case .insert(let id, let index):
-                        working.insert(id, at: index)
-                    }
-                }
+                var removed: [NSToolbarItem.Identifier] = []
+                MainToolbarLayout.perform(
+                    edits,
+                    remove: { index in removed.append(working.remove(at: index)) },
+                    insert: { identifier, index in working.insert(identifier, at: index) })
+                let touched = removed.filter { protected.contains($0) }
+                #expect(touched.isEmpty)
             }
         }
     }
