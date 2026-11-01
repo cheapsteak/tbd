@@ -25,19 +25,28 @@ public extension Trait where Self == TimeLimitTrait {
     /// how long the test ought to take.** Swift Testing runs the whole
     /// population in one process with no concurrency cap, on a 3-thread CI
     /// runner, so a test's *reported* duration is mostly time suspended waiting
-    /// for a thread. Mined from green runs of one commit: fast pass 1a
-    /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported p50 84.0 s, p99
-    /// 107.6 s, max 111.7 s; fast pass 1b (the rest of the daemon target, ~3900
-    /// tests) p50 63.6 s, p99 101.2 s, max 107.4 s; fast pass 2 (everything
-    /// else, ~7200 tests) p90 88.2 s and max 101.7 s on one run and p90 72.3 s,
-    /// max 82.4 s on another. A limit of one minute therefore sits **below the
-    /// median** of both halves of a healthy pass 1 and below the **p90** of a
-    /// healthy pass 2 — it is a coin flip on green runs, and it fired that way
-    /// on three `TerminalLockedAccessTests` tests at the same instant, twice in
-    /// five days, with no hang anywhere. Five minutes clears the largest
-    /// measured maximum by ~2.7x while staying a small fraction of the step
-    /// budget. The full derivation — how 300 s composes with `ciSafeDeadline`
-    /// (120 s) and the arming waits (45 s), and the invariant the three satisfy
+    /// for a thread. Mined from CI runs: fast pass 1a
+    /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a slowest test of
+    /// 51.7–86.5 s, 86.5 s on a slow runner; fast pass 1b (the rest of the
+    /// daemon target, ~3900 tests) 22.5–38.5 s; fast pass 2 (everything else,
+    /// ~7200 tests), measured as one step, 67.2–94.5 s (p90 55–79 s, p99
+    /// 66–93 s), with 101.7 s the worst on record. Split into 2a and 2b, pass
+    /// 2's slowest tests reported 41.0 s and 37.5 s on one green run (p90
+    /// 34.1 s and 29.4 s). The largest green maxima on record are pass 1's:
+    /// 111.7 s in 1a and 107.4 s in 1b, on runs where every in-memory test
+    /// database ran the whole migration chain. `ciSafeDeadline`'s ~18 s margin
+    /// is applied to pass 2's tail, not pass 1's, because pass 1's reported
+    /// time includes the wait for a test body to start, which no bound inside
+    /// the body pays; this limit, which bounds a whole test, is sized against
+    /// pass 1's records too. A limit of one minute sits inside pass 1a's range
+    /// of slowest tests and **below the p99** of every healthy one-step pass 2
+    /// measured — it is a coin flip on green runs, and it fired that way on
+    /// three `TerminalLockedAccessTests` tests at the same instant, twice in
+    /// five days, with no hang anywhere. Five minutes (300 s) clears the
+    /// largest maximum on record, 111.7 s, by about 2.7x while staying a small
+    /// fraction of the step budget.
+    /// The full derivation — how 300 s composes with `ciSafeDeadline` (120 s)
+    /// and the arming waits (45 s), and the invariant the three satisfy
     /// together — is on ``clockDriven`` below; re-derive all of them together
     /// when the population moves materially.
     ///

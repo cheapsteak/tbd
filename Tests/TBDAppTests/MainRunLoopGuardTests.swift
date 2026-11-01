@@ -7,10 +7,11 @@ import TestSupport
 ///
 /// Swift runs the test bundle's async `main` by calling `CFRunLoopRun()` and
 /// then `exit(0)`, so a stop of the main run loop at its outermost level ended
-/// the whole run with status 0 and no summary: the `fast-pass-app ran no tests`
-/// deaths on CI. Without the guard this test is that death, every run: the
-/// stop lands while the process has no other way to survive it, and the pass
-/// reports no tests. With it, the run loop is resumed and the count moves.
+/// the whole run with status 0 and no summary: the deaths CI names
+/// `fast-pass-app-a ran no tests` or `fast-pass-app-b ran no tests`. Without
+/// the guard this test is that death, every run: the stop lands while the
+/// process has no other way to survive it, and the pass reports no tests.
+/// With it, the run loop is resumed and the count moves.
 @Suite("Test host main run loop guard")
 struct MainRunLoopGuardTests {
     @Test func stoppingTheMainRunLoopDoesNotEndTheRun() async {
