@@ -7,9 +7,10 @@ import TBDShared
 /// The worktree's panels in `PanelSurfaceStore` (side panel notes spec,
 /// "Daemon"): the `worktree_panel` rows, the list every surface of the
 /// worktree reads, the surfaces a change to the list rewrites, and how
-/// archive, promote, note deletion and a deleted worktree row reclaim them.
-/// The operations that change the list from a tab are covered by
-/// `PanelCoordinatorTests`.
+/// archive, promote, note deletion and a deleted worktree row reclaim them,
+/// and `applyReducing`'s refusal of a note panel for a note not in the
+/// worktree. The operations that change the list from a tab are otherwise
+/// covered by `PanelCoordinatorTests`.
 @Suite("WorktreePanelStoreTests")
 struct WorktreePanelStoreTests {
 
@@ -385,6 +386,62 @@ struct WorktreePanelStoreTests {
 
         #expect(try await db.panelSurface.worktreePanels(worktreeID: ownerID) == [owned])
         #expect(try await db.panelSurface.worktreePanels(worktreeID: otherID).isEmpty)
+    }
+
+    // MARK: - Opening a note from a tab
+
+    /// The daemon-wide revision counter's value.
+    private func revisionCounter(_ db: TBDDatabase) async throws -> Int64? {
+        try await db.writerForTests.read { dbc in
+            try Int64.fetchOne(dbc, sql: "SELECT value FROM panel_revision_counter WHERE id = 1")
+        }
+    }
+
+    /// `applyReducing` checks, inside its transaction, that a note panel the
+    /// operation adds shows a note of the worktree. A note with no row, as
+    /// after a `note.delete` that committed between the caller's own check
+    /// and the operation, and another worktree's note are both refused, and
+    /// nothing is written: no panel, no change to the surface, no receipt
+    /// and no revision taken. The worktree's own note still opens.
+    @Test func applyRefusesANotePanelForANoteNotInTheWorktree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (_, wtID) = try await makeWorktree(db)
+        let (_, otherID) = try await makeWorktree(db, name: "other")
+        let ownNote = try await db.notes.create(worktreeID: wtID)
+        let foreignNote = try await db.notes.create(worktreeID: otherID)
+        let tab = try await seedTab(db, worktreeID: wtID, position: 0)
+        let before = try #require(try await db.panelSurface.surface(tabID: tab.id))
+        let counterBefore = try await revisionCounter(db)
+
+        for noteID in [UUID(), foreignNote.id] {
+            let operationID = UUID()
+            await #expect(throws: PanelSurfaceStoreError.noteNotInWorktree(noteID: noteID, worktreeID: wtID)) {
+                _ = try await db.panelSurface.applyReducing(
+                    operationID: operationID, tabID: tab.id, worktreeID: wtID, now: Date()
+                ) { current in
+                    try PanelSurfaceReducer.apply(
+                        .open(content: .note(noteID: noteID), newPanel: false), to: current)
+                }
+            }
+            #expect(try await db.panelSurface.receipt(operationID: operationID) == nil)
+        }
+
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == before)
+        #expect(try await panelRowCount(db, worktreeID: wtID) == 0)
+        #expect(try await panelRowCount(db, worktreeID: otherID) == 0)
+        #expect(try await revisionCounter(db) == counterBefore)
+
+        let outcome = try await db.panelSurface.applyReducing(
+            operationID: UUID(), tabID: tab.id, worktreeID: wtID, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.open(content: .note(noteID: ownNote.id), newPanel: false), to: current)
+        }
+        guard case .applied(let applied, _)? = outcome else {
+            Issue.record("expected .applied, got \(String(describing: outcome))")
+            return
+        }
+        #expect(applied.tab.worktreePanel(showing: .note(noteID: ownNote.id)) != nil)
+        #expect(try await panelRowCount(db, worktreeID: wtID) == 1)
     }
 
     // MARK: - Note deletion

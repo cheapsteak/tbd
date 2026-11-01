@@ -94,9 +94,12 @@ public actor PanelCoordinator {
             return try reply(to: prior, for: envelope)
         }
 
-        // 2. Resource existence for open/navigate destinations. It reads other
-        // tables, so it stays outside the apply transaction; a resource
-        // vanishing right after this is a separate, inherent race.
+        // 2. Resource existence for open/navigate destinations, a cheap check
+        // outside the apply transaction. A note can still be deleted right
+        // after it, so `applyReducing` checks a note panel the operation adds
+        // again inside its transaction, and that refusal maps to the same
+        // `invalidResource`. A terminal vanishing after this is a separate,
+        // inherent race.
         try await validateResourceExists(in: envelope.operation, worktreeID: envelope.worktreeID)
 
         // 3. Transactional load → reduce → persist. Loading inside the store's
@@ -123,9 +126,14 @@ public actor PanelCoordinator {
             }
         }
 
-        let outcome = try await db.panelSurface.applyReducing(
-            operationID: envelope.operationID, tabID: envelope.tabID,
-            worktreeID: envelope.worktreeID, now: now(), reduce: reduce)
+        let outcome: PanelSurfaceStore.ApplyOutcome?
+        do {
+            outcome = try await db.panelSurface.applyReducing(
+                operationID: envelope.operationID, tabID: envelope.tabID,
+                worktreeID: envelope.worktreeID, now: now(), reduce: reduce)
+        } catch PanelSurfaceStoreError.noteNotInWorktree(let noteID, _) {
+            throw PanelCoordinatorError.invalidResource("note \(noteID) not in worktree")
+        }
 
         guard let outcome else {
             // No readable surface row for this tab under the claimed worktree.

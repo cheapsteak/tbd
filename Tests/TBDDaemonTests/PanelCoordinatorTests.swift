@@ -223,6 +223,49 @@ struct PanelCoordinatorTests {
         #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
     }
 
+    /// A note deleted after the coordinator's own check and before the apply
+    /// transaction: `note.delete` found no panel to remove, so the
+    /// transaction's own check must refuse, or every tab of the worktree
+    /// would show a panel for the deleted note. The store's refusal reaches
+    /// the caller as the same `invalidResource` the coordinator's check
+    /// gives. `apply` reads `now` once, between the two checks, which is
+    /// where this test deletes the row.
+    @Test func noteDeletedAfterTheCheckIsInvalidResource() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let recorder = BroadcastRecorder()
+        let noteKey = note.id.uuidString
+        let coordinator = PanelCoordinator(
+            db: db, broadcast: { recorder.record($0) },
+            now: {
+                // `now` is synchronous, so the delete is a synchronous write;
+                // nothing else holds the database at this point.
+                _ = try? db.writerForTests.write { dbc in
+                    try dbc.execute(sql: "DELETE FROM note WHERE id = ?", arguments: [noteKey])
+                }
+                return Date()
+            })
+
+        let openNote = envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: note.id), newPanel: false))
+        let error = await #expect(throws: PanelCoordinatorError.self) {
+            _ = try await coordinator.apply(openNote)
+        }
+
+        guard case .invalidResource(let detail)? = error else {
+            Issue.record("expected invalidResource, got \(String(describing: error))")
+            return
+        }
+        #expect(detail.contains(note.id.uuidString))
+        #expect(try await db.notes.get(id: note.id) == nil, "the note was deleted between the checks")
+        #expect(recorder.count == 0)
+        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wtID).isEmpty)
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
+    }
+
     @Test func openOfOwnNoteApplies() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)

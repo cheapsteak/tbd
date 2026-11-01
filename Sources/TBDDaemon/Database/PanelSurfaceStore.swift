@@ -215,6 +215,13 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
     /// is gone, so no write can take a revision; the write is refused rather
     /// than given one that could fall below a stored revision.
     case revisionCounterMissing
+    /// An operation added a worktree panel showing a note that has no `note`
+    /// row in the operation's worktree, because the note was deleted, or
+    /// never existed, or belongs to another worktree. Checked inside the
+    /// operation's transaction, so a `note.delete` that commits between a
+    /// caller's own check and the operation cannot leave every tab of the
+    /// worktree showing a panel for a missing note; nothing is written.
+    case noteNotInWorktree(noteID: UUID, worktreeID: UUID)
 
     public var errorDescription: String? {
         switch self {
@@ -229,6 +236,9 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
             return "refusing to store tab \(tabID.uuidString)'s panel surface: it breaks the panel model (\(reason))"
         case .revisionCounterMissing:
             return "refusing to store a panel surface: the panel_revision_counter row is missing"
+        case .noteNotInWorktree(let noteID, let worktreeID):
+            return "refusing to open note \(noteID.uuidString) as a worktree panel: "
+                + "no such note belongs to worktree \(worktreeID.uuidString)"
         }
     }
 }
@@ -582,6 +592,12 @@ public struct PanelSurfaceStore: Sendable {
     /// other readable surface of the worktree with it
     /// (`rewriteSurfaces`), and the outcome carries them in `siblings`. A
     /// sibling row that cannot be read is left as it is.
+    ///
+    /// Throws `noteNotInWorktree`, writing nothing, when the reduced list
+    /// adds a panel showing a note with no `note` row in `worktreeID`. The
+    /// check reads the note inside this transaction, so a `note.delete`
+    /// committing after the caller's own check, which finds no panel to
+    /// remove, cannot be followed by a write that shows the deleted note.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
         reduce: @Sendable (WorkspaceTabSurface) throws -> WorkspaceTabSurface
@@ -602,6 +618,7 @@ public struct PanelSurfaceStore: Sendable {
             }
 
             var next = try reduce(current)
+            try Self.requireNotesOfAddedPanels(in: next, beyond: current, worktreeID: worktreeID, db: db)
             next.revision = try Self.nextRevision(db: db)
 
             try Self.writeSurface(
@@ -623,6 +640,25 @@ public struct PanelSurfaceStore: Sendable {
             try receipt.save(db)
             try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
             return .applied(result, siblings: siblings)
+        }
+    }
+
+    /// Throws `noteNotInWorktree` for the first worktree panel of `next`
+    /// that `current` does not hold and that shows a note with no `note` row
+    /// in `worktreeID`, against an open transaction. A panel already in
+    /// `current`'s list is not checked: the operation did not add it.
+    private static func requireNotesOfAddedPanels(
+        in next: WorkspaceTabSurface, beyond current: WorkspaceTabSurface, worktreeID: UUID,
+        db: GRDB.Database
+    ) throws {
+        let heldIDs = Set(current.worktreePanels.map(\.id))
+        for panel in next.worktreePanels where !heldIDs.contains(panel.id) {
+            guard case .note(let noteID) = panel.content else { continue }
+            let owner = try String.fetchOne(
+                db, sql: "SELECT worktreeID FROM note WHERE id = ?", arguments: [noteID.uuidString])
+            guard owner.flatMap(UUID.init(uuidString:)) == worktreeID else {
+                throw PanelSurfaceStoreError.noteNotInWorktree(noteID: noteID, worktreeID: worktreeID)
+            }
         }
     }
 
