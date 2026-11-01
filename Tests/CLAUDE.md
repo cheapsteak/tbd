@@ -469,11 +469,9 @@ max 111.7 s, and fast pass 1b (~3900 tests) p50 63.6 s, p99 101.2 s and max
 runnable tests. In pass 1 it also includes the time a test waits for its body
 to start at all, which no bound inside the body pays, and the record fits:
 across five CI attempts of that commit no bounded wait timed out in pass 1a or
-1b. In pass 2 a healthy wait itself comes close to the bound: on a green run a
-test whose only wait succeeded (`ThemeStoreTests.watcherReloadsOnExternalAdd`,
-which needs the main actor) reported 87.6 s, within 2.4 s of a 90 s bound, and
-passing tests on a run of `main` reached 97.2 s. So pass 2 is the pass
-`saturatedPass` is sized against (the derivation is at `ciSafeDeadline`). A
+1b. Pass 2's green tail, by contrast, crosses a 90 s bound outright — 101.7 s
+above, and 97.2 s among the passing tests of a run of `main` — so pass 2 is the
+pass `saturatedPass` is sized against (the derivation is at `ciSafeDeadline`). A
 2–30 s hand-rolled wait therefore sits well below the healthy latency of the
 very hop it is guarding, and a one-minute suite limit sits below the median of
 both halves of pass 1 and below pass 2's p90. Both fire on healthy runs, and

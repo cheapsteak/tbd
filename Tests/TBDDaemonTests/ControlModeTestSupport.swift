@@ -52,11 +52,9 @@ import Testing
 /// reported duration there includes the time a test waits for its body to
 /// start, which a wait inside the body never pays, so those figures bound a
 /// wait only loosely. The record agrees: across five CI attempts of that
-/// commit no bounded wait timed out in pass 1a or 1b. In pass 2 a healthy wait
-/// itself comes close to the bound: on a green run a test whose only wait
-/// succeeded (`ThemeStoreTests.watcherReloadsOnExternalAdd`, which needs the
-/// main actor) reported 87.6 s, within 2.4 s of a 90 s bound, and passing
-/// tests on a run of `main` reached 97.2 s.
+/// commit no bounded wait timed out in pass 1a or 1b, while pass 2's green
+/// tail crosses a 90 s bound outright — 101.7 s above, and 97.2 s among the
+/// passing tests of a run of `main`.
 ///
 /// 120 s clears pass 2's green maximum by ~18 s, and the deadline still
 /// elapses only on a genuine hang.
