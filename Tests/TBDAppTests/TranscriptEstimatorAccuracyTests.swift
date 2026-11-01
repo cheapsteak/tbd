@@ -279,6 +279,13 @@ struct TranscriptEstimatorAccuracyTests {
         // same way whichever geometry measures it, so each paragraph is rendered
         // once here and measured at all four geometries below — by one measurer,
         // the way the Coordinator keeps one for every row it sizes.
+        //
+        // That "same way" is a known gap, and this test has always had it: every
+        // paragraph, user rows included, is rendered without paste recognition,
+        // where production's `composedBlocks` renders a user prompt with
+        // `recognizePastes: true`. The corpus holds no paste tags, so for these
+        // paragraphs the two renders should match, but a change to paste
+        // unwrapping would not show here.
         var renderedCorpus: [[MessageBlock]] = []
         for text in Self.paragraphCorpus {
             renderedCorpus.append(MarkdownAttributedRenderer.renderBlocks(
