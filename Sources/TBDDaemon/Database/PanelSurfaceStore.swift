@@ -648,8 +648,11 @@ public struct PanelSurfaceStore: Sendable {
     /// or for a new terminal, never opens a side region the user did not
     /// ask for; the worktree's panels are one toggle away. An import with
     /// panels of its own keeps the candidate's collapse state, and an update
-    /// never changes it. Worktree creation writes the main tab's surface
-    /// open instead, before any sync (`seedSurface`).
+    /// never changes it. The rule covers imports only: worktree creation
+    /// writes its main tab's surface open in the transaction that opens the
+    /// starter note (`openWorktreePanel(seeding:)`), and a tab the app synced
+    /// before a panel opened keeps its open region, the open's rewrite
+    /// fronting the panel when nothing else was in front.
     ///
     /// Listing a tab clears its row's `awaitingListing` marker, whichever
     /// case applies. Clearing it alone changes nothing the app sees, so it

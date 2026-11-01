@@ -257,7 +257,7 @@ struct WorktreePanelStoreTests {
     }
 
     /// An import with panels of its own keeps the collapse the app gave it,
-    /// whether or not the worktree has panels.
+    /// even in a worktree with panels.
     @Test func importWithOwnPanelsKeepsItsCollapse() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (_, wtID) = try await makeWorktree(db)
@@ -306,24 +306,32 @@ struct WorktreePanelStoreTests {
         }
     }
 
-    /// `seedSurface` writes a tab's first surface open, with the panel on
-    /// the given content in front, marked as awaiting its listing; it never
-    /// overwrites a row, and writes nothing when no panel shows the content.
-    @Test func seedSurfaceWritesAnOpenSurfaceOnlyForATabWithoutOne() async throws {
+    /// `openWorktreePanel(seeding:)` writes the seed's tab a surface, open,
+    /// with the new panel in front and marked as awaiting its listing, in the
+    /// open's transaction. The siblings the open rewrites keep their collapse
+    /// state, and a tab that already has a row is never overwritten.
+    @Test func openWorktreePanelSeedsAnOpenSurfaceOnlyForATabWithoutOne() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (_, wtID) = try await makeWorktree(db)
         let note = try await db.notes.create(worktreeID: wtID)
         _ = try await db.panelSurface.openWorktreePanel(worktreeID: wtID, content: .changes, now: Date())
-        _ = try await db.panelSurface.openWorktreePanel(
-            worktreeID: wtID, content: .note(noteID: note.id), now: Date())
+        let openSibling = try await seedEmptyTab(db, worktreeID: wtID, position: 0)
+        let collapsedSibling = try await seedTab(db, worktreeID: wtID, collapsed: true, position: 1)
+        let tabID = UUID()
+        let seed = SurfaceSeed(tabID: tabID, primary: .terminal(terminalID: tabID), position: 2)
+
+        let written = try await db.panelSurface.openWorktreePanel(
+            worktreeID: wtID, content: .note(noteID: note.id), seeding: seed, now: Date())
+
         let panels = try await db.panelSurface.worktreePanels(worktreeID: wtID)
         let notePanel = try #require(panels.last)
-        let tabID = UUID()
-
-        let seeded = try #require(try await db.panelSurface.seedSurface(
-            tabID: tabID, worktreeID: wtID, primary: .terminal(terminalID: tabID), position: 2,
-            showing: .note(noteID: note.id), now: Date()))
-
+        #expect(notePanel.content == .note(noteID: note.id))
+        try #require(written.map(\.id) == [openSibling.id, collapsedSibling.id, tabID])
+        #expect(written[0].side.collapsed == false)
+        #expect(written[1].side.collapsed == true, "a sibling keeps its collapse")
+        #expect(written[1].side.activePanelID == collapsedSibling.side.activePanelID)
+        let seeded = written[2]
+        #expect(seeded.primary == .terminal(terminalID: tabID))
         #expect(seeded.side.panels.isEmpty)
         #expect(seeded.side.activePanelID == notePanel.id)
         #expect(seeded.side.collapsed == false)
@@ -332,19 +340,29 @@ struct WorktreePanelStoreTests {
         #expect(seeded.worktreePanels == panels)
         #expect(try await db.panelSurface.surface(tabID: tabID) == seeded)
         #expect(try await awaitingListing(db, tabID: tabID) == true)
+        let positions = try await db.writerForTests.read { dbc in
+            try Int.fetchAll(
+                dbc, sql: "SELECT position FROM workspace_tab_surface WHERE worktreeID = ? ORDER BY position",
+                arguments: [wtID.uuidString])
+        }
+        #expect(positions == [0, 1, 2])
 
-        let again = try await db.panelSurface.seedSurface(
-            tabID: tabID, worktreeID: wtID, primary: .terminal(terminalID: tabID), position: 0,
-            showing: .changes, now: Date())
-        #expect(again == nil, "an existing row is never overwritten")
+        // The same open again changes nothing, and seeds nothing over the row.
+        let again = try await db.panelSurface.openWorktreePanel(
+            worktreeID: wtID, content: .note(noteID: note.id), seeding: seed, now: Date())
+        #expect(again.isEmpty)
         #expect(try await db.panelSurface.surface(tabID: tabID) == seeded)
 
-        let otherTabID = UUID()
-        let noPanel = try await db.panelSurface.seedSurface(
-            tabID: otherTabID, worktreeID: wtID, primary: .terminal(terminalID: otherTabID), position: 0,
-            showing: .note(noteID: UUID()), now: Date())
-        #expect(noPanel == nil)
-        #expect(try await db.panelSurface.surface(tabID: otherTabID) == nil)
+        // A new panel seeded on a tab that has a row rewrites it with the
+        // others, and leaves it collapsed.
+        let other = try await db.notes.create(worktreeID: wtID)
+        let onExisting = SurfaceSeed(
+            tabID: collapsedSibling.id, primary: collapsedSibling.primary, position: 1)
+        let rewritten = try await db.panelSurface.openWorktreePanel(
+            worktreeID: wtID, content: .note(noteID: other.id), seeding: onExisting, now: Date())
+        #expect(rewritten.map(\.id) == [openSibling.id, collapsedSibling.id, tabID])
+        let stillCollapsed = try #require(try await db.panelSurface.surface(tabID: collapsedSibling.id))
+        #expect(stillCollapsed.side.collapsed == true)
     }
 
     // MARK: - Writing

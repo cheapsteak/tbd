@@ -144,6 +144,47 @@ struct NoteTabOnCreateTests {
         #expect(second.side.collapsed == true)
     }
 
+    /// The initial note panel opens in a surface only for a terminal of this
+    /// worktree: an active tab ID that names no terminal, or another
+    /// worktree's terminal, still gets the panel opened, and no surface is
+    /// seeded. The same terminal, active in its own worktree, is the control.
+    @Test func initialNotePanelSeedsOnlyATerminalOfThisWorktree() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await db.repos.create(
+            path: "/tmp/ntc-repo-\(UUID())", displayName: "r", defaultBranch: "main")
+        let unknownActive = try await db.worktrees.create(
+            repoID: repo.id, name: "unknown", branch: "b-unknown",
+            path: "/tmp/ntc-unknown-\(UUID())", tmuxServer: "srv")
+        let foreignActive = try await db.worktrees.create(
+            repoID: repo.id, name: "foreign", branch: "b-foreign",
+            path: "/tmp/ntc-foreign-\(UUID())", tmuxServer: "srv")
+        let owner = try await db.worktrees.create(
+            repoID: repo.id, name: "owner", branch: "b-owner",
+            path: "/tmp/ntc-owner-\(UUID())", tmuxServer: "srv")
+        let ownersTerminal = try await db.terminals.create(
+            worktreeID: owner.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        try await db.worktrees.setActiveTabID(worktreeID: unknownActive.id, tabID: UUID())
+        try await db.worktrees.setActiveTabID(worktreeID: foreignActive.id, tabID: ownersTerminal.id)
+        try await db.worktrees.setActiveTabID(worktreeID: owner.id, tabID: ownersTerminal.id)
+
+        for worktreeID in [unknownActive.id, foreignActive.id] {
+            await lifecycle.createInitialNotePanel(worktreeID: worktreeID)
+            #expect(try await db.panelSurface.worktreePanels(worktreeID: worktreeID).count == 1,
+                    "the panel opens")
+            #expect(try await db.panelSurface.surfaces(worktreeID: worktreeID).isEmpty,
+                    "no surface is seeded")
+        }
+        #expect(try await db.panelSurface.surface(tabID: ownersTerminal.id) == nil)
+
+        await lifecycle.createInitialNotePanel(worktreeID: owner.id)
+        let seeded = try #require(try await db.panelSurface.surface(tabID: ownersTerminal.id))
+        #expect(seeded.worktreeID == owner.id)
+        #expect(seeded.side.collapsed == false)
+    }
+
     /// With the setting off, creation writes no surface and broadcasts none.
     @Test func creationWithNotesOffSeedsNothing() async throws {
         let (_, cleanup) = isolateTBDHome()

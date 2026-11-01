@@ -5,6 +5,23 @@ import TBDShared
 
 private let worktreePanelLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
+/// A tab whose surface `PanelSurfaceStore.openWorktreePanel(seeding:)`
+/// writes open on the panel it opens, when the tab has no surface yet:
+/// worktree creation's main tab, so the starter note shows beside the
+/// primary terminal while a tab a sync imports later starts collapsed.
+public struct SurfaceSeed: Sendable, Equatable {
+    public let tabID: WorkspaceTabID
+    public let primary: PrimaryContent
+    /// The tab's index in the tab bar, stored in the `position` column.
+    public let position: Int
+
+    public init(tabID: WorkspaceTabID, primary: PrimaryContent, position: Int) {
+        self.tabID = tabID
+        self.primary = primary
+        self.position = position
+    }
+}
+
 /// The worktree's panels (side panel notes spec, "The model" and "Daemon"):
 /// one ordered list per worktree in `worktree_panel`, which every workspace
 /// tab surface of the worktree carries. A change to the list rewrites every
@@ -47,57 +64,65 @@ extension PanelSurfaceStore {
     /// Appends a worktree panel showing `content` unless one already does,
     /// and rewrites every readable surface of the worktree with the new list,
     /// in one transaction. Returns the surfaces it rewrote, in position
-    /// order; none when the worktree already had the panel, or has no
-    /// surfaces yet, in which case a tab sync joins the list in when it
-    /// imports them.
+    /// order, then the seeded surface when it wrote one. It rewrites none
+    /// when the worktree already had the panel, or has no surfaces yet, in
+    /// which case a tab sync joins the list in when it imports them.
     ///
     /// It selects nothing: each surface keeps the panel in front and its
     /// collapse state, except that one with nothing in front brings the
     /// new list's first panel forward (`PanelSurfaceReducer.adopting`).
-    /// Worktree creation opens the initial note this way.
+    ///
+    /// With `seed`, the same transaction then writes that tab's surface open,
+    /// with this panel in front, when the tab has no row yet (see
+    /// `SurfaceSeed`). Worktree creation opens the initial note this way, for
+    /// the main tab, so no tab sync can import the tab collapsed between the
+    /// open and the seed.
     public func openWorktreePanel(
-        worktreeID: UUID, content: WorktreePanelContent, now: Date
+        worktreeID: UUID, content: WorktreePanelContent, seeding seed: SurfaceSeed? = nil, now: Date
     ) async throws -> [WorkspaceTabSurface] {
         try await writer.write { db -> [WorkspaceTabSurface] in
             var panels = try Self.storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
-            guard !panels.contains(where: { $0.content == content }) else { return [] }
-            panels.append(WorktreePanel(id: UUID(), content: content))
-            try Self.writeWorktreePanels(panels, worktreeID: worktreeID, db: db)
-            return try Self.rewriteSurfaces(
-                worktreeID: worktreeID, worktreePanels: panels, except: nil, db: db, now: now)
+            var written: [WorkspaceTabSurface] = []
+            if !panels.contains(where: { $0.content == content }) {
+                panels.append(WorktreePanel(id: UUID(), content: content))
+                try Self.writeWorktreePanels(panels, worktreeID: worktreeID, db: db)
+                written = try Self.rewriteSurfaces(
+                    worktreeID: worktreeID, worktreePanels: panels, except: nil, db: db, now: now)
+            }
+            if let seed, let seeded = try Self.seedSurface(
+                seed, worktreeID: worktreeID, showing: content, now: now, in: db) {
+                written.append(seeded)
+            }
+            return written
         }
     }
 
-    /// Writes a surface for a tab that has none yet, open, with the worktree
-    /// panel showing `content` in front, and returns it. Writes nothing and
-    /// returns nil when the tab already has a row, readable or not, or when
-    /// no worktree panel shows `content`. Worktree creation runs it for the
-    /// main tab after `openWorktreePanel`, so the starter note shows beside
-    /// the primary terminal, while a tab a sync imports later starts
-    /// collapsed (`syncTabs`).
+    /// Writes `seed`'s tab a surface, open, with the worktree panel showing
+    /// `content` in front, inside a caller's write transaction, and returns
+    /// it. Writes nothing and returns nil when the tab already has a row,
+    /// readable or not, or when no worktree panel shows `content`. Only
+    /// `openWorktreePanel(seeding:)` runs it, right after it opens the panel.
     ///
     /// The surface has no panels of its own, no label, the default width
-    /// and the revision counter's next value, and is stored at `position`.
-    /// Its row is marked `awaitingListing`, as a promote's moved rows are:
-    /// the app lists the tab only once it has loaded it, and a sync built
-    /// before then must not prune the row. The first sync that lists the tab
-    /// finds a readable row and changes only its position, label and
-    /// primary, never its collapse state.
-    public func seedSurface(
-        tabID: UUID, worktreeID: UUID, primary: PrimaryContent, position: Int,
-        showing content: WorktreePanelContent, now: Date
-    ) async throws -> WorkspaceTabSurface? {
-        try await writer.write { db -> WorkspaceTabSurface? in
-            guard try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabID.uuidString) == nil else { return nil }
-            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
-            guard let front = worktreePanels.first(where: { $0.content == content }) else { return nil }
-            let surface = WorkspaceTabSurface(
-                id: tabID, worktreeID: worktreeID, primary: primary,
-                side: SideRegion(activePanelID: front.id, collapsed: false),
-                worktreePanels: worktreePanels, revision: try Self.nextRevision(db: db))
-            try Self.writeSurface(surface, position: position, awaitingListing: true, db: db, now: now)
-            return surface
-        }
+    /// and the revision counter's next value, and is stored at the seed's
+    /// position. Its row is marked `awaitingListing`, as a promote's moved
+    /// rows are: the app lists the tab only once it has loaded it, and a
+    /// sync built before then must not prune the row. The first sync that
+    /// lists the tab finds a readable row and changes only its position,
+    /// label and primary, never its collapse state.
+    static func seedSurface(
+        _ seed: SurfaceSeed, worktreeID: UUID, showing content: WorktreePanelContent, now: Date,
+        in db: GRDB.Database
+    ) throws -> WorkspaceTabSurface? {
+        guard try WorkspaceTabSurfaceRecord.fetchOne(db, key: seed.tabID.uuidString) == nil else { return nil }
+        let worktreePanels = try storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
+        guard let front = worktreePanels.first(where: { $0.content == content }) else { return nil }
+        let surface = WorkspaceTabSurface(
+            id: seed.tabID, worktreeID: worktreeID, primary: seed.primary,
+            side: SideRegion(activePanelID: front.id, collapsed: false),
+            worktreePanels: worktreePanels, revision: try nextRevision(db: db))
+        try writeSurface(surface, position: seed.position, awaitingListing: true, db: db, now: now)
+        return surface
     }
 
     /// Removes the worktree panel showing `content`, inside a caller's write

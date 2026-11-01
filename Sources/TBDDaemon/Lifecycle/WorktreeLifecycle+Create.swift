@@ -824,9 +824,12 @@ extension WorktreeLifecycle {
     /// Opening the panel selects nothing. So that the starter note shows,
     /// the worktree's active tab, the primary terminal, gets its surface
     /// written open with the note in front when it has none yet
-    /// (`seedActiveTabSurface`); every other tab a later sync imports starts
-    /// collapsed. The seeded surface and any surface the open rewrote are
-    /// broadcast together.
+    /// (`activeTerminalTabSeed`), in the transaction that opens the panel
+    /// (`PanelSurfaceStore.openWorktreePanel(seeding:)`). A tab a sync
+    /// imports after the panel opened comes out collapsed; a tab the app
+    /// synced before then keeps its open region, and the open's rewrite
+    /// fronts the note there when nothing else was in front. The seeded
+    /// surface and any surface the open rewrote are broadcast together.
     ///
     /// Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
@@ -841,15 +844,15 @@ extension WorktreeLifecycle {
                     content: seed
                 )
             }
-            var changedSurfaces = try await db.panelSurface.openWorktreePanel(
-                worktreeID: worktreeID, content: .note(noteID: note.id), now: now())
+            let mainTab: SurfaceSeed?
             do {
-                if let seeded = try await seedActiveTabSurface(worktreeID: worktreeID, noteID: note.id) {
-                    changedSurfaces.append(seeded)
-                }
+                mainTab = try await activeTerminalTabSeed(worktreeID: worktreeID)
             } catch {
-                logger.warning("failed to open the initial note panel in the main tab of \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                mainTab = nil
+                logger.warning("failed to find the main tab of \(worktreeID, privacy: .public) to open the initial note panel in: \(error.localizedDescription, privacy: .public)")
             }
+            let changedSurfaces = try await db.panelSurface.openWorktreePanel(
+                worktreeID: worktreeID, content: .note(noteID: note.id), seeding: mainTab, now: now())
             subscriptions?.broadcastWorktreePanelsChanged(
                 worktreeID: worktreeID, surfaces: changedSurfaces)
         } catch {
@@ -857,23 +860,20 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Writes the surface of the worktree's active tab open, with the note's
-    /// worktree panel in front (`PanelSurfaceStore.seedSurface`), and returns
-    /// it. Nil, writing nothing, when the active tab is not a terminal of
-    /// this worktree (a terminal tab's ID is its terminal's), or already has
-    /// a surface. The surface sits at the tab's index in the tab order, 0
-    /// when the order does not name it.
-    private func seedActiveTabSurface(worktreeID: UUID, noteID: UUID) async throws -> WorkspaceTabSurface? {
+    /// The worktree's active tab as the tab whose surface the initial note
+    /// panel opens in, or nil when the active tab is not a terminal of this
+    /// worktree (a terminal tab's ID is its terminal's). It sits at the tab's
+    /// index in the tab order, 0 when the order does not name it.
+    private func activeTerminalTabSeed(worktreeID: UUID) async throws -> SurfaceSeed? {
         guard let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID),
               let terminal = try await db.terminals.get(id: activeTabID),
               terminal.worktreeID == worktreeID else {
             return nil
         }
         let tabOrder = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
-        return try await db.panelSurface.seedSurface(
-            tabID: activeTabID, worktreeID: worktreeID, primary: .terminal(terminalID: terminal.id),
-            position: tabOrder.firstIndex(of: activeTabID) ?? 0,
-            showing: .note(noteID: noteID), now: now())
+        return SurfaceSeed(
+            tabID: activeTabID, primary: .terminal(terminalID: terminal.id),
+            position: tabOrder.firstIndex(of: activeTabID) ?? 0)
     }
 
     /// Attempts to create a git worktree, trying origin/<default> then falling back
