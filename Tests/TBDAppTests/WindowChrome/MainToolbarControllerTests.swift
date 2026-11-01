@@ -1056,16 +1056,18 @@ struct MainToolbarControllerTests {
     // MARK: - Re-install
 
     /// The replacement alone brings the toolbar back, through KVO on the
-    /// window's `toolbar`: `ready()` leaves no apply queued and nothing here
-    /// schedules one, so no other apply can stand in for the watch.
+    /// window's `toolbar`: it is made in the turn that found no apply queued,
+    /// and nothing here schedules one, so no other apply can stand in for the
+    /// watch.
     @Test func reinstallsAReplacedToolbar() async throws {
         let fixture = ToolbarFixture(label: "reinstallsAReplacedToolbar")
         defer { fixture.tearDown() }
         try await fixture.ready()
-        try #require(fixture.controller.applyScheduled == false)
 
-        fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.replacement")
-        try #require(fixture.window.toolbar !== fixture.controller.toolbar)
+        try await fixture.withNoApplyQueued("before the replacement") {
+            fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.replacement")
+            try #require(fixture.window.toolbar !== fixture.controller.toolbar)
+        }
 
         let back = try await waitForMainActorCondition("our toolbar to come back") {
             fixture.window.toolbar === fixture.controller.toolbar
@@ -1088,29 +1090,29 @@ struct MainToolbarControllerTests {
         let controller = fixture.controller
         let window = fixture.window
         try #require(window.isVisible)
-        try #require(controller.applyScheduled == false)
         try #require(controller.recentReplacements.isEmpty)
 
         let cap = MainToolbarController.maxReplacementsInWindow
         for attempt in 1...cap {
-            window.toolbar = nil
-            // KVO reports synchronously, so the clear is already counted.
-            #expect(controller.recentReplacements.count == attempt)
+            // Made with no apply queued, so the clear alone brings ours back.
+            try await fixture.withNoApplyQueued("before clear \(attempt) of \(cap)") {
+                window.toolbar = nil
+                // KVO reports synchronously, so the clear is already counted.
+                #expect(controller.recentReplacements.count == attempt)
+            }
             let back = try await waitForMainActorCondition("clear \(attempt) of \(cap) to be put back") {
                 window.toolbar === controller.toolbar
             }
             try #require(back)
         }
-        let quiet = try await waitForMainActorCondition("no apply queued before the clear past the cap") {
-            !controller.applyScheduled
-        }
-        try #require(quiet)
-        try #require(controller.isInReinstallCooldown == false)
 
-        window.toolbar = nil
-        #expect(controller.isInReinstallCooldown)
-        #expect(controller.applyScheduled == false)
-        #expect(window.toolbar == nil)
+        try await fixture.withNoApplyQueued("before the clear past the cap") {
+            try #require(controller.isInReinstallCooldown == false)
+            window.toolbar = nil
+            #expect(controller.isInReinstallCooldown)
+            #expect(controller.applyScheduled == false)
+            #expect(window.toolbar == nil)
+        }
 
         try await clock.requireAdvanceWhenArmed(
             by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
@@ -1137,32 +1139,32 @@ struct MainToolbarControllerTests {
 
         window.orderOut(nil)
         try #require(window.isVisible == false)
-        let quiet = try await waitForMainActorCondition("no apply queued after ordering the window out") {
-            !controller.applyScheduled
+        // Everything from the removal to the toolbar set after it runs in the
+        // turn that found no apply queued, with nothing that can suspend.
+        try await fixture.withNoApplyQueued("after ordering the window out") {
+            try #require(controller.recentReplacements.isEmpty)
+
+            window.toolbar = nil
+            // KVO reports synchronously, so a watch that took the removal for a
+            // replacement would have counted it and queued an apply by now.
+            #expect(controller.recentReplacements.isEmpty)
+            #expect(controller.applyScheduled == false)
+            #expect(controller.isInstalled)
+
+            let appliesBefore = controller.applyCount
+            controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+            #expect(controller.applyCount == appliesBefore + 1)
+            #expect(window.toolbar == nil)
+
+            // Nothing suspends from ordering the window in to the toolbar set,
+            // so no queued apply can put ours back in between.
+            fixture.split.onViewDidAppear = nil
+            window.orderFront(nil)
+            try #require(window.isVisible)
+            try #require(window.toolbar == nil)
+            window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterRemoval")
+            #expect(controller.recentReplacements.count == 1)
         }
-        try #require(quiet)
-        try #require(controller.recentReplacements.isEmpty)
-
-        window.toolbar = nil
-        // KVO reports synchronously, so a watch that took the removal for a
-        // replacement would have counted it and queued an apply by now.
-        #expect(controller.recentReplacements.isEmpty)
-        #expect(controller.applyScheduled == false)
-        #expect(controller.isInstalled)
-
-        let appliesBefore = controller.applyCount
-        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(controller.applyCount == appliesBefore + 1)
-        #expect(window.toolbar == nil)
-
-        // Nothing suspends from ordering the window in to the toolbar set, so
-        // no queued apply can put ours back in between.
-        fixture.split.onViewDidAppear = nil
-        window.orderFront(nil)
-        try #require(window.isVisible)
-        try #require(window.toolbar == nil)
-        window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterRemoval")
-        #expect(controller.recentReplacements.count == 1)
         let back = try await waitForMainActorCondition("a toolbar set after the removal to be replaced by ours") {
             window.toolbar === controller.toolbar
         }
@@ -1182,27 +1184,25 @@ struct MainToolbarControllerTests {
 
         window.orderOut(nil)
         try #require(window.isVisible == false)
-        let quiet = try await waitForMainActorCondition("no apply queued after ordering the window out") {
-            !controller.applyScheduled
+        try await fixture.withNoApplyQueued("after ordering the window out") {
+            try #require(controller.recentReplacements.isEmpty)
+            try #require(window.toolbar === controller.toolbar)
+
+            let other = NSToolbar(identifier: "MainToolbarControllerTests.onHiddenWindow")
+            window.toolbar = other
+            // KVO reports synchronously, so a watch that took the change for a
+            // replacement would have counted it and queued an apply by now.
+            #expect(controller.recentReplacements.isEmpty)
+            #expect(controller.applyScheduled == false)
+            #expect(controller.isInstalled)
+
+            // The apply runs, which is what makes its leaving the other
+            // toolbar on the window mean something.
+            let appliesBefore = controller.applyCount
+            controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+            #expect(controller.applyCount == appliesBefore + 1)
+            #expect(window.toolbar === other)
         }
-        try #require(quiet)
-        try #require(controller.recentReplacements.isEmpty)
-        try #require(window.toolbar === controller.toolbar)
-
-        let other = NSToolbar(identifier: "MainToolbarControllerTests.onHiddenWindow")
-        window.toolbar = other
-        // KVO reports synchronously, so a watch that took the change for a
-        // replacement would have counted it and queued an apply by now.
-        #expect(controller.recentReplacements.isEmpty)
-        #expect(controller.applyScheduled == false)
-        #expect(controller.isInstalled)
-
-        // The apply runs, which is what makes its leaving the other toolbar
-        // on the window mean something.
-        let appliesBefore = controller.applyCount
-        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(controller.applyCount == appliesBefore + 1)
-        #expect(window.toolbar === other)
     }
 
     /// One replacement past `maxReplacementsInWindow` inside one
@@ -1222,11 +1222,12 @@ struct MainToolbarControllerTests {
         let controller = fixture.controller
         let window = fixture.window
 
-        let kept = try await fixture.replaceUntilTheCooldownStarts(label: "refused")
-        // KVO reports synchronously, so the refusal is already in place.
-        #expect(controller.isInReinstallCooldown)
-        #expect(controller.applyScheduled == false)
-        #expect(window.toolbar === kept)
+        _ = try await fixture.replaceUntilTheCooldownStarts(label: "refused") { replacement in
+            // KVO reports synchronously, so the refusal is already in place.
+            #expect(controller.isInReinstallCooldown)
+            #expect(controller.applyScheduled == false)
+            #expect(window.toolbar === replacement)
+        }
 
         try await clock.requireAdvanceWhenArmed(
             by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
@@ -1345,17 +1346,18 @@ struct MainToolbarControllerTests {
 
         let kept = try await fixture.replaceUntilTheCooldownStarts(label: "observed")
         try #require(controller.isInReinstallCooldown)
-        let quiet = try await waitForMainActorCondition("no apply queued once the cooldown started") {
-            !controller.applyScheduled
-        }
-        try #require(quiet)
 
-        let appliesBefore = controller.applyCount
-        let changesBefore = controller.observedChangeCount
         let other = fixture.worktrees[1].id
-        try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
-        fixture.state.devServerLists[other] = fixture.list(
-            [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+        let before = try await fixture.withNoApplyQueued("once the cooldown started") {
+            () throws -> (applies: Int, changes: Int) in
+            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
+            fixture.state.devServerLists[other] = fixture.list(
+                [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+            return counts
+        }
+        let appliesBefore = before.applies
+        let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
@@ -1410,19 +1412,21 @@ struct MainToolbarControllerTests {
         defer { fixture.tearDown() }
         try await fixture.ready()
 
-        fixture.controller.uninstall()
-        #expect(fixture.window.toolbar == nil)
-        #expect(fixture.controller.isInstalled == false)
-        // KVO reports synchronously, so a watch that took the removal for a
-        // replacement would have queued an apply by now.
-        #expect(fixture.controller.applyScheduled == false)
+        try await fixture.withNoApplyQueued("before the uninstall") {
+            fixture.controller.uninstall()
+            #expect(fixture.window.toolbar == nil)
+            #expect(fixture.controller.isInstalled == false)
+            // KVO reports synchronously, so a watch that took the removal for a
+            // replacement would have queued an apply by now.
+            #expect(fixture.controller.applyScheduled == false)
 
-        // The apply runs, which is what makes its leaving the window without
-        // a toolbar mean something.
-        let appliesBefore = fixture.controller.applyCount
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(fixture.controller.applyCount == appliesBefore + 1)
-        #expect(fixture.window.toolbar == nil)
+            // The apply runs, which is what makes its leaving the window
+            // without a toolbar mean something.
+            let appliesBefore = fixture.controller.applyCount
+            fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+            #expect(fixture.controller.applyCount == appliesBefore + 1)
+            #expect(fixture.window.toolbar == nil)
+        }
     }
 
     /// Uninstalling lets go of the window and unhooks the split's collapse
@@ -1443,16 +1447,13 @@ struct MainToolbarControllerTests {
         let controller = fixture.controller
         try await fixture.replaceAndWaitForReinstall(
             times: MainToolbarController.maxReplacementsInWindow, label: "beforeUninstall")
-        let quiet = try await waitForMainActorCondition("no apply queued before the uninstall") {
-            !controller.applyScheduled
+        try await fixture.withNoApplyQueued("before the uninstall") {
+            controller.uninstall()
+            #expect(controller.window == nil)
+            #expect(controller.split === fixture.split)
+            let reportUnhooked = fixture.split.onSidebarCollapsedChange == nil
+            #expect(reportUnhooked)
         }
-        try #require(quiet)
-
-        controller.uninstall()
-        #expect(controller.window == nil)
-        #expect(controller.split === fixture.split)
-        let reportUnhooked = fixture.split.onSidebarCollapsedChange == nil
-        #expect(reportUnhooked)
 
         let split = fixture.split
         split.sidebarItem.isCollapsed = true
@@ -1588,12 +1589,17 @@ struct MainToolbarControllerTests {
         }
         try #require(shown)
 
-        let appliesBefore = controller.applyCount
-        let changesBefore = controller.observedChangeCount
         let other = fixture.worktrees[1].id
-        try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
-        fixture.state.devServerLists[other] = fixture.list(
-            [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+        let before = try await fixture.withNoApplyQueued("before another worktree's servers change") {
+            () throws -> (applies: Int, changes: Int) in
+            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
+            fixture.state.devServerLists[other] = fixture.list(
+                [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+            return counts
+        }
+        let appliesBefore = before.applies
+        let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
@@ -1833,6 +1839,9 @@ private final class ToolbarFixture {
     let controller: MainToolbarController
     let window: NSWindow
     var stopRequests: [RemoteSessionSelection] = []
+    /// What the last quiet probe of `withNoApplyQueued` saw, for its
+    /// diagnostic.
+    private var quietProbe = (observedChanges: 0, applies: 0)
 
     /// - Parameters:
     ///   - nested: puts the split inside a plain container controller, which
@@ -1954,7 +1963,10 @@ private final class ToolbarFixture {
     /// Installs the toolbar directly as well, so only `installsOnAppear`
     /// depends on `viewDidAppear` arriving, then waits for the first apply
     /// and for no further apply to be queued, so a test starts with nothing
-    /// pending that could stand in for the trigger it is about.
+    /// pending that could stand in for the trigger it is about. The wait's
+    /// probe runs in an earlier main-actor turn than the caller's next line,
+    /// so a test whose assertion needs nothing queued at its own change makes
+    /// that change inside `withNoApplyQueued`.
     func ready() async throws {
         controller.install(on: window)
         let controller = self.controller
@@ -1964,6 +1976,45 @@ private final class ToolbarFixture {
                 && !controller.applyScheduled
         }
         try #require(applied)
+    }
+
+    /// How many times `withNoApplyQueued` waits for none to be queued before
+    /// it gives up.
+    static let quietAttempts = 3
+
+    /// Runs `body` with no apply queued, in the same synchronous main-actor
+    /// segment as the check that found none, and returns what `body` returns.
+    ///
+    /// A wait for none queued is not enough on its own. Its probe runs in an
+    /// earlier main-actor turn than the test body, which has to win the main
+    /// actor back once the wait returns, and anything that runs in that gap
+    /// can queue an apply: `scheduleApply()` from the window's
+    /// `effectiveAppearance` watch, a collapse report or a cooldown's end, or
+    /// an observed `AppState` change. That apply is a
+    /// `DispatchQueue.main.async` block queued behind the body, so a body that
+    /// then asserts its own change queued nothing would see it. So the check
+    /// is made here first, with nothing that can suspend between it and
+    /// `body`; when an apply is queued, this waits for none and checks again,
+    /// `quietAttempts` times at most. An assertion that a change queued
+    /// nothing belongs inside `body`, never after this returns.
+    func withNoApplyQueued<T>(_ what: String, _ body: () throws -> T) async throws -> T {
+        if !controller.applyScheduled { return try body() }
+        var gaps: [String] = []
+        for _ in 1...Self.quietAttempts {
+            let quiet = try await waitForMainActorCondition("no apply queued \(what)") { [self] in
+                guard !controller.applyScheduled else { return false }
+                quietProbe = (observedChanges: controller.observedChangeCount, applies: controller.applyCount)
+                return true
+            }
+            try #require(quiet)
+            // The probe ran in an earlier main-actor turn than this line.
+            if !controller.applyScheduled { return try body() }
+            gaps.append("""
+                observed changes \(quietProbe.observedChanges) → \(controller.observedChangeCount), \
+                applies \(quietProbe.applies) → \(controller.applyCount)
+                """)
+        }
+        throw ApplyQueuedBeforeTheTestsTurn(what: what, gaps: gaps)
     }
 
     /// Replaces the toolbar `count` times, waiting each time for the
@@ -1985,16 +2036,23 @@ private final class ToolbarFixture {
     /// then once more with no apply queued, and returns that last
     /// replacement, the one the cooldown leaves on the window. The date seam
     /// must be frozen, so every replacement is inside one window.
-    func replaceUntilTheCooldownStarts(label: String) async throws -> NSToolbar {
+    ///
+    /// `check` runs on that last replacement in the same main-actor turn as
+    /// the replacement and the check that found no apply queued before it
+    /// (`withNoApplyQueued`), so an assertion that the replacement queued
+    /// nothing belongs there.
+    func replaceUntilTheCooldownStarts(
+        label: String, then check: (NSToolbar) throws -> Void = { _ in }
+    ) async throws -> NSToolbar {
         try await replaceAndWaitForReinstall(times: MainToolbarController.maxReplacementsInWindow, label: label)
         let controller = self.controller
-        let quiet = try await waitForMainActorCondition("no apply queued before the replacement past the cap") {
-            !controller.applyScheduled
-        }
-        try #require(quiet)
-        try #require(controller.isInReinstallCooldown == false)
+        let window = self.window
         let kept = NSToolbar(identifier: "MainToolbarControllerTests.\(label).kept")
-        window.toolbar = kept
+        try await withNoApplyQueued("before the replacement past the cap") {
+            try #require(controller.isInReinstallCooldown == false)
+            window.toolbar = kept
+            try check(kept)
+        }
         return kept
     }
 
@@ -2172,6 +2230,28 @@ private final class ToolbarFixture {
         let controller = NSViewController()
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: windowSize.height))
         return controller
+    }
+}
+
+/// `withNoApplyQueued` never found the test's own turn with no apply queued:
+/// after each wait for none, something had queued one again before the test
+/// ran. Each gap names the observed-change and apply counts at the quiet
+/// probe and at the test's turn; an observed-change count that rose names an
+/// observed `AppState` change as the source, and one that did not names
+/// `scheduleApply()` — the appearance watch, a collapse report or a
+/// cooldown's end.
+private struct ApplyQueuedBeforeTheTestsTurn: Error, CustomStringConvertible {
+    let what: String
+    let gaps: [String]
+
+    var description: String {
+        """
+        no turn with no apply queued \(what): after each of \(gaps.count) wait(s) for \
+        none, an apply was queued again before the test's turn — \
+        \(gaps.joined(separator: "; ")). A rise in observed changes names an observed \
+        AppState change as the source; none names scheduleApply() (appearance, \
+        collapse, cooldown end).
+        """
     }
 }
 

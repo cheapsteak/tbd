@@ -43,7 +43,7 @@ import Testing
 /// Here the pass is `--no-parallel` on an otherwise idle machine, the
 /// handshakes settle in milliseconds, and the bound below goes back to being
 /// what it is meant to be: a hang-catcher that asserts nothing.
-/// ## Why an explicit `.timeLimit`, and why 7 minutes
+/// ## Why an explicit `.timeLimit`, and why 9 minutes
 ///
 /// Tier-3 suites pin their own rather than inheriting `.clockDriven`, whose
 /// value is sized for the fast parallel pass (`Tests/CLAUDE.md`). Not every
@@ -55,17 +55,18 @@ import Testing
 ///
 /// The number is sized above this suite's worst-case chain, the way
 /// `ProviderEventsSupervisorTests` sizes its own. `stopAllDoesNotBlockActor`
-/// chains FOUR `teardownWaitDeadline` waits — 360 s — and the gate holds run
-/// concurrently on GCD threads rather than adding to that. A 4-minute limit
-/// would sit under the chain, and the failure that produced would be the worst
-/// kind: a generic time-limit expiry with no named diagnostic, reached on
-/// waits that were merely slow rather than wrong. 7 minutes clears 360 s with
-/// margin, stays well inside the quiet pass's 15-minute step budget, and still
+/// chains FOUR `teardownWaitDeadline` waits — 480 s at
+/// `TestDeadlines.saturatedPass`'s 120 s — and the gate holds run concurrently
+/// on GCD threads rather than adding to that. A limit of 8 minutes or less
+/// would sit at or under the chain, and the failure that produced would be the
+/// worst kind: a generic time-limit expiry with no named diagnostic, reached on
+/// waits that were merely slow rather than wrong. 9 minutes clears 480 s by a
+/// minute, stays inside the quiet pass's 15-minute step budget, and still
 /// clears the 1.97 s this suite actually takes by two orders of magnitude.
 ///
 /// If that chain ever needs to grow, shorten it rather than raising this
 /// again — the standing remedy in `Tests/CLAUDE.md`.
-@Suite("TmuxControlSupervisor teardown isolation", .timeLimit(.minutes(7)))
+@Suite("TmuxControlSupervisor teardown isolation", .timeLimit(.minutes(9)))
 struct TmuxControlSupervisorTeardownTests {
 
     /// Write an executable stub "tmux" that ignores its args and sleeps, so a
@@ -351,16 +352,15 @@ struct TmuxControlSupervisorTeardownTests {
 
 /// Hang guard for this suite's bounded waits on teardown progress.
 ///
-/// Deliberately unchanged at the 90 s the suite carried in the fast pass. The
-/// point of the move is that the number is no longer load-bearing — in the
-/// serial quiet pass a healthy handshake returns in milliseconds — so keeping
-/// it makes this a pure re-tiering with no deadline re-derivation smuggled in.
-/// Every wait is positive and breaks on its first satisfying probe, so the
-/// value costs a passing run nothing and only a genuinely wedged one pays it.
-/// `ciSafeDeadline` itself lives in `Tests/TBDDaemonTests` and is not
-/// importable from this target, so the value comes from `TestSupport` — one
-/// literal for all three consumers, with the derivation still recorded at
-/// `ciSafeDeadline`.
+/// The shared saturated-pass value, not a number of the suite's own. In the
+/// serial quiet pass it is not load-bearing — a healthy handshake returns in
+/// milliseconds — so it carries no derivation here; the suite's `.timeLimit`
+/// is sized from it instead. Every wait is positive and breaks on its first
+/// satisfying probe, so the value costs a passing run nothing and only a
+/// genuinely wedged one pays it. `ciSafeDeadline` itself lives in
+/// `Tests/TBDDaemonTests` and is not importable from this target, so the value
+/// comes from `TestSupport` — one literal for all three consumers, with the
+/// derivation recorded at `ciSafeDeadline`.
 private let teardownWaitDeadline: Duration = TestDeadlines.saturatedPass
 
 /// Poll `condition` until it holds or `timeout` elapses. Returns its final

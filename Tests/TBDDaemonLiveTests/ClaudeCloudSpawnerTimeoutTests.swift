@@ -27,8 +27,8 @@ import TestSupport
 ///
 /// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`: this is
 /// tier 3, so CI runs it serially (`--filter '^TBDDaemonLiveTests\.'
-/// --no-parallel`) on an otherwise-idle machine — the raised 4-minute
-/// `.clockDriven` limit exists to absorb the fast parallel pass's arming
+/// --no-parallel`) on an otherwise-idle machine — `.clockDriven`'s
+/// five-minute limit exists to absorb the fast parallel pass's arming
 /// latency, which does not apply here, and a hang in this suite should be
 /// caught promptly rather than tolerated for minutes.
 @Suite(.timeLimit(.minutes(1)))

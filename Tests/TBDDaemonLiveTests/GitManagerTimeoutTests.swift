@@ -58,13 +58,13 @@ import TestSupport
 ///    *structurally*: their grandchildren hold the pipe write ends open for 120 s
 ///    and 30 s of REAL time, and the only thing that distinguishes "returned
 ///    without waiting for EOF" from "regressed into an EOF-waiting drain" is that
-///    the latter blocks past the limit. At 240 s a regressed 120 s drain finishes
+///    the latter blocks past the limit. At 300 s a regressed 120 s drain finishes
 ///    inside the budget and the test goes green — mutation-verified proof,
 ///    silently disarmed, with nothing going red to tell you.
-/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
-///    4 minutes to absorb the arming latency of the fast parallel pass, whose
-///    ~4536-test population is what makes a clock handshake take tens of
-///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+/// 2. **It does not need the larger budget.** `.clockDriven` is 5 minutes to
+///    absorb the arming latency of the fast parallel pass, whose population of
+///    thousands of in-process tests is what makes a clock handshake take tens
+///    of seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds.
 ///
@@ -75,8 +75,8 @@ import TestSupport
 /// handshake returns in milliseconds, so only a genuine miss ever pays the
 /// guard, and it reports as a named diagnostic 15 s before the limit would have
 /// cut it off unattributed. The guard deliberately stays at its 45 s default
-/// rather than `TestDeadlines.saturatedPass` (90 s), which the fast pass uses for
-/// arming behind an unstructured task: here 90 s sits past the suite limit, so
+/// rather than `TestDeadlines.saturatedPass` (120 s), which the fast pass uses for
+/// arming behind an unstructured task: here 120 s sits past the suite limit, so
 /// the diagnostic could never be reached, and the latency it is sized for does
 /// not occur in the quiet pass.
 @Suite(.timeLimit(.minutes(1)))

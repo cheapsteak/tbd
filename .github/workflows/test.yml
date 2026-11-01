@@ -1271,9 +1271,9 @@ jobs:
       # and from the ~4,350 and ~2,800 the deadline triple was originally
       # derived against. Pass-1 test time was 247 s and 231 s on the red runs
       # against 153 s and 195 s on the green ones, and every hang-catcher in the
-      # suite is sized per scheduling hop — `TestDeadlines.saturatedPass` 90 s,
-      # `TestGate.deadline` 120 s, the clock guards 45 s, the suite limit
-      # 240 s — so the red runs are simply the slow-runner tail of the same
+      # suite is sized per scheduling hop — `TestDeadlines.saturatedPass` 120 s,
+      # `TestGate.deadline` 150 s, the clock guards 45 s, the suite limit
+      # 300 s — so the red runs are simply the slow-runner tail of the same
       # distribution. Re-splitting is the remedy that follows from "population
       # is the scheduler" (`Tests/CLAUDE.md`); raising the deadlines instead
       # re-derives four coupled constants and wants a spec first.

@@ -25,19 +25,21 @@ public extension Trait where Self == TimeLimitTrait {
     /// how long the test ought to take.** Swift Testing runs the whole
     /// population in one process with no concurrency cap, on a 3-thread CI
     /// runner, so a test's *reported* duration is mostly time suspended waiting
-    /// for a thread. Mined from a green run: fast pass 1 (`^TBDDaemonTests\.`,
-    /// ~5200 tests) reported p50 65.6 s, p99 92.1 s, max 95.5 s, with 87% of
-    /// tests over 45 s; fast pass 2 (everything else, ~4800 tests) reported p90
-    /// 51.4 s and max 55.3 s. A limit of one minute therefore sits **below the
-    /// median** of a healthy pass 1 and five seconds above the **maximum** of a
+    /// for a thread. Mined from green runs of one commit: fast pass 1a
+    /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported p50 84.0 s, p99
+    /// 107.6 s, max 111.7 s; fast pass 1b (the rest of the daemon target, ~3900
+    /// tests) p50 63.6 s, p99 101.2 s, max 107.4 s; fast pass 2 (everything
+    /// else, ~7200 tests) p90 88.2 s and max 101.7 s on one run and p90 72.3 s,
+    /// max 82.4 s on another. A limit of one minute therefore sits **below the
+    /// median** of both halves of a healthy pass 1 and below the **p90** of a
     /// healthy pass 2 — it is a coin flip on green runs, and it fired that way
     /// on three `TerminalLockedAccessTests` tests at the same instant, twice in
-    /// five days, with no hang anywhere. Four minutes clears the measured
-    /// maximum by ~2.5x while staying a small fraction of the step budget. The
-    /// full derivation — how 240 s composes with `ciSafeDeadline` (90 s) and
-    /// `waitForSuspension` (45 s), and the invariant the three satisfy together
-    /// — is on ``clockDriven`` below; re-derive all of them together when the
-    /// population moves materially.
+    /// five days, with no hang anywhere. Five minutes clears the largest
+    /// measured maximum by ~2.7x while staying a small fraction of the step
+    /// budget. The full derivation — how 300 s composes with `ciSafeDeadline`
+    /// (120 s) and the arming waits (45 s), and the invariant the three satisfy
+    /// together — is on ``clockDriven`` below; re-derive all of them together
+    /// when the population moves materially.
     ///
     /// **(b) The rule: a fast-pass suite uses this trait rather than a literal
     /// `.timeLimit`, unless the limit is itself the regression detector.** A
@@ -59,7 +61,7 @@ public extension Trait where Self == TimeLimitTrait {
     /// An inner bounded wait keeps its own, smaller deadline — this limit is the
     /// outer backstop that lets that wait's named diagnostic land instead of
     /// being truncated into a bare "Time limit was exceeded".
-    static var fastPassBounded: Self { .timeLimit(.minutes(4)) }
+    static var fastPassBounded: Self { .timeLimit(.minutes(5)) }
 
     /// Suite/test trait for anything driven by a `TestClock`.
     ///
@@ -76,11 +78,12 @@ public extension Trait where Self == TimeLimitTrait {
     /// is wedged, and you want the failure attributed to the test rather than
     /// to the runner.
     ///
-    /// **Why 4 and no longer 1.** The floor argument (whole minutes) says the
-    /// limit cannot be *smaller* than a minute; it never argued that one minute
-    /// was right. What pins the value from below are the two wall-clock waits a
-    /// clock-driven test can sit on: this file's `waitForSuspension` (45 s,
-    /// re-derived below) and `ciSafeDeadline` (90 s,
+    /// **Why 5, not 1.** The floor argument (whole minutes) says the limit
+    /// cannot be *smaller* than a minute; it never argued that one minute was
+    /// right. What pins the value from below are the two wall-clock waits a
+    /// clock-driven test can sit on: an arming wait (45 s — this file's
+    /// `waitForSuspension`, re-derived below, and `EventDrivenTestClock`'s
+    /// strict waits, which keep its value) and `ciSafeDeadline` (120 s,
     /// `Tests/TBDDaemonTests/ControlModeTestSupport.swift`). Clock-driven
     /// suites really do consume the latter — `AttachRPCOrchestrationTests` and
     /// `PaneRepairCoordinatorTests` are both `.clockDriven, .serialized` and
@@ -97,18 +100,20 @@ public extension Trait where Self == TimeLimitTrait {
     /// truncates the test; chains beyond the first belong to a test that is
     /// already failing, and truncating those is deliberate.
     ///
-    /// 4 minutes = 240 s satisfies that:
-    /// - one `waitFor` (90 s) + one `waitForSuspension` (45 s) = 135 s ✓
-    /// - two `waitFor` = 180 s ✓
-    /// - two `waitForSuspension` = 90 s ✓ — this keeps the original "a test that
+    /// 5 minutes = 300 s satisfies that:
+    /// - one `waitFor` (120 s) + one arming wait (45 s) = 165 s ✓
+    /// - two `waitFor` = 240 s ✓
+    /// - two arming waits = 90 s ✓ — this keeps the original "a test that
     ///   waits twice must afford both waits" property the one-minute pairing
     ///   was reasoned from
+    /// - one gate held to `TestGate.deadline` (150 s) leaves 150 s for the rest
+    ///   of the test ✓
     ///
-    /// 240 s stays far above any legitimate clock-driven run, which finishes in
+    /// 300 s stays far above any legitimate clock-driven run, which finishes in
     /// milliseconds.
     ///
     /// **The margin is thin, and it is worth naming how thin.** Do not read
-    /// "240 s" as comfortable headroom — several existing chains sit near or
+    /// "300 s" as comfortable headroom — several existing chains sit near or
     /// past it, all consistent with the invariant (only an already-failing test
     /// ever pays a full chain of timeouts), but with nothing to spare:
     /// Count `advanceWhenSuspended` as a `waitForSuspension` when you tally a
@@ -117,16 +122,16 @@ public extension Trait where Self == TimeLimitTrait {
     /// Grepping only for the literal `waitForSuspension(` undercounts every
     /// figure below, which is how a PR #547 reviewer read two of these chains
     /// as shallower than they are.
-    /// - `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval` is
-    ///   the deepest chain still riding this type's **non-throwing** pair: four
-    ///   `advanceWhenSuspended` plus one `waitForSuspension`, five clock guards
-    ///   for 225 s, and its two `waitFor` calls take the paper worst case to
-    ///   405 s. Every guard there is payable in one run, because a miss records
-    ///   and the chain keeps going.
+    /// - `PaneRepairCoordinatorTests.readerWaitEscalatesToTheSlowInterval`
+    ///   chains five clock guards — four `requireAdvanceWhenArmed` and one
+    ///   `requireSleeperArmed`, 225 s — and its two `waitFor` calls take the
+    ///   paper worst case to 465 s. Its clock waits are the strict form, so a
+    ///   missed arming throws and ends the chain; what one run can pay is its
+    ///   two `waitFor` calls, 240 s, or the first of them plus one clock guard.
     /// - The poller chains are nominally deeper still —
     ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
     ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
-    ///   `FireRecorder.next()`) for 270 s, past this limit;
+    ///   `FireRecorder.next()`) for 270 s, 30 s under this limit;
     ///   `GatedIntervalSleepTests.boundaryIsExact` pays five for 225 s — but
     ///   they are on `EventDrivenTestClock`'s strict waits, where a missed
     ///   arming throws before anything advances, so the chain stops at the
@@ -134,21 +139,21 @@ public extension Trait where Self == TimeLimitTrait {
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
     ///   happen (see "The event-driven clock" below).
-    /// - In `PaneRepairCoordinatorTests`, **6 of 13** tests have a worst case
-    ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
-    ///   not just the one 6-deep chain (540 s) usually cited. Four of the sites
-    ///   that used to push that count to 9 of 13 are now single `advanceUntil`
-    ///   guards instead of an advance plus a 90 s `waitFor`.
+    /// - In `PaneRepairCoordinatorTests`, **10 of 13** tests have a paper worst
+    ///   case above 300 s (counting each `ciSafeDeadline` wait — `waitFor` and
+    ///   the suite's `readUntil` — at 120 s and each clock wait at 45 s), not
+    ///   just the 6-`waitFor` chain usually cited, which with its two
+    ///   `readUntil` reads is 960 s.
     ///
-    /// **If these start tripping, shorten the chain — do not raise this limit
-    /// again.** `Tests/CLAUDE.md` already requires advance chains to stay in
-    /// single digits, and a 5-deep chain is at the edge of that rule; injecting
-    /// pacing values to cross a threshold in 2–3 advances is the remedy. Raising
-    /// 240 s buys room for chains that only an already-failing test walks, and
-    /// costs every genuinely wedged test that much longer to be attributed.
+    /// **If these start tripping, shorten the chain — do not raise this limit.**
+    /// `Tests/CLAUDE.md` already requires advance chains to stay in single
+    /// digits, and a 5-deep chain is at the edge of that rule; injecting pacing
+    /// values to cross a threshold in 2–3 advances is the remedy. Raising 300 s
+    /// buys room for chains that only an already-failing test walks, and costs
+    /// every genuinely wedged test that much longer to be attributed.
     ///
     /// **Scope: this is sized for the fast parallel pass.** Every input above —
-    /// the ~4536-test population, the arming latency it inflates, the two
+    /// the pass's test population, the arming latency it inflates, the two
     /// wall-clock waits it makes expensive — is a property of the in-process
     /// parallel run. Tier-3 suites in `Tests/TBDDaemonLiveTests` execute in the
     /// quiet pass (`--filter '^TBDDaemonLiveTests\.' --no-parallel`, idle
@@ -256,7 +261,7 @@ public extension TestClock {
     /// That failure is field-observed, not hypothetical.
     /// `PaneRepairCoordinatorTests`' broken-pipe test drove the repair's
     /// reader-wait — a `poll(2)`-and-re-arm loop — with a single advance after
-    /// closing the pipe's read end, and wedged in CI for the full 240 s limit
+    /// closing the pipe's read end, and wedged in CI for a full 240 s limit
     /// with only the pause written, the sink still `repairing` and the repair
     /// still in flight: the exact fingerprint of a probe that read "keep
     /// waiting" once and then never got another advance. It survived a
@@ -311,8 +316,9 @@ public extension TestClock {
     ///   - timeout: real-time hang guard, same family and same 45 s value as
     ///     `waitForSuspension` (see its note for the derivation). Count one call
     ///     to this helper as one guard when tallying a test's worst case; it
-    ///     *replaces* an `advanceWhenSuspended` (45 s) plus the `waitFor` (90 s)
-    ///     that used to follow it, so converting a site shortens the chain.
+    ///     *replaces* an `advanceWhenSuspended` (45 s) plus the `waitFor`
+    ///     (`TestDeadlines.saturatedPass`, 120 s) that would otherwise follow it,
+    ///     so converting a site shortens the chain.
     ///   - pollInterval: how long to step aside when nothing is armed yet. Each
     ///     probe costs a `megaYield`, so lazier is better — same reasoning as
     ///     `waitForSuspension`.
@@ -447,15 +453,16 @@ public extension TestClock {
     ///     "duration" suspended waiting for a turn.
     ///
     ///     Re-derived for the current population: 45 s here, so a twice-waiting
-    ///     test needs 90 s, inside `.clockDriven`'s 4-minute (240 s) limit with
-    ///     room for the rest of the test — and 45 s plus one 90 s
-    ///     `ciSafeDeadline` wait is 135 s, also inside it. See `.clockDriven`
+    ///     test needs 90 s, inside `.clockDriven`'s 5-minute (300 s) limit with
+    ///     room for the rest of the test — and 45 s plus one 120 s
+    ///     `ciSafeDeadline` wait is 165 s, also inside it. See `.clockDriven`
     ///     above for the full triple and the invariant that licenses it. Only a
     ///     genuinely un-armed timer ever pays this timeout — a healthy handshake
     ///     returns in milliseconds, so the raise costs passing runs nothing.
     ///
     ///     What 45 s does **not** buy is a deep chain: at five of these waits
-    ///     a test is at 225 s of a 240 s limit, and this helper's non-throwing
+    ///     a test has spent 225 s of a 300 s limit, one `ciSafeDeadline` wait
+    ///     more carries it past the limit, and this helper's non-throwing
     ///     shape means a chain that size pays every guard rather than stopping
     ///     at the first miss (contrast `EventDrivenTestClock`'s strict pair,
     ///     `requireSleeperArmed` / `requireAdvanceWhenArmed`, under "The
@@ -465,7 +472,7 @@ public extension TestClock {
     ///     consistent with the invariant — only a failing test walks the whole
     ///     chain — but it is not headroom. The remedy if it bites is to shorten
     ///     the chain (`Tests/CLAUDE.md`: keep advances in single digits; inject
-    ///     pacing), not to raise 240 s. Re-derive all three numbers again if the
+    ///     pacing), not to raise 300 s. Re-derive all three numbers again if the
     ///     population moves materially.
     ///   - pollInterval: how long to step aside between probes. Each probe costs
     ///     a megaYield, so probing tightly floods the pool with background tasks

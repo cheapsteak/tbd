@@ -427,7 +427,7 @@ struct BoundedProcessRunnerTests {
     /// under test — and not a wall-clock ceiling.
     ///
     /// **A ceiling sized against the pass is still a ceiling on the runner.**
-    /// `TestDeadlines.saturatedPass` (90 s) sat close enough to fast pass 1's
+    /// `TestDeadlines.saturatedPass`, at 90 s, sat close enough to fast pass 1's
     /// own numbers — p50 65.6 s, p99 92.1 s, max 95.5 s reported per test on a
     /// **green** run — that this test reddened twice in a row on an unrelated
     /// PR at elapsed 103–107 s, on a runner shared with two other runs (runs
@@ -610,7 +610,7 @@ struct BoundedProcessRunnerTests {
     /// the number is this large.
     ///
     /// It must dominate every `waitFor` in this suite — all of which are
-    /// `TestDeadlines.saturatedPass` (90 s) — so a child that is gone is a child
+    /// `TestDeadlines.saturatedPass` (120 s) — so a child that is gone is a child
     /// something KILLED, never one that finished its sleep inside the wait. Each
     /// such child is signalled by the escalation under test and, failing that,
     /// by its test's own `defer`.

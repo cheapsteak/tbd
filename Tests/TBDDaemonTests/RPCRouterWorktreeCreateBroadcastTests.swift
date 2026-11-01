@@ -76,21 +76,69 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         try "\(exitCode)\n".write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    /// Polls `condition` until it returns true or the deadline passes.
-    /// The deadline is the shared saturated-pass budget rather than a literal:
-    /// what these wait for is produced by a detached task no test owns, which
-    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
-    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
+    /// Polls `condition` through `pollUntilTrue` until it holds, on the shared
+    /// saturated-pass budget rather than a literal: what these wait for is
+    /// produced by a detached task no test owns, which SE-0417 leaves on the
+    /// cooperative pool behind the whole fast pass — see `gateHoldingTask` in
+    /// `Tests/TestSupport/BoundedGateSupport.swift`.
+    ///
+    /// A timeout is recorded as a `BoundedWaitTimeout` carrying what `observed`
+    /// read and how long the wait took, so the diagnostic reaches the CI
+    /// summary (Tests/CLAUDE.md, assertion-hygiene rule 4), and returns false.
+    /// `observed` is read before one last check of `condition`, so an event
+    /// that lands while the diagnostic is composed passes instead of printing
+    /// a contradiction. Cancellation throws: the harness ended the test, and
+    /// no timeout is invented for it.
     private func waitUntil(
-        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
-        _ condition: @Sendable () async throws -> Bool
+        _ what: String,
+        observed: @Sendable () async -> String,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @Sendable () async -> Bool
     ) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if try await condition() { return true }
-            try await Task.sleep(nanoseconds: 50_000_000)
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(50), condition)
+        switch outcome {
+        case .satisfied:
+            return true
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            let seen = await observed()
+            if await condition() { return true }
+            let elapsed = ContinuousClock.now - start
+            Issue.record(
+                BoundedWaitTimeout(
+                    what: what, observed: "\(seen) (waited \(elapsed))",
+                    deadline: TestDeadlines.saturatedPass),
+                sourceLocation: sourceLocation)
+            return false
         }
-        return try await condition()
+    }
+
+    /// The `.worktreeCreated` deltas broadcast for `worktreeID`.
+    private static func createdDeltas(_ deltas: [StateDelta], for worktreeID: UUID) -> [StateDelta] {
+        deltas.filter {
+            if case .worktreeCreated(let d) = $0 { return d.worktreeID == worktreeID }
+            return false
+        }
+    }
+
+    /// The broadcast deltas as a diagnostic reads them: each case's name, in
+    /// order.
+    private static func describe(_ deltas: [StateDelta]) -> String {
+        let names = deltas.map { delta in String(String(describing: delta).prefix { $0 != "(" }) }
+        return "\(deltas.count) delta(s) \(names)"
+    }
+
+    /// The worktree row's status as a diagnostic reads it.
+    private static func describeRow(db: TBDDatabase, id: UUID) async -> String {
+        do {
+            guard let row = try await db.worktrees.get(id: id) else { return "no row" }
+            return "row status \(row.status)"
+        } catch {
+            return "row read failed: \(error)"
+        }
     }
 
     @Test func readyCompletionBroadcastsExactlyOneWorktreeCreated() async throws {
@@ -114,16 +162,26 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let pending = try response.decodeResult(Worktree.self)
         #expect(pending.status == .creating)
 
-        // Background phase 2 runs on the repo serializer; wait for the flip.
-        let activated = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status == .active
+        // Background phase 2 runs on the repo serializer. Wait for the
+        // broadcast itself, not for the row: the lifecycle sets the row
+        // `.active` and returns `.ready`, and only then does the handler
+        // re-read the row and broadcast, so an `.active` row does not yet mean
+        // the broadcast has happened.
+        let broadcast = try await waitUntil(
+            "the handler's .worktreeCreated broadcast",
+            observed: {
+                let row = await Self.describeRow(db: db, id: pending.id)
+                return "\(row); \(Self.describe(deltas.snapshot()))"
+            }
+        ) {
+            !Self.createdDeltas(deltas.snapshot(), for: pending.id).isEmpty
         }
-        #expect(activated, "background create must complete")
+        #expect(broadcast, "background create must complete and broadcast")
 
-        let created = deltas.snapshot().filter {
-            if case .worktreeCreated(let d) = $0 { return d.worktreeID == pending.id }
-            return false
-        }
+        let row = try await db.worktrees.get(id: pending.id)
+        #expect(row?.status == .active, "the row is active before the handler broadcasts")
+
+        let created = Self.createdDeltas(deltas.snapshot(), for: pending.id)
         #expect(created.count == 1,
                 ".ready completion must produce exactly one .worktreeCreated broadcast")
     }
@@ -151,23 +209,31 @@ struct RPCRouterWorktreeCreateBroadcastTests {
 
         // Wait for phase 2 to spawn the pre-session terminal (the marker file
         // is wiped at spawn, so writing it after this point is race-free).
-        let hookSpawned = try await waitUntil {
-            try await db.terminals.list(worktreeID: pending.id)
-                .contains { $0.label == "pre-session" }
+        let hookSpawned = try await waitUntil(
+            "phase 2 to spawn the pre-session terminal",
+            observed: {
+                guard let terminals = try? await db.terminals.list(worktreeID: pending.id) else {
+                    return "terminal list read failed"
+                }
+                return "terminal labels \(terminals.map { $0.label })"
+            }
+        ) {
+            let terminals = try? await db.terminals.list(worktreeID: pending.id)
+            return terminals?.contains { $0.label == "pre-session" } == true
         }
         #expect(hookSpawned, "phase 2 must spawn the pre-session terminal")
 
         // Finish the hook and wait for the detached phase 3 to activate the row.
         try writeMarker(worktreeID: pending.id, exitCode: 0)
-        let activated = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status == .active
+        let activated = try await waitUntil(
+            "phase 3 to flip the row to .active",
+            observed: { await Self.describeRow(db: db, id: pending.id) }
+        ) {
+            (try? await db.worktrees.get(id: pending.id))?.status == .active
         }
         #expect(activated, "phase 3 must flip the row to .active")
 
-        let created = deltas.snapshot().filter {
-            if case .worktreeCreated(let d) = $0 { return d.worktreeID == pending.id }
-            return false
-        }
+        let created = Self.createdDeltas(deltas.snapshot(), for: pending.id)
         #expect(created.count == 1,
                 ".preSessionPending must produce exactly one .worktreeCreated total (no handler duplicate)")
     }
@@ -258,7 +324,10 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         gate.continuation.yield(())
         gate.continuation.finish()
 
-        let failed = try await waitUntil {
+        let failed = try await waitUntil(
+            "the background create's failure broadcast",
+            observed: { Self.describe(deltas.snapshot()) }
+        ) {
             deltas.snapshot().contains {
                 if case .worktreeArchived(let d) = $0 { return d.worktreeID == pending.id }
                 return false
