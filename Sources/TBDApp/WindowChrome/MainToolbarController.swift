@@ -48,7 +48,8 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   the toolbar back if the window is visible and shows another or none.
 /// - **Overflow.** An item that does not fit goes to the toolbar's overflow
 ///   menu as its menu form. Every view item has an explicit one that acts as
-///   the item does, or for the title shows it inertly, and every action the
+///   the item does, or for the title shows it inertly; the leading item's is
+///   a submenu with a row for each of its buttons, and every action the
 ///   toolbar wires takes `Any?`, so a row sending it from an `NSMenuItem`
 ///   never meets a method typed for another sender. The remote buttons have
 ///   explicit rows too; only the Servers item keeps AppKit's default, its

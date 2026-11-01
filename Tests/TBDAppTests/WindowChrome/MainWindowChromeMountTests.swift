@@ -39,7 +39,7 @@ struct MainWindowChromeMountTests {
         let identifiers = mount.toolbarIdentifiers
         let allowed = Set(MainToolbarItemID.allowed)
         let stray = identifiers.filter { !allowed.contains($0) }
-        #expect(identifiers.contains(MainToolbarItemID.toggleSidebar))
+        #expect(identifiers.contains(MainToolbarItemID.leadingButtons))
         #expect(stray.isEmpty)
 
         // The state's store is a test suite, not `.standard`, so the divider

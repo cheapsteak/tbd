@@ -32,7 +32,7 @@ struct MainToolbarLayoutTests {
 
     @Test func shownOrder() {
         let expected: [NSToolbarItem.Identifier] = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
+            ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter,
             ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: false)) == expected)
@@ -43,7 +43,7 @@ struct MainToolbarLayoutTests {
             sidebarCollapsed: false, showsServers: true, showsTranscript: true,
             showsReconnect: true, showsStop: true)
         let expected: [NSToolbarItem.Identifier] = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
+            ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter,
             ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
             ItemID.servers, .space, ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
         ]
@@ -55,8 +55,7 @@ struct MainToolbarLayoutTests {
             sidebarCollapsed: true, showsServers: true, showsTranscript: false,
             showsReconnect: true, showsStop: false)
         let expected: [NSToolbarItem.Identifier] = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward,
-            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
+            ItemID.leadingButtons, ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
             ItemID.servers, .space, ItemID.remoteReconnect,
         ]
         #expect(Self.ids(state) == expected)
@@ -71,8 +70,7 @@ struct MainToolbarLayoutTests {
 
     @Test func collapsedOrder() {
         let expected: [NSToolbarItem.Identifier] = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward,
-            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
+            ItemID.leadingButtons, ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: true)) == expected)
     }
@@ -84,13 +82,14 @@ struct MainToolbarLayoutTests {
         }
     }
 
-    @Test func toggleAndArrowsLeadInEveryState() {
-        let lead: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
+    /// The one item holding the toggle and arrows opens the list in every
+    /// state, ahead of the tracking separator.
+    @Test func leadingButtonsLeadInEveryState() {
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
-            #expect(Array(list.prefix(3)) == lead)
+            #expect(list.first == ItemID.leadingButtons)
             let separator = list.firstIndex(of: ItemID.sidebarSeparator)
-            #expect((separator ?? 0) > 2)
+            #expect((separator ?? 0) > 0)
         }
     }
 
@@ -141,7 +140,7 @@ struct MainToolbarLayoutTests {
     }
 
     @Test func noPRAndNoFilePanelItem() {
-        #expect(ItemID.custom.count == 10)
+        #expect(ItemID.custom.count == 8)
         let distinct = Set(ItemID.custom)
         #expect(distinct.count == ItemID.custom.count)
         let allowed: [NSToolbarItem.Identifier] = ItemID.custom + ItemID.standard
@@ -167,9 +166,7 @@ struct MainToolbarLayoutTests {
 
     /// Run through `MainToolbarLayout.perform`, the loop the toolbar runs.
     @Test func editsNeverTouchTheLeadingItems() {
-        let protected: Set<NSToolbarItem.Identifier> = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward, ItemID.sidebarSeparator,
-        ]
+        let protected: Set<NSToolbarItem.Identifier> = [ItemID.leadingButtons, ItemID.sidebarSeparator]
         let all = MainToolbarLayoutState.allCombinations
         for a in all {
             for b in all {
@@ -194,13 +191,13 @@ struct MainToolbarLayoutTests {
     /// serve, stops the run there: nothing after it is attempted, so no later
     /// index, each of which assumed it took, reaches the list.
     @Test func performStopsAtAnInsertThatAddsNothing() {
-        let leading: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
+        let leading: [NSToolbarItem.Identifier] = [ItemID.leadingButtons]
         let items = FakeToolbarItems(leading, refusing: [ItemID.sidebarSeparator])
         let edits = MainToolbarLayout.edits(from: leading, to: Self.ids(Self.state(collapsed: true)))
 
         let stop = items.perform(edits)
 
-        let refusedInsert = ToolbarEdit.insert(ItemID.sidebarSeparator, at: 3)
+        let refusedInsert = ToolbarEdit.insert(ItemID.sidebarSeparator, at: leading.count)
         let expectedStop = ToolbarEditStop.noEffect(refusedInsert)
         #expect(stop == expectedStop)
         let expectedAttempts: [ToolbarEdit] = [refusedInsert]
@@ -211,9 +208,9 @@ struct MainToolbarLayoutTests {
     /// An index outside the list as it stands is never carried out, for an
     /// insert past the end or a remove at it, where `NSToolbar` would raise.
     @Test func performCarriesOutNothingOutsideTheList() {
-        let leading: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
-        let pastTheEnd = ToolbarEdit.insert(ItemID.title, at: 4)
-        let atTheEnd = ToolbarEdit.remove(at: 3)
+        let leading: [NSToolbarItem.Identifier] = [ItemID.leadingButtons]
+        let pastTheEnd = ToolbarEdit.insert(ItemID.title, at: leading.count + 1)
+        let atTheEnd = ToolbarEdit.remove(at: leading.count)
         let cases: [ToolbarEdit] = [pastTheEnd, atTheEnd]
         for edit in cases {
             let items = FakeToolbarItems(leading)
@@ -233,13 +230,13 @@ struct MainToolbarLayoutTests {
         let separator: Set<NSToolbarItem.Identifier> = [ItemID.sidebarSeparator]
         let collapsed = Self.ids(Self.state(collapsed: true))
         let expanded = Self.ids(Self.state(collapsed: false))
-        let leading: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
+        let leading: [NSToolbarItem.Identifier] = [ItemID.leadingButtons]
         let items = FakeToolbarItems(leading, refusing: separator)
         var sync = ToolbarLayoutSync()
 
         let first = items.pass(&sync, to: collapsed)
         let firstExpected = ToolbarLayoutSync.Outcome.stopped(
-            .noEffect(.insert(ItemID.sidebarSeparator, at: 3)), retry: true)
+            .noEffect(.insert(ItemID.sidebarSeparator, at: leading.count)), retry: true)
         #expect(first == firstExpected)
         #expect(sync.refused == separator)
 
@@ -255,8 +252,9 @@ struct MainToolbarLayoutTests {
         #expect(items.attempts.isEmpty)
 
         let changed = items.pass(&sync, to: expanded)
+        // After the leading item, the flexible space and the filter.
         let changedExpected = ToolbarLayoutSync.Outcome.stopped(
-            .noEffect(.insert(ItemID.sidebarSeparator, at: 5)), retry: true)
+            .noEffect(.insert(ItemID.sidebarSeparator, at: leading.count + 2)), retry: true)
         #expect(changed == changedExpected)
         let expandedWithoutSeparator = expanded.filter { !separator.contains($0) }
         #expect(items.list == expandedWithoutSeparator)
@@ -294,28 +292,29 @@ struct MainToolbarLayoutTests {
         #expect(items.list == served)
     }
 
-    /// The sidebar's minimum thickness is the leading inset, the three
-    /// compact buttons each followed by one spacing, one more spacing for the
-    /// empty flexible space before the filter, the filter at its widest and
-    /// the margin before the separator: 310 pt with the current estimates.
-    /// Each button and its spacing make one 28 pt pitch.
+    /// The sidebar's minimum thickness is the leading inset, the leading item
+    /// holding three buttons one pitch each, one spacing after it and one
+    /// before the filter, around the empty flexible space, the filter at its
+    /// widest and the margin before the separator: 322 pt with the measured
+    /// inset and the estimated spacing.
     @Test func minimumThicknessFitsTheSidebarSection() {
         let inset: CGFloat = MainToolbarMetrics.firstItemLeadingInset
-        let button: CGFloat = MainToolbarMetrics.iconButtonWidth
+        let pitch: CGFloat = MainToolbarMetrics.iconButtonPitch
+        let leading: CGFloat = MainToolbarMetrics.leadingButtonsWidth
         let spacing: CGFloat = MainToolbarMetrics.interItemSpacing
         let filter: CGFloat = MainToolbarMetrics.filterMaxWidth
         let padding: CGFloat = MainToolbarMetrics.sectionPadding
-        let derived: CGFloat = inset + 3 * button + 4 * spacing + filter + padding
+        let derived: CGFloat = inset + leading + 2 * spacing + filter + padding
         let minimum: CGFloat = MainToolbarMetrics.sidebarMinimumThickness
         let maximum: CGFloat = MainToolbarMetrics.sidebarMaximumThickness
         #expect(minimum == derived)
-        #expect(minimum == 310)
+        #expect(minimum == 322)
         #expect(minimum < maximum)
 
-        let pitch: CGFloat = button + spacing
-        #expect(pitch == MainToolbarMetrics.iconButtonPitch)
-        #expect(MainToolbarMetrics.iconButtonPitch == 28)
-        #expect(button == 20)
+        let threePitches: CGFloat = 3 * pitch
+        #expect(leading == threePitches)
+        #expect(pitch == 28)
+        #expect(inset == 92)
         #expect(MainToolbarMetrics.iconButtonHeight == 28)
         #expect(MainToolbarMetrics.iconGlyphPointSize == 13)
     }

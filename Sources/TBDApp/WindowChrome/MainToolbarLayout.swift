@@ -4,9 +4,11 @@ import Foundation
 /// Identifiers of the main window's `NSToolbar` items. The PR button and the
 /// file-panel toggle are deliberately absent from the AppKit toolbar.
 enum MainToolbarItemID {
-    static let toggleSidebar = NSToolbarItem.Identifier("tbd.toolbar.toggleSidebar")
-    static let back = NSToolbarItem.Identifier("tbd.toolbar.back")
-    static let forward = NSToolbarItem.Identifier("tbd.toolbar.forward")
+    /// One item holding the sidebar toggle, Back and Forward side by side
+    /// (`LeadingToolbarButtonsHost`). One item rather than three, because
+    /// AppKit gives each separate unbordered view item a fixed 44 pt slot,
+    /// too wide for buttons that sit 28 pt apart.
+    static let leadingButtons = NSToolbarItem.Identifier("tbd.toolbar.leadingButtons")
     static let repoFilter = NSToolbarItem.Identifier("tbd.toolbar.repoFilter")
     /// The tracking separator between the sidebar's part of the toolbar and
     /// the main area's, under an identifier of TBD's own. AppKit builds its
@@ -23,7 +25,7 @@ enum MainToolbarItemID {
 
     /// TBD's own identifiers, in toolbar order: the one list of them.
     static let custom: [NSToolbarItem.Identifier] = [
-        toggleSidebar, back, forward, repoFilter, sidebarSeparator, title,
+        leadingButtons, repoFilter, sidebarSeparator, title,
         servers, remoteTranscript, remoteReconnect, remoteStop,
     ]
 
@@ -62,9 +64,7 @@ enum ToolbarEditStop: Equatable {
 enum MainToolbarLayout {
     /// The item list, left to right, for `state`.
     static func identifiers(for state: MainToolbarLayoutState) -> [NSToolbarItem.Identifier] {
-        var ids: [NSToolbarItem.Identifier] = [
-            MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
-        ]
+        var ids: [NSToolbarItem.Identifier] = [MainToolbarItemID.leadingButtons]
         // The leading flexible space only pushes the filter to the sidebar's
         // edge, so it leaves with the filter.
         if !state.sidebarCollapsed {
@@ -90,7 +90,7 @@ enum MainToolbarLayout {
     }
 
     /// Minimal-ish edits turning `from` into `to`, using only inserts and
-    /// removes so items shared by both lists (notably the leading ones and the
+    /// removes so items shared by both lists (notably the leading item and the
     /// tracking separator) are never torn down.
     static func edits(
         from: [NSToolbarItem.Identifier], to: [NSToolbarItem.Identifier]
@@ -225,53 +225,50 @@ struct ToolbarLayoutSync {
     }
 }
 
-/// The sizes the toolbar's layout rests on: the compact leading buttons, the
+/// The sizes the toolbar's layout rests on: the leading buttons, the
 /// sidebar's minimum thickness derived from them, and the title item's
 /// flexible width.
 ///
 /// AppKit moves a toolbar item that does not fit its section into the
 /// toolbar's overflow menu, out of its place, so the sidebar can never be
-/// narrower than the items over it. AppKit publishes
-/// neither its spacing between items nor where it places the first item after
-/// the window buttons, so `interItemSpacing` and `firstItemLeadingInset` are
-/// estimates, taken from a reference macOS 27 toolbar whose window buttons,
-/// sidebar toggle, back and forward sit 28 pt apart. The running app confirms
-/// or tightens them.
+/// narrower than the items over it. AppKit publishes neither where it places
+/// the first item after the window buttons nor its spacing between items.
+/// `firstItemLeadingInset` is measured in the running app; `interItemSpacing`
+/// is an estimate the running app has yet to confirm.
 enum MainToolbarMetrics {
-    /// The distance from one leading button's centre to the next: the
-    /// reference toolbar's 28 pt, split into `iconButtonWidth` and
-    /// `interItemSpacing`.
+    /// The distance from one leading button's centre to the next, and so each
+    /// button's width: the toggle, Back and Forward sit side by side in one
+    /// item, with no spacing of AppKit's between them, matching a macOS 27
+    /// toolbar whose window buttons, sidebar toggle, back and forward sit
+    /// 28 pt apart.
     static let iconButtonPitch: CGFloat = 28
-    /// AppKit's spacing between adjacent toolbar items. It is not public, so
-    /// this is an estimate the running app confirms: when the buttons it
-    /// shows are not `iconButtonPitch` apart, this is the constant to tune.
-    static let interItemSpacing: CGFloat = 8
-    /// A leading button's width: the pitch less AppKit's spacing, so adjacent
-    /// buttons sit `iconButtonPitch` apart.
-    static let iconButtonWidth: CGFloat = iconButtonPitch - interItemSpacing
     /// A leading button's height. AppKit centres items vertically in the
     /// toolbar, which puts the glyphs on the window buttons' line.
     static let iconButtonHeight: CGFloat = 28
-    /// The point size of a leading button's symbol, drawn at regular weight.
+    /// The leading item's width: the toggle, Back and Forward, one pitch each.
+    static let leadingButtonsWidth: CGFloat = 3 * iconButtonPitch
+    /// The point size of a leading button's symbol, drawn at regular weight
+    /// and medium scale.
     static let iconGlyphPointSize: CGFloat = 13
+    /// AppKit's spacing between adjacent toolbar items. It is not public, so
+    /// this is an estimate the running app confirms.
+    static let interItemSpacing: CGFloat = 8
     /// From the window's leading edge to the first item's leading edge: where
-    /// AppKit places the first item after the window buttons. Estimated from
-    /// the reference toolbar, whose toggle is centred 97.8 pt from the edge,
-    /// less half a button.
-    static let firstItemLeadingInset: CGFloat = 88
+    /// AppKit places the first item after the window buttons in this toolbar.
+    /// Measured in the running app.
+    static let firstItemLeadingInset: CGFloat = 92
     /// The repo filter's widest, past which a long repo name truncates.
     static let filterMaxWidth: CGFloat = 110
     /// The margin the sidebar's section keeps before the tracking separator.
     static let sectionPadding: CGFloat = 20
     /// The sidebar's section at its narrowest, left to right: the leading
-    /// inset; toggle, back and forward, each followed by one spacing; the
-    /// flexible space, empty at this width but still spaced on both sides,
-    /// so one more spacing before the filter; the filter at its widest; and
-    /// the margin before the separator. 310 pt with the estimates above.
-    /// Three buttons and four spacings are three pitches and one more
-    /// spacing, so the thickness grows with the spacing estimate.
+    /// inset; the leading item; one spacing after it and one before the
+    /// filter, around the flexible space, which is empty at this width but
+    /// still spaced on both sides; the filter at its widest; and the margin
+    /// before the separator. 322 pt, of which the two spacings are the
+    /// estimate, so the thickness grows with it.
     static let sidebarMinimumThickness: CGFloat =
-        firstItemLeadingInset + 3 * iconButtonWidth + 4 * interItemSpacing + filterMaxWidth + sectionPadding
+        firstItemLeadingInset + leadingButtonsWidth + 2 * interItemSpacing + filterMaxWidth + sectionPadding
     static let sidebarMaximumThickness: CGFloat = 400
 
     /// The title item's narrowest, which the title view holds as a required

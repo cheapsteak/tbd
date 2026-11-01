@@ -90,23 +90,23 @@ A `MainToolbarController` owns an `NSToolbar`, is its delegate, and installs it
 on the main window when the split appears, with `toolbarStyle = .unified`.
 Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
 
-1. **Sidebar toggle** – a compact button (see "Compact buttons") whose action
-   is the split controller's `toggleSidebar(_:)`.
-2. **Back** and 3. **Forward** – compact buttons, enabled from
-   `AppState.canGoBack` and `canGoForward`. They are not `isNavigational`, which
-   would move them after the separator.
-4. **Flexible space.**
-5. **Repo filter** – a menu item showing the current filter, as the `Picker`
+1. **Leading buttons** – one item holding three compact buttons side by side
+   (see "Compact buttons"): the sidebar toggle, whose action is the split
+   controller's `toggleSidebar(_:)`, then back and forward, enabled from
+   `AppState.canGoBack` and `canGoForward`. The item is not `isNavigational`,
+   which would move it after the separator.
+2. **Flexible space.**
+3. **Repo filter** – a menu item showing the current filter, as the `Picker`
    does today. It is removed from the toolbar while the sidebar is collapsed
    and put back when it expands.
-6. **Tracking separator** – an `NSTrackingSeparatorToolbarItem` that the
+4. **Tracking separator** – an `NSTrackingSeparatorToolbarItem` that the
    toolbar creates under an identifier of its own, bound to the split's first
    divider and never changed afterwards. Everything before it sits over the
    sidebar, and stays beside the window buttons when the sidebar collapses.
    It is not the standard `.sidebarTrackingSeparator`, because AppKit's own
    item for that identifier finds a divider on its own, and re-binding it
    afterwards raises a KVO exception.
-7. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
+5. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
    a borderless item. Its width does not follow its text: the item fills the
    space between the tracking separator and the right-hand items, within a
    constant minimum and maximum, and the cluster sits at its leading edge. So
@@ -114,8 +114,8 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    forward or a new selection changes the title. A title wider than the item
    is cut at the item's trailing edge, and nothing else is cut: the notes
    button's hover label reaches past the cluster's leading and bottom edges.
-8. **Flexible space.**
-9. **The right-hand items,** with today's behavior: the Servers split button
+6. **Flexible space.**
+7. **The right-hand items,** with today's behavior: the Servers split button
    and the remote session buttons (Reconnect, Stop with its confirmation, and
    Transcript, shown on the remote spec's terms). The Servers button is an
    `NSMenuToolbarItem` whose menu an `NSMenuDelegate` builds each time it
@@ -135,51 +135,60 @@ turn, never during a SwiftUI update, which can re-enter layout.
 The toggle, back and forward match the leading buttons of a macOS 27 toolbar
 whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
 
-- **View** – each is a view item whose view is a plain host view, 20 pt wide
-  and 28 pt tall, held by required constraints. The host holds an
-  accessory-bar `NSButton` pinned to its four edges by required constraints,
-  which win over the bezel's wider intrinsic size. AppKit centres items
-  vertically, which puts the glyphs on the window buttons' line.
-- **Pitch** – 28 pt: the 20 pt host plus AppKit's spacing between items,
-  which is not public and is estimated at 8 pt.
-- **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt and
-  regular weight. Back and forward draw grey while disabled.
-- **Hover** – the button is bordered with `showsBorderOnlyWhileMouseInside`,
+- **One item** – the three buttons share one view item. AppKit gives each
+  separate unbordered view item a fixed 44 pt slot, centred on its view,
+  whatever the view's width: measured in the running app, views 8, 20 and
+  32 pt wide all sat about 44 pt apart, with glyph centres 114.5, 157.8 and
+  203.0 pt from the window's leading edge. So three items can never sit 28 pt
+  apart, and their wider slots push the repo filter into the overflow menu at
+  the sidebar's minimum width. One item's view lays out its buttons itself.
+- **View** – the item's view is a plain host view, 84 × 28 pt, held by
+  required constraints. It holds three accessory-bar `NSButton`s, toggle,
+  back and forward, each 28 pt wide by a required constraint. Required
+  constraints chain them from the host's leading edge to its trailing edge
+  and pin each to its top and bottom, which wins over the bezel's wider
+  intrinsic size. AppKit centres items vertically, which puts the glyphs on
+  the window buttons' line.
+- **Pitch** – 28 pt: each button is one pitch wide and the buttons touch, so
+  none of AppKit's spacing between items falls between them.
+- **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt,
+  regular weight and medium scale. The scale is named because a toolbar draws
+  its buttons at large control size, which scales up a symbol whose
+  configuration names none: measured in the running app, the toggle's ink
+  drew 19.5 × 15 pt and each chevron's 8 × 14 pt, about 1.25 times too big.
+  At medium scale they draw 15 × 12 pt and 6 × 11 pt, against the reference's
+  16 × 13 pt and 6 × 11 pt. Back and forward draw grey while disabled.
+- **Hover** – each button is bordered with `showsBorderOnlyWhileMouseInside`,
   so its bezel shows only while the pointer is over it: it highlights on hover
   and shows no border at rest.
 - **No glass** – `NSToolbarItem` forwards `isBordered`, `isEnabled`, target,
   action and image to its view when the view answers them, so a bordered
-  button as the item's view would make the item bordered. A bordered item
-  gets a Liquid Glass background, and adjacent glass items share one capsule,
-  so the three buttons would sit together on one. The host answers none of
-  those, so the item keeps its own `isBordered = false`, set explicitly, and
-  shows no glass, as the title item does. The bordered button one level down
-  keeps its own hover highlight.
-- **Wiring** – the target and action are set on the button and the overflow
-  row. An item with a custom view keeps no target or action its view does
-  not answer, so the item reads nil (measured on CI); glass follows
-  `isBordered`, not these. For the same reason the
-  item is a `ToolbarIconButtonItem`, an `NSToolbarItem` subclass that
-  reports its button's state: setting the item's flag sets the button and the
-  overflow row, and the setter compares the item's own flag, the button and
-  the row, and sets each only when it differs. Back and forward set the item
-  alone, and only when the item or its row differs from the snapshot, because
-  calling the `isEnabled` setter posts KVO change notifications for `enabled`
-  even when nothing changes. So an apply that changes nothing sets nothing,
-  and a row that drifted comes back on the next one. No compact item
-  autovalidates: `NSToolbarItem`'s `validate` does nothing for an item with a
-  custom view, and none of the three wants validating. The host is not an
-  accessibility element, so VoiceOver lands on the button.
+  button as the item's view would make the item bordered, and a bordered item
+  gets a Liquid Glass background. The host answers none of those, so the item
+  keeps its own `isBordered = false`, set explicitly, and shows no glass, as
+  the title item does; in the running app no capsule shows. The bordered
+  buttons one level down keep their own hover highlight.
+- **Wiring** – each button carries its own target, action and tool tip, and
+  each row of the overflow form its own target and action; the item carries
+  none. An item with a custom view keeps no target or action its view does
+  not answer, so the item reads nil (measured on CI), and it forwards a tool
+  tip to any view, where it would sit on the host under the buttons. The item
+  stays enabled. Back and forward start disabled, button and row, and each
+  apply sets each button and row from the snapshot only when it differs, so
+  an apply that changes nothing sets nothing and a row that drifted comes back
+  on the next one. The item does not autovalidate: `NSToolbarItem`'s
+  `validate` does nothing for an item with a custom view, and the toggle stays
+  enabled while back and forward follow the snapshot. The host is not an
+  accessibility element, so VoiceOver lands on each button.
 - **Copies** – the toolbar never shows a copy, because user customization is
   off (`allowsUserCustomization = false` in `MainToolbarController`). AppKit
   copies a view item by archiving its view and unarchiving the copy's, and
   the host decodes only so that a copy AppKit makes cannot crash: it keeps no
-  stored property (its button is its subview) and marks its constraints
-  `shouldBeArchived`, so a copy keeps its size and edges. The item subclass
-  keeps no stored property either, so it inherits `init(itemIdentifier:)`,
-  which a copy calls on the item's own class. A copied Back or Forward button
-  keeps its action but not its target, since an archive keeps a target only
-  when it archives the target too; no displayed item depends on that.
+  stored property (its buttons are its subviews, found by their identifiers)
+  and marks its constraints `shouldBeArchived`, so a copy keeps its size and
+  its buttons' layout. A copied back or forward button keeps its action but
+  not its target, since an archive keeps a target only when it archives the
+  target too; no displayed item depends on that.
 
 ### The overflow menu
 
@@ -189,8 +198,10 @@ label that sends the view's action from an `NSMenuItem`, and `NSToolbarItem.h`
 promises a target and action on the default row only for standard items. So
 every item but one has an explicit form:
 
-- **Toggle, back and forward** – a row acting as the button does; back and
-  forward are disabled when history has nowhere to go.
+- **Leading buttons** – "Navigation", with a submenu of "Toggle Sidebar",
+  "Back" and "Forward", each acting as its button does. The submenu does not
+  autoenable; back and forward are disabled, as their buttons are, when
+  history has nowhere to go.
 - **Repo filter** – "Filter", with a submenu of "All Repos" and each repo, the
   current choice checked, kept in step with the popup.
 - **Title cluster** – an inert row showing the title, or "No Selection" when
@@ -216,19 +227,20 @@ AppKit moves a toolbar item that does not fit its section into the overflow
 menu, out of its place. So the sidebar's minimum thickness is the sidebar's
 section at its narrowest, left to right:
 
-- **Leading inset** – 88 pt from the window's edge to the first item, where
-  AppKit places it after the window buttons, estimated from the reference
-  toolbar.
-- **Buttons** – 3 × 20 pt.
-- **Spacing** – 4 × 8 pt: one after each button, and one more before the
-  filter, as AppKit spaces both sides of the flexible space between forward
-  and the filter even when it is empty.
+- **Leading inset** – 92 pt from the window's edge to the first item, where
+  AppKit places it after the window buttons in this toolbar, measured in the
+  running app.
+- **Leading buttons** – 84 pt: one item of three 28 pt buttons.
+- **Spacing** – 2 × 8 pt: one after the leading item and one before the
+  filter, as AppKit spaces both sides of the flexible space between them even
+  when it is empty. AppKit does not publish its spacing between items, so
+  8 pt is an estimate.
 - **Filter** – 110 pt, its maximum width.
 - **Margin** – 20 pt before the tracking separator.
 
-That is 88 + 3 × 20 + 4 × 8 + 110 + 20 = 310 pt, below the 400 pt maximum. The
-spacing and the inset are estimates: the running app confirms them, and the
-spacing is the one constant to tune if the buttons do not sit 28 pt apart.
+That is 92 + 84 + 2 × 8 + 110 + 20 = 322 pt, below the 400 pt maximum. The
+spacing is the one estimate in it: the running app confirms it, and the
+thickness grows with it.
 
 ### Shortcuts
 
@@ -258,24 +270,28 @@ No durable resource is added.
   SwiftUI toolbar; the key on builds the split controller and the AppKit
   toolbar, with no SwiftUI toolbar.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
-  only while shown, the toggle and arrows before the separator in both; each
-  conditional item against the state that shows it.
+  only while shown, the leading item first and before the separator in both;
+  each conditional item against the state that shows it.
 - **Collapse settings:** `canCollapse` true and `canCollapseFromWindowResize`
   false after setup and after a layout pass; both separator styles `.none`.
-- **The toggle survives a collapse:** in a hosted window, the toggle and arrows
-  are still toolbar items after the sidebar collapses.
-- **Compact buttons:** each is an unbordered `ToolbarIconButtonItem` that does
-  not autovalidate, whose host answers none of the selectors an item forwards
-  and holds 20 × 28 pt, and whose button fills the host, with its tool tip,
-  target and action, which the item does not keep (it reads nil); back and forward start
-  disabled, button included, and an apply brings back a row that drifted;
-  setting the toggle item's `isEnabled` moves its button and row; a copy keeps
-  the subclass, the host, its layout and the button's glyph and action, and
-  its flag is its button's; the sidebar's minimum thickness is the "Width"
-  formula.
+- **The leading buttons survive a collapse:** in a hosted window, the leading
+  item is still a toolbar item, at its full width beside the window buttons,
+  after the sidebar collapses and after it expands again.
+- **Compact buttons:** one unbordered item that does not autovalidate, keeps
+  no target or action and is enabled, whose host answers none of the
+  selectors an item forwards and holds 84 × 28 pt by required constraints; its
+  three buttons tile the host at 0, 28 and 56 pt, each 28 × 28 pt and each
+  with its identifier, tool tip, accessibility label, target and action; each
+  glyph's ink is within 2 pt of the reference; back and forward start
+  disabled, button and row, follow the snapshot, and an apply brings back a
+  row that drifted; a copy keeps the host, its three buttons with their glyphs
+  and actions, and its size; the sidebar's minimum thickness is the "Width"
+  formula. The glyph test measures the image drawn on its own, outside any
+  control, so it cannot see the control size; the live check does.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
-  none, sends its action from a menu item without raising; the filter's form
-  mirrors the popup and sets the filter.
+  none, sends its action from a menu item without raising, the leading item's
+  "Navigation" submenu row by row with Toggle Sidebar checked rather than
+  sent; the filter's form mirrors the popup and sets the filter.
 - **Title width:** the title item keeps its frame as the title goes from short
   to long and back, and starts at or after the divider; a fitting measurement
   of the title view gives its constant ideal width whatever the text.
@@ -291,9 +307,9 @@ No durable resource is added.
 - **Two toolbars to keep in step** until the SwiftUI path is deleted.
 - **Keeping glass off the compact buttons relies on forwarding.** They have
   none because their item is unbordered and its view forwards nothing. If a
-  macOS release gives glass to view items by another rule, the three buttons
-  would share one capsule. No test can see glass, so only the live check on
-  screen shows whether a capsule appears.
+  macOS release gives glass to view items by another rule, one capsule would
+  sit behind all three buttons. No test can see glass, so only the live check
+  on screen shows whether a capsule appears.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.

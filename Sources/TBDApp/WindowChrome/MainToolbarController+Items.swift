@@ -26,52 +26,91 @@ struct ToolbarImageKey {
     var key: String
 }
 
-/// The view of a compact leading toolbar item: a plain view holding the
-/// item's accessory-bar button, pinned to its four edges.
+/// The view of the toolbar's leading item: a plain view holding the sidebar
+/// toggle, Back and Forward, three accessory-bar buttons side by side, each
+/// `MainToolbarMetrics.iconButtonPitch` wide, so their centres sit one pitch
+/// apart. They share one item because AppKit gives each separate unbordered
+/// view item a fixed 44 pt slot, centred on its view, whatever the view's
+/// width (measured: hosts 8, 20 and 32 pt wide all sat 44 pt apart), so three
+/// items could never sit 28 pt apart.
 ///
-/// The button is not the item's view itself because `NSToolbarItem` forwards
+/// No button is the item's view because `NSToolbarItem` forwards
 /// `isBordered`, `isEnabled`, `target`, `action` and `image` to a view that
 /// answers them. A bordered button as an item's view makes the item bordered,
-/// which gives it a Liquid Glass background, and adjacent glass items share
-/// one capsule. A plain view answers none of them, so the item keeps its own
-/// `isBordered = false` and shows no glass, while the bordered button one
-/// level down keeps its own hover highlight. That is why this class must not
-/// gain any of those properties; `ToolbarIconButtonItem` carries the item's
-/// `isEnabled` to the button instead.
+/// which gives it a Liquid Glass background. A plain view answers none of
+/// them, so the item keeps its own `isBordered = false` and shows no glass,
+/// while the bordered buttons one level down keep their own hover highlight.
+/// That is why this class must not gain any of those properties. The item
+/// stays enabled; `updateContent(_:)` enables Back and Forward on their
+/// buttons.
 ///
-/// AppKit measures the host, which carries the item's size constraints. The
-/// button's edge constraints are required, so they hold it to the host's size
-/// over the accessory-bar bezel's wider intrinsic size. The host is not an
-/// accessibility element, so VoiceOver lands on the button.
+/// AppKit measures the host, which holds the item's size by required
+/// constraints, three pitches by one button's height. Each button holds one
+/// pitch by a required width constraint, and required constraints chain them
+/// leading to trailing and pin each to the host's top and bottom, so they
+/// tile the host over the accessory-bar bezel's own intrinsic size. The host
+/// is not an accessibility element, so VoiceOver lands on each button.
 ///
-/// The host keeps no stored property: its button is its subview. It decodes,
-/// where views here usually leave `init(coder:)` unavailable, because AppKit
-/// copies a view item by archiving its view and unarchiving the copy, and an
-/// unavailable decoder would crash that copy. The button comes back from the
-/// archive as a subview, and the constraints come back with it because they
-/// are marked `shouldBeArchived`: AppKit archives no constraint made in code
-/// otherwise. Accessibility is not archived, so the decoder sets it again.
-final class ToolbarIconButtonHost: NSView {
-    /// The button the host holds.
-    var button: NSButton? {
-        subviews.lazy.compactMap { $0 as? NSButton }.first
-    }
+/// The host keeps no stored property: its buttons are its subviews, found by
+/// their identifiers. It decodes, where views here usually leave
+/// `init(coder:)` unavailable, because AppKit copies a view item by archiving
+/// its view and unarchiving the copy, and an unavailable decoder would crash
+/// that copy. The buttons come back from the archive as subviews, and the
+/// constraints with them because they are marked `shouldBeArchived`: AppKit
+/// archives no constraint made in code otherwise. Accessibility is not
+/// archived, so the decoder sets it again.
+final class LeadingToolbarButtonsHost: NSView {
+    static let toggleID = NSUserInterfaceItemIdentifier("tbd.toolbar.leadingButtons.toggle")
+    static let backID = NSUserInterfaceItemIdentifier("tbd.toolbar.leadingButtons.back")
+    static let forwardID = NSUserInterfaceItemIdentifier("tbd.toolbar.leadingButtons.forward")
 
-    init(button: NSButton) {
-        super.init(frame: button.frame)
+    /// The identifiers of the host's size constraints and of each button's
+    /// width constraint, which name them in a layout log and let a test find
+    /// them among the others.
+    static let widthID = "tbd.toolbar.leadingButtons.width"
+    static let heightID = "tbd.toolbar.leadingButtons.height"
+    static let buttonWidthID = "tbd.toolbar.leadingButtons.buttonWidth"
+
+    var toggleButton: NSButton? { button(Self.toggleID) }
+    var backButton: NSButton? { button(Self.backID) }
+    var forwardButton: NSButton? { button(Self.forwardID) }
+
+    /// Lays out `toggle`, `back` and `forward` in that order, leading to
+    /// trailing, and gives each its identifier.
+    init(toggle: NSButton, back: NSButton, forward: NSButton) {
+        let size = NSSize(width: MainToolbarMetrics.leadingButtonsWidth, height: MainToolbarMetrics.iconButtonHeight)
+        super.init(frame: NSRect(origin: .zero, size: size))
         translatesAutoresizingMaskIntoConstraints = false
-        button.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(button)
-        let edges = [
-            button.leadingAnchor.constraint(equalTo: leadingAnchor),
-            button.trailingAnchor.constraint(equalTo: trailingAnchor),
-            button.topAnchor.constraint(equalTo: topAnchor),
-            button.bottomAnchor.constraint(equalTo: bottomAnchor),
+        let ordered: [(NSButton, NSUserInterfaceItemIdentifier)] = [
+            (toggle, Self.toggleID), (back, Self.backID), (forward, Self.forwardID),
         ]
-        for edge in edges {
-            edge.shouldBeArchived = true
+        let width = widthAnchor.constraint(equalToConstant: size.width)
+        width.identifier = Self.widthID
+        let height = heightAnchor.constraint(equalToConstant: size.height)
+        height.identifier = Self.heightID
+        var layout = [width, height]
+        var previousEdge = leadingAnchor
+        for (button, identifier) in ordered {
+            button.identifier = identifier
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+            let buttonWidth = button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonPitch)
+            buttonWidth.identifier = Self.buttonWidthID
+            layout += [
+                button.leadingAnchor.constraint(equalTo: previousEdge),
+                button.topAnchor.constraint(equalTo: topAnchor),
+                button.bottomAnchor.constraint(equalTo: bottomAnchor),
+                buttonWidth,
+            ]
+            previousEdge = button.trailingAnchor
         }
-        NSLayoutConstraint.activate(edges)
+        layout.append(previousEdge.constraint(equalTo: trailingAnchor))
+        // Archived with the host and its buttons, so a copied item keeps its
+        // size and layout.
+        for constraint in layout {
+            constraint.shouldBeArchived = true
+        }
+        NSLayoutConstraint.activate(layout)
         setAccessibilityElement(false)
     }
 
@@ -79,44 +118,10 @@ final class ToolbarIconButtonHost: NSView {
         super.init(coder: coder)
         setAccessibilityElement(false)
     }
-}
 
-/// A compact leading toolbar item, whose view is a `ToolbarIconButtonHost`.
-///
-/// The host forwards nothing, so the item's `isEnabled` would otherwise never
-/// reach the button. Here the item reports its button's state, and setting
-/// the item's flag sets the button and the overflow row. The setter compares
-/// each part, the item's own flag, the button and the row, and sets only what
-/// differs. That holds whoever sets it: `updateContent(_:)` for Back and
-/// Forward, or AppKit when it copies an item, which enables the copy. Until
-/// the item has its host, the getter reads the item's own flag.
-///
-/// No compact item autovalidates (`makeIconButtonItem`): `validate` does
-/// nothing for an item with a custom view, and none of the three wants
-/// validating.
-///
-/// It has no stored property, so it inherits `init(itemIdentifier:)`, and
-/// AppKit can make or copy it as it does any item: a copy calls that
-/// initializer on the item's own class.
-final class ToolbarIconButtonItem: NSToolbarItem {
-    /// The button its host holds.
-    var button: NSButton? {
-        (view as? ToolbarIconButtonHost)?.button
-    }
-
-    override var isEnabled: Bool {
-        get { button?.isEnabled ?? super.isEnabled }
-        set {
-            if super.isEnabled != newValue {
-                super.isEnabled = newValue
-            }
-            if let button, button.isEnabled != newValue {
-                button.isEnabled = newValue
-            }
-            if let form = menuFormRepresentation, form.isEnabled != newValue {
-                form.isEnabled = newValue
-            }
-        }
+    /// The subview button carrying `identifier`.
+    private func button(_ identifier: NSUserInterfaceItemIdentifier) -> NSButton? {
+        subviews.lazy.compactMap { $0 as? NSButton }.first { $0.identifier == identifier }
     }
 }
 
@@ -133,15 +138,8 @@ extension MainToolbarController {
     ///   title view, which one view can only be in once.
     func makeItem(_ identifier: NSToolbarItem.Identifier, willBeInserted: Bool) -> NSToolbarItem? {
         switch identifier {
-        case MainToolbarItemID.toggleSidebar:
-            return makeIconButtonItem(identifier, symbol: "sidebar.left", tip: "Toggle Sidebar",
-                                      target: split, action: #selector(NSSplitViewController.toggleSidebar(_:)))
-        case MainToolbarItemID.back:
-            return makeHistoryItem(identifier, symbol: "chevron.left", tip: "Back",
-                                   action: #selector(navigateBack(_:)))
-        case MainToolbarItemID.forward:
-            return makeHistoryItem(identifier, symbol: "chevron.right", tip: "Forward",
-                                   action: #selector(navigateForward(_:)))
+        case MainToolbarItemID.leadingButtons:
+            return makeLeadingButtonsItem()
         case MainToolbarItemID.repoFilter:
             return makeFilterItem()
         case MainToolbarItemID.sidebarSeparator:
@@ -165,74 +163,105 @@ extension MainToolbarController {
         }
     }
 
-    /// A compact leading button: a view item whose view is a
-    /// `ToolbarIconButtonHost`, `iconButtonWidth` by `iconButtonHeight`,
-    /// holding an accessory-bar `NSButton` with the symbol at
-    /// `iconGlyphPointSize`. The button is bordered but shows its border only
-    /// while the pointer is inside it, so it highlights on hover and shows no
-    /// bezel at rest. The item is not bordered, and the host answers none of
-    /// the properties an item forwards to its view, so the item has no Liquid
-    /// Glass background (see `ToolbarIconButtonHost`). The target and action
-    /// are set on the button and on the overflow row, an explicit menu form,
-    /// and the item keeps neither: an item with a custom view forwards them
-    /// to the view or drops them, and the host does not answer them
-    /// (measured on CI), so the item reads nil. Glass follows `isBordered`,
-    /// not these. The item is a
-    /// `ToolbarIconButtonItem`, so it reports its button's state, and setting
-    /// its flag sets the button and the row. It does not autovalidate:
-    /// `NSToolbarItem.h` documents that `validate` does nothing for an item
-    /// with a custom view, and none of the three wants validating, as the
-    /// toggle stays enabled and Back and Forward follow the snapshot.
-    private func makeIconButtonItem(
-        _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
-    ) -> ToolbarIconButtonItem {
+    /// The leading item: a view item whose view is a
+    /// `LeadingToolbarButtonsHost` holding the sidebar toggle, Back and
+    /// Forward. The item is not bordered, and the host answers none of the
+    /// properties an item forwards to its view, so the item has no Liquid
+    /// Glass background (see `LeadingToolbarButtonsHost`). The item keeps no
+    /// target, action or tool tip: each button carries its own, and so does
+    /// each row of the overflow form. `NSToolbarItem` forwards a tool tip to
+    /// any view, as every view answers it, so one set on the item would sit
+    /// on the host, under buttons that cover it.
+    ///
+    /// The item stays enabled: Back and Forward are enabled on their buttons
+    /// and rows, which start disabled, by `updateContent(_:)`. It does not
+    /// autovalidate: `NSToolbarItem.h` documents that `validate` does nothing
+    /// for an item with a custom view, and the toggle stays enabled while
+    /// Back and Forward follow the snapshot. Not `isNavigational`, which
+    /// would move it after the tracking separator.
+    private func makeLeadingButtonsItem() -> NSToolbarItem {
+        let toggle = Self.makeLeadingButton(
+            symbol: "sidebar.left", tip: "Toggle Sidebar",
+            target: split, action: #selector(NSSplitViewController.toggleSidebar(_:)))
+        let back = Self.makeLeadingButton(
+            symbol: "chevron.left", tip: "Back", target: self, action: #selector(navigateBack(_:)))
+        let forward = Self.makeLeadingButton(
+            symbol: "chevron.right", tip: "Forward", target: self, action: #selector(navigateForward(_:)))
+        back.isEnabled = false
+        forward.isEnabled = false
+
+        let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.leadingButtons)
+        item.view = LeadingToolbarButtonsHost(toggle: toggle, back: back, forward: forward)
+        item.isBordered = false
+        item.autovalidates = false
+        item.label = Self.leadingButtonsLabel
+        item.menuFormRepresentation = makeLeadingButtonsForm()
+        return item
+    }
+
+    /// The leading item's label, which titles its overflow row.
+    static let leadingButtonsLabel = "Navigation"
+
+    /// One leading button: an accessory-bar `NSButton` showing `symbol` at
+    /// `iconGlyphPointSize`, one pitch by `iconButtonHeight`. It is bordered
+    /// but shows its border only while the pointer is inside it, so it
+    /// highlights on hover and shows no bezel at rest. It does not scale its
+    /// image, which `iconGlyph` sizes.
+    private static func makeLeadingButton(
+        symbol: String, tip: String, target: AnyObject?, action: Selector
+    ) -> NSButton {
         let button = NSButton(frame: NSRect(
-            x: 0, y: 0, width: MainToolbarMetrics.iconButtonWidth, height: MainToolbarMetrics.iconButtonHeight))
+            x: 0, y: 0, width: MainToolbarMetrics.iconButtonPitch, height: MainToolbarMetrics.iconButtonHeight))
         button.bezelStyle = .accessoryBar
         button.isBordered = true
         button.showsBorderOnlyWhileMouseInside = true
         button.title = ""
-        button.image = Self.iconGlyph(symbol, description: tip)
+        button.image = iconGlyph(symbol, description: tip)
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleNone
         button.toolTip = tip
         button.setAccessibilityLabel(tip)
         button.target = target
         button.action = action
-
-        let host = ToolbarIconButtonHost(button: button)
-        let width = host.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth)
-        width.identifier = Self.iconButtonWidthID
-        let height = host.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight)
-        height.identifier = Self.iconButtonHeightID
-        // Archived with the host, so a copied item keeps its size.
-        width.shouldBeArchived = true
-        height.shouldBeArchived = true
-        NSLayoutConstraint.activate([width, height])
-
-        let item = ToolbarIconButtonItem(itemIdentifier: identifier)
-        item.view = host
-        item.isBordered = false
-        item.autovalidates = false
-        item.label = tip
-        item.toolTip = tip
-        let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")
-        form.target = target
-        item.menuFormRepresentation = form
-        return item
+        return button
     }
 
-    /// The identifiers of a compact item's size constraints, on its host,
-    /// which name them in a layout log and let a test find them among the
-    /// host's other constraints. Required, so with the button's required edge
-    /// constraints they win over the bezel's wider intrinsic size.
-    static let iconButtonWidthID = "tbd.toolbar.iconButton.width"
-    static let iconButtonHeightID = "tbd.toolbar.iconButton.height"
+    /// The leading item's overflow row: "Navigation", with a submenu of
+    /// "Toggle Sidebar", "Back" and "Forward", each sending its button's
+    /// action to its button's target. The submenu does not autoenable, so
+    /// Back and Forward start disabled, as their buttons do, and
+    /// `updateContent(_:)` keeps them in step with history;
+    /// `validateMenuItem(_:)` answers for them too, should a menu ask.
+    private func makeLeadingButtonsForm() -> NSMenuItem {
+        let form = NSMenuItem(title: Self.leadingButtonsLabel, action: nil, keyEquivalent: "")
+        let rows = NSMenu(title: Self.leadingButtonsLabel)
+        rows.autoenablesItems = false
+        let toggle = NSMenuItem(
+            title: "Toggle Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "")
+        toggle.target = split
+        let back = NSMenuItem(title: "Back", action: #selector(navigateBack(_:)), keyEquivalent: "")
+        back.target = self
+        back.isEnabled = false
+        let forward = NSMenuItem(title: "Forward", action: #selector(navigateForward(_:)), keyEquivalent: "")
+        forward.target = self
+        forward.isEnabled = false
+        for row in [toggle, back, forward] {
+            rows.addItem(row)
+        }
+        form.submenu = rows
+        return form
+    }
 
-    /// `symbol` at the leading buttons' point size and regular weight,
-    /// carrying `description` for accessibility.
+    /// `symbol` at the leading buttons' point size, regular weight and
+    /// medium scale, carrying `description` for accessibility. The scale is
+    /// named because a toolbar draws its buttons at large control size, which
+    /// scales up a symbol whose configuration names none: measured in the
+    /// running app, the toggle's ink drew 19.5 by 15 pt and each chevron's
+    /// 8 by 14 pt, about 1.25 times the size medium gives (15 by 12 and
+    /// 6 by 11 pt).
     private static func iconGlyph(_ symbol: String, description: String) -> NSImage? {
-        let configuration = NSImage.SymbolConfiguration(pointSize: MainToolbarMetrics.iconGlyphPointSize, weight: .regular)
+        let configuration = NSImage.SymbolConfiguration(
+            pointSize: MainToolbarMetrics.iconGlyphPointSize, weight: .regular, scale: .medium)
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
             .withSymbolConfiguration(configuration)
         image?.accessibilityDescription = description
@@ -252,20 +281,6 @@ extension MainToolbarController {
         }
         return NSTrackingSeparatorToolbarItem(
             identifier: MainToolbarItemID.sidebarSeparator, splitView: split.splitView, dividerIndex: 0)
-    }
-
-    /// Back or Forward, a compact leading button. Not `isNavigational`, which
-    /// would move it after the tracking separator. `canGoBack` and
-    /// `canGoForward` decide whether it is enabled, through
-    /// `updateContent(_:)`, and `validateMenuItem(_:)` for its overflow row.
-    /// It starts disabled, and the item disables its button and its overflow
-    /// row with it (`ToolbarIconButtonItem`).
-    private func makeHistoryItem(
-        _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, action: Selector
-    ) -> ToolbarIconButtonItem {
-        let item = makeIconButtonItem(identifier, symbol: symbol, tip: tip, target: self, action: action)
-        item.isEnabled = false
-        return item
     }
 
     /// The repo filter: a popup whose width is capped and whose compression
@@ -447,11 +462,8 @@ extension MainToolbarController {
     /// value is set only when it differs from what the item holds, so an
     /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let back = compactItem(MainToolbarItemID.back) {
-            updateEnabled(back, snapshot.canGoBack)
-        }
-        if let forward = compactItem(MainToolbarItemID.forward) {
-            updateEnabled(forward, snapshot.canGoForward)
+        if let leading = item(MainToolbarItemID.leadingButtons) {
+            updateHistory(leading, snapshot)
         }
         if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
             updateFilter(filterItem, popup, snapshot.filter)
@@ -468,32 +480,35 @@ extension MainToolbarController {
         }
     }
 
-    /// The present compact item for `identifier`, or nil when there is none.
-    /// An item there of another class is logged and skipped.
-    private func compactItem(_ identifier: NSToolbarItem.Identifier) -> ToolbarIconButtonItem? {
-        guard let found = item(identifier) else { return nil }
-        guard let compact = found as? ToolbarIconButtonItem else {
-            let name = identifier.rawValue
-            let kind = String(describing: type(of: found))
+    /// Enables Back and Forward, button and overflow row, from the
+    /// snapshot's `canGoBack` and `canGoForward`. Each flag is set only when
+    /// it differs, so an apply that changes nothing sets nothing, and a row
+    /// that drifted comes back on the next apply; the row's own flag matters
+    /// because the overflow menu may or may not validate its rows. The item
+    /// itself stays enabled. An item whose view is not the host, or a host
+    /// missing a button, is logged and skipped.
+    private func updateHistory(_ item: NSToolbarItem, _ snapshot: MainToolbarSnapshot) {
+        guard let host = item.view as? LeadingToolbarButtonsHost,
+              let back = host.backButton, let forward = host.forwardButton else {
+            let kind = item.view.map { String(describing: type(of: $0)) } ?? "no view"
             itemsLogger.error(
-                "Main toolbar item \(name, privacy: .public) is a \(kind, privacy: .public), not a compact item; skipped")
-            return nil
+                "Main toolbar's leading item holds \(kind, privacy: .public), not its three buttons; skipped")
+            return
         }
-        return compact
+        let rows = item.menuFormRepresentation?.submenu?.items ?? []
+        let backRow = rows.first { $0.action == #selector(navigateBack(_:)) }
+        let forwardRow = rows.first { $0.action == #selector(navigateForward(_:)) }
+        Self.updateEnabled(back, backRow, snapshot.canGoBack)
+        Self.updateEnabled(forward, forwardRow, snapshot.canGoForward)
     }
 
-    /// Enables or disables Back or Forward. It calls the item's setter only
-    /// when the item, which reports its button's state, or its overflow row
-    /// differs from `enabled`: calling the `isEnabled` setter posts KVO change
-    /// notifications for `enabled` even when nothing changes, so an apply
-    /// that changes nothing must not call it. The row clause brings a row
-    /// that drifted back on the next apply; the row's own flag matters
-    /// because the overflow menu may or may not validate its rows. The setter
-    /// then sets only the parts that differ (`ToolbarIconButtonItem`).
-    private func updateEnabled(_ item: ToolbarIconButtonItem, _ enabled: Bool) {
-        let rowDiffers = item.menuFormRepresentation.map { $0.isEnabled != enabled } ?? false
-        if item.isEnabled != enabled || rowDiffers {
-            item.isEnabled = enabled
+    /// Sets `button` and `row` to `enabled`, each only when it differs.
+    private static func updateEnabled(_ button: NSButton, _ row: NSMenuItem?, _ enabled: Bool) {
+        if button.isEnabled != enabled {
+            button.isEnabled = enabled
+        }
+        if let row, row.isEnabled != enabled {
+            row.isEnabled = enabled
         }
     }
 
