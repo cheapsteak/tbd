@@ -310,7 +310,10 @@ let package = Package(
         // whenever another suite built a table first. A second constructor
         // installs the main run loop guard (`MainRunLoopGuard.m`): Swift's
         // async test `main` exits 0 when the main run loop is stopped, and the
-        // guard resumes it as `NSApplication.run()` would. Test-only.
+        // guard resumes it as `NSApplication.run()` would. A third installs a
+        // no-op SIGPIPE handler (`SIGPIPEHandler.c`), so a write to a closed
+        // pipe or socket fails with EPIPE instead of ending the pass, while
+        // children still start with SIGPIPE at its default. Test-only.
         .target(
             name: "TestProcessDefaults",
             path: "Tests/TestProcessDefaults",
@@ -391,8 +394,10 @@ let package = Package(
                 "TBDKernel",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
-                // test process before any table exists, and keeps the process
-                // running through a stopped main run loop; see the target.
+                // test process before any table exists, keeps the process
+                // running through a stopped main run loop, and catches SIGPIPE;
+                // see the target. Linked into the one test bundle every test
+                // target shares, so it covers every pass, not just this target.
                 "TestProcessDefaults",
                 "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),

@@ -73,11 +73,11 @@ struct SocketSIGPIPETests {
     /// `adoptedSidecarSocketIsProtected` above is the test that detects a
     /// regression in the production path.
     ///
-    /// The `#require` on `suppress` is load-bearing: a broken helper would
-    /// otherwise leave the socket unprotected and this write would kill the
-    /// whole test process by signal 13, discarding the run's summary line for
-    /// every other suite — instead of failing here by name with the write
-    /// never attempted.
+    /// The `#require` on `suppress` is what ties this test to the helper. The
+    /// write alone cannot: the test host catches SIGPIPE with a no-op handler
+    /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`), so an unprotected socket
+    /// would return the same `EPIPE` here. The app has no such handler, and
+    /// `suppressSetsTheOption` is what asserts the option itself.
     ///
     /// It is written against a raw `socketpair` rather than a live
     /// `FDSidecarClient` so the close and the write are strictly ordered on

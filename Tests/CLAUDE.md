@@ -894,6 +894,14 @@ front.
   loop…` to stderr, so search a CI log for that line before suspecting a
   crash. What stops the loop is unidentified: nothing in the repo calls
   `CFRunLoopStop` or `NSApp.stop`.
+- **Never set SIGPIPE's disposition in a test.** The test host catches
+  SIGPIPE with a no-op handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`),
+  so a write to a closed pipe or socket already fails with `EPIPE` instead of
+  killing the pass, as one did on CI with "unexpected signal code 13". A
+  `signal(SIGPIPE, SIG_IGN)` in a test replaces that handler for every suite in
+  the process, and `SIG_IGN`, unlike a handler, survives `exec` into every
+  child a plain `posix_spawn` or `forkpty` starts afterwards. Production sockets and pipes still need
+  `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`: the app has no such handler.
 - **An `NSDraggingInfo` stub must not declare
   `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
   category already declares it, so the stub's own version fails with

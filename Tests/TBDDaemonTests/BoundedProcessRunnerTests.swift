@@ -128,10 +128,11 @@ struct BoundedProcessRunnerTests {
     /// child exits near-instantly and a >64KB write cannot complete without
     /// the reader (the child) draining it, so the write is guaranteed to
     /// observe the closed read end — no timing race with the child's exit.
-    /// `signal(SIGPIPE, SIG_IGN)` mirrors `main.swift`'s process-wide stance
-    /// (see `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder`
-    /// for the same pattern) — without it, the raw SIGPIPE would kill this
-    /// TEST process before the write even has a chance to return an error.
+    /// The daemon ignores SIGPIPE (`main.swift`), so there the write returns
+    /// EPIPE; here the test host's no-op SIGPIPE handler
+    /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE.
+    /// The test must not set the disposition itself: that is process-wide, and
+    /// would replace the handler for every suite running alongside it.
     ///
     /// Before the fix, `stdinPipe.fileHandleForWriting.write(stdin)` (the
     /// non-throwing overload) raised an uncatchable
@@ -139,7 +140,6 @@ struct BoundedProcessRunnerTests {
     /// have aborted the whole test process rather than merely failing an
     /// assertion — so a green run of this test is itself part of the proof.
     @Test func childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess() async throws {
-        signal(SIGPIPE, SIG_IGN)
         let oversizedPayload = Data(repeating: 0x41, count: 200_000)
         let outcome = try await runBoundedProcess(
             executable: "/bin/sh",
