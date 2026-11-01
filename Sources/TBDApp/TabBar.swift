@@ -77,10 +77,58 @@ private struct TabDropDelegate: DropDelegate {
     }
 }
 
+// MARK: - TabRowMetrics
+
+/// The tab row's dimensions. The workspace tab bar and the side region's strip
+/// share one row across the window, so both take their height from here.
+enum TabRowMetrics {
+    static let height: CGFloat = 30
+}
+
+// MARK: - TabBarTrailingItems
+
+/// What the workspace tab bar draws at its trailing end besides Session
+/// History: the selected tab's own control before it, and the expand button
+/// after it. `PanelSurfaceWorkspaceView` decides both from the tab and its
+/// side region; a bar drawn anywhere else (Session History open, a tab whose
+/// layout still splits off a terminal, no tabs) takes `none`.
+struct TabBarTrailingItems {
+    /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
+    /// or nil when its kind has none.
+    var selectedTabControl: PaneChromeControl?
+    var onSelectedTabControl: @MainActor () -> Void
+    /// True while the side region is collapsed and has panels.
+    var showsExpandButton: Bool
+    var onExpand: @MainActor () -> Void
+
+    /// No selected-tab control and no expand button.
+    ///
+    /// Computed rather than stored: Swift 6 accepts a stored static only of a
+    /// `Sendable` type, which a struct of closures is not, and building an
+    /// empty value costs nothing.
+    static var none: TabBarTrailingItems {
+        TabBarTrailingItems(
+            selectedTabControl: nil, onSelectedTabControl: {},
+            showsExpandButton: false, onExpand: {})
+    }
+}
+
 // MARK: - TabBar
 
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
+///
+/// Reads, left to right: the tabs, the + button, then a trailing group of the
+/// selected tab's control, Session History and the expand button, the first
+/// and last only as `trailing` asks. The trailing group keeps its full width
+/// at the row's trailing edge however many tabs there are. While the tabs fit
+/// in the width it leaves, the + button sits right after the last one; once
+/// they overflow — a narrow primary column on the daemon path, beside a wide
+/// side region — they scroll horizontally, and the + button stays in view
+/// just after them (`TabsThenAddLayout`). The selected tab is scrolled into
+/// view when the bar appears, when the selection changes and when the tab
+/// list does, so a tab appended and selected, or one selected by a shortcut
+/// or from the sidebar, is never left outside the visible tabs.
 struct TabBar: View {
     let tabs: [TBDShared.Tab]
     let worktreeID: UUID
@@ -98,39 +146,86 @@ struct TabBar: View {
     // the profile-picker "Fork Session" menu (#361). No tab-level closures.
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
+    /// The selected tab's control and the expand button, drawn around Session
+    /// History.
+    var trailing: TabBarTrailingItems = .none
 
     var body: some View {
+        ScrollViewReader { proxy in
+            row
+                .onAppear { scrollSelectedTabIntoView(proxy) }
+                .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
+                .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
+        }
+    }
+
+    private var selectedTabID: UUID? {
+        Self.tabIDToKeepInView(tabs: tabs, activeTabIndex: activeTabIndex, isHistorySelected: isHistorySelected)
+    }
+
+    /// The tab the bar keeps in view: the selected one, or none while Session
+    /// History is open or the active index names no tab.
+    static func tabIDToKeepInView(
+        tabs: [TBDShared.Tab], activeTabIndex: Int, isHistorySelected: Bool
+    ) -> UUID? {
+        guard !isHistorySelected, tabs.indices.contains(activeTabIndex) else { return nil }
+        return tabs[activeTabIndex].id
+    }
+
+    /// Scrolls the tabs the least distance that shows the selected one
+    /// whole; a tab already in view does not move.
+    private func scrollSelectedTabIntoView(_ proxy: ScrollViewProxy) {
+        guard let selectedTabID else { return }
+        proxy.scrollTo(selectedTabID)
+    }
+
+    /// The tabs, the + button and the trailing group, in one row.
+    private var row: some View {
         HStack(spacing: 0) {
-            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                TabBarItem(
-                    tab: tab,
-                    index: index,
-                    worktreeID: worktreeID,
-                    isSelected: index == activeTabIndex,
-                    terminal: terminalForTab(tab.id),
-                    onSelect: { activeTabIndex = index },
-                    onClose: { onCloseTab(index) }
+            TabsThenAddLayout {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                            TabBarItem(
+                                tab: tab,
+                                index: index,
+                                worktreeID: worktreeID,
+                                isSelected: index == activeTabIndex,
+                                terminal: terminalForTab(tab.id),
+                                onSelect: { activeTabIndex = index },
+                                onClose: { onCloseTab(index) }
+                            )
+                        }
+                    }
+                }
+                // Tabs that fit stay put under a trackpad swipe.
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+
+                AddTabButton(
+                    profiles: appState.modelProfiles,
+                    onAddShell: onAddShell,
+                    onAddClaude: onAddClaude,
+                    onAddClaudeProfile: onAddClaudeProfile,
+                    onChooseAccount: onChooseAccount,
+                    onAddCodex: onAddCodex,
+                    onAddNote: onAddNote
                 )
             }
+            // Exactly the width the trailing group leaves, the tabs and the +
+            // button at its leading edge: `minWidth: 0` stops the frame from
+            // reporting the tabs' full width, which would push the trailing
+            // group past the row's end. Clipped only for a column too narrow
+            // for the + button itself.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
-            AddTabButton(
-                profiles: appState.modelProfiles,
-                onAddShell: onAddShell,
-                onAddClaude: onAddClaude,
-                onAddClaudeProfile: onAddClaudeProfile,
-                onChooseAccount: onChooseAccount,
-                onAddCodex: onAddCodex,
-                onAddNote: onAddNote
-            )
-            Spacer()
-
-            HistoryTabButton(
-                isSelected: isHistorySelected,
-                action: onHistoryTab
-            )
+            trailingGroup
+                // Its full width, at the row's height, sized before the tabs.
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
         }
         .padding(.horizontal, 0)
-        .frame(height: 30)
+        .frame(height: TabRowMetrics.height)
         .background(Color(nsColor: .windowBackgroundColor))
         // Catch-all so dropping a tab on the +/history button or empty
         // strip space still clears `draggingTabID`. Returns false (no
@@ -140,6 +235,100 @@ struct TabBar: View {
             appState.draggingTabID = nil
             return false
         }
+    }
+
+    /// The selected tab's control, Session History, and the expand button.
+    private var trailingGroup: some View {
+        HStack(spacing: 0) {
+            if let control = trailing.selectedTabControl {
+                PaneChromeControlButton(control: control) {
+                    trailing.onSelectedTabControl()
+                }
+            }
+
+            HistoryTabButton(
+                isSelected: isHistorySelected,
+                action: onHistoryTab
+            )
+
+            // Brings back the collapsed side region. It shows only while the
+            // region is collapsed, and the strip's collapse button only while
+            // it is visible, so `⌘\` is bound on one of the two at a time.
+            if trailing.showsExpandButton {
+                SidePanelToggleButton(collapsed: true) {
+                    trailing.onExpand()
+                }
+            }
+        }
+    }
+}
+
+// MARK: - TabsThenAddLayout
+
+/// Lays out the workspace tab bar's tabs, a horizontal scroll view, and the
+/// + button after them. The tabs take their ideal width — a horizontal scroll
+/// view's is its content's — while the + button still fits after them, so it
+/// sits right after the last tab. Past that they take the width the button
+/// leaves and scroll, and the button stays in view at the scroll area's end.
+///
+/// A layout rather than a `ViewThatFits` choosing between a plain row and a
+/// scrolling one. That would hold two sets of tab items, each with its own
+/// rename field, hover and drop state, and both picking up a pending rename,
+/// and would swap one set for the other whenever the column crossed the width
+/// the tabs need. Here a resize only moves the scroll area's edge: no tab
+/// item is rebuilt.
+///
+/// Each subview's ideal size is measured once, when SwiftUI makes or updates
+/// the layout's cache, and both `sizeThatFits` and `placeSubviews` read it
+/// from there: an ideal size does not depend on the proposal.
+struct TabsThenAddLayout: Layout {
+    /// The subviews' ideal sizes, in order.
+    struct Cache {
+        var idealSizes: [CGSize]
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(idealSizes: Self.idealSizes(of: subviews))
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache.idealSizes = Self.idealSizes(of: subviews)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let ideals = cache.idealSizes
+        let widths = Self.widths(idealWidths: ideals.map(\.width), available: proposal.width)
+        let height = proposal.height ?? ideals.map(\.height).max() ?? 0
+        return CGSize(width: widths.reduce(0, +), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let widths = Self.widths(
+            idealWidths: cache.idealSizes.map(\.width),
+            available: bounds.width)
+        var x = bounds.minX
+        for (subview, width) in zip(subviews, widths) {
+            subview.place(
+                at: CGPoint(x: x, y: bounds.midY),
+                anchor: .leading,
+                proposal: ProposedViewSize(width: width, height: bounds.height))
+            x += width
+        }
+    }
+
+    /// The width each subview gets, in order: every one after the first its
+    /// ideal width, and the first its ideal width capped to what the others
+    /// leave of `available`, never below zero. With no width offered, each
+    /// takes its ideal width.
+    static func widths(idealWidths: [CGFloat], available: CGFloat?) -> [CGFloat] {
+        guard let first = idealWidths.first, let available else { return idealWidths }
+        let rest: [CGFloat] = Array(idealWidths.dropFirst())
+        let firstWidth: CGFloat = max(0, min(first, available - rest.reduce(0, +)))
+        return [firstWidth] + rest
+    }
+
+    private static func idealSizes(of subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
     }
 }
 
@@ -162,12 +351,15 @@ private struct AddTabButton: View {
     /// A `@State` default-value expression runs on EVERY call to the memberwise
     /// initializer — `@State` only preserves the stored value after first
     /// mount, it does not stop the expression from re-evaluating. `AddTabButton`
-    /// is built inside `TabBar.body`, itself built inside `SingleWorktreeView.body`,
-    /// and `WorktreePager` keeps one of those mounted per kept-alive worktree, all
-    /// reading `AppState` — so a change to any property they read (the 2 s poll,
-    /// terminal churn) re-ran `detect()` for every mounted worktree, each doing
-    /// `2 × (PATH dirs + 8)` synchronous `stat`s on the main thread. The two real refresh paths below cover the value: `.task`
-    /// on appear, and a synchronous re-detect in `showMenu()`.
+    /// is built inside `TabBar.body`. The bar is built by
+    /// `SingleWorktreeView.tabBar(_:)` and drawn by `SingleWorktreeView.body`,
+    /// or on the daemon path by `PanelSurfaceWorkspaceView.body`, and
+    /// `WorktreePager` keeps one worktree view mounted per kept-alive worktree,
+    /// all reading `AppState`. A `detect()` default would therefore re-run on a
+    /// change to any property they read (the 2 s poll, terminal churn) for
+    /// every mounted worktree, each doing `2 × (PATH dirs + 8)` synchronous
+    /// `stat`s on the main thread. The two real refresh paths below cover the
+    /// value: `.task` on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
 
     var body: some View {
@@ -578,6 +770,86 @@ enum ContinueInClaudeMenu {
     }
 }
 
+// MARK: - Tab controls
+
+/// The terminal pin's item in a workspace tab's right-click menu (panel tabs
+/// spec, "The renderer"): "Unpin" for a pinned terminal, "Pin" for any other,
+/// and no item for a tab with no terminal behind it.
+enum TabPinMenu {
+    static func title(for terminal: TBDShared.Terminal?) -> String? {
+        guard let terminal else { return nil }
+        return terminal.pinnedAt != nil ? "Unpin" : "Pin"
+    }
+}
+
+/// What committing a tab's rename field writes (panel tabs spec, "The
+/// renderer"): a note tab's rename is its note's title, and any other tab's
+/// is the tab's label.
+enum TabRename: Equatable {
+    /// Set the tab's label to this text (`AppState.renameTab`, which trims it
+    /// and clears the label for blank text).
+    case label(String)
+    /// Write the note's title — nil leaves the title as it is — and clear the
+    /// tab's label, so the tab shows the title.
+    case note(noteID: UUID, title: String?)
+
+    /// The rename for a tab showing `content`, committed with `text`, while
+    /// its note (for a note tab) is titled `currentNoteTitle`.
+    static func commit(content: PaneContent, text: String, currentNoteTitle: String?) -> TabRename {
+        guard case .note(let noteID) = content else { return .label(text) }
+        return .note(noteID: noteID, title: noteTitle(text: text, currentNoteTitle: currentNoteTitle))
+    }
+
+    /// The title a note's rename writes: the trimmed text, or nil when it is
+    /// blank or already the note's title.
+    static func noteTitle(text: String, currentNoteTitle: String?) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != currentNoteTitle else { return nil }
+        return trimmed
+    }
+}
+
+/// The width a workspace tab's rename field keeps while it is open. Inside
+/// the tabs' horizontal scroll view the field is offered no width and takes
+/// its ideal one, which on its own is barely wider than the floor; it takes
+/// the label's width from when editing began instead, so the tab keeps its
+/// width as the field opens.
+enum TabRenameFieldWidth {
+    /// The narrowest a field is drawn, for a short or empty label.
+    static let floor: CGFloat = 60
+
+    /// The field's minimum (and ideal) width for a label `labelWidth` wide.
+    static func minimum(labelWidth: CGFloat) -> CGFloat {
+        max(floor, labelWidth)
+    }
+}
+
+/// What a tab bar item does with the pending rename
+/// (`AppState.pendingTabRenameID`) when it looks: the item showing that tab
+/// opens its rename field and clears the request; any other item leaves it.
+struct TabRenamePickUp: Equatable {
+    let startsEditing: Bool
+    /// The pending rename once the item has looked.
+    let pendingIDAfter: UUID?
+
+    static func decide(tabID: UUID, pendingID: UUID?) -> TabRenamePickUp {
+        guard pendingID == tabID else {
+            return TabRenamePickUp(startsEditing: false, pendingIDAfter: pendingID)
+        }
+        return TabRenamePickUp(startsEditing: true, pendingIDAfter: nil)
+    }
+}
+
+/// A workspace tab's hover text: a web page's full address, which its label
+/// (the host) leaves out. No other tab has one; a Claude tab has its account
+/// hover card instead.
+enum WorkspaceTabTooltip {
+    static func text(for content: PaneContent) -> String? {
+        guard case .webview(_, let url) = content else { return nil }
+        return url.absoluteString
+    }
+}
+
 // MARK: - TabTerminalTarget
 
 /// Pure resolution of the terminal a tab is backed by: the anchor its deep
@@ -596,6 +868,33 @@ enum TabTerminalTarget {
     }
 }
 
+// MARK: - WorkspaceTabFileMenu
+
+/// The file a workspace tab's right-click menu offers Copy Path, Reveal in
+/// Finder and Open With for: the one a pane header's title menu acts on
+/// (`headerMenuTarget`), for the tab's content, with the copy item's wording.
+/// A file tab offers its file, and a transcript tab its terminal's session
+/// `.jsonl` once that terminal's row carries a non-empty one; every other tab
+/// offers none, and with no target the menu has none of the three items. On
+/// the daemon path no header names the primary, so the tab's menu is where
+/// these items are.
+///
+/// Extracted from the view so each kind is unit-testable without rendering
+/// SwiftUI (same pattern as `TabTerminalTarget`).
+enum WorkspaceTabFileMenu {
+    /// - Parameter transcriptPath: the session `.jsonl` of a terminal, by its
+    ///   ID; asked only for the terminal a transcript tab follows.
+    static func target(
+        for content: PaneContent, transcriptPath: (UUID) -> String?
+    ) -> HeaderMenuTarget? {
+        var path: String?
+        if case .liveTranscript(_, let terminalID) = content {
+            path = transcriptPath(terminalID)
+        }
+        return headerMenuTarget(for: content, transcriptPath: path)
+    }
+}
+
 private struct TabBarItem: View {
     let tab: TBDShared.Tab
     let index: Int
@@ -610,6 +909,17 @@ private struct TabBarItem: View {
     @State private var isEditing: Bool = false
     @State private var dropEdge: DropEdge? = nil
     @State private var measuredWidth: CGFloat = 100
+    /// The label's width as last drawn. The label gives way to the rename
+    /// field while editing, so this holds its width from when editing began,
+    /// the rename field's minimum.
+    @State private var labelWidth: CGFloat = 0
+    /// The applications Open With offers for `fileMenuTarget`'s file, looked
+    /// up off the main actor when the item appears or that file changes, and
+    /// again each time the pointer enters the item, so the right-click that
+    /// almost always follows a hover finds the list fresh; never while the
+    /// menu is built (`RevealAndOpenWithMenuItems`). One lookup at a time,
+    /// and none outlives the item's file or the item (`OpenWithAppsLookup`).
+    @StateObject private var fileMenuApps = OpenWithAppsLookup()
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
@@ -619,6 +929,12 @@ private struct TabBarItem: View {
 
     private var showClose: Bool {
         isSelected || isHovering
+    }
+
+    /// The rename field's minimum width: the label's width when editing
+    /// began, and at least 60 pt.
+    private var renameFieldMinWidth: CGFloat {
+        TabRenameFieldWidth.minimum(labelWidth: labelWidth)
     }
 
     private var isCodeViewer: Bool {
@@ -700,10 +1016,11 @@ private struct TabBarItem: View {
                             text: tabLabel,
                             isEditing: $isEditing,
                             onCommit: { newText in
-                                appState.renameTab(
+                                appState.commitTabRename(
                                     tabID: tab.id,
                                     worktreeID: worktreeID,
-                                    newLabel: newText
+                                    content: tab.content,
+                                    text: newText
                                 )
                             },
                             editorFont: .systemFont(ofSize: 11),
@@ -719,7 +1036,11 @@ private struct TabBarItem: View {
                             }
                         )
                         .font(.system(size: 11))
-                        .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
+                        // The scroll view offers no width, so the field takes
+                        // its ideal one (`TabRenameFieldWidth`).
+                        .frame(
+                            minWidth: renameFieldMinWidth, idealWidth: renameFieldMinWidth,
+                            maxWidth: .infinity, alignment: .leading)
                     } else {
                         Text(tabLabel)
                             .font(.system(size: 11))
@@ -727,6 +1048,11 @@ private struct TabBarItem: View {
                             .lineLimit(1)
                             .fixedSize()
                             .foregroundStyle(isParked ? .tertiary : (isSelected ? .primary : .secondary))
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                proxy.size.width
+                            } action: { width in
+                                labelWidth = width
+                            }
                     }
 
                     if terminal?.pendingResumeAt != nil {
@@ -742,6 +1068,7 @@ private struct TabBarItem: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .modifier(OptionalHelp(text: WorkspaceTabTooltip.text(for: tab.content)))
 
             // Close button — right side
             Button(action: onClose) {
@@ -793,16 +1120,27 @@ private struct TabBarItem: View {
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
+        .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
+        .onChange(of: fileMenuTarget?.path) { _, path in
+            fileMenuApps.show(path: path)
+        }
+        .onDisappear { fileMenuApps.stop() }
         .onHover { hovering in
             isHovering = hovering
+            if hovering {
+                fileMenuApps.pointerEntered()
+            }
         }
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
                 guard isRenameable else { return }
-                if !isSelected { onSelect() }
-                isEditing = true
+                beginRename()
             }
         )
+        .onAppear { pickUpPendingRename() }
+        .onChange(of: appState.pendingTabRenameID) { _, _ in
+            pickUpPendingRename()
+        }
         .opacity(appState.draggingTabID == tab.id ? 0.4 : 1)
         .overlay(alignment: dropEdge == .leading ? .leading : .trailing) {
             if dropEdge != nil {
@@ -935,24 +1273,14 @@ private struct TabBarItem: View {
         }
     }
 
-    /// Absolute path on disk for tab content that has a backing file
-    /// (codeViewer points at the file directly; liveTranscript points at
-    /// the resolved Claude session JSONL via the underlying terminal).
-    private var copyablePath: String? {
-        switch tab.content {
-        case .codeViewer(_, let path):
-            return path.isEmpty ? nil : path
-        case .liveTranscript(_, let terminalID):
-            let allTerminals = appState.terminals.values.flatMap { $0 }
-            return allTerminals.first { $0.id == terminalID }?.transcriptPath
-        default:
-            return nil
+    /// The file this tab's Copy Path, Reveal in Finder and Open With act on,
+    /// and the copy item's wording (`WorkspaceTabFileMenu`); nil for a tab
+    /// with no file, which offers none of them. A transcript tab's file is
+    /// the session `.jsonl` on its terminal's row in this worktree.
+    private var fileMenuTarget: HeaderMenuTarget? {
+        WorkspaceTabFileMenu.target(for: tab.content) { terminalID in
+            appState.terminal(id: terminalID, in: worktreeID)?.transcriptPath
         }
-    }
-
-    private var copyPathLabel: String {
-        if case .liveTranscript = tab.content { return "Copy Conversation Path" }
-        return "Copy Path"
     }
 
     /// The terminal this tab renders, for deep-link anchoring — nil for
@@ -964,11 +1292,9 @@ private struct TabBarItem: View {
 
     @ViewBuilder
     private var contextMenuContent: some View {
-        if let path = copyablePath {
-            Button(copyPathLabel) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            }
+        if let fileTarget = fileMenuTarget {
+            Button(fileTarget.copyLabel) { copyToPasteboard(fileTarget.path) }
+            RevealAndOpenWithMenuItems(path: fileTarget.path, apps: fileMenuApps.apps)
         }
 
         Button("Copy Link") {
@@ -987,6 +1313,17 @@ private struct TabBarItem: View {
         }
 
         Divider()
+
+        if let terminal, let pinTitle = TabPinMenu.title(for: terminal) {
+            let pinned = terminal.pinnedAt != nil
+            Button {
+                Task { await appState.setTerminalPin(id: terminal.id, pinned: !pinned) }
+            } label: {
+                Label(pinTitle, systemImage: pinned ? "pin.slash" : "pin")
+            }
+
+            Divider()
+        }
 
         // Shells move too, so this sits outside the Claude-only block.
         if TransportMigrationMenu.isOffered(
@@ -1079,8 +1416,7 @@ private struct TabBarItem: View {
 
         if isRenameable {
             Button("Rename Tab") {
-                if !isSelected { onSelect() }
-                isEditing = true
+                beginRename()
             }
             Divider()
         }
@@ -1088,6 +1424,21 @@ private struct TabBarItem: View {
         Button(action: onClose) {
             Label("Close Tab", systemImage: "xmark")
         }
+    }
+
+    /// Selects the tab and asks for its rename field through `AppState`
+    /// (`requestTabRename`), not this item's own state: selecting can move the
+    /// bar to another view, which rebuilds this item, and the item showing the
+    /// tab then — this one or its replacement — opens the field.
+    private func beginRename() {
+        if !isSelected { onSelect() }
+        appState.requestTabRename(tabID: tab.id)
+    }
+
+    /// Opens the rename field when the pending rename is this tab's.
+    private func pickUpPendingRename() {
+        guard appState.takePendingTabRename(tabID: tab.id) else { return }
+        isEditing = true
     }
 
     /// Viewer content shows the icon it shares with the side region's strip
@@ -1168,5 +1519,21 @@ private struct HistoryTabButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .help("Session History")
+    }
+}
+
+// MARK: - OptionalHelp
+
+/// `.help(text)` when there is text, and nothing otherwise, so a view with no
+/// tooltip gets no empty one.
+private struct OptionalHelp: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.help(text)
+        } else {
+            content
+        }
     }
 }

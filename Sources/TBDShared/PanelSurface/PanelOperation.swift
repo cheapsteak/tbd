@@ -27,7 +27,7 @@ public enum PanelOperation: Codable, Sendable, Equatable {
     case resize(width: Double)
 }
 
-/// Not a security credential — supports feature gating and diagnostics (§7.2).
+/// Not a security credential — diagnostics only (§7.2).
 public enum PanelOperationOrigin: String, Codable, Sendable {
     case appUser, agentCLI, daemonReconcile
 }

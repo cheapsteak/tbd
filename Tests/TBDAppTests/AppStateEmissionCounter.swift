@@ -135,6 +135,7 @@ final class AppStateEmissionTracker {
         _ = state.activeTabIndices
         _ = state.worktreeTabOrders
         _ = state.draggingTabID
+        _ = state.pendingTabRenameID
         _ = state.repoFilter
         _ = state.expandedSidebarGroups
         _ = state.sidebarSelectionGeneration
@@ -264,6 +265,7 @@ final class AppStateEmissionTracker {
         "activeTabIndices",
         "worktreeTabOrders",
         "draggingTabID",
+        "pendingTabRenameID",
         "repoFilter",
         "expandedSidebarGroups",
         "sidebarSelectionGeneration",

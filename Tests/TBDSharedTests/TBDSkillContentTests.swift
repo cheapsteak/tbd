@@ -124,7 +124,8 @@ import Foundation
     #expect(body.contains("`select --panel <id>`"))
     #expect(body.contains("`collapse` hides the side panel"))
     #expect(body.contains("`expand` shows it again"))
-    #expect(body.contains("enabled \"Side panel with tabs\" in Settings"))
+    #expect(!body.contains("panel_tabs_enabled"))
+    #expect(!body.contains("Side panel with tabs"))
     #expect(body.contains("unless you pass `--tab <id>`"))
     // The v1 free-split vocabulary is gone from the guidance.
     #expect(!body.contains("select-tab"))

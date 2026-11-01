@@ -52,19 +52,29 @@ struct PanePlaceholder: View {
     /// change it triggers, and what it needs to know about that layout. See
     /// `PaneActions`.
     let actions: PaneActions
-    /// False where something outside the leaf already names the pane (a tab
-    /// in the side region), so the header drops its own title.
-    var showsPaneLabel: Bool = true
+    /// The state behind the pane's per-kind controls, when the view drawing
+    /// the tab row owns it and draws those controls itself. Handed one, the
+    /// leaf draws no header: a tab names and closes what it shows (panel tabs
+    /// spec, "The leaf seam"). Handed none, the leaf keeps its own and draws
+    /// its header, as in a legacy split and the multi-worktree grid, where no
+    /// tab names the pane.
+    var chrome: PaneChromeState? = nil
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
-    @State private var showSourceCode = false
-    @State private var hasRenderableContent = false
     @State private var showHistoryPalette = false
-    @StateObject private var webviewState = WebviewState()
-    @State private var didCopyURL = false
+    /// Holds the leaf's own control state, read only while `chrome` is nil.
+    /// `@StateObject` builds the holder once per view identity, never on a
+    /// re-init, and the holder builds the state only on first read.
+    @StateObject private var ownChromeHolder = OwnChromeHolder()
     @AppStorage(AppState.enableTranscriptKey)
     private var transcriptFeatureEnabled = AppState.enableTranscriptDefault
+
+    /// The control state this leaf reads and writes: the one handed in, or
+    /// its own.
+    private var chromeState: PaneChromeState {
+        chrome ?? ownChromeHolder.state
+    }
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -73,22 +83,26 @@ struct PanePlaceholder: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar header
-            toolbar
+            // The header, only where no tab row carries the controls.
+            if chrome == nil {
+                toolbar
 
-            Divider()
+                Divider()
+            }
 
             // Pane content
             paneBody
         }
         .onPreferenceChange(HasRenderableContentKey.self) { newValue in
-            // Defer @State writes to the next runloop tick.
+            // Defer writes to the chrome state to the next runloop tick.
             //
             // SwiftUI propagates preference values during its layout / render
             // pass — and on pane teardown the preference resets to its
             // default, which fires this handler *while* the host view is
-            // mid-layout. Mutating @State synchronously here re-invalidates
-            // the view inside the same pass, producing
+            // mid-layout. Writing the chrome state synchronously here
+            // re-invalidates the views that read it — this leaf, or the tab
+            // row that owns the state and draws its controls — inside the
+            // same pass, producing
             // "NSHostingView is being laid out reentrantly while rendering
             // its SwiftUI content" and (with our FilePreviewView changes
             // adding @StateObject + .task teardown work in the same phase)
@@ -97,10 +111,11 @@ struct PanePlaceholder: View {
             // Hopping to the next main-actor turn lets the current layout
             // pass finish, then schedules a normal subsequent render.
             Task { @MainActor in
-                if newValue && !hasRenderableContent {
-                    showSourceCode = false
+                let state = chromeState
+                if newValue && !state.hasRenderableContent {
+                    state.showSourceCode = false
                 }
-                hasRenderableContent = newValue
+                state.hasRenderableContent = newValue
             }
         }
     }
@@ -118,16 +133,14 @@ struct PanePlaceholder: View {
                 historyNavigation(history: history)
             }
 
-            if showsPaneLabel {
-                paneLabel
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    // Scoped to the title only (not the whole header row) so
-                    // right-click on the history chevrons / close button isn't
-                    // swallowed by the file menu.
-                    .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
-            }
+            paneLabel
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                // Scoped to the title only (not the whole header row) so
+                // right-click on the history chevrons / close button isn't
+                // swallowed by the file menu.
+                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
 
             Spacer()
 
@@ -186,9 +199,7 @@ struct PanePlaceholder: View {
                 }
             }
         case .webview(_, let url):
-            Text(webviewState.currentURL?.absoluteString ?? url.absoluteString)
-                .truncationMode(.tail)
-                .help(webviewState.currentURL?.absoluteString ?? url.absoluteString)
+            WebviewAddressLabel(initialURL: url, state: chromeState.webviewState)
         case .codeViewer(_, let path):
             Text(URL(fileURLWithPath: path).lastPathComponent)
         case .note(let noteID):
@@ -225,23 +236,25 @@ struct PanePlaceholder: View {
                     : "Show the chat-style live transcript pane")
             }
 
-        case .webview:
-            Button(action: copyWebviewURL) {
-                Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
+        case .webview(_, let initialURL):
+            let state = chromeState
+            Button(action: { state.copyAddress(state.webviewState.currentURL ?? initialURL) }) {
+                Image(systemName: state.didCopyAddress ? "checkmark" : "doc.on.doc")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
             .help("Copy URL")
 
         case .codeViewer:
-            if hasRenderableContent {
-                Button(action: { showSourceCode.toggle() }) {
+            let state = chromeState
+            if state.hasRenderableContent {
+                Button(action: { state.showSourceCode.toggle() }) {
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
                         .font(.caption)
-                        .foregroundStyle(showSourceCode ? .primary : .secondary)
+                        .foregroundStyle(state.showSourceCode ? .primary : .secondary)
                 }
                 .buttonStyle(.borderless)
-                .help(showSourceCode ? "Show rendered view" : "Show source code")
+                .help(state.showSourceCode ? "Show rendered view" : "Show source code")
             }
 
         case .note, .liveTranscript:
@@ -333,12 +346,12 @@ struct PanePlaceholder: View {
         case .terminal(let terminalID):
             terminalContent(terminalID: terminalID)
         case .webview(_, let url):
-            WebviewPaneView(url: url, state: webviewState)
+            WebviewPaneView(url: url, state: chromeState.webviewState)
         case .codeViewer(_, let path):
             CodeViewerPaneView(
                 path: path,
                 worktreePath: worktree.path,
-                showSourceCode: showSourceCode,
+                showSourceCode: chromeState.showSourceCode,
                 // A link clicked inside a rendered markdown document points
                 // THIS pane at the linked file, keeping its pane UUID.
                 onNavigate: { actions.navigateInPane(content, $0) }
@@ -526,21 +539,35 @@ struct PanePlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
 
-    // MARK: - Webview Actions
+// MARK: - OwnChromeHolder
 
-    private func copyWebviewURL() {
-        guard case .webview(_, let initialURL) = content else { return }
-        let urlString = (webviewState.currentURL ?? initialURL).absoluteString
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(urlString, forType: .string)
-        didCopyURL = true
-        Task { @MainActor in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            didCopyURL = false
-        }
+/// A leaf's own `PaneChromeState`, for a leaf no tab row hands one to.
+/// Created lazily, so a leaf that is handed one — every leaf on the daemon
+/// path — never builds a state or the `WebviewState` inside it. Publishes
+/// nothing: views observe the state it holds, which is `@Observable`.
+@MainActor
+final class OwnChromeHolder: ObservableObject {
+    lazy var state = PaneChromeState()
+}
+
+// MARK: - WebviewAddressLabel
+
+/// The legacy header's title for a web pane: the page's current address,
+/// which follows in-page navigation, or the address the pane opened with
+/// until the page reports one. A view of its own so that it can observe the
+/// `WebviewState` directly, because `PaneChromeState` does not forward that
+/// object's changes.
+private struct WebviewAddressLabel: View {
+    let initialURL: URL
+    @ObservedObject var state: WebviewState
+
+    var body: some View {
+        let address = (state.currentURL ?? initialURL).absoluteString
+        Text(address)
+            .truncationMode(.tail)
+            .help(address)
     }
 }
 
@@ -553,35 +580,80 @@ extension View {
     /// menu. `transcriptPath` supplies the `.jsonl` path for live-transcript
     /// panes (resolving it needs the terminal model, so the caller passes it in).
     ///
-    /// Also hung on a side-region tab (`SideRegionView`), whose leaf hides
-    /// the title this menu otherwise sits on.
-    @ViewBuilder
+    /// Where the leaf draws its header, the menu hangs on the header's title.
+    /// On the daemon path no leaf draws one: a side panel's menu hangs on the
+    /// panel's tab in the side region's strip (`SideRegionView`), and a
+    /// primary's items are on its workspace tab's right-click menu (`TabBar`).
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
-        if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {
-            self.contextMenu {
-                Button(target.copyLabel) { copyToPasteboard(target.path) }
-                Button("Reveal in Finder") { revealInFinder(path: target.path) }
+        modifier(HeaderFileContextMenu(
+            target: headerMenuTarget(for: content, transcriptPath: transcriptPath)))
+    }
+}
 
-                let apps = openWithApps(forPath: target.path)
-                if !apps.isEmpty {
-                    Menu("Open With") {
-                        ForEach(apps) { app in
-                            Button {
-                                openFile(path: target.path, withApp: app.url)
-                            } label: {
-                                Label {
-                                    Text(app.displayName)
-                                } icon: {
-                                    Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
-                                        .renderingMode(.original)
-                                }
-                            }
+/// The pane-header file menu for `target`, or no menu for none. The
+/// applications Open With offers are looked up off the main actor
+/// (`OpenWithAppsLookup`) when the view appears or the file changes, and
+/// again each time the pointer enters it, so the right-click that almost
+/// always follows a hover finds a file created since, or a handler installed
+/// since, in the list. Never while a body is evaluated: the menu reads them
+/// back from `lookup.apps`.
+private struct HeaderFileContextMenu: ViewModifier {
+    let target: HeaderMenuTarget?
+    @StateObject private var lookup = OpenWithAppsLookup()
+
+    func body(content: Content) -> some View {
+        if let target {
+            content
+                .contextMenu {
+                    Button(target.copyLabel) { copyToPasteboard(target.path) }
+                    RevealAndOpenWithMenuItems(path: target.path, apps: lookup.apps)
+                }
+                .onAppear { lookup.show(path: target.path) }
+                .onChange(of: target.path) { _, path in
+                    lookup.show(path: path)
+                }
+                .onDisappear { lookup.stop() }
+                .onHover { hovering in
+                    guard hovering else { return }
+                    lookup.pointerEntered()
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// Reveal in Finder and the Open With submenu for the file at `path`: the
+/// file menu's items after its copy item, shared by the pane header's title
+/// (`headerFileContextMenu`) and a workspace tab's right-click menu
+/// (`TabBar`). It takes the applications Open With lists as `apps` rather
+/// than asking Launch Services (`openWithApps`) itself, because SwiftUI
+/// builds a context menu's content while it evaluates the body of the view
+/// the menu hangs on: each caller looks them up off the main actor at mount,
+/// on a change of `path` and on each hover-enter, and hands in the result.
+/// Open With is left out when `apps` is empty.
+struct RevealAndOpenWithMenuItems: View {
+    let path: String
+    let apps: [OpenWithApp]
+
+    var body: some View {
+        Button("Reveal in Finder") { revealInFinder(path: path) }
+
+        if !apps.isEmpty {
+            Menu("Open With") {
+                ForEach(apps) { app in
+                    Button {
+                        openFile(path: path, withApp: app.url)
+                    } label: {
+                        Label {
+                            Text(app.displayName)
+                        } icon: {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
+                                .renderingMode(.original)
                         }
                     }
                 }
             }
-        } else {
-            self
         }
     }
 }
@@ -623,12 +695,13 @@ struct EditableNoteTitle: View {
         }
     }
 
+    /// Commits the trimmed text as the note's title when it is not blank and
+    /// differs from the title (`TabRename.noteTitle`), through `renameNote`,
+    /// so a rename here and one on the note's tab persist in the order they
+    /// were made.
     private func commitEdit() {
         isEditing = false
-        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != note?.title else { return }
-        Task {
-            await appState.updateNote(noteID: noteID, worktreeID: worktreeID, title: trimmed)
-        }
+        guard let title = TabRename.noteTitle(text: editText, currentNoteTitle: note?.title) else { return }
+        appState.renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
     }
 }

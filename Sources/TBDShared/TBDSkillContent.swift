@@ -241,8 +241,6 @@ auto-archive off for the worktree instead.
 
 Each worktree tab shows its **primary** content (its terminal, or a file/web/note/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, note, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
 
-The side panel is off unless the user enabled "Side panel with tabs" in Settings. While it is off, `tbd panel list` still works, and every command that changes the side panel fails with the daemon's error naming `panel_tabs_enabled` — ask the user to turn it on rather than retrying.
-
 ### See
 
 ```bash

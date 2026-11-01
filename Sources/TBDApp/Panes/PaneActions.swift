@@ -17,12 +17,13 @@ enum PaneHistoryStep: Equatable {
 /// Everything `PanePlaceholder` asks of the workspace around it, injected
 /// instead of performed in place.
 ///
-/// The leaf renders one pane — its header, history chevrons and content — but
-/// it does not own the tree it sits in. Every structural change it triggers,
-/// and the two things it needs to know about that tree (whether a transcript
-/// is open, which history to show), goes through this set, so the same leaf
-/// can render on top of more than one source of truth. `legacy` is the
-/// app-side `LayoutNode` tree.
+/// The leaf renders one pane — its content, and, where no tab row carries its
+/// controls, its header and history chevrons too — but it does not own the
+/// tree it sits in. Every structural change it triggers, and the two things
+/// it needs to know about that tree (whether a transcript is open, which
+/// history to show), goes through this set, so the same leaf can render on
+/// top of more than one source of truth. `legacy` is the app-side
+/// `LayoutNode` tree, and `daemon` the daemon-owned panel surface.
 ///
 /// Split ratios are not here: `SplitContainer` commits them itself, and the
 /// leaf never resizes anything.
@@ -41,13 +42,16 @@ struct PaneActions {
     /// Act on a link clicked in a terminal's live transcript.
     var openTranscriptLink: @MainActor (PaneContent, _ terminalID: UUID, TranscriptLinkTarget) -> Void
     /// Close the pane showing the given content. Takes the content, not just
-    /// the pane ID, because closing a note pane also deletes the note.
+    /// the pane ID, because the legacy set deletes a note pane's note as it
+    /// closes it; the daemon set's close keeps the note.
     var close: @MainActor (PaneContent) -> Void
     /// Show or hide a terminal's live transcript, from the pane showing the
     /// given content.
     var toggleTranscript: @MainActor (PaneContent, _ terminalID: UUID) -> Void
     /// Whether a terminal's live transcript is showing: the on-state of the
-    /// terminal header's Transcript button.
+    /// Transcript button, which sits at the trailing end of the workspace tab
+    /// bar on the daemon path and in the terminal's own header in a legacy
+    /// split.
     var isTranscriptOpen: @MainActor (_ terminalID: UUID) -> Bool
     /// The history behind a pane's back/forward chevrons and history palette.
     /// Nil hides them.
@@ -62,8 +66,9 @@ extension PaneActions {
     /// The app-side layout tree: mutate the `LayoutNode` behind `layout` and
     /// keep `AppState`'s pane bookkeeping (slot histories, tabs, notes) in
     /// step. This is the whole of the legacy split layout's behaviour for a
-    /// leaf, and so the rollback path while the panel tabs flag is off.
-    /// Closing the last pane finds its tab by pane ID.
+    /// leaf, which serves the multi-worktree grid and a tab whose layout
+    /// still splits off a terminal. Closing the last pane finds its tab by
+    /// pane ID.
     @MainActor
     static func legacy(
         layout: Binding<LayoutNode>,

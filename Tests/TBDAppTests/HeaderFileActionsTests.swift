@@ -57,4 +57,77 @@ struct HeaderFileActionsTests {
         let missing = NSTemporaryDirectory() + "tbd-does-not-exist-\(UUID().uuidString).md"
         #expect(openWithApps(forPath: missing).isEmpty)
     }
+
+    @Test("the off-main lookup returns empty for a non-existent file")
+    func offMainLookupOfMissingFile() async {
+        let missing = NSTemporaryDirectory() + "tbd-does-not-exist-\(UUID().uuidString).md"
+        let apps = await lookUpOpenWithApps(forPath: missing)
+        #expect(apps.isEmpty)
+    }
+
+    /// What one `openWithApps` call did, in a task cancelled at `cancelAt`.
+    private struct LookupRun: Sendable {
+        let apps: [OpenWithApp]
+        let calls: [String]
+    }
+
+    /// Where `runLookup` cancels the task the lookup runs in.
+    private enum CancelPoint: Sendable {
+        case never
+        case beforeTheFileCheck
+        case afterTheFileCheck
+    }
+
+    private static let editorURL = URL(fileURLWithPath: "/Applications/Editor.app")
+
+    /// Runs `openWithApps` on a task of its own over stand-ins for the disk
+    /// and Launch Services, which report a file that exists and one app for
+    /// it, cancelling the task at `cancelAt`.
+    private static func runLookup(cancelAt: CancelPoint) async -> LookupRun {
+        let editorURL = Self.editorURL
+        return await Task.detached { () -> LookupRun in
+            if cancelAt == .beforeTheFileCheck {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            var calls: [String] = []
+            let apps = openWithApps(
+                forPath: "/abs/foo.md",
+                fileExists: { _ in
+                    calls.append("fileExists")
+                    if cancelAt == .afterTheFileCheck {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                    return true
+                },
+                applicationsToOpen: { _ in
+                    calls.append("applicationsToOpen")
+                    return [editorURL]
+                })
+            return LookupRun(apps: apps, calls: calls)
+        }.value
+    }
+
+    @Test("openWithApps checks the file and queries Launch Services when its task is not cancelled")
+    func uncancelledLookupRunsItsQuery() async {
+        let run = await Self.runLookup(cancelAt: .never)
+        let expectedCalls: [String] = ["fileExists", "applicationsToOpen"]
+        let expectedApps: [OpenWithApp] = [OpenWithApp(url: Self.editorURL)]
+        #expect(run.calls == expectedCalls)
+        #expect(run.apps == expectedApps)
+    }
+
+    @Test("openWithApps in a cancelled task neither checks the file nor queries Launch Services")
+    func cancelledLookupSkipsItsQuery() async {
+        let run = await Self.runLookup(cancelAt: .beforeTheFileCheck)
+        #expect(run.calls.isEmpty, "observed \(run.calls)")
+        #expect(run.apps.isEmpty)
+    }
+
+    @Test("openWithApps cancelled after its file check skips the Launch Services query")
+    func lookupCancelledAfterTheFileCheckSkipsTheQuery() async {
+        let run = await Self.runLookup(cancelAt: .afterTheFileCheck)
+        let expectedCalls: [String] = ["fileExists"]
+        #expect(run.calls == expectedCalls)
+        #expect(run.apps.isEmpty)
+    }
 }
