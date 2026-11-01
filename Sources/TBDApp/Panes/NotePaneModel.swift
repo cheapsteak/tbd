@@ -44,6 +44,12 @@ final class NotePaneModel {
     /// instead of polling the filesystem; nothing in the app reads it.
     @ObservationIgnored private(set) var pendingSaveTask: Task<Void, Never>?
 
+    /// The write `writePendingSave` started last, until it lands. Each write
+    /// starts only once the one before it has landed, so one model's writes
+    /// reach the file in the order their text was taken, and awaiting this
+    /// one awaits every write the model has started (`flushPendingSave`).
+    @ObservationIgnored private var inFlightWrite: Task<Void, Never>?
+
     /// Unsaved text, tagged with the note it belongs to.
     ///
     /// The tag is what makes a flush safe from any context: it writes to the
@@ -162,19 +168,27 @@ final class NotePaneModel {
         }
     }
 
-    /// Persist unsaved text now, and do not return until it has landed.
+    /// Persist unsaved text now, and do not return until it has landed —
+    /// and until every write this model started before it has landed too.
     ///
     /// Awaiting the cancelled task is what makes this a flush rather than a
     /// cancel: if the debounce was already past its cancellation check and
     /// inside the write, that write completes before this returns. Without it,
     /// `load` could still start reading a file with a write in flight — the
     /// same fault one step further in.
+    ///
+    /// The last step awaits `inFlightWrite` for the same reason. Whoever took
+    /// the text first — the debounce, `paneDisappeared`, a `load`, another
+    /// close's flush — may still be writing it, and this flush then finds
+    /// nothing pending; returning at once would let a close stat the file
+    /// before the text lands.
     func flushPendingSave(appState: AppState) async {
         let task = pendingSaveTask
         pendingSaveTask = nil
         task?.cancel()
         await task?.value
         await writePendingSave(appState: appState)
+        await inFlightWrite?.value
     }
 
     /// The pane went away (tab switch, window close). `onDisappear` cannot
@@ -183,9 +197,10 @@ final class NotePaneModel {
     /// discards it.
     ///
     /// The model's save flusher is unregistered only once that write has
-    /// landed, so a close of the note asked for meanwhile still waits for it,
-    /// and only when no `load` has registered the model again since: the
-    /// pane can reappear before the flush ends.
+    /// landed, so a close of the note asked for meanwhile reaches this
+    /// model's `flushPendingSave`, which waits for the write in flight; and
+    /// only when no `load` has registered the model again since: the pane can
+    /// reappear before the flush ends.
     @discardableResult
     func paneDisappeared(appState: AppState) -> Task<Void, Never> {
         let registration = saveFlusherRegistration
@@ -213,9 +228,17 @@ final class NotePaneModel {
         }
     }
 
-    /// Takes the pending text and writes it. Whoever gets here first takes it:
-    /// `pendingSave` is cleared **before** the `await`, so a flush racing the
-    /// debounce cannot write the same text twice.
+    /// Takes the pending text and writes it, returning once it has landed.
+    /// Whoever gets here first takes it: `pendingSave` is cleared **before**
+    /// the `await`, so a flush racing the debounce cannot write the same text
+    /// twice.
+    ///
+    /// The write runs on a task of its own, recorded as `inFlightWrite`,
+    /// which first awaits the write before it. So a keystroke made while a
+    /// write is landing arms a debounce whose write cannot overtake it, and a
+    /// flush that finds nothing pending can still wait for the text someone
+    /// else took. Nothing cancels that task: cancelling the debounce or the
+    /// flush that started it never abandons a write.
     ///
     /// An emptying write goes through `appState.saveNoteContent` like any
     /// other, which hands it to the daemon so the content file and the legacy
@@ -223,10 +246,19 @@ final class NotePaneModel {
     private func writePendingSave(appState: AppState) async {
         guard let pending = pendingSave else { return }
         pendingSave = nil
-        await appState.saveNoteContent(
-            noteID: pending.noteID, worktreeID: pending.worktreeID, content: pending.text)
-        if current?.noteID == pending.noteID {
-            savedText = pending.text
+        let previous = inFlightWrite
+        let write = Task { @MainActor in
+            await previous?.value
+            await appState.saveNoteContent(
+                noteID: pending.noteID, worktreeID: pending.worktreeID, content: pending.text)
+            if self.current?.noteID == pending.noteID {
+                self.savedText = pending.text
+            }
+        }
+        inFlightWrite = write
+        await write.value
+        if inFlightWrite == write {
+            inFlightWrite = nil
         }
     }
 }

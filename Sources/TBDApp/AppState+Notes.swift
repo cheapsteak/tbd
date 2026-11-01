@@ -216,14 +216,12 @@ extension AppState {
         }
         let path = noteContentPathResolver(worktreeID, noteID)
         do {
-            // `writeOrThrow`, not `write`: this file is the only copy of the
-            // text now that the daemon is out of the content path, and the
-            // RPC that used to carry this write reported its failures. A
-            // `.debug` line would make a full disk or a permission change look
-            // exactly like a successful save.
-            try await Task.detached(priority: .userInitiated) {
-                try NotesFileStore().writeOrThrow(content, to: path)
-            }.value
+            // `noteContentWriter` uses `writeOrThrow`, not `write`: this file
+            // is the only copy of the text now that the daemon is out of the
+            // content path, and the RPC that used to carry this write reported
+            // its failures. A `.debug` line would make a full disk or a
+            // permission change look exactly like a successful save.
+            try await noteContentWriter(content, path)
         } catch {
             logger.error("Failed to write note content to \(path, privacy: .public): \(error, privacy: .public)")
         }

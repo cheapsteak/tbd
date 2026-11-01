@@ -112,6 +112,96 @@ struct NotePendingSaveCloseTests {
         }
     }
 
+    /// Stubs `noteContentWriter` to record the text of each write as it
+    /// starts and to hold the first one on `gate`, then write for real.
+    private static func holdFirstWrite(_ state: AppState, on gate: PanelCallGate) -> PanelEventLog {
+        let starts = PanelEventLog()
+        let write = state.noteContentWriter
+        state.noteContentWriter = { @MainActor content, path in
+            starts.record(content)
+            if starts.events.count == 1 {
+                await gate.wait()
+            }
+            try await write(content, path)
+        }
+        return starts
+    }
+
+    /// The pane's disappearing flush takes the edit and starts its write;
+    /// a close's flush then finds nothing pending. It must still wait for
+    /// that write, or the close stats the file before the text lands.
+    @Test("a flush waits for a write another flush already took, and returns once it has landed")
+    func flushWaitsForAWriteAlreadyInFlight() async throws {
+        try await Fixture.withState { state in
+            let root = Editor.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
+            let gate = PanelCallGate()
+            _ = Self.holdFirstWrite(state, on: gate)
+            Editor.type(Self.typed, into: editor, state: state)
+            let disappearing = editor.paneDisappeared(appState: state)
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the disappearing flush's write is in flight")
+
+            let log = PanelEventLog()
+            let closing = Task { @MainActor in
+                await state.flushPendingNoteSave(noteID: noteID)
+                log.record("flushed")
+            }
+            await Fixture.drainMainActor()
+
+            #expect(log.events.isEmpty, "the flush returned while the write was still in flight")
+            #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == nil)
+
+            gate.release()
+            await closing.value
+
+            let flushed: [String] = ["flushed"]
+            #expect(log.events == flushed)
+            #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == Self.typed,
+                    "the text had landed by the time the flush returned")
+            await disappearing.value
+        }
+    }
+
+    /// A keystroke made while a write is landing arms a debounce of its own;
+    /// that later write must start only once the earlier one has landed, or
+    /// the earlier text lands last and overwrites the later.
+    @Test("one editor's writes land in the order their text was taken")
+    func writesOfOneEditorLandInOrder() async throws {
+        try await Fixture.withState { state in
+            let root = Editor.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
+            let gate = PanelCallGate()
+            let starts = Self.holdFirstWrite(state, on: gate)
+            let earlier = "earlier text"
+            let later = "later text"
+
+            Editor.type(earlier, into: editor, state: state)
+            let firstFlush = Task { @MainActor in await state.flushPendingNoteSave(noteID: noteID) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the earlier write is in flight")
+            Editor.type(later, into: editor, state: state)
+            let secondFlush = Task { @MainActor in await state.flushPendingNoteSave(noteID: noteID) }
+            await Fixture.drainMainActor()
+
+            let startedWhileHeld: [String] = [earlier]
+            #expect(starts.events == startedWhileHeld, "the later write started before the earlier one landed")
+
+            gate.release()
+            await firstFlush.value
+            await secondFlush.value
+
+            let startedInOrder: [String] = [earlier, later]
+            #expect(starts.events == startedInOrder)
+            #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == later,
+                    "the later text is the one left on disk")
+        }
+    }
+
     @Test("a flush awaits every editor of the note, and a stale unregister removes no newer registration")
     func flushAwaitsEveryEditorAndStaleUnregisterKeepsNewer() async {
         await Fixture.withState { state in

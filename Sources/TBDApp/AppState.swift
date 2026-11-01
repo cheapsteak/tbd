@@ -2460,6 +2460,16 @@ final class AppState {
     /// `prBindingsFetcher` — `DaemonClient` is concrete, no protocol.
     @ObservationIgnored lazy var noteLegacyContentFetcher: @MainActor (UUID) async throws -> String =
         { [daemonClient] noteID in try await daemonClient.getNote(noteID: noteID).content }
+    /// How a non-empty save writes a note's content file
+    /// (`saveNoteContent`): given the text and the file's path, off the main
+    /// thread, throwing on failure. Injectable so a test can hold a write in
+    /// flight.
+    @ObservationIgnored lazy var noteContentWriter: @MainActor (String, String) async throws -> Void =
+        { content, path in
+            try await Task.detached(priority: .userInitiated) {
+                try NotesFileStore().writeOrThrow(content, to: path)
+            }.value
+        }
     /// How an emptying save is handed back to the daemon, which deletes the
     /// content file and clears the legacy column together. Injectable so a
     /// test can prove that ordinary (non-empty) saves never reach it.
