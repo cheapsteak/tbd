@@ -155,12 +155,23 @@ enum SplitDividerMetrics {
 
 /// A draggable divider between split children.
 /// Uses deferred resize: tracks drag offset for an indicator overlay, commits on release.
+/// A drag stops where either pane beside it would go below its smallest
+/// share: `defaultMinimumRatio`, or a larger one from `minimumRatios`
+/// (`clampedOffset`). The workspace view's side region passes one sized to
+/// its strip's fixed controls; the legacy split layouts pass none.
 struct SplitDivider: View {
+    /// The smallest share any pane may be dragged to.
+    static let defaultMinimumRatio: CGFloat = 0.1
+
     let direction: SplitDirection
     let thickness: CGFloat
     let index: Int
     @Binding var ratios: [CGFloat]
     let availableSpace: CGFloat
+    /// Each pane's smallest share, by its index in `ratios`. A pane with no
+    /// entry, or a smaller one, keeps `defaultMinimumRatio`; empty leaves
+    /// every pane at that.
+    var minimumRatios: [CGFloat] = []
     let onDragEnd: () -> Void
 
     @State private var dragStartRatios: [CGFloat] = []
@@ -214,11 +225,12 @@ struct SplitDivider: View {
                     ? value.translation.width
                     : value.translation.height
 
-                // Clamp the drag offset to respect min ratios
-                let minRatio: CGFloat = 0.1
-                let maxForward = (dragStartRatios[index + 1] - minRatio) * availableSpace
-                let maxBackward = -(dragStartRatios[index] - minRatio) * availableSpace
-                dragOffset = max(maxBackward, min(maxForward, translation))
+                dragOffset = Self.clampedOffset(
+                    translation: translation,
+                    startRatios: dragStartRatios,
+                    index: index,
+                    availableSpace: availableSpace,
+                    minimumRatios: minimumRatios)
             }
             .onEnded { _ in
                 guard availableSpace > 0 else {
@@ -236,5 +248,36 @@ struct SplitDivider: View {
                 dragStartRatios = []
                 onDragEnd()
             }
+    }
+
+    /// The offset, in points, a drag of `translation` moves the divider at
+    /// `index` from `startRatios`, clamped so neither pane beside it, `index`
+    /// and `index + 1`, goes below its smallest share (`minimumRatio`). A
+    /// forward offset grows the pane at `index` and shrinks the one after it.
+    ///
+    /// Each bound is clamped at zero, so a pane that starts below its
+    /// smallest share is never moved further down and the drag never pushes
+    /// it the other way on its own; dragging the other way still grows it.
+    /// Zero for no space to drag in, or for an `index` the ratios do not have.
+    static func clampedOffset(
+        translation: CGFloat,
+        startRatios: [CGFloat],
+        index: Int,
+        availableSpace: CGFloat,
+        minimumRatios: [CGFloat]
+    ) -> CGFloat {
+        guard availableSpace > 0, index >= 0, index + 1 < startRatios.count else { return 0 }
+        let leadingMinimum = minimumRatio(at: index, in: minimumRatios)
+        let trailingMinimum = minimumRatio(at: index + 1, in: minimumRatios)
+        let maxForward = max(0, (startRatios[index + 1] - trailingMinimum) * availableSpace)
+        let maxBackward = min(0, -(startRatios[index] - leadingMinimum) * availableSpace)
+        return max(maxBackward, min(maxForward, translation))
+    }
+
+    /// The smallest share the pane at `index` may be dragged to: its entry in
+    /// `minimumRatios`, never below `defaultMinimumRatio`.
+    static func minimumRatio(at index: Int, in minimumRatios: [CGFloat]) -> CGFloat {
+        guard minimumRatios.indices.contains(index) else { return defaultMinimumRatio }
+        return max(defaultMinimumRatio, minimumRatios[index])
     }
 }

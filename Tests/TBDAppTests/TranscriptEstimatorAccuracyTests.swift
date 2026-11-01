@@ -275,20 +275,33 @@ struct TranscriptEstimatorAccuracyTests {
         var signedLineError = 0
         var worst: (text: String, width: CGFloat, delta: CGFloat)?
 
+        // The render takes no width, and this loop renders every paragraph the
+        // same way whichever geometry measures it, so each paragraph is rendered
+        // once here and measured at all four geometries below — by one measurer,
+        // the way the Coordinator keeps one for every row it sizes.
+        //
+        // That "same way" is a known gap, and this test has always had it: every
+        // paragraph, user rows included, is rendered without paste recognition,
+        // where production's `composedBlocks` renders a user prompt with
+        // `recognizePastes: true`. The corpus holds no paste tags, so for these
+        // paragraphs the two renders should match, but a change to paste
+        // unwrapping would not show here.
+        let renderedCorpus: [[MessageBlock]] = Self.paragraphCorpus.map { text in
+            MarkdownAttributedRenderer.renderBlocks(text, theme: .chatBubble, linkResolver: nil)
+        }
+        let measurer = MessageBlockMeasurer()
+
         for width in Self.widths {
             for role in [TranscriptBubbleGeometry.Role.assistant, .user] {
                 let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role)
-                for text in Self.paragraphCorpus {
+                for (text, blocks) in zip(Self.paragraphCorpus, renderedCorpus) {
                     let item: TranscriptItem = role == .user
                         ? .userPrompt(id: "p", text: text, timestamp: nil)
                         : .assistantText(id: "p", text: text, timestamp: nil, usage: nil)
                     let node = TranscriptRenderNode(id: "p", kind: .chatBubble(item), badgeUsage: nil)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
-                        blocksHeight: MessageBlockMeasurer().blocksHeight(
-                            MarkdownAttributedRenderer.renderBlocks(
-                                text, theme: .chatBubble, linkResolver: nil),
-                            bodyWidth: bodyWidth),
+                        blocksHeight: measurer.blocksHeight(blocks, bodyWidth: bodyWidth),
                         role: role)
                     let delta = estimate - measured
                     signedLineError += Int((delta / Self.renderedLineHeight).rounded())
@@ -427,25 +440,37 @@ struct TranscriptEstimatorAccuracyTests {
         var signedTotal: CGFloat = 0
         var total = 0
         var generator = SplitMix64(seed: 0x5EED_1234)
+        // One measurer for the whole corpus, as the Coordinator keeps one for
+        // every row it sizes.
+        let measurer = MessageBlockMeasurer()
 
         for _ in 0..<Self.corpusMessageCount {
             let (shape, text) = Self.randomMessage(&generator)
+            // A message's blocks depend on its text, role and badge, never on the
+            // column width, so each arm is rendered once here and measured at both
+            // widths below. The measuring runs width first, then arm: the order
+            // the thresholds below were swept in.
+            let renderedArms: [RenderedArm] = Self.corpusArms.map { arm -> RenderedArm in
+                let usage = Self.corpusUsage(badged: arm.badged)
+                let item: TranscriptItem = arm.role == .user
+                    ? .userPrompt(id: "corpus", text: text, timestamp: nil)
+                    : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
+                return RenderedArm(
+                    arm: arm, item: item, usage: usage,
+                    blocks: TranscriptBubbleGeometry.composedBlocks(
+                        for: item, badgeUsage: usage, linkResolver: nil))
+            }
             for width in Self.widths {
-                for arm in Self.corpusArms {
+                for rendered in renderedArms {
+                    let arm = rendered.arm
                     let role = arm.role
-                    let usage: TokenUsage? = arm.badged
-                        ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
-                        : nil
-                    let item: TranscriptItem = role == .user
-                        ? .userPrompt(id: "corpus", text: text, timestamp: nil)
-                        : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
-                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(item),
+                    let usage = rendered.usage
+                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(rendered.item),
                                                     badgeUsage: usage)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
-                        blocksHeight: MessageBlockMeasurer().blocksHeight(
-                            TranscriptBubbleGeometry.composedBlocks(
-                                for: item, badgeUsage: usage, linkResolver: nil),
+                        blocksHeight: measurer.blocksHeight(
+                            rendered.blocks,
                             bodyWidth: TranscriptBubbleGeometry.bodyWidth(
                                 columnWidth: width, role: role)),
                         role: role)
@@ -508,11 +533,27 @@ struct TranscriptEstimatorAccuracyTests {
     /// unbadged row exactly and measure the same height again: it is measured
     /// once and counted twice instead. The weight keeps the rate and mean
     /// thresholds reading over the 3200 combinations they were swept against.
-    private static let corpusArms: [(role: TranscriptBubbleGeometry.Role, badged: Bool, weight: Int)] = [
+    private static let corpusArms: [CorpusArm] = [
         (.assistant, false, 1),
         (.assistant, true, 1),
         (.user, false, 2),
     ]
+
+    private typealias CorpusArm = (role: TranscriptBubbleGeometry.Role, badged: Bool, weight: Int)
+
+    /// One corpus arm of one message, rendered once and measured at both column
+    /// widths.
+    private struct RenderedArm {
+        let arm: CorpusArm
+        let item: TranscriptItem
+        let usage: TokenUsage?
+        let blocks: [MessageBlock]
+    }
+
+    /// The usage badge a corpus arm carries, if it is a badged one.
+    private static func corpusUsage(badged: Bool) -> TokenUsage? {
+        badged ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0) : nil
+    }
 
     /// A deterministic PRNG, so the corpus is the same on every run and on every
     /// machine — a fuzzer that finds a different defect each run cannot be a

@@ -83,39 +83,65 @@ private struct TabDropDelegate: DropDelegate {
 /// share one row across the window, so both take their height from here.
 enum TabRowMetrics {
     static let height: CGFloat = 30
+    /// The width of one icon button at a tab row's trailing end: a
+    /// `PaneChromeControlButton`, the refresh control's slot
+    /// (`PaneRefreshControl`), the strip's + menu and the side panel toggle
+    /// (`SidePanelToggleButton`). The side region's minimum width is built
+    /// from it (`SideStripMetrics.fixedControlsWidth`).
+    static let controlWidth: CGFloat = 28
 }
 
 // MARK: - TabBarTrailingItems
 
-/// What the workspace tab bar draws at its trailing end besides Session
-/// History: the selected tab's own control and the Notes button before it,
-/// and the expand button after it. `PanelSurfaceWorkspaceView` decides all
-/// three from the tab, its side region and the worktree's notes; a bar drawn
-/// anywhere else (Session History open, a tab whose layout still splits off a
-/// terminal, no tabs) takes `none`.
+/// What the workspace tab bar draws at its trailing end, in order
+/// (`TabBarTrailingItem.items`), with what each button does.
+/// `PanelSurfaceWorkspaceView` decides them from the tab, its side region and
+/// the worktree's notes: the primary's viewer control and Session History,
+/// then, while the side region is hidden and the bar reaches the window's
+/// right edge, the transcript and Notes buttons (`TabRowEdgeControls`) and
+/// the expand button. A bar drawn anywhere else (Session History open, a tab
+/// whose layout still splits off a terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
-    /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
-    /// or nil when its kind has none.
-    var selectedTabControl: PaneChromeControl?
-    var onSelectedTabControl: @MainActor () -> Void
-    /// The Notes button (`PaneChromeControl.notes`), drawn right after the
-    /// selected tab's control, or nil for a bar that has none.
-    var notesControl: PaneChromeControl?
-    var onNotesControl: @MainActor () -> Void = {}
-    /// True while the tab's loaded side region is hidden: collapsed, or
-    /// without a panel (`PanelSurfaceWorkspaceView.showsExpandButton`).
-    var showsExpandButton: Bool
-    var onExpand: @MainActor () -> Void
+    /// The primary's own control (`WorkspaceTabBarChrome.viewerControl`), or
+    /// nil when its kind has none.
+    let viewerControl: PaneChromeControl?
+    /// What the primary's viewer control does.
+    let onViewerControl: @MainActor () -> Void
+    /// The transcript and Notes buttons, with their actions, while the bar
+    /// draws them (`PanelSurfaceWorkspaceView.barEdgeControls`); nil while
+    /// the side region shows, whose strip draws its own, and for a bar off
+    /// the daemon path (`none`).
+    let edge: TabRowEdgeControls?
+    /// Whether the side region shows beside the primary
+    /// (`PanelSurfaceWorkspaceView.showsSide`).
+    let showsSide: Bool
+    /// Whether the expand button shows
+    /// (`PanelSurfaceWorkspaceView.showsExpandButton`).
+    let showsExpandButton: Bool
+    /// What the expand button does.
+    let onExpand: @MainActor () -> Void
 
-    /// No selected-tab control, no Notes button and no expand button.
+    /// The items, left to right (`TabBarTrailingItem.items`). Derived from
+    /// `edge` rather than stored beside it, so an `.edge` item exists only
+    /// while `edge` is set to act for it.
+    var items: [TabBarTrailingItem] {
+        TabBarTrailingItem.items(
+            viewerControl: viewerControl,
+            edgeItems: edge?.items ?? [],
+            showsSide: showsSide,
+            showsExpandButton: showsExpandButton)
+    }
+
+    /// Session History alone: no viewer control, no transcript or Notes
+    /// button and no expand button.
     ///
     /// Computed rather than stored: Swift 6 accepts a stored static only of a
     /// `Sendable` type, which a struct of closures is not, and building an
     /// empty value costs nothing.
     static var none: TabBarTrailingItems {
         TabBarTrailingItems(
-            selectedTabControl: nil, onSelectedTabControl: {},
-            showsExpandButton: false, onExpand: {})
+            viewerControl: nil, onViewerControl: {}, edge: nil,
+            showsSide: false, showsExpandButton: false, onExpand: {})
     }
 }
 
@@ -124,10 +150,12 @@ struct TabBarTrailingItems {
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
 ///
-/// Reads, left to right: the tabs, the + button, then a trailing group of the
-/// selected tab's control, the Notes button, Session History and the expand
-/// button, all but Session History only as `trailing` asks. The trailing group keeps its full width
-/// at the row's trailing edge however many tabs there are. While the tabs fit
+/// Reads, left to right: the tabs, the + button, then a trailing group in the
+/// order `trailing` gives — the primary's viewer control, Session History,
+/// and, while the side region is hidden, the transcript button, the Notes
+/// button and the expand button — all but Session History only as `trailing`
+/// asks. The trailing group keeps its full width at the row's trailing edge
+/// however many tabs there are. While the tabs fit
 /// in the width it leaves, the + button sits right after the last one; once
 /// they overflow — a narrow primary column on the daemon path, beside a wide
 /// side region — they scroll horizontally, and the + button stays in view
@@ -151,8 +179,7 @@ struct TabBar: View {
     // the profile-picker "Fork Session" menu (#361). No tab-level closures.
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
-    /// The selected tab's control, the Notes button and the expand button,
-    /// drawn around Session History.
+    /// The trailing group's items, Session History among them, in order.
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
@@ -241,34 +268,38 @@ struct TabBar: View {
         }
     }
 
-    /// The selected tab's control, the Notes button, Session History, and the
-    /// expand button.
+    /// `trailing`'s items, left to right, in the order it gives them.
     private var trailingGroup: some View {
         HStack(spacing: 0) {
-            if let control = trailing.selectedTabControl {
-                PaneChromeControlButton(control: control) {
-                    trailing.onSelectedTabControl()
-                }
+            ForEach(trailing.items) { item in
+                trailingItem(item)
             }
+        }
+    }
 
-            if let notesControl = trailing.notesControl {
-                PaneChromeControlButton(control: notesControl) {
-                    trailing.onNotesControl()
-                }
+    @ViewBuilder
+    private func trailingItem(_ item: TabBarTrailingItem) -> some View {
+        switch item {
+        case .viewerControl(let control):
+            PaneChromeControlButton(control: control) {
+                trailing.onViewerControl()
             }
-
+        case .sessionHistory:
             HistoryTabButton(
                 isSelected: isHistorySelected,
                 action: onHistoryTab
             )
-
+        case .edge(let edgeItem):
+            // Set whenever an `.edge` item exists (`TabBarTrailingItems.items`).
+            if let edge = trailing.edge {
+                TabRowEdgeButton(item: edgeItem, edge: edge)
+            }
+        case .expand:
             // Shows the hidden side region. It shows only while the region is
             // hidden, and the strip's collapse button only while it is
             // visible, so `⌘\` is bound on at most one of the two at a time.
-            if trailing.showsExpandButton {
-                SidePanelToggleButton(collapsed: true) {
-                    trailing.onExpand()
-                }
+            SidePanelToggleButton(collapsed: true) {
+                trailing.onExpand()
             }
         }
     }

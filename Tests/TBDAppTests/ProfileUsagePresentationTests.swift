@@ -815,10 +815,27 @@ struct SkipAccountPickerPersistenceTests {
             let reloaded = AppState(userDefaults: defaults)
             #expect(reloaded.skipAccountPicker)
 
-            // Toggling back off round-trips too (both branches of the gate).
+            // Toggling back off round-trips too (both branches of the gate),
+            // and `false` is stored as an explicit value, not left absent.
             reloaded.skipAccountPicker = false
             #expect(defaults.bool(forKey: "com.tbd.app.accountPicker.useDefaultWithoutAsking") == false)
+            #expect(defaults.object(forKey: "com.tbd.app.accountPicker.useDefaultWithoutAsking") as? Bool == false)
             #expect(AppState(userDefaults: defaults).skipAccountPicker == false)
+        }
+    }
+
+    /// `init` restores the value from its key and must not write it straight
+    /// back: on an untouched suite the key stays absent, and assigning the
+    /// value the property already holds writes nothing either.
+    @Test func constructingAppStateWritesNoSkipAccountPickerValue() {
+        withIsolatedDefaults { defaults in
+            let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+            let state = AppState(userDefaults: defaults)
+            // Both checks fail on an unconditional write: `init`'s restore runs the `didSet`.
+            #expect(defaults.object(forKey: key) == nil)
+
+            state.skipAccountPicker = false
+            #expect(defaults.object(forKey: key) == nil)
         }
     }
 

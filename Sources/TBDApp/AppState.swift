@@ -846,8 +846,24 @@ final class AppState {
     /// spawns silently on the global default profile instead of opening the
     /// spawn-time account picker. Toggleable from the picker itself and
     /// Settings → Model Profiles. Persisted per-user.
+    ///
+    /// An unchanged value is not written back: each write is a synchronous
+    /// `cfprefsd` round trip, and `init` restores this from the same key, so
+    /// constructing an `AppState` over an absent or `false` key writes nothing.
+    /// A stored `true` is still written back once per `init`, because the
+    /// property starts at `false` and the restore changes it; that is one write
+    /// per launch for anyone who turned the setting on.
+    ///
+    /// The guard compares with `oldValue`, not with the stored value. Reading
+    /// the stored value with `bool(forKey:)` searches every defaults domain —
+    /// launch arguments, global and registered defaults — so a value from one
+    /// of those would make a real choice look already saved and leave it
+    /// unwritten. Against `oldValue`, every real change is saved.
     var skipAccountPicker: Bool = false {
-        didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
+        didSet {
+            guard skipAccountPicker != oldValue else { return }
+            userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey)
+        }
     }
     /// The remote session whose transcript the toolbar toggle has hidden, or
     /// nil when no transcript is hidden. In memory only and never persisted:

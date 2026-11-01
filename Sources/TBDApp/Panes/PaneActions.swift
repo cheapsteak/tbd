@@ -49,9 +49,8 @@ struct PaneActions {
     /// given content.
     var toggleTranscript: @MainActor (PaneContent, _ terminalID: UUID) -> Void
     /// Whether a terminal's live transcript is showing: the on-state of the
-    /// Transcript button, which sits at the trailing end of the workspace tab
-    /// bar on the daemon path and in the terminal's own header in a legacy
-    /// split.
+    /// Transcript button, which sits at the window's right edge on the daemon
+    /// path and in the terminal's own header in a legacy split.
     var isTranscriptOpen: @MainActor (_ terminalID: UUID) -> Bool
     /// The history behind a pane's back/forward chevrons and history palette.
     /// Nil hides them.

@@ -294,7 +294,7 @@ struct ChangesPanelTests {
 
         state.perform(.renderToggle(showingSource: false), contentURL: nil)
         state.perform(.copyAddress(copied: false), contentURL: nil)
-        state.perform(.transcript(isOn: true), contentURL: nil)
+        state.perform(.transcript(isOn: true, isEnabled: true), contentURL: nil)
         #expect(state.refreshCount == 0)
 
         state.perform(.refresh, contentURL: nil)
