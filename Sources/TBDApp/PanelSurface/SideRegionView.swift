@@ -90,7 +90,7 @@ struct SideRegionView: View {
                     actions: .daemon(
                         appState: appState, worktreeID: surface.worktreeID, tabID: surface.id,
                         panelID: active.id),
-                    showsPaneLabel: false
+                    chrome: nil
                 )
                 .id(active.id)
             } else {

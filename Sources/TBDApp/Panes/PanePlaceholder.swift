@@ -52,19 +52,27 @@ struct PanePlaceholder: View {
     /// change it triggers, and what it needs to know about that layout. See
     /// `PaneActions`.
     let actions: PaneActions
-    /// False where something outside the leaf already names the pane (a tab
-    /// in the side region), so the header drops its own title.
-    var showsPaneLabel: Bool = true
+    /// The state behind the pane's per-kind controls, when the view drawing
+    /// the tab row owns it and draws those controls itself. Handed one, the
+    /// leaf draws no header: a tab names and closes what it shows (panel tabs
+    /// spec, "The leaf seam"). Handed none, the leaf keeps its own and draws
+    /// its header, as in a legacy split and the multi-worktree grid, where no
+    /// tab names the pane.
+    var chrome: PaneChromeState? = nil
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
-    @State private var showSourceCode = false
-    @State private var hasRenderableContent = false
     @State private var showHistoryPalette = false
-    @StateObject private var webviewState = WebviewState()
-    @State private var didCopyURL = false
+    /// The leaf's own control state, read only while `chrome` is nil.
+    @State private var ownChrome = PaneChromeState()
     @AppStorage(AppState.enableTranscriptKey)
     private var transcriptFeatureEnabled = AppState.enableTranscriptDefault
+
+    /// The control state this leaf reads and writes: the one handed in, or
+    /// its own.
+    private var chromeState: PaneChromeState {
+        chrome ?? ownChrome
+    }
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -73,10 +81,12 @@ struct PanePlaceholder: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar header
-            toolbar
+            // The header, only where no tab row carries the controls.
+            if chrome == nil {
+                toolbar
 
-            Divider()
+                Divider()
+            }
 
             // Pane content
             paneBody
@@ -97,10 +107,11 @@ struct PanePlaceholder: View {
             // Hopping to the next main-actor turn lets the current layout
             // pass finish, then schedules a normal subsequent render.
             Task { @MainActor in
-                if newValue && !hasRenderableContent {
-                    showSourceCode = false
+                let state = chromeState
+                if newValue && !state.hasRenderableContent {
+                    state.showSourceCode = false
                 }
-                hasRenderableContent = newValue
+                state.hasRenderableContent = newValue
             }
         }
     }
@@ -118,16 +129,14 @@ struct PanePlaceholder: View {
                 historyNavigation(history: history)
             }
 
-            if showsPaneLabel {
-                paneLabel
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    // Scoped to the title only (not the whole header row) so
-                    // right-click on the history chevrons / close button isn't
-                    // swallowed by the file menu.
-                    .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
-            }
+            paneLabel
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                // Scoped to the title only (not the whole header row) so
+                // right-click on the history chevrons / close button isn't
+                // swallowed by the file menu.
+                .headerFileContextMenu(for: content, transcriptPath: transcriptPath)
 
             Spacer()
 
@@ -186,9 +195,7 @@ struct PanePlaceholder: View {
                 }
             }
         case .webview(_, let url):
-            Text(webviewState.currentURL?.absoluteString ?? url.absoluteString)
-                .truncationMode(.tail)
-                .help(webviewState.currentURL?.absoluteString ?? url.absoluteString)
+            WebviewAddressLabel(initialURL: url, state: chromeState.webviewState)
         case .codeViewer(_, let path):
             Text(URL(fileURLWithPath: path).lastPathComponent)
         case .note(let noteID):
@@ -225,23 +232,25 @@ struct PanePlaceholder: View {
                     : "Show the chat-style live transcript pane")
             }
 
-        case .webview:
-            Button(action: copyWebviewURL) {
-                Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
+        case .webview(_, let initialURL):
+            let state = chromeState
+            Button(action: { state.copyAddress(state.webviewState.currentURL ?? initialURL) }) {
+                Image(systemName: state.didCopyAddress ? "checkmark" : "doc.on.doc")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
             .help("Copy URL")
 
         case .codeViewer:
-            if hasRenderableContent {
-                Button(action: { showSourceCode.toggle() }) {
+            let state = chromeState
+            if state.hasRenderableContent {
+                Button(action: { state.showSourceCode.toggle() }) {
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
                         .font(.caption)
-                        .foregroundStyle(showSourceCode ? .primary : .secondary)
+                        .foregroundStyle(state.showSourceCode ? .primary : .secondary)
                 }
                 .buttonStyle(.borderless)
-                .help(showSourceCode ? "Show rendered view" : "Show source code")
+                .help(state.showSourceCode ? "Show rendered view" : "Show source code")
             }
 
         case .note, .liveTranscript:
@@ -333,12 +342,12 @@ struct PanePlaceholder: View {
         case .terminal(let terminalID):
             terminalContent(terminalID: terminalID)
         case .webview(_, let url):
-            WebviewPaneView(url: url, state: webviewState)
+            WebviewPaneView(url: url, state: chromeState.webviewState)
         case .codeViewer(_, let path):
             CodeViewerPaneView(
                 path: path,
                 worktreePath: worktree.path,
-                showSourceCode: showSourceCode,
+                showSourceCode: chromeState.showSourceCode,
                 // A link clicked inside a rendered markdown document points
                 // THIS pane at the linked file, keeping its pane UUID.
                 onNavigate: { actions.navigateInPane(content, $0) }
@@ -526,21 +535,24 @@ struct PanePlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
 
-    // MARK: - Webview Actions
+// MARK: - WebviewAddressLabel
 
-    private func copyWebviewURL() {
-        guard case .webview(_, let initialURL) = content else { return }
-        let urlString = (webviewState.currentURL ?? initialURL).absoluteString
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(urlString, forType: .string)
-        didCopyURL = true
-        Task { @MainActor in
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            didCopyURL = false
-        }
+/// The legacy header's title for a web pane: the page's current address,
+/// which follows in-page navigation, or the address the pane opened with
+/// until the page reports one. A view of its own so that it can observe the
+/// `WebviewState` directly, because `PaneChromeState` does not forward that
+/// object's changes.
+private struct WebviewAddressLabel: View {
+    let initialURL: URL
+    @ObservedObject var state: WebviewState
+
+    var body: some View {
+        let address = (state.currentURL ?? initialURL).absoluteString
+        Text(address)
+            .truncationMode(.tail)
+            .help(address)
     }
 }
 
