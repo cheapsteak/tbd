@@ -373,8 +373,7 @@ struct GeneralSettingsTab: View {
 
     static let panelTabsHelp = "Shows files, pages, notes and transcripts in a side panel with tabs beside "
         + "each tab's main content, and lets agents open and arrange its panels with tbd panel. "
-        + "Off by default while it soaks. "
-        + "The window's sidebar split and toolbar follow this setting at the next launch."
+        + "Off by default while it soaks."
 
     /// Native sidebar opt-in. App-side `UserDefaults` through `@AppStorage`,
     /// the same key `SidebarView` reads, so flipping it swaps the sidebar
@@ -387,7 +386,8 @@ struct GeneralSettingsTab: View {
 
     static let appKitSidebarHelp = "Draws the sidebar's list with native AppKit rows instead of SwiftUI, "
         + "the foundation for dragging worktrees to nest, un-nest and reorder them. "
-        + "Off by default while it soaks."
+        + "Off by default while it soaks. "
+        + "The window's sidebar split and toolbar follow this setting at the next launch."
 
     /// Moves the sessions that already exist onto the holder. Sits beside the
     /// toggle because that is where someone who just turned it on looks for what
