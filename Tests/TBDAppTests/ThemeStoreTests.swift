@@ -205,9 +205,13 @@ struct ThemeStoreTests {
         // few seconds until a reload is seen. Each re-add removes the file
         // first, so it is still an add, and the retry path never calls
         // `reloadFromDisk()`, so only the watcher's own callback can fill
-        // `userThemes`. Phase 2 then adds `ext2.json` once, with no re-adds:
-        // the stream is proven live, so the since-now miss cannot apply, and a
-        // watcher that drops a single add fails the test.
+        // `userThemes`. Phase 2 then adds `ext2.json` once, with no re-adds.
+        // The stream is proven live, so the since-now miss cannot apply, and a
+        // watcher that has stopped delivering events fails here. It cannot rule
+        // out every dropped add: the watcher reloads the whole directory on any
+        // event, so a reload still in flight from phase 1 can make `ext2`
+        // visible and mask one dropped add. Only a reload counter in
+        // `ThemeStore` could rule that out.
         //
         // Each wait is a hang guard, not a tolerance window: it ends on the
         // first satisfying probe. Its budget is `TestDeadlines.saturatedPass`

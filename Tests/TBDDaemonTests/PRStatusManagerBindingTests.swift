@@ -1004,11 +1004,6 @@ struct PRStatusManagerBindingTests {
                 "the recheck was still running after its deadline elapsed")
     }
 
-    /// How long a recheck child sleeps: it must outlive every wait before and
-    /// including the one that checks it died, so only a signal can end it
-    /// inside them. Each test's `defer` kills it by its recorded pid.
-    private static let recheckChildLifetimeSeconds = Int(TestDeadlines.saturatedPassSeconds) * 5
-
     @Test("a recheck child that ignores SIGTERM is killed by its deadline",
           .clockDriven)
     func recheckChildIsKilledWhenItIgnoresSIGTERM() async throws {
@@ -1058,12 +1053,14 @@ struct PRStatusManagerBindingTests {
             glRunner: { args, path in
                 guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
                 else { return await gl.run(args: args, repoPath: path) }
+                // The child outlives every wait before and including the one
+                // that checks it died, so only a signal can end it inside them.
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
                     args: [
                         "-c",
                         "trap '' TERM; echo $$ > '\(pidFile.path)'; "
-                            + "exec sleep \(Self.recheckChildLifetimeSeconds)",
+                            + "exec sleep \(TestDeadlines.outlivingChildSeconds)",
                     ],
                     repoPath: dir.path,
                     clock: clock)
@@ -1130,9 +1127,11 @@ struct PRStatusManagerBindingTests {
             glRunner: { args, path in
                 guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
                 else { return await gl.run(args: args, repoPath: path) }
+                // The child outlives every wait before and including the one
+                // that checks it exited, so only SIGTERM can end it inside them.
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
-                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep \(Self.recheckChildLifetimeSeconds)"],
+                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep \(TestDeadlines.outlivingChildSeconds)"],
                     repoPath: dir.path,
                     clock: clock)
             },

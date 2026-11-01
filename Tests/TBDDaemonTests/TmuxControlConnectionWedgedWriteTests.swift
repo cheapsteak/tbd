@@ -17,45 +17,49 @@ import TestSupport
 ///
 /// These tests wedge a write for real: a stub "tmux" holds the pty replica
 /// open and never reads its stdin, and a 1 MB `sendCommand` from a background
-/// thread parks in `write()`. Each stub sleeps a UNIQUE duration so the
-/// failure-path `pkill -f` cleanup can target exactly this test's child
-/// without touching other suites' stubs.
+/// thread parks in `write()`. Each stub records its own pid, and the
+/// failure-path cleanup kills by that pid, so it can never reach another
+/// run's stub.
 @Suite("TmuxControlConnection wedged-write teardown (R7-H1)")
 struct TmuxControlConnectionWedgedWriteTests {
 
-    /// How long a stub sleeps. It must outlive every wait before and including
-    /// the last one that checks the write was unwedged — three
+    /// Executable stub "tmux" that ignores its args, records its pid, holds the
+    /// pty replica open, and never reads stdin — so a big master-side write
+    /// wedges.
+    ///
+    /// It sleeps `TestDeadlines.outlivingChildSeconds`, past every wait before
+    /// and including the last one that checks the write was unwedged — three
     /// `saturatedPass` waits and a 300 ms settle — because a stub that ended
     /// on its own would tear the pty down and unwedge the write without
-    /// `stop()` having killed it. `offset` keeps each test's duration unique
-    /// for `killStub`.
-    private static func stubLifetimeSeconds(offset: Int) -> Int {
-        Int(TestDeadlines.saturatedPassSeconds) * 5 + offset
-    }
-
-    /// Executable stub "tmux" that ignores its args, holds the pty replica
-    /// open, and never reads stdin — so a big master-side write wedges.
-    private func makeStub(sleepSeconds: Int) throws -> String {
+    /// `stop()` having killed it.
+    private func makeStub() throws -> String {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-wedge-stub-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("stub-tmux.sh").path
-        try "#!/bin/sh\nexec sleep \(sleepSeconds)\n".write(toFile: path, atomically: true, encoding: .utf8)
+        let pidFile = Self.pidFile(forStub: path)
+        try "#!/bin/sh\necho $$ > '\(pidFile)'\nexec sleep \(TestDeadlines.outlivingChildSeconds)\n"
+            .write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
         return path
     }
 
-    /// Kill any leftover stub child by its unique sleep duration. A no-op on
-    /// the green path (stop() already killed it); on the red/failure path this
-    /// is what unwedges the parked write so leaked threads can exit.
-    private func killStub(sleepSeconds: Int) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-f", "sleep \(sleepSeconds)"]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
+    /// Where the stub at `stub` records its pid: `$$` is the shell's, and
+    /// `exec` keeps it, so this is the pid of the `sleep` itself.
+    private static func pidFile(forStub stub: String) -> String {
+        ((stub as NSString).deletingLastPathComponent as NSString).appendingPathComponent("stub.pid")
+    }
+
+    /// Kill a leftover stub by the pid it recorded. A no-op on the green path
+    /// (stop() already killed it); on the red/failure path this is what
+    /// unwedges the parked write so leaked threads can exit. By pid, never by
+    /// name pattern: another worktree running this suite has a stub with the
+    /// same command line.
+    private func killStub(_ stub: String) {
+        guard let text = try? String(contentsOfFile: Self.pidFile(forStub: stub), encoding: .utf8),
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0
+        else { return }
+        kill(pid, SIGKILL)
     }
 
     /// Park a background thread inside `sendCommand` and confirm it is wedged
@@ -78,10 +82,9 @@ struct TmuxControlConnectionWedgedWriteTests {
 
     @Test("stop() returns bounded while a pty write is wedged, and releases the writer")
     func stopReturnsWhileWriteWedged() async throws {
-        let sleepSeconds = Self.stubLifetimeSeconds(offset: 1)
-        let stub = try makeStub(sleepSeconds: sleepSeconds)
+        let stub = try makeStub()
         defer {
-            killStub(sleepSeconds: sleepSeconds)
+            killStub(stub)
             try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent)
         }
 
@@ -115,10 +118,9 @@ struct TmuxControlConnectionWedgedWriteTests {
 
     @Test("a wedged write cannot permanently starve ensureConnection for the server (R7-H1 + R6-M4)")
     func wedgedWriteDoesNotStarveSuccessor() async throws {
-        let sleepSeconds = Self.stubLifetimeSeconds(offset: 2)
-        let stub = try makeStub(sleepSeconds: sleepSeconds)
+        let stub = try makeStub()
         defer {
-            killStub(sleepSeconds: sleepSeconds)
+            killStub(stub)
             try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent)
         }
 

@@ -146,6 +146,9 @@ public extension Trait where Self == TimeLimitTrait {
     ///   `readUntil` reads is 960 s.
     ///
     /// **If these start tripping, shorten the chain — do not raise this limit.**
+    /// The limit is derived from `TestDeadlines.saturatedPass` through the
+    /// invariant above and moves only when that constant does; a chain that
+    /// trips it is shortened, never answered by raising the limit.
     /// `Tests/CLAUDE.md` already requires advance chains to stay in single
     /// digits, and a 5-deep chain is at the edge of that rule; injecting pacing
     /// values to cross a threshold in 2–3 advances is the remedy. Raising 300 s

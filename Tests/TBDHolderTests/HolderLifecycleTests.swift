@@ -14,16 +14,14 @@ import TBDKernel
 struct HolderLifecycleTests {
     private static let rcFreeEnvironment = ["PATH": "/usr/bin:/bin", "TERM": "dumb"]
 
-    /// How long a job that has to stay alive sleeps. It must outlive every wait
-    /// before and including the one after which the test checks it — the
-    /// fixture's bootstrap waits, `waitForSocket` and the test's own — so
-    /// teardown, not the clock, is what ends it. Still bounded, so a fixture
-    /// that somehow escapes teardown reaps itself.
-    private static let jobLifetimeSeconds = Int(TestDeadlines.saturatedPassSeconds) * 5
-
-    /// A job that does nothing but stay alive, for `jobLifetimeSeconds`.
+    /// A job that does nothing but stay alive. It sleeps
+    /// `TestDeadlines.outlivingChildSeconds`, so it outlives every wait before
+    /// and including the one after which the test checks it — the fixture's
+    /// bootstrap waits, `waitForSocket` and the test's own — and teardown, not
+    /// the clock, is what ends it. Still bounded, so a fixture that somehow
+    /// escapes teardown reaps itself.
     private static func idleJob(marker: String = "") -> HolderLaunchRequest {
-        let stayAlive = "sleep \(jobLifetimeSeconds)"
+        let stayAlive = "sleep \(TestDeadlines.outlivingChildSeconds)"
         return HolderLaunchRequest(
             executable: "/bin/sh",
             arguments: ["-c", marker.isEmpty ? stayAlive : "printf '\(marker)\\n'; \(stayAlive)"],
@@ -268,7 +266,7 @@ struct HolderLifecycleTests {
         let script = [
             "echo LEAKED >&\(probe) 2>/dev/null",
             "echo RAN > '\(home)/ran.marker'",
-            "sleep \(Self.jobLifetimeSeconds)",
+            "sleep \(TestDeadlines.outlivingChildSeconds)",
         ].joined(separator: "; ")
         let launch = HolderLaunchRequest(
             executable: "/bin/sh",

@@ -429,11 +429,13 @@ already-failing test walks a full chain of timeouts and the first diagnostic is
 already recorded by then.
 
 **The remedy if they start tripping is to shorten the chain, not to raise the
-limit again.** "Keep advance chains short — single digits" below is already the
-rule, and a 5-deep chain sits at its edge; inject pacing values and cross the
-threshold in 2–3 advances. Raising 300 s buys room only for tests that are
-already failing, and taxes every genuinely wedged test with a longer wait
-before it gets attributed.
+limit.** The limit is derived from `TestDeadlines.saturatedPass` through the
+invariant above and moves only when that constant does; a chain that trips it
+is shortened, never answered by raising the limit. "Keep advance chains short —
+single digits" below is already the rule, and a 5-deep chain sits at its edge;
+inject pacing values and cross the threshold in 2–3 advances. Raising 300 s
+buys room only for tests that are already failing, and taxes every genuinely
+wedged test with a longer wait before it gets attributed.
 
 **All three are sized for the fast parallel pass, so tier 3 opts out.** The
 quiet pass (`--no-parallel`, idle machine) never sees the saturation that forced

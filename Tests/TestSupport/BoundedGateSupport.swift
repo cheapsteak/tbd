@@ -162,6 +162,14 @@ public enum TestDeadlines {
 
     /// The same 120 s, as a `Duration` for poll-loop waits.
     public static let saturatedPass: Duration = .seconds(saturatedPassSeconds)
+
+    /// How long, in whole seconds, a test's child process sleeps when it must
+    /// outlive every wait that checks it: five `saturatedPass` budgets, so a
+    /// child that is gone inside such a wait was ended rather than having
+    /// finished its sleep, and one that has to be alive afterwards still is.
+    /// Derived from `saturatedPassSeconds`, so it moves with it. The test that
+    /// spawns the child still kills it by pid when it is done.
+    public static let outlivingChildSeconds: Int = Int(saturatedPassSeconds) * 5
 }
 
 /// Carries a bounded wait's OBSERVED state on the primary failure line

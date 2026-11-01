@@ -71,12 +71,18 @@ struct TmuxControlSupervisorTeardownTests {
 
     /// Write an executable stub "tmux" that ignores its args and sleeps, so a
     /// real `TmuxControlConnection` can start (pty + process) without tmux.
+    ///
+    /// It sleeps `TestDeadlines.outlivingChildSeconds`, past this suite's
+    /// longest chain of `teardownWaitDeadline` waits: a stub that ended on its
+    /// own would end its control stream, and the natural-end path's `stop()`
+    /// could then satisfy a wait the test meant for its own teardown.
     private func makeStubBinary() throws -> String {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-teardown-stub-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("stub-tmux.sh").path
-        try "#!/bin/sh\nexec sleep 300\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexec sleep \(TestDeadlines.outlivingChildSeconds)\n"
+            .write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
         return path
     }

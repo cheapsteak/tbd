@@ -1057,8 +1057,9 @@ struct MainToolbarControllerTests {
 
     /// The replacement alone brings the toolbar back, through KVO on the
     /// window's `toolbar`: it is made in the turn that found no apply queued,
-    /// and nothing here schedules one, so no other apply can stand in for the
-    /// watch.
+    /// and in that same turn the replacement has counted and queued the apply
+    /// that puts ours back, so the watch is what brings it back rather than
+    /// some later apply.
     @Test func reinstallsAReplacedToolbar() async throws {
         let fixture = ToolbarFixture(label: "reinstallsAReplacedToolbar")
         defer { fixture.tearDown() }
@@ -1067,6 +1068,10 @@ struct MainToolbarControllerTests {
         try await fixture.withNoApplyQueued("before the replacement") {
             fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.replacement")
             try #require(fixture.window.toolbar !== fixture.controller.toolbar)
+            // KVO reports synchronously, so the watch has already counted the
+            // replacement and queued the reinstall.
+            #expect(fixture.controller.recentReplacements.count == 1)
+            #expect(fixture.controller.applyScheduled)
         }
 
         let back = try await waitForMainActorCondition("our toolbar to come back") {
