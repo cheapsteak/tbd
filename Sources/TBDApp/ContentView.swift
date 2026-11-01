@@ -354,7 +354,7 @@ struct ContentView: View {
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
                                 // Shown only while attached; hides the transcript for this
-                                // session's current connection only.
+                                // session only (`remoteTranscriptHiddenSelection`).
                                 Button {
                                     appState.toggleRemoteTranscript(selection)
                                 } label: {

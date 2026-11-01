@@ -479,8 +479,10 @@ final class AppState {
                 sidebarSelectionGeneration &+= 1
             }
             // Leaving a session ends its transcript hide; reselecting the
-            // same session keeps it (`remoteTranscriptHiddenAttach`).
-            clearRemoteTranscriptHide(unlessFor: selectedRemoteSession)
+            // same session keeps it (`remoteTranscriptHiddenSelection`).
+            if let old = oldValue, old != selectedRemoteSession {
+                endRemoteTranscriptHide(for: old)
+            }
         }
     }
 
@@ -826,34 +828,33 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
-    /// The attach connection whose transcript the toolbar toggle has hidden —
-    /// a session plus the restart generation its terminal is mounted under —
-    /// or nil when no transcript is hidden. In memory only and never
-    /// persisted: the transcript opens by default, every time.
+    /// The remote session whose transcript the toolbar toggle has hidden, or
+    /// nil when no transcript is hidden. In memory only and never persisted:
+    /// the transcript opens by default, every time.
     ///
-    /// A hide ends when the user leaves its session, or when its connection
-    /// ends: an exit, an unmount, or a replacement.
+    /// A hide ends when a person acts: it lasts until the user leaves the
+    /// session, reattaches, or asks for a reconnect. A connection the app
+    /// restarts on its own keeps it, so the terminal never narrows without a
+    /// gesture behind it.
     ///
     /// - **Leaving** – `selectedRemoteSession` moves to any other session, or
     ///   to none. Reselecting the same session keeps the hide.
-    /// - **An exit** – `markRemoteSessionDetached` records the hidden
-    ///   connection's child exiting.
-    /// - **An unmount** – `markRemoteAttachUnmounted` reports the pager
-    ///   tearing down the hidden connection's tab, whatever the reason: an
-    ///   explicit detach, the session leaving eligibility (its provider needs
-    ///   sign-in, say), the session vanishing, or a superseded generation. It
-    ///   covers the teardowns no exit reports.
-    /// - **A replacement** – Reconnect, or a restart after a network change,
-    ///   bumps the generation. The pane is hidden only while the session is
-    ///   attached under exactly this key, so the new connection shows its
-    ///   transcript at once, and the pager's unmount of the replaced key then
-    ///   clears the value.
+    /// - **Reattaching** – the Attach or Reattach button
+    ///   (`reattachRemoteSession`) or the context menu's Attach
+    ///   (`selectRemoteSession(provider:sessionID:reattach:)`).
+    /// - **A reconnect the user asks for** – the toolbar's or the context
+    ///   menu's Reconnect, or the CLI's `remote.reconnect`
+    ///   (`reconnectRemoteSession`).
     ///
-    /// Set only by `toggleRemoteTranscript`. Cleared by
-    /// `clearRemoteTranscriptHide(unlessFor:)` on leaving and
-    /// `clearRemoteTranscriptHide(ofConnection:)` on an exit or unmount, each
-    /// of which writes only when the value changes.
-    var remoteTranscriptHiddenAttach: RemoteAttachMountKey? = nil
+    /// Everything else keeps it: an exit, an unmount, and the restart after a
+    /// network change or a wake (`restartRemoteAttachChildren(startedBefore:)`).
+    /// While the session is not attached its transcript shows regardless of
+    /// the hide, because the pane applies a hide only while attached.
+    ///
+    /// Set only by `toggleRemoteTranscript`. Cleared only by
+    /// `endRemoteTranscriptHide(for:)`, which writes only when the value
+    /// changes.
+    var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -1463,10 +1464,6 @@ final class AppState {
     /// `reconnectRemoteSession` has since superseded is dropped: that child
     /// was killed on purpose, and recording its exit would detach — or put
     /// into backoff — the fresh child that replaced it. `nil` skips the check.
-    /// An exit that is not dropped ends a transcript hide on the connection
-    /// that exited (`remoteTranscriptHiddenAttach`). A dropped one leaves any
-    /// hide alone, because its connection was already replaced and a hide on
-    /// the replacement belongs to a connection still running.
     ///
     /// `now` is the instant the backoff window is measured from — the date
     /// seam, defaulted so no production call site changes, so a test can
@@ -1481,10 +1478,6 @@ final class AppState {
         if let generation, generation != remoteAttachGeneration(for: selection) {
             return
         }
-        // Past the guard, the exit belongs to the current generation, so the
-        // connection that ended is the one under the current key, and a
-        // transcript hide on it ends with it (`remoteTranscriptHiddenAttach`).
-        clearRemoteTranscriptHide(ofConnection: remoteAttachMountKey(for: selection))
         // The child that reported this exit is gone, so its spawn time must
         // not outlive it. `handleNetworkChange` reads a recorded start as "a
         // live child has been running since then" and restarts the pane; an
@@ -1518,10 +1511,13 @@ final class AppState {
     /// Explicit Attach/Reattach button action. Records connection intent and
     /// clears both clean-detach and pending-reconnect state, bypassing the
     /// backoff window. Provider eligibility still gates the resulting mount.
+    /// A deliberate gesture, so it also ends a transcript hide on `selection`
+    /// (`remoteTranscriptHiddenSelection`).
     func reattachRemoteSession(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
         touchAttachedRemoteSession(selection)
+        endRemoteTranscriptHide(for: selection)
     }
 
     /// The restart generation `selection`'s attach terminal is currently
@@ -1568,16 +1564,10 @@ final class AppState {
     /// explicit detach, the session vanishing, or a superseded generation. The
     /// pager's dismantle terminates the child with its exit callback
     /// suppressed, so this is the only way `startedAt` learns the child is
-    /// gone. A report for a generation that is no longer current leaves the
-    /// start alone, so the old key's removal after a reconnect cannot clear
-    /// the replacement child's start. The generation itself is kept.
-    ///
-    /// Every report, current or not, ends a transcript hide on the connection
-    /// it names (`remoteTranscriptHiddenAttach`). The comparison is by the
-    /// whole key, so the old key's removal after a reconnect cannot end a
-    /// hide on the replacement.
+    /// gone. A report for a generation that is no longer current is dropped,
+    /// so the old key's removal after a reconnect cannot clear the replacement
+    /// child's start. The generation itself is kept.
     func markRemoteAttachUnmounted(_ selection: RemoteSessionSelection, generation: Int) {
-        clearRemoteTranscriptHide(ofConnection: RemoteAttachMountKey(selection: selection, generation: generation))
         guard generation == remoteAttachGeneration(for: selection) else { return }
         remoteAttachGenerations[selection]?.startedAt = nil
     }
@@ -1658,8 +1648,16 @@ final class AppState {
     /// unregistered or `.needsAuth`). No pane would mount for it, so
     /// clearing its detach and backoff state would discard real bookkeeping
     /// for zero effect.
+    ///
+    /// - Parameter keepsTranscriptHide: whether a transcript hide on
+    ///   `selection` survives the reconnect (`remoteTranscriptHiddenSelection`).
+    ///   `false`, the default, is a reconnect the user asks for — the
+    ///   toolbar's or the context menu's Reconnect, or the CLI's
+    ///   `remote.reconnect` — and ends the hide when the reconnect goes ahead.
+    ///   `true` is a restart the app makes on its own, which keeps it
+    ///   (`restartRemoteAttachChildren(startedBefore:)`).
     @discardableResult
-    func reconnectRemoteSession(_ selection: RemoteSessionSelection) -> Bool {
+    func reconnectRemoteSession(_ selection: RemoteSessionSelection, keepsTranscriptHide: Bool = false) -> Bool {
         guard attachEligibleRemoteSelections.contains(selection) else { return false }
         let wasDetached = explicitlyDetachedRemoteSessions[selection] != nil
             || pendingReconnectRemoteSessions[selection] != nil
@@ -1671,13 +1669,16 @@ final class AppState {
         remoteAttachGenerations[selection] = RemoteAttachGeneration(
             generation: remoteAttachGeneration(for: selection) + 1, startedAt: nil)
         touchAttachedRemoteSession(selection)
+        if !keepsTranscriptHide {
+            endRemoteTranscriptHide(for: selection)
+        }
         return true
     }
 
     /// Restarts every attached selection whose child has a recorded spawn time
     /// before `date` — the network-change path's step 1 — and returns how many.
     ///
-    /// Each restart is a plain `reconnectRemoteSession`, so a live child's
+    /// Each restart is a `reconnectRemoteSession`, so a live child's
     /// leftover pending-reconnect entry is dropped, exactly as for the manual
     /// Reconnect: that entry predates the child that is running now, and
     /// carrying it would re-arm the health gate
@@ -1687,6 +1688,11 @@ final class AppState {
     /// a respawn loop is re-established by the first failure after the
     /// restart; the restart cadence itself is bounded by the watcher's
     /// debounce.
+    ///
+    /// Unlike the manual Reconnect, each restart keeps a transcript hide
+    /// (`keepsTranscriptHide: true`): nobody asked for it, so it must not
+    /// bring the transcript back and narrow the terminal
+    /// (`remoteTranscriptHiddenSelection`).
     ///
     /// `recentlyAttachedRemoteSessions` is restored to its prior order
     /// afterwards: every restart ends in `touchAttachedRemoteSession`, which
@@ -1706,7 +1712,7 @@ final class AppState {
         var restarted = 0
         for selection in attachedRemoteSelections {
             guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < date else { continue }
-            if reconnectRemoteSession(selection) { restarted += 1 }
+            if reconnectRemoteSession(selection, keepsTranscriptHide: true) { restarted += 1 }
         }
         // Unconditional, and load-bearing beyond the order restore: this is
         // the spec's third effect, "re-evaluate now"

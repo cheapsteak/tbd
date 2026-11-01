@@ -42,9 +42,8 @@ extension AppState {
     /// session is attached is `attachedRemoteSelections`, which is rebuilt on
     /// every read, so a view that needs several of these answers asks here
     /// once per evaluation rather than once per answer. The fields come from
-    /// the pure gates in `RemoteSessionDetailGates`. The pane is hidden only
-    /// while the session is attached under exactly the hidden key, so a
-    /// replaced connection shows its transcript at once.
+    /// the pure gates in `RemoteSessionDetailGates`, and the hide they apply
+    /// is `remoteTranscriptHiddenSelection`.
     func remoteTranscriptPresentation(for selection: RemoteSessionSelection) -> RemoteTranscriptPresentation {
         let capabilities = remoteProviderCapabilities(for: selection)
         let attached = remoteSessionIsAttached(selection)
@@ -54,14 +53,7 @@ extension AppState {
                 capabilities: capabilities, attached: attached),
             showsPane: RemoteSessionDetailGates.showsTranscriptPane(
                 capabilities: capabilities, attached: attached,
-                // The restart generation is read only while a hide exists for
-                // this selection: spawn and unmount reports write it for every
-                // session, and reading it unconditionally re-renders views on
-                // that traffic. The `selection` check short-circuits before
-                // `remoteAttachMountKey` reads it.
-                hiddenByToggle: remoteTranscriptHiddenAttach.map {
-                    $0.selection == selection && $0 == remoteAttachMountKey(for: selection)
-                } ?? false),
+                hiddenByToggle: remoteTranscriptHiddenSelection == selection),
             transcriptLeads: RemoteSessionDetailGates.transcriptLeads(
                 capabilities: capabilities, attached: attached))
     }
@@ -80,8 +72,8 @@ extension AppState {
 
     /// Whether `selection`'s detail pane shows the transcript half of its
     /// split: always while it is not attached, and while it is attached
-    /// unless the toolbar toggle has hidden it for this session's current
-    /// connection (`remoteTranscriptHiddenAttach`).
+    /// unless the toolbar toggle has hidden it
+    /// (`remoteTranscriptHiddenSelection`).
     ///
     /// The single-answer name a window toolbar calls when it builds each item
     /// on its own, as an AppKit toolbar does. A caller that needs several
@@ -90,43 +82,24 @@ extension AppState {
         remoteTranscriptPresentation(for: selection).showsPane
     }
 
-    /// The toolbar toggle's action: hides the transcript of `selection`'s
-    /// current connection, or shows it again when that connection's is the
-    /// one hidden. Only one transcript is ever hidden, and nothing is
-    /// persisted. A no-op unless the toggle is offered for `selection` and
-    /// `selection` is the session on screen, so a session that is not attached
-    /// or not selected never records a hide.
+    /// The toolbar toggle's action: hides `selection`'s transcript, or shows
+    /// it again when `selection` is the one hidden. Only one transcript is
+    /// ever hidden, and nothing is persisted; how long a hide lasts is the
+    /// rule on `remoteTranscriptHiddenSelection`. A no-op unless the toggle is
+    /// offered for `selection` and `selection` is the session on screen, so a
+    /// session that is not attached or not selected never records a hide.
     func toggleRemoteTranscript(_ selection: RemoteSessionSelection) {
         guard selection == selectedRemoteSession, remoteSessionShowsTranscriptToggle(selection) else { return }
-        let key = remoteAttachMountKey(for: selection)
-        remoteTranscriptHiddenAttach = remoteTranscriptHiddenAttach == key ? nil : key
+        remoteTranscriptHiddenSelection = remoteTranscriptHiddenSelection == selection ? nil : selection
     }
 
-    /// Ends a transcript hide on any session other than `selection`, because
-    /// the user has left the session it belongs to (the rule is on
-    /// `remoteTranscriptHiddenAttach`). Called when the selection changes. A
-    /// hide on `selection` itself is kept, so reselecting the session on
-    /// screen leaves it hidden. Writes only when there is a hide to end, so a
-    /// call that changes nothing emits no observation.
-    func clearRemoteTranscriptHide(unlessFor selection: RemoteSessionSelection?) {
-        guard let hidden = remoteTranscriptHiddenAttach, hidden.selection != selection else { return }
-        remoteTranscriptHiddenAttach = nil
-    }
-
-    /// Ends the transcript hide on `connection`, because that connection has
-    /// ended (the rule is on `remoteTranscriptHiddenAttach`). Called with the
-    /// key of a connection that exited or was unmounted. Writes only when
-    /// `connection` is the one hidden, so a hide on any other connection,
-    /// including a later one of the same session, is left alone.
-    func clearRemoteTranscriptHide(ofConnection connection: RemoteAttachMountKey) {
-        guard remoteTranscriptHiddenAttach == connection else { return }
-        remoteTranscriptHiddenAttach = nil
-    }
-
-    /// The key `selection`'s attach terminal is mounted under now: the
-    /// connection a transcript hide on it would belong to.
-    func remoteAttachMountKey(for selection: RemoteSessionSelection) -> RemoteAttachMountKey {
-        RemoteAttachMountKey(selection: selection, generation: remoteAttachGeneration(for: selection))
+    /// Ends the transcript hide on `selection` if it is the one hidden: the
+    /// single clear behind every gesture that ends a hide (the rule is on
+    /// `remoteTranscriptHiddenSelection`). Writes only when the value changes,
+    /// so a call that ends nothing emits no observation.
+    func endRemoteTranscriptHide(for selection: RemoteSessionSelection) {
+        guard remoteTranscriptHiddenSelection == selection else { return }
+        remoteTranscriptHiddenSelection = nil
     }
 
     /// The mirrored row for `selection`, or nil while it is not in the mirror.
