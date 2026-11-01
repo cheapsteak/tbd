@@ -106,9 +106,18 @@ revision guard needs nothing new.
   in the same transaction and broadcasts the change.
 - **New worktrees.** Worktree creation makes the initial "Notes" note as
   before, carryover seed included, and opens it as a worktree panel instead of
-  appending it to the tab order. The config column
+  appending it to the tab order. It also writes the surface of the
+  worktree's main tab, with the note in front and the region open, so a new
+  worktree opens its starter note visibly; the app's first tab sync keeps that
+  surface, as it keeps any it can read. The config column
   `auto_create_notes_enabled` keeps its meaning. Its Settings label becomes
   "Open a Notes panel for new worktrees".
+- **Imported tabs.** A tab the daemon imports in a tab sync with no panels of
+  its own comes out collapsed when its worktree has worktree panels, with the
+  first one in front. Most tabs have no surface when the app updates, and
+  every new terminal tab is imported, so without this an update, or a new
+  tab, would open the side region and narrow the terminal. A tab that brings
+  panels of its own keeps its collapse state.
 - **Migration.** Existing notes move into the side panel. For every note row,
   the migration:
   - inserts a worktree panel in the worktree's tab order;
@@ -128,9 +137,11 @@ revision guard needs nothing new.
   worktree's first panel in front, one ◫ away. A tab that had panels keeps
   its collapse state and the panel in front, and the worktree panels join its
   strip; the one exception is a tab whose own note panel was in front, which
-  brings the note's worktree panel forward, as above. New worktrees differ on
-  purpose: creation opens the starter note visibly, which is what the
-  "Open a Notes panel for new worktrees" setting asks for.
+  brings the note's worktree panel forward, as above. A tab with no surface
+  yet comes out collapsed when the app's next tab sync imports it (see
+  "Imported tabs"). New worktrees differ on purpose: creation opens the
+  starter note visibly in the main tab, which is what the "Open a Notes panel
+  for new worktrees" setting asks for.
 
   The JSON edit of `tabOrder` takes the Swift escape hatch in
   `SQLMigrationLoader.inlineTimestampMigrations`, unless the `.sql` allowlist
@@ -200,8 +211,12 @@ tabs, so they are reached through the side panel's + menu until one does.
   - `note.delete` removes the note's panel.
   - Archive deletes the worktree's panels, and promote moves the Changes
     panel and deletes the note panels.
-  - Creation opens the initial note as a panel when `auto_create_notes_enabled`
-    is on, and opens none when it is off.
+  - Creation opens the initial note as a panel, in front of an open region in
+    the main tab, when `auto_create_notes_enabled` is on, and opens none when
+    it is off.
+  - A tab sync imports a tab with no panels of its own collapsed when the
+    worktree has worktree panels, and leaves a tab with its own panels, or in a
+    worktree without worktree panels, as it came.
   - The migration moves a note out of `tabOrder` into the worktree's panels,
     replaces a tab's own note panel with the worktree panel (in front when the
     old one was), collapses a tab whose side region had no panels, leaves a
