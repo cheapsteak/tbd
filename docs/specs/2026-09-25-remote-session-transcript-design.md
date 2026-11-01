@@ -204,7 +204,7 @@ Remote sessions get a **Transcript** toggle in the window toolbar beside Reconne
 
 With the flag on, background sync keeps the cache current, so the pane opens over it and the cached first paint described under "Layout" shows it at once. For a session with no cache yet, the first sync is a tail reset, so the pane fills from 12 message records rather than streaming the whole history page by page.
 
-The transcript opens by default, every time. While a session is not attached it is always shown. Each time a session attaches, the transcript opens beside the terminal. The toggle hides it for the session on screen only. Switching to another session, reattaching, or a reconnect the user asks for shows it again; a connection the app restarts on its own — after a network change, a wake from sleep, or an unexpected exit — keeps it hidden, so the terminal never narrows without a gesture behind it. Nothing is persisted.
+The transcript opens by default, every time. While a session is not attached it is always shown. Each time the user attaches a session, the transcript opens beside the terminal. The toggle hides it for the session on screen only. Switching to another session, reattaching, or a reconnect the user asks for shows it again; a connection the app restarts on its own — after a network change, a wake from sleep, or an unexpected exit — keeps it hidden, so the terminal never narrows without a gesture behind it. Nothing is persisted.
 
 ### Layout
 
