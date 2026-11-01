@@ -101,7 +101,7 @@ ITERATION_DEADLINE_S=600
 # §6.2 and §6.4). A test alone must execute at least itself.
 TEST_SCOPE_FLOOR=1
 # Execution deadlines for a whole CI pass, per iteration. Sized from spec §9's
-# figures for the nightly's whole-fast-pass arm, which runs all three fast passes
+# figures for the nightly's whole-fast-pass arm, which runs every fast pass
 # in one process under induced load: about 38 minutes for its FIRST iteration
 # (first-build and warm-up cost included) and about 8 minutes for each warm one.
 # One fast pass is a subset of that arm, so those are upper bounds; the deadlines
@@ -218,7 +218,7 @@ adhoc_test_spec() {
   printf 'Test|--filter %s|%s|adhoc|ad hoc: %s alone\n' "$(exact_id_filter "$1")" "$TEST_SCOPE_FLOOR" "$1"
 }
 
-# THE CI PASSES, AS DATA: name|floor|swift-test args. These are `test.yml`'s four
+# THE CI PASSES, AS DATA: name|floor|swift-test args. These are `test.yml`'s five
 # `scripts/ci/watched-test-pass.sh` invocations with CI's single quotes removed
 # and the args that do not decide which tests run or how dropped:
 # `--fingerprint` (it guards the developer's home directories), `--skip-build`
@@ -243,14 +243,16 @@ CI_SWIFTPM_FLAGS_WORD='"${swiftpm_flags[@]}"'
 CI_PASSES=(
   "fast-pass-daemon-a|1200|--parallel --filter ^TBDDaemonTests\\.[A-O]"
   "fast-pass-daemon-b|1500|--parallel --filter ^TBDDaemonTests\\. --skip ^TBDDaemonTests\\.[A-O]"
-  "fast-pass-app|1900|--parallel --skip ^(TBDDaemonTests|TBDDaemonLiveTests)\\."
+  "fast-pass-app-a|1400|--parallel --filter ^TBDAppTests\\.[A-P]"
+  "fast-pass-app-b|3200|--parallel --skip ^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.[A-P])"
   "quiet-pass|35|--filter ^TBDDaemonLiveTests\\. --no-parallel"
 )
 
 # True when SwiftPM, given these args, would run the test whose filter form is
 # $1: some `--filter` matches (or there is none) and no `--skip` does.
-# `LC_ALL=C` because `[A-O]` is a code-point range in SwiftPM's matcher but a
-# collation range in some bash locales, where it also admits lowercase letters.
+# `LC_ALL=C` because `[A-O]` and `[A-P]` are code-point ranges in SwiftPM's
+# matcher but collation ranges in some bash locales, where they also admit
+# lowercase letters.
 pass_runs() {
   local id="$1" LC_ALL=C
   local -a parts
@@ -602,10 +604,11 @@ failing_tests_from() {
 # --- one target ---------------------------------------------------------------
 
 # Field $2 (1-5) of a TARGETS-format line, name|filter|floor|issue|description.
-# The FILTER may itself contain `|` — fast pass 2 skips
-# `^(TBDDaemonTests|TBDDaemonLiveTests)\.` — so a plain `IFS='|' read` would split
-# inside it and read part of the regex as the floor. Name is the first field and
-# the other three are the last three; the filter is whatever lies between.
+# The FILTER may itself contain `|` — fast pass 2b skips
+# `^(TBDDaemonTests\.|TBDDaemonLiveTests\.|TBDAppTests\.[A-P])` — so a plain
+# `IFS='|' read` would split inside it and read part of the regex as the floor.
+# Name is the first field and the other three are the last three; the filter is
+# whatever lies between.
 spec_field() {
   local spec="$1" rest name description issue floor
   name="${spec%%|*}"; rest="${spec#*|}"

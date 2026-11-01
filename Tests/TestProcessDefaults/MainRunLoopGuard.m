@@ -12,8 +12,9 @@
 /// run loop from any thread, or from a main-queue job. The process then ends
 /// with status 0 in the middle of the run, with no summary, no xUnit results
 /// and no crash report, and `swift test` reports success: the shape of the
-/// `fast-pass-app ran no tests` deaths on CI, where SwiftPM's exit status
-/// rules out a signal.
+/// deaths CI names `fast-pass-app-a ran no tests` or
+/// `fast-pass-app-b ran no tests`, where SwiftPM's exit status rules out a
+/// signal.
 ///
 /// The app never sees this: `NSApplication.run()` loops over the run loop and
 /// carries on after a stray stop (measured with a stop from a background

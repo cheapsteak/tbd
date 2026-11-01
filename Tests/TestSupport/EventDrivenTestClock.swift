@@ -311,8 +311,12 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     ///     ``TestDeadlines/saturatedPass`` where the arming is not one hop from
     ///     the test body** — where reaching the sleep costs a main-actor round
     ///     trip, or an unstructured task that has to be given a thread first.
-    ///     45 s sits below fast pass 2's measured p90 per-test latency, so such
-    ///     a wait measures the runner rather than the code under test;
+    ///     45 s sat below fast pass 2's p90 per-test latency when pass 2 ran as
+    ///     one step. With pass 2 split, one green run measured p99 40.9 s and
+    ///     36.0 s in 2a and 2b, so 45 s sits only about 4–9 s above those tails,
+    ///     inside the ~20 s that runner noise alone has moved a pass's tail.
+    ///     Such a wait still measures the runner rather than the code under
+    ///     test;
     ///     `ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock` is
     ///     the worked example. **On task
     ///     cancellation the wait ends without a diagnostic**: the waiter is

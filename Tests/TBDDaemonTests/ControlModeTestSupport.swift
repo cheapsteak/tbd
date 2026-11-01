@@ -43,21 +43,31 @@ import Testing
 /// binding constraint rather than an incidental one.
 ///
 /// The pass that binds this value is fast pass 2 (everything but the two
-/// daemon targets, ~7200 tests). Measured on two green runs of one commit,
-/// its slowest test reported 101.7 s on one (p50 9.9 s, p90 88.2 s, p99
-/// 100.5 s) and 82.4 s on the other (p90 72.3 s) — runner noise alone moves
-/// the tail by about twenty seconds — and about 30% of its tests report over
-/// 45 s on every run measured. Fast passes 1a and 1b report longer tails (on
-/// the second run, max 111.7 s and 107.4 s, p50 84.0 s and 63.6 s), but a
-/// reported duration there includes the time a test waits for its body to
-/// start, which a wait inside the body never pays, so those figures bound a
-/// wait only loosely. The record agrees: across five CI attempts of that
-/// commit no bounded wait timed out in pass 1a or 1b, while pass 2's green
-/// tail crosses a 90 s bound outright — 101.7 s above, and 97.2 s among the
-/// passing tests of a run of `main`.
+/// daemon targets, ~7200 tests). Its worst green maximum on record is 101.7 s,
+/// with pass 2 as one step. Five other green runs as one step measured its
+/// slowest test at 67.2–94.5 s (p90 55–79 s, p99 66–93 s), and runner noise
+/// alone moves that tail by about twenty seconds. A tail within about 8 s of
+/// the ~102 s split trigger (120 s less the ~18 s margin) is why pass 2 runs
+/// as two steps, 2a and 2b, cut by main-thread time: on one green run their
+/// slowest tests reported 41.0 s and 37.5 s (p99 40.9 s and 36.0 s).
 ///
-/// 120 s clears pass 2's green maximum by ~18 s, and the deadline still
-/// elapses only on a genuine hang.
+/// Pass 1's figures are evidence, not the sizing input. Fast pass 1a's
+/// slowest test reports 51.7–86.5 s on recent runs, 86.5 s on a slow runner,
+/// and 1b's 22.5–38.5 s. On green runs where every in-memory database ran the
+/// whole migration chain, 1a and 1b reported 111.7 s and 107.4 s. A reported
+/// duration there also includes the time a test waits for its body to start,
+/// which a wait inside the body never pays, so those figures bound a wait only
+/// loosely.
+///
+/// So the sizing rule is applied to pass 2's tail: it clears the worst green
+/// tail by about 18 s, because runner noise alone moves it by about twenty.
+/// 120 s clears the 101.7 s on record by about 18 s, and the 94.5 s by about
+/// 25 s, and the deadline still elapses only on a genuine hang. It is sized
+/// against the record and is not re-derived from the split halves' tails.
+/// Re-deriving it would also move the values coupled to it:
+/// `TestGate.deadline`, `.fastPassBounded`, and the tier-3 suite limits summed
+/// from chains of these waits (`Tests/CLAUDE.md`, "Population is the
+/// scheduler").
 ///
 /// ## The interaction with `.clockDriven` — read before changing either value
 ///
