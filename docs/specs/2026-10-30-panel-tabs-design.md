@@ -419,6 +419,14 @@ CLAUDE.md asks for a default-off flag when a change replaces a load-bearing
 path. The owner chose to ship this without one, having used it on their own
 install, so the way back is a revert and a release.
 
+The tab row's chrome follows the same decision, and the owner asked for no
+setting for any of it. Three things ship without a flag or a setting: the
+transcript and Notes buttons at the window's right edge, the transcript button
+drawn disabled on a tab with no transcript, and the side region's minimum
+width in points. CLAUDE.md asks for a default-off flag when existing items
+move. The owner chose to ship without one, so the way back is again a revert
+and a release.
+
 ### CLI and agent guidance
 
 `tbd panel` (`Sources/TBDCLI/Commands/PanelCommands.swift`). Every subcommand

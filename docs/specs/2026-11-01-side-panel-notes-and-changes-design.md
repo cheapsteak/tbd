@@ -199,7 +199,9 @@ revision guard needs nothing new.
 ## Rollout
 
 No flag. Panel tabs ship to everyone without one, and this moves existing items
-by the same decision of the owner's. The way back is a revert and a release.
+by the same decision of the owner's, the Notes button's place included: at the
+window's right edge, beside the side panel's collapse or expand button. The
+way back is a revert and a release.
 Neither a revert nor a downgrade makes the moved notes reappear as workspace
 tabs, so they are reached through the Notes button and the side panel's +
 menu until one does.
