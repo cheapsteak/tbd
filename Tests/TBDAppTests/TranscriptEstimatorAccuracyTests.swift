@@ -275,20 +275,27 @@ struct TranscriptEstimatorAccuracyTests {
         var signedLineError = 0
         var worst: (text: String, width: CGFloat, delta: CGFloat)?
 
+        // The render takes neither a width nor a role, so each paragraph is
+        // rendered once here and measured at all four geometries below — by one
+        // measurer, the way the Coordinator keeps one for every row it sizes.
+        var renderedCorpus: [[MessageBlock]] = []
+        for text in Self.paragraphCorpus {
+            renderedCorpus.append(MarkdownAttributedRenderer.renderBlocks(
+                text, theme: .chatBubble, linkResolver: nil))
+        }
+        let measurer = MessageBlockMeasurer()
+
         for width in Self.widths {
             for role in [TranscriptBubbleGeometry.Role.assistant, .user] {
                 let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role)
-                for text in Self.paragraphCorpus {
+                for (text, blocks) in zip(Self.paragraphCorpus, renderedCorpus) {
                     let item: TranscriptItem = role == .user
                         ? .userPrompt(id: "p", text: text, timestamp: nil)
                         : .assistantText(id: "p", text: text, timestamp: nil, usage: nil)
                     let node = TranscriptRenderNode(id: "p", kind: .chatBubble(item), badgeUsage: nil)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
-                        blocksHeight: MessageBlockMeasurer().blocksHeight(
-                            MarkdownAttributedRenderer.renderBlocks(
-                                text, theme: .chatBubble, linkResolver: nil),
-                            bodyWidth: bodyWidth),
+                        blocksHeight: measurer.blocksHeight(blocks, bodyWidth: bodyWidth),
                         role: role)
                     let delta = estimate - measured
                     signedLineError += Int((delta / Self.renderedLineHeight).rounded())
@@ -427,27 +434,44 @@ struct TranscriptEstimatorAccuracyTests {
         var signedTotal: CGFloat = 0
         var total = 0
         var generator = SplitMix64(seed: 0x5EED_1234)
+        // One measurer for the whole corpus, as the Coordinator keeps one for
+        // every row it sizes.
+        let measurer = MessageBlockMeasurer()
 
         for _ in 0..<Self.corpusMessageCount {
             let (shape, text) = Self.randomMessage(&generator)
+            // A message's blocks depend on its text, role and badge, never on the
+            // column width, so each arm is rendered once here and measured at both
+            // widths below. The measuring still runs width first, then arm, so
+            // every sum and list below accumulates in the same order as before.
+            var rendered: [RenderedArm] = []
+            for arm in Self.corpusArms {
+                let usage: TokenUsage? = arm.badged
+                    ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
+                    : nil
+                let item: TranscriptItem = arm.role == .user
+                    ? .userPrompt(id: "corpus", text: text, timestamp: nil)
+                    : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
+                rendered.append(RenderedArm(
+                    role: arm.role, weight: arm.weight, item: item, usage: usage,
+                    blocks: TranscriptBubbleGeometry.composedBlocks(
+                        for: item, badgeUsage: usage, linkResolver: nil)))
+            }
+            var tableHeights: TableHeights = []
             for width in Self.widths {
-                for arm in Self.corpusArms {
+                for arm in rendered {
                     let role = arm.role
-                    let usage: TokenUsage? = arm.badged
-                        ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
-                        : nil
-                    let item: TranscriptItem = role == .user
-                        ? .userPrompt(id: "corpus", text: text, timestamp: nil)
-                        : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
-                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(item),
+                    let usage = arm.usage
+                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(arm.item),
                                                     badgeUsage: usage)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
-                        blocksHeight: MessageBlockMeasurer().blocksHeight(
-                            TranscriptBubbleGeometry.composedBlocks(
-                                for: item, badgeUsage: usage, linkResolver: nil),
+                        blocksHeight: Self.blocksHeight(
+                            arm.blocks,
                             bodyWidth: TranscriptBubbleGeometry.bodyWidth(
-                                columnWidth: width, role: role)),
+                                columnWidth: width, role: role),
+                            measurer: measurer,
+                            tableHeights: &tableHeights),
                         role: role)
                     total += arm.weight
                     signedTotal += CGFloat(arm.weight) * (estimate - measured)
@@ -513,6 +537,54 @@ struct TranscriptEstimatorAccuracyTests {
         (.assistant, true, 1),
         (.user, false, 2),
     ]
+
+    /// One corpus arm, rendered once and measured at both column widths.
+    private struct RenderedArm {
+        let role: TranscriptBubbleGeometry.Role
+        let weight: Int
+        let item: TranscriptItem
+        let usage: TokenUsage?
+        let blocks: [MessageBlock]
+    }
+
+    /// The tables one corpus message has had measured so far, with the body
+    /// width each was measured at.
+    private typealias TableHeights = [(data: TranscriptTableData, bodyWidth: CGFloat, height: CGFloat)]
+
+    /// `MessageBlockMeasurer.blocksHeight(_:bodyWidth:)`, built from the same two
+    /// calls the Coordinator's cache-fed path makes — `height(of:bodyWidth:)` per
+    /// block, summed by `blocksHeight(fromBlockHeights:)` — except that a TABLE
+    /// already measured at this body width is read back from `tableHeights`.
+    ///
+    /// A table's height is a function of its data and the body width alone
+    /// (`tableHeight` lays out a fresh hosting controller on every call), and it
+    /// is the most expensive measurement in this file: one SwiftUI layout pass
+    /// each, over half of the corpus test's main-thread time on CI. The badged and
+    /// unbadged assistant arms of a message carry identical tables at identical
+    /// widths, so without this every assistant table was laid out twice. Prose is
+    /// always measured, and an unequal table is measured afresh.
+    private static func blocksHeight(
+        _ blocks: [MessageBlock],
+        bodyWidth: CGFloat,
+        measurer: MessageBlockMeasurer,
+        tableHeights: inout TableHeights
+    ) -> CGFloat {
+        var heights: [CGFloat] = []
+        for block in blocks {
+            guard case .table(let data) = block else {
+                heights.append(measurer.height(of: block, bodyWidth: bodyWidth))
+                continue
+            }
+            if let known = tableHeights.first(where: { $0.data == data && $0.bodyWidth == bodyWidth }) {
+                heights.append(known.height)
+            } else {
+                let height = measurer.height(of: block, bodyWidth: bodyWidth)
+                tableHeights.append((data: data, bodyWidth: bodyWidth, height: height))
+                heights.append(height)
+            }
+        }
+        return measurer.blocksHeight(fromBlockHeights: heights)
+    }
 
     /// A deterministic PRNG, so the corpus is the same on every run and on every
     /// machine — a fuzzer that finds a different defect each run cannot be a
