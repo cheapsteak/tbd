@@ -33,6 +33,9 @@ struct PanelSurfaceLoadKey: Equatable {
 /// "The renderer"): the primary's column on the left, the split divider, and
 /// the side region on the right while it has panels — its own or the
 /// worktree's — and is not collapsed (`WorkspaceTabSurface.isSideVisible`).
+/// The side region is never narrower than its strip's fixed controls
+/// (`minimumSideShare`): the divider stops a drag there, and a narrower
+/// stored width renders at it.
 ///
 /// Each column starts with its own strip of tabs, and the two share one row:
 /// this view draws the workspace tab bar over the primary's column, so the bar
@@ -153,7 +156,11 @@ struct PanelSurfaceWorkspaceView: View {
         GeometryReader { geometry in
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
-            let shares = Self.shares(drag: dividerDrag, tabID: tabID, width: side.width)
+            // The side never renders, nor is dragged, narrower than its
+            // strip's fixed controls.
+            let minimumShare = Self.minimumSideShare(availableSpace: availableSpace)
+            let shares = Self.shares(
+                drag: dividerDrag, tabID: tabID, width: side.width, minimumShare: minimumShare)
 
             // The primary's column stays the first child whatever the side
             // region does, so showing or hiding the region never rebuilds the
@@ -168,10 +175,17 @@ struct PanelSurfaceWorkspaceView: View {
                         thickness: thickness,
                         index: 0,
                         ratios: Binding(
-                            get: { Self.shares(drag: dividerDrag, tabID: tabID, width: side.width) },
+                            get: {
+                                Self.shares(
+                                    drag: dividerDrag, tabID: tabID, width: side.width,
+                                    minimumShare: minimumShare)
+                            },
                             set: { dividerDrag = DividerDrag(tabID: tabID, ratios: $0) }
                         ),
                         availableSpace: availableSpace,
+                        // The primary keeps the divider's own floor, which is
+                        // what the model's widest side share leaves it.
+                        minimumRatios: [SplitDivider.defaultMinimumRatio, minimumShare],
                         onDragEnd: { commitWidth() }
                     )
                     .id(tabID)
@@ -337,12 +351,15 @@ struct PanelSurfaceWorkspaceView: View {
     /// The divider's `[primary, side]` shares for the tab `tabID`: a drag's
     /// while one on this tab is being committed, otherwise the side region's
     /// `width`. A drag on another tab, or one with malformed shares, is not
-    /// this tab's.
-    static func shares(drag: DividerDrag?, tabID: UUID, width: Double) -> [CGFloat] {
+    /// this tab's. Either way the side's share is at least `minimumShare`
+    /// (`minimumSideShare`), so a window that shrank while a drag was being
+    /// committed still draws the strip's controls whole.
+    static func shares(drag: DividerDrag?, tabID: UUID, width: Double, minimumShare: CGFloat) -> [CGFloat] {
         if let drag, drag.tabID == tabID, drag.ratios.count == 2 {
-            return drag.ratios
+            guard drag.ratios[1] < minimumShare else { return drag.ratios }
+            return [1 - minimumShare, minimumShare]
         }
-        return Self.ratios(forWidth: width)
+        return Self.ratios(forWidth: width, minimumShare: minimumShare)
     }
 
     /// A surface's side region, or `SideRegion.empty` for none.
@@ -350,11 +367,35 @@ struct PanelSurfaceWorkspaceView: View {
         surface?.side ?? .empty
     }
 
-    /// The divider's `[primary, side]` shares for a side-region width, clamped
-    /// by `SideRegion.clamp`, the divider's own limit.
-    static func ratios(forWidth width: Double) -> [CGFloat] {
-        let clamped = SideRegion.clamp(width)
-        return [CGFloat(1 - clamped), CGFloat(clamped)]
+    /// The divider's `[primary, side]` shares for a side-region width: the
+    /// width clamped by `SideRegion.clamp`, the model's range, and then raised
+    /// to `minimumShare` (`minimumSideShare`), the app's limit in points. The
+    /// primary gets the rest. A stored width below that limit renders at the
+    /// limit, so the strip's controls are never clipped.
+    static func ratios(forWidth width: Double, minimumShare: CGFloat) -> [CGFloat] {
+        let side = max(CGFloat(SideRegion.clamp(width)), minimumShare)
+        return [1 - side, side]
+    }
+
+    /// The smallest share of `availableSpace`, the width the primary and the
+    /// side share, that the side region may take: enough for its strip's
+    /// fixed controls (`SideStripMetrics.fixedControlsWidth`), so none of
+    /// them is ever clipped and only the panel tabs between them give up
+    /// room. It is a limit in points, which the model's
+    /// `SideRegion.widthRange`, a range of shares, cannot carry, so the app
+    /// keeps it: the divider stops a drag there and `ratios` renders a
+    /// narrower stored width at it.
+    ///
+    /// Never below the range's lower bound, and never above its upper bound,
+    /// so the primary always keeps what that bound leaves it. A main area too
+    /// small for even the upper bound to fit the controls (about 233 pt) is
+    /// the one case the cap wins and the strip falls back on its own clip.
+    /// With no space to share, the lower bound.
+    static func minimumSideShare(availableSpace: CGFloat) -> CGFloat {
+        let lower = CGFloat(SideRegion.widthRange.lowerBound)
+        let upper = CGFloat(SideRegion.widthRange.upperBound)
+        guard availableSpace > 0, availableSpace.isFinite else { return lower }
+        return min(max(SideStripMetrics.fixedControlsWidth / availableSpace, lower), upper)
     }
 
     /// The `resize` a released drag sends: the side's share, clamped. Nil when
@@ -362,6 +403,11 @@ struct PanelSurfaceWorkspaceView: View {
     /// a click on the divider sends nothing. A non-finite share is no width
     /// the user chose: `SideRegion.clamp` would turn it into the default, and
     /// a resize to that would move the divider nobody dragged there.
+    ///
+    /// A released share is at least `minimumSideShare`, because the divider
+    /// stops a drag there. A stored width below that limit, from a wider
+    /// window or another client, stays stored until the user drags the
+    /// divider; until then it only renders at the limit (`ratios`).
     static func resizeOperation(ratios: [CGFloat], currentWidth: Double) -> PanelOperation? {
         guard ratios.count == 2, ratios[1].isFinite else { return nil }
         let width = SideRegion.clamp(Double(ratios[1]))

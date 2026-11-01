@@ -636,15 +636,53 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - The divider
 
+    /// A minimum share no width in the model's range is below, so only
+    /// `SideRegion.clamp` shapes the shares.
+    private static var rangeFloor: CGFloat { CGFloat(SideRegion.widthRange.lowerBound) }
+
     @Test("the divider's shares follow the side region's width")
     func ratiosFollowTheWidth() {
+        let rangeFloor = Self.rangeFloor
         let quarter: [CGFloat] = [0.75, 0.25]
-        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 0.25) == quarter)
+        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 0.25, minimumShare: rangeFloor) == quarter)
         // Out of range or not finite, the shares follow `SideRegion.clamp`.
-        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 1.5)
-            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.widthRange.upperBound))
-        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: .nan)
-            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.defaultWidth))
+        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 1.5, minimumShare: rangeFloor)
+            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.widthRange.upperBound, minimumShare: rangeFloor))
+        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: .nan, minimumShare: rangeFloor)
+            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.defaultWidth, minimumShare: rangeFloor))
+    }
+
+    /// The strip's controls are measured in points and the model's width in
+    /// shares, so the app turns one into the other for the space at hand.
+    @Test("the strip's fixed controls need 210 pt, and the side's smallest share is theirs, within the model's range")
+    func minimumSideShareFitsTheFixedControls() {
+        #expect(SideStripMetrics.fixedControlsWidth == 210)
+
+        let lowerBound = CGFloat(SideRegion.widthRange.lowerBound)
+        let upperBound = CGFloat(SideRegion.widthRange.upperBound)
+        let controlsShareAt1400: CGFloat = 210 / 1400
+        // A 1,400 pt main area: the controls' own share, above the floor.
+        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 1400) == controlsShareAt1400)
+        // A wide one: the controls need less than the floor, so the floor.
+        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 3000) == lowerBound)
+        // A tiny one: even the widest share cannot hold them, so the cap wins
+        // and the primary keeps what it leaves.
+        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 200) == upperBound)
+        // No space to share.
+        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 0) == lowerBound)
+    }
+
+    @Test("a stored width below the strip's limit renders at the limit, and a wider one is unchanged")
+    func storedWidthBelowTheLimitRendersAtIt() {
+        let tabID = UUID()
+        let minimum = PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 1400)
+        let atLimit: [CGFloat] = [1 - minimum, minimum]
+        let half: [CGFloat] = [0.5, 0.5]
+
+        let narrow = PanelSurfaceWorkspaceView.shares(drag: nil, tabID: tabID, width: 0.1, minimumShare: minimum)
+        let wide = PanelSurfaceWorkspaceView.shares(drag: nil, tabID: tabID, width: 0.5, minimumShare: minimum)
+        #expect(narrow == atLimit)
+        #expect(wide == half)
     }
 
     @Test("a released drag sends the side's share, clamped to the model's range")
@@ -675,7 +713,7 @@ struct PanelSurfaceRenderBranchTests {
 
     @Test("a release that moved nothing, or malformed shares, sends nothing")
     func resizeUnchangedSendsNothing() {
-        let unmoved = PanelSurfaceWorkspaceView.ratios(forWidth: 0.4)
+        let unmoved = PanelSurfaceWorkspaceView.ratios(forWidth: 0.4, minimumShare: Self.rangeFloor)
         #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: unmoved, currentWidth: 0.4) == nil)
         #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: [], currentWidth: 0.4) == nil)
     }
@@ -704,19 +742,37 @@ struct PanelSurfaceRenderBranchTests {
         #expect(!refreshed.showSourceCode, "nothing of the pruned state carries over")
     }
 
-    @Test("the divider shows a drag's shares only on the tab the drag was on")
+    @Test("the divider shows a drag's shares only on the tab the drag was on, never below the strip's limit")
     func dragSharesBelongToTheirTab() {
         let draggedTab = UUID()
         let otherTab = UUID()
+        let rangeFloor = Self.rangeFloor
         let dragged: [CGFloat] = [0.6, 0.4]
-        let fromWidth: [CGFloat] = PanelSurfaceWorkspaceView.ratios(forWidth: 0.25)
+        let fromWidth: [CGFloat] = PanelSurfaceWorkspaceView.ratios(forWidth: 0.25, minimumShare: rangeFloor)
         let drag = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: dragged)
-        let malformed = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: [0.6])
+        let malformedRatios: [CGFloat] = [0.6]
+        let malformed = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: malformedRatios)
 
-        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: draggedTab, width: 0.25) == dragged)
-        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: otherTab, width: 0.25) == fromWidth)
-        #expect(PanelSurfaceWorkspaceView.shares(drag: nil, tabID: draggedTab, width: 0.25) == fromWidth)
-        #expect(PanelSurfaceWorkspaceView.shares(drag: malformed, tabID: draggedTab, width: 0.25) == fromWidth)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: draggedTab, width: 0.25, minimumShare: rangeFloor)
+            == dragged)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: otherTab, width: 0.25, minimumShare: rangeFloor)
+            == fromWidth)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: nil, tabID: draggedTab, width: 0.25, minimumShare: rangeFloor)
+            == fromWidth)
+        #expect(PanelSurfaceWorkspaceView.shares(
+            drag: malformed, tabID: draggedTab, width: 0.25, minimumShare: rangeFloor) == fromWidth)
+
+        // A drag being committed while the window shrank below its shares
+        // renders at the limit too.
+        let minimum: CGFloat = 0.15
+        let belowRatios: [CGFloat] = [0.92, 0.08]
+        let below = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: belowRatios)
+        let atLimit: [CGFloat] = [1 - minimum, minimum]
+        #expect(PanelSurfaceWorkspaceView.shares(drag: below, tabID: draggedTab, width: 0.25, minimumShare: minimum)
+            == atLimit)
+        // One at or above the limit keeps its own shares.
+        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: draggedTab, width: 0.25, minimumShare: minimum)
+            == dragged)
     }
 
     // MARK: - The workspace tab bar

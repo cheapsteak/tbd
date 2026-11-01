@@ -56,6 +56,33 @@ struct SideStripHistoryButtons: Equatable {
     let forward: Bool
 }
 
+/// The widths of the strip's fixed controls, which the strip draws with and
+/// the side region's minimum width is made of, so the two cannot drift apart.
+enum SideStripMetrics {
+    /// The inset before the history buttons.
+    static let historyLeadingInset: CGFloat = 4
+    /// Each history button's width: search, back and forward.
+    static let historyButtonWidth: CGFloat = 22
+    /// Search, back and forward.
+    static let historyButtonCount = 3
+    /// The most buttons the trailing group holds: the + menu, the active
+    /// panel's control, the transcript button, the Notes button and collapse.
+    /// The most, not the current count, so the region's minimum width stays
+    /// put as the active panel or the transcript setting changes.
+    static let trailingSlotCount = 5
+
+    /// The width the strip's fixed controls need, in points: the history
+    /// buttons with their inset, and a full trailing group of
+    /// `TabRowMetrics.controlWidth` buttons. The panel tabs between them need
+    /// none, since they scroll. The side region is kept at least this wide
+    /// (`PanelSurfaceWorkspaceView.minimumSideShare`).
+    static var fixedControlsWidth: CGFloat {
+        historyLeadingInset
+            + CGFloat(historyButtonCount) * historyButtonWidth
+            + CGFloat(trailingSlotCount) * TabRowMetrics.controlWidth
+    }
+}
+
 /// One item of the side strip's + menu: a new note, the Changes list, or a
 /// note of the worktree that no panel shows yet.
 enum SideStripAddItem: Hashable, Identifiable {
@@ -217,7 +244,10 @@ enum SideRegionStrip {
 ///
 /// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`), so
 /// the two read as one row split by the divider, and clipped to its frame, so
-/// it never draws over the divider. Left to right it holds history search,
+/// it never draws over the divider. The region is never narrower than the
+/// strip's fixed controls (`SideStripMetrics.fixedControlsWidth`), so none of
+/// them is clipped: the panel tabs between them give up room and scroll
+/// instead. Left to right it holds history search,
 /// back and forward for the active panel; the panel tabs — the worktree's
 /// panels (notes and the Changes list), which every workspace tab of the
 /// worktree shows, then this tab's own — each selecting on a click, closing
@@ -419,17 +449,20 @@ struct SideRegionView: View {
             .layoutPriority(1)
         }
         .frame(height: TabRowMetrics.height)
-        // Near the region's minimum width the two fixed-width ends can need
-        // more than the strip has, and the row would then report that larger
-        // width and overflow on both sides. This frame takes exactly the
-        // strip's width and pins the row to its trailing edge, so what does
-        // not fit falls off the leading end, the history buttons first, and
-        // the clip below cuts it there, off the divider. The + menu, the
-        // active panel's control, the transcript and Notes buttons and the
-        // collapse button stay in reach, since they act at the window's edge.
-        // The content shape keeps clicks to the strip's frame too, because a
-        // clip limits drawing, not hit testing, and the clipped buttons would
-        // otherwise take clicks over the end of the workspace tab bar.
+        // A backstop. The workspace view keeps the region at least as wide as
+        // the two fixed-width ends (`SideStripMetrics.fixedControlsWidth`,
+        // `PanelSurfaceWorkspaceView.minimumSideShare`), so they fit and only
+        // the panel tabs between them give up room. Only a main area too small
+        // for even the widest share to hold them can leave the strip narrower
+        // than its ends, and the row would then report the larger width and
+        // overflow on both sides. This frame takes exactly the strip's width
+        // and pins the row to its trailing edge, so what does not fit falls
+        // off the leading end, the history buttons first, and the clip below
+        // cuts it there, off the divider; the buttons at the window's edge
+        // stay in reach. The content shape keeps clicks to the strip's frame
+        // too, because a clip limits drawing, not hit testing, and the clipped
+        // buttons would otherwise take clicks over the end of the workspace
+        // tab bar.
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
         .clipped()
         .contentShape(Rectangle())
@@ -469,7 +502,7 @@ struct SideRegionView: View {
             }
             .disabled(!enabled.forward)
         }
-        .padding(.leading, 4)
+        .padding(.leading, SideStripMetrics.historyLeadingInset)
     }
 
     /// Opens the searchable history palette over the active panel's history.
@@ -483,7 +516,7 @@ struct SideRegionView: View {
             // weight the three bars crowd into a smudge.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 10, weight: .regular))
-                .frame(width: 22)
+                .frame(width: SideStripMetrics.historyButtonWidth)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
@@ -499,7 +532,8 @@ struct SideRegionView: View {
         }
     }
 
-    /// A back or forward chevron, 22 pt wide at the row's full height.
+    /// A back or forward chevron, `SideStripMetrics.historyButtonWidth` wide at
+    /// the row's full height.
     private func historyStepButton(
         icon: String,
         help: String,
@@ -508,7 +542,7 @@ struct SideRegionView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 9, weight: .bold))
-                .frame(width: 22)
+                .frame(width: SideStripMetrics.historyButtonWidth)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
@@ -687,7 +721,7 @@ struct SideRegionView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: 28)
+        .frame(width: TabRowMetrics.controlWidth)
         .frame(maxHeight: .infinity)
         .help("Add a side panel")
         .accessibilityLabel(Text("Add a side panel"))
@@ -760,7 +794,7 @@ struct SidePanelToggleButton: View {
         Button(action: action) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 11))
-                .frame(width: 28)
+                .frame(width: TabRowMetrics.controlWidth)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }

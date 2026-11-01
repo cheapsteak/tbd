@@ -83,6 +83,12 @@ private struct TabDropDelegate: DropDelegate {
 /// share one row across the window, so both take their height from here.
 enum TabRowMetrics {
     static let height: CGFloat = 30
+    /// The width of one icon button at a tab row's trailing end: a
+    /// `PaneChromeControlButton`, the refresh control's slot
+    /// (`PaneRefreshControl`), the strip's + menu and the side panel toggle
+    /// (`SidePanelToggleButton`). The side region's minimum width is built
+    /// from it (`SideStripMetrics.fixedControlsWidth`).
+    static let controlWidth: CGFloat = 28
 }
 
 // MARK: - TabBarTrailingItems

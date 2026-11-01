@@ -283,8 +283,8 @@ enum PaneChromeControl: Equatable {
 // MARK: - PaneChromeControlButton
 
 /// An icon-only button for a ``PaneChromeControl``, sized for a tab row:
-/// 28 pt wide and the row's full height, all of it clickable. It reads
-/// nothing but its control.
+/// `TabRowMetrics.controlWidth` wide and the row's full height, all of it
+/// clickable. It reads nothing but its control.
 struct PaneChromeControlButton: View {
     let control: PaneChromeControl
     let action: () -> Void
@@ -292,7 +292,7 @@ struct PaneChromeControlButton: View {
     var body: some View {
         Button(action: action) {
             symbol
-                .frame(width: 28)
+                .frame(width: TabRowMetrics.controlWidth)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
@@ -323,8 +323,9 @@ struct PaneChromeControlButton: View {
 
 /// The Changes list's refresh control: the ``PaneChromeControl/refresh``
 /// button, or, while the list loads (`PaneChromeState.isRefreshing`), a small
-/// spinner in the same 28 pt slot. It is its own view so that only it, not
-/// the strip around it, redraws as a load begins and ends.
+/// spinner in the same `TabRowMetrics.controlWidth` slot. It is its own view
+/// so that only it, not the strip around it, redraws as a load begins and
+/// ends.
 struct PaneRefreshControl: View {
     let chrome: PaneChromeState
 
@@ -332,7 +333,7 @@ struct PaneRefreshControl: View {
         if chrome.isRefreshing {
             ProgressView()
                 .controlSize(.mini)
-                .frame(width: 28)
+                .frame(width: TabRowMetrics.controlWidth)
                 .frame(maxHeight: .infinity)
                 .help("Refreshing")
                 .accessibilityLabel(Text("Refreshing"))

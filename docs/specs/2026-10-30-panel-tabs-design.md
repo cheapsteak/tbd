@@ -117,7 +117,10 @@ Rules the validator enforces:
   reorder; a navigation commits the current entry to the front, moves rather
   than duplicates the destination, and evicts from the tail.
 - **`width` lies in 0.1–0.9,** the legacy divider's limit, and defaults to
-  0.5. The divider clamps a drag to the same range.
+  0.5. The divider clamps a drag to the same range. The app also keeps the
+  side region at least as wide as its strip's fixed controls (see "The
+  renderer"); that limit is in points, so it lives in the app and the model's
+  range stays as it is.
 
 Recency is an ordered list, not a timestamp, so the reducer stays pure and
 needs no clock.
@@ -570,9 +573,15 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
   transcript button, the Notes button, and the collapse button. The three
   history buttons act on the active panel and stay in place, dimmed, when it
   has no history to step through — a transcript or a note — so the tabs never
-  shift under the pointer. A strip too narrow for both ends loses its leading
-  end first, so the buttons at the window's edge stay in reach. Below the
-  strip, the active panel renders through `PanePlaceholder`.
+  shift under the pointer. The side region is never narrower than its
+  strip's fixed controls: the history buttons and the full trailing group,
+  measured in points, so no control in the strip is clipped and only the
+  panel tabs between them give up room, which they scroll into. A divider
+  drag stops at that width, and a stored width below it renders at it and
+  stays stored until the next drag. The model's `widthRange` is unchanged;
+  this limit is the app's, because the controls are measured in points and
+  the width is a share. Below the strip, the active panel renders through
+  `PanePlaceholder`.
 - **The terminal's pin** is in its workspace tab's right-click menu (Pin or
   Unpin). The pinned-terminal dock keeps its unpin.
 - **A note's title** is edited by renaming its tab, in the workspace tab bar or
@@ -664,6 +673,11 @@ Each branch is tested both ways, asserting opposite outcomes.
     plain one; the strip's history buttons enabled for a file or web panel and
     dimmed for a transcript or note; the strip's per-kind control; the expand
     button whenever a loaded region is hidden.
+  - The side region's minimum width, as values: the strip's fixed controls'
+    width in points; the side's smallest share for a given space, held to the
+    model's range at both ends; a stored width or a committing drag below it
+    rendering at it; and the divider's drag stopping at each pane's minimum,
+    with the legacy split layouts' 10% floor unchanged.
   - Notes: closing a side-region note tab with content asks, then closes and
     deletes; an empty one closes and deletes without asking; a declined
     confirmation changes nothing; the `close` operation alone keeps the note.
