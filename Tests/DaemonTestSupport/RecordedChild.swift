@@ -22,10 +22,10 @@ public enum RecordedChild {
     }
 
     /// The same check for a pid the test learned another way, such as from the
-    /// parent's `Process` once `run()` has returned: SIGKILLs `pid` only if the
-    /// process holding it started no later than `learned`, the moment the test
-    /// learned it. The child started before that moment, and a process that
-    /// takes the pid over afterwards started after it.
+    /// parent's `Process`: SIGKILLs `pid` only if the process holding it
+    /// started no later than `learned`. Sound only when the pid still named the
+    /// child at `learned`: the child started before that moment, and a process
+    /// that takes the pid over afterwards started after it.
     public static func killIfStarted(_ pid: pid_t, noLaterThan learned: Date) {
         guard pid > 0,
               let started = ProcessStartTime.startTime(pid: pid),
