@@ -43,7 +43,7 @@ struct PanelList: AsyncParsableCommand {
 
     mutating func run() async throws {
         let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
+        let worktreeID = try resolveWorktreeNameOrID(worktree, client: client)
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
         // `list` reads through `panel.get`. Scoped to `--tab` when given;
@@ -589,7 +589,7 @@ private func runPanelOperation(
     worktree: String, tab: String?, json: Bool, operation: PanelOperation
 ) throws {
     let client = SocketClient()
-    let worktreeID = try resolveWorktreeArg(worktree, client: client)
+    let worktreeID = try resolveWorktreeNameOrID(worktree, client: client)
     let target = try resolvePanelTarget(tab: tab) { scopedTabID in
         try client.call(
             method: RPCMethod.panelGet,
@@ -621,28 +621,4 @@ func panelEnvelope(
         operationID: operationID, worktreeID: worktreeID, tabID: tabID,
         baseRevision: current.tabs.first(where: { $0.id == tabID })?.revision,
         origin: .agentCLI, operation: operation)
-}
-
-/// Resolve a worktree argument that could be a UUID or a name. Duplicated
-/// from `TerminalCommands.swift` (that copy is `private` there) rather than
-/// promoted to a shared internal helper — see PR brief.
-private func resolveWorktreeArg(_ nameOrID: String, client: SocketClient) throws -> UUID {
-    if let id = UUID(uuidString: nameOrID) {
-        return id
-    }
-
-    let worktrees: [Worktree] = try client.call(
-        method: RPCMethod.worktreeList,
-        params: WorktreeListParams(),
-        resultType: [Worktree].self
-    )
-
-    let matches = worktrees.filter { $0.name == nameOrID || $0.displayName == nameOrID }
-    guard let match = matches.first else {
-        throw CLIError.invalidArgument("No worktree found with name or ID: \(nameOrID)")
-    }
-    if matches.count > 1 {
-        throw CLIError.invalidArgument("Multiple worktrees match '\(nameOrID)'. Use the full ID instead.")
-    }
-    return match.id
 }
