@@ -5,7 +5,7 @@ import Testing
 import DaemonTestSupport
 import TestSupport
 
-/// `panel.syncTabs` over RPC (panel tabs spec, "Tab sync"): the gate, legacy
+/// `panel.syncTabs` over RPC (panel tabs spec, "Tab sync"): legacy
 /// conversion of tabs without a surface, skip reasons, deletion of unlisted
 /// tabs, re-parenting, and exactly one broadcast per sync that changed
 /// something; and the removal an archive broadcasts for the surfaces it
@@ -87,25 +87,26 @@ struct PanelSyncTabsTests {
         .file(FileReference(path: path))
     }
 
-    // MARK: - Gate
+    // MARK: - No setting gates a sync
 
-    @Test("sync refuses with the flag unset or off, naming panel_tabs_enabled, and writes nothing")
-    func syncRefusesWhenFlagOff() async throws {
-        let (router, db, deltas) = try makeRouterAndDB()
+    /// The retired `config.panel_tabs_enabled` column still exists in a fresh
+    /// test database until the reconciler drops it. Writing 0 into it proves
+    /// no code path consults it: a gate that read the old flag would refuse.
+    @Test("sync imports a listed tab whatever the retired column holds")
+    func syncIgnoresTheRetiredColumn() async throws {
+        let (router, db, _) = try makeRouterAndDB()
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "UPDATE config SET panel_tabs_enabled = 0")
+        }
         let wtID = try await makeWorktree(db)
-        let tabs = [terminalTab()]
+        let tab = terminalTab()
 
-        let unset = try await sync(router, worktreeID: wtID, tabs)
-        #expect(!unset.success)
-        #expect(unset.error?.contains("panel_tabs_enabled") == true)
+        let response = try await sync(router, worktreeID: wtID, [tab])
 
-        try await db.config.setPanelTabsEnabled(false)
-        let off = try await sync(router, worktreeID: wtID, tabs)
-        #expect(!off.success)
-        #expect(off.error?.contains("panel_tabs_enabled") == true)
-
-        #expect(try await db.panelSurface.surfaces(worktreeID: wtID).isEmpty)
-        #expect(panelSurfaceDeltas(deltas).isEmpty)
+        #expect(response.success)
+        let result = try response.decodeResult(PanelSyncTabsResult.self)
+        #expect(result.importedTabIDs == [tab.tabID])
+        #expect(try await db.panelSurface.surfaces(worktreeID: wtID).map(\.id) == [tab.tabID])
     }
 
     // MARK: - Import
@@ -113,7 +114,6 @@ struct PanelSyncTabsTests {
     @Test("sync imports every listed tab without a surface, in order, with its pane history")
     func syncImportsTabsWithoutSurfaces() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabAID = UUID()
         let tabBID = UUID()
@@ -165,7 +165,6 @@ struct PanelSyncTabsTests {
     @Test("a tab with a terminal outside its primary is skipped with a reason and gets no surface")
     func syncSkipsATerminalSplitTab() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let splitTabID = UUID()
         let plainTabID = UUID()
@@ -193,7 +192,6 @@ struct PanelSyncTabsTests {
     @Test("a tab that already has a surface is never reported skipped, whatever its legacy layout holds")
     func skippedNamesOnlyTabsLeftWithoutASurface() async throws {
         let (router, db, _) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabID = UUID()
         let mainTerminal = UUID()
@@ -223,7 +221,6 @@ struct PanelSyncTabsTests {
     @Test("a tab missing from the list is deleted and named in removedTabIDs and the delta")
     func syncDeletesAnUnlistedTab() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabA = terminalTab(label: "A")
         let tabB = viewerTab(label: "B")
@@ -250,7 +247,6 @@ struct PanelSyncTabsTests {
     @Test("an empty tab list deletes every surface of the worktree")
     func syncWithNoTabsDeletesEverySurface() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabA = terminalTab()
         let tabB = terminalTab()
@@ -270,7 +266,6 @@ struct PanelSyncTabsTests {
     @Test("each sync broadcasts at most once, and an unchanged re-sync broadcasts nothing")
     func syncBroadcastsOnceAndNotWhenUnchanged() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabs = [viewerTab(label: "A"), terminalTab(label: "B"), terminalTab(label: "C")]
 
@@ -291,7 +286,6 @@ struct PanelSyncTabsTests {
     @Test("a reorder and relabel update the surfaces' own fields and keep their panels")
     func syncUpdatesOrderAndLabelButNeverPanels() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tabAID = UUID()
         let terminalA = UUID()
@@ -337,7 +331,6 @@ struct PanelSyncTabsTests {
     @Test("a listed tab whose surface sits under another worktree moves with its panels")
     func syncReparentsASurface() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let scratchID = try await makeWorktree(db, name: "scratch")
         let mainID = try await makeWorktree(db, name: "main")
         let tab = viewerTab(label: "moved")
