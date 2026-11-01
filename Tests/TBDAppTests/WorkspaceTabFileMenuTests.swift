@@ -3,11 +3,12 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-/// The file a workspace tab's right-click menu offers Reveal in Finder and
-/// Open With for. On the daemon path no header names the primary, so for a
-/// file or transcript primary that menu is where those items are. Asserted
-/// through the resolver rather than a rendered menu, so each kind is testable
-/// without SwiftUI.
+/// The file a workspace tab's right-click menu offers Copy Path, Reveal in
+/// Finder and Open With for: one target drives all three, so a tab with no
+/// target offers none of them. On the daemon path no header names the
+/// primary, so for a file or transcript primary that menu is where those
+/// items are. Asserted through the resolver rather than a rendered menu, so
+/// each kind is testable without SwiftUI.
 @Suite("Workspace tab file menu")
 struct WorkspaceTabFileMenuTests {
     private static let filePath = "/w/src/main.swift"
@@ -37,7 +38,10 @@ struct WorkspaceTabFileMenuTests {
         #expect(target == expected)
     }
 
-    @Test("a transcript tab whose terminal has no session file yet offers none")
+    /// The terminal's row can carry an empty path before its session file is
+    /// known. That is no file either: no Copy Conversation Path for it, and no
+    /// Reveal in Finder or Open With.
+    @Test("a transcript tab whose terminal has no session file yet, or an empty path, offers no file items")
     func transcriptTabWithoutSessionFileOffersNone() {
         let content = PaneContent.liveTranscript(id: UUID(), terminalID: UUID())
 
@@ -45,7 +49,7 @@ struct WorkspaceTabFileMenuTests {
         let withEmptyPath = WorkspaceTabFileMenu.target(for: content, transcriptPath: { _ in "" })
 
         #expect(withoutPath == nil)
-        #expect(withEmptyPath == nil)
+        #expect(withEmptyPath == nil, "an empty session path offers no Copy Conversation Path")
     }
 
     @Test("terminal, note and web tabs offer none, whatever the session files say")

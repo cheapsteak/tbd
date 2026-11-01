@@ -757,12 +757,14 @@ enum TabTerminalTarget {
 
 // MARK: - WorkspaceTabFileMenu
 
-/// The file a workspace tab's right-click menu offers Reveal in Finder and
-/// Open With for: the one a pane header's title menu acts on
-/// (`headerMenuTarget`), for the tab's content. A file tab offers its file,
-/// and a transcript tab its terminal's session `.jsonl` once that terminal's
-/// row carries one; every other tab offers none. On the daemon path no header
-/// names the primary, so the tab's menu is where these items are.
+/// The file a workspace tab's right-click menu offers Copy Path, Reveal in
+/// Finder and Open With for: the one a pane header's title menu acts on
+/// (`headerMenuTarget`), for the tab's content, with the copy item's wording.
+/// A file tab offers its file, and a transcript tab its terminal's session
+/// `.jsonl` once that terminal's row carries a non-empty one; every other tab
+/// offers none, and with no target the menu has none of the three items. On
+/// the daemon path no header names the primary, so the tab's menu is where
+/// these items are.
 ///
 /// Extracted from the view so each kind is unit-testable without rendering
 /// SwiftUI (same pattern as `TabTerminalTarget`).
@@ -794,6 +796,10 @@ private struct TabBarItem: View {
     @State private var isEditing: Bool = false
     @State private var dropEdge: DropEdge? = nil
     @State private var measuredWidth: CGFloat = 100
+    /// The applications Open With offers for `fileMenuTarget`'s file, looked
+    /// up once each time that file changes rather than while the menu is
+    /// built (`RevealAndOpenWithMenuItems`).
+    @State private var fileMenuApps: [OpenWithApp] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
@@ -979,6 +985,9 @@ private struct TabBarItem: View {
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
+        .task(id: fileMenuTarget?.path) {
+            fileMenuApps = fileMenuTarget.map { openWithApps(forPath: $0.path) } ?? []
+        }
         .onHover { hovering in
             isHovering = hovering
         }
@@ -1124,29 +1133,14 @@ private struct TabBarItem: View {
         }
     }
 
-    /// Absolute path on disk for tab content that has a backing file
-    /// (codeViewer points at the file directly; liveTranscript points at
-    /// the resolved Claude session JSONL via the underlying terminal).
-    private var copyablePath: String? {
-        switch tab.content {
-        case .codeViewer(_, let path):
-            return path.isEmpty ? nil : path
-        case .liveTranscript(_, let terminalID):
-            return transcriptPath(of: terminalID)
-        default:
-            return nil
+    /// The file this tab's Copy Path, Reveal in Finder and Open With act on,
+    /// and the copy item's wording (`WorkspaceTabFileMenu`); nil for a tab
+    /// with no file, which offers none of them. A transcript tab's file is
+    /// the session `.jsonl` on its terminal's row in this worktree.
+    private var fileMenuTarget: HeaderMenuTarget? {
+        WorkspaceTabFileMenu.target(for: tab.content) { terminalID in
+            appState.terminal(id: terminalID, in: worktreeID)?.transcriptPath
         }
-    }
-
-    /// The session `.jsonl` the terminal `terminalID` writes, from its row.
-    private func transcriptPath(of terminalID: UUID) -> String? {
-        let allTerminals = appState.terminals.values.flatMap { $0 }
-        return allTerminals.first { $0.id == terminalID }?.transcriptPath
-    }
-
-    private var copyPathLabel: String {
-        if case .liveTranscript = tab.content { return "Copy Conversation Path" }
-        return "Copy Path"
     }
 
     /// The terminal this tab renders, for deep-link anchoring — nil for
@@ -1158,16 +1152,9 @@ private struct TabBarItem: View {
 
     @ViewBuilder
     private var contextMenuContent: some View {
-        if let path = copyablePath {
-            Button(copyPathLabel) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            }
-        }
-
-        if let fileTarget = WorkspaceTabFileMenu.target(
-            for: tab.content, transcriptPath: { transcriptPath(of: $0) }) {
-            RevealAndOpenWithMenuItems(path: fileTarget.path)
+        if let fileTarget = fileMenuTarget {
+            Button(fileTarget.copyLabel) { copyToPasteboard(fileTarget.path) }
+            RevealAndOpenWithMenuItems(path: fileTarget.path, apps: fileMenuApps)
         }
 
         Button("Copy Link") {

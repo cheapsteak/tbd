@@ -584,15 +584,31 @@ extension View {
     /// On the daemon path no leaf draws one: a side panel's menu hangs on the
     /// panel's tab in the side region's strip (`SideRegionView`), and a
     /// primary's items are on its workspace tab's right-click menu (`TabBar`).
-    @ViewBuilder
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
-        if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {
-            self.contextMenu {
-                Button(target.copyLabel) { copyToPasteboard(target.path) }
-                RevealAndOpenWithMenuItems(path: target.path)
-            }
+        modifier(HeaderFileContextMenu(
+            target: headerMenuTarget(for: content, transcriptPath: transcriptPath)))
+    }
+}
+
+/// The pane-header file menu for `target`, or no menu for none. The
+/// applications Open With offers are looked up once each time the file
+/// changes, never while a body is evaluated, and read back from `apps`.
+private struct HeaderFileContextMenu: ViewModifier {
+    let target: HeaderMenuTarget?
+    @State private var apps: [OpenWithApp] = []
+
+    func body(content: Content) -> some View {
+        if let target {
+            content
+                .contextMenu {
+                    Button(target.copyLabel) { copyToPasteboard(target.path) }
+                    RevealAndOpenWithMenuItems(path: target.path, apps: apps)
+                }
+                .task(id: target.path) {
+                    apps = openWithApps(forPath: target.path)
+                }
         } else {
-            self
+            content
         }
     }
 }
@@ -600,17 +616,18 @@ extension View {
 /// Reveal in Finder and the Open With submenu for the file at `path`: the
 /// file menu's items after its copy item, shared by the pane header's title
 /// (`headerFileContextMenu`) and a workspace tab's right-click menu
-/// (`TabBar`). A view of its own so that the Launch Services query behind
-/// Open With (`openWithApps`) runs in this view's body, which SwiftUI
-/// evaluates for the menu, and never in the body of the view the menu hangs
-/// on. Open With is left out when no application can open the file.
+/// (`TabBar`). It takes the applications Open With lists as `apps` rather
+/// than asking Launch Services (`openWithApps`) itself, because SwiftUI
+/// builds a context menu's content while it evaluates the body of the view
+/// the menu hangs on: each caller looks them up once per change of `path`
+/// and hands in the result. Open With is left out when `apps` is empty.
 struct RevealAndOpenWithMenuItems: View {
     let path: String
+    let apps: [OpenWithApp]
 
     var body: some View {
         Button("Reveal in Finder") { revealInFinder(path: path) }
 
-        let apps = openWithApps(forPath: path)
         if !apps.isEmpty {
             Menu("Open With") {
                 ForEach(apps) { app in
