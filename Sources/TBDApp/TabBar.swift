@@ -841,8 +841,10 @@ private struct TabBarItem: View {
     @State private var dropEdge: DropEdge? = nil
     @State private var measuredWidth: CGFloat = 100
     /// The applications Open With offers for `fileMenuTarget`'s file, looked
-    /// up once each time that file changes rather than while the menu is
-    /// built (`RevealAndOpenWithMenuItems`).
+    /// up off the main actor when the item mounts or that file changes, and
+    /// again each time the pointer enters the item, so the right-click that
+    /// almost always follows a hover finds the list fresh; never while the
+    /// menu is built (`RevealAndOpenWithMenuItems`).
     @State private var fileMenuApps: [OpenWithApp] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
@@ -1030,13 +1032,13 @@ private struct TabBarItem: View {
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
         .task(id: fileMenuTarget?.path) {
-            // Most tabs have no file: their list stays empty, and an equal
-            // write would only re-evaluate this item.
-            let apps = fileMenuTarget.map { openWithApps(forPath: $0.path) } ?? []
-            if apps != fileMenuApps { fileMenuApps = apps }
+            await refreshFileMenuApps()
         }
         .onHover { hovering in
             isHovering = hovering
+            if hovering {
+                Task { await refreshFileMenuApps() }
+            }
         }
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
@@ -1188,6 +1190,21 @@ private struct TabBarItem: View {
         WorkspaceTabFileMenu.target(for: tab.content) { terminalID in
             appState.terminal(id: terminalID, in: worktreeID)?.transcriptPath
         }
+    }
+
+    /// Looks up `fileMenuApps` for `fileMenuTarget`'s file off the main
+    /// actor (`lookUpOpenWithApps`) and writes it only when it changed, and
+    /// only while that file is still the target's. Most tabs have no file:
+    /// their list stays empty without a lookup, and an equal write would only
+    /// re-evaluate this item.
+    private func refreshFileMenuApps() async {
+        guard let path = fileMenuTarget?.path else {
+            if !fileMenuApps.isEmpty { fileMenuApps = [] }
+            return
+        }
+        let apps = await lookUpOpenWithApps(forPath: path)
+        guard path == fileMenuTarget?.path, apps != fileMenuApps else { return }
+        fileMenuApps = apps
     }
 
     /// The terminal this tab renders, for deep-link anchoring — nil for

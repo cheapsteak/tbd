@@ -57,4 +57,11 @@ struct HeaderFileActionsTests {
         let missing = NSTemporaryDirectory() + "tbd-does-not-exist-\(UUID().uuidString).md"
         #expect(openWithApps(forPath: missing).isEmpty)
     }
+
+    @Test("the off-main lookup returns empty for a non-existent file")
+    func offMainLookupOfMissingFile() async {
+        let missing = NSTemporaryDirectory() + "tbd-does-not-exist-\(UUID().uuidString).md"
+        let apps = await lookUpOpenWithApps(forPath: missing)
+        #expect(apps.isEmpty)
+    }
 }

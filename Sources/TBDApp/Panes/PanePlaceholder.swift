@@ -591,8 +591,12 @@ extension View {
 }
 
 /// The pane-header file menu for `target`, or no menu for none. The
-/// applications Open With offers are looked up once each time the file
-/// changes, never while a body is evaluated, and read back from `apps`.
+/// applications Open With offers are looked up off the main actor
+/// (`lookUpOpenWithApps`) when the view mounts or the file changes, and again
+/// each time the pointer enters it, so the right-click that almost always
+/// follows a hover finds a file created since mount, or a handler installed
+/// since, in the list. Never while a body is evaluated: the menu reads them
+/// back from `apps`.
 private struct HeaderFileContextMenu: ViewModifier {
     let target: HeaderMenuTarget?
     @State private var apps: [OpenWithApp] = []
@@ -605,12 +609,24 @@ private struct HeaderFileContextMenu: ViewModifier {
                     RevealAndOpenWithMenuItems(path: target.path, apps: apps)
                 }
                 .task(id: target.path) {
-                    let found = openWithApps(forPath: target.path)
-                    if found != apps { apps = found }
+                    await refreshApps(forPath: target.path)
+                }
+                .onHover { hovering in
+                    guard hovering else { return }
+                    Task { await refreshApps(forPath: target.path) }
                 }
         } else {
             content
         }
+    }
+
+    /// Writes `apps` only when the lookup changed them, and only while
+    /// `path` is still the target's file: an equal write would re-evaluate
+    /// the view, and a lookup for a file the view has left behind is stale.
+    private func refreshApps(forPath path: String) async {
+        let found = await lookUpOpenWithApps(forPath: path)
+        guard path == target?.path, found != apps else { return }
+        apps = found
     }
 }
 
@@ -620,8 +636,9 @@ private struct HeaderFileContextMenu: ViewModifier {
 /// (`TabBar`). It takes the applications Open With lists as `apps` rather
 /// than asking Launch Services (`openWithApps`) itself, because SwiftUI
 /// builds a context menu's content while it evaluates the body of the view
-/// the menu hangs on: each caller looks them up once per change of `path`
-/// and hands in the result. Open With is left out when `apps` is empty.
+/// the menu hangs on: each caller looks them up off the main actor at mount,
+/// on a change of `path` and on each hover-enter, and hands in the result.
+/// Open With is left out when `apps` is empty.
 struct RevealAndOpenWithMenuItems: View {
     let path: String
     let apps: [OpenWithApp]

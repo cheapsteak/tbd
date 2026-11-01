@@ -34,7 +34,9 @@ func headerMenuTarget(for content: PaneContent, transcriptPath: String?) -> Head
 // MARK: - Open With app resolution
 
 /// An application that can open a file, as offered by the "Open With" submenu.
-struct OpenWithApp: Identifiable, Equatable {
+/// Only the app's bundle URL, so a lookup off the main actor can hand it back;
+/// the submenu draws each app's icon when it is built.
+struct OpenWithApp: Identifiable, Equatable, Sendable {
     let url: URL
     var id: URL { url }
     var displayName: String { appDisplayName(for: url) }
@@ -43,10 +45,18 @@ struct OpenWithApp: Identifiable, Equatable {
 /// Applications registered to open the file at `path`, default app first
 /// (the same ordered set Finder shows). Empty when the file does not exist or
 /// no apps are registered — callers omit the submenu in that case.
+/// Nonisolated, and it touches the disk and Launch Services, so views reach it
+/// through `lookUpOpenWithApps(forPath:)`, off the main actor.
 func openWithApps(forPath path: String) -> [OpenWithApp] {
     guard FileManager.default.fileExists(atPath: path) else { return [] }
     let fileURL = URL(fileURLWithPath: path)
     return NSWorkspace.shared.urlsForApplications(toOpen: fileURL).map(OpenWithApp.init)
+}
+
+/// `openWithApps(forPath:)` on a detached task at utility priority, so the
+/// file check and the Launch Services query never run on the main thread.
+func lookUpOpenWithApps(forPath path: String) async -> [OpenWithApp] {
+    await Task.detached(priority: .utility) { openWithApps(forPath: path) }.value
 }
 
 /// Human-readable app name from its bundle URL
