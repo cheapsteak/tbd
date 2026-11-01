@@ -99,8 +99,9 @@ struct TerminalContainerView: View {
 /// On the daemon path (`rendersDaemonPath`) the active tab draws as a
 /// `PanelSurfaceWorkspaceView`, which draws the tab bar itself over the
 /// primary's column, so the bar shares one row with the side region's strip.
-/// On every other path — Session History open, a tab the last tab sync
-/// skipped, no tabs — this view draws the bar full width above the content.
+/// On every other path — Session History open, a tab whose layout still
+/// splits off a terminal, no tabs — this view draws the bar full width above
+/// the content.
 /// The bar's tabs, + menu actions and account picker are this view's on both
 /// paths (`tabBar(_:)`).
 struct SingleWorktreeView: View {
@@ -352,8 +353,8 @@ struct SingleWorktreeView: View {
     /// (`AppState.workspaceRenderPath`), or nil when no tab is shown: none
     /// is active, or the selection has no checkout on this disk. Only a
     /// daemon render path with Session History closed takes it, with a
-    /// surface or without one yet; Session History, no tab, and a tab the
-    /// last tab sync skipped (`.legacy`) do not.
+    /// surface or without one yet; Session History, no tab, and a tab whose
+    /// layout still splits off a terminal (`.legacy`) do not.
     static func rendersDaemonPath(historyActive: Bool, renderPath: WorkspaceRenderPath?) -> Bool {
         guard !historyActive, case .daemon? = renderPath else { return false }
         return true
@@ -370,8 +371,8 @@ struct SingleWorktreeView: View {
             HistoryPaneView(worktreeID: worktreeID)
         } else if let daemonTab {
             // The daemon-owned surface, nil until the copy holds the tab's:
-            // every tab but one the last tab sync skipped, which falls through
-            // to the legacy branch below, unchanged. The view draws the tab
+            // every tab but one whose layout still splits off a terminal,
+            // which falls through to the legacy branch below, unchanged. The view draws the tab
             // bar itself, over the primary's column. Not keyed by tab, so one
             // view, and the tab bar in it, serves every daemon-path tab; it
             // keys the primary and side region by tab inside.

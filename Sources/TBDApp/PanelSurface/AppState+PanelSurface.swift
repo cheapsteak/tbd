@@ -22,7 +22,7 @@ typealias PanelSurfaceCopy = [UUID: [WorkspaceTabID: WorkspaceTabSurface]]
 /// branch").
 enum WorkspaceRenderPath: Equatable {
     /// `SplitLayoutView` over the app-side `LayoutNode` tree, unchanged: a tab
-    /// the last tab sync skipped, whose layout still splits off a terminal.
+    /// whose layout still splits off a terminal.
     case legacy
     /// `PanelSurfaceWorkspaceView` over the copy's surface for the tab, or
     /// over none yet — nil draws the same layout with an empty side region
@@ -39,14 +39,38 @@ extension AppState {
         panelSurfaces[worktreeID]?[tabID]
     }
 
-    /// The renderer for one workspace tab: legacy only for a tab the last tab
-    /// sync skipped (`panelSyncSkippedTabIDs`), the daemon path for every
-    /// other. The copy fills asynchronously, so a tab with no surface yet
-    /// takes the daemon path with none — the same view as once its surface
-    /// arrives, so the primary's terminal view is never rebuilt.
+    /// The renderer for one workspace tab. Legacy only for a tab whose layout
+    /// still splits off a terminal: one the last tab sync skipped
+    /// (`panelSyncSkippedTabIDs`), or, before any sync names it, one the copy
+    /// holds no surface for and whose legacy layout holds a terminal outside
+    /// the primary by the converter's own test
+    /// (`legacyLayoutSplitsOffTerminal`). The skipped set lives only in
+    /// memory, so after a launch that test draws such a tab legacy from its
+    /// first frame, rather than flipping it to legacy once the first sync
+    /// answers, which would rebuild its primary's terminal view.
+    ///
+    /// Every other tab takes the daemon path, a tab with a surface always.
+    /// The copy fills asynchronously, so a tab with no surface yet takes it
+    /// with none — the same view as once its surface arrives, so the
+    /// primary's terminal view is never rebuilt.
     func workspaceRenderPath(worktreeID: UUID, tabID: UUID) -> WorkspaceRenderPath {
         guard !panelSyncSkippedTabIDs.contains(tabID) else { return .legacy }
-        return .daemon(panelSurface(worktreeID: worktreeID, tabID: tabID))
+        let surface = panelSurface(worktreeID: worktreeID, tabID: tabID)
+        if surface == nil, legacyLayoutSplitsOffTerminal(worktreeID: worktreeID, tabID: tabID) {
+            return .legacy
+        }
+        return .daemon(surface)
+    }
+
+    /// Whether the tab's legacy layout (`layouts`) holds a terminal anywhere
+    /// but its primary, by the very test the converter skips a tab by
+    /// (`LegacyTabConverter.terminalOutsidePrimary`). False for a tab with no
+    /// layout, or one this worktree's tab list does not hold.
+    private func legacyLayoutSplitsOffTerminal(worktreeID: UUID, tabID: UUID) -> Bool {
+        guard let layout = layouts[tabID],
+              let tab = tabs[worktreeID]?.first(where: { $0.id == tabID })
+        else { return false }
+        return LegacyTabConverter.terminalOutsidePrimary(content: tab.content, layout: layout) != nil
     }
 
     // MARK: - Loading

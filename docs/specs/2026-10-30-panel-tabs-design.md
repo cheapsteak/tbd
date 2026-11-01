@@ -573,8 +573,15 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
 
 `TerminalContainerView.layoutContent` asks one plain function,
 `workspaceRenderPath(worktreeID:tabID:)`. It returns the legacy path only for a
-tab the last sync named in `skippedTabIDs`, whose layout still splits off a
-terminal. Every other tab takes the daemon path: with the copy's surface when it
+tab whose layout still splits off a terminal: one the last sync named in
+`skippedTabIDs`, or, before any sync names it, one the copy holds no surface
+for and whose legacy layout holds a terminal outside the primary by the
+converter's own test (`LegacyTabConverter.terminalOutsidePrimary`). The skipped
+set lives only in memory, so after a launch it is the converter's test that
+draws such a tab legacy from its first frame; without it, the tab would draw
+the daemon path, its second terminal hidden, until the first sync answered, and
+then rebuild its terminal view as legacy. Every other tab takes the daemon
+path, and a tab with a surface always does: with the copy's surface when it
 holds one, and with an empty side region until then. A new tab therefore draws
 the same layout before and after its surface arrives, and its terminal view is
 never rebuilt. A gesture on a tab with no surface yet sends the worktree's
@@ -614,10 +621,14 @@ Each branch is tested both ways, asserting opposite outcomes.
     acknowledgement; launch loads each worktree once, after the sync.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none.
-  - The render branch: a skipped tab renders legacy; a tab with a surface
-    renders the daemon path with it; a tab with no surface yet renders the
-    daemon path with an empty side region, and its primary keeps its view
-    identity when the surface arrives; a gesture on it syncs before it applies.
+  - The render branch: a skipped tab renders legacy; a tab whose layout
+    splits off a terminal renders legacy before any sync names it while the
+    copy holds no surface for it, and the daemon path once it holds one; a tab
+    with no surface whose layout splits off only viewers renders the daemon
+    path; a tab with a surface renders the daemon path with it; a tab with no
+    surface yet renders the daemon path with an empty side region, and its
+    primary keeps its view identity when the surface arrives; a gesture on it
+    syncs before it applies.
   - The chrome, as values: the workspace tab bar's trailing control for each
     primary kind; the strip's history buttons enabled for a file or web panel
     and dimmed for a transcript or note; the strip's per-kind control; the

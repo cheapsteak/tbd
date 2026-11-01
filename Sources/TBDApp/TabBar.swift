@@ -90,8 +90,8 @@ enum TabRowMetrics {
 /// What the workspace tab bar draws at its trailing end besides Session
 /// History: the selected tab's own control before it, and the expand button
 /// after it. `PanelSurfaceWorkspaceView` decides both from the tab and its
-/// side region; a bar drawn anywhere else (Session History open, a tab the
-/// tab sync skipped, no tabs) takes `none`.
+/// side region; a bar drawn anywhere else (Session History open, a tab whose
+/// layout still splits off a terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
     /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
     /// or nil when its kind has none.

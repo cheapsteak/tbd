@@ -149,6 +149,24 @@ struct LegacyTabConverterTests {
                 == .skipped("tab \(viewerTab.tabID): terminal \(primaryTerminal) outside the primary"))
     }
 
+    /// The test `convert` skips by, which the app also asks to render a tab
+    /// legacy before any sync has named it skipped.
+    @Test func terminalOutsidePrimaryNamesTheTerminalBesideThePrimary() {
+        let primaryTerminal = UUID()
+        let otherTerminal = UUID()
+        let primary = PaneContent.terminal(terminalID: primaryTerminal)
+        let terminalSplit = Fixture.hsplit(
+            [.pane(primary), .pane(.terminal(terminalID: otherTerminal))], [0.5, 0.5])
+        let viewerSplit = Fixture.hsplit(
+            [.pane(primary), .pane(.codeViewer(id: UUID(), path: "/a"))], [0.5, 0.5])
+
+        #expect(LegacyTabConverter.terminalOutsidePrimary(content: primary, layout: terminalSplit) == otherTerminal)
+        // Only viewers beside the primary, the primary alone, or no layout.
+        #expect(LegacyTabConverter.terminalOutsidePrimary(content: primary, layout: viewerSplit) == nil)
+        #expect(LegacyTabConverter.terminalOutsidePrimary(content: primary, layout: .pane(primary)) == nil)
+        #expect(LegacyTabConverter.terminalOutsidePrimary(content: primary, layout: nil) == nil)
+    }
+
     @Test func skipsATabTheModelCannotExpress() {
         // Two legacy panes on one terminal's transcript: the model allows one
         // view per terminal, so the tab stays legacy rather than lose a pane.

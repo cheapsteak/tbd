@@ -83,6 +83,58 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    /// A legacy layout around `tab`'s primary with `other` beside it.
+    private static func layout(around tab: TBDShared.Tab, beside other: PaneContent) -> LayoutNode {
+        .split(
+            id: UUID(), direction: .horizontal,
+            children: [.pane(tab.content), .pane(other)],
+            ratios: [0.5, 0.5])
+    }
+
+    /// The skipped set lives only in memory, so after a launch nothing names
+    /// such a tab until the first sync answers; the converter's own test keeps
+    /// it legacy meanwhile.
+    @Test("a tab with no surface whose layout splits off a terminal renders legacy before any sync names it")
+    func terminalSplitRendersLegacyBeforeAnySync() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = Self.layout(around: tab, beside: .terminal(terminalID: UUID()))
+
+            #expect(state.panelSyncSkippedTabIDs.isEmpty, "precondition: no sync has named it")
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .legacy)
+        }
+    }
+
+    @Test("a tab whose layout splits off a terminal renders the daemon path when the copy holds its surface")
+    func terminalSplitWithASurfaceRendersDaemon() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = Self.layout(around: tab, beside: .terminal(terminalID: UUID()))
+            let surface = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1)
+            state.panelSurfaces = [worktreeID: [tab.id: surface]]
+
+            let withSurface: WorkspaceRenderPath = .daemon(surface)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == withSurface)
+        }
+    }
+
+    @Test("a tab with no surface whose layout splits off only viewers renders the daemon path with none")
+    func viewerSplitRendersDaemonAwaitingSurface() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = Self.layout(around: tab, beside: .codeViewer(id: UUID(), path: "/w/a.md"))
+
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
+        }
+    }
+
     /// The daemon skips a tab whose legacy layout holds a terminal outside the
     /// primary. Closing that terminal changes `layouts`, which offers the tab
     /// again, and the sync that imports it takes it off the skipped set.
