@@ -511,9 +511,12 @@ extension AppState {
     /// could land out of order and leave the daemon holding the older tab
     /// list. A call made while a flush is sending waits for it, then runs its
     /// own pass, so when it returns every change made before the call has
-    /// gone out — what a caller that loads surfaces next relies on. A failure
-    /// is logged and not retried; the next change, or the next subscription,
-    /// sends the worktree again.
+    /// gone out — what a caller that loads surfaces next relies on.
+    ///
+    /// A failed sync is logged, and its worktree is marked dirty again once
+    /// the pass ends, so one flush never retries it and no flush is scheduled
+    /// for it. The next flush sends it again: a gesture's flush before its
+    /// apply, the shown tab's load, a tab change, or a resubscribe.
     func flushPanelTabSync() async {
         // The flush clears its own handle as its last step, so once a waiter
         // resumes the handle names a newer flush or none.
@@ -528,9 +531,13 @@ extension AppState {
         await flush.value
     }
 
-    /// The body of one flush: keeps going until nothing ready is dirty.
+    /// The body of one flush: keeps going until nothing ready is dirty, then
+    /// marks dirty again each worktree whose sync failed and that is still
+    /// ready. One no longer ready was archived (`forgetPanelSurfaces`) or is
+    /// awaiting a resubscribe, which marks it dirty itself.
     private func sendDirtyPanelTabSyncs() async {
         defer { panelSyncFlushScheduled = false }
+        var failed = Set<UUID>()
         while let worktreeID = panelSyncDirty.first(where: { panelSyncReadyWorktrees.contains($0) }) {
             panelSyncDirty.remove(worktreeID)
             // nil: the worktree's tab list is gone. Nothing is sent — an empty
@@ -552,12 +559,14 @@ extension AppState {
                         """)
                 }
             } catch {
+                failed.insert(worktreeID)
                 logger.error("""
                     panel.syncTabs failed for worktree \(worktreeID, privacy: .public): \
                     \(error.localizedDescription, privacy: .public)
                     """)
             }
         }
+        panelSyncDirty.formUnion(failed.intersection(panelSyncReadyWorktrees))
     }
 
     // MARK: - Resubscribe

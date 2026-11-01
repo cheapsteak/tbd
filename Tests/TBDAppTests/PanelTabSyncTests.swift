@@ -10,8 +10,9 @@ import TBDShared
 /// IDs, order, labels or primaries change, and one `panel.syncTabs` per dirty
 /// worktree goes out on the next main-actor turn — but only once that
 /// worktree's tab list is complete, because a sync deletes the surface of
-/// every tab it does not list. A gesture on a tab with no surface yet sends
-/// that pending sync before it applies.
+/// every tab it does not list. A failed sync stays pending for the next
+/// flush, and a gesture on a tab with no surface yet sends a pending sync
+/// before it applies.
 @Suite("Panel tab sync")
 @MainActor
 struct PanelTabSyncTests {
@@ -283,6 +284,87 @@ struct PanelTabSyncTests {
             state.markPanelSyncReady(worktreeIDs: [worktreeID])
             await Fixture.drainMainActor()
             #expect(syncs.sent.count == 1)
+        }
+    }
+
+    // MARK: - A failed sync
+
+    @Test("a sync that fails leaves its worktree dirty, sent once and with no flush scheduled for it")
+    func failedSyncLeavesWorktreeDirty() async {
+        await Fixture.withState { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                throw Fixture.Rejected(message: "the daemon refused the sync")
+            }
+
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.count == 1, "neither the flush nor a flush scheduled for it retried the sync")
+            #expect(state.panelSyncDirty.contains(worktreeID), "the next flush sends it again")
+            #expect(!state.panelSyncFlushScheduled)
+        }
+    }
+
+    @Test("a sync that succeeds leaves its worktree clean")
+    func successfulSyncLeavesWorktreeClean() async throws {
+        try await Fixture.withState { state in
+            let syncs = Fixture.collectSyncs(state)
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+
+            _ = try Fixture.single(syncs.sent)
+            #expect(!state.panelSyncDirty.contains(worktreeID))
+        }
+    }
+
+    @Test("a gesture on a tab whose sync failed sends that sync again before it applies")
+    func gestureAfterFailedSyncResendsIt() async throws {
+        try await Fixture.withState { state in
+            let first = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [first], syncs: Fixture.collectSyncs(state))
+            let log = PanelEventLog()
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                if syncs.sent.count == 1 {
+                    log.record("sync failed")
+                    throw Fixture.Rejected(message: "the daemon refused the sync")
+                }
+                log.record("sync")
+                return Fixture.emptySyncResult
+            }
+            let created = Fixture.terminalTab(label: "shell")
+            let reply = Fixture.surface(tabID: created.id, worktreeID: worktreeID, revision: 1)
+            state.panelApplyTrigger = { @MainActor _ in
+                log.record("apply")
+                return PanelApplyResult(tab: reply, replayed: false)
+            }
+            // The created tab's sync fails, so the daemon never imports it and
+            // the copy holds no surface for it.
+            state.tabs[worktreeID]?.append(created)
+            await Fixture.drainMainActor()
+            try #require(state.panelSurface(worktreeID: worktreeID, tabID: created.id) == nil,
+                         "precondition: the copy holds no surface for the tab")
+
+            let returned = await state.applyPanelOperation(
+                worktreeID: worktreeID, tabID: created.id, .setCollapsed(false))
+            await Fixture.drainMainActor()
+
+            let expectedEvents: [String] = ["sync failed", "sync", "apply"]
+            #expect(log.events == expectedEvents, "the apply follows a second send of the failed sync")
+            let resent = try #require(syncs.sent.last)
+            let resentTabIDs: [UUID] = resent.tabs.map(\.tabID)
+            let expectedTabIDs: [UUID] = [first.id, created.id]
+            #expect(resentTabIDs == expectedTabIDs, "the resent sync carries the tab the gesture is on")
+            #expect(returned == reply)
+            #expect(!state.panelSyncDirty.contains(worktreeID))
         }
     }
 
