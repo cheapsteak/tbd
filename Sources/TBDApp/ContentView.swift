@@ -344,21 +344,23 @@ struct ContentView: View {
                 // session's live: plain buttons (no badges to flatten) on
                 // one fused capsule, like back/forward.
                 if let selection = appState.selectedRemoteSession {
-                    let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+                    // One read of the attach state for every button below.
+                    let transcriptPresentation = appState.remoteTranscriptPresentation(for: selection)
+                    let showsReconnect = transcriptPresentation.attached
                     let showsStop = appState.remoteSessionShowsStop(selection)
-                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                    let showsTranscriptToggle = transcriptPresentation.showsToggle
+                    let transcriptShown = transcriptPresentation.showsPane
                     if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
-                                // One preference for every remote session
-                                // (`remoteTranscriptOpen`), not per session.
+                                // Shown only while attached; hides the transcript for this
+                                // session only (`remoteTranscriptHiddenSelection`).
                                 Button {
-                                    appState.toggleRemoteTranscriptOpen()
+                                    appState.toggleRemoteTranscript(selection)
                                 } label: {
-                                    Image(systemName: appState.remoteTranscriptOpen
-                                          ? "text.bubble.fill" : "text.bubble")
+                                    Image(systemName: transcriptShown ? "text.bubble.fill" : "text.bubble")
                                 }
-                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                                .help(transcriptShown ? "Hide transcript" : "Show transcript")
                             }
                             if showsReconnect {
                                 // Restarts the local `attach` child in place —
