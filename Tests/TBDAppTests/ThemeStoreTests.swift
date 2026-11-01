@@ -223,13 +223,17 @@ struct ThemeStoreTests {
         let adder = ThemeFileAdder(file: themesDir.appendingPathComponent("ext.json"), contents: contents)
         let reAddInterval: Duration = .seconds(5)
         let start = ContinuousClock.now
+        // No re-add at or past the budget: `pollUntilTrue` probes once more
+        // after its deadline, and a write made then would count in the
+        // diagnostic as an add the watcher had time to see.
+        let reAddsEnd = start.advanced(by: TestDeadlines.saturatedPass)
         try adder.add()
         let outcome = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(100)
         ) { @Sendable in
             await MainActor.run { () -> Bool in
                 if !store.userThemes.isEmpty { return true }
-                adder.reAddIfDue(every: reAddInterval)
+                adder.reAddIfDue(every: reAddInterval, until: reAddsEnd)
                 return false
             }
         }
@@ -427,10 +431,11 @@ private final class ThemeFileAdder {
     }
 
     /// Adds the file again once `interval` has passed since the last attempt,
-    /// recording a failed write instead of throwing it, since the poll that
-    /// calls this cannot throw.
-    func reAddIfDue(every interval: Duration) {
-        guard ContinuousClock.now - lastAttempt >= interval else { return }
+    /// and only before `end`, recording a failed write instead of throwing it,
+    /// since the poll that calls this cannot throw.
+    func reAddIfDue(every interval: Duration, until end: ContinuousClock.Instant) {
+        let now = ContinuousClock.now
+        guard now < end, now - lastAttempt >= interval else { return }
         do {
             try add()
         } catch {

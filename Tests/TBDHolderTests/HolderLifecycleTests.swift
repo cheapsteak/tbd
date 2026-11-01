@@ -14,12 +14,10 @@ import TBDKernel
 struct HolderLifecycleTests {
     private static let rcFreeEnvironment = ["PATH": "/usr/bin:/bin", "TERM": "dumb"]
 
-    /// A job that does nothing but stay alive. It sleeps
-    /// `TestDeadlines.outlivingChildSeconds`, so it outlives every wait before
-    /// and including the one after which the test checks it — the fixture's
-    /// bootstrap waits, `waitForSocket` and the test's own — and teardown, not
-    /// the clock, is what ends it. Still bounded, so a fixture that somehow
-    /// escapes teardown reaps itself.
+    /// A job that does nothing but stay alive. It ends on its own after
+    /// `TestDeadlines.outlivingChildSeconds`, long enough to outlive the
+    /// fixture's bootstrap waits, `waitForSocket` and the test's own wait;
+    /// teardown kills it sooner.
     private static func idleJob(marker: String = "") -> HolderLaunchRequest {
         let stayAlive = "sleep \(TestDeadlines.outlivingChildSeconds)"
         return HolderLaunchRequest(

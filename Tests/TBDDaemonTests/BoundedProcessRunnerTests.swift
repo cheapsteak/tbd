@@ -435,11 +435,12 @@ struct BoundedProcessRunnerTests {
     /// tuned to the healthy path's ~1.2 s, had gone red at 31.3 s for the same
     /// reason. Neither number was ever an assertion about the code.
     ///
-    /// `childLifetimeSeconds` is 600 so that the bound derived from it clears
-    /// those sightings and that pacing by roughly six times over, while staying
-    /// a bound a genuinely stuck call still trips: a call that really did wait
-    /// its child out returns at ten minutes, and this fails at ten minutes with
-    /// the elapsed time in the message.
+    /// `childLifetimeSeconds` is `TestDeadlines.outlivingChildSeconds`, 600 s,
+    /// so the bound derived from it clears those sightings and that pacing by
+    /// roughly six times over, while staying a bound a genuinely stuck call
+    /// still trips: a call that really did wait its child out returns only
+    /// after the child's whole lifetime, and this fails then with the elapsed
+    /// time in the message.
     ///
     /// The *wedged-snapshot* property — that a blocking snapshot cannot cost
     /// another call its deadline — is pinned deterministically by
@@ -622,7 +623,10 @@ struct BoundedProcessRunnerTests {
     /// fast pass 1, whose green-run per-test latency is p50 65.6 s / p99 92.1 s
     /// and which produced two 103–107 s sightings of that test against a 90 s
     /// ceiling. 600 s clears both by roughly six times.
-    private static let childLifetimeSeconds = 600
+    ///
+    /// It is `TestDeadlines.outlivingChildSeconds`, so it moves with
+    /// `saturatedPass` and stays above every wait in the suite.
+    private static let childLifetimeSeconds = TestDeadlines.outlivingChildSeconds
 
     /// A `sh -c` body that records its own pid, then becomes a long-lived sleeper
     /// that ignores SIGTERM. `SIG_IGN` is inherited across `exec`, so the

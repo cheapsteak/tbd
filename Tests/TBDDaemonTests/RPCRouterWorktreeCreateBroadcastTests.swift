@@ -162,7 +162,8 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             let row = await Self.describeRow(db: db, id: pending.id)
             return "\(row); \(Self.describe(deltas.snapshot()))"
         }
-        #expect(phase2Done, "background create must complete")
+        // `waitFor` has recorded the timeout; nothing after it can add to it.
+        guard phase2Done else { return }
 
         let row = try await db.worktrees.get(id: pending.id)
         #expect(row?.status == .active, "phase 2 must leave the row active")
@@ -207,7 +208,7 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             let terminals = try? await db.terminals.list(worktreeID: pending.id)
             return terminals?.contains { $0.label == "pre-session" } == true
         }
-        #expect(hookSpawned, "phase 2 must spawn the pre-session terminal")
+        guard hookSpawned else { return }
 
         // Finish the hook and wait for the detached phase 3 to activate the row.
         try writeMarker(worktreeID: pending.id, exitCode: 0)
@@ -217,7 +218,7 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         ) {
             (try? await db.worktrees.get(id: pending.id))?.status == .active
         }
-        #expect(activated, "phase 3 must flip the row to .active")
+        guard activated else { return }
 
         // The handler's `.preSessionPending` branch runs inside its phase-2
         // serializer job, so a duplicate it broadcast would land before a
@@ -226,7 +227,7 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let phase2Done = try await waitForPhase2(of: router, repoID: repo.id) {
             Self.describe(deltas.snapshot())
         }
-        #expect(phase2Done, "the handler's phase-2 job must finish")
+        guard phase2Done else { return }
 
         let created = Self.createdDeltas(deltas.snapshot(), for: pending.id)
         #expect(created.count == 1,
@@ -328,7 +329,7 @@ struct RPCRouterWorktreeCreateBroadcastTests {
                 return false
             }
         }
-        #expect(failed, "the background create must fail and broadcast")
+        guard failed else { return }
 
         let delta = try #require(deltas.snapshot().compactMap { delta -> WorktreeIDDelta? in
             if case .worktreeArchived(let d) = delta, d.worktreeID == pending.id { return d }
