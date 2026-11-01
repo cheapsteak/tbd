@@ -34,7 +34,7 @@ macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **a
 - **An image item with `isBordered = false`:** no glass.
 - **A view item whose view has its own `isBordered`** (an `NSButton`, an `NSPopUpButton`): the item reports the view's value, so a bordered button gets glass, and adjacent glass items fuse onto one capsule. Measured in this app: three adjacent view items whose views were bordered accessory-bar buttons sat on one shared capsule.
 - **A view item whose view has no `isBordered`** (a plain `NSView`, an `NSHostingView`) **and `item.isBordered = false`:** no glass. The leading buttons (`ToolbarIconButtonHost` in `MainToolbarController+Items.swift`) and the title stay off glass this way; the leading buttons' bordered button sits one level down and keeps its own hover highlight.
-- So to keep a button off glass, never make a bordered control the item's view directly. Wrap it in a plain view and set the target and action on the button itself, since the wrapper forwards none of them. The wrapper's item is a `ToolbarIconButtonItem`, which overrides `isEnabled` to keep the button and the overflow row in step with the item, so set the item's `isEnabled`, never the button's.
+- So to keep a button off glass, never make a bordered control the item's view directly. Wrap it in a plain view and set the target and action on the button itself, since the wrapper forwards none of them. The wrapper's item is a `ToolbarIconButtonItem`, whose `isEnabled` reads its button and, when set, brings the overflow row along, so set the item's `isEnabled`, never the button's.
 
 ### Split button (primary action + dropdown)
 

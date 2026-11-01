@@ -52,9 +52,9 @@ struct ToolbarImageKey {
 /// are marked `shouldBeArchived`: AppKit archives no constraint made in code
 /// otherwise. Accessibility is not archived, so the decoder sets it again.
 final class ToolbarIconButtonHost: NSView {
-    /// The button the host holds.
+    /// The button the host holds, its one subview.
     var button: NSButton? {
-        subviews.first(where: { $0 is NSButton }) as? NSButton
+        subviews.first as? NSButton
     }
 
     init(button: NSButton) {
@@ -84,10 +84,17 @@ final class ToolbarIconButtonHost: NSView {
 /// A compact leading toolbar item, whose view is a `ToolbarIconButtonHost`.
 ///
 /// The host forwards nothing, so the item's `isEnabled` would otherwise never
-/// reach the button. Overriding it here keeps the item, its button and its
-/// overflow row in step whoever sets it: `updateContent(_:)` for Back and
-/// Forward, AppKit when it copies an item, which enables the copy, or anything
-/// else that sets the flag on the toggle, which still autovalidates.
+/// reach the button. Here the item's flag is its button's: the getter reads
+/// the button, so nothing can leave the two apart, and setting the flag
+/// brings the overflow row along. The setter compares each part, the item's
+/// own flag, the button and the row, and sets only what differs. That holds
+/// whoever sets it: `updateContent(_:)` for Back and Forward, or AppKit when
+/// it copies an item, which enables the copy. Until the item has its host,
+/// the getter reads the item's own flag.
+///
+/// No compact item autovalidates (`makeIconButtonItem`): `validate` does
+/// nothing for an item with a custom view, and none of the three wants
+/// validating.
 ///
 /// It has no stored property, so it inherits `init(itemIdentifier:)`, and
 /// AppKit can make or copy it as it does any item: a copy calls that
@@ -99,9 +106,11 @@ final class ToolbarIconButtonItem: NSToolbarItem {
     }
 
     override var isEnabled: Bool {
-        get { super.isEnabled }
+        get { button?.isEnabled ?? super.isEnabled }
         set {
-            super.isEnabled = newValue
+            if super.isEnabled != newValue {
+                super.isEnabled = newValue
+            }
             if let button, button.isEnabled != newValue {
                 button.isEnabled = newValue
             }
@@ -167,8 +176,11 @@ extension MainToolbarController {
     /// Glass background (see `ToolbarIconButtonHost`). The button carries the
     /// target and action, the item neither, and the item's overflow row is an
     /// explicit menu form carrying the same target and action. The item is a
-    /// `ToolbarIconButtonItem`, so its `isEnabled` moves the button and the
-    /// row with it.
+    /// `ToolbarIconButtonItem`, so its `isEnabled` is its button's and moves
+    /// the row with it. It does not autovalidate: `NSToolbarItem.h` documents
+    /// that `validate` does nothing for an item with a custom view, and none
+    /// of the three wants validating, as the toggle stays enabled and Back
+    /// and Forward follow the snapshot.
     private func makeIconButtonItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
     ) -> ToolbarIconButtonItem {
@@ -199,6 +211,7 @@ extension MainToolbarController {
         let item = ToolbarIconButtonItem(itemIdentifier: identifier)
         item.view = host
         item.isBordered = false
+        item.autovalidates = false
         item.label = tip
         item.toolTip = tip
         let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")
@@ -240,17 +253,15 @@ extension MainToolbarController {
     }
 
     /// Back or Forward, a compact leading button. Not `isNavigational`, which
-    /// would move it after the tracking separator. `autovalidates` is off
-    /// because validation would enable it whenever its target answers the
-    /// action; `canGoBack` and `canGoForward` decide instead, through
+    /// would move it after the tracking separator. `canGoBack` and
+    /// `canGoForward` decide whether it is enabled, through
     /// `updateContent(_:)`, and `validateMenuItem(_:)` for its overflow row.
     /// It starts disabled, and the item disables its button and its overflow
     /// row with it (`ToolbarIconButtonItem`).
     private func makeHistoryItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, action: Selector
-    ) -> NSToolbarItem {
+    ) -> ToolbarIconButtonItem {
         let item = makeIconButtonItem(identifier, symbol: symbol, tip: tip, target: self, action: action)
-        item.autovalidates = false
         item.isEnabled = false
         return item
     }
@@ -434,10 +445,10 @@ extension MainToolbarController {
     /// value is set only when it differs from what the item holds, so an
     /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let back = item(MainToolbarItemID.back) {
+        if let back = item(MainToolbarItemID.back) as? ToolbarIconButtonItem {
             updateEnabled(back, snapshot.canGoBack)
         }
-        if let forward = item(MainToolbarItemID.forward) {
+        if let forward = item(MainToolbarItemID.forward) as? ToolbarIconButtonItem {
             updateEnabled(forward, snapshot.canGoForward)
         }
         if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
@@ -455,14 +466,14 @@ extension MainToolbarController {
         }
     }
 
-    /// Enables or disables Back or Forward when its flag differs. The item, a
-    /// `ToolbarIconButtonItem`, keeps its button and its overflow row in step;
-    /// the row's own flag matters because the overflow menu may or may not
-    /// validate its rows.
-    private func updateEnabled(_ item: NSToolbarItem, _ enabled: Bool) {
-        if item.isEnabled != enabled {
-            item.isEnabled = enabled
-        }
+    /// Enables or disables Back or Forward. The item's setter compares its
+    /// own flag, its button and its overflow row each with `enabled` and sets
+    /// only what differs (`ToolbarIconButtonItem`), so an apply that changes
+    /// nothing sets nothing, and a row that drifted comes back on the next
+    /// apply. The row's own flag matters because the overflow menu may or may
+    /// not validate its rows.
+    private func updateEnabled(_ item: ToolbarIconButtonItem, _ enabled: Bool) {
+        item.isEnabled = enabled
     }
 
     /// Gives the title item a fresh overflow row showing `title`, or "No

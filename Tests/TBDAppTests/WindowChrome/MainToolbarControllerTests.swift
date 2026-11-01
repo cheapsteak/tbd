@@ -267,7 +267,8 @@ struct MainToolbarControllerTests {
     /// none of the selectors an item forwards to its view (`isBordered`,
     /// `isEnabled`, `target`, `action` and `image`, getters and setters), and
     /// the item holds no target or action of its own, which it would if the
-    /// view forwarded them.
+    /// view forwarded them. No item autovalidates: `validate` does nothing for
+    /// an item with a custom view, and none of the three wants validating.
     ///
     /// The host's button is an accessory-bar button, bordered but showing its
     /// border only under the pointer, image-only, with its tool tip and
@@ -304,6 +305,7 @@ struct MainToolbarControllerTests {
             let itemHasTarget = item.target != nil
             #expect(!itemHasTarget)
             #expect(item.action == nil)
+            #expect(item.autovalidates == false)
 
             #expect(item.label == tip)
             #expect(item.toolTip == tip)
@@ -357,7 +359,9 @@ struct MainToolbarControllerTests {
     /// overflow row with it, through the base class's property as AppKit
     /// would set it. No apply sets the toggle's flag, so this is the one path
     /// the Back and Forward tests do not cover: the host forwards nothing, and
-    /// only the item (`ToolbarIconButtonItem`) carries the flag down.
+    /// only the item (`ToolbarIconButtonItem`) carries the flag down. The
+    /// item's flag reads its button, so a button set directly, against the
+    /// item, is what the item then reports: the two cannot drift apart.
     @Test func toggleEnablementMovesItsButtonAndRow() async throws {
         let fixture = ToolbarFixture(label: "toggleEnablementMovesItsButtonAndRow")
         defer { fixture.tearDown() }
@@ -375,6 +379,10 @@ struct MainToolbarControllerTests {
         #expect(toggle.isEnabled == true)
         #expect(button.isEnabled == true)
         #expect(row.isEnabled == true)
+
+        let drifted = !toggle.isEnabled
+        button.isEnabled = drifted
+        #expect(toggle.isEnabled == drifted)
     }
 
     /// A compact item survives AppKit's copy, which archives the item's view
@@ -382,12 +390,13 @@ struct MainToolbarControllerTests {
     /// The copy is a `ToolbarIconButtonItem`, still unbordered, over a new
     /// `ToolbarIconButtonHost` whose button carries the original's glyph and
     /// action, pinned to the host's edges, with the host at the compact size:
-    /// the constraints are archived with it. AppKit enables the copy as it
-    /// copies, whatever the original's flag, so the test sets the copy's
-    /// `isEnabled` afterwards and checks that its button and row follow,
-    /// rather than comparing the flag with the original's. The button's
-    /// target is not compared: an archive keeps a target only when it
-    /// archives the target too.
+    /// the constraints are archived with it. Straight after the copy, before
+    /// the test sets anything, the copy's flag is its button's, whatever
+    /// AppKit set as it copied. AppKit enables the copy as it copies, whatever
+    /// the original's flag, so the test then sets the copy's `isEnabled` both
+    /// ways and checks that its button and row follow, rather than comparing
+    /// the flag with the original's. The button's target is not compared: an
+    /// archive keeps a target only when it archives the target too.
     ///
     /// The items are fresh from the delegate, as AppKit asks for one it will
     /// not insert, so no window state rides along in the archive.
@@ -412,6 +421,7 @@ struct MainToolbarControllerTests {
             let copied = try #require(original.copy() as? ToolbarIconButtonItem)
             let host = try #require(copied.view as? ToolbarIconButtonHost)
             let button = try #require(copied.button)
+            #expect(button.isEnabled == copied.isEnabled)
             #expect(host !== originalHost)
             #expect(copied.itemIdentifier == identifier)
             #expect(copied.isBordered == false)
@@ -477,7 +487,10 @@ struct MainToolbarControllerTests {
     /// A Back or Forward item starts disabled, with its button and its
     /// overflow row, as the delegate makes it and before any apply. Each apply
     /// then sets the item from the snapshot, and the item keeps the button and
-    /// the row in step (`ToolbarIconButtonItem`).
+    /// the row in step (`ToolbarIconButtonItem`). A row disabled directly
+    /// while its item is enabled comes back on the next apply that enables
+    /// Back, though the item already shows that value: the item's setter
+    /// compares the row as well as the item.
     @Test func backForwardEnablementFollowsTheSnapshot() async throws {
         let fixture = ToolbarFixture(label: "backForwardEnablementFollowsTheSnapshot")
         defer { fixture.tearDown() }
@@ -526,6 +539,16 @@ struct MainToolbarControllerTests {
         #expect(forward.isEnabled == true)
         #expect(forwardButton.isEnabled == true)
         #expect(forwardRow.isEnabled == true)
+
+        snapshot.canGoBack = true
+        fixture.controller.apply(snapshot)
+        try #require(back.isEnabled)
+        try #require(backRow.isEnabled)
+        backRow.isEnabled = false
+        fixture.controller.apply(snapshot)
+        #expect(back.isEnabled == true)
+        #expect(backButton.isEnabled == true)
+        #expect(backRow.isEnabled == true)
     }
 
     /// The Back and Forward overflow rows validate against history, as their
