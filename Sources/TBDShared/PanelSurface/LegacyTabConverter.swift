@@ -85,7 +85,7 @@ public enum LegacyTabConverter {
     /// anywhere but its primary pane, the tab's `content`; nil when it holds
     /// none. A tab without a layout is its primary alone, so it holds none.
     /// `convert` skips a tab that holds one.
-    public static func terminalOutsidePrimary(content: PaneContent, layout: LayoutNode?) -> UUID? {
+    static func terminalOutsidePrimary(content: PaneContent, layout: LayoutNode?) -> UUID? {
         let tree = layout ?? .pane(content)
         for pane in viewerPanes(of: tree, primaryPaneID: content.paneID) {
             if case .terminal(let terminalID) = pane {
