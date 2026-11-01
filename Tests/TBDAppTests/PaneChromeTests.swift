@@ -12,7 +12,9 @@ import TestSupport
 /// `Task` on the main actor, so the timer arms only once that task has had a
 /// main-actor turn, and the reset needs another after the advance: every wait
 /// takes `TestDeadlines.saturatedPass` (Tests/CLAUDE.md, "Clock and date
-/// seams"). Each test costs at most two such guards.
+/// seams"). The restart test chains three such guards on paper, but its two
+/// arming waits are strict and its one non-throwing wait comes last, so at
+/// most one can elapse in a run; every other test chains at most two.
 @MainActor
 @Suite("Pane chrome state", .clockDriven)
 struct PaneChromeTests {
@@ -63,6 +65,11 @@ struct PaneChromeTests {
 
         // 2 s after the first copy, past its 1.5 s, but 1 s after the second.
         #expect(state.didCopyAddress, "the first copy's reset must not clear the second copy's checkmark")
+
+        // 2.5 s after the first copy, 1.5 s after the second: the restarted
+        // wait has run out, so the checkmark clears.
+        await clock.advance(by: .milliseconds(500))
+        #expect(await Self.waitUntilCleared(state) == .satisfied)
         let expectedWrites: [String] = [first.absoluteString, second.absoluteString]
         #expect(written.values == expectedWrites)
     }

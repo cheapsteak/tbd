@@ -16,8 +16,8 @@ struct PanelTabsMigrationTests {
 
     /// The v1 panel rows hold the split-tree layout the v2 model cannot read,
     /// so the `panel_tabs` migration deletes every one of them. Rows written
-    /// by a daemon that predates the migration are gone afterwards; the worktree they belonged to
-    /// is not.
+    /// by a daemon that predates the migration are gone afterwards; the
+    /// worktree they belonged to is not.
     @Test func migrationEmptiesV1PanelTables() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
