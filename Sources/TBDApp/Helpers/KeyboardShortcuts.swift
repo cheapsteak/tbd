@@ -268,17 +268,13 @@ private struct NavigationCommandsContent: View {
 
     var body: some View {
         Button(MainWindowCommand.back.title) {
-            Task { @MainActor in
-                appState.navigateBack()
-            }
+            appState.navigateBack()
         }
         .keyboardShortcut(MainWindowCommand.back.key, modifiers: MainWindowCommand.back.modifiers)
         .disabled(!appState.canGoBack)
 
         Button(MainWindowCommand.forward.title) {
-            Task { @MainActor in
-                appState.navigateForward()
-            }
+            appState.navigateForward()
         }
         .keyboardShortcut(MainWindowCommand.forward.key, modifiers: MainWindowCommand.forward.modifiers)
         .disabled(!appState.canGoForward)
