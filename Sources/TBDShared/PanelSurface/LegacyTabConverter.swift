@@ -64,9 +64,12 @@ public enum LegacyTabConverter {
     /// Why `convert` would skip `tab`, or nil when it would convert it: the
     /// verdict of `convert` itself, so it covers every reason a tab is
     /// skipped. The app asks it to render a tab legacy before any sync has
-    /// named it skipped, with the payload and histories the sync would send,
-    /// so the app and the daemon cannot disagree about a tab. Pure: it reads
-    /// nothing but its arguments.
+    /// named it skipped, with the payload the sync would send, so the app and
+    /// the daemon cannot disagree about a tab. The app passes no pane
+    /// histories: `convert` reads one only to build a panel's history, which
+    /// it keeps to the pane's kind, dedupes, caps and points at the pane's
+    /// content, so none can change the verdict. Pure: it reads nothing but
+    /// its arguments.
     public static func skipReason(
         worktreeID: UUID,
         tab: LegacyTabPayload,
