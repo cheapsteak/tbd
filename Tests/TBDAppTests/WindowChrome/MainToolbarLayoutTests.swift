@@ -32,8 +32,8 @@ struct MainToolbarLayoutTests {
 
     @Test func shownOrder() {
         let expected: [NSToolbarItem.Identifier] = [
-            ID.toggleSidebar, ID.back, ID.forward, .flexibleSpace, ID.repoFilter,
-            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
+            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: false)) == expected)
     }
@@ -43,9 +43,9 @@ struct MainToolbarLayoutTests {
             sidebarCollapsed: false, showsServers: true, showsTranscript: true,
             showsReconnect: true, showsStop: true)
         let expected: [NSToolbarItem.Identifier] = [
-            ID.toggleSidebar, ID.back, ID.forward, .flexibleSpace, ID.repoFilter,
-            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
-            ID.servers, .space, ID.remoteTranscript, ID.remoteReconnect, ID.remoteStop,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
+            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.servers, .space, ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
         ]
         #expect(Self.ids(state) == expected)
     }
@@ -55,15 +55,15 @@ struct MainToolbarLayoutTests {
             sidebarCollapsed: true, showsServers: true, showsTranscript: false,
             showsReconnect: true, showsStop: false)
         let expected: [NSToolbarItem.Identifier] = [
-            ID.toggleSidebar, ID.back, ID.forward,
-            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
-            ID.servers, .space, ID.remoteReconnect,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward,
+            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.servers, .space, ItemID.remoteReconnect,
         ]
         #expect(Self.ids(state) == expected)
     }
 
     @Test func everyEmittedIdentifierIsAllowed() {
-        let allowed = Set(ID.allowed)
+        let allowed = Set(ItemID.allowed)
         for state in MainToolbarLayoutState.allCombinations {
             #expect(Self.ids(state).allSatisfy { allowed.contains($0) })
         }
@@ -71,21 +71,21 @@ struct MainToolbarLayoutTests {
 
     @Test func collapsedOrder() {
         let expected: [NSToolbarItem.Identifier] = [
-            ID.toggleSidebar, ID.back, ID.forward,
-            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward,
+            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: true)) == expected)
     }
 
     @Test func filterOnlyWhileShown() {
         for state in MainToolbarLayoutState.allCombinations {
-            let hasFilter = Self.ids(state).contains(ID.repoFilter)
+            let hasFilter = Self.ids(state).contains(ItemID.repoFilter)
             #expect(hasFilter == !state.sidebarCollapsed)
         }
     }
 
     @Test func toggleAndArrowsLeadInEveryState() {
-        let lead: [NSToolbarItem.Identifier] = [ID.toggleSidebar, ID.back, ID.forward]
+        let lead: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
             #expect(Array(list.prefix(3)) == lead)
@@ -97,15 +97,15 @@ struct MainToolbarLayoutTests {
     @Test func eachRightHandItemFollowsItsFlag() {
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
-            #expect(list.contains(ID.servers) == state.showsServers)
-            #expect(list.contains(ID.remoteTranscript) == state.showsTranscript)
-            #expect(list.contains(ID.remoteReconnect) == state.showsReconnect)
-            #expect(list.contains(ID.remoteStop) == state.showsStop)
+            #expect(list.contains(ItemID.servers) == state.showsServers)
+            #expect(list.contains(ItemID.remoteTranscript) == state.showsTranscript)
+            #expect(list.contains(ItemID.remoteReconnect) == state.showsReconnect)
+            #expect(list.contains(ItemID.remoteStop) == state.showsStop)
             let remote = list.filter {
-                $0 == ID.remoteTranscript || $0 == ID.remoteReconnect || $0 == ID.remoteStop
+                $0 == ItemID.remoteTranscript || $0 == ItemID.remoteReconnect || $0 == ItemID.remoteStop
             }
             let order: [NSToolbarItem.Identifier] = [
-                ID.remoteTranscript, ID.remoteReconnect, ID.remoteStop,
+                ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
             ]
             #expect(remote == order.filter { remote.contains($0) })
         }
@@ -117,7 +117,7 @@ struct MainToolbarLayoutTests {
             let anyRemote = state.showsTranscript || state.showsReconnect || state.showsStop
             let wantsSpace = state.showsServers && anyRemote
             #expect(list.contains(.space) == wantsSpace)
-            if wantsSpace, let serversIndex = list.firstIndex(of: ID.servers) {
+            if wantsSpace, let serversIndex = list.firstIndex(of: ItemID.servers) {
                 let after = list.dropFirst(serversIndex + 1).first
                 #expect(after == .space)
             }
@@ -125,8 +125,8 @@ struct MainToolbarLayoutTests {
     }
 
     @Test func noPRAndNoFilePanelItem() {
-        #expect(ID.custom.count == 9)
-        for id in ID.custom {
+        #expect(ItemID.custom.count == 9)
+        for id in ItemID.custom {
             let raw = id.rawValue.lowercased()
             #expect(!raw.hasSuffix(".pr"))
             #expect(!raw.contains("filepanel"))
@@ -147,7 +147,7 @@ struct MainToolbarLayoutTests {
 
     @Test func editsNeverTouchTheLeadingItems() {
         let protected: Set<NSToolbarItem.Identifier> = [
-            ID.toggleSidebar, ID.back, ID.forward, .sidebarTrackingSeparator,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .sidebarTrackingSeparator,
         ]
         let all = MainToolbarLayoutState.allCombinations
         for a in all {
