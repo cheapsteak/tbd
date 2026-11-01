@@ -93,14 +93,19 @@ enum RemoteSessionSendPayload {
 /// viewer or diff panel: those are local-worktree-only and simply aren't
 /// rendered here (spec non-goal for v1 remote sessions).
 ///
-/// Laid out like a local session: the terminal fills the pane, and the
-/// session's name and its Reconnect / Stop actions live in the window
-/// toolbar (`ContentView`). The only chrome here is a compact warning strip,
-/// rendered only while a warning actually applies, and — only while neither a
-/// live attached terminal nor the transcript's enabled composer is showing — a
-/// send footer (see `RemoteSessionDetailGates.showsSendFooter`). When the transcript is
-/// available and open, the session's conversation sits beside the terminal in
-/// a horizontal split (`RemoteTranscriptPaneView`).
+/// The session's name and its Reconnect / Stop actions live in the window
+/// toolbar (`ContentView`), as a local session's do. The content area is a
+/// horizontal split of the terminal side and, when the provider declares
+/// `transcript.read`, the session's transcript (`RemoteTranscriptPaneView`).
+/// Until the session attaches, the transcript leads on the left and the
+/// terminal side — the Attach prompt, the sign-in prompt or the log — sits on
+/// the right. Attached, the terminal leads and the transcript sits on the
+/// right, where the toolbar's Transcript toggle can hide it. Attaching and
+/// detaching swap the halves without remounting `RemoteAttachPager` (see
+/// `contentArea`). The only other chrome is a compact warning strip, rendered
+/// only while a warning actually applies, and — only while neither a live
+/// attached terminal nor the transcript's enabled composer is showing — a send
+/// footer (see `RemoteSessionDetailGates.showsSendFooter`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
 /// this view hosts `RemoteAttachPager`, which keeps recently-viewed
@@ -276,16 +281,23 @@ struct RemoteSessionDetailView: View {
 
     // MARK: - Content
 
-    /// A horizontal split: the terminal side on the left, and — when
-    /// `remoteSessionShowsTranscriptPane` says the session shows it — the
-    /// transcript on the right. The split is always the container, even with
-    /// one child, so opening or closing the transcript only adds or removes
-    /// the second child and never restructures the left one: `RemoteAttachPager` stays
-    /// mounted either way (see `terminalArea` and `RemoteDetailSplit`).
+    /// A horizontal split of the terminal side and the transcript, placed by
+    /// role (`RemoteDetailSplit`). `remoteSessionShowsTranscriptPane` says
+    /// whether the transcript shows, and `remoteSessionTranscriptLeads` whether
+    /// it is on the left: the transcript leads until the session attaches, and
+    /// the terminal leads once it has. The split is always the container, even
+    /// with one child, and keeps both halves at fixed positions in the view
+    /// tree: showing or hiding the transcript only adds or removes it, and a
+    /// swap changes only where each half is drawn. So `RemoteAttachPager` stays
+    /// mounted throughout (see `terminalArea`), and a swap keeps the
+    /// transcript's sync driver as well.
     private var contentArea: some View {
-        RemoteDetailSplit(showsTrailing: appState.remoteSessionShowsTranscriptPane(selection)) {
+        RemoteDetailSplit(
+            showsTranscript: appState.remoteSessionShowsTranscriptPane(selection),
+            transcriptLeads: appState.remoteSessionTranscriptLeads(selection)
+        ) {
             terminalArea
-        } trailing: {
+        } transcript: {
             RemoteTranscriptLivePane(selection: selection)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
