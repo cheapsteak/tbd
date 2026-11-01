@@ -22,11 +22,13 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   diffs the items against `MainToolbarLayout.identifiers(for:)` with inserts
 ///   and removes only, so the items both layouts share are never rebuilt, then
 ///   updates the present items' content in place, setting only what changed.
-/// - **Replacement.** A replaced toolbar schedules an apply at once, through
-///   KVO on `window.toolbar`, so it does not wait for an unrelated change. A
-///   window that keeps replacing it is left alone after
-///   `maxReinstallBurst` re-installs in quick succession, so the two never
-///   ping-pong.
+/// - **Replacement.** A change of the window's `toolbar` away from ours
+///   schedules an apply at once, through KVO on `window.toolbar`, so it does
+///   not wait for an unrelated change. More than `maxReplacementsInWindow`
+///   replacements within `replacementWindow` start a `reinstallCooldown`, in
+///   which applies leave the window's toolbar alone, so the two never
+///   ping-pong. When it ends, the controller schedules the apply that puts
+///   the toolbar back.
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width".
@@ -39,15 +41,18 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// and tests running side by side would follow each other's.
     nonisolated static let identifierPrefix = "tbd.mainToolbar."
 
-    /// How many re-installs in a row, each within `reinstallBurstWindow` of
-    /// the attempt before it, the toolbar gets before the controller stops
-    /// putting it back and logs an error. Whatever keeps replacing it and this
-    /// controller would otherwise trade the window's toolbar on every turn.
-    static let maxReinstallBurst = 3
+    /// How many times something may replace the toolbar on its window within
+    /// `replacementWindow` before the controller stops putting it back for
+    /// `reinstallCooldown`. Whatever keeps replacing it and this controller
+    /// would otherwise trade the window's toolbar on every turn.
+    static let maxReplacementsInWindow = 3
 
-    /// Seconds between re-install attempts beyond which a new burst starts.
-    /// A replacement after a quiet spell is re-installed again.
-    static let reinstallBurstWindow: TimeInterval = 1
+    /// The span, in seconds, over which replacements are counted. A
+    /// replacement older than this no longer counts.
+    static let replacementWindow: TimeInterval = 1
+
+    /// How long a toolbar that replaced ours too often stays on the window.
+    static let reinstallCooldown: Duration = .seconds(5)
 
     let toolbar: NSToolbar
     let appState: AppState
@@ -86,11 +91,27 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private var appearanceObservation: NSKeyValueObservation?
     private var toolbarObservation: NSKeyValueObservation?
 
-    /// When re-installs are attempted, for the burst count. Injected so a test
-    /// can place attempts inside or outside one window.
+    /// When each replacement happened, for the count over
+    /// `replacementWindow`. A date seam rather than the clock's instants: the
+    /// times are compared, never waited on, and `any Clock<Duration>` cannot
+    /// subtract its own instants. Injected so a test can place replacements
+    /// inside or outside one window.
     private let now: @Sendable () -> Date
-    private var reinstallBurst = 0
-    private var lastReinstallAttempt: Date?
+    /// Waits out `reinstallCooldown`. Injected so a test drives the cooldown
+    /// in virtual time.
+    private let clock: any Clock<Duration>
+    /// The replacements inside the current `replacementWindow`.
+    private var recentReplacements: [Date] = []
+    /// Whether the window showed our toolbar at the last change the watch
+    /// saw, so only a change away from ours counts as a replacement.
+    private var windowShowsOurToolbar = false
+    /// The running cooldown. While it is set, applies leave the window's
+    /// toolbar alone and the watch ignores the window's changes.
+    private var cooldown: Task<Void, Never>?
+
+    /// Whether a toolbar that replaced ours too often is being left on the
+    /// window. For tests.
+    var isInReinstallCooldown: Bool { cooldown != nil }
 
     // MARK: Item state, kept here so `+Items` can reach it
 
@@ -110,12 +131,14 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         appState: AppState,
         titleView: NSView,
         requestRemoteStop: @escaping (RemoteSessionSelection) -> Void,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.appState = appState
         self.titleView = titleView
         self.requestRemoteStop = requestRemoteStop
         self.now = now
+        self.clock = clock
         toolbar = NSToolbar(identifier: MainToolbarController.identifierPrefix + UUID().uuidString)
         filterMenuTracker = FilterMenuTracker()
         super.init()
@@ -144,6 +167,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
             attach(to: window)
         }
         isInstalled = true
+        windowShowsOurToolbar = true
         // Both handlers are `@Sendable`; AppKit sets both values on the main
         // thread, and `performOnMain` covers any other. Neither reads its
         // change object. The toolbar's is registered after `attach`, so the
@@ -159,12 +183,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Stops following the window and takes the toolbar off it, if it still
     /// shows it; a toolbar something else put there stays. The watching stops
-    /// first, so the removal is not taken for a replacement. `fallbackWindow`
-    /// is checked when the toolbar was never installed. Safe to call again.
+    /// first, so the removal is not taken for a replacement, and a running
+    /// cooldown is cancelled. `fallbackWindow` is checked when the toolbar was
+    /// never installed. Safe to call again.
     func uninstall(fallbackWindow: NSWindow? = nil) {
         isInstalled = false
         appearanceObservation = nil
         toolbarObservation = nil
+        cooldown?.cancel()
+        cooldown = nil
+        recentReplacements.removeAll()
         if let window = window ?? fallbackWindow, window.toolbar === toolbar {
             window.toolbar = nil
         }
@@ -181,41 +209,66 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         scheduleApply()
     }
 
-    /// The window's `toolbar` changed. Anything but ours schedules the apply
-    /// that puts ours back.
+    /// The window's `toolbar` changed. A change away from ours is a
+    /// replacement, and counts toward the cooldown; a change from one other
+    /// toolbar to another does not. Anything but ours schedules the apply that
+    /// puts ours back, unless a cooldown is running or this replacement
+    /// started one. Applies never count: only the window's changes do.
     private func windowToolbarChanged() {
-        guard isInstalled, let window, window.toolbar !== toolbar else { return }
+        guard isInstalled, let window else { return }
+        let showsOurs = window.toolbar === toolbar
+        let replaced = windowShowsOurToolbar && !showsOurs
+        windowShowsOurToolbar = showsOurs
+        guard !showsOurs, cooldown == nil else { return }
+        if replaced {
+            recordReplacement(leaving: window.toolbar)
+            guard cooldown == nil else { return }
+        }
         scheduleApply()
     }
 
-    /// Puts the toolbar back on `window`, unless this attempt is past
-    /// `maxReinstallBurst` in the current burst. Every attempt, refused or
-    /// not, extends the burst, so a window that keeps replacing the toolbar
-    /// stays refused until it has been quiet for `reinstallBurstWindow`.
-    private func reinstall(on window: NSWindow) {
-        let attempt = now()
-        if let last = lastReinstallAttempt, attempt.timeIntervalSince(last) <= Self.reinstallBurstWindow {
-            reinstallBurst += 1
-        } else {
-            reinstallBurst = 1
+    /// Counts a replacement, dropping those older than `replacementWindow`.
+    /// One more than `maxReplacementsInWindow` starts the cooldown and clears
+    /// the count, so the first replacement after the cooldown starts afresh.
+    private func recordReplacement(leaving found: NSToolbar?) {
+        let at = now()
+        recentReplacements.removeAll { at.timeIntervalSince($0) > Self.replacementWindow }
+        recentReplacements.append(at)
+        guard recentReplacements.count > Self.maxReplacementsInWindow else { return }
+        recentReplacements.removeAll()
+        startCooldown(leaving: found)
+    }
+
+    /// Leaves `found` on the window for `reinstallCooldown`, logging once,
+    /// then schedules the apply that puts our toolbar back. `uninstall`
+    /// cancels it.
+    private func startCooldown(leaving found: NSToolbar?) {
+        let cap = Self.maxReplacementsInWindow
+        let span = Self.replacementWindow
+        let pause = Self.reinstallCooldown
+        let foundID = found?.identifier ?? "none"
+        toolbarLogger.error("""
+            Main toolbar was replaced more than \(cap, privacy: .public) times within \
+            \(span, privacy: .public) s; leaving the window's toolbar (\(foundID, privacy: .public)) \
+            in place for \(pause.components.seconds, privacy: .public) s
+            """)
+        let clock = self.clock
+        cooldown = Task { [weak self] in
+            // A cancelled sleep throws; the check covers a cancel that lands
+            // after the sleep returned.
+            try? await clock.sleep(for: pause)
+            guard !Task.isCancelled else { return }
+            self?.cooldownEnded()
         }
-        lastReinstallAttempt = attempt
-        guard reinstallBurst <= Self.maxReinstallBurst else {
-            // Once per burst, not once per refused attempt.
-            if reinstallBurst == Self.maxReinstallBurst + 1 {
-                let cap = Self.maxReinstallBurst
-                let spacing = Self.reinstallBurstWindow
-                let found = window.toolbar?.identifier ?? "none"
-                toolbarLogger.error("""
-                    Main toolbar was put back \(cap, privacy: .public) times, each within \
-                    \(spacing, privacy: .public) s of the last, and replaced again; leaving the window's toolbar \
-                    (\(found, privacy: .public)) in place until the replacements stop
-                    """)
-            }
-            return
-        }
-        toolbarLogger.info("Main toolbar was replaced on its window; re-installing it")
-        attach(to: window)
+    }
+
+    /// The cooldown ran out: the scheduled apply puts the toolbar back if the
+    /// window still shows another.
+    private func cooldownEnded() {
+        cooldown = nil
+        guard isInstalled else { return }
+        toolbarLogger.info("Main toolbar re-install cooldown ended")
+        scheduleApply()
     }
 
     // MARK: The update loop
@@ -283,9 +336,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         toolbarLogger.debug("Main toolbar apply \(self.applyCount, privacy: .public)")
         appliedSnapshot = snapshot
         // Something else, such as a SwiftUI scene update, can set the window's
-        // toolbar; ours comes back here.
-        if isInstalled, let window, window.toolbar !== toolbar {
-            reinstall(on: window)
+        // toolbar; ours comes back here, except during a cooldown.
+        if isInstalled, cooldown == nil, let window, window.toolbar !== toolbar {
+            toolbarLogger.info("Main toolbar was replaced on its window; re-installing it")
+            attach(to: window)
         }
         applyLayout(MainToolbarLayout.identifiers(for: snapshot.layoutState(sidebarCollapsed: sidebarCollapsed)))
         updateContent(snapshot)

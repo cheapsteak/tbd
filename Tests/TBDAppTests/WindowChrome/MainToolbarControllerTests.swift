@@ -351,46 +351,110 @@ struct MainToolbarControllerTests {
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
     }
 
-    /// A window that keeps replacing the toolbar gets it back
-    /// `maxReinstallBurst` times within one burst and then keeps the
-    /// replacement; a replacement after a quiet spell starts a new burst and
-    /// is put back again. The date seam places the attempts: frozen, every
-    /// one is inside the burst window; advanced past it, the next one is not.
-    @Test func stopsReinstallingAToolbarThatKeepsBeingReplaced() async throws {
-        let dates = TestDateSource()
-        let fixture = ToolbarFixture(label: "stopsReinstallingAToolbarThatKeepsBeingReplaced", now: dates.provider)
+    /// One replacement past `maxReplacementsInWindow` inside one
+    /// `replacementWindow` starts the cooldown: that replacement stays and
+    /// queues nothing. When the cooldown runs out, the controller puts the
+    /// toolbar back with nothing else scheduling an apply. The count then
+    /// starts afresh: with the date still frozen, the next replacement is put
+    /// back at once, where a count that was never cleared would make it the
+    /// fifth inside one window and start another cooldown.
+    @Test(.clockDriven) func refusesAToolbarReplacedTooOftenUntilTheCooldownEnds() async throws {
+        let clock = EventDrivenTestClock()
+        let fixture = ToolbarFixture(
+            label: "refusesAToolbarReplacedTooOftenUntilTheCooldownEnds",
+            now: TestDateSource().provider, clock: clock)
         defer { fixture.tearDown() }
         try await fixture.ready()
-        let cap = MainToolbarController.maxReinstallBurst
-        try #require(cap > 0)
+        let controller = fixture.controller
+        let window = fixture.window
 
-        for attempt in 1...cap {
-            fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.burst.\(attempt)")
-            let back = try await waitUntil("re-install \(attempt) of \(cap) in one burst") {
-                fixture.window.toolbar === fixture.controller.toolbar
+        let kept = try await fixture.replaceUntilTheCooldownStarts(label: "refused")
+        // KVO reports synchronously, so the refusal is already in place.
+        #expect(controller.isInReinstallCooldown)
+        #expect(controller.applyScheduled == false)
+        #expect(window.toolbar === kept)
+
+        try await clock.requireAdvanceWhenArmed(
+            by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
+        let back = try await waitUntil("the toolbar to come back when the cooldown ends") {
+            window.toolbar === controller.toolbar
+        }
+        try #require(back)
+        #expect(controller.isInReinstallCooldown == false)
+
+        window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.refused.afterCooldown")
+        #expect(controller.isInReinstallCooldown == false)
+        let backAgain = try await waitUntil("the first replacement after the cooldown to be put back") {
+            window.toolbar === controller.toolbar
+        }
+        #expect(backAgain)
+    }
+
+    /// Applies during the cooldown leave the replacement on the window and do
+    /// not extend the cooldown. They run after part of it has passed, and the
+    /// rest of the original cooldown still brings the toolbar back; a
+    /// cooldown an apply restarted would need the whole of it again. The
+    /// partial advance must not end it either: had it, the first apply after
+    /// it would have put the toolbar back.
+    @Test(.clockDriven) func appliesDuringTheCooldownNeitherReinstallNorExtendIt() async throws {
+        let clock = EventDrivenTestClock()
+        let fixture = ToolbarFixture(
+            label: "appliesDuringTheCooldownNeitherReinstallNorExtendIt",
+            now: TestDateSource().provider, clock: clock)
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        let kept = try await fixture.replaceUntilTheCooldownStarts(label: "stream")
+        try #require(controller.isInReinstallCooldown)
+        let cooldown = MainToolbarController.reinstallCooldown
+        let partway: Duration = .seconds(2)
+        try #require(partway < cooldown)
+        try await clock.requireAdvanceWhenArmed(by: partway, timeout: TestDeadlines.saturatedPass)
+
+        for round in 1...3 {
+            let before = controller.applyCount
+            controller.scheduleApply()
+            let applied = try await waitUntil("apply \(round) during the cooldown") {
+                controller.applyCount > before
             }
-            try #require(back)
+            try #require(applied)
+            #expect(window.toolbar === kept)
+            #expect(controller.isInReinstallCooldown)
         }
 
-        // One more inside the same burst: the apply it schedules runs, and
-        // leaves the replacement in place.
-        let kept = NSToolbar(identifier: "MainToolbarControllerTests.burst.kept")
-        let appliesBefore = fixture.controller.applyCount
-        fixture.window.toolbar = kept
-        let applied = try await waitUntil("the apply the replacement past the cap scheduled") {
-            fixture.controller.applyCount > appliesBefore
+        try await clock.requireAdvanceWhenArmed(by: cooldown - partway, timeout: TestDeadlines.saturatedPass)
+        let back = try await waitUntil("the toolbar to come back at the original cooldown's end") {
+            window.toolbar === controller.toolbar
         }
-        try #require(applied)
-        #expect(fixture.window.toolbar === kept)
-        #expect(fixture.controller.isInstalled)
+        #expect(back)
+    }
 
-        // After a quiet spell, a replacement is put back again.
-        dates.advance(by: MainToolbarController.reinstallBurstWindow + 1)
-        fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterQuiet")
-        let backAfterQuiet = try await waitUntil("a re-install after the burst window passed") {
-            fixture.window.toolbar === fixture.controller.toolbar
+    /// Replacements older than `replacementWindow` stop counting: after the
+    /// cap's worth inside one window and a quiet spell, one more is put back
+    /// at once instead of starting the cooldown.
+    @Test func oneReplacementAfterAQuietSpellIsPutBackAtOnce() async throws {
+        let dates = TestDateSource()
+        let fixture = ToolbarFixture(
+            label: "oneReplacementAfterAQuietSpellIsPutBackAtOnce",
+            now: dates.provider, clock: EventDrivenTestClock())
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        try await fixture.replaceAndWaitForReinstall(
+            times: MainToolbarController.maxReplacementsInWindow, label: "beforeQuiet")
+        try #require(controller.isInReinstallCooldown == false)
+
+        dates.advance(by: MainToolbarController.replacementWindow + 1)
+        window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterQuiet")
+        #expect(controller.isInReinstallCooldown == false)
+        let back = try await waitUntil("a replacement after a quiet spell to be put back") {
+            window.toolbar === controller.toolbar
         }
-        #expect(backAfterQuiet)
+        #expect(back)
     }
 
     /// Uninstalling takes the toolbar off for good: its own removal is not
@@ -642,8 +706,12 @@ private final class ToolbarFixture {
     ///   - nested: puts the split inside a plain container controller, which
     ///     is the window's `contentViewController`, instead of making the
     ///     split the content itself.
-    ///   - now: the controller's date seam, which times its re-installs.
-    init(label: String, nested: Bool = false, now: @escaping @Sendable () -> Date = { Date() }) {
+    ///   - now: the controller's date seam, which times its replacements.
+    ///   - clock: the controller's clock, which times its re-install cooldown.
+    init(
+        label: String, nested: Bool = false, now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         _ = NSApplication.shared
         let suite = TestDefaultsSuite("MainToolbarControllerTests.\(label)")
         self.suite = suite
@@ -672,7 +740,7 @@ private final class ToolbarFixture {
             autosaveName: nil)
         let titleView = NSTextField(labelWithString: "feature")
         let controller = MainToolbarController(
-            appState: state, titleView: titleView, requestRemoteStop: { _ in }, now: now)
+            appState: state, titleView: titleView, requestRemoteStop: { _ in }, now: now, clock: clock)
         split.onViewDidAppear = { [weak controller, weak split] window in
             guard let controller, let split else { return }
             controller.install(on: window, split: split)
@@ -724,6 +792,38 @@ private final class ToolbarFixture {
                 && !controller.applyScheduled
         }
         try #require(applied)
+    }
+
+    /// Replaces the toolbar `count` times, waiting each time for the
+    /// controller to put it back.
+    func replaceAndWaitForReinstall(times count: Int, label: String) async throws {
+        try #require(count > 0)
+        let controller = self.controller
+        let window = self.window
+        for attempt in 1...count {
+            window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.\(label).\(attempt)")
+            let back = try await waitUntil("re-install \(attempt) of \(count) (\(label))") {
+                window.toolbar === controller.toolbar
+            }
+            try #require(back)
+        }
+    }
+
+    /// Replaces the toolbar `maxReplacementsInWindow` times, each put back,
+    /// then once more with no apply queued, and returns that last
+    /// replacement, the one the cooldown leaves on the window. The date seam
+    /// must be frozen, so every replacement is inside one window.
+    func replaceUntilTheCooldownStarts(label: String) async throws -> NSToolbar {
+        try await replaceAndWaitForReinstall(times: MainToolbarController.maxReplacementsInWindow, label: label)
+        let controller = self.controller
+        let quiet = try await waitUntil("no apply queued before the replacement past the cap") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
+        try #require(controller.isInReinstallCooldown == false)
+        let kept = NSToolbar(identifier: "MainToolbarControllerTests.\(label).kept")
+        window.toolbar = kept
+        return kept
     }
 
     /// Uninstalls first, so the controller's watch on `window.toolbar` does
