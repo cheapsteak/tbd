@@ -497,7 +497,8 @@ struct SidebarRowModelFactory {
             isInHiddenSection: isInHiddenSection,
             isMain: isMain,
             heightClass: subtitles.isEmpty ? .single : .withSubtitle,
-            hasRepo: worktree.repoID != nil)
+            hasRepo: worktree.repoID != nil,
+            isPlaceholder: appState.pendingWorktreeIDs.contains(id))
     }
 
     // MARK: Remote session rows — `RemoteSessionRowView`

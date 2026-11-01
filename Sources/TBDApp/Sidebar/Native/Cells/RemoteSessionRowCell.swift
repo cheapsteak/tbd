@@ -26,6 +26,9 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
 
     private(set) var model: RemoteSessionRowModel?
     private(set) var isHovered = false
+    /// The row's section chevron is hovered: the cell, not the row view,
+    /// draws at `SidebarCellKit.chevronHoverOpacity` of its own opacity.
+    private(set) var isDimmedByChevron = false
     /// The name is wider than the room it has: hovering the row shows it in
     /// the tooltip bubble.
     private(set) var isNameTruncated = false
@@ -68,7 +71,7 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
         captionField.stringValue = model.caption ?? ""
         captionField.isHidden = model.caption == nil
         suffix.show(model.suffix)
-        alphaValue = (model.isGone ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
+        alphaValue = Self.opacity(of: model, dimmedByChevron: isDimmedByChevron)
         setAccessibilityLabel(Self.accessibilityLabel(for: model))
         needsLayout = true
     }
@@ -77,6 +80,20 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
     /// truncated-name bubble.
     func setHovered(_ hovered: Bool) {
         isHovered = hovered
+    }
+
+    /// The pointer reached or left the chevron of the row's section.
+    func setDimmedByChevron(_ dimmed: Bool) {
+        guard dimmed != isDimmedByChevron else { return }
+        isDimmedByChevron = dimmed
+        if let model { alphaValue = Self.opacity(of: model, dimmedByChevron: dimmed) }
+    }
+
+    /// The row's opacity: a gone session, a hidden repo's section and a
+    /// hovered chevron each dim it, and they compose.
+    static func opacity(of model: RemoteSessionRowModel, dimmedByChevron: Bool) -> CGFloat {
+        (model.isGone ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
+            * (dimmedByChevron ? SidebarCellKit.chevronHoverOpacity : 1)
     }
 
     // MARK: Rename
@@ -101,6 +118,7 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
         super.prepareForReuse()
         model = nil
         isHovered = false
+        isDimmedByChevron = false
     }
 
     static func accessibilityLabel(for model: RemoteSessionRowModel) -> String {

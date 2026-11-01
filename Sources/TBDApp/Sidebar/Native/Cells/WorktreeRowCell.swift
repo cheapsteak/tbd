@@ -73,6 +73,11 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     /// pointer leaves the row for the menu.
     private(set) var isMenuOpen = false
     private(set) var hoveredPart: SidebarHoverPart = .none
+    /// The row's section chevron is hovered: the cell draws at
+    /// `SidebarCellKit.chevronHoverOpacity` of its own opacity. The cell dims,
+    /// not the row view, so the selection tint and the guide lines keep
+    /// theirs, as in the SwiftUI row.
+    private(set) var isDimmedByChevron = false
     /// The name is wider than the room it has: hovering the row shows it in
     /// the tooltip bubble.
     private(set) var isNameTruncated = false
@@ -139,7 +144,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         plusButton.setAccessibilityLabel("New nested worktree under \(model.name)")
         updateControls()
 
-        alphaValue = (model.isDimmed ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
+        alphaValue = Self.opacity(of: model, dimmedByChevron: isDimmedByChevron)
         setAccessibilityLabel(Self.accessibilityLabel(for: model))
         setAccessibilityCustomActions(customActions(for: model))
         needsLayout = true
@@ -150,6 +155,20 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         guard hovered != isHovered else { return }
         isHovered = hovered
         updateControls()
+    }
+
+    /// The pointer reached or left the chevron of the row's section.
+    func setDimmedByChevron(_ dimmed: Bool) {
+        guard dimmed != isDimmedByChevron else { return }
+        isDimmedByChevron = dimmed
+        if let model { alphaValue = Self.opacity(of: model, dimmedByChevron: dimmed) }
+    }
+
+    /// The row's opacity: a missing scratch directory, a hidden repo's
+    /// section and a hovered chevron each dim it, and they compose.
+    static func opacity(of model: WorktreeRowModel, dimmedByChevron: Bool) -> CGFloat {
+        (model.isDimmed ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
+            * (dimmedByChevron ? SidebarCellKit.chevronHoverOpacity : 1)
     }
 
     func setMenuOpen(_ open: Bool) {
@@ -228,6 +247,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         model = nil
         isHovered = false
         isMenuOpen = false
+        isDimmedByChevron = false
         setHoveredPart(.none)
         updateControls()
     }

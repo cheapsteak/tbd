@@ -81,11 +81,11 @@ enum SidebarDropPolicy {
     /// The rows a drag starting on `origin` carries, top to bottom.
     ///
     /// A drag from a selected row carries the selection; from an unselected
-    /// row, that row alone. Main rows, unadopted remote sessions and headers
-    /// stay behind, as does a row whose ancestor is also carried, since it
-    /// travels with that ancestor. A selection that mixes scratch rows and
-    /// worktrees carries the kind of `origin`. Nothing is carried when
-    /// `origin` itself cannot be dragged.
+    /// row, that row alone. Main rows, creating placeholders, unadopted remote
+    /// sessions and headers stay behind, as does a row whose ancestor is also
+    /// carried, since it travels with that ancestor. A selection that mixes
+    /// scratch rows and worktrees carries the kind of `origin`. Nothing is
+    /// carried when `origin` itself cannot be dragged.
     static func carried(selection: [SidebarNodeID], origin: SidebarNodeID, index: SidebarDropIndex) -> [UUID] {
         guard let originRow = CarriedRow(origin, index: index) else { return [] }
         let candidates = selection.contains(origin) ? selection : [origin]
@@ -140,7 +140,8 @@ enum SidebarDropPolicy {
     /// A drop onto a row. A worktree row nests the carried rows as its last
     /// children; the main row un-nests them to the top of its repo's
     /// worktrees, directly below it. Every other row rejects: nesting under
-    /// a scratch row, a remote session or a header is not a thing.
+    /// a scratch row, a remote session or a header is not a thing, and a
+    /// creating placeholder is a row the daemon has not heard of yet.
     ///
     /// State groups are closed both ways: a row inside a group nests only
     /// onto a row in that same group, and a row outside every group nests
@@ -153,7 +154,8 @@ enum SidebarDropPolicy {
             return place(under: sectionID, at: section.rowGaps.lowerBound, rows: rows,
                          proposal: (targetID, dropOnItemIndex), index: index)
         }
-        guard let lineage = trace(from: target, carried: rows.ids, index: index),
+        guard !model.isPlaceholder,
+              let lineage = trace(from: target, carried: rows.ids, index: index),
               !lineage.isCollapsed, !lineage.isCarried,
               !rows.isScratch, lineage.section != .scratchHeader else { return rejected }
         for row in rows.rows {
@@ -172,11 +174,16 @@ enum SidebarDropPolicy {
     /// remote sessions and group headers that follow them — moves to the
     /// nearest gap a worktree can take: directly below main, or directly
     /// after the last worktree row.
+    ///
+    /// The rows land before the first row after the gap that is neither
+    /// carried nor a creating placeholder, or at the end of the group when
+    /// there is none: the daemon knows neither kind as a place to land. The
+    /// gap under a placeholder, among its children, rejects.
     private static func place(under parentID: SidebarNodeID, at proposedIndex: Int, rows: CarriedRows,
                               proposal: Retarget, index: SidebarDropIndex) -> Answer {
         guard let parent = index.entry(parentID),
               let lineage = trace(from: parent, carried: rows.ids, index: index),
-              !lineage.isCollapsed, !lineage.isCarried,
+              !lineage.isCollapsed, !lineage.isCarried, !lineage.ownerIsPlaceholder,
               // Scratch rows reorder within the scratch section only, and no
               // other row drops into it.
               (lineage.section == .scratchHeader) == rows.isScratch else { return rejected }
@@ -200,12 +207,13 @@ enum SidebarDropPolicy {
         }
         let gaps = parent.rowGaps
         let childIndex = min(max(proposedIndex, gaps.lowerBound), gaps.upperBound)
-        // The daemon places before a row that is not itself carried.
+        // The daemon places before a row it knows that is not itself carried.
         var before: UUID?
         var position = childIndex
         while position < gaps.upperBound {
             let child = index.child(of: parent, at: position)
-            if !rows.ids.contains(child.id), case .worktree(let uuid) = child.id {
+            if !rows.ids.contains(child.id), case .worktree(let model) = child.kind, !model.isPlaceholder,
+               case .worktree(let uuid) = child.id {
                 before = uuid
                 break
             }
@@ -306,6 +314,9 @@ enum SidebarDropPolicy {
         /// row placed among this node's children gets. Nil at a section's
         /// top level, and in a group that sits directly under a section.
         var owner: UUID?
+        /// `owner` is a creating placeholder, which the daemon refuses as a
+        /// parent.
+        var ownerIsPlaceholder = false
         /// The node or an ancestor hides its children.
         var isCollapsed: Bool
         /// The node or an ancestor is carried.
@@ -319,8 +330,11 @@ enum SidebarDropPolicy {
             case .groupHeader:
                 if group == nil { group = node.id }
                 if !node.isExpanded { isCollapsed = true }
-            case .worktree:
-                if owner == nil, case .worktree(let uuid) = node.id { owner = uuid }
+            case .worktree(let model):
+                if owner == nil, case .worktree(let uuid) = node.id {
+                    owner = uuid
+                    ownerIsPlaceholder = model.isPlaceholder
+                }
                 if !node.isExpanded { isCollapsed = true }
             case .scratchHeader, .repoHeader, .providerHeader:
                 if !node.isExpanded { isCollapsed = true }
@@ -359,10 +373,11 @@ enum SidebarDropPolicy {
         var isScratch: Bool { lineage.section == .scratchHeader }
 
         /// Nil unless `id` is a draggable row in the tree: a worktree row,
-        /// local or an adopted remote lane, other than a main row.
+        /// local or an adopted remote lane, other than a main row or a
+        /// creating placeholder.
         init?(_ id: SidebarNodeID, index: SidebarDropIndex) {
             guard case .worktree(let uuid) = id, let entry = index.entry(id),
-                  case .worktree(let model) = entry.node.kind, !model.isMain,
+                  case .worktree(let model) = entry.node.kind, !model.isMain, !model.isPlaceholder,
                   let lineage = SidebarDropPolicy.trace(from: entry, carried: [], index: index) else { return nil }
             self.id = id
             self.uuid = uuid

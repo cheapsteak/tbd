@@ -50,7 +50,8 @@ extension SidebarOutlineController: SidebarMenuHost {
     }
 
     /// The hovered row shows its controls; a revealed section's header shows
-    /// its `+` and chevron; the `+` whose menu is open stays shown.
+    /// its `+` and chevron; the `+` whose menu is open stays shown; the rows
+    /// of a section whose chevron is hovered dim.
     func applyHover(to cell: NSView, id: SidebarNodeID) {
         let hovered = hoverState.row == id
         let part = hovered ? hoverState.part : .none
@@ -60,12 +61,14 @@ extension SidebarOutlineController: SidebarMenuHost {
             cell.setHovered(hovered)
             cell.setMenuOpen(menuOpen)
             cell.setHoveredPart(part)
+            cell.setDimmedByChevron(isDimmedByChevron(id))
         case let cell as SectionHeaderCell:
             cell.setHovered(hoverState.revealedSections.contains(id))
             cell.setMenuOpen(menuOpen)
             cell.setHoveredPart(part)
         case let cell as RemoteSessionRowCell:
             cell.setHovered(hovered)
+            cell.setDimmedByChevron(isDimmedByChevron(id))
         default:
             break
         }
@@ -73,15 +76,16 @@ extension SidebarOutlineController: SidebarMenuHost {
 
     /// A worktree or session row in the section whose chevron is hovered.
     /// Group headers and the header itself keep their opacity, as in
-    /// `RepoSectionView` and `ScratchSectionView`.
-    func isDimmedByChevron(_ node: SidebarNode) -> Bool {
+    /// `RepoSectionView` and `ScratchSectionView`. The row's cell dims, not
+    /// its row view, so the selection tint and guide lines keep theirs.
+    func isDimmedByChevron(_ id: SidebarNodeID) -> Bool {
         guard let section = hoverState.dimmedSection else { return false }
-        switch node.kind {
+        switch id {
         case .worktree, .remoteSession:
-            var top = node.id
+            var top = id
             while let parent = tree.parent(of: top) { top = parent }
             return top == section
-        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .groupHeader:
+        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group:
             return false
         }
     }
