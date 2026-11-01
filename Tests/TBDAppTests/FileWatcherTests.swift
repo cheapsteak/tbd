@@ -54,7 +54,7 @@ import TestSupport
 /// | `writeUntilArmed`'s `attemptWindow` | 4 s | **not a guard** — the threshold that decides "the event is gone" |
 ///
 /// **The criterion these are sized against** is: the FIRST guard to fire must
-/// get its named diagnostic out inside `.clockDriven`'s 240 s per-test limit,
+/// get its named diagnostic out inside `.clockDriven`'s 300 s per-test limit,
 /// otherwise the limit kills the test and reports an unnamed "wedged" instead
 /// of observed state (rule 4). Healthy prefix ~0.6 s + the largest single
 /// deadline = well under half the limit, for every test here.
@@ -65,7 +65,7 @@ import TestSupport
 /// weak criterion rather than a wrong one, and it is not what these values are
 /// sized against. Several of the deeper tests here — `atomicSaveReopensAndKeepsStreamLive`
 /// chains three armed writes, three handshake guards, three polls and an FD
-/// wait — have a paper cascade well past 240 s. That is the same arithmetic
+/// wait — have a paper cascade well past 300 s. That is the same arithmetic
 /// `.clockDriven`'s own doc comment reports for `PaneRepairCoordinatorTests`,
 /// and it is consistent for the same reason: only a test that is *already*
 /// failing walks a full chain of timeouts, and its first guard has recorded a

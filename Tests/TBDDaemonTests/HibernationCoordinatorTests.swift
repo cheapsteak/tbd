@@ -21,7 +21,7 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
 }
 
 /// `.clockDriven` is applied at SUITE level even though only the park-poll
-/// tests below drive an `EventDrivenTestClock`. The trait is a four-minute time
+/// tests below drive an `EventDrivenTestClock`. The trait is a five-minute time
 /// limit — a hang-catcher, not a perf budget — so it costs the other tests
 /// nothing and it catches the one failure mode virtual time introduces here (a
 /// test-clock sleep nobody advances hangs forever instead of going red).

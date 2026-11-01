@@ -349,7 +349,7 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     let process = LocalProcess(delegate: outgoing, dispatchQueue: .main)
     // The child must live exactly as long as the test, however starved the
     // test is: a `sleep N` exits mid-test once the pass delays the test past N
-    // seconds (the suite has hit its 240 s limit), after which
+    // seconds (the suite has hit a 240 s time limit), after which
     // `LocalProcess.send` drops every write and every probe reads as an
     // absence. `cat` blocks reading its tty forever, and since the tty is in
     // canonical mode and no test sends a newline it writes nothing back; the

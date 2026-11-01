@@ -32,8 +32,8 @@ import TestSupport
 /// Every wait here takes ``mainActorHop`` as its hang guard, and the arming
 /// waits are the strict form — a missed arming ends the test rather than
 /// paying the recorder's guard as well, so the two-step chain in
-/// `separatedChangesFireTwice` costs at most two guards (180 s) inside
-/// `.clockDriven`'s 240 s limit.
+/// `separatedChangesFireTwice` costs at most two guards (240 s) inside
+/// `.clockDriven`'s 300 s limit.
 @MainActor
 @Suite("AppState appearance debounce", .clockDriven, .serialized)
 struct AppearanceDebounceTests {

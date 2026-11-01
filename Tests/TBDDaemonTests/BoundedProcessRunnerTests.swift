@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Darwin
 import Dispatch
 import Testing
@@ -427,7 +428,7 @@ struct BoundedProcessRunnerTests {
     /// under test — and not a wall-clock ceiling.
     ///
     /// **A ceiling sized against the pass is still a ceiling on the runner.**
-    /// `TestDeadlines.saturatedPass` (90 s) sat close enough to fast pass 1's
+    /// `TestDeadlines.saturatedPass`, at 90 s, sat close enough to fast pass 1's
     /// own numbers — p50 65.6 s, p99 92.1 s, max 95.5 s reported per test on a
     /// **green** run — that this test reddened twice in a row on an unrelated
     /// PR at elapsed 103–107 s, on a runner shared with two other runs (runs
@@ -435,11 +436,12 @@ struct BoundedProcessRunnerTests {
     /// tuned to the healthy path's ~1.2 s, had gone red at 31.3 s for the same
     /// reason. Neither number was ever an assertion about the code.
     ///
-    /// `childLifetimeSeconds` is 600 so that the bound derived from it clears
-    /// those sightings and that pacing by roughly six times over, while staying
-    /// a bound a genuinely stuck call still trips: a call that really did wait
-    /// its child out returns at ten minutes, and this fails at ten minutes with
-    /// the elapsed time in the message.
+    /// `childLifetimeSeconds` is `TestDeadlines.outlivingChildSeconds`, 600 s,
+    /// so the bound derived from it clears those sightings and that pacing by
+    /// roughly six times over, while staying a bound a genuinely stuck call
+    /// still trips: a call that really did wait its child out returns only
+    /// after the child's whole lifetime, and this fails then with the elapsed
+    /// time in the message.
     ///
     /// The *wedged-snapshot* property — that a blocking snapshot cannot cost
     /// another call its deadline — is pinned deterministically by
@@ -449,6 +451,9 @@ struct BoundedProcessRunnerTests {
         let scratch = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratch) }
         let pidFile = scratch.appendingPathComponent("pid")
+        // On every exit path, and only while the pid still names the child:
+        // the escalation under test normally kills and reaps it first.
+        defer { RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path) }
 
         let started = ContinuousClock.now
         let outcome = try await runBoundedProcess(
@@ -471,7 +476,6 @@ struct BoundedProcessRunnerTests {
                 """)
 
         let recorded = Self.readPid(from: pidFile)
-        defer { if let recorded { kill(recorded, SIGKILL) } }
         let pid = try #require(recorded, "the child never recorded its pid")
         try await waitFor(
             "the TERM-ignoring child to be reaped",
@@ -523,6 +527,12 @@ struct BoundedProcessRunnerTests {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let firstPidFile = scratch.appendingPathComponent("first")
         let secondPidFile = scratch.appendingPathComponent("second")
+        // On every exit path, and only while each pid still names its child:
+        // the escalation under test normally kills and reaps both first.
+        defer {
+            RecordedChild.killIfStartedBeforeWriting(pidFile: firstPidFile.path)
+            RecordedChild.killIfStartedBeforeWriting(pidFile: secondPidFile.path)
+        }
 
         // Entry is announced asynchronously (nothing on the observing side ever
         // blocks a thread); the hold itself is a semaphore, because the seam is
@@ -567,7 +577,6 @@ struct BoundedProcessRunnerTests {
         }
 
         let recordedSecond = Self.readPid(from: secondPidFile)
-        defer { if let recordedSecond { kill(recordedSecond, SIGKILL) } }
         let secondPid = try #require(recordedSecond, "the second child never recorded its pid")
         try await waitFor(
             "the second call's TERM-ignoring child to be reaped while a snapshot is wedged",
@@ -588,7 +597,6 @@ struct BoundedProcessRunnerTests {
             return
         }
         let recordedFirst = Self.readPid(from: firstPidFile)
-        defer { if let recordedFirst { kill(recordedFirst, SIGKILL) } }
         let firstPid = try #require(recordedFirst, "the first child never recorded its pid")
         try await waitFor(
             "the first call's TERM-ignoring child to be reaped",
@@ -610,7 +618,7 @@ struct BoundedProcessRunnerTests {
     /// the number is this large.
     ///
     /// It must dominate every `waitFor` in this suite — all of which are
-    /// `TestDeadlines.saturatedPass` (90 s) — so a child that is gone is a child
+    /// `TestDeadlines.saturatedPass` (120 s) — so a child that is gone is a child
     /// something KILLED, never one that finished its sleep inside the wait. Each
     /// such child is signalled by the escalation under test and, failing that,
     /// by its test's own `defer`.
@@ -622,7 +630,10 @@ struct BoundedProcessRunnerTests {
     /// fast pass 1, whose green-run per-test latency is p50 65.6 s / p99 92.1 s
     /// and which produced two 103–107 s sightings of that test against a 90 s
     /// ceiling. 600 s clears both by roughly six times.
-    private static let childLifetimeSeconds = 600
+    ///
+    /// It is `TestDeadlines.outlivingChildSeconds`, so it moves with
+    /// `saturatedPass` and stays above every wait in the suite.
+    private static let childLifetimeSeconds = TestDeadlines.outlivingChildSeconds
 
     /// A `sh -c` body that records its own pid, then becomes a long-lived sleeper
     /// that ignores SIGTERM. `SIG_IGN` is inherited across `exec`, so the

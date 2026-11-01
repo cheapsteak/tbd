@@ -416,8 +416,9 @@ struct EventDrivenTestClockSelfTests {
     func requireAdvanceIsInertOnCancellation() async {
         let clock = EventDrivenTestClock()
         let waiter = Task { [clock] in
-            // Long enough that expiry cannot be what ends this wait.
-            try? await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: .seconds(120))
+            // Twice the parent's `waitUntil` budget, so expiry cannot end this
+            // wait before the parent's handshake does and cancels it.
+            try? await clock.requireAdvanceWhenArmed(by: .seconds(5), timeout: TestDeadlines.saturatedPass * 2)
         }
         await Self.waitUntil("an arming waiter is parked") { clock.hasParkedArmingWaiter }
 
@@ -435,8 +436,9 @@ struct EventDrivenTestClockSelfTests {
         let clock = EventDrivenTestClock()
         let waiter = Task { [clock] () -> String in
             do {
-                // Long enough that expiry cannot be what ends this wait.
-                try await clock.requireSleeperArmed(timeout: .seconds(120))
+                // Twice the parent's `waitUntil` budget, so expiry cannot end
+                // this wait before the parent's handshake does and cancels it.
+                try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass * 2)
                 return "returned"
             } catch {
                 return "threw: \(error)"
@@ -644,9 +646,10 @@ struct EventDrivenTestClockSelfTests {
         let clock = EventDrivenTestClock()
         let waiter = Task { [clock] () -> String in
             do {
-                // Long enough that expiry cannot be what ends this wait.
+                // Twice the parent's `waitUntil` budget, so expiry cannot end
+                // this wait before the parent's handshake does and cancels it.
                 let held = try await clock.advanceUntil("never", by: .seconds(1),
-                                                        timeout: .seconds(120)) { false }
+                                                        timeout: TestDeadlines.saturatedPass * 2) { false }
                 return "returned \(held)"
             } catch {
                 return "threw: \(error)"

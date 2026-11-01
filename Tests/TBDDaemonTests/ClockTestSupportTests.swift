@@ -41,8 +41,8 @@ struct ClockTestSupportTests {
     // (Tests/CLAUDE.md, "No bounded wait in a fast-pass target carries a
     // literal deadline"; `pollUntilTrue`'s "size it with
     // `TestDeadlines.saturatedPass` unless the wait is one scheduling hop").
-    // The first test pays at most two 90 s guards (arming, then the fire) and
-    // the second one, inside `.clockDriven`'s 240 s limit. `advance` itself
+    // The first test pays at most two 120 s guards (arming, then the fire) and
+    // the second one, inside `.clockDriven`'s 300 s limit. `advance` itself
     // megaYields without a bound, so a pass starved past that still ends at the
     // suite limit; nothing on `TestClock` can bound it.
 
