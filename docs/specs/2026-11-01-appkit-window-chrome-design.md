@@ -99,8 +99,13 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
 5. **Repo filter** – a menu item showing the current filter, as the `Picker`
    does today. It is removed from the toolbar while the sidebar is collapsed
    and put back when it expands.
-6. **`.sidebarTrackingSeparator`** – everything before it sits over the
+6. **Tracking separator** – an `NSTrackingSeparatorToolbarItem` that the
+   toolbar creates under an identifier of its own, bound to the split's first
+   divider and never changed afterwards. Everything before it sits over the
    sidebar, and stays beside the window buttons when the sidebar collapses.
+   It is not the standard `.sidebarTrackingSeparator`, because AppKit's own
+   item for that identifier finds a divider on its own, and re-binding it
+   afterwards raises a KVO exception.
 7. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
    a borderless item.
 8. **Flexible space.**
