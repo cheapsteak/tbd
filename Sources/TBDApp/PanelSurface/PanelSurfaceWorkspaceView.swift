@@ -33,15 +33,26 @@ struct PanelSurfaceLoadKey: Equatable {
 /// "The renderer"): the primary's column on the left, the split divider, and
 /// the side region on the right while it has panels — its own or the
 /// worktree's — and is not collapsed (`WorkspaceTabSurface.isSideVisible`).
+/// The side region is never narrower than its strip's fixed controls
+/// (`minimumSideShare`): the divider stops a drag there, and a narrower
+/// stored width renders at it.
 ///
 /// Each column starts with its own strip of tabs, and the two share one row:
 /// this view draws the workspace tab bar over the primary's column, so the bar
 /// and the side region's strip meet at the divider, which runs through the
 /// row. With the region hidden, the bar spans the whole width. The bar's
-/// trailing end carries the selected tab's own control
-/// (`WorkspaceTabBarChrome`), the Notes button, Session History, and the
-/// expand button while the region is hidden. No pane draws a header: the
-/// primary's leaf gets its tab's state from `primaryChromes`, and the bar
+/// trailing end carries the primary's viewer control
+/// (`WorkspaceTabBarChrome.viewerControl`) and Session History. The
+/// transcript and Notes buttons (`TabRowEdgeControls`) sit at the window's
+/// right edge, just before the button that hides or shows the region: at the
+/// end of the side region's strip, before its collapse button, while the
+/// region shows, and at the end of the bar, before the expand button, while
+/// it is hidden. One function decides them for both rows
+/// (`TabRowEdgeControls.make`): this view calls it for the bar, only while
+/// the bar draws them (`barEdgeControls`), and `SideRegionView` calls it for
+/// the strip with the same primary and transcript setting, which this view
+/// passes to it as plain values rather than closures. No pane draws a header:
+/// the primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
 /// order is bar, banner, content, as on every other path.
@@ -70,12 +81,14 @@ struct PanelSurfaceLoadKey: Equatable {
 /// the divider under it and, while it shows, the pre-session banner and its
 /// divider.
 ///
-/// A divider drag, the expand button, the transcript control and the Notes
-/// button each send one panel operation through
+/// A divider drag, the expand button, and the transcript and Notes buttons,
+/// in whichever row draws them, each send one panel operation through
 /// `AppState.applyPanelOperation` and adopt the tab the daemon returns; the
 /// Notes button in a worktree with no note creates one first
-/// (`AppState.toggleNotesPanel`). The rendered/source toggle and copy-address
-/// act on the tab's chrome state and send nothing.
+/// (`AppState.toggleNotesPanel`). The transcript button in front of any
+/// primary but a Claude terminal is disabled and sends nothing. The
+/// rendered/source toggle and copy-address act on the tab's chrome state and
+/// send nothing.
 struct PanelSurfaceWorkspaceView: View {
     let tab: TBDShared.Tab
     /// The copy's surface for this tab, or nil while it holds none yet.
@@ -130,14 +143,24 @@ struct PanelSurfaceWorkspaceView: View {
         let side = self.side
         let tabID = tab.id
         let chrome = primaryChromes.state(for: tabID)
+        let showsSide = Self.showsSide(surface: surface)
+        let primary = primaryContent
+        let transcriptViewEnabled = self.transcriptViewEnabled
         // Read here, not in the `GeometryReader` closure, so what the bar's
-        // trailing items read is a dependency of this body.
-        let trailing = trailingItems(chrome: chrome)
-        let showsSide = surface?.isSideVisible ?? false
+        // trailing items read is a dependency of this body. The bar's edge
+        // controls are built only while the bar draws them.
+        let barEdge = Self.barEdgeControls(
+            appState: appState, worktreeID: worktree.id, tabID: tabID, primary: primary,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
+        let trailing = trailingItems(chrome: chrome, edge: barEdge, showsSide: showsSide)
         GeometryReader { geometry in
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
-            let shares = Self.shares(drag: dividerDrag, tabID: tabID, width: side.width)
+            // The side never renders, nor is dragged, narrower than its
+            // strip's fixed controls.
+            let minimumShare = Self.minimumSideShare(availableSpace: availableSpace)
+            let shares = Self.shares(
+                drag: dividerDrag, tabID: tabID, width: side.width, minimumShare: minimumShare)
 
             // The primary's column stays the first child whatever the side
             // region does, so showing or hiding the region never rebuilds the
@@ -152,16 +175,29 @@ struct PanelSurfaceWorkspaceView: View {
                         thickness: thickness,
                         index: 0,
                         ratios: Binding(
-                            get: { Self.shares(drag: dividerDrag, tabID: tabID, width: side.width) },
+                            get: {
+                                Self.shares(
+                                    drag: dividerDrag, tabID: tabID, width: side.width,
+                                    minimumShare: minimumShare)
+                            },
                             set: { dividerDrag = DividerDrag(tabID: tabID, ratios: $0) }
                         ),
                         availableSpace: availableSpace,
+                        // The primary keeps the divider's own floor, which is
+                        // what the model's widest side share leaves it.
+                        minimumRatios: [SplitDivider.defaultMinimumRatio, minimumShare],
                         onDragEnd: { commitWidth() }
                     )
                     .id(tabID)
                     .zIndex(1)
 
-                    SideRegionView(surface: surface, worktree: worktree)
+                    // Plain values, not the edge controls' closures, so
+                    // SwiftUI can tell when the region's inputs are unchanged
+                    // and skip its body; it builds the same edge controls
+                    // from them.
+                    SideRegionView(
+                        surface: surface, worktree: worktree,
+                        primary: primary, transcriptViewEnabled: transcriptViewEnabled)
                         .id(tabID)
                         .frame(width: shares[1] * availableSpace)
                 }
@@ -222,69 +258,64 @@ struct PanelSurfaceWorkspaceView: View {
         }
     }
 
-    /// The bar's trailing items: the primary's control, read from `chrome`,
-    /// the Notes button, on while the worktree's first note is in front of
-    /// the visible region (`NotesToggleDecision.isOn`), and the expand button
-    /// while the tab's loaded side region is hidden.
-    private func trailingItems(chrome: PaneChromeState) -> TabBarTrailingItems {
+    /// The bar's trailing items (`TabBarTrailingItem.items`): the primary's
+    /// viewer control, read from `chrome`, and Session History; then, while
+    /// the side region is hidden (`showsSide` false), the transcript and Notes
+    /// buttons from `edge` (`barEdgeControls`, nil while the region shows),
+    /// and the expand button once the tab's surface is known
+    /// (`showsExpandButton`).
+    private func trailingItems(
+        chrome: PaneChromeState, edge: TabRowEdgeControls?, showsSide: Bool
+    ) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
         let tabID = tab.id
         let content = primaryContent
         let surface = surface
-
-        var isClaudeTerminal = false
-        var transcriptOpen = false
-        if case .terminal(let terminalID) = content {
-            isClaudeTerminal = appState.terminal(id: terminalID, in: worktreeID)?.isClaudeResumable == true
-            if isClaudeTerminal && transcriptViewEnabled {
-                transcriptOpen = PaneActions.daemon(
-                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                ).isTranscriptOpen(terminalID)
-            }
-        }
-        let control = WorkspaceTabBarChrome.trailingControl(
+        let viewerControl = WorkspaceTabBarChrome.viewerControl(
             primary: content,
-            isClaudeTerminal: isClaudeTerminal,
-            transcriptViewEnabled: transcriptViewEnabled,
-            transcriptOpen: transcriptOpen,
             canRender: chrome.hasRenderableContent,
             showingSource: chrome.showSourceCode,
             copied: chrome.didCopyAddress)
 
         return TabBarTrailingItems(
-            selectedTabControl: control,
-            onSelectedTabControl: {
-                // The transcript control opens or closes a panel, which only
-                // this view's action set can send; the viewer controls act on
-                // the tab's chrome state, as the side region's strip does.
-                switch control {
-                case .transcript?:
-                    guard case .terminal(let terminalID) = content else { return }
-                    PaneActions.daemon(
-                        appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                    ).toggleTranscript(content, terminalID)
-                case let viewerControl?:
-                    var contentURL: URL?
-                    if case .webview(_, let url) = content {
-                        contentURL = url
-                    }
-                    chrome.perform(viewerControl, contentURL: contentURL)
-                case nil:
-                    break
+            viewerControl: viewerControl,
+            onViewerControl: {
+                // The viewer controls act on the tab's chrome state, as the
+                // side region's strip does.
+                guard let viewerControl else { return }
+                var contentURL: URL?
+                if case .webview(_, let url) = content {
+                    contentURL = url
                 }
+                chrome.perform(viewerControl, contentURL: contentURL)
             },
-            notesControl: Self.notesControl(surface: surface, notes: appState.notes[worktreeID]),
-            onNotesControl: {
-                Task { @MainActor in
-                    await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
-                }
-            },
+            edge: edge,
+            showsSide: showsSide,
             showsExpandButton: Self.showsExpandButton(surface: surface),
             onExpand: {
                 appState.sendPanelOperation(
                     worktreeID: worktreeID, tabID: tabID, Self.expandOperation(surface: surface))
             })
+    }
+
+    /// The transcript and Notes buttons the workspace tab bar draws
+    /// (`TabRowEdgeControls.make`), or nil while the side region shows
+    /// (`showsSide`): the strip draws them then, and `SideRegionView` builds
+    /// its own, so the bar reads nothing for buttons it will not draw.
+    @MainActor
+    static func barEdgeControls(
+        appState: AppState,
+        worktreeID: UUID,
+        tabID: UUID,
+        primary: PaneContent,
+        surface: WorkspaceTabSurface?,
+        transcriptViewEnabled: Bool
+    ) -> TabRowEdgeControls? {
+        guard !showsSide(surface: surface) else { return nil }
+        return TabRowEdgeControls.make(
+            appState: appState, worktreeID: worktreeID, tabID: tabID, primary: primary,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
     }
 
     /// Sends the released drag's width, clamped to the model's range, for the
@@ -320,12 +351,15 @@ struct PanelSurfaceWorkspaceView: View {
     /// The divider's `[primary, side]` shares for the tab `tabID`: a drag's
     /// while one on this tab is being committed, otherwise the side region's
     /// `width`. A drag on another tab, or one with malformed shares, is not
-    /// this tab's.
-    static func shares(drag: DividerDrag?, tabID: UUID, width: Double) -> [CGFloat] {
+    /// this tab's. Either way the side's share is at least `minimumShare`
+    /// (`minimumSideShare`), so a window that shrank while a drag was being
+    /// committed still draws the strip's controls whole.
+    static func shares(drag: DividerDrag?, tabID: UUID, width: Double, minimumShare: CGFloat) -> [CGFloat] {
         if let drag, drag.tabID == tabID, drag.ratios.count == 2 {
-            return drag.ratios
+            guard drag.ratios[1] < minimumShare else { return drag.ratios }
+            return [1 - minimumShare, minimumShare]
         }
-        return Self.ratios(forWidth: width)
+        return Self.ratios(forWidth: width, minimumShare: minimumShare)
     }
 
     /// A surface's side region, or `SideRegion.empty` for none.
@@ -333,11 +367,35 @@ struct PanelSurfaceWorkspaceView: View {
         surface?.side ?? .empty
     }
 
-    /// The divider's `[primary, side]` shares for a side-region width, clamped
-    /// by `SideRegion.clamp`, the divider's own limit.
-    static func ratios(forWidth width: Double) -> [CGFloat] {
-        let clamped = SideRegion.clamp(width)
-        return [CGFloat(1 - clamped), CGFloat(clamped)]
+    /// The divider's `[primary, side]` shares for a side-region width: the
+    /// width clamped by `SideRegion.clamp`, the model's range, and then raised
+    /// to `minimumShare` (`minimumSideShare`), the app's limit in points. The
+    /// primary gets the rest. A stored width below that limit renders at the
+    /// limit, so the strip's controls are never clipped.
+    static func ratios(forWidth width: Double, minimumShare: CGFloat) -> [CGFloat] {
+        let side = max(CGFloat(SideRegion.clamp(width)), minimumShare)
+        return [1 - side, side]
+    }
+
+    /// The smallest share of `availableSpace`, the width the primary and the
+    /// side share, that the side region may take: enough for its strip's
+    /// fixed controls (`SideStripMetrics.fixedControlsWidth`), so none of
+    /// them is ever clipped and only the panel tabs between them give up
+    /// room. It is a limit in points, which the model's
+    /// `SideRegion.widthRange`, a range of shares, cannot carry, so the app
+    /// keeps it: the divider stops a drag there and `ratios` renders a
+    /// narrower stored width at it.
+    ///
+    /// Never below the range's lower bound, and never above its upper bound,
+    /// so the primary always keeps what that bound leaves it. A main area too
+    /// small for even the upper bound to fit the controls (about 233 pt) is
+    /// the one case the cap wins and the strip falls back on its own clip.
+    /// With no space to share, the lower bound.
+    static func minimumSideShare(availableSpace: CGFloat) -> CGFloat {
+        let lower = CGFloat(SideRegion.widthRange.lowerBound)
+        let upper = CGFloat(SideRegion.widthRange.upperBound)
+        guard availableSpace > 0, availableSpace.isFinite else { return lower }
+        return min(max(SideStripMetrics.fixedControlsWidth / availableSpace, lower), upper)
     }
 
     /// The `resize` a released drag sends: the side's share, clamped. Nil when
@@ -345,6 +403,11 @@ struct PanelSurfaceWorkspaceView: View {
     /// a click on the divider sends nothing. A non-finite share is no width
     /// the user chose: `SideRegion.clamp` would turn it into the default, and
     /// a resize to that would move the divider nobody dragged there.
+    ///
+    /// A released share is at least `minimumSideShare`, because the divider
+    /// stops a drag there. A stored width below that limit, from a wider
+    /// window or another client, stays stored until the user drags the
+    /// divider; until then it only renders at the limit (`ratios`).
     static func resizeOperation(ratios: [CGFloat], currentWidth: Double) -> PanelOperation? {
         guard ratios.count == 2, ratios[1].isFinite else { return nil }
         let width = SideRegion.clamp(Double(ratios[1]))
@@ -361,7 +424,8 @@ struct PanelSurfaceWorkspaceView: View {
         CGSize(width: width, height: primaryLeafHeight)
     }
 
-    /// The Notes button as the bar draws it: on while the worktree's first
+    /// The Notes button at the window's right edge, as the side region's
+    /// strip or the workspace tab bar draws it: on while the worktree's first
     /// note is in front of a visible side region, so a press would close it
     /// (`NotesToggleDecision.isOn`), and disabled while the worktree's notes,
     /// `notes`, have not loaded and the tab shows no note panel
@@ -369,6 +433,15 @@ struct PanelSurfaceWorkspaceView: View {
     static func notesControl(surface: WorkspaceTabSurface?, notes: [NoteSummary]?) -> PaneChromeControl {
         let decision = PaneActions.notesToggleDecision(surface: surface, notes: notes)
         return .notes(isOn: decision.isOn, isEnabled: decision.isEnabled)
+    }
+
+    /// Whether the side region draws beside the primary: once the tab's
+    /// surface is known and its region is visible
+    /// (`WorkspaceTabSurface.isSideVisible`). Before the copy holds a surface
+    /// for the tab (`surface` nil) it does not, so the workspace tab bar spans
+    /// the whole width and carries the transcript and Notes buttons.
+    static func showsSide(surface: WorkspaceTabSurface?) -> Bool {
+        surface?.isSideVisible ?? false
     }
 
     /// The expand button shows once the tab's surface is known and its side
@@ -396,31 +469,51 @@ struct PanelSurfaceWorkspaceView: View {
 
 // MARK: - WorkspaceTabBarChrome
 
-/// The selected tab's own control at the workspace tab bar's trailing end
-/// (panel tabs spec, "The renderer"), decided as a value so each kind can be
-/// asserted without standing up a view.
+/// The two controls the workspace tab's primary decides (panel tabs spec,
+/// "The renderer" and "The transcript button"): its viewer control, at the
+/// workspace tab bar's trailing end, and the transcript button, at the
+/// window's right edge. Decided as values so each kind can be asserted
+/// without standing up a view.
 enum WorkspaceTabBarChrome {
-    /// The transcript button for a Claude terminal while the transcript view
-    /// is on. Any other primary is viewer content, which takes the control
-    /// the side region's strip gives the same kind
-    /// (`PaneChromeControl.viewerControl`): the rendered/source toggle for a
-    /// file that can render, and copy-address for a web page. A note, a plain
-    /// terminal and a transcript primary have none.
-    static func trailingControl(
+    /// The primary's own control, drawn at the workspace tab bar's trailing
+    /// end before Session History. Viewer content takes the control the side
+    /// region's strip gives the same kind (`PaneChromeControl.viewerControl`):
+    /// the rendered/source toggle for a file that can render, and copy-address
+    /// for a web page. A terminal, a note and a transcript primary have none.
+    static func viewerControl(
         primary: PaneContent,
-        isClaudeTerminal: Bool,
-        transcriptViewEnabled: Bool,
-        transcriptOpen: Bool,
         canRender: Bool,
         showingSource: Bool,
         copied: Bool
     ) -> PaneChromeControl? {
-        if case .terminal = primary {
-            guard isClaudeTerminal, transcriptViewEnabled else { return nil }
-            return .transcript(isOn: transcriptOpen)
-        }
         guard let viewer = LegacyTabConverter.panelContent(from: primary) else { return nil }
         return PaneChromeControl.viewerControl(
             for: viewer.kind, canRender: canRender, showingSource: showingSource, copied: copied)
+    }
+
+    /// The transcript button at the window's right edge, or nil for none.
+    /// With the transcript view off no tab has one. With it on, every tab
+    /// draws one: live in front of a Claude terminal, and on while that
+    /// terminal's transcript panel exists (`transcriptOpen`); disabled in
+    /// front of any other primary — a plain or Codex terminal, a file, a web
+    /// page, a note or a transcript.
+    ///
+    /// Disabled rather than removed, as the side region's history buttons
+    /// are (`SideStripHistoryButtons`) and as the Notes button is while it
+    /// cannot act: the buttons before it — Session History while the region
+    /// is hidden, the + menu and the active panel's control while it shows —
+    /// would otherwise shift by a button's width whenever the selection moved
+    /// between a Claude terminal's tab and any other.
+    static func transcriptControl(
+        primary: PaneContent,
+        isClaudeTerminal: Bool,
+        transcriptViewEnabled: Bool,
+        transcriptOpen: Bool
+    ) -> PaneChromeControl? {
+        guard transcriptViewEnabled else { return nil }
+        guard case .terminal = primary, isClaudeTerminal else {
+            return .transcript(isOn: false, isEnabled: false)
+        }
+        return .transcript(isOn: transcriptOpen, isEnabled: true)
     }
 }

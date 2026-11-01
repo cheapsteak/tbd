@@ -132,8 +132,9 @@ struct PaneChromeTests {
         let state = PaneChromeState(pasteboard: { written.record($0) }, clock: ImmediateClock<Duration>())
 
         state.perform(.copyAddress(copied: false), contentURL: nil)
-        state.perform(.transcript(isOn: false), contentURL: opened)
-        state.perform(.transcript(isOn: true), contentURL: opened)
+        state.perform(.transcript(isOn: false, isEnabled: true), contentURL: opened)
+        state.perform(.transcript(isOn: true, isEnabled: true), contentURL: opened)
+        state.perform(.transcript(isOn: false, isEnabled: false), contentURL: opened)
         state.perform(.notes(isOn: false, isEnabled: true), contentURL: opened)
         state.perform(.notes(isOn: true, isEnabled: true), contentURL: opened)
 
@@ -171,15 +172,29 @@ struct PaneChromeTests {
 
     @Test("the transcript control fills and takes the accent colour only while on")
     func transcriptControlFollowsItsOnState() {
-        let on = PaneChromeControl.transcript(isOn: true)
-        let off = PaneChromeControl.transcript(isOn: false)
+        let on = PaneChromeControl.transcript(isOn: true, isEnabled: true)
+        let off = PaneChromeControl.transcript(isOn: false, isEnabled: true)
 
         #expect(on.systemImage == "text.bubble.fill")
         #expect(on.tint == .accent)
         #expect(on.help == "Hide the chat-style live transcript pane")
+        #expect(on.isEnabled)
         #expect(off.systemImage == "text.bubble")
         #expect(off.tint == .primary)
         #expect(off.help == "Show the chat-style live transcript pane")
+        #expect(off.isEnabled)
+    }
+
+    /// In front of a primary with no transcript to show the transcript
+    /// button stays in its place, drawn disabled, and says so.
+    @Test("the disabled transcript control is secondary, cannot be pressed, and says the tab has no transcript")
+    func disabledTranscriptControl() {
+        let disabled = PaneChromeControl.transcript(isOn: false, isEnabled: false)
+
+        #expect(disabled.systemImage == "text.bubble")
+        #expect(disabled.tint == .secondary)
+        #expect(!disabled.isEnabled)
+        #expect(disabled.help == "No transcript for this tab")
     }
 
     @Test("the render toggle is primary while showing source and secondary otherwise")

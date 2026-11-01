@@ -7,7 +7,7 @@ import TBDShared
 // `note.create`, `note.delete` and `panel.apply` go through injected seams, so
 // no socket opens, and every `AppState` is on a throwaway defaults suite.
 
-/// The Notes button in the workspace tab bar: nothing opens a note panel by
+/// The Notes button at the window's right edge: nothing opens a note panel by
 /// itself, so the button shows, brings forward or closes the worktree's first
 /// note — the oldest by `createdAt` — with the transcript button's three
 /// states, and in a worktree whose notes are listed and empty creates one
@@ -220,16 +220,18 @@ struct NotesButtonTests {
         #expect(loading.tint == .secondary)
         #expect(loading.help == "Notes are loading")
         #expect(!loading.isEnabled)
-        // Every other control can always be pressed.
+        // The viewer controls can always be pressed, and so can a live
+        // transcript button.
         let others: [PaneChromeControl] = [
-            .transcript(isOn: true), .renderToggle(showingSource: false), .copyAddress(copied: false), .refresh,
+            .transcript(isOn: true, isEnabled: true), .transcript(isOn: false, isEnabled: true),
+            .renderToggle(showingSource: false), .copyAddress(copied: false), .refresh,
         ]
         for control in others {
             #expect(control.isEnabled, "\(control)")
         }
     }
 
-    @Test("the bar draws the button on while the first note is in front, and disabled while it cannot act")
+    @Test("the button draws on while the first note is in front, and disabled while it cannot act")
     func workspaceBarNotesControl() {
         let first = Self.note(createdAt: 1_000)
         let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
@@ -253,9 +255,14 @@ struct NotesButtonTests {
             == on)
     }
 
-    @Test("a bar drawn off the daemon path has no Notes button")
+    @Test("a bar drawn off the daemon path has Session History alone, and no Notes button")
     func noneHasNoNotesButton() {
-        #expect(TabBarTrailingItems.none.notesControl == nil)
+        let offPath = TabBarTrailingItems.none
+        let items: [TabBarTrailingItem] = offPath.items
+        let expected: [TabBarTrailingItem] = [.sessionHistory]
+        #expect(items == expected)
+        let carriesEdgeControls = offPath.edge != nil
+        #expect(!carriesEdgeControls)
     }
 
     // MARK: - A press
