@@ -937,16 +937,19 @@ public struct PanelSurfaceStore: Sendable {
     /// - **Note panels** are deleted. The notes stay with `fromWorktreeID`,
     ///   whose ID keys their content files, so a panel moved with them would
     ///   name a note `toWorktreeID` does not have, and `note.delete` would
-    ///   never find it. A moved tab that had one in front brings its most
-    ///   recent own panel forward, else the merged list's first panel
-    ///   (`PanelSurfaceReducer.adopting`, applied on read).
+    ///   never find it.
     /// - **The Changes panel** joins `toWorktreeID`'s panels after its own,
-    ///   unless `toWorktreeID` already has one: then it is deleted, and a
-    ///   moved tab that had it in front fronts `toWorktreeID`'s instead.
+    ///   unless `toWorktreeID` already has one: then it is deleted.
     ///
     /// Every surface under `toWorktreeID` then carries the merged list: when
     /// it differs from `toWorktreeID`'s own, its readable surfaces are
-    /// rewritten with it (`rewriteSurfaces`).
+    /// rewritten with it (`rewriteSurfaces`). Each readable moved surface
+    /// adopts the merged list (`PanelSurfaceReducer.adopting`) and is stored
+    /// whole, as `rewriteSurfaces` stores one, so a moved tab whose panel in
+    /// front was deleted is stored fronting its most recent own panel, else
+    /// the merged list's first panel. A moved row that cannot be read moves
+    /// with its columns re-pointed and its `layout` and histories as they
+    /// were.
     ///
     /// Each moved row is marked `awaitingListing`. The app learns of the
     /// main worktree before this move, so a `panel.syncTabs` it built from
@@ -968,16 +971,13 @@ public struct PanelSurfaceStore: Sendable {
         let ownPanels = try Self.storedWorktreePanels(worktreeKey: toWorktreeID.uuidString, db: db)
         var merged = ownPanels
         var droppedKeys: [String] = []
-        // A dropped Changes panel's ID, mapped to the kept one.
-        var replacements: [PanelID: PanelID] = [:]
         for panel in try Self.storedWorktreePanels(worktreeKey: fromWorktreeID.uuidString, db: db) {
             switch panel.content {
             case .note:
                 droppedKeys.append(panel.id.uuidString)
             case .changes:
-                if let kept = merged.first(where: { $0.content == .changes }) {
+                if merged.contains(where: { $0.content == .changes }) {
                     droppedKeys.append(panel.id.uuidString)
-                    replacements[panel.id] = kept.id
                 } else {
                     merged.append(panel)
                 }
@@ -993,21 +993,37 @@ public struct PanelSurfaceStore: Sendable {
                 worktreeID: toWorktreeID, worktreePanels: merged, except: nil, db: db, now: now)
         }
 
-        var rows = try WorkspaceTabSurfaceRecord
+        let rows = try WorkspaceTabSurfaceRecord
             .filter(Column("worktreeID") == fromWorktreeID.uuidString)
             .order(Column("position"))
             .fetchAll(db)
         let firstFreePosition = try Int.fetchOne(
             db, sql: "SELECT MAX(position) + 1 FROM workspace_tab_surface WHERE worktreeID = ?",
             arguments: [toWorktreeID.uuidString]) ?? 0
-        for index in rows.indices {
-            rows[index].worktreeID = toWorktreeID.uuidString
-            rows[index].position = firstFreePosition + index
-            rows[index].layout = Self.layout(rows[index].layout, replacingFront: replacements)
-            rows[index].revision = Int64(try Self.nextRevision(db: db))
-            rows[index].updatedAt = now
-            rows[index].awaitingListing = true
-            try rows[index].update(db)
+        let historiesByTab = try Self.histories(tabKeys: rows.map(\.id), db: db)
+        var moved: [WorkspaceTabSurface] = []
+        for (index, record) in rows.enumerated() {
+            let position = firstFreePosition + index
+            // Read with the merged list, which repairs a front naming a
+            // deleted panel, then stored whole, so the row names only panels
+            // that exist.
+            guard let readable = record.toModel(
+                histories: historiesByTab[record.id] ?? [:], worktreePanels: merged) else {
+                var row = record
+                row.worktreeID = toWorktreeID.uuidString
+                row.position = position
+                row.revision = Int64(try Self.nextRevision(db: db))
+                row.updatedAt = now
+                row.awaitingListing = true
+                try row.update(db)
+                continue
+            }
+            let surface = WorkspaceTabSurface(
+                id: readable.id, worktreeID: toWorktreeID, label: readable.label,
+                primary: readable.primary, side: readable.side, worktreePanels: readable.worktreePanels,
+                revision: try Self.nextRevision(db: db))
+            try Self.writeSurface(surface, position: position, awaitingListing: true, db: db, now: now)
+            moved.append(surface)
         }
         try db.execute(
             sql: "UPDATE worktree_panel SET worktreeID = ? WHERE worktreeID = ?",
@@ -1016,23 +1032,6 @@ public struct PanelSurfaceStore: Sendable {
         try db.execute(
             sql: "UPDATE panel_operation_receipt SET worktreeID = ? WHERE worktreeID = ?",
             arguments: [toWorktreeID.uuidString, fromWorktreeID.uuidString])
-        let historiesByTab = try Self.histories(tabKeys: rows.map(\.id), db: db)
-        let moved = rows.compactMap {
-            $0.toModel(histories: historiesByTab[$0.id] ?? [:], worktreePanels: merged)
-        }
         return rewritten + moved
-    }
-
-    /// `layout` with the panel in front replaced by `replacements[front]`
-    /// when that names one; unchanged otherwise, or when it does not decode.
-    private static func layout(_ layout: String, replacingFront replacements: [PanelID: PanelID]) -> String {
-        guard !replacements.isEmpty,
-              var stored = decodeJSON(StoredSideRegion.self, from: layout),
-              let front = stored.activePanelID,
-              let replacement = replacements[front] else {
-            return layout
-        }
-        stored.activePanelID = replacement
-        return (try? encodeJSONString(stored)) ?? layout
     }
 }

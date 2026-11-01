@@ -544,6 +544,25 @@ struct WorktreePanelStoreTests {
         return (repo.id, scratch, main.id)
     }
 
+    /// The part of a `layout` column these tests read: the tab's own panels
+    /// and the panel in front.
+    private struct StoredLayoutColumn: Decodable {
+        let panelIDs: [PanelID]
+        let activePanelID: PanelID?
+    }
+
+    /// A tab's `layout` column as stored, decoded from the raw text rather
+    /// than through a read, which would repair a front naming a missing
+    /// panel.
+    private func storedLayout(_ db: TBDDatabase, tabID: UUID) async throws -> StoredLayoutColumn {
+        let json = try await db.writerForTests.read { dbc in
+            try String.fetchOne(
+                dbc, sql: "SELECT layout FROM workspace_tab_surface WHERE id = ?",
+                arguments: [tabID.uuidString])
+        }
+        return try JSONDecoder().decode(StoredLayoutColumn.self, from: Data(try #require(json).utf8))
+    }
+
     /// Every `worktree_panel` row that shows `noteID`, in any worktree.
     private func notePanelRowCount(_ db: TBDDatabase, noteID: UUID) async throws -> Int {
         let content = try encodeJSONString(WorktreePanelContent.note(noteID: noteID))
@@ -557,8 +576,9 @@ struct WorktreePanelStoreTests {
     /// A scratch promote moves the scratch worktree's Changes panel to a
     /// main worktree that has none, after the main worktree's own panels,
     /// and deletes its note panels: the notes stay with the archived scratch
-    /// worktree. A moved tab that had a note panel in front brings its most
-    /// recent own panel forward, else the merged list's first panel. The main
+    /// worktree. A moved tab that had a note panel in front is stored
+    /// fronting its most recent own panel, else the merged list's first
+    /// panel, so its `layout` column never names the deleted panel. The main
     /// worktree's own tab takes the merged list at a fresh revision, keeping
     /// its front, and the promote returns it with the moved tabs.
     @Test func promoteMovesTheChangesPanelAndDeletesNotePanels() async throws {
@@ -612,13 +632,26 @@ struct WorktreePanelStoreTests {
         #expect(surfaces[2].side.activePanelID == scratchChanges.id,
                 "with no own panel, it fronts the merged list's first panel")
         #expect(returned == surfaces)
+
+        // The stored rows, not only the reads, name panels that exist.
+        let mainPanels = try await db.panelSurface.worktreePanels(worktreeID: mainID)
+        let mainPanelIDs = Set(mainPanels.map(\.id))
+        for tab in [withOwnPanel, withoutPanels] {
+            let stored = try await storedLayout(db, tabID: tab.id)
+            let front = try #require(stored.activePanelID)
+            let frontExists = stored.panelIDs.contains(front) || mainPanelIDs.contains(front)
+            #expect(frontExists, "tab \(tab.id)'s stored front \(front) names no panel")
+        }
+        #expect(try await storedLayout(db, tabID: withOwnPanel.id).activePanelID == ownPanelID)
+        #expect(try await storedLayout(db, tabID: withoutPanels.id).activePanelID == scratchChanges.id)
     }
 
     /// When the main worktree already has a Changes panel, the scratch
-    /// worktree's is deleted, and a moved tab that had it in front fronts the
-    /// main worktree's. The scratch note panels are deleted all the same, and
-    /// the main worktree's list is unchanged, so its own tab is not
-    /// rewritten and the promote returns only the moved tab.
+    /// worktree's is deleted, and a moved tab with no own panel that had it
+    /// in front is stored fronting the merged list's first panel, here the
+    /// main worktree's Changes panel. The scratch note panels are deleted all
+    /// the same, and the main worktree's list is unchanged, so its own tab is
+    /// not rewritten and the promote returns only the moved tab.
     @Test func promoteDropsTheScratchChangesPanelWhenMainHasOne() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (repoID, scratch, mainID) = try await makePromotePair(db)
@@ -657,5 +690,45 @@ struct WorktreePanelStoreTests {
         #expect(surfaces[1].side.activePanelID == mainChanges.id,
                 "a moved tab fronting the dropped Changes panel fronts the main worktree's")
         #expect(returned == [surfaces[1]])
+        #expect(try await storedLayout(db, tabID: movedTab.id).activePanelID == mainChanges.id,
+                "the stored row, not only the read, names the kept Changes panel")
+    }
+
+    /// A moved row that cannot be read still moves: re-pointed to the main
+    /// worktree after its own surfaces and marked awaiting its listing, with
+    /// its `layout` as it was. The promote does not return it.
+    @Test func promoteMovesAnUnreadableRowAsItIs() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (repoID, scratch, mainID) = try await makePromotePair(db)
+        try await seedTab(db, worktreeID: mainID, position: 0)
+        let unreadable = try await seedTab(db, worktreeID: scratch.id, position: 0)
+        let brokenLayout = "not a layout"
+        try await db.writerForTests.write { dbc in
+            try dbc.execute(
+                sql: "UPDATE workspace_tab_surface SET layout = ? WHERE id = ?",
+                arguments: [brokenLayout, unreadable.id.uuidString])
+        }
+
+        let returned = try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: mainID, repoID: repoID,
+            tmuxServer: scratch.tmuxServer)
+
+        #expect(returned.isEmpty)
+        typealias MovedColumns = (worktreeID: String, position: Int, layout: String, awaitingListing: Bool)
+        let stored = try await db.writerForTests.read { dbc -> MovedColumns? in
+            guard let row = try Row.fetchOne(
+                dbc, sql: "SELECT worktreeID, position, layout, awaitingListing FROM workspace_tab_surface WHERE id = ?",
+                arguments: [unreadable.id.uuidString]) else { return nil }
+            let worktreeKey: String = row["worktreeID"]
+            let position: Int = row["position"]
+            let layout: String = row["layout"]
+            let awaiting: Bool = row["awaitingListing"]
+            return (worktreeKey, position, layout, awaiting)
+        }
+        let moved = try #require(stored)
+        #expect(moved.worktreeID == mainID.uuidString)
+        #expect(moved.position == 1)
+        #expect(moved.layout == brokenLayout)
+        #expect(moved.awaitingListing == true)
     }
 }
