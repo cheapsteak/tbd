@@ -428,8 +428,10 @@ struct SideRegionView: View {
     }
 
     /// The tab's title, or, while a note tab is being renamed, its rename
-    /// field. A note's rename commits a new title when the trimmed text is not
-    /// blank and differs from the note's title (`TabRename.noteTitle`).
+    /// field. A note's rename commits as one on the workspace tab bar does
+    /// (`AppState.commitSideNoteRename`): a new title when the trimmed text is
+    /// not blank and differs from the note's title, and the note's workspace
+    /// tab's label cleared.
     @ViewBuilder
     private func tabTitle(_ tab: SideRegionTab) -> some View {
         let title = Text(tab.title)
@@ -453,7 +455,7 @@ struct SideRegionView: View {
                     }
                 ),
                 onCommit: { text in
-                    commitNoteRename(noteID: noteID, text: text)
+                    appState.commitSideNoteRename(noteID: noteID, worktreeID: worktree.id, text: text)
                 },
                 editorFont: .systemFont(ofSize: 11),
                 selectAllOnEnterEditing: true,
@@ -464,12 +466,6 @@ struct SideRegionView: View {
         } else {
             title
         }
-    }
-
-    private func commitNoteRename(noteID: UUID, text: String) {
-        let currentTitle = appState.notes[worktree.id]?.first(where: { $0.id == noteID })?.title
-        guard let title = TabRename.noteTitle(text: text, currentNoteTitle: currentTitle) else { return }
-        appState.renameNote(noteID: noteID, worktreeID: worktree.id, title: title)
     }
 
     // MARK: Trailing edge

@@ -352,6 +352,23 @@ extension AppState {
         }
     }
 
+    /// Commit a note's rename field in the side region's strip by the same
+    /// rule as the workspace tab bar's (`commitTabRename`): the note's title,
+    /// when the text is new and not blank (`TabRename.noteTitle`), and either
+    /// way a cleared label on the note's own workspace tab, so that tab shows
+    /// the title too. A worktree whose tab list holds no tab on the note gets
+    /// the title alone.
+    func commitSideNoteRename(noteID: UUID, worktreeID: UUID, text: String) {
+        let content = PaneContent.note(noteID: noteID)
+        if let tab = tabs[worktreeID]?.first(where: { $0.content == content }) {
+            commitTabRename(tabID: tab.id, worktreeID: worktreeID, content: content, text: text)
+            return
+        }
+        let currentTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
+        guard let title = TabRename.noteTitle(text: text, currentNoteTitle: currentTitle) else { return }
+        renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
+    }
+
     /// Ask the tab bar item showing `tabID` to open its rename field
     /// (`pendingTabRenameID`).
     func requestTabRename(tabID: UUID) {
