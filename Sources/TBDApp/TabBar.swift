@@ -272,8 +272,8 @@ struct TabsThenAddLayout: Layout {
     /// takes its ideal width.
     static func widths(idealWidths: [CGFloat], available: CGFloat?) -> [CGFloat] {
         guard let first = idealWidths.first, let available else { return idealWidths }
-        let rest = idealWidths.dropFirst()
-        let firstWidth = max(0, min(first, available - rest.reduce(0, +)))
+        let rest: [CGFloat] = Array(idealWidths.dropFirst())
+        let firstWidth: CGFloat = max(0, min(first, available - rest.reduce(0, +)))
         return [firstWidth] + rest
     }
 }
