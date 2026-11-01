@@ -556,21 +556,22 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: macos-26
-    # 120, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The build step, the cache save and the four test steps
-    # below carry `timeout-minutes` of 30, 10, 15, 15, 15 and 15 — a
-    # 100-minute step budget — and they exist so that a wedged run dies on a
+    # 135, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The build step, the cache save and the five test steps
+    # below carry `timeout-minutes` of 30, 10, 15, 15, 15, 15 and 15 — a
+    # 115-minute step budget — and they exist so that a wedged run dies on a
     # step that names what hung: the compile, the save, or which pass, after
     # that pass's own watchdog has captured the stacks. A job bound at or below
-    # 100 would pre-empt them and kill the run with the uninformative message
-    # those step bounds were written to avoid. 120 clears the step budget with
-    # room for checkout, `brew install tmux`, the cache restore and the result
-    # uploads — none of which is individually timed — while cutting worst-case
-    # occupancy of one of the five macOS slots from six hours to two.
-    timeout-minutes: 120
-    # All four test steps below append their `.flaky(issue:)` retry records
+    # 115 would pre-empt them and kill the run with the uninformative message
+    # those step bounds were written to avoid. 135 clears the step budget with
+    # 20 minutes for checkout, `brew install tmux`, the cache restore and the
+    # result uploads — none of which is individually timed — while cutting
+    # worst-case occupancy of one of the five macOS slots from six hours to
+    # two and a quarter.
+    timeout-minutes: 135
+    # All five test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
-    # produces one artifact covering all three fast passes and the quiet pass
+    # produces one artifact covering all four fast passes and the quiet pass
     # together. Unset locally, where the trait writes nothing.
     #
     # A LITERAL path, not `${{ runner.temp }}`: the `runner` context is not
@@ -584,7 +585,7 @@ jobs:
       # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
       # `scripts/swift-safe`'s default — see the "Three parallel swift-frontend
       # processes" block below. Job-level so every step gets it: the build step
-      # by spelling `-j "$TBD_SWIFT_JOBS"`, and the four `scripts/test.sh` steps
+      # by spelling `-j "$TBD_SWIFT_JOBS"`, and the five `scripts/test.sh` steps
       # through the wrapper. One cap, one place.
       TBD_SWIFT_JOBS: "3"
       # The debug information this job compiles with, lighter than SwiftPM's
@@ -616,7 +617,7 @@ jobs:
       # is inferred, not measured.
       #
       # ONE DEFINITION, SPELLED BY EVERY STEP THAT REACHES SWIFTPM: the build
-      # and all four passes. Each reads it with `${CI_SWIFTPM_FLAGS:?…}`, so a
+      # and all five passes. Each reads it with `${CI_SWIFTPM_FLAGS:?…}`, so a
       # step that runs without it fails on its first line instead of building
       # with the defaults, and expands it on its own command line rather than
       # leaving a wrapper to supply it. The passes carry the flags although
@@ -1060,7 +1061,7 @@ jobs:
       # `timeout-minutes` ends one with no stacks. The bound still names this
       # step, and so the compile, as what hung; a stall that does turn up here
       # is the evidence for adding a watchdog.
-      - name: Build (every target, including the test targets, once for all four passes)
+      - name: Build (every target, including the test targets, once for all five passes)
         id: build
         timeout-minutes: 30
         run: |
@@ -1190,7 +1191,7 @@ jobs:
           key: ${{ steps.spm-cache.outputs.cache-primary-key }}
 
       # ---------------------------------------------------------------------
-      # Four sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
+      # Five sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
       # serially on an otherwise idle machine instead of contending with the
       # parallel passes. A second *job* would draw from the 5-concurrent-macOS-job
@@ -1210,7 +1211,7 @@ jobs:
       # `scripts/ci/watched-test-pass.test.sh`, run by the `lint` job.
       #
       # ---------------------------------------------------------------------
-      # Why the fast pass is THREE steps instead of one
+      # Why the fast pass is FOUR steps instead of one
       #
       # Swift Testing parallelizes every non-serialized test in ONE process with
       # no concurrency cap. All targets compile into that process, so per-test
@@ -1234,8 +1235,8 @@ jobs:
       # invocation re-pays SPM's no-op build check and process startup. That is
       # the honest figure: a single iteration showed +6 s and it did not hold up
       # across the run. Set against a step that already spends 139-404 s on the
-      # compile, it is a good trade for halving the tail. Splitting again pays
-      # that startup cost a third time for the same reason. That measurement
+      # compile, it is a good trade for halving the tail. Each further split
+      # pays that startup cost once more for the same reason. That measurement
       # included SwiftPM's no-op build check. Every pass here runs with
       # `--skip-build` against the build step above, which drops the build
       # half of that check but not the re-planning before it (see "WHAT
@@ -1245,7 +1246,7 @@ jobs:
       # This is NOT the "sharding across runners" that §1 considered and
       # rejected and §2 lists as a non-goal. That rejection was about extra
       # *jobs*: the 5-concurrent-macOS-job cap, and each shard re-paying the
-      # ~2 min build. These are three sequential `swift test` invocations in ONE
+      # ~2 min build. These are four sequential `swift test` invocations in ONE
       # job sharing ONE build — the same shape this file already uses for the
       # fast/quiet split. It pays neither the job cap nor a second build.
       #
@@ -1278,14 +1279,38 @@ jobs:
       # is the scheduler" (`Tests/CLAUDE.md`); raising the deadlines instead
       # re-derives four coupled constants and wants a spec first.
       #
-      # Why step 1b and step 2 are COMPLEMENTS and not enumerations
+      # What forced the fourth step. Pass 2 is bound by the main thread, not by
+      # the cooperative pool: its `@MainActor` tests run one at a time, so a
+      # test's reported time is mostly the main-actor work queued ahead of it.
+      # Measured on five green runs with pass 2 as one step, its slowest test
+      # reported 67.2–94.5 s, and the spread follows the runner: one runner
+      # finished pass 1a in 52 s and still put 94.5 s on pass 2's slowest test.
+      # That is within about 6 s of the 100 s at which `Tests/CLAUDE.md`
+      # ("Population is the scheduler") says to split — `saturatedPass` less
+      # its 18 s margin — and pass 2's timing tests flake in that tail; one
+      # failed after 94.2 s. A split runs its halves one after the other, so it
+      # saves no main-thread time and costs another ~26 s of startup. What it
+      # buys is a per-test tail roughly half as long, because a test queues
+      # behind only its own half's main-actor work.
       #
-      # The four passes must partition the package exhaustively, and that has
+      # So pass 2's cut is measured too, on the resource that binds it:
+      # main-thread time, not test count. Through `P`, TBDAppTests holds 51.6%
+      # and 53.6% of pass 2's main-thread samples in two whole-pass profiles,
+      # and 52% of its own tests. Step 2a takes `^TBDAppTests\.[A-P]`; step 2b
+      # takes everything else outside the daemon targets — TBDAppTests Q–Z,
+      # TBDSharedTests, TBDCLITests, TBDKernelTests, TBDHolderTests,
+      # TBDPeerHelperTests and the app tests that sit in no suite. That is why
+      # 2b executes about 4,540 tests to 2a's 2,700 while each carries about
+      # half the main-thread time.
+      #
+      # Why steps 1b and 2b are COMPLEMENTS and not enumerations
+      #
+      # The five passes must partition the package exhaustively, and that has
       # to hold *by construction* rather than by anyone remembering to update a
       # list. The spec makes exactly this point about the target boundary in §3
       # ("Enforcement mechanism = target boundary"): it is "compiler-enforced,
       # cannot silently zero-match like a `--filter` regex". A fast pass
-      # expressed as three `--filter` enumerations gives that
+      # expressed as `--filter` enumerations gives that
       # property up — `swift test --filter` exits GREEN on zero matches, so a
       # newly added `TBDFooTests` would simply appear in no list, run in NO
       # pass, and nothing would go red.
@@ -1293,14 +1318,16 @@ jobs:
       # The floors cannot cover that hole, and it is worth being precise about
       # why: adding a target does not *reduce* any listed step's count, so every
       # floor still clears and every step stays green while the new target's
-      # tests execute nowhere. Expressing step 2 as "everything except
-      # TBDDaemonTests and TBDDaemonLiveTests" closes it — a new target lands
-      # in step 2 automatically and runs. Step 1a takes the A–O half of
-      # TBDDaemonTests, step 1b takes the REST of TBDDaemonTests as a complement
-      # of 1a rather than as a `[P-Z]` enumeration (a suite renamed to start
-      # with a digit or an underscore would fall out of both halves otherwise),
-      # step 2 takes the complement of steps 1+3, the quiet pass takes
-      # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
+      # tests execute nowhere. Expressing step 2b as "everything except
+      # TBDDaemonTests, TBDDaemonLiveTests and 2a's half of TBDAppTests" closes
+      # it — a new target lands in step 2b automatically and runs. Step 1a
+      # takes the A–O half of TBDDaemonTests, step 1b takes the REST of
+      # TBDDaemonTests as a complement of 1a rather than as a `[P-Z]`
+      # enumeration (a suite renamed to start with a digit or an underscore
+      # would fall out of both halves otherwise), step 2a takes the A–P half of
+      # TBDAppTests, step 2b takes the complement of every other step in ONE
+      # `--skip` regex, so nothing can fall between two lists, and the quiet
+      # pass takes TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
       #
       # Floors: `swift test --list-tests` on 2026-08-28 reports TBDDaemonTests
       # 4354, TBDAppTests 2790, TBDSharedTests 858, TBDCLITests 306,
@@ -1312,8 +1339,8 @@ jobs:
       # daemon pass had a median test reporting an 85.8 s span (p90 112.1 s,
       # max 132.8 s) and 47% of its tests spanned longer than the whole 90 s
       # `ciSafeDeadline` that bounds the handshake waits among them. What
-      # actually EXECUTES is slightly lower for step 2 — 3876 on the 2026-08-27
-      # green run, the most recent one to reach step 2 at all — because a
+      # actually EXECUTES is slightly lower for pass 2 — 3876 on the 2026-08-27
+      # green run, the most recent one to reach pass 2 at all — because a
       # handful of tests are conditionally skipped at runtime. The floors are
       # set against the executed counts (the summary line these steps grep),
       # which is the only number the check can see; don't "correct" them to the
@@ -1330,6 +1357,12 @@ jobs:
       # deliberately far below either half and will be recalibrated from the
       # counts this cut's first run prints, which is the only source that
       # measures what actually executes.
+      #
+      # The two app halves are floored at 1500 and 2500, against the ~2,700 and
+      # ~4,540 tests they execute. They sit far below either half for the same
+      # reasons as the daemon floors: the executed count drifts from run to
+      # run, and a floor is there to catch a collapse, not to track the
+      # population.
       #
       # And the executed count is NOT stable run to run: two CI runs on one PR,
       # on commits differing only in doc comments (zero tests added,
@@ -1455,31 +1488,50 @@ jobs:
             -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
 
-      - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
-        id: fast_pass_app
-        # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 1b
-        # and step 2 are COMPLEMENTS" block above. A new test target lands here
-        # on its own. Its `if:` is 1b's, for 1b's reasons.
+      - name: Test (fast parallel pass 2a — TBDAppTests A–P)
+        id: fast_pass_app_a
+        # The A–P half of TBDAppTests, a cut that halves pass 2's main-thread
+        # time rather than its test count — see "What forced the fourth step"
+        # above. Its `if:` is 1b's, for 1b's reasons.
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # 15. A step bound wide enough for the per-test limits to fire first and
         # attribute a hang to a named test would buy nothing now: the watchdog
         # does that job sooner and with a stack. It bounds the pass at 600 s —
-        # against 71 s of step time on the split's first CI run — so the
-        # platform bound only has to clear the budget plus the sampling and kill
-        # sweep.
+        # against a 69–96 s test run for the whole of pass 2 as one step — so
+        # the platform bound only has to clear the budget plus the sampling and
+        # kill sweep.
         timeout-minutes: 15
         run: |
           read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
-            --name fast-pass-app --budget-seconds 600 \
-            --floor 1900 \
+            --name fast-pass-app-a --budget-seconds 600 \
+            --floor 1500 \
+            --floor-message 'the --filter regex matched nothing or the target was renamed.' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDAppTests\.[A-P]' \
+               --xunit-output /tmp/xunit-app-a.xml --experimental-xunit-message-failure
+
+      - name: Test (fast parallel pass 2b — everything else outside the daemon targets)
+        id: fast_pass_app_b
+        # Expressed as a COMPLEMENT, not a list of targets, and in ONE `--skip`
+        # regex — see the "Why steps 1b and 2b are COMPLEMENTS" block above. A
+        # new test target, and any TBDAppTests suite outside `[A-P]`, lands here
+        # on its own. Its `if:` is 1b's, for 1b's reasons, so a red 2a does not
+        # skip it.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # 15 and a 600 s budget, for 2a's reasons.
+        timeout-minutes: 15
+        run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
+          scripts/ci/watched-test-pass.sh \
+            --name fast-pass-app-b --budget-seconds 600 \
+            --floor 2500 \
             --floor-message 'the --skip regex over-matched or a target was renamed.' \
-            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
-               --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --skip '^(TBDDaemonTests\.|TBDDaemonLiveTests\.|TBDAppTests\.[A-P])' \
+               --xunit-output /tmp/xunit-app-b.xml --experimental-xunit-message-failure
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
         id: quiet_pass
-        # Runs on a red fast pass for the same reason 1b and 2 do: the live
+        # Runs on a red fast pass for the same reason 1b, 2a and 2b do: the live
         # suites are the ones a fast-pass flake most often hides. Like theirs,
         # its `if:` also names the build step outright.
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
@@ -1535,16 +1587,16 @@ jobs:
       # `if: always()` is the whole point, and both outcomes need the XML. A
       # failing run's is the only machine-readable account of what failed. A
       # passing run's carries the test populations the valve sums to print
-      # `Test run with N tests`, which six floor checks require before they will
+      # `Test run with N tests`, which every floor check requires before it will
       # believe a run happened at all — without it a green remote verdict reads
       # as a truncated suite. `warn` on absence, matching the metrics upload
       # above: a missing file means the wiring broke and that must be visible.
       #
-      # The glob already covers the fourth file the daemon split added:
-      # `scripts/remote_verify.py` discovers results with `rglob("*.xml")` over
-      # the unpacked artifact (`result_files`) and sums whatever it finds, so
-      # splitting or renaming a pass needs no change there — only that each pass
-      # keeps writing its XML under `/tmp/xunit-*.xml`.
+      # The glob covers every pass's file, the two daemon halves and the two
+      # app halves included: `scripts/remote_verify.py` discovers results with
+      # `rglob("*.xml")` over the unpacked artifact (`result_files`) and sums
+      # whatever it finds, so splitting or renaming a pass needs no change there
+      # — only that each pass keeps writing its XML under `/tmp/xunit-*.xml`.
       - name: Upload xUnit results
         if: always()
         uses: actions/upload-artifact@v4

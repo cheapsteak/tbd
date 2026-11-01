@@ -611,9 +611,9 @@ class Failure:
 def result_files(directory: Path) -> list[Path]:
     """Every xUnit file in a downloaded artifact, in a stable order.
 
-    Globbed rather than named. `test.yml` writes one file per pass — three
-    today — and SwiftPM may split a pass again between its XCTest and Swift
-    Testing writers, so the count is a property of the run, not a constant.  A
+    Globbed rather than named. `test.yml` writes one file per pass, and
+    SwiftPM may split a pass again between its XCTest and Swift Testing
+    writers, so the count is a property of the run, not a constant.  A
     run that died early simply publishes fewer, which is not an error here.
     """
     return sorted(path for path in directory.rglob("*.xml") if path.is_file())
@@ -1144,10 +1144,11 @@ def read_run_results(
 
 
 def _test_run_summary(count: int, outcome: str) -> str:
-    """The line six call sites grep for, in the wording they grep for.
+    """The line every floor check greps for, in the wording it greps for.
 
-    `scripts/git-hooks/pre-push`, `scripts/nightly-flake-stress.sh` and three
-    steps of `.github/workflows/test.yml` all read a run's population out of
+    `scripts/git-hooks/pre-push`, `scripts/nightly-flake-stress.sh` and
+    `scripts/ci/watched-test-pass.sh`, which runs every pass of
+    `.github/workflows/test.yml`, all read a run's population out of
     `Test run with N tests` and treat its absence as a collapsed or truncated
     suite. A remote verdict that omitted it would be read as a broken run and
     block the push naming the wrong cause, so the remote path states the same
@@ -1223,7 +1224,7 @@ def _write_failure_report(
     here instead of announcing a failure it cannot describe.
 
     THE COUNT LINE IS SUPPRESSED FOR A NARROWED CALLER, and that is a guard
-    rather than tidiness. Six consumers grep `Test run with [0-9]+ tests?` and
+    rather than tidiness. The floor checks grep `Test run with [0-9]+ tests?` and
     take `head -1`, and `scripts/git-hooks/pre-push` captures both streams — so
     this line would arrive *before*, and win over, the count printed by the local
     re-run that a narrowed caller does next. A `--filter` naming a renamed type

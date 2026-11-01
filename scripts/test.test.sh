@@ -2188,10 +2188,10 @@ remote_verify_argv() { cat "$1/remote-verify-argv" 2>/dev/null; }
 
 # WHAT A FLOOR CONSUMER WOULD READ OUT OF THIS RUN'S LOG — the first
 # `Test run with N tests`, extracted exactly as `scripts/git-hooks/pre-push`,
-# `scripts/nightly-flake-stress.sh` and the three `test.yml` steps extract it,
-# `head -1` included. Asserting through the consumer's own reading is the point:
-# a count that is merely PRESENT somewhere in the log proves nothing, since the
-# floor only ever sees the first one.
+# `scripts/nightly-flake-stress.sh` and `scripts/ci/watched-test-pass.sh` (every
+# `test.yml` pass) extract it, `head -1` included. Asserting through the
+# consumer's own reading is the point: a count that is merely PRESENT somewhere
+# in the log proves nothing, since the floor only ever sees the first one.
 first_reported_test_count() {
   printf '%s\n' "$1" | grep -oE 'Test run with [0-9]+ tests?' | grep -oE '[0-9]+' | head -1
 }
@@ -3119,10 +3119,11 @@ test_the_listing_gate_does_not_catch_a_filtered_run() {
 # ---------------------------------------------------------------------------
 # 7c. The count in the log has to describe the run being reported
 #
-# Six consumers decide whether a run is trustworthy by grepping its log for
+# The floor checks decide whether a run is trustworthy by grepping its log for
 # `Test run with N tests` and taking the FIRST match — `scripts/git-hooks/
 # pre-push` (which pipes both streams into its log), `scripts/nightly-flake-
-# stress.sh`, and three floors in `.github/workflows/test.yml`.
+# stress.sh`, and `scripts/ci/watched-test-pass.sh` for every pass in
+# `.github/workflows/test.yml`.
 #
 # On the narrowed-red path two runs speak into one log, and only the second's
 # verdict is reported: the remote whole-suite report prints first, then the local

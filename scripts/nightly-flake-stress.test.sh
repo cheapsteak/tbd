@@ -748,9 +748,14 @@ test_pass_of_maps_each_target_to_its_ci_pass() {
     'TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/a()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonTests/nilPreferredKeepsOrder()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonLiveTests.GitManagerTimeoutTests/a()|Pass-quiet-pass|35'
-    'TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()|Pass-fast-pass-app|1900'
-    'TBDSharedTests/topLevel()|Pass-fast-pass-app|1900'
-    'TBDAppTests.ArchiveTombstoneTests/testArchiving|Pass-fast-pass-app|1900'
+    'TBDAppTests.ArchiveTombstoneTests/testArchiving|Pass-fast-pass-app-a|1500'
+    'TBDAppTests.PanelTabTests/a()|Pass-fast-pass-app-a|1500'
+    'TBDAppTests.QuietIngestTests/a()|Pass-fast-pass-app-b|2500'
+    'TBDAppTests.TranscriptEstimatorAccuracyTests/a()|Pass-fast-pass-app-b|2500'
+    'TBDAppTests/suiteLessTest()|Pass-fast-pass-app-b|2500'
+    'TBDSharedTests.HolderLockTests/lockIsReacquirableAfterRelease()|Pass-fast-pass-app-b|2500'
+    'TBDSharedTests/topLevel()|Pass-fast-pass-app-b|2500'
+    'TBDCLITests.ArgsTests/a()|Pass-fast-pass-app-b|2500'
   )
   local c id want_name want_floor spec
   for c in "${cases[@]}"; do
@@ -762,20 +767,20 @@ test_pass_of_maps_each_target_to_its_ci_pass() {
   done
   # A suite-less test's xunit classname is the bare module, which `^TBDDaemonTests\.`
   # does not match; only its FILTER form does. Matching the classname instead
-  # would send it to fast pass 2, where CI never runs it.
+  # would send it to fast pass 2b, where CI never runs it.
   local mutant
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
   mutant_of mutant pass_spec_of 's/^  form="\$\(filter_form_of "\$id"\)"/  form="${id%\/*}"/' || return
-  assert_eq "mutation: matching the classname misplaces a suite-less test" "Pass-fast-pass-app" \
+  assert_eq "mutation: matching the classname misplaces a suite-less test" "Pass-fast-pass-app-b" \
     "$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests/nilPreferredKeepsOrder()'" | cut -d'|' -f1)"
 }
 
 test_a_filter_containing_a_pipe_keeps_its_floor() {
-  # Fast pass 2's skip regex holds a `|`. Read with `IFS='|'`, the floor field
+  # Fast pass 2b's skip regex holds a `|`. Read with `IFS='|'`, the floor field
   # would be the tail of that regex and every iteration would fail its floor.
   local spec; spec="$(pass_spec_of 'TBDAppTests.X/y()')"
-  assert_eq "the whole filter" "--parallel --skip ^(TBDDaemonTests|TBDDaemonLiveTests)\\." "$(spec_field "$spec" 2)"
-  assert_eq "the floor" "1900" "$(spec_field "$spec" 3)"
+  assert_eq "the whole filter" "--parallel --skip ^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.[A-P])" "$(spec_field "$spec" 2)"
+  assert_eq "the floor" "2500" "$(spec_field "$spec" 3)"
   assert_eq "the issue field" "adhoc" "$(spec_field "$spec" 4)"
   assert_eq "a TARGETS line reads as before" "GitManagerTimeout|3|503" \
     "$(s='GitManagerTimeout|--no-parallel --filter ^X|3|503|desc'; printf '%s|%s|%s' "$(spec_field "$s" 1)" "$(spec_field "$s" 3)" "$(spec_field "$s" 4)")"
@@ -788,6 +793,8 @@ test_pass_of_ranges_are_code_point_ranges() {
   # platform's regex library, so removing the pin flips this only on some hosts.
   assert_eq "lowercase suite name -> 1b, under any caller locale" "Pass-fast-pass-daemon-b" \
     "$(LC_ALL=en_US.UTF-8 pass_spec_of 'TBDDaemonTests.lowercaseSuite/x()' 2>/dev/null | cut -d'|' -f1)"
+  assert_eq "lowercase app suite name -> 2b, under any caller locale" "Pass-fast-pass-app-b" \
+    "$(LC_ALL=en_US.UTF-8 pass_spec_of 'TBDAppTests.lowercaseSuite/x()' 2>/dev/null | cut -d'|' -f1)"
 }
 
 test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
@@ -798,6 +805,14 @@ test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
   assert_contains "the mutant really widened 1a" "$(grep fast-pass-daemon-a "$mutant" | head -1)" "[A-Z]"
   out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SessionStatesRPCTests/a()'" 2>&1)" || rc=$?
   assert_eq "mutation: a 1a widened to [A-Z] no longer maps the P-Z suite" "1" "$rc"
+  assert_contains "and says it is run by two passes" "$out" "two CI passes"
+  # MUTATION: widen 2a to every letter while 2b still skips only A-P.
+  # QuietIngestTests is then run by 2a AND 2b.
+  mutant_of mutant pass_spec_of 's/^(  "fast-pass-app-a.*)\[A-P\]/\1[A-Z]/' || return
+  assert_contains "the mutant really widened 2a" "$(grep fast-pass-app-a "$mutant" | head -1)" "[A-Z]"
+  rc=0
+  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDAppTests.QuietIngestTests/a()'" 2>&1)" || rc=$?
+  assert_eq "mutation: a 2a widened to [A-Z] no longer maps the Q-Z suite" "1" "$rc"
   assert_contains "and says it is run by two passes" "$out" "two CI passes"
   # MUTATION: drop the quiet pass. A live test then lands in no pass.
   mutant_of mutant pass_spec_of '/^  "quiet-pass\|/d' || return
@@ -812,7 +827,7 @@ test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
 # or floor must make the check fail.
 test_the_pass_table_matches_test_yml() {
   local wf="$HERE/../.github/workflows/test.yml"
-  assert_eq "four invocations parsed from test.yml" "4" "$(pass_table_from_workflow "$wf" | grep -c .)"
+  assert_eq "five invocations parsed from test.yml" "5" "$(pass_table_from_workflow "$wf" | grep -c .)"
   assert_eq "real test.yml agrees" "0" "$(check_pass_table "$wf" >/dev/null 2>&1; echo $?)"
   local d; d="$(mktmpd)"
   sed 's/--floor 1500/--floor 1600/' "$wf" > "$d/floor.yml"
@@ -833,7 +848,7 @@ test_the_pass_table_matches_test_yml() {
 # the real test.yml in agreement rather than the flag being absent.
 test_the_pass_table_drops_skip_build() {
   local wf="$HERE/../.github/workflows/test.yml" mutant rc
-  assert_eq "every CI pass in test.yml carries --skip-build" "4" \
+  assert_eq "every CI pass in test.yml carries --skip-build" "5" \
     "$(grep -c -e '-- --fingerprint --skip-build ' "$wf")"
   assert_eq "no parsed pass carries it" "0" \
     "$(pass_table_from_workflow "$wf" | grep -c -e '--skip-build')"
@@ -876,7 +891,7 @@ skip_build_gates() {
 
 test_every_skip_build_pass_is_gated_on_the_build() {
   local wf="$HERE/../.github/workflows/test.yml" d
-  assert_eq "four steps in test.yml forward --skip-build" "4" \
+  assert_eq "five steps in test.yml forward --skip-build" "5" \
     "$(skip_build_gates "$wf" | grep -c .)"
   assert_eq "every one names the build step's success in its if:" "" \
     "$(skip_build_gates "$wf" | grep '^UNGATED')"
@@ -884,7 +899,7 @@ test_every_skip_build_pass_is_gated_on_the_build() {
   # MUTATION: drop the build clause from the passes that run after a red 1a.
   # Their `!cancelled()` would then run them after a failed build too.
   sed "s/steps\.build\.outcome == 'success' && //" "$wf" > "$d/later.yml"
-  assert_eq "mutation: 1b, 2 and the quiet pass without the clause are caught" "3" \
+  assert_eq "mutation: 1b, 2a, 2b and the quiet pass without the clause are caught" "4" \
     "$(skip_build_gates "$d/later.yml" | grep -c '^UNGATED')"
   # MUTATION: 1a gated on `!cancelled()` alone, which would run it after a
   # failed build.
@@ -906,7 +921,7 @@ test_every_skip_build_pass_is_gated_on_the_build() {
 # what keeps the real test.yml in agreement rather than the word being absent.
 test_the_pass_table_drops_the_ci_build_flags() {
   local wf="$HERE/../.github/workflows/test.yml" mutant rc
-  assert_eq "every CI pass in test.yml carries the flags right after --skip-build" "4" \
+  assert_eq "every CI pass in test.yml carries the flags right after --skip-build" "5" \
     "$(grep -c -F -e "-- --fingerprint --skip-build $CI_SWIFTPM_FLAGS_WORD " "$wf")"
   assert_eq "no parsed pass carries them" "0" \
     "$(pass_table_from_workflow "$wf" | grep -c -F -e "$CI_SWIFTPM_FLAGS_WORD")"
@@ -974,7 +989,7 @@ test_every_swiftpm_command_in_the_test_job_carries_the_ci_build_flags() {
   local wf="$HERE/../.github/workflows/test.yml" d
   assert_eq "the test job defines CI_SWIFTPM_FLAGS, non-empty" "1" \
     "$(ci_flags_definitions "$wf" | grep -c .)"
-  assert_eq "five commands in the test job reach SwiftPM: the build and four passes" "5" \
+  assert_eq "six commands in the test job reach SwiftPM: the build and five passes" "6" \
     "$(swiftpm_flag_carriers "$wf" | grep -c .)"
   assert_eq "every one carries the flags" "" "$(swiftpm_flag_carriers "$wf" | grep '^DROPS')"
   assert_contains "the build step is one of them" "$(swiftpm_flag_carriers "$wf")" "carries Build ("
@@ -987,7 +1002,7 @@ test_every_swiftpm_command_in_the_test_job_carries_the_ci_build_flags() {
   # MUTATION: no command expands the array.
   # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
   sed 's/ "\${swiftpm_flags\[@\]}"//' "$wf" > "$d/unexpanded.yml"
-  assert_eq "mutation: every command without the expansion is caught" "5" \
+  assert_eq "mutation: every command without the expansion is caught" "6" \
     "$(swiftpm_flag_carriers "$d/unexpanded.yml" | grep -c '^DROPS')"
   # MUTATION: the build alone loses them, which would leave every pass planning
   # flags the build never compiled with.
@@ -997,7 +1012,7 @@ test_every_swiftpm_command_in_the_test_job_carries_the_ci_build_flags() {
     "$(swiftpm_flag_carriers "$d/build.yml" | grep '^DROPS')" "DROPS Build ("
   # MUTATION: the array expanded but never read — it would expand to nothing.
   sed '/read -r -a swiftpm_flags/d' "$wf" > "$d/unread.yml"
-  assert_eq "mutation: expanding an array no step read is caught" "5" \
+  assert_eq "mutation: expanding an array no step read is caught" "6" \
     "$(swiftpm_flag_carriers "$d/unread.yml" | grep -c '^DROPS')"
   # MUTATION: a retry step added after the passes, copied without the flags.
   { cat "$wf"
@@ -1020,9 +1035,10 @@ test_pass_of_filters_match_test_yml_verbatim() {
   local wf="$HERE/../.github/workflows/test.yml" body; body="$(cat "$wf")"
   assert_contains "1a filter in test.yml"  "$body" "--parallel --filter '^TBDDaemonTests\.[A-O]'"
   assert_contains "1b filter in test.yml"  "$body" "--parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]'"
-  assert_contains "2 filter in test.yml"   "$body" "--parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'"
+  assert_contains "2a filter in test.yml"  "$body" "--parallel --filter '^TBDAppTests\.[A-P]'"
+  assert_contains "2b filter in test.yml"  "$body" "--parallel --skip '^(TBDDaemonTests\.|TBDDaemonLiveTests\.|TBDAppTests\.[A-P])'"
   assert_contains "quiet filter in test.yml" "$body" "--filter '^TBDDaemonLiveTests\.' --no-parallel"
-  local floor; for floor in 1200 1500 1900 35; do
+  local floor; for floor in 1200 1500 2500 35; do
     assert_contains "floor $floor in test.yml" "$body" "--floor $floor"
   done
   # And the harness's own copies equal those strings once CI's quotes are removed.

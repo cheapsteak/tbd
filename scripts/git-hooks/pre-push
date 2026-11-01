@@ -98,11 +98,11 @@ fi
 # the parallel pass and that limit is measuring machine load instead of the
 # behaviour it was written to catch. See Tests/CLAUDE.md "Test tiers".
 #
-# The fast pass is one invocation here, not the two CI splits it into: that
-# split trades +26 s of wall time for a shorter scheduling tail on a loaded
+# The fast pass is one invocation here, not the four CI splits it into: each
+# split trades about 26 s of wall time for a shorter scheduling tail on a loaded
 # runner, and locally the wall time is what the pusher is waiting on.
 #
-# Both passes carry an EXECUTED-TEST FLOOR, mirroring all three CI steps.
+# Both passes carry an EXECUTED-TEST FLOOR, mirroring the CI steps.
 # `swift test --filter`/`--skip` exits GREEN on zero matches, and the filter
 # matches the TYPE name rather than the @Suite display string — so a renamed or
 # collapsed target runs nothing and passes. The floors sit well below the real
