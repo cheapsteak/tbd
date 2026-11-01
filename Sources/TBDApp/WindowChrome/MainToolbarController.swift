@@ -161,6 +161,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// The popup the filter options were last built into, and the options.
     weak var builtFilterPopup: NSPopUpButton?
     var builtFilterOptions: [RepoFilterPresentation.Option] = []
+    /// Filter selections set so far, for the debug log and for tests. An
+    /// apply that finds the popup already showing the filter sets none.
+    var filterSelectionCount = 0
     /// The Servers icon per running state, appearance and accessibility label.
     var serversImages: [String: NSImage] = [:]
     /// Per item, the key its image was last derived from, so an unchanged

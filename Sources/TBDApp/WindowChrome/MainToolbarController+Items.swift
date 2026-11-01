@@ -254,19 +254,28 @@ extension MainToolbarController {
 
     /// Checks the row the filter names, or none when it names a repo that is
     /// gone, as the SwiftUI `Picker` shows it, rather than a false "All Repos".
+    /// Only when that differs from the popup's selection: an apply that finds
+    /// the popup already showing the filter sets nothing.
     private func selectFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
-        guard filter.selectedIsKnown else {
+        let target = Self.filterRow(in: popup, for: filter)
+        guard popup.indexOfSelectedItem != target else { return }
+        if target < 0 {
             popup.select(nil)
-            return
+        } else {
+            popup.selectItem(at: target)
         }
+        filterSelectionCount += 1
+        itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public): row \(target, privacy: .public)")
+    }
+
+    /// The index of the row `filter` names, or -1, the popup's "no
+    /// selection", when it names a repo that is gone.
+    private static func filterRow(in popup: NSPopUpButton, for filter: RepoFilterPresentation) -> Int {
+        guard filter.selectedIsKnown else { return -1 }
         let index = popup.itemArray.firstIndex { row in
             !row.isSeparatorItem && (row.representedObject as? UUID) == filter.selected
         }
-        if let index {
-            popup.selectItem(at: index)
-        } else {
-            popup.select(nil)
-        }
+        return index ?? -1
     }
 
     private func updateServers(_ item: NSMenuToolbarItem, _ servers: ServersPresentation) {

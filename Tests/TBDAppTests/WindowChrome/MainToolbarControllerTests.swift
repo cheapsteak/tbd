@@ -334,6 +334,46 @@ struct MainToolbarControllerTests {
         #expect(popup.indexOfSelectedItem == -1)
     }
 
+    /// The filter's row is selected only when the popup does not already
+    /// show it: an apply with the filter unchanged sets no selection, for a
+    /// known repo or a missing one. A popup whose selection something else
+    /// moved is set back, which is also what shows the count does move when
+    /// a selection is set. Every apply here is direct and nothing suspends,
+    /// so no scheduled apply lands in between.
+    @Test func anUnchangedFilterIsNotSelectedAgain() async throws {
+        let fixture = ToolbarFixture(label: "anUnchangedFilterIsNotSelectedAgain")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+
+        fixture.state.repoFilter = fixture.repos[1].id
+        let known = MainToolbarSnapshot.make(from: fixture.state)
+        let before = controller.filterSelectionCount
+        controller.apply(known)
+        let popup = try #require(fixture.filterPopup)
+        #expect(popup.indexOfSelectedItem == 3)
+        #expect(controller.filterSelectionCount == before + 1)
+
+        controller.apply(known)
+        #expect(popup.indexOfSelectedItem == 3)
+        #expect(controller.filterSelectionCount == before + 1)
+
+        popup.selectItem(at: 0)
+        controller.apply(known)
+        #expect(popup.indexOfSelectedItem == 3)
+        #expect(controller.filterSelectionCount == before + 2)
+
+        fixture.state.repoFilter = UUID()
+        let missing = MainToolbarSnapshot.make(from: fixture.state)
+        controller.apply(missing)
+        #expect(popup.indexOfSelectedItem == -1)
+        #expect(controller.filterSelectionCount == before + 3)
+
+        controller.apply(missing)
+        #expect(popup.indexOfSelectedItem == -1)
+        #expect(controller.filterSelectionCount == before + 3)
+    }
+
     @Test func filterWidthIsCapped() async throws {
         let fixture = ToolbarFixture(label: "filterWidthIsCapped")
         defer { fixture.tearDown() }
