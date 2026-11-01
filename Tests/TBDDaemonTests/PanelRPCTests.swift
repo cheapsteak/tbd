@@ -68,7 +68,7 @@ struct PanelRPCTests {
 
     // MARK: - panel.get
 
-    @Test("panel.get on an empty store returns an empty result, no error, flag unset")
+    @Test("panel.get on an empty store returns an empty result, no error")
     func getOnEmptyStoreReturnsEmptyResult() async throws {
         let (router, _) = try makeRouterAndDB()
         let request = try RPCRequest(
@@ -79,7 +79,7 @@ struct PanelRPCTests {
         #expect(result.tabs.isEmpty)
     }
 
-    @Test("panel.get reflects a committed tab with the flag unset")
+    @Test("panel.get reflects a committed tab")
     func getReflectsCommittedTab() async throws {
         let (router, db) = try makeRouterAndDB()
         let wtID = try await makeWorktree(db)

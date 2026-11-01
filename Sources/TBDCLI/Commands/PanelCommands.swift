@@ -46,8 +46,7 @@ struct PanelList: AsyncParsableCommand {
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
-        // `panel.get` is ungated, so `list` answers while the flag is off.
-        // Scoped to `--tab` when given; scoped or not, the reply names the
+        // `list` reads through `panel.get`. Scoped to `--tab` when given; scoped or not, the reply names the
         // worktree's active tab, which the listing marks.
         let result: PanelGetResult = try client.call(
             method: RPCMethod.panelGet,
