@@ -557,9 +557,11 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
   the title.
 - **Closing a note's side-region tab** works as closing a workspace note tab
   does: when the note has content the app asks first, then closes the panel
-  and deletes the note. Nothing in the app lists notes, so a note closed and
-  kept would be unreachable. The `close` operation itself keeps the note, so an
-  agent's `tbd panel close` does too.
+  and deletes the note. One rule holds on every tab: every note in a worktree
+  has its own workspace tab, whose × already asks and then deletes the note
+  (`AppState.closeTab`), so × on its side tab does the same; deleting the note
+  removes its workspace tab too, so the note is gone everywhere. The `close`
+  operation itself keeps the note, so an agent's `tbd panel close` does too.
 - **A web page's full address** shows in its tab's tooltip.
 - **While Session History is open,** no workspace tab is selected, so the
   history view takes the whole width under a full-width tab bar.
@@ -646,7 +648,7 @@ Each branch is tested both ways, asserting opposite outcomes.
   operation re-points a primary.
 - **A note further back in a panel's history outlives the panel.** Closing a
   note panel deletes the note it shows; notes the panel navigated away from
-  are kept, and nothing lists them.
+  are kept, each on its own workspace tab.
 - **Local-daemon latency is assumed.** If `panel.apply` ever crossed a network,
   the single round trip would need the optimistic layer.
 
@@ -689,8 +691,8 @@ Each branch is tested both ways, asserting opposite outcomes.
 - **The transcript button on the terminal's own tab, or in the window
   toolbar.** The tab already carries a status glyph, a title and a close
   button; the window toolbar is per window, and the button acts on one tab.
-- **× keeps a side-region note.** Nothing lists notes, so a kept note would be
-  unreachable.
+- **× keeps a side-region note.** A note's × means the same thing on every
+  tab, and the workspace tab's × already deletes the note.
 
 ## Future extensions
 
