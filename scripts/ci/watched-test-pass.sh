@@ -272,11 +272,53 @@ rm -f "$rc_file"
   echo "${PIPESTATUS[0]}" > "$rc_file"
 ) &
 pipeline=$!
+
+# THROWAWAY STALL DIAGNOSTIC (do not merge). On the fast passes only, a
+# sampler follows the log and captures stacks whenever Swift Testing goes
+# quiet; see scripts/ci/stall-sampler.py. It is stopped right after the wait
+# loop below, before either exit path's verdict logic, and nothing it does can
+# reach this pass's status, floor check or messages.
+stall_sampler_pid=""
+stall_sampler_wanted=0
+for stall_sampler_arg in ${forwarded[@]+"${forwarded[@]}"}; do
+  if [ "$stall_sampler_arg" = "--parallel" ]; then
+    stall_sampler_wanted=1
+  fi
+done
+if [ "$stall_sampler_wanted" -eq 1 ]; then
+  stall_diag_dir=/tmp/stall-diag
+  if mkdir -p "$stall_diag_dir" 2>/dev/null; then
+    python3 -I "$here/stall-sampler.py" --log "$log_file" --pipeline-pid "$pipeline" \
+      --out-dir "$stall_diag_dir" --name "$name" --quiet-seconds 1.0 \
+      --sample-seconds 2 --max-captures 12 \
+      < /dev/null > "$stall_diag_dir/$name-sampler.out" 2>&1 &
+    stall_sampler_pid=$!
+  fi
+fi
+stop_stall_sampler() {
+  local stall_waited=0
+  [ -n "$stall_sampler_pid" ] || return 0
+  kill -TERM "$stall_sampler_pid" 2>/dev/null || true
+  while kill -0 "$stall_sampler_pid" 2>/dev/null && [ "$stall_waited" -lt 50 ]; do
+    sleep 0.1
+    stall_waited=$((stall_waited + 1))
+  done
+  kill -KILL "$stall_sampler_pid" 2>/dev/null || true
+  wait "$stall_sampler_pid" 2>/dev/null || true
+  stall_sampler_pid=""
+  return 0
+}
+
 waited=0
 while kill -0 "$pipeline" 2>/dev/null && [ "$waited" -lt "$budget_seconds" ]; do
   sleep 5
   waited=$((waited + 5))
 done
+
+# Both exit paths pass through here: the pipeline has ended, or the budget has
+# expired and the block below samples and kills it. Either way the stall
+# sampler stops first (TERM, then KILL after 5 s).
+stop_stall_sampler
 
 # Collect a process tree by parent pid, so targets are found by lineage from the
 # pipeline rather than by executable name.
