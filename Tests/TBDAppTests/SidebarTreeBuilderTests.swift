@@ -370,6 +370,31 @@ struct SidebarTreeBuilderTests {
         #expect(before != after)
     }
 
+    /// A creating placeholder — a row in `pendingWorktreeIDs`, which the
+    /// daemon has not heard of — is marked, so the drop policy keeps off it.
+    /// A daemon row that is itself `.creating`, its hook still running, is
+    /// not: the daemon knows it.
+    @Test func placeholderMarkFollowsPendingWorktreeIDs() throws {
+        let suite = TestDefaultsSuite("SidebarTreeBuilderTests.placeholder")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let pending = Self.row("pending", repo: repo.id, order: 0, status: .creating)
+        let creating = Self.row("creating", repo: repo.id, order: 1, status: .creating)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [pending, creating]]
+        state.pendingWorktreeIDs = [pending.id]
+
+        let tree = Self.build(state)
+        #expect(try #require(Self.worktreeModel(tree, pending.id)).isPlaceholder)
+        #expect(try #require(Self.worktreeModel(tree, creating.id)).isPlaceholder == false)
+
+        // Once the daemon has the row, the mark goes.
+        state.pendingWorktreeIDs = []
+        let settled = Self.build(state)
+        #expect(try #require(Self.worktreeModel(settled, pending.id)).isPlaceholder == false)
+    }
+
     // MARK: Purity
 
     /// The controller builds inside `withObservationTracking`; a tracked write

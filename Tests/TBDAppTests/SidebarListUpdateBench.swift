@@ -194,13 +194,16 @@ extension SidebarListUpdateBench {
     /// Graduation criterion 4: the native path no slower than the `List` path
     /// at 800 sessions. Both are measured as main-thread CPU per refresh with
     /// an idle baseline subtracted, which is what `runCase` measures, and
-    /// both include the layout pass that makes the rows.
+    /// both include the layout pass that makes the rows. A sample can come
+    /// out below the baseline; both sides clamp such a sample to zero the same
+    /// way, so the comparison favours neither.
     @Test("native versus List at 800 remote sessions (gated by TBD_PERF_BENCH=1)")
     func nativeVersusList() async {
         guard ProcessInfo.processInfo.environment["TBD_PERF_BENCH"] == "1" else { return }
         for collapse in [false, true] {
-            let list = await runCase(n: 800, collapse: collapse)
-            let native = nativeCPUDeltas(collapse: collapse)
+            let listSamples = await runCase(n: 800, collapse: collapse)
+            let list = Self.clampedToZero(listSamples)
+            let native = Self.clampedToZero(nativeCPUDeltas(collapse: collapse))
             let listSorted = list.sorted(), nativeSorted = native.sorted()
             let listP50 = Self.percentile(listSorted, 0.5), nativeP50 = Self.percentile(nativeSorted, 0.5)
             let nativeP95 = Self.percentile(nativeSorted, 0.95), listP95 = Self.percentile(listSorted, 0.95)
@@ -212,8 +215,15 @@ extension SidebarListUpdateBench {
         }
     }
 
+    /// A baseline-subtracted sample below zero is noise in the baseline, not
+    /// a refresh that cost less than nothing: it counts as zero.
+    static func clampedToZero(_ samples: [Double]) -> [Double] {
+        samples.map { max(0, $0) }
+    }
+
     /// Main-thread CPU per refresh of the native sidebar at 800 sessions
-    /// (mutation, rebuild + apply, layout), idle baseline subtracted.
+    /// (mutation, rebuild + apply, layout), idle baseline subtracted, raw:
+    /// `nativeVersusList` clamps it as it clamps the `List`'s.
     private func nativeCPUDeltas(collapse: Bool) -> [Double] {
         let h = OutlineHarness("bench.vs")
         defer { h.tearDown() }
@@ -234,7 +244,7 @@ extension SidebarListUpdateBench {
             h.controller.flushPendingRebuild()
             h.host?.layout()
             let elapsed = Double(cpuNanos() - start) / 1_000_000 - baseline
-            if step >= NativeBudget.warmUp { deltas.append(max(0, elapsed)) }
+            if step >= NativeBudget.warmUp { deltas.append(elapsed) }
         }
         return deltas
     }

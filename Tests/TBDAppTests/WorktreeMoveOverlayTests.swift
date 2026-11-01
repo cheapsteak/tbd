@@ -463,7 +463,21 @@ struct WorktreeMoveOverlayTests {
         #expect(state.activeToast?.message == "Couldn't move Row c: \(MoveRefused().localizedDescription)")
         #expect(state.activeToast?.style == .error)
 
-        fetch.release(returning: meanwhile)
+        // The refresh brings the daemon's state, which never had the move.
+        // One more change rides on it — f renamed — so the test can see the
+        // answer land.
+        var renamedF = f
+        renamedF.displayName = "Row f, renamed"
+        fetch.release(returning: [a, b, c, renamedD, e, renamedF, reorderedG])
+        await waitUntil("the failure's refresh lands") { row(state, f.id)?.displayName == "Row f, renamed" }
+
+        #expect(state.pendingWorktreeMoves.isEmpty)
+        #expect(row(state, c.id)?.parentWorktreeID == a.id)
+        #expect(childOrder(state, repo: r, parent: a.id) == ["c", "d"])
+        #expect(childOrder(state, repo: r, parent: b.id) == ["e"])
+        #expect(row(state, d.id)?.displayName == "Row d, renamed")
+        #expect(row(state, g.id)?.sortOrder == 5)
+        #expect(state.activeToast?.message == "Couldn't move Row c: \(MoveRefused().localizedDescription)")
         state.dismissToast()
     }
 
@@ -555,6 +569,88 @@ struct WorktreeMoveOverlayTests {
         await rpc.succeed(valid)
         #expect(rpc.sent.map(\.moveID) == [valid])
         #expect(childOrder(state, repo: top.repo, parent: top.b.id) == ["d"])
+    }
+
+    /// A creating placeholder is a row the daemon has never heard of, so a
+    /// move naming one as a carried row, the parent or `before` would only
+    /// fail and snap back. It is refused before anything changes.
+    @Test func refusesAMoveNamingACreatingPlaceholder() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let top = TopLevelFixture()
+        let pending = makeRow("pending", repoID: top.repo, sortOrder: 0, status: .creating)
+        state.worktrees = [top.repo: top.rows + [pending]]
+        state.pendingWorktreeIDs = [pending.id]
+        let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
+        wire(state, rpc: rpc, fetch: fetch)
+        let untouched = state.worktrees
+
+        let carried = state.moveWorktrees(ids: [pending.id], newParentID: nil, before: top.a.id)
+        let carriedWithAnother = state.moveWorktrees(ids: [top.c.id, pending.id], newParentID: nil, before: nil)
+        let asParent = state.moveWorktrees(ids: [top.d.id], newParentID: pending.id, before: nil)
+        let asBefore = state.moveWorktrees(ids: [top.d.id], newParentID: nil, before: pending.id)
+
+        #expect(carried == nil)
+        #expect(carriedWithAnother == nil)
+        #expect(asParent == nil)
+        #expect(asBefore == nil)
+        #expect(state.worktrees == untouched)
+        #expect(state.pendingWorktreeMoves.isEmpty)
+        #expect(rpc.sent.isEmpty)
+
+        // Control: once the daemon has the row, it leaves
+        // `pendingWorktreeIDs`, and the same move goes ahead.
+        state.pendingWorktreeIDs = []
+        let valid = expectMove(state, ids: [top.d.id], newParentID: nil, before: pending.id)
+        await rpc.succeed(valid)
+        let sentIDs = rpc.sent.map { $0.moveID }
+        #expect(sentIDs == [valid])
+        #expect(rpc.sent.first?.beforeWorktreeID == pending.id)
+    }
+
+    // MARK: - The fence's scope
+
+    /// A fetch sent before a move's reply is fenced: its list may predate the
+    /// commit, so it is not assigned. The rest of the poll reads RPCs of its
+    /// own, sent after the list came back, and still applies — here a
+    /// terminal that appeared meanwhile.
+    @Test func fencedFetchStillAppliesTerminals() async {
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
+        let top = TopLevelFixture()
+        state.worktrees = [top.repo: top.rows]
+        let rpc = MoveRPCGate(), fetch = FetchGate(rows: top.rows)
+        wire(state, rpc: rpc, fetch: fetch)
+        let terminal = TBDShared.Terminal(
+            worktreeID: top.a.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+        let listed = [terminal]
+        state.terminalsListFetcher = { listed }
+
+        let moveID = expectMove(state, ids: [top.d.id], newParentID: nil, before: top.b.id)
+        let moved = state.worktrees
+
+        // A poll goes out while the RPC is in flight; the reply then fences it.
+        fetch.holdNext = true
+        let poll = Task { await state.refreshWorktrees() }
+        await waitUntil("the poll is sent") { fetch.heldCount == 1 }
+        await rpc.succeed(moveID)
+        await waitUntil("the reply is recorded") { state.pendingWorktreeMoves.first?.rpcSucceeded == true }
+        #expect(state.worktreeFetchFence == 1)
+
+        let counter = ListWriteCounter(state)
+        fetch.release(returning: top.rows)
+        await poll.value
+        counter.stop()
+
+        // The list stays as the drop left it, and the move is not retired by
+        // a fetch below its fence…
+        #expect(counter.count == 0)
+        #expect(state.worktrees == moved)
+        let pendingIDs = state.pendingWorktreeMoves.map { $0.moveID }
+        #expect(pendingIDs == [moveID])
+        // …while the terminal half of the poll applied.
+        let adopted = (state.terminals[top.a.id] ?? []).map { $0.id }
+        #expect(adopted == [terminal.id], "A fenced poll dropped the terminals it fetched")
     }
 
     // MARK: - Two drops

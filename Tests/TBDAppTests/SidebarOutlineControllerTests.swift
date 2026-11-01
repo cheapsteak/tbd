@@ -7,7 +7,8 @@ import TestSupport
 
 // The controller is mounted in a real, offscreen window and driven through
 // `flushPendingRebuild()`, never by waiting for the main loop. The scratch
-// directory probe is a fixed answer, so no test touches the disk through it.
+// directory probe is a fixed answer unless a test hands in its own, so no
+// test touches the disk through it.
 
 /// A `SidebarOutlineController` over an `AppState` fixture: configure `state`
 /// and `defaults`, then `mount()` to run the first load offscreen.
@@ -22,11 +23,17 @@ final class OutlineHarness {
     var outline: SidebarOutlineView { controller.outline }
     var clip: NSClipView { controller.scrollView.contentView }
 
-    init(_ label: String) {
+    /// - Parameters:
+    ///   - scratchDirectoryProbe: answers whether a scratch directory exists;
+    ///     every directory exists unless a test says otherwise.
+    ///   - clock: the controller's clock, for its hover debounce and its
+    ///     scratch re-probe.
+    init(_ label: String, scratchDirectoryProbe: @escaping @Sendable (String) -> Bool = { _ in true },
+         clock: any Clock<Duration> = ContinuousClock()) {
         suite = TestDefaultsSuite("SidebarOutlineControllerTests.\(label)")
         state = AppState(userDefaults: suite.defaults)
         controller = SidebarOutlineController(
-            appState: state, defaults: suite.defaults, scratchDirectoryProbe: { _ in true })
+            appState: state, defaults: suite.defaults, scratchDirectoryProbe: scratchDirectoryProbe, clock: clock)
     }
 
     /// Mounts the controller offscreen and runs its first load.
@@ -285,6 +292,88 @@ struct SidebarOutlineControllerTests {
         #expect(rowAfter == anchorRow + 1, "The inserted row sits above the anchor")
         let offsetAfter = h.outline.rect(ofRow: rowAfter).minY - h.clip.bounds.minY
         #expect(abs(offsetAfter - offsetBefore) < 0.5, "The anchor row moved on screen: \(offsetBefore) → \(offsetAfter)")
+    }
+
+    /// A row above the anchor goes: the anchor moves up a row in the
+    /// outline, and the clip view follows it.
+    @Test func scrollAnchorRestoredAfterRemoveAbove() throws {
+        let h = OutlineHarness("anchor.remove")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = (0..<40).map { Self.row("row \($0)", repo, order: $0) }
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows]
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        let anchor = SidebarNodeID.worktree(rows[20].id)
+        let before = try Self.scrollAnchor(anchor, in: h)
+
+        h.state.worktrees[repo.id]?.removeAll { $0.id == rows[3].id }
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        let rowAfter = h.row(anchor)
+        #expect(rowAfter == before.row - 1, "The removed row sat above the anchor")
+        try Self.expectAnchorHeld(anchor, before, in: h)
+    }
+
+    /// A nested row above the anchor moves to a parent below it: the anchor
+    /// moves up a row in the outline, and the clip view follows it.
+    @Test func scrollAnchorRestoredAfterCrossParentMoveAbove() throws {
+        let h = OutlineHarness("anchor.move")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = (0..<40).map { Self.row("row \($0)", repo, order: $0) }
+        let moving = Self.row("moving", repo, parent: rows[2].id, order: 0)
+        let staying = Self.row("staying", repo, parent: rows[2].id, order: 1)
+        // The destination already shows a child, so the move is a move.
+        let resident = Self.row("resident", repo, parent: rows[30].id, order: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: rows + [moving, staying, resident]]
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        let anchor = SidebarNodeID.worktree(rows[20].id)
+        let before = try Self.scrollAnchor(anchor, in: h)
+        let item = try #require(h.controller.item(for: .worktree(moving.id)))
+
+        let found = h.state.worktrees[repo.id]?.firstIndex { $0.id == moving.id }
+        let index = try #require(found)
+        h.state.worktrees[repo.id]?[index].parentWorktreeID = rows[30].id
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        #expect(h.controller.item(for: .worktree(moving.id)) === item, "A moved row keeps its item")
+        #expect(h.controller.tree.parent(of: .worktree(moving.id)) == .worktree(rows[30].id))
+        let rowAfter = h.row(anchor)
+        #expect(rowAfter == before.row - 1, "The moved row left from above the anchor")
+        try Self.expectAnchorHeld(anchor, before, in: h)
+    }
+
+    /// A row above the anchor grows: an unhealthy provider's header shows
+    /// its issue line, and the clip view follows the anchor down.
+    @Test func scrollAnchorRestoredAfterHeightChangeAbove() throws {
+        let h = OutlineHarness("anchor.height")
+        defer { h.tearDown() }
+        h.defaults.set(false, forKey: AppState.showScratchSectionKey)
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.state.remoteSessions = (0..<40).map { SidebarGroupFixtures.session("session \($0)") }
+        h.mount(size: NSSize(width: 320, height: 200))
+
+        let header = SidebarNodeID.providerHeader("acme")
+        try #require(h.row(header) == 0, "The provider header must be the first row, above the anchor")
+        let shown = h.shownIDs
+        try #require(shown.count > 30)
+        let anchor = shown[20]
+        let before = try Self.scrollAnchor(anchor, in: h)
+        let headerHeightBefore = h.outline.rect(ofRow: h.row(header)).height
+
+        h.state.remoteProviders = [SidebarGroupFixtures.provider(health: .error)]
+        h.controller.flushPendingRebuild()
+
+        #expect(h.controller.fallbackReloadCount == 0)
+        let headerHeightAfter = h.outline.rect(ofRow: h.row(header)).height
+        try #require(headerHeightAfter != headerHeightBefore, "The header's height never changed")
+        try Self.expectAnchorHeld(anchor, before, in: h)
     }
 
     @Test func heightClassChangeDoesNotAnimate() throws {
@@ -608,6 +697,47 @@ struct SidebarOutlineControllerTests {
         #expect(h.controller.appStateSelectionWriteCount == 1)
     }
 
+    /// A ⌘- or ⇧-click extends the selection, so a selected row the outline
+    /// does not show — inside a collapsed section — stays selected, as the
+    /// dock keeps rows it does not show. A plain click replaces the
+    /// selection.
+    @Test func extendingOutlineSelectionKeepsRowsItDoesNotShow() throws {
+        let h = OutlineHarness("extend")
+        defer { h.tearDown() }
+        let folded = Repo(path: "/tmp/acme-folded", displayName: "folded", expanded: false)
+        let open = Repo(path: "/tmp/acme-open", displayName: "open")
+        let hidden = Self.row("hidden", folded)
+        let first = Self.row("first", open, order: 0)
+        let second = Self.row("second", open, order: 1)
+        h.state.repos = [folded, open]
+        h.state.worktrees = [folded.id: [hidden], open.id: [first, second]]
+        h.state.selectedWorktreeIDs = [hidden.id]
+        h.mount()
+        let names = [hidden.id: "hidden", first.id: "first", second.id: "second"]
+        try #require(h.row(.worktree(hidden.id)) < 0, "The selected row must be out of view")
+        try #require(h.outline.selectedRowIndexes.isEmpty, h.evidence(names))
+
+        // ⌘-click: the shown row joins the selection, and the hidden one stays.
+        h.controller.selectionModifiers = { .command }
+        h.outline.selectRowIndexes(IndexSet(integer: h.row(.worktree(first.id))), byExtendingSelection: true)
+        #expect(h.state.selectedWorktreeIDs == [hidden.id, first.id], h.evidence(names))
+
+        // ⌘-click on the shown row again: it leaves; the hidden one stays.
+        h.outline.selectRowIndexes(IndexSet(), byExtendingSelection: false)
+        #expect(h.state.selectedWorktreeIDs == [hidden.id], h.evidence(names))
+
+        // ⇧ extends the same way.
+        h.controller.selectionModifiers = { .shift }
+        let both = IndexSet([h.row(.worktree(first.id)), h.row(.worktree(second.id))])
+        h.outline.selectRowIndexes(both, byExtendingSelection: false)
+        #expect(h.state.selectedWorktreeIDs == [hidden.id, first.id, second.id], h.evidence(names))
+
+        // Control: a plain click replaces the selection.
+        h.controller.selectionModifiers = { [] }
+        h.outline.selectRowIndexes(IndexSet(integer: h.row(.worktree(second.id))), byExtendingSelection: false)
+        #expect(h.state.selectedWorktreeIDs == [second.id], h.evidence(names))
+    }
+
     @Test func modelSelectionNotEchoedDuringApply() throws {
         let h = OutlineHarness("noEcho")
         defer { h.tearDown() }
@@ -851,6 +981,41 @@ struct SidebarOutlineControllerTests {
         #expect(h.state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: lower.payload.id))
         #expect(h.state.selectedWorktreeIDs.isEmpty)
         #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.remoteSession(lower.id))))
+    }
+
+    // MARK: Scroll anchor
+
+    /// Where the anchor row stood before an apply: its outline row, its top
+    /// in the outline, and that top's offset from the clip view's top.
+    struct AnchorPosition {
+        let row: Int
+        let top: CGFloat
+        let offset: CGFloat
+    }
+
+    /// Scrolls so `anchor`'s top sits 5 pt above the clip view's top, making
+    /// it the first visible row, and records where it stands.
+    static func scrollAnchor(_ anchor: SidebarNodeID, in h: OutlineHarness) throws -> AnchorPosition {
+        let row = h.row(anchor)
+        try #require(row > 0, "The anchor must have rows above it")
+        h.outline.scroll(NSPoint(x: 0, y: h.outline.rect(ofRow: row).minY + 5))
+        try #require(h.clip.bounds.minY > 0, "The outline never scrolled; the check would be vacuous")
+        let top = h.outline.rect(ofRow: row).minY
+        return AnchorPosition(row: row, top: top, offset: top - h.clip.bounds.minY)
+    }
+
+    /// The anchor moved in the outline, so a clip view left where it was
+    /// would show it elsewhere; it shows at the offset it had.
+    static func expectAnchorHeld(_ anchor: SidebarNodeID, _ before: AnchorPosition, in h: OutlineHarness,
+                                 sourceLocation: SourceLocation = #_sourceLocation) throws {
+        let row = h.row(anchor)
+        try #require(row >= 0, "The anchor row is gone", sourceLocation: sourceLocation)
+        let top = h.outline.rect(ofRow: row).minY
+        try #require(abs(top - before.top) > 1, "The anchor never moved in the outline; the check would be vacuous",
+                     sourceLocation: sourceLocation)
+        let offset = top - h.clip.bounds.minY
+        #expect(abs(offset - before.offset) < 0.5, "The anchor row moved on screen: \(before.offset) → \(offset)",
+                sourceLocation: sourceLocation)
     }
 
     // MARK: Fixtures

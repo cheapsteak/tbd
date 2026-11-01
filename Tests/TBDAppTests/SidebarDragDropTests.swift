@@ -502,6 +502,53 @@ struct SidebarDragDropTests {
         #expect(nestParams.beforeWorktreeID == nil)
     }
 
+    /// A creating placeholder first among a repo's rows — the daemon has
+    /// never heard of it — is skipped end to end: it starts no drag, and a
+    /// drop onto the main row asks `worktree.moveMany` to land before the
+    /// first row the daemon knows.
+    @Test func dropOntoMainSkipsACreatingPlaceholder() async throws {
+        let h = OutlineHarness("drag.placeholder")
+        defer { h.tearDown() }
+        let f = DragFixture()
+        f.install(in: h)
+        let pending = SidebarOutlineControllerTests.row("pending", f.repo, order: -1, status: .creating)
+        h.state.worktrees[f.repo.id]?.append(pending)
+        h.state.pendingWorktreeIDs = [pending.id]
+        let recorder = MoveRecorder()
+        recorder.install(on: h.state)
+        h.mount()
+        var names = f.names
+        names[pending.id] = "pending"
+        let repo = SidebarNodeID.repoHeader(f.repo.id)
+        let placeholder = SidebarNodeID.worktree(pending.id)
+        let order = h.controller.tree.children(of: repo).map { $0.id }
+        // The placeholder sits directly below main.
+        try #require(order.count > 2 && order[1] == placeholder, h.evidence(names))
+
+        // A press on the placeholder writes nothing to the pasteboard.
+        Self.press(placeholder, in: h)
+        let written = Self.writtenID(for: placeholder, in: h)
+        #expect(written == nil, "A creating placeholder must never be carried")
+
+        // a1 onto main: shown at the gap below main, and sent before `a`.
+        let info = try Self.startDrag(pressing: .worktree(f.a1.id), in: h)
+        defer { info.release() }
+        let main = SidebarNodeID.worktree(f.main.id)
+        let onto = SidebarDropPolicy.dropOnItemIndex
+        let operation = try Self.validate(info, parent: main, childIndex: onto, in: h)
+        #expect(operation == .move)
+        // AppKit hands `acceptDrop` the position `validateDrop` retargeted to.
+        let accepted = try Self.accept(info, parent: repo, childIndex: 1, in: h)
+        #expect(accepted, h.evidence(names))
+        Self.endSession(in: h)
+
+        await recorder.waitForCount(1)
+        let request = try #require(recorder.sent.first)
+        #expect(request.worktreeIDs == [f.a1.id])
+        #expect(request.newParentID == nil)
+        #expect(request.beforeWorktreeID == f.a.id, "The drop named the placeholder, which the daemon refuses")
+    }
+
     /// Review Focus 1: a target or a carried row archived during the drag.
     /// The shown structure is held, so the row is still on screen, but the
     /// drop is checked against `AppState` as it stands: rejected, nothing
