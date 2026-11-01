@@ -126,7 +126,8 @@ struct LegacyTabConverterTests {
 
         // An explicit single-pane layout reads the same as no layout.
         let url = try #require(URL(string: "https://example.com"))
-        let webTab = Fixture.tab(.webview(id: UUID(), url: url), layout: .pane(.webview(id: UUID(), url: url)))
+        let webPaneID = UUID()
+        let webTab = Fixture.tab(.webview(id: webPaneID, url: url), layout: .pane(.webview(id: webPaneID, url: url)))
         let expectedWeb = WorkspaceTabSurface(
             id: webTab.tabID, worktreeID: Fixture.worktreeID, label: nil,
             primary: .web(url), side: .empty, revision: 0)
