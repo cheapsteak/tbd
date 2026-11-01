@@ -725,8 +725,9 @@ The behaviors a rewrite most easily loses:
    only through the click handler.
 10. The window chrome: the toggle, back and forward stay beside the window
     buttons with the sidebar shown and collapsed; the repo filter hides while
-    collapsed; every right-hand toolbar item matches the SwiftUI toolbar's
-    behavior; no separator line under the sidebar's toolbar area; waking from
+    collapsed; every right-hand toolbar item the AppKit toolbar keeps matches
+    the SwiftUI toolbar's behavior, and it has no PR button and no
+    file-panel toggle; no separator line under the sidebar's toolbar area; waking from
     sleep never collapses the sidebar.
 
 ## Testing

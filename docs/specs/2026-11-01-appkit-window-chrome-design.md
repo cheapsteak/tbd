@@ -48,12 +48,16 @@ button's menu once.
   the main area's part of the toolbar: just past the sidebar's edge when it is
   shown, right after the arrows when it is collapsed.
 - No separator line under the sidebar's part of the toolbar.
+- No PR button. A worktree often relates to several PRs, so a toolbar button
+  for one PR misreads the worktree; the sidebar rows' PR glyphs and
+  `tbd pr list` show them all.
+- No file-panel toggle in the toolbar. The Changes panel's toggle leaves the
+  window toolbar; ⌘⇧E stays as a menu command.
 
 ## Non-goals
 
-- **Changing what the other toolbar items do.** The PR and Servers split
-  buttons, the remote session buttons and the file-panel toggle are rebuilt
-  with the behavior they have.
+- **Changing what the other toolbar items do.** The Servers split button and
+  the remote session buttons are rebuilt with the behavior they have.
 - **The window with the native sidebar off.** It stays SwiftUI, unchanged.
 - **User toolbar customization.**
 
@@ -100,16 +104,18 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
 7. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
    a borderless item.
 8. **Flexible space.**
-9. **The right-hand items,** with today's behavior: the PR split button, the
-   Servers split button, the remote session buttons (Reconnect, Stop with its
-   confirmation, and Transcript, shown on the remote spec's terms), and the
-   file-panel toggle. The split buttons are `NSMenuToolbarItem`s whose menus an
-   `NSMenuDelegate` builds each time they open, and whose images update in
-   place, so no item is rebuilt to refresh it.
+9. **The right-hand items,** with today's behavior: the Servers split button
+   and the remote session buttons (Reconnect, Stop with its confirmation, and
+   Transcript, shown on the remote spec's terms). The Servers button is an
+   `NSMenuToolbarItem` whose menu an `NSMenuDelegate` builds each time it
+   opens, and whose image updates in place, so no item is rebuilt to refresh
+   it.
+
+The PR split button and the file-panel toggle are not rebuilt (see "Goals").
 
 Which items are present and in what order is a pure function of a small state
-value: whether the sidebar is collapsed, what is selected, the PR's status, the
-remote session's state. The controller observes `AppState` with
+value: whether the sidebar is collapsed, what is selected, the remote session's
+state. The controller observes `AppState` with
 `withObservationTracking` and applies a changed result on the next main-actor
 turn, never during a SwiftUI update, which can re-enter layout.
 
