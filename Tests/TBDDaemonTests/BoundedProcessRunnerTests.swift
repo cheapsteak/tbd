@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Darwin
 import Dispatch
 import Testing
@@ -450,6 +451,9 @@ struct BoundedProcessRunnerTests {
         let scratch = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratch) }
         let pidFile = scratch.appendingPathComponent("pid")
+        // On every exit path, and only while the pid still names the child:
+        // the escalation under test normally kills and reaps it first.
+        defer { RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path) }
 
         let started = ContinuousClock.now
         let outcome = try await runBoundedProcess(
@@ -472,7 +476,6 @@ struct BoundedProcessRunnerTests {
                 """)
 
         let recorded = Self.readPid(from: pidFile)
-        defer { if let recorded { kill(recorded, SIGKILL) } }
         let pid = try #require(recorded, "the child never recorded its pid")
         try await waitFor(
             "the TERM-ignoring child to be reaped",
@@ -524,6 +527,12 @@ struct BoundedProcessRunnerTests {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let firstPidFile = scratch.appendingPathComponent("first")
         let secondPidFile = scratch.appendingPathComponent("second")
+        // On every exit path, and only while each pid still names its child:
+        // the escalation under test normally kills and reaps both first.
+        defer {
+            RecordedChild.killIfStartedBeforeWriting(pidFile: firstPidFile.path)
+            RecordedChild.killIfStartedBeforeWriting(pidFile: secondPidFile.path)
+        }
 
         // Entry is announced asynchronously (nothing on the observing side ever
         // blocks a thread); the hold itself is a semaphore, because the seam is
@@ -568,7 +577,6 @@ struct BoundedProcessRunnerTests {
         }
 
         let recordedSecond = Self.readPid(from: secondPidFile)
-        defer { if let recordedSecond { kill(recordedSecond, SIGKILL) } }
         let secondPid = try #require(recordedSecond, "the second child never recorded its pid")
         try await waitFor(
             "the second call's TERM-ignoring child to be reaped while a snapshot is wedged",
@@ -589,7 +597,6 @@ struct BoundedProcessRunnerTests {
             return
         }
         let recordedFirst = Self.readPid(from: firstPidFile)
-        defer { if let recordedFirst { kill(recordedFirst, SIGKILL) } }
         let firstPid = try #require(recordedFirst, "the first child never recorded its pid")
         try await waitFor(
             "the first call's TERM-ignoring child to be reaped",
