@@ -326,8 +326,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     static func lockSidebarOpen(in window: NSWindow) {
         guard let contentView = window.contentView,
-              let splitVC = findSplitViewController(in: contentView),
-              let sidebarItem = splitVC.splitViewItems.first,
+              let splitVC = findSplitViewController(in: contentView) else {
+            return
+        }
+        // The AppKit split sets its own collapse flags once (spec, "Window structure").
+        if splitVC is MainSplitViewController { return }
+        guard let sidebarItem = splitVC.splitViewItems.first,
               sidebarItem.behavior == .sidebar else {
             // .sidebar guard: if the detail pane ever hosts its own
             // NSSplitViewController (nested NavigationSplitView, NavigationView),
