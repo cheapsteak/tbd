@@ -175,7 +175,14 @@ struct ThemeStoreTests {
         #expect(trashed[0].hasPrefix("\(id)-"))
     }
 
-    @Test("external file additions trigger a reload via the watcher")
+    /// The watcher is FSEvents-backed, so its reload waits on `fseventsd`, a
+    /// daemon outside this process. On CI under the fast pass's filesystem
+    /// load, deliveries took 21–88 s on green runs, and on red runs none
+    /// arrived within the budget even while the process was otherwise idle; a
+    /// red run that re-added the file every 5 s saw none of 19 adds in 120 s.
+    /// No wait in the test can shorten that, so the test is quarantined: the
+    /// trait retries it, and #1201 holds the diagnosis and the follow-up.
+    @Test("external file additions trigger a reload via the watcher", .flaky(issue: 1201))
     func watcherReloadsOnExternalAdd() async throws {
         let themesDir = try makeIsolatedThemesDir()
 
@@ -194,40 +201,31 @@ struct ThemeStoreTests {
         try JSONEncoder().encode(theme)
             .write(to: themesDir.appendingPathComponent("ext.json"))
 
-        // Hang guard, not a tolerance window. This is a positive wait: it breaks
-        // on the first satisfying probe (~0.1s on the healthy path), so only a
-        // genuinely failing run ever pays the deadline.
-        //
-        // Why it has to be generous at all: both this polling loop and the
-        // FSEvents callback's `Task { @MainActor in ... }` bounce must acquire a
-        // turn on the single serial MainActor executor (bound to the process's
-        // one main thread), and every @MainActor suite in the process queues for
-        // that same executor. Same root cause as the cooperative-pool starvation
-        // documented for `ciSafeDeadline` in
-        // Tests/TBDDaemonTests/ControlModeTestSupport.swift (PR #379).
-        //
-        // 90s is anchored to that same population-derived figure rather than
-        // tuned here. The predecessor 30s was sized (PR #441) against a
-        // ~3000-test process where the reproduced delay was ~12s; the population
-        // is now 5417, and this test failed at 30s on a loaded multi-agent dev
-        // box during a full in-process run. Re-derive if the population moves
-        // materially again — see Tests/CLAUDE.md, "Population is the scheduler".
-        let timeout: TimeInterval = 90
-        let deadline = Date().addingTimeInterval(timeout)
-        while store.userThemes.isEmpty && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        // A hang guard, not a tolerance window: the wait ends on the first
+        // satisfying probe, so only a run whose event never arrives pays the
+        // budget, the shared `TestDeadlines.saturatedPass`.
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(100)
+        ) { @Sendable in
+            await MainActor.run { !store.userThemes.isEmpty }
         }
-        guard !store.userThemes.isEmpty else {
+        switch outcome {
+        case .satisfied:
+            break
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
             // Thrown, not `#expect(..., "message")`: only `Issue.record(_: some
             // Error)` puts the diagnostic on the primary failure line CI
-            // summaries quote (Tests/CLAUDE.md rule 4). The three observations
-            // discriminate the failure modes: `loadErrors` separates "reload ran
-            // but decode failed" from "reload never ran", and the directory
-            // listing separates "the file never landed" (a test bug) from "the
-            // watcher never fired".
+            // summaries quote (Tests/CLAUDE.md rule 4). `loadErrors` separates
+            // "reload ran but decode failed" from "reload never ran", and the
+            // directory listing separates "the file never landed" (a test bug)
+            // from "the watcher never fired".
             throw Failure("""
                 the themes-directory watcher never reloaded after an external add — \
-                after \(timeout)s, userThemes=\(store.userThemes.map(\.id)), \
+                after \(ContinuousClock.now - start) (budget \(TestDeadlines.saturatedPass)), \
+                userThemes=\(store.userThemes.map(\.id)), \
                 loadErrors=\(store.loadErrors), \
                 directory contents=\(String(describing: try? FileManager.default
                     .contentsOfDirectory(atPath: themesDir.path)))

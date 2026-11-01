@@ -173,8 +173,8 @@ struct HolderAttachRPCTests {
     /// The timeout is driven on the injected clock, not waited for.
     /// `requireAdvanceWhenArmed` also proves the timer task actually armed.
     /// `.clockDriven` is on this test alone rather than the suite: it is the
-    /// only one that drives a clock, and a four-minute limit over the other
-    /// eleven would let a genuine hang in any of them take four times as long
+    /// only one that drives a clock, and a five-minute limit over the other
+    /// eleven would let a genuine hang in any of them take five times as long
     /// to surface — this family already hits time limits under load.
     @Test(.clockDriven) func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
         let clock = EventDrivenTestClock()

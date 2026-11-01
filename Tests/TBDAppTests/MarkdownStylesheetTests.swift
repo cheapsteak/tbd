@@ -309,7 +309,7 @@ struct MarkdownStylesheetTests {
     /// `.clockDriven` tally: every wait here throws on timeout, so at most one
     /// guard elapses in any run. The worst case is phase 1's — four 2 s
     /// registration windows, then one saturated-pass wait — well inside the
-    /// 240 s limit.
+    /// 300 s limit.
     ///
     /// One-sidedness worth naming: this watches a *directory*, so the events
     /// are not attributable to a particular entry. A straggler probe event

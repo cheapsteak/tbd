@@ -47,8 +47,8 @@ import TestSupport
 /// time. The sixty seconds this used to spell out was reasoned as "four minutes
 /// of a shared box is not free", and that reasoning was wrong in its premise: a
 /// suite limit is wall time only on a failing run, and one minute is *below*
-/// the median reported duration of a healthy test in this pass, where duration
-/// is mostly suspension behind ~5000 other runnable tests. See
+/// the p90 reported duration of a healthy test in this pass, where duration
+/// is mostly suspension behind thousands of other runnable tests. See
 /// `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 ///
 /// What the limit therefore is, stated rather than glossed: a coarse outer

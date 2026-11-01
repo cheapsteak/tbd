@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // MARK: - Injected `gh`
@@ -1040,22 +1041,25 @@ struct PRStatusManagerBindingTests {
         // it, so this is the pid of the `sleep` the deadline has to reach.
         let pidFile = dir.appendingPathComponent("child.pid")
         // Nothing reclaims a forge CLI subprocess, this suite included: if the
-        // assertion below fails the child is still out there, so end it here.
-        defer {
-            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
-               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                kill(leaked, SIGKILL)
-            }
-        }
+        // assertion below fails the child is still out there, so end it here —
+        // on every exit path, and only while its pid still names the child,
+        // since the escalation under test normally kills and reaps it first.
+        defer { RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path) }
 
         let manager = PRStatusManager(
             ghRunner: { _, _ in nil },
             glRunner: { args, path in
                 guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
                 else { return await gl.run(args: args, repoPath: path) }
+                // The child outlives every wait before and including the one
+                // that checks it died, so only a signal can end it inside them.
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
-                    args: ["-c", "trap '' TERM; echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    args: [
+                        "-c",
+                        "trap '' TERM; echo $$ > '\(pidFile.path)'; "
+                            + "exec sleep \(TestDeadlines.outlivingChildSeconds)",
+                    ],
                     repoPath: dir.path,
                     clock: clock)
             },
@@ -1109,21 +1113,20 @@ struct PRStatusManagerBindingTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let pidFile = dir.appendingPathComponent("child.pid")
-        defer {
-            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
-               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                kill(leaked, SIGKILL)
-            }
-        }
+        // Killed here on every exit path, and only while its pid still names
+        // the child: the SIGTERM under test normally ends and reaps it first.
+        defer { RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path) }
 
         let manager = PRStatusManager(
             ghRunner: { _, _ in nil },
             glRunner: { args, path in
                 guard args.contains(where: { $0.contains("with_merge_status_recheck=true") })
                 else { return await gl.run(args: args, repoPath: path) }
+                // The child outlives every wait before and including the one
+                // that checks it exited, so only SIGTERM can end it inside them.
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
-                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep \(TestDeadlines.outlivingChildSeconds)"],
                     repoPath: dir.path,
                     clock: clock)
             },
