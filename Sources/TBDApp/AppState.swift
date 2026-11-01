@@ -847,13 +847,17 @@ final class AppState {
     /// spawn-time account picker. Toggleable from the picker itself and
     /// Settings → Model Profiles. Persisted per-user.
     ///
-    /// Written only when it changes. `init` restores it from the same key, and
-    /// writing that value straight back cost a synchronous `cfprefsd` round trip
-    /// on every construction while saving nothing: an absent key already reads
-    /// as `false`.
+    /// Written only when it differs from what the key already holds. `init`
+    /// restores it from that key, and writing the value straight back cost a
+    /// synchronous `cfprefsd` round trip on every construction while saving
+    /// nothing. The comparison is with the stored value, not `oldValue`: the
+    /// property starts at `false`, so restoring a stored `true` changes it, yet
+    /// there is nothing to write. An absent key reads as `false`, so `false`
+    /// over an absent key writes nothing either.
     var skipAccountPicker: Bool = false {
         didSet {
-            guard skipAccountPicker != oldValue else { return }
+            guard userDefaults.bool(forKey: Self.skipAccountPickerKey) != skipAccountPicker
+            else { return }
             userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey)
         }
     }
