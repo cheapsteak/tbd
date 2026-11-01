@@ -60,14 +60,27 @@ struct MainToolbarSnapshotTests {
         }
     }
 
+    @Test func filterNamingAKnownRepo() {
+        withState { state, repos, _ in
+            state.repoFilter = repos[0].id
+            let filter = MainToolbarSnapshot.make(from: state).filter
+            #expect(filter.selectedIsKnown)
+            #expect(filter.selected == repos[0].id)
+        }
+    }
+
     @Test func serversNeedOneSelectedWorktreeAndAList() {
         withState { state, _, worktrees in
             let a = worktrees[0].id
             let b = worktrees[1].id
             state.devServerLists[a] = list([server("web", .stopped)], id: a)
+            state.devServerLists[b] = list([server("web", .stopped)], id: b)
 
+            // Both worktrees have a list, so only the count guard can refuse.
             state.selectedWorktreeIDs = [a, b]
             #expect(MainToolbarSnapshot.make(from: state).servers == nil)
+
+            state.devServerLists[b] = nil
 
             state.selectedWorktreeIDs = [b]
             #expect(MainToolbarSnapshot.make(from: state).servers == nil)
@@ -95,35 +108,53 @@ struct MainToolbarSnapshotTests {
         }
     }
 
+    private func provider(capabilities: [String]) -> RemoteProviderStatus {
+        RemoteProviderStatus(
+            config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+            describe: ProviderDescribe(name: "acme", capabilities: capabilities),
+            health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+    }
+
+    private func runningSession() -> RemoteSessionInfo {
+        RemoteSessionInfo(
+            provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
+            gone: false, dismissed: false, lastSeen: Date())
+    }
+
     @Test func remoteFlagsMirrorAppState() {
         withState { state, _, _ in
             let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
             #expect(MainToolbarSnapshot.make(from: state).remote == nil)
 
-            state.remoteProviders = [RemoteProviderStatus(
-                config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
-                describe: nil, health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)]
-            state.remoteSessions = [RemoteSessionInfo(
-                provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                gone: false, dismissed: false, lastSeen: Date())]
+            // Transcript only: the provider declares transcript.read, and the
+            // session has not been attached.
+            state.remoteProviders = [provider(capabilities: [RemoteCapability.transcriptRead])]
+            state.remoteSessions = [runningSession()]
             state.selectedRemoteSession = selection
+            let transcriptOnly = MainToolbarSnapshot.make(from: state).remote
+            #expect(transcriptOnly?.selection == selection)
+            #expect(transcriptOnly?.showsTranscript == true)
+            #expect(transcriptOnly?.showsReconnect == false)
+            #expect(transcriptOnly?.showsStop == true)
+            #expect(transcriptOnly?.showsTranscript == state.remoteSessionShowsTranscriptToggle(selection))
+            #expect(transcriptOnly?.showsStop == state.remoteSessionShowsStop(selection))
+            #expect(transcriptOnly?.transcriptOpen == state.remoteTranscriptOpen)
 
-            let remote = MainToolbarSnapshot.make(from: state).remote
-            #expect(remote?.selection == selection)
-            #expect(remote?.showsStop == state.remoteSessionShowsStop(selection))
-            #expect(remote?.showsReconnect == state.attachedRemoteSelections.contains(selection))
-            #expect(remote?.showsTranscript == state.remoteSessionShowsTranscriptToggle(selection))
-            #expect(remote?.transcriptOpen == state.remoteTranscriptOpen)
-            #expect(remote?.showsStop == true)
+            // Reconnect: an attach-capable session the user has attached.
+            state.remoteProviders = [provider(capabilities: ["attach"])]
+            state.touchAttachedRemoteSession(selection)
+            let attached = MainToolbarSnapshot.make(from: state).remote
+            #expect(state.attachedRemoteSelections.contains(selection))
+            #expect(attached?.showsReconnect == true)
+            #expect(attached?.showsTranscript == false)
 
-            // A session the mirror no longer holds offers no Stop; with the
-            // other two flags false too, the whole group disappears.
+            // A session the mirror no longer holds offers none of the three.
             state.remoteSessions = []
-            let gone = MainToolbarSnapshot.make(from: state).remote
             let anyFlag = state.remoteSessionShowsStop(selection)
                 || state.attachedRemoteSelections.contains(selection)
                 || state.remoteSessionShowsTranscriptToggle(selection)
-            #expect((gone != nil) == anyFlag)
+            #expect(!anyFlag)
+            #expect(MainToolbarSnapshot.make(from: state).remote == nil)
         }
     }
 

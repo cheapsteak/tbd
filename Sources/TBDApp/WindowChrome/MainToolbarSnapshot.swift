@@ -70,7 +70,7 @@ struct MainToolbarSnapshot: Equatable {
            let worktreeID = appState.selectedWorktreeIDs.first,
            let list = appState.devServerLists[worktreeID],
            AppState.showsServersButton(list) {
-            let runningCount = list.servers.filter { $0.state == .running }.count
+            let runningCount = ServersButtonLabel.runningCount(list)
             let primaryURL = AppState.primaryDevServerURL(list)
             servers = ServersPresentation(
                 worktreeID: worktreeID,

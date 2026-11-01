@@ -9,7 +9,11 @@ struct ServersButtonLabel: View {
     let list: DevServerListResult
     @Environment(\.colorScheme) private var colorScheme
 
-    private var runningCount: Int { list.servers.filter { $0.state == .running }.count }
+    private var runningCount: Int { Self.runningCount(list) }
+
+    nonisolated static func runningCount(_ list: DevServerListResult) -> Int {
+        list.servers.filter { $0.state == .running }.count
+    }
 
     var body: some View {
         // A `Label` so the toolbar `Menu`'s `.labelStyle(.titleAndIcon)`
