@@ -1477,10 +1477,19 @@ struct MainToolbarControllerTests {
 
     /// During a cooldown the window shows another toolbar, and an apply an
     /// observed change asked for, finding nothing the toolbar shows changed,
-    /// still does nothing: no apply runs, so no content is updated on the
-    /// detached toolbar. A change the toolbar does show is still applied,
-    /// leaving the replacement on the window. The cooldown is never advanced,
-    /// so it runs throughout; the fixture's teardown cancels it.
+    /// still does nothing: no apply runs for that change, so no content is
+    /// updated on the detached toolbar. A change the toolbar does show is
+    /// still applied, leaving the replacement on the window. The cooldown is
+    /// never advanced, so it runs throughout; the fixture's teardown cancels
+    /// it.
+    ///
+    /// The count asserted is `observedOnlyApplyCount`, not `applyCount`: only
+    /// an observed change moves it. Anything else that asks for an apply,
+    /// such as the window's appearance watch, can do so at any turn of a
+    /// loaded pass, after the check that found none queued: its apply either
+    /// joins the one the change queued, which then runs in full, or runs
+    /// after it. Either adds to `applyCount` and neither moves the count
+    /// asserted.
     @Test func anUnchangedObservedChangeDuringTheCooldownDoesNotReapply() async throws {
         let fixture = ToolbarFixture(
             label: "anUnchangedObservedChangeDuringTheCooldownDoesNotReapply",
@@ -1503,31 +1512,31 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("once the cooldown started") {
-            () throws -> (applies: Int, changes: Int) in
-            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            () throws -> (observedOnlyApplies: Int, changes: Int) in
+            let counts = (
+                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let appliesBefore = before.applies
+        let observedOnlyAppliesBefore = before.observedOnlyApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.applyCount == appliesBefore)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
         #expect(window.toolbar === kept)
         #expect(controller.isInReinstallCooldown)
 
         let repoID = fixture.repos[1].id
         fixture.state.repoFilter = repoID
         let applied = try await waitForMainActorCondition("the apply for a change the toolbar shows") {
-            controller.applyCount > appliesBefore
+            controller.appliedSnapshot?.filter.selected == repoID
         }
         try #require(applied)
-        #expect(controller.appliedSnapshot?.filter.selected == repoID)
         #expect(window.toolbar === kept)
         #expect(controller.isInReinstallCooldown)
     }
@@ -1690,7 +1699,9 @@ struct MainToolbarControllerTests {
     /// The apply count alone cannot tell: the stale registrations' calls
     /// coalesce into the one queued apply. `observedChangeCount` counts the
     /// registrations that acted, and is what goes wrong without the
-    /// generation check.
+    /// generation check. Both counts are read in the turn behind the
+    /// change's apply, so an apply something else asks for after it is not
+    /// counted against the change.
     @Test func oneObservedChangeActsOnce() async throws {
         let fixture = ToolbarFixture(label: "oneObservedChangeActsOnce")
         defer { fixture.tearDown() }
@@ -1716,12 +1727,9 @@ struct MainToolbarControllerTests {
         let appliesBefore = fixture.controller.applyCount
         let repoID = fixture.repos[1].id
         fixture.state.repoFilter = repoID
-        let applied = try await waitForMainActorCondition("the apply the filter change scheduled") {
-            fixture.controller.applyCount > appliesBefore
-        }
-        try #require(applied)
-        #expect(fixture.controller.observedChangeCount == changesBefore + 1)
-        #expect(fixture.controller.applyCount == appliesBefore + 1)
+        let after = try await fixture.countsBehindTheQueuedApply()
+        #expect(after.observedChanges == changesBefore + 1)
+        #expect(after.applies == appliesBefore + 1)
         #expect(fixture.controller.appliedSnapshot?.filter.selected == repoID)
     }
 
@@ -1730,7 +1738,9 @@ struct MainToolbarControllerTests {
     /// apply. That apply finds the snapshot, the collapse and the appearance
     /// as the toolbar shows them and does no layout or content work. It still
     /// re-arms the tracking: a change to the selected worktree's list is
-    /// applied after it.
+    /// applied after it. The count asserted is the one only an observed
+    /// change moves, for the reason
+    /// `anUnchangedObservedChangeDuringTheCooldownDoesNotReapply` gives.
     @Test func anotherWorktreesServersDoNotReapply() async throws {
         let fixture = ToolbarFixture(label: "anotherWorktreesServersDoNotReapply")
         defer { fixture.tearDown() }
@@ -1745,58 +1755,57 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("before another worktree's servers change") {
-            () throws -> (applies: Int, changes: Int) in
-            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            () throws -> (observedOnlyApplies: Int, changes: Int) in
+            let counts = (
+                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let appliesBefore = before.applies
+        let observedOnlyAppliesBefore = before.observedOnlyApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.applyCount == appliesBefore)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
 
         fixture.showServers(url: nil)
         let applied = try await waitForMainActorCondition("the apply for the selected worktree's change") {
-            controller.applyCount > appliesBefore
+            controller.appliedSnapshot?.servers?.isRunning == false
         }
-        try #require(applied)
-        #expect(controller.appliedSnapshot?.servers?.isRunning == false)
+        #expect(applied)
     }
 
     /// An apply asked for by anything but an observed change runs in full
     /// with nothing changed: a repeated install, as a second `viewDidAppear`
     /// makes, and `scheduleApply()`, through which the replacement and
     /// appearance watches, the cooldown's end and the filter menu's close
-    /// all ask.
+    /// all ask. Each count is read in the turn behind the request's apply,
+    /// so an apply something else asks for after it is not counted against
+    /// the request. Neither request's apply is one only observed changes
+    /// asked for, so `observedOnlyApplyCount` stays where it was.
     @Test func requestedAppliesRunWithNothingChanged() async throws {
         let fixture = ToolbarFixture(label: "requestedAppliesRunWithNothingChanged")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let observedOnlyAppliesBefore = controller.observedOnlyApplyCount
 
         let beforeInstall = controller.applyCount
         controller.install(on: fixture.window)
         try #require(controller.applyScheduled)
-        let installRan = try await waitForMainActorCondition("the apply a repeated install queued") {
-            !controller.applyScheduled
-        }
-        try #require(installRan)
-        #expect(controller.applyCount == beforeInstall + 1)
+        let afterInstall = try await fixture.countsBehindTheQueuedApply()
+        #expect(afterInstall.applies == beforeInstall + 1)
 
         let beforeRequest = controller.applyCount
         controller.scheduleApply()
         try #require(controller.applyScheduled)
-        let requestRan = try await waitForMainActorCondition("the apply scheduleApply() queued") {
-            !controller.applyScheduled
-        }
-        try #require(requestRan)
-        #expect(controller.applyCount == beforeRequest + 1)
+        let afterRequest = try await fixture.countsBehindTheQueuedApply()
+        #expect(afterRequest.applies == beforeRequest + 1)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
     }
 
     // MARK: - Content
@@ -2171,6 +2180,32 @@ private final class ToolbarFixture {
         throw ApplyQueuedBeforeTheTestsTurn(what: what, gaps: gaps)
     }
 
+    /// The controller's counts in the main-queue turn right behind the apply
+    /// queued now: the one the caller's change or request just queued, or
+    /// the one already queued that it joined.
+    ///
+    /// The controller queues each apply with `DispatchQueue.main.async`, and
+    /// the main queue runs blocks in the order they were queued, so the
+    /// block queued here runs once that apply has, and before any apply
+    /// queued after it. A wait's probe gives no such order: it reaches the
+    /// main actor after a hop through the cooperative pool, and another
+    /// source can queue and run an apply in between. So a count that one
+    /// change's apply should move by exactly one is read here. This awaits
+    /// one main-queue turn and nothing else, as every `@MainActor` test's own
+    /// resumption does, so it takes no deadline.
+    func countsBehindTheQueuedApply() async throws -> ApplyCounts {
+        try #require(controller.applyScheduled, "no apply is queued to read behind")
+        let controller = self.controller
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    continuation.resume(returning: ApplyCounts(
+                        applies: controller.applyCount, observedChanges: controller.observedChangeCount))
+                }
+            }
+        }
+    }
+
     /// Replaces the toolbar `count` times, waiting each time for the
     /// controller to put it back.
     func replaceAndWaitForReinstall(times count: Int, label: String) async throws {
@@ -2421,6 +2456,13 @@ private final class ToolbarFixture {
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: windowSize.height))
         return controller
     }
+}
+
+/// The controller's apply and observed-change counts, as
+/// `countsBehindTheQueuedApply()` reads them.
+private struct ApplyCounts: Sendable {
+    let applies: Int
+    let observedChanges: Int
 }
 
 /// `withNoApplyQueued` never found the test's own turn with no apply queued:
