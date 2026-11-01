@@ -227,6 +227,107 @@ struct PanelSurfaceRenderBranchTests {
         #expect(headerMenuTarget(for: tab.paneContent, transcriptPath: tab.transcriptPath) == nil)
     }
 
+    @Test("the strip's history buttons are enabled for a file or web panel and dimmed for a transcript or note")
+    func stripHistoryButtonsPerKind() {
+        let panelID = UUID()
+        let newer = PaneContent.codeViewer(id: panelID, path: "/w/a.md")
+        let older = PaneContent.codeViewer(id: panelID, path: "/w/b.md")
+        // Entries [newer, older] with the cursor on the newer one: back moves
+        // toward older entries, at higher indices.
+        var onNewer = PaneHistory.seeded(with: older)
+        onNewer.recordReplacement(outgoing: older, incoming: newer)
+        var onOlder = onNewer
+        _ = onOlder.goBack()
+        let entries: [PaneContent] = [newer, older]
+        #expect(onNewer.entries == entries, "precondition: two entries, newest first")
+        #expect(onNewer.cursor == 0)
+        #expect(onOlder.cursor == 1)
+        let single = PaneHistory.seeded(with: .webview(id: panelID, url: Self.pageURL))
+
+        let file = PanelContent.file(FileReference(path: "/w/a.md"))
+        let web = PanelContent.web(Self.pageURL)
+        let note = PanelContent.note(noteID: UUID())
+        let transcript = PanelContent.transcript(terminalID: UUID())
+
+        let backOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: true, forward: false)
+        let forwardOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: false, forward: true)
+        let searchOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: false, forward: false)
+        let dimmed: SideStripHistoryButtons = SideStripHistoryButtons(search: false, back: false, forward: false)
+
+        #expect(SideRegionStrip.historyButtons(for: file, history: onNewer) == backOnly)
+        #expect(SideRegionStrip.historyButtons(for: file, history: onOlder) == forwardOnly)
+        #expect(SideRegionStrip.historyButtons(for: web, history: onNewer) == backOnly)
+        #expect(SideRegionStrip.historyButtons(for: web, history: single) == searchOnly)
+        // A note or a transcript is dimmed, even over a history a file would
+        // step through.
+        #expect(SideRegionStrip.historyButtons(for: note, history: onNewer) == dimmed)
+        #expect(SideRegionStrip.historyButtons(for: transcript, history: onNewer) == dimmed)
+        #expect(SideRegionStrip.historyButtons(for: transcript, history: onOlder) == dimmed)
+        // A file whose history is unknown has nothing to step through.
+        #expect(SideRegionStrip.historyButtons(for: file, history: nil) == dimmed)
+    }
+
+    @Test("the strip's per-kind control")
+    func stripTrailingControlPerKind() {
+        let file = PanelContent.file(FileReference(path: "/w/README.md"))
+        let web = PanelContent.web(Self.pageURL)
+        let note = PanelContent.note(noteID: UUID())
+        let transcript = PanelContent.transcript(terminalID: UUID())
+
+        // A file that can render: the rendered/source toggle, showing which.
+        let showingSource: PaneChromeControl? = .renderToggle(showingSource: true)
+        let showingRendered: PaneChromeControl? = .renderToggle(showingSource: false)
+        #expect(SideRegionStrip.trailingControl(
+            for: file, canRender: true, showingSource: true, copied: false) == showingSource)
+        #expect(SideRegionStrip.trailingControl(
+            for: file, canRender: true, showingSource: false, copied: false) == showingRendered)
+        // A file that cannot render has none.
+        #expect(SideRegionStrip.trailingControl(
+            for: file, canRender: false, showingSource: true, copied: true) == nil)
+
+        // A web page: copy-address, with its checkmark after a copy, whether
+        // or not anything could render.
+        let copied: PaneChromeControl? = .copyAddress(copied: true)
+        let notCopied: PaneChromeControl? = .copyAddress(copied: false)
+        #expect(SideRegionStrip.trailingControl(
+            for: web, canRender: false, showingSource: false, copied: true) == copied)
+        #expect(SideRegionStrip.trailingControl(
+            for: web, canRender: true, showingSource: true, copied: false) == notCopied)
+
+        // A note and a transcript have none, whatever the inputs say.
+        let withoutControl: [PanelContent] = [note, transcript]
+        for content in withoutControl {
+            #expect(SideRegionStrip.trailingControl(
+                for: content, canRender: true, showingSource: true, copied: true) == nil, "\(content)")
+        }
+    }
+
+    @Test("a web tab's tooltip is its full address; other tabs show their title")
+    func stripTooltips() throws {
+        let noteID = UUID()
+        let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/src/main.swift")))
+        let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
+        let note = ViewerPanel(id: UUID(), content: .note(noteID: noteID))
+        let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
+        let side = SideRegion(
+            panels: [file, web, note, transcript], activePanelID: file.id,
+            recency: [file.id, web.id, note.id, transcript.id])
+
+        let tabs = SideRegionStrip.tabs(
+            for: side,
+            noteTitle: { $0 == noteID ? "Plan" : nil },
+            transcriptPath: { _ in nil })
+        try #require(tabs.count == 4)
+
+        // The web tab's title is only the host; its tooltip is the whole URL.
+        #expect(tabs[1].title == "example.com")
+        #expect(tabs[1].tooltip == "https://example.com/docs/page")
+        // Every other tab's tooltip is its title.
+        let titles = ["main.swift", "Plan", "Transcript"]
+        let tooltips = [tabs[0].tooltip, tabs[2].tooltip, tabs[3].tooltip]
+        #expect(tooltips == titles)
+    }
+
     // MARK: - The divider
 
     @Test("the divider's shares follow the side region's width")
