@@ -125,12 +125,12 @@ struct LegacyTabConverterTests {
         #expect(Fixture.convert(terminalTab) == .converted(expectedTerminal))
 
         // An explicit single-pane layout reads the same as no layout.
-        let noteID = UUID()
-        let noteTab = Fixture.tab(.note(noteID: noteID), layout: .pane(.note(noteID: noteID)))
-        let expectedNote = WorkspaceTabSurface(
-            id: noteTab.tabID, worktreeID: Fixture.worktreeID, label: nil,
-            primary: .note(noteID: noteID), side: .empty, revision: 0)
-        #expect(Fixture.convert(noteTab) == .converted(expectedNote))
+        let url = try #require(URL(string: "https://example.com"))
+        let webTab = Fixture.tab(.webview(id: UUID(), url: url), layout: .pane(.webview(id: UUID(), url: url)))
+        let expectedWeb = WorkspaceTabSurface(
+            id: webTab.tabID, worktreeID: Fixture.worktreeID, label: nil,
+            primary: .web(url), side: .empty, revision: 0)
+        #expect(Fixture.convert(webTab) == .converted(expectedWeb))
     }
 
     @Test func skipsTabWithTerminalOutsidePrimary() {
@@ -384,7 +384,6 @@ struct LegacyTabConverterTests {
             cursor: 2)
         let tabs: [LegacyTabPayload] = [
             Fixture.tab(.terminal(terminalID: terminalID)),
-            Fixture.tab(.note(noteID: noteID)),
             Fixture.tab(.webview(id: UUID(), url: url)),
             Fixture.tab(.liveTranscript(id: UUID(), terminalID: terminalID)),
             Fixture.tab(
@@ -422,6 +421,12 @@ struct LegacyTabConverterTests {
                 == .transcript(terminalID: terminalID))
     }
 
+    @Test func skipsATabWhoseContentIsANote() {
+        let noteID = UUID()
+        let tab = Fixture.tab(.note(noteID: noteID))
+        #expect(Fixture.convert(tab) == .skipped("tab \(tab.tabID): its content has no primary form"))
+    }
+
     @Test func primaryContentMapsEveryVariant() throws {
         let url = try #require(URL(string: "https://example.com"))
         let noteID = UUID()
@@ -431,7 +436,7 @@ struct LegacyTabConverterTests {
         #expect(LegacyTabConverter.primaryContent(from: .codeViewer(id: UUID(), path: "/a"))
                 == .file(FileReference(path: "/a")))
         #expect(LegacyTabConverter.primaryContent(from: .webview(id: UUID(), url: url)) == .web(url))
-        #expect(LegacyTabConverter.primaryContent(from: .note(noteID: noteID)) == .note(noteID: noteID))
+        #expect(LegacyTabConverter.primaryContent(from: .note(noteID: noteID)) == nil)
         #expect(LegacyTabConverter.primaryContent(from: .liveTranscript(id: UUID(), terminalID: terminalID))
                 == .transcript(terminalID: terminalID))
     }

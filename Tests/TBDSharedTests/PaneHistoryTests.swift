@@ -199,4 +199,28 @@ struct PaneHistoryTests {
         #expect(history.cursor == 1)
         #expect(history.isWellFormed)
     }
+
+    @Test func compactMap_keepsOrderAndCursorWhenEveryEntryMaps() {
+        let history = PaneHistory(entries: [viewer("/c"), viewer("/b"), viewer("/a")], cursor: 1)
+
+        let mapped: MRUHistory<String>? = history.compactMap { content -> String? in
+            if case .codeViewer(_, let path) = content { return path }
+            return nil
+        }
+
+        #expect(mapped?.entries == ["/c", "/b", "/a"])
+        #expect(mapped?.cursor == 1)
+    }
+
+    @Test func compactMap_isNilWhenAnyEntryMapsToNil() {
+        let history = PaneHistory(
+            entries: [viewer("/b"), .note(noteID: UUID()), viewer("/a")], cursor: 0)
+
+        let mapped: MRUHistory<String>? = history.compactMap { content -> String? in
+            if case .codeViewer(_, let path) = content { return path }
+            return nil
+        }
+
+        #expect(mapped == nil)
+    }
 }

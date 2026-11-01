@@ -132,21 +132,7 @@ struct LegacyTabConverterFixtureTests {
         #expect(outcome == .skipped("tab \(tab.tabID): terminal \(firstExtra) outside the primary"))
     }
 
-    // MARK: - Notes, as primary and as panel
-
-    @Test func notePrimaryIsNeverAPanel() throws {
-        let noteID = UUID()
-        let layout = Fixture.hsplit(
-            [.pane(.note(noteID: noteID)), .pane(.codeViewer(id: UUID(), path: "/y"))], [0.5, 0.5])
-        let tab = Fixture.tab(.note(noteID: noteID), layout: layout)
-
-        let surface = try #require(Fixture.surface(Fixture.convert(tab)))
-
-        let expectedContents: [PanelContent?] = [Fixture.file("/y")]
-        #expect(surface.primary == .note(noteID: noteID))
-        #expect(surface.side.panels.map(\.content) == expectedContents)
-        #expect(!surface.side.panels.map(\.id).contains(noteID))
-    }
+    // MARK: - Notes as panes
 
     @Test func notePaneBesideAViewerPrimaryIsDropped() throws {
         let noteID = UUID()

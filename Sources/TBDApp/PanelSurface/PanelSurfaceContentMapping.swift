@@ -36,11 +36,6 @@ extension MRUHistory where Element == PanelContent {
     /// only Changes content has and no tab's own panel holds
     /// (`PanelSurfaceValidator`).
     func paneHistory(panelID: PanelID) -> PaneHistory? {
-        guard entries.allSatisfy({ $0.paneContent(panelID: panelID) != nil }) else { return nil }
-        // `MRUHistory.init(entries:cursor:)` is internal to TBDShared, so the
-        // history is rebuilt through `map`, whose transform must return a
-        // leaf for every entry. The guard has just shown each one has a leaf
-        // form, so the fallback is never taken.
-        return map { $0.paneContent(panelID: panelID) ?? PaneContent.note(noteID: panelID) }
+        compactMap { $0.paneContent(panelID: panelID) }
     }
 }

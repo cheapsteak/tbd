@@ -117,9 +117,11 @@ public enum LegacyTabConverter {
         }
     }
 
-    /// Maps a legacy pane to primary content. Every legacy variant has a
-    /// primary form today; the optional leaves room for one without, whose
-    /// tab `convert` skips.
+    /// Maps a legacy pane to primary content. A note has none: it is shown
+    /// by its worktree panel, never as a workspace tab's primary
+    /// (`PrimaryContent.note` stays only so old rows decode). `convert` skips
+    /// a tab whose content has no primary form, and `panel.syncTabs` keeps the
+    /// stored primary for it.
     public static func primaryContent(from legacy: PaneContent) -> PrimaryContent? {
         switch legacy {
         case .terminal(let id):
@@ -128,8 +130,8 @@ public enum LegacyTabConverter {
             return .web(url)
         case .codeViewer(_, let path):
             return .file(FileReference(path: path))
-        case .note(let noteID):
-            return .note(noteID: noteID)
+        case .note:
+            return nil
         case .liveTranscript(_, let terminalID):
             return .transcript(terminalID: terminalID)
         }
