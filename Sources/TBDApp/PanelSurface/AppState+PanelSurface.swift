@@ -588,8 +588,10 @@ extension AppState {
     }
 
     /// The body of one flush: keeps going until nothing ready is dirty, then
-    /// marks dirty again each worktree whose sync failed and that is still
-    /// ready. One no longer ready was archived (`forgetPanelSurfaces`) or is
+    /// marks dirty again each worktree whose last sync in the pass failed and
+    /// that is still ready. A worktree edited while its failed sync was in
+    /// flight is sent again in the same pass, and a success there leaves it
+    /// clean. One no longer ready was archived (`forgetPanelSurfaces`) or is
     /// awaiting a resubscribe, which marks it dirty itself.
     private func sendDirtyPanelTabSyncs() async {
         defer { panelSyncFlushScheduled = false }
@@ -602,6 +604,10 @@ extension AppState {
             guard let params = buildPanelSyncParams(worktreeID: worktreeID) else { continue }
             do {
                 let result = try await panelSyncTrigger(params)
+                // Clears a failure earlier in this pass: the worktree was
+                // edited while that sync was in flight, and this send carried
+                // its latest list.
+                failed.remove(worktreeID)
                 // This sync's verdict on the tabs it listed replaces the last.
                 setPanelSyncSkippedTabIDs(
                     panelSyncSkippedTabIDs

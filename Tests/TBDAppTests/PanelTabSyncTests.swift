@@ -309,6 +309,37 @@ struct PanelTabSyncTests {
         }
     }
 
+    /// The edit lands while the failing sync is in flight, so the same pass
+    /// sends the worktree again; that send succeeding must clear the failure,
+    /// or the next flush would send the same list a third time.
+    @Test("a sync that fails, is edited in flight and succeeds on its resend in the same flush leaves its worktree clean")
+    func failureThenSuccessInOneFlushLeavesWorktreeClean() async {
+        await Fixture.withState { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor [weak state] params in
+                syncs.record(params)
+                guard syncs.sent.count == 1 else { return Fixture.emptySyncResult }
+                state?.tabs[worktreeID]?[0].label = "edited in flight"
+                throw Fixture.Rejected(message: "the daemon refused the sync")
+            }
+
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+
+            let sentLabels: [String?] = syncs.sent.map { $0.tabs.first?.label }
+            let expectedLabels: [String?] = ["renamed", "edited in flight"]
+            #expect(sentLabels == expectedLabels, "the same flush resent the edited list")
+            #expect(!state.panelSyncDirty.contains(worktreeID), "the resend's success left the worktree dirty")
+            #expect(!state.panelSyncFlushScheduled)
+
+            await state.flushPanelTabSync()
+
+            #expect(syncs.sent.count == 2, "the next flush sent the same list again")
+        }
+    }
+
     @Test("a sync that succeeds leaves its worktree clean")
     func successfulSyncLeavesWorktreeClean() async throws {
         try await Fixture.withState { state in
