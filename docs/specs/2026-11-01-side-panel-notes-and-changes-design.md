@@ -97,8 +97,11 @@ revision guard needs nothing new.
   `applyReducing` transaction.
 - **Reclamation**, extended the way the surfaces were (panel tabs spec, "Tab
   sync"): archiving a worktree deletes its worktree panels in the same
-  transaction; a scratch promote moves them to the main worktree; the cascade
-  covers a deleted row.
+  transaction; a scratch promote moves its Changes panel to the main worktree,
+  unless the main worktree has one, and deletes its note panels, because a
+  promote leaves the notes themselves with the archived scratch worktree, and
+  a note's content file is keyed by that worktree; the cascade covers a
+  deleted row.
 - **Notes follow their panels.** `note.delete` deletes the note's worktree panel
   in the same transaction and broadcasts the change.
 - **New worktrees.** Worktree creation makes the initial "Notes" note as
@@ -195,7 +198,8 @@ tabs, so they are reached through the side panel's + menu until one does.
   - A worktree panel change rewrites every tab surface of the worktree, each at
     a fresh revision, in one delta.
   - `note.delete` removes the note's panel.
-  - Archive deletes the worktree's panels, and promote moves them.
+  - Archive deletes the worktree's panels, and promote moves the Changes
+    panel and deletes the note panels.
   - Creation opens the initial note as a panel when `auto_create_notes_enabled`
     is on, and opens none when it is off.
   - The migration moves a note out of `tabOrder` into the worktree's panels,
