@@ -43,21 +43,24 @@ import Testing
 /// binding constraint rather than an incidental one.
 ///
 /// The pass that binds this value is fast pass 2 (everything but the two
-/// daemon targets, ~7200 tests). Measured on two green runs of one commit,
-/// its slowest test reported 101.7 s on one (p50 9.9 s, p90 88.2 s, p99
-/// 100.5 s) and 82.4 s on the other (p90 72.3 s) — runner noise alone moves
-/// the tail by about twenty seconds — and about 30% of its tests report over
-/// 45 s on every run measured. Fast passes 1a and 1b report longer tails (on
-/// the second run, max 111.7 s and 107.4 s, p50 84.0 s and 63.6 s), but a
-/// reported duration there includes the time a test waits for its body to
-/// start, which a wait inside the body never pays, so those figures bound a
-/// wait only loosely. The record agrees: across five CI attempts of that
-/// commit no bounded wait timed out in pass 1a or 1b, while pass 2's green
-/// tail crosses a 90 s bound outright — 101.7 s above, and 97.2 s among the
-/// passing tests of a run of `main`.
+/// daemon targets, ~7200 tests). Measured on four green CI runs, its slowest
+/// test reported 77.1 s, 67.2 s, 68.1 s and 86.3 s (p90 55–71 s, p99
+/// 66–85 s), and runner noise alone moves that tail by about twenty seconds.
+/// Fast passes 1a and 1b report shorter tails (slowest 54.3–74.2 s and
+/// 26.5–34.2 s). A reported duration there also includes the time a test
+/// waits for its body to start, which a wait inside the body never pays, so
+/// those figures bound a wait only loosely.
 ///
-/// 120 s clears pass 2's green maximum by ~18 s, and the deadline still
-/// elapses only on a genuine hang.
+/// The sizing rule clears the worst green tail by about 18 s, because runner
+/// noise alone moves it by about twenty. 120 s clears pass 2's 86.3 s by
+/// about 34 s, and the deadline still elapses only on a genuine hang. Nothing
+/// below about 105 s satisfies the rule, and a step that small does not repay
+/// re-deriving the values coupled to this one: `TestGate.deadline`,
+/// `.fastPassBounded`, and the tier-3 suite limits summed from chains of
+/// these waits. Pass 2 is main-thread bound, so a split would add about 26 s
+/// of startup and save no main-thread time, though it would roughly halve the
+/// tail; the trigger to split is its green maximum nearing about 100 s
+/// (`Tests/CLAUDE.md`, "Population is the scheduler").
 ///
 /// ## The interaction with `.clockDriven` — read before changing either value
 ///

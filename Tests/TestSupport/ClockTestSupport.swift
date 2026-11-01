@@ -25,21 +25,20 @@ public extension Trait where Self == TimeLimitTrait {
     /// how long the test ought to take.** Swift Testing runs the whole
     /// population in one process with no concurrency cap, on a 3-thread CI
     /// runner, so a test's *reported* duration is mostly time suspended waiting
-    /// for a thread. Mined from green runs of one commit: fast pass 1a
-    /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported p50 84.0 s, p99
-    /// 107.6 s, max 111.7 s; fast pass 1b (the rest of the daemon target, ~3900
-    /// tests) p50 63.6 s, p99 101.2 s, max 107.4 s; fast pass 2 (everything
-    /// else, ~7200 tests) p90 88.2 s and max 101.7 s on one run and p90 72.3 s,
-    /// max 82.4 s on another. A limit of one minute therefore sits **below the
-    /// median** of both halves of a healthy pass 1 and below the **p90** of a
-    /// healthy pass 2 — it is a coin flip on green runs, and it fired that way
-    /// on three `TerminalLockedAccessTests` tests at the same instant, twice in
-    /// five days, with no hang anywhere. Five minutes clears the largest
-    /// measured maximum by ~2.7x while staying a small fraction of the step
-    /// budget. The full derivation — how 300 s composes with `ciSafeDeadline`
-    /// (120 s) and the arming waits (45 s), and the invariant the three satisfy
-    /// together — is on ``clockDriven`` below; re-derive all of them together
-    /// when the population moves materially.
+    /// for a thread. Mined from green CI runs: fast pass 1a
+    /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a slowest test of
+    /// 54.3–74.2 s (p99 49–66 s); fast pass 1b (the rest of the daemon target,
+    /// ~3900 tests) 26.5–34.2 s (p99 25–31 s); fast pass 2 (everything else,
+    /// ~7200 tests) 67.2–86.3 s (p90 55–71 s, p99 66–85 s). A limit of one
+    /// minute therefore sits **below the p99** of every healthy pass 2
+    /// measured, and inside the range of its p90 — it is a coin flip on green
+    /// runs, and it fired that way on three `TerminalLockedAccessTests` tests
+    /// at the same instant, twice in five days, with no hang anywhere. Five
+    /// minutes clears the largest measured maximum by about 3.5x while staying
+    /// a small fraction of the step budget. The full derivation — how 300 s
+    /// composes with `ciSafeDeadline` (120 s) and the arming waits (45 s), and
+    /// the invariant the three satisfy together — is on ``clockDriven`` below;
+    /// re-derive all of them together when the population moves materially.
     ///
     /// **(b) The rule: a fast-pass suite uses this trait rather than a literal
     /// `.timeLimit`, unless the limit is itself the regression detector.** A

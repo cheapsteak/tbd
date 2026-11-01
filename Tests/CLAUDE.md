@@ -342,6 +342,17 @@ narrower job: catching a target that *is* named in one of these regexes
 collapsing or being renamed, where the regex would zero-match or over-skip its
 way to a green run of nothing. Keep them updated.
 
+**Pass 2 stays one step until its tail nears 100 s.** Pass 2 is bound by the
+main thread, not by the pool: its `@MainActor` tests run one at a time (see
+the main-thread stall below). A split runs its two halves one after the other,
+so the main-thread work takes just as long, and the job pays about 26 s more
+startup. A split would roughly halve pass 2's per-test tail, and that buys
+deadline margin. But the margin is already about 34 s, past the 18 s the
+sizing rule asks for (see `saturatedPass` below). So the trigger is pass 2's
+green per-test maximum nearing about 100 s, which is `saturatedPass` less that
+18 s. Then split it the way pass 1 is split, with the second half a complement,
+and update the floors and the figures below.
+
 **Wall-clock handshake deadlines are hang-catchers sized against the population
 of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`),
 the `timeout` of `EventDrivenTestClock`'s arming waits
@@ -458,24 +469,21 @@ fast-pass suite carries a hand-written `.timeLimit`.** A wait takes its deadline
 from `TestDeadlines` (`saturatedPass` as a `Duration`, `saturatedPassSeconds` as
 a `TimeInterval`), and a suite or test hang guard takes `.fastPassBounded` —
 which `.clockDriven` is an alias of, so there is one dial. The evidence is what
-the passes' own numbers say about a small number. Measured on two **green** runs
-of one commit: fast pass 2 (everything outside the two daemon targets, ~7200
-tests) reported p50 9.9 s, p90 88.2 s, p99 100.5 s and max 101.7 s per test on
-one, and p50 6.7 s, p90 72.3 s and max 82.4 s on the other — runner noise alone
-moves its tail by about twenty seconds. On the second run fast pass 1a
-(`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported p50 84.0 s, p99 107.6 s and
-max 111.7 s, and fast pass 1b (~3900 tests) p50 63.6 s, p99 101.2 s and max
-107.4 s. Reported duration is almost entirely time suspended behind other
-runnable tests. In pass 1 it also includes the time a test waits for its body
-to start at all, which no bound inside the body pays, and the record fits:
-across five CI attempts of that commit no bounded wait timed out in pass 1a or
-1b. Pass 2's green tail, by contrast, crosses a 90 s bound outright — 101.7 s
-above, and 97.2 s among the passing tests of a run of `main` — so pass 2 is the
-pass `saturatedPass` is sized against (the derivation is at `ciSafeDeadline`). A
-2–30 s hand-rolled wait therefore sits well below the healthy latency of the
-very hop it is guarding, and a one-minute suite limit sits below the median of
-both halves of pass 1 and below pass 2's p90. Both fire on healthy runs, and
-both did. Three exceptions, and only these: a **negative-assertion window**
+the passes' own numbers say about a small number. Measured on **green** CI
+runs: fast pass 2 (everything outside the two daemon targets, ~7200 tests)
+reported a slowest test of 77.1 s, 67.2 s, 68.1 s and 86.3 s on four runs, with
+p90 55–71 s and p99 66–85 s, and runner noise alone moves its tail by about
+twenty seconds. Fast pass 1a (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a
+slowest test of 54.3 s, 55.5 s and 74.2 s on three runs (p99 49–66 s), and fast
+pass 1b (~3900 tests) 26.5 s, 26.8 s and 34.2 s (p99 25–31 s). Reported
+duration is almost entirely time suspended behind other runnable tests. In
+pass 1 it also includes the time a test waits for its body to start at all,
+which no bound inside the body pays, so pass 1's figures bound a wait only
+loosely. Pass 2 sets the tail `saturatedPass` is sized against (the derivation
+is at `ciSafeDeadline`). A 2–30 s hand-rolled wait therefore sits well below
+the healthy latency of the very hop it is guarding, and a one-minute suite
+limit sits below pass 2's p99 on every run measured. Both fire on healthy runs,
+and both did. Three exceptions, and only these: a **negative-assertion window**
 ("nothing fires within X") is the assertion and is never lengthened; a
 **discriminating threshold** that decides
 between two diagnoses (`FileWatcherTests`' `attemptWindow`) is likewise the
@@ -485,6 +493,14 @@ observation. Everything else — including a wait reached only through productio
 code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
 follow and only the bound is yours (see "Thread-blocking gates" below) — takes
 the shared constant.
+
+**`saturatedPass` stays at 120 s.** The sizing rule clears the worst green
+tail by about 18 s, because runner noise alone moves that tail by about twenty
+seconds. Pass 2's worst green maximum is 86.3 s, so 120 s clears it by about
+34 s. Nothing below about 105 s satisfies the rule, and a step that small does
+not repay re-deriving the values coupled to this one: `TestGate.deadline`, the
+`.fastPassBounded` limit, and the tier-3 suite limits summed from chains of
+`saturatedPass` waits. Pass 1's tails, at 74.2 s or less, are not near it.
 
 One more thing a reader should not have to mine a log for: the **"72 known
 issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
@@ -514,6 +530,61 @@ Three remedies are already refuted; don't re-litigate them.
 at this same comparison ran each arm as a block and was invalidated by
 uncontrolled load drift from sibling agents on the shared box — the arms
 measured different machines, not different configurations.
+
+**A stall is a spell of 1–20 s in which no test starts or finishes.** Unlike
+the wedge the stall watchdog bounds (`scripts/ci/watched-test-pass.sh`), it ends
+on its own, but every test queued behind it waits it out. The fast passes show
+two shapes. In each, a thread that every other test is queued on is held by
+work that does not suspend.
+
+**The cooperative pool, held by synchronous CPU work.** CI's pool has three
+threads, so three test bodies that compute for seconds without suspending stop
+the pass. Running the whole migration chain in every
+`TBDDatabase.init(inMemory:)` is what held it in the daemon passes. Stack
+samples taken in stalls found all three pool threads inside it. A whole-pass
+profile put it at 29.8% of all pool time in pass 1a and 24.4% in 1b, about 55%
+and 65% of the pool's busy time. So `init(inMemory:)` copies a template
+migrated once per process (`Sources/TBDDaemon/Database/Database.swift`).
+Measured on CI, a run's gaps of 1 s or more summed to 42–85 s in pass 1a and
+26–53 s in 1b with a migration per init, and to 12–24 s and 4–6 s with the
+template. Some pool stalls remain: `posix_spawn` of git, through
+`GitManager.run` and `runBoundedProcess`, at 1–3% of pool time.
+
+**The main thread, held by main-actor work.** Pass 2 is bound by the main
+thread. `@MainActor` tests run one at a time, so a test that does long
+synchronous work on the main actor holds up every other one. A whole-pass
+profile found the main thread inside a test body for 90.7% of the pass, while
+the pool sat idle for 82.5% of it. Moving work that does not need the main
+thread off it cut the main thread's samples by about 24%, from 8,693 to 6,591.
+`ComposerImagePreparerTests` runs its image work on `GateExecutor.shared`
+through `withTaskExecutorPreference` and checks the thread's name there.
+`TranscriptEstimatorAccuracyTests` renders each message once rather than once
+per width, and reads back a table it has already laid out at that width.
+`AppState` writes `skipAccountPicker` back only when its value changes. Of
+what is left on the main thread, about 10 s is synchronous `cfprefsd` XPC from
+per-test defaults suites, and about 7 s is sleep inside `RunLoopPump` turns.
+
+**So a new fixture keeps both threads free.** Do no long synchronous CPU work
+on the cooperative pool. Do no work on the main actor that does not need the
+main actor. Build an expensive fixture once and share it where it is immutable;
+the in-memory database template is the precedent. Run heavy CPU work on threads
+the tests own, through `withTaskExecutorPreference(GateExecutor.shared)`.
+
+**Find a stall by measuring it, in four steps.** The method is what transfers;
+no tooling for it lives in the repo.
+
+- **Sum the gaps.** Add up every gap of 1 s or more between consecutive
+  timestamped lines of a fast pass's Swift Testing log. The runner's
+  timestamps match NSLog's in-process ones to within 14 ms, so a gap in the
+  log is a gap in the process.
+- **Rule out the VM.** Run a heartbeat process outside the test process that
+  ticks every 100 ms. If it never freezes, the VM is not pausing.
+- **Sample during stalls.** Whenever the log has been quiet for 1 s, run
+  `sample <pid> 2 10` on the `swiftpm-testing-helper` process. Classify what the
+  pool threads and the main thread are doing.
+- **Sample the whole pass.** Take one `sample` of the helper across the whole
+  pass. Credit each sample to the outermost test function above it. That ranks
+  the tests by how much pool or main-thread time they hold.
 
 New tests should state their tier. Tier-1 tests put no real sleep in the
 *behaviour under test* — the code under test is driven entirely by virtual
@@ -587,10 +658,11 @@ runner and pinned by `TaskPriorityParityTests`
 (`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
 is queued *behind higher-priority work* — the pool's queue is FIFO among the
 thousands of tasks the pass keeps runnable, and one suspension hop on a green
-run can cost up to about the pass's own per-test tail, around 100 s in fast
-pass 2 (p99 100.5 s; see "Population is the scheduler" for why pass 2 is the
-measure). A handshake that needs *k* hops therefore costs up to *k* × that, and
-the uninjected latch needs three or four — each caller starting, reaching the
+run can cost up to about the pass's own per-test tail, around 85 s in fast
+pass 2 (p99 66–85 s on the green runs measured; see "Population is the
+scheduler" for why pass 2 is the measure). A handshake that needs *k* hops
+therefore costs up to *k* × that, and the uninjected latch needs three or
+four — each caller starting, reaching the
 latch and awaiting the run; the run's own unstructured task starting; then
 every caller resuming. Measured against a 90 s bound, CI saw 0 of 8 callers
 back after 90 s while the test's own polling task, already runnable, kept
