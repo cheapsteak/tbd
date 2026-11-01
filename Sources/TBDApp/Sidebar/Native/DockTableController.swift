@@ -306,6 +306,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     private func rebuildNow() {
         loadViewIfNeeded()
+        // The outline's signposter, under names of the dock's own, so
+        // Instruments attributes a slow frame to the list that spent it.
+        let interval = SidebarOutlineController.signposter.beginInterval("dockRebuild")
         let state = appState
         let directoryExists = self.directoryExists
         let latest = withObservationTracking { () -> [DockRow] in
@@ -321,6 +324,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         // Anything scheduled while building is covered by this build; a change
         // after the tracking re-armed schedules afresh.
         rebuildScheduled = false
+        SidebarOutlineController.signposter.endInterval("dockRebuild", interval)
         apply(latest)
     }
 
@@ -366,6 +370,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// Applies `latest`, then mirrors `AppState`'s selection into the table.
     /// The selection guard covers the whole apply, through `endUpdates`.
     func apply(_ latest: [DockRow]) {
+        let interval = SidebarOutlineController.signposter.beginInterval("dockApply")
+        defer { SidebarOutlineController.signposter.endInterval("dockApply", interval) }
         let previousCount = rows.count
         isApplyingModelSelection = true
         if hasLoaded {
@@ -494,18 +500,19 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// SwiftUI dock's tags would write it, then mirrored straight back, since
     /// the `didSet` may route it. A ⌘- or ⇧-click extends the selection, so
     /// selected rows the dock does not show stay selected; a plain click
-    /// replaces it.
+    /// replaces it. The outline follows the same rule
+    /// (`SidebarSelectionBridge.userSelection`).
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isApplyingModelSelection else {
             suppressedSelectionNotificationCount += 1
             return
         }
         let selected = table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? rows[$0].id : nil }
-        var ids = SidebarSelectionBridge.appStateIDs(for: selected)
-        if !selectionModifiers().isDisjoint(with: [.command, .shift]) {
-            let shown = Set(rows.map(\.id))
-            ids.formUnion(appState.selectedWorktreeIDs.filter { !shown.contains(.worktree($0)) })
-        }
+        let shown = Set(rows.map(\.id))
+        let ids = SidebarSelectionBridge.userSelection(
+            selected: selected, current: appState.selectedWorktreeIDs,
+            extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
+            isShown: { shown.contains($0) })
         writeSelection(ids)
         isApplyingModelSelection = true
         applyModelSelection()

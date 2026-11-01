@@ -10,6 +10,9 @@ enum SidebarCellKit {
     static let rowSpacing: CGFloat = 6
     /// The leading and suffix glyph slot: `.frame(width: 12, height: 12)`.
     static let glyphSide: CGFloat = 12
+    /// A row's share of its own opacity while its section's chevron is
+    /// hovered, as `RepoSectionView` dims the rows the gesture would hide.
+    static let chevronHoverOpacity: CGFloat = 0.7
 
     // MARK: Fonts — the SwiftUI rows' text styles on macOS
 

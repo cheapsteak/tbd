@@ -79,6 +79,12 @@ struct WorktreeRowModel: Equatable {
     /// `worktree.repoID != nil`. Nesting is repo-only, so a scratch row offers
     /// no nested `+` and no "New nested worktree" action.
     var hasRepo: Bool = false
+    /// `AppState.pendingWorktreeIDs` holds the row: a creating placeholder,
+    /// local or a remote lane's, drawn before the daemon has the row. The
+    /// cell draws it as any creating row; `SidebarDropPolicy` never carries
+    /// it, nests onto it or places rows before it, since the daemon refuses
+    /// an ID it has never seen.
+    var isPlaceholder: Bool = false
 }
 
 /// A repo or Scratch section header (`RepoSectionView.headerRow`,

@@ -44,8 +44,9 @@ enum PinnedDockContent {
     ///     a child vanish the moment you clicked it in the dock.
     ///   - children: injected rather than derived so the dock and the sidebar
     ///     list agree on what a child is. Callers pass `appState.children(of:)`,
-    ///     which already filters to `.active`/`.creating` and sorts by
-    ///     `sortOrder`; duplicating that predicate here would let the two drift.
+    ///     which already filters to `.active`/`.creating` and sorts in sibling
+    ///     order (`Worktree.precedesSibling`); duplicating that predicate here
+    ///     would let the two drift.
     static func rows(allWorktrees: [Worktree],
                      selectedIDs: Set<UUID>,
                      children: (UUID) -> [Worktree]) -> [PinnedDockRow] {

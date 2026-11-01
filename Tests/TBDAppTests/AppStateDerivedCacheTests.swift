@@ -30,15 +30,16 @@ private func makeWorktree(
     )
 }
 
-/// The pre-memoization `children(of:)` body, verbatim. Every index assertion
-/// below is stated against this oracle so the memoized index cannot silently
-/// drift from the semantics it replaced.
+/// The pre-memoization `children(of:)` body, with the daemon's sibling
+/// order (`Worktree.precedesSibling`) for ties. Every index assertion below
+/// is stated against this oracle so the memoized index cannot silently drift
+/// from the semantics it replaced.
 @MainActor
 private func referenceChildren(_ state: AppState, of parentID: UUID) -> [Worktree] {
     state.worktrees.values
         .flatMap { $0 }
         .filter { $0.parentWorktreeID == parentID && ($0.status == .active || $0.status == .creating) }
-        .sorted { $0.sortOrder < $1.sortOrder }
+        .sorted(by: Worktree.precedesSibling)
 }
 
 @MainActor

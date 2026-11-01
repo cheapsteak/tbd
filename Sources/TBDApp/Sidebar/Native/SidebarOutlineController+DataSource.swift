@@ -181,9 +181,6 @@ extension SidebarOutlineController {
         configuration.isNestTarget = nestTargetID == node.id
         rowView.configuration = configuration
         configuredRowViews[ObjectIdentifier(rowView)] = node.id
-        // `RepoSectionView` dims its rows while the section's chevron is
-        // hovered: the gesture is about to hide them.
-        rowView.alphaValue = isDimmedByChevron(node) ? 0.7 : 1
     }
 
     /// How many worktree rows `id` sits under: `WorktreeRowView`'s

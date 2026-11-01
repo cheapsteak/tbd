@@ -5,7 +5,8 @@ import TBDShared
 
 /// `WorktreeStore.moveMany`: the sidebar's all-or-nothing drop. Every check
 /// runs before any write, the destination group is renumbered 0…n−1, and the
-/// result is the whole destination group in its new order.
+/// result is the group's unarchived rows in their new order, with whether a
+/// carried row changed parent.
 @Suite struct WorktreeMoveManyTests {
 
     func makeDB() throws -> TBDDatabase {
@@ -145,7 +146,9 @@ import TBDShared
         #expect(try await topLevel(db, repo: other) == [sibling.id, child.id])
         #expect(try await topLevel(db, repo: home) == [parent.id])
         #expect(try await children(db, of: parent.id).isEmpty)
-        #expect(result.map(\.worktreeID) == [sibling.id, child.id])
+        let resultIDs = result.entries.map { $0.worktreeID }
+        #expect(resultIDs == [sibling.id, child.id])
+        #expect(result.reparented)
     }
 
     /// Scratch rows have a NULL `repoID`. A group query written `repoID = ?`
@@ -166,11 +169,13 @@ import TBDShared
         // s2 and s3 must be renumbered around s1 for this order to hold.
         let expected = [s2.id, s1.id, s3.id]
         #expect(try await entries(db, expected).map(\.sortOrder) == [0, 1, 2])
-        #expect(result == [
+        #expect(result.entries == [
             WorktreeOrderEntry(worktreeID: s2.id, parentWorktreeID: nil, sortOrder: 0),
             WorktreeOrderEntry(worktreeID: s1.id, parentWorktreeID: nil, sortOrder: 1),
             WorktreeOrderEntry(worktreeID: s3.id, parentWorktreeID: nil, sortOrder: 2),
         ])
+        // A reorder among the rows' own siblings changes no parent.
+        #expect(!result.reparented)
         // The repo's top-level group is a different group and is not touched.
         #expect(try await db.worktrees.get(id: repoRow.id)?.sortOrder == repoRowOrderBefore)
     }
@@ -321,27 +326,33 @@ import TBDShared
 
     // MARK: - Result
 
-    /// The result is every row of the destination group, archived rows
-    /// included, each with its parent and new sortOrder, and it matches what
-    /// the database now holds.
-    @Test func returnsTheWholeDestinationGroup() async throws {
+    /// The result is every unarchived row of the destination group, each
+    /// with its parent and new sortOrder, and it matches what the database
+    /// now holds. An archived row in the group is renumbered with the rest
+    /// but left out of the result, which the delta broadcasts.
+    @Test func returnsTheDestinationGroupWithoutArchivedRows() async throws {
         let db = try makeDB()
         let repo = try await makeRepo(db)
         let parent = try await makeWT(db, repo: repo, name: "parent")
         let c1 = try await makeWT(db, repo: repo, name: "c1", parent: parent.id)
-        let c2 = try await makeWT(db, repo: repo, name: "c2", parent: parent.id)
         let archived = try await makeWT(db, repo: repo, name: "archived", parent: parent.id)
         try await db.worktrees.updateStatus(id: archived.id, status: .archived)
+        let c2 = try await makeWT(db, repo: repo, name: "c2", parent: parent.id)
         let mover = try await makeWT(db, repo: repo, name: "mover")
 
         let result = try await db.worktrees.moveMany(
             worktreeIDs: [mover.id], newParentID: parent.id, before: c2.id)
 
-        let expectedIDs = [c1.id, mover.id, c2.id, archived.id]
-        let expected = expectedIDs.enumerated().map { index, id in
-            WorktreeOrderEntry(worktreeID: id, parentWorktreeID: parent.id, sortOrder: index)
-        }
-        #expect(result == expected)
-        #expect(try await entries(db, expectedIDs) == result)
+        // The whole group's new order, archived row included.
+        let renumbered = [c1.id, archived.id, mover.id, c2.id]
+        let stored = try await entries(db, renumbered)
+        let storedOrders = stored.map { $0.sortOrder }
+        #expect(storedOrders == [0, 1, 2, 3])
+        // The result is that order without the archived row.
+        let expected = stored.filter { $0.worktreeID != archived.id }
+        #expect(result.entries == expected)
+        let resultIDs = result.entries.map { $0.worktreeID }
+        #expect(resultIDs == [c1.id, mover.id, c2.id])
+        #expect(result.reparented)
     }
 }

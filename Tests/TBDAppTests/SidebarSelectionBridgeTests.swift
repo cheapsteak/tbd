@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import TBDApp
@@ -45,6 +46,34 @@ struct SidebarSelectionBridgeTests {
         // Round trip: what the outline shows writes back the same IDs.
         let shown = SidebarSelectionBridge.outlineIDs(selectedWorktreeIDs: [first], selectedRemoteSession: lane)
         #expect(SidebarSelectionBridge.appStateIDs(for: Array(shown)) == [first, lane])
+    }
+
+    /// The one rule both lists follow for a user's selection: a plain click
+    /// replaces it; a ⌘- or ⇧-click keeps selected rows the list does not
+    /// show, and drops a shown row the user deselected.
+    @Test func userSelectionKeepsUnshownRowsOnlyWhenExtending() {
+        let shownRow = UUID()
+        let deselected = UUID()
+        let unshown = UUID()
+        let lane = RemoteSessionIdentity.uuid(provider: "acme", sessionID: "lane")
+        let shown: Set<SidebarNodeID> = [.worktree(shownRow), .worktree(deselected), .remoteSession(lane)]
+        let current: Set<UUID> = [deselected, unshown]
+        let selected: [SidebarNodeID] = [.worktree(shownRow), .remoteSession(lane)]
+
+        let extended = SidebarSelectionBridge.userSelection(
+            selected: selected, current: current, extending: true, isShown: { shown.contains($0) })
+        #expect(extended == [shownRow, lane, unshown])
+
+        let replaced = SidebarSelectionBridge.userSelection(
+            selected: selected, current: current, extending: false, isShown: { shown.contains($0) })
+        #expect(replaced == [shownRow, lane])
+
+        // ⌘ and ⇧ extend; anything else replaces.
+        #expect(SidebarSelectionBridge.extendsSelection(.command))
+        #expect(SidebarSelectionBridge.extendsSelection(.shift))
+        #expect(SidebarSelectionBridge.extendsSelection([.command, .option]))
+        #expect(!SidebarSelectionBridge.extendsSelection([]))
+        #expect(!SidebarSelectionBridge.extendsSelection(.option))
     }
 
     @Test func onlyRowsAreSelectable() {

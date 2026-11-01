@@ -195,10 +195,10 @@ final class AppState {
     @ObservationIgnored private var allWorktreesCache: [Worktree]?
 
     /// Every active/creating worktree bucketed by `parentWorktreeID`, in
-    /// `sortOrder`. Backs `children(of:)`, which the sidebar calls once per
-    /// row while rendering — recomputing the O(N) flatMap/filter/sort per call
-    /// made a render pass O(N²) (measured 79.5 ms at 127 worktrees; the index
-    /// costs 1.68 ms cold and ~0 warm).
+    /// sibling order (`Worktree.precedesSibling`). Backs `children(of:)`,
+    /// which the sidebar calls once per row while rendering — recomputing the
+    /// O(N) flatMap/filter/sort per call made a render pass O(N²) (measured
+    /// 79.5 ms at 127 worktrees; the index costs 1.68 ms cold and ~0 warm).
     ///
     /// Deliberately dict-only, never `allWorktrees`: scratch spaces can never
     /// be children (see `children(of:)`).
@@ -215,15 +215,16 @@ final class AppState {
                 index[parentID, default: []].append(worktree)
             }
         }
-        // Same comparator as the pre-index implementation. `Dictionary.values`
-        // iteration order is nondeterministic and `sort` is not stable, so ties
-        // on equal `sortOrder` were already nondeterministic — deliberately not
-        // "fixed" with an id tie-break, which would change behavior.
+        // The daemon's sibling order, ties included: `Dictionary.values`
+        // iteration order is nondeterministic and `sort` is not stable, so a
+        // comparator on `sortOrder` alone left tied rows in an arbitrary
+        // order, which the first `worktree.moveMany` into the group then
+        // renumbered by `createdAt` — moving rows the user never touched.
         // `Array(index.keys)` rather than `index.keys`: the lazy view holds a
         // reference to the dictionary's storage, so mutating `index` inside
         // the loop would force a full copy-on-write copy on every iteration.
         for key in Array(index.keys) {
-            index[key]?.sort { $0.sortOrder < $1.sortOrder }
+            index[key]?.sort(by: Worktree.precedesSibling)
         }
         childrenIndexCache = index
         return index
@@ -2489,6 +2490,11 @@ final class AppState {
         { [daemonClient] repoID in
             try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
         }
+    /// How `refreshWorktrees(repoID:)` fetches every terminal — injectable for
+    /// the same reason as `worktreesFetcher`, so a test can see the terminal
+    /// half of a poll apply without a real daemon.
+    @ObservationIgnored lazy var terminalsListFetcher: @MainActor () async throws -> [TBDShared.Terminal] =
+        { [daemonClient] in try await daemonClient.listTerminals() }
     /// How `moveWorktrees` sends `worktree.moveMany` — injectable for the same
     /// reason as `terminalHibernateSender`, so a test decides when the RPC
     /// returns and can drive the overlay, the fence and the failure restore
@@ -4284,8 +4290,9 @@ final class AppState {
     func refreshWorktrees(repoID: UUID? = nil) async {
         // Numbered when sent, scoped or not. A result numbered below
         // `worktreeFetchFence` was requested before a move's RPC succeeded, so
-        // it may have read the daemon before that commit: it is discarded
-        // rather than allowed to undo the move.
+        // its list may have read the daemon before that commit: the list is
+        // not assigned, rather than allowed to undo the move. The rest of the
+        // poll reads RPCs of its own and runs as usual.
         let fetchNumber = nextWorktreeFetchNumber
         nextWorktreeFetchNumber += 1
         do {
@@ -4293,26 +4300,33 @@ final class AppState {
             // Absent rows satisfy reconcileTombstones identically to status==.archived
             // (both confirm the tombstone), so tombstone reconciliation is unaffected.
             let allWts = try await worktreesFetcher(repoID)
-            guard fetchNumber >= worktreeFetchFence else {
-                logger.debug("Discarding worktree fetch \(fetchNumber, privacy: .public): sent before a move committed (fence \(self.worktreeFetchFence, privacy: .public))")
-                return
-            }
-            // A fetch at or above a succeeded move's fence read its commit, so
-            // that move leaves the overlay before the result is applied: the
-            // daemon's state is the truth from here, including any later
-            // writer's move of the same rows, which re-applying the move would
-            // undo.
-            retireSettledWorktreeMoves(appliedFetch: fetchNumber)
-            // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
-            // stale poll predating an archive cannot resurrect the row.
-            // Reconcile only on the unscoped path: a scoped allWts omits other repos'
-            // worktrees, which would look absent and evict their tombstones prematurely.
-            if repoID == nil {
-                recentlyArchivedWorktreeIDs = AppState.reconcileTombstones(
-                    recentlyArchivedWorktreeIDs,
-                    daemonWorktrees: allWts,
-                    now: Date()
-                )
+            // The fence covers the worktree lists and what is tied to them:
+            // retiring settled moves and reconciling tombstones, both of which
+            // read this result as the daemon's current state. Terminals,
+            // notes, tab readiness and pane histories come from their own
+            // RPCs, sent after this one returned, so a fenced poll still
+            // applies them.
+            let listsAreFenced = fetchNumber < worktreeFetchFence
+            if listsAreFenced {
+                logger.debug("Keeping the worktree lists over fetch \(fetchNumber, privacy: .public): sent before a move committed (fence \(self.worktreeFetchFence, privacy: .public))")
+            } else {
+                // A fetch at or above a succeeded move's fence read its
+                // commit, so that move leaves the overlay before the result is
+                // applied: the daemon's state is the truth from here,
+                // including any later writer's move of the same rows, which
+                // re-applying the move would undo.
+                retireSettledWorktreeMoves(appliedFetch: fetchNumber)
+                // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
+                // stale poll predating an archive cannot resurrect the row.
+                // Reconcile only on the unscoped path: a scoped allWts omits other repos'
+                // worktrees, which would look absent and evict their tombstones prematurely.
+                if repoID == nil {
+                    recentlyArchivedWorktreeIDs = AppState.reconcileTombstones(
+                        recentlyArchivedWorktreeIDs,
+                        daemonWorktrees: allWts,
+                        now: Date()
+                    )
+                }
             }
             let fetched = AppState.visibleWorktrees(
                 from: allWts,
@@ -4342,8 +4356,9 @@ final class AppState {
             // periodic refresh is where that flip is observed.
             promoteRevivedWorktrees(observing: allWts)
 
+            // A fenced fetch leaves both lists as the app holds them.
             var listsChanged = false
-            if let repoID {
+            if !listsAreFenced, let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
                 var merged = fetched + placeholders
@@ -4362,7 +4377,7 @@ final class AppState {
                     listsChanged = true
                     forgetDevServerState(droppedFrom: previous, keeping: Set(merged.map(\.id)))
                 }
-            } else {
+            } else if !listsAreFenced {
                 var grouped: [UUID: [Worktree]] = [:]
                 var scratch: [Worktree] = []
                 for wt in fetched {
@@ -4391,7 +4406,7 @@ final class AppState {
                     worktrees = grouped
                     listsChanged = true
                 }
-                let sortedScratch = scratch.sorted { $0.sortOrder < $1.sortOrder }
+                let sortedScratch = scratch.sorted(by: Worktree.precedesSibling)
                 if sortedScratch != scratchWorktrees {
                     scratchWorktrees = sortedScratch
                     listsChanged = true
@@ -4408,7 +4423,7 @@ final class AppState {
 
             // Single RPC — fetch all terminals, group client-side
             let terminalSnapshotGeneration = terminalReplacementObservationGeneration
-            let allTerminals = try await daemonClient.listTerminals()
+            let allTerminals = try await terminalsListFetcher()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
             // One no-status reconcile for the whole poll, not one per worktree.

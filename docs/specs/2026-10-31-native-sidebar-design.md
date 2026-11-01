@@ -104,6 +104,18 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   `SidebarRemoteGroups`. Work that SwiftUI row bodies repeat on every evaluation
   today runs here once per rebuild. Text needed only on hover, such as PR
   freshness tooltips, is computed when the pointer arrives, not per rebuild.
+- **`SidebarRowModelFactory`** – computes each worktree and remote session row's
+  model from `AppState`, once per rebuild, through the same pure helpers the
+  matching SwiftUI row uses. The builder takes its row models from it, and so
+  does the dock, which builds no tree.
+- **`SidebarContainerController`** – the native sidebar's root: the outline's
+  scroll view filling the column, then a divider and the dock along the bottom
+  edge, the stack the SwiftUI footer group draws. It sets the dock's height in
+  closed form, `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
+  five rows and 40% of the list above the divider — on every layout and
+  whenever the dock's row count changes. It hands the outline and the dock one
+  sheet presenter and one `+` menu, and gives the dock the outline's answers
+  about scratch directories, so the dock never reads the disk.
 - **`SidebarOutlineController`** – an `NSViewController` that owns an
   `NSScrollView` and an `NSOutlineView` subclass, runs the update loop below, and
   acts as the outline's data source and delegate.
@@ -119,13 +131,30 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   guide lines. The existing AppKit views `TypingDotsView` and `InlineTextField`
   are reused inside the cells.
 - **`DockTableController`** – an `NSTableView` over `PinnedDockContent.rows`,
-  using the worktree cell and the same update loop.
-- **`SidebarSelectionBridge`** – maps outline selection to `AppState` and back.
+  with row models from `SidebarRowModelFactory`, the worktree and remote
+  session cells, and the same update loop.
+- **`SidebarHoverTracker`** – one per list, the outline's and the dock's: one
+  tracking area that reports the hovered row, the part of it under the pointer,
+  and the sections whose headers it reveals, with the repo header's 80 ms
+  debounce on the injected clock (see "Hover").
+- **`SidebarPlusMenu`** – the one `+` menu both lists share: the existing
+  `WorktreeProfilePickerView` in `FloatingPanel`, opened and closed by
+  `HoverMenuModel` and anchored to whichever AppKit `+` the pointer reached.
+  Only one can be open, so binding it to another `+` closes the first.
+- **`SidebarMenus`** – builds a row's or header's context menu from the
+  existing models when it is asked for, never per rebuild (see "Context menus,
+  popovers and sheets").
+- **`NativeSidebarSheetPresenter`** – the native sidebar's one sheet slot. The
+  controllers set it from menus and buttons; `NativeSidebarView` presents it. A
+  request while a sheet is up is dropped, so a second form cannot stack on the
+  first.
+- **`SidebarSelectionBridge`** – maps outline selection to `AppState` and back,
+  and holds the one rule both lists follow for a user's selection.
 - **`SidebarDropPolicy`** – pure; decides what a drag proposal means.
 - **`NativeSidebarView`** – the native path's SwiftUI wrapper: it mounts the
-  controller through an `NSViewControllerRepresentable` and presents the
-  sidebar's sheets. `SidebarView` shows it, with the SwiftUI footer beneath,
-  when the flag is on.
+  container controller through an `NSViewControllerRepresentable` and presents
+  the sidebar's sheets from the presenter. `SidebarView` shows it, with the
+  SwiftUI footer beneath, when the flag is on.
 
 ### Update loop
 
@@ -135,11 +164,18 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
    rebuild-scheduled flag and rebuilds on the next main-loop turn, re-arming the
    tracking as it does. A burst of writes therefore costs one pass. The builder
    never writes to `AppState`, and neither does anything the apply step
-   triggers, or each rebuild would schedule the next. The one exception is a
-   selected row that vanishes: when a selected worktree leaves `AppState`
-   without the selection being pruned, the apply writes the reduced selection
-   once, and the rebuild that write schedules finds nothing left to change.
-   Tests drive the loop through `flushPendingRebuild()`.
+   triggers, or each rebuild would schedule the next. Two steps do write
+   inside the tracked build, before its tracking is installed, so their
+   writes schedule nothing and the build that follows them sees the result:
+   `performReveals`, which runs `SidebarView`'s reveals and may write
+   `expandedSidebarGroups`, a repo's `expanded`, the Scratch section's key and
+   `pendingScrollToWorktreeID`; and `takeRenameRequest`, which clears
+   `editingWorktreeID` when it takes a rename. Each writes only when its value
+   changes. Outside the build, the one write is a selected row that vanishes:
+   when a selected worktree leaves `AppState` without the selection being
+   pruned, the apply writes the reduced selection once, and the rebuild that
+   write schedules finds nothing left to change. Tests drive the loop through
+   `flushPendingRebuild()`.
 2. The first load is a `reloadData`. After that, the controller diffs the new
    tree against the previous one and applies the result in one
    `beginUpdates`/`endUpdates` block:
@@ -177,7 +213,9 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
 4. Before applying, the controller records the first visible row's ID and its
    offset from the top of the clip view, and restores them afterwards.
    `NSTableView` moves the clip view on its own during layout after height
-   changes, as this app's transcript table showed.
+   changes, as this app's transcript table showed. At the very top, with the
+   clip view scrolled to zero, no anchor is recorded, deliberately: a sidebar
+   scrolled to the top stays there, so a row inserted first is seen.
 5. While a drag session or an inline rename is in progress, the controller
    holds structural changes and applies them when it ends. Content changes
    still apply. A drag's hold ends in `draggingSession(_:endedAt:)`, which
@@ -243,7 +281,12 @@ tint instead of turning white.
   whole apply, through `endUpdates`, so the selection changes `NSOutlineView`
   posts while rows move are not echoed to `AppState`. At the end of the apply
   the controller selects the rows `AppState` names.
-- The dock and the main outline both mirror the one selection set.
+- The dock and the main outline both mirror the one selection set, and a
+  user's selection in either goes through one rule in `SidebarSelectionBridge`:
+  a plain click replaces the selection, and a ⌘- or ⇧-click extends it, so a
+  selected row the list does not show — inside a collapsed section, or shown
+  only in the other list — stays selected. A row the list shows and the user
+  deselects leaves.
 - `SidebarRowView` draws today's tint (accent at 0.2 opacity).
 
 ### Expansion and reveal
@@ -260,19 +303,27 @@ tint instead of turning white.
   `revealSidebarGroups`, the Ended reveal, and the selection reveal with its
   baseline rule. `SidebarView.revealBaseline` moves to a shared pure function
   both paths call.
-- For `pendingScrollToWorktreeID`, the controller scrolls the target row to the
-  center in the same apply pass that expanded its section, then clears the
-  value. No run-loop hop is needed because the controller owns the rows.
+- The controller takes `pendingScrollToWorktreeID` at the top of the rebuild,
+  with the reveals, and clears it there, before the tracking is installed. The
+  apply that follows scrolls the target row to the center, in the same pass
+  that expanded its section; while structure is held, the apply that ends the
+  hold does. A target with no row by then is dropped, as the `List` drops it.
+  No run-loop hop is needed because the controller owns the rows.
 
 ### Hover
 
-- One tracking area on the outline determines the hovered row and tells its
-  cell. A tracking area gets no exit event when content scrolls under a
-  still pointer, so the hovered row is recomputed from the pointer position on
-  every clip-view scroll and after every apply, and cleared when a drag starts.
+- One tracking area per list, through each list's own `SidebarHoverTracker`,
+  determines the hovered row and tells its cell: the outline's, and the dock's,
+  whose worktree rows show the same pin toggle and nested `+`. A tracking area
+  gets no exit event when content scrolls under a still pointer, so the hovered
+  row is recomputed from the pointer position on every clip-view scroll and
+  after every apply, and cleared when a drag starts.
 - Repo and scratch headers reveal their `+` and chevron on hover, with the repo
   header's 80 ms debounce. Hovering a chevron dims that section's rows to 0.7
-  opacity.
+  of their own opacity. The dimming goes on each row's cell, composed with the
+  cell's other dimming (a hidden repo, a missing scratch directory, a gone
+  session), not on its row view, so the selection tint and the guide lines keep
+  theirs.
 - A worktree row's nested `+` keeps `HoverMenuModel`'s 400 ms hover delay,
   ⌥-click, and close on app deactivation. It opens the existing SwiftUI
   `WorktreeProfilePickerView` in `FloatingPanel`, anchored to the AppKit button.
@@ -291,8 +342,9 @@ row that is not shown yet stays pending until the row appears. The focus-race
 handling in `RenameableLabel` carries over.
 
 A new worktree's creating placeholder is replaced by the daemon's row while its
-rename may still be open. When the row under an open edit leaves the model and
-a rename is asked for on another row, the edit moves there: the open editor
+rename may still be open, and that is the one case the edit is handed over:
+when the creating row under an open edit leaves the model and a rename is asked
+for on the row now shown in its place, the edit moves there. The open editor
 closes without committing, and the new row's editor opens with what was typed,
 which a commit then applies to the real row.
 
@@ -320,20 +372,22 @@ which a commit then applies to the real row.
   status a sighted user reads from the suffix.
 - Controls shown only on hover, the pin toggle and the nested `+`, are also
   offered as `accessibilityCustomActions`, so VoiceOver reaches them without a
-  pointer.
+  pointer. A row with a pull request also offers "Open pull request", since its
+  PR glyph is not a button.
 
 ## Drag and drop
 
 ### What can be dragged
 
 - Worktree rows other than the main row, local or adopted remote lanes, and
-  scratch rows. Unadopted remote sessions and headers return no pasteboard
-  writer.
+  scratch rows. Unadopted remote sessions, headers and creating placeholders
+  (see "Where it can go") return no pasteboard writer.
 - A drag that starts on a selected row carries the selection; a drag that starts
   on an unselected row carries that row. From a selection, the drag leaves out
-  main rows, unadopted remote sessions, and any row whose ancestor is also
-  carried, since that row travels with its ancestor. If the selection mixes
-  scratch rows and worktrees, the drag carries the kind under the cursor.
+  main rows, creating placeholders, unadopted remote sessions, and any row
+  whose ancestor is also carried, since that row travels with its ancestor. If
+  the selection mixes scratch rows and worktrees, the drag carries the kind
+  under the cursor.
 - AppKit asks for a pasteboard writer for every selected row, or for the
   clicked row alone, so those rules live in the writer. An override of
   `canDragRows(with:at:)` records the mouse-down row's kind; the writer returns
@@ -352,7 +406,11 @@ which a commit then applies to the real row.
   `NSEvent.modifierFlags` rather than from the current event. The PR glyph is
   not a button: a click on it opens the pull request through the outline's
   click action, which checks whether the click landed on the glyph, and a press
-  on it can start a drag like any other point in the row.
+  on it can start a drag like any other point in the row. Because the press
+  reaches the outline like any other, the click also selects the row, as a
+  click anywhere else on it does; the SwiftUI glyph, a button, leaves the
+  selection alone. The outline selects on the press, before it can tell a
+  click from the start of a drag, and a drag must be able to start there.
 
 ### Where it can go
 
@@ -378,6 +436,15 @@ Each rule applies to every carried row; if one fails, the drop is rejected.
 - **Between a repo's top-level rows** – un-nest to the top level.
 - **Scratch rows** – reorder within the scratch section only, and no other row
   drops into it.
+- **Creating placeholders** – the row the app draws while a create is in
+  flight, a local create's or a remote lane's (which can stand for about a
+  minute), is one the daemon has never heard of, and `worktree.moveMany`
+  refuses an unknown ID. The row model marks it from
+  `AppState.pendingWorktreeIDs`, and the policy never carries one, never nests
+  onto one or into its children, and never names one as the row others land
+  before: a gap above a placeholder lands before the next row the daemon
+  knows, or at the end of the group when no such row follows. A daemon row that
+  is itself creating, its hook still running, is an ordinary row.
 - **Rejected:**
   - a drop onto a carried row or one of its descendants;
   - nesting under a scratch row, a remote session or a header;
@@ -455,25 +522,32 @@ The daemon, in `WorktreeStore.moveMany`:
    `beforeWorktreeID`, when given, must belong to the destination group and not
    be carried.
 3. Computes the new order with `SiblingPlacement.place(group:carried:before:)`,
-   a pure function in `TBDShared`: the group without the carried rows, with the
-   carried rows inserted before `before`, or appended.
+   a pure function in `TBDShared`, over the group in sibling order —
+   `sortOrder`, then `createdAt`, then ID: the group without the carried rows,
+   with the carried rows inserted before `before`, or appended.
 4. Writes each carried row's `parentWorktreeID`, and `sortOrder` 0…n−1 across
    the group in the new order. A carried remote row whose parent changes gets
    `remote_parent_assigned = 1`, exactly as `move` sets it.
 5. After the transaction commits, broadcasts a `worktreeSiblingsReordered`
-   delta carrying the request's `moveID` and the destination group's full
-   result, every row in it with its `parentWorktreeID` and new `sortOrder`, and
-   replies. The delta and the reply travel on different sockets, so the app may
-   see either first. The existing `worktreeMoved` delta carries only the moved row,
-   so a client applying it holds stale sibling sort orders until its next poll;
-   the full-group delta brings a client to the daemon's state in one step. A
-   client that predates the delta catches up at its next poll. The
-   implementation confirms that an unknown delta is skipped rather than ending
-   the subscription.
+   delta carrying the request's `moveID` and the destination group's result,
+   every unarchived row in it with its `parentWorktreeID` and new `sortOrder`,
+   and replies. Archived rows are renumbered with the rest but left out of the
+   delta: no client lists them, and a top-level group can hold thousands. The
+   delta and the reply travel on different sockets, so the app may see either
+   first. The existing `worktreeMoved` delta carries only the moved row, so a
+   client applying it holds stale sibling sort orders until its next poll; the
+   group delta brings a client to the daemon's state in one step. A client that
+   predates the delta catches up at its next poll. The implementation confirms
+   that an unknown delta is skipped rather than ending the subscription.
 
 Any failed check throws a typed error and writes nothing. `worktree.move` stays
 for `tbd worktree reparent`. Single-row drags send `moveMany` with one ID, so
 the sidebar has one commit path.
+
+A worktree with children is not auto-archivable, so the handler disarms
+auto-archive on the new parent, as `worktree.move` does, when some carried row's
+parent changed. A reorder among a parent's own children gives it no child it
+did not have, and a parent the user re-armed stays armed.
 
 `AppState.moveWorktrees(ids:newParentID:before:)` replaces the unused
 `moveWorktree`:
@@ -484,6 +558,12 @@ the sidebar has one commit path.
   includes archived rows and the app's lists do not, but the placement keeps
   the relative order of the rows both sides hold, so the two agree on every
   visible row.
+- **Sibling order.** Every list that shows a sibling group — a section's top
+  level, a row's children, the scratch rows — sorts it as the daemon orders a
+  group: `sortOrder`, then `createdAt`, then ID. Rows that tie on `sortOrder`,
+  such as a creating placeholder, which starts at 0, then show where the first
+  move into their group leaves them, so that move never visibly swaps two rows
+  the user did not touch. The SwiftUI path sorts the same way.
 - **A pending-move overlay.** The app re-fetches worktrees every 2 s, and other
   paths call `refreshWorktrees` too. Fetches are not serialized: each RPC opens
   its own socket, so a fetch that read the database before the commit can be
@@ -501,14 +581,17 @@ the sidebar has one commit path.
   engines such as Replicache.
 - **A fence for stale fetches.** `AppState` numbers each worktree fetch when it
   sends it. When a move's RPC succeeds, the number the next fetch will get
-  becomes that move's fence, and from then on any fetch result numbered below
-  the highest fence is discarded, so a fetch that read the daemon before a
-  commit is never applied after it. A move leaves the overlay once its RPC has
-  succeeded and the app has applied either the `worktreeSiblingsReordered`
-  delta carrying its `moveID`, whether it arrived before or after the reply, or
-  a fetch numbered at or above its fence.
-  The `moveID` keeps a move by the CLI or another window from retiring this
-  one.
+  becomes that move's fence, and from then on the worktree list of any fetch
+  numbered below the highest fence is discarded, so a list that read the
+  daemon before a commit is never applied after it. The fence covers the list
+  and what reads it as the daemon's current state — retiring settled moves and
+  reconciling archive tombstones — and nothing else: the same poll's
+  terminals, notes, tab readiness and pane histories come from RPCs of their
+  own, sent after the list returned, and apply as usual. A move leaves the
+  overlay once its RPC has succeeded and the app has applied either the
+  `worktreeSiblingsReordered` delta carrying its `moveID`, whether it arrived
+  before or after the reply, or a fetch numbered at or above its fence. The
+  `moveID` keeps a move by the CLI or another window from retiring this one.
 - **Failure.** At the drop, `AppState` snapshots the carried rows' parents and
   the order of their source and destination groups. If the RPC fails, the move
   leaves the overlay, the app restores those rows and groups from the snapshot,
@@ -523,7 +606,9 @@ the sidebar has one commit path.
   success, with no restore and no toast.
 - **Refused locally.** A move whose destination parent the app does not list,
   or whose parent is a `main` row, is refused before anything changes: no local
-  apply, no RPC.
+  apply, no RPC. So is a move that names a creating placeholder — a row in
+  `pendingWorktreeIDs` — as a carried row, the parent or `before`, since the
+  daemon would refuse the ID.
 
 The overlay and the fence rely on two daemon invariants, which `moveMany`'s
 tests pin: `moveMany` replies only after its transaction commits, and
@@ -556,17 +641,26 @@ the main thread has a budget:
 - **Drop to screen** – the outline shows a drop's result on the main-loop turn
   after the drop, within the rebuild budget.
 - **Drop validation** – `validateDrop` runs on every mouse movement during a
-  drag. `SidebarDropPolicy` answers by walking ancestors and looking up children
-  through the existing children index, so its cost grows with the tree's depth,
-  not its size; each call takes under 1 ms on the trees above.
+  drag. `SidebarDropPolicy` answers by walking ancestors and looking up
+  children through a `SidebarDropIndex` — each node's parent, position and
+  outline level — which the outline builds once per applied tree, on the first
+  drag question after the apply. Its cost grows with the tree's depth, not its
+  size; each call takes under 1 ms on the trees above.
 - **No blocking work** – the rebuild, the drop path and the cells do no IPC, no
-  disk access and no Launch Services queries on the main thread.
+  disk access and no Launch Services queries on the main thread, with one
+  exception: the PR glyph is a bundled SVG, which `WorktreeRowView.loadIcon`
+  reads once per icon and caches, as the SwiftUI row does. Whether a scratch
+  space's directory exists, which dims its row, is probed off the main thread:
+  when the set of scratch paths changes, on app activation, and every 60 s on
+  the injected clock, so a folder deleted or restored while the app runs dims
+  or brightens its row. A rebuild follows only when an answer changed.
 
 `SidebarListUpdateBench` (env-gated, not a CI timing test, since timing on a
 shared runner flakes) is extended to measure a full rebuild and apply, a drop
-and a `validateDrop` call on 320-row and 800-session trees. The rebuild and apply
-steps also emit `os_signpost` intervals, so Instruments can attribute a slow
-frame to them.
+and a `validateDrop` call on 320-row and 800-session trees. The rebuild and
+apply steps of both lists, the outline's and the dock's, also emit
+`os_signpost` intervals under names of their own, so Instruments can attribute
+a slow frame to the list that spent it.
 
 ## Flag and rollout
 
@@ -616,10 +710,15 @@ The behaviors a rewrite most easily loses:
    `HoverMenuModel` timing and close on deactivate, truncation-only tooltips,
    PR-glyph click-through, and the context-menu Collapse/Expand items.
 7. Section styling: hidden repos at 0.55 opacity, the missing-repo badge with
-   Locate…, dimmed gone sessions and missing scratch directories, provider health
-   suffixes, the selected provider's background.
+   Locate…, dimmed gone sessions and missing scratch directories (one deleted
+   while the app runs dims within 60 s, or when the app is activated), provider
+   health suffixes, the selected provider's background.
 8. Every input a row draws refreshes it: status suffix, typing dots, PR glyph,
    unread bold, subtitles, the dev-server dot, the no-status mark.
+9. Rows that take no selection, on a live `NSOutlineView`: ↓ and ↑ cross a
+   section header without stopping at it, and a real click on a header runs
+   its action through the outline's `action`, which the offscreen tests drive
+   only through the click handler.
 
 ## Testing
 
@@ -633,29 +732,35 @@ Most coverage is pure:
 - **Tree diff** – old and new trees map to the expected insert, remove, move and
   reconfigure operations, and held structural changes apply at drag end.
 - **`SidebarDropPolicy`** – a case per rule above, including the end-of-subtree
-  depth choice, the onto-main un-nest, retargeting, collapsed sections, and the
-  carried set for multi-row drags.
+  depth choice, the onto-main un-nest, retargeting, collapsed sections, creating
+  placeholders, and the carried set for multi-row drags.
 - **`SiblingPlacement.place`** – before, end, carried rows already in the group,
   and preserved relative order of non-carried rows.
 - **`SidebarSelectionBridge`** – both directions, with mixed local and remote
-  selections.
+  selections, and the plain and ⌘/⇧ branches of a user's selection.
 
 Daemon:
 
 - `moveMany` writes nothing when any row fails validation, keeps the carried
   order, shifts scratch siblings through the NULL-safe group, sets
   `remote_parent_assigned` only when a remote row's parent changes, and rejects
-  carried rows from different top-level groups. The RPC handler has a test, and
-  the `worktreeSiblingsReordered` delta it broadcasts carries the whole
-  destination group.
+  carried rows from different top-level groups. The RPC handler has a test: the
+  `worktreeSiblingsReordered` delta it broadcasts carries the destination
+  group's unarchived rows, and it disarms auto-archive on a parent a carried row
+  joined but not on one whose children were only reordered.
 
 App:
 
 - `moveWorktrees` matches the daemon's order locally before the RPC returns.
 - A fetch result that predates the commit, assigned while the move is in
   flight, leaves the rows where the move put them and publishes nothing.
-- A fetch numbered below the fence and answered after the overlay retired is
-  discarded.
+- A fetch numbered below the fence and answered after the overlay retired has
+  its list discarded, and a fenced poll still applies the terminals it fetched.
+- Rows tied on `sortOrder` show in `createdAt`, then ID order, and the first
+  move into a tied group keeps the rows it did not carry in the order they
+  showed in.
+- A move naming a creating placeholder as a carried row, parent or `before` is
+  refused with no local apply and no RPC.
 - A delta from another writer, applied while the move is in flight, does not
   move the carried rows.
 - A move leaves the overlay after the delta with its own `moveID`, or a fetch
@@ -668,15 +773,17 @@ App:
 - Offscreen AppKit tests through `OffscreenHost` mount the outline and the dock
   and check rows and kinds, the selection round trip, expansion through the
   `AppState` setters, `validateDrop` and `acceptDrop` with a stub
-  `NSDraggingInfo`, rebuild coalescing through `flushPendingRebuild()`, and the
-  rename field appearing when `editingWorktreeID` is set.
+  `NSDraggingInfo`, rebuild coalescing through `flushPendingRebuild()`, the
+  rename field appearing when `editingWorktreeID` is set, the scroll anchor
+  across inserts, removes, cross-parent moves and height-class changes above
+  it, and the scratch re-probe on a test clock.
 - One test per flag branch: off mounts the `List`, on mounts the native sidebar.
   Flag tests use `TestDefaultsSuite`, never `UserDefaults.standard`.
 - The env-gated `SidebarRenderHarness` renders both paths from one fixture as
   side-by-side images for review. It is not a CI gate.
 
-The 80 ms header debounce and any other new hover timer take an injected clock,
-per `CLAUDE.md`.
+The 80 ms header debounce, the 60 s scratch re-probe and any other new timer
+take an injected clock, per `CLAUDE.md`.
 
 ## Risks
 

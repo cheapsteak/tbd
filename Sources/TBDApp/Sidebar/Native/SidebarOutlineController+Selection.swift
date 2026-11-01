@@ -53,14 +53,25 @@ extension SidebarOutlineController {
 
     /// A user's selection: written to `AppState.selectedWorktreeIDs` as the
     /// `List`'s tags would write it, then mirrored straight back, since the
-    /// `didSet` may route it — a remote row's ID never rests in that set.
+    /// `didSet` may route it — a remote row's ID never rests in that set. A
+    /// ⌘- or ⇧-click extends the selection, so selected rows the outline does
+    /// not show — inside a collapsed section, or only in the dock — stay
+    /// selected; a plain click replaces it. The dock follows the same rule
+    /// (`SidebarSelectionBridge.userSelection`).
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isApplyingModelSelection else {
             suppressedSelectionNotificationCount += 1
             return
         }
         let selected = outline.selectedRowIndexes.compactMap { (outline.item(atRow: $0) as? SidebarItem)?.id }
-        writeSelection(SidebarSelectionBridge.appStateIDs(for: selected))
+        let ids = SidebarSelectionBridge.userSelection(
+            selected: selected, current: appState.selectedWorktreeIDs,
+            extending: SidebarSelectionBridge.extendsSelection(selectionModifiers()),
+            isShown: { id in
+                guard let item = self.items.existing(id) else { return false }
+                return self.outline.row(forItem: item) >= 0
+            })
+        writeSelection(ids)
         isApplyingModelSelection = true
         applyModelSelection()
         isApplyingModelSelection = false

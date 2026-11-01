@@ -78,6 +78,11 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     var moveWorktreesForTesting: ((SidebarDropMove) -> UUID?)?
     /// The update the last structural apply ran, for a failing test to print.
     var lastAppliedUpdate: OutlineUpdate?
+    /// The modifier keys of the event that changed the selection: what tells
+    /// a ⌘- or ⇧-click from a plain one. Tests hand in fixed keys.
+    var selectionModifiers: @MainActor () -> NSEvent.ModifierFlags = {
+        NSApplication.shared.currentEvent?.modifierFlags ?? []
+    }
     /// Each row view configured since the last apply began, and the row it
     /// was configured for: what a failing test prints to tell the view it
     /// configured from the view the outline shows.
@@ -131,14 +136,25 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// background task so no rebuild touches the disk. A path not yet probed
     /// reads as existing, so a row is never dimmed on a guess. The pinned
     /// dock reads it too, through the container.
+    ///
+    /// Probed when the set of paths changes, and again on app activation and
+    /// every `scratchReprobeInterval`, so a folder deleted or restored while
+    /// the app runs dims or brightens its row without waiting for another
+    /// scratch space to come or go.
     private(set) var scratchDirectoryExists: [String: Bool] = [:]
     /// Runs after a probe changed an answer; the container points it at the
     /// dock, which rebuilds as the outline does.
     var onScratchDirectoriesChanged: (() -> Void)?
     private var probedScratchPaths: Set<String> = []
     private let scratchDirectoryProbe: @Sendable (String) -> Bool
+    /// Probes finished so far, whatever they found: what a test waits on.
+    private(set) var scratchProbeCount = 0
+    /// The slow cadence the scratch directories are probed again on.
+    static let scratchReprobeInterval: Duration = .seconds(60)
 
     nonisolated(unsafe) private var defaultsObserver: (any NSObjectProtocol)?
+    nonisolated(unsafe) private var activationObserver: (any NSObjectProtocol)?
+    nonisolated(unsafe) private var scratchReprobeTask: Task<Void, Never>?
 
     // MARK: Interaction state (`+Interaction`)
 
@@ -191,7 +207,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     ///     Runs off the main thread; tests hand in a fixed answer.
     ///   - sheets: the slot the SwiftUI wrapper presents sheets from; a
     ///     controller mounted on its own gets one of its own.
-    ///   - clock: the hover tracker's clock, for its 80 ms debounce.
+    ///   - clock: the hover tracker's clock, for its 80 ms debounce, and the
+    ///     scratch directories' slow re-probe.
     init(
         appState: AppState,
         defaults: UserDefaults,
@@ -215,6 +232,13 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         ) { [weak self] _ in
             SidebarOutlineController.performOnMain { self?.defaultsDidChange() }
         }
+        // A folder removed in Finder while TBD was in the background shows
+        // as soon as the user comes back.
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            SidebarOutlineController.performOnMain { self?.reprobeScratchDirectories() }
+        }
     }
 
     @available(*, unavailable)
@@ -226,6 +250,10 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         if let defaultsObserver {
             NotificationCenter.default.removeObserver(defaultsObserver)
         }
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+        }
+        scratchReprobeTask?.cancel()
     }
 
     // MARK: View
@@ -293,6 +321,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         super.viewDidLoad()
         // Never load inside the SwiftUI update pass that mounted the view.
         scheduleRebuild()
+        startScratchReprobes()
     }
 
     /// The one column spans the sidebar's width, so cells and row views do.
@@ -451,6 +480,36 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             scratchDirectoryExists = [:]
             return
         }
+        probeScratchDirectories(paths)
+    }
+
+    /// Probes the current scratch directories again, off the main thread: on
+    /// app activation and on the slow cadence. A rebuild follows only when an
+    /// answer changed.
+    func reprobeScratchDirectories() {
+        guard !probedScratchPaths.isEmpty else { return }
+        probeScratchDirectories(probedScratchPaths)
+    }
+
+    /// Re-probes every `scratchReprobeInterval` on the injected clock, for
+    /// as long as the controller lives. The task holds the controller
+    /// weakly, and `deinit` cancels it.
+    private func startScratchReprobes() {
+        guard scratchReprobeTask == nil else { return }
+        let clock = hoverClock
+        scratchReprobeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await clock.sleep(for: SidebarOutlineController.scratchReprobeInterval)
+                } catch {
+                    return
+                }
+                self?.reprobeScratchDirectories()
+            }
+        }
+    }
+
+    private func probeScratchDirectories(_ paths: Set<String>) {
         let probe = scratchDirectoryProbe
         // The disk is read off the main thread, and the answer is taken on it
         // by a main-actor task. A detached task holding the controller across
@@ -468,6 +527,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     }
 
     private func scratchDirectoriesProbed(_ found: [String: Bool], for paths: Set<String>) {
+        scratchProbeCount += 1
         guard paths == probedScratchPaths else { return }
         let changed = found.contains { path, exists in (scratchDirectoryExists[path] ?? true) != exists }
         scratchDirectoryExists = found

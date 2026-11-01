@@ -227,13 +227,17 @@ struct SidebarInteractionTests {
         #expect(h.controller.hoverState.part == .chevron)
         #expect(h.controller.hoverState.dimmedSection == header)
 
+        // The row's content dims; its row view — the selection tint and the
+        // guide lines — keeps its opacity, as in the SwiftUI row.
         for id in [parent.id, child.id] {
-            let alpha = try #require(h.rowView(.worktree(id), make: true)).alphaValue
-            #expect(abs(alpha - 0.7) < 0.001, "A row of the hovered chevron's section is not dimmed")
+            let cellAlpha = try #require(Self.cell(.worktree(id), in: h)).alphaValue
+            #expect(abs(cellAlpha - 0.7) < 0.001, "A row of the hovered chevron's section is not dimmed")
+            let rowViewAlpha = try #require(h.rowView(.worktree(id), make: true)).alphaValue
+            #expect(rowViewAlpha == 1, "The row view dimmed, taking the tint and guide lines with it")
         }
-        let otherAlpha = try #require(h.rowView(.worktree(elsewhere.id), make: true)).alphaValue
+        let otherAlpha = try #require(Self.cell(.worktree(elsewhere.id), in: h)).alphaValue
         #expect(otherAlpha == 1, "Another section's row dimmed")
-        let headerAlpha = try #require(h.rowView(header, make: true)).alphaValue
+        let headerAlpha = try #require(Self.cell(header, in: h)).alphaValue
         #expect(headerAlpha == 1, "The header itself dimmed")
 
         // Onto the title, off the chevron: the rows come back.
@@ -242,9 +246,40 @@ struct SidebarInteractionTests {
         #expect(h.controller.hoverState.row == header)
         #expect(h.controller.hoverState.part == .none)
         for id in [parent.id, child.id] {
-            let alpha = try #require(h.rowView(.worktree(id), make: false)).alphaValue
+            let alpha = try #require(Self.cell(.worktree(id), in: h)).alphaValue
             #expect(alpha == 1)
         }
+    }
+
+    /// The chevron's dimming composes with the row's own: a row of a hidden
+    /// repo's section, already at 0.55, draws at 0.55 × 0.7 while the
+    /// chevron is hovered, and back at 0.55 after.
+    @Test func chevronDimmingComposesWithTheRowsOwnOpacity() throws {
+        let h = OutlineHarness("interaction.chevronDimComposes")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.chevronBeforeProjectNameKey)
+        h.defaults.set(true, forKey: SidebarBuildOptions.showHiddenReposKey)
+        let hidden = Repo(path: "/tmp/acme-hidden", displayName: "hidden", hidden: true)
+        let row = SidebarOutlineControllerTests.row("row", hidden)
+        h.state.repos = [hidden]
+        h.state.worktrees = [hidden.id: [row]]
+        h.mount()
+        let tracker = try #require(h.controller.hoverTracker)
+        let rowID = SidebarNodeID.worktree(row.id)
+        let resting = try #require(Self.cell(rowID, in: h)).alphaValue
+        try #require(abs(resting - 0.55) < 0.001, "The hidden repo's row must start at its own 0.55")
+
+        let header = SidebarNodeID.repoHeader(hidden.id)
+        let headerCell = try #require(Self.cell(header, in: h) as? SectionHeaderCell)
+        let chevron = headerCell.chevronButton.frame
+        tracker.pointerMoved(toWindowPoint: headerCell.convert(NSPoint(x: chevron.midX, y: chevron.midY), to: nil))
+        try #require(h.controller.hoverState.dimmedSection == header)
+        let dimmed = try #require(Self.cell(rowID, in: h)).alphaValue
+        #expect(abs(dimmed - 0.55 * 0.7) < 0.001)
+
+        tracker.pointerExited()
+        let restored = try #require(Self.cell(rowID, in: h)).alphaValue
+        #expect(abs(restored - 0.55) < 0.001)
     }
 
     // MARK: Rename

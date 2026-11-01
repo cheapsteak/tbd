@@ -46,11 +46,19 @@ extension AppState {
     /// and the reason, and the app refreshes from the daemon.
     ///
     /// A parent the app does not list, or one that is `main`, is refused here,
-    /// as is an empty `ids`: nothing moves, no RPC is sent, and the result is
-    /// nil.
+    /// as is an empty `ids`, and so is a move that names a creating
+    /// placeholder — a row in `pendingWorktreeIDs`, which the daemon has never
+    /// heard of — as a carried row, the parent or `before`: nothing moves, no
+    /// RPC is sent, and the result is nil.
     @discardableResult
     func moveWorktrees(ids: [UUID], newParentID: UUID?, before: UUID?) -> UUID? {
         guard !ids.isEmpty else { return nil }
+        let named = ids + [newParentID, before].compactMap { $0 }
+        if let placeholder = named.first(where: { pendingWorktreeIDs.contains($0) }) {
+            logger.warning(
+                "worktree.moveMany refused locally: \(placeholder, privacy: .public) is a creating placeholder the daemon does not know")
+            return nil
+        }
         var lists = WorktreeMoveLists(worktrees: worktrees, scratch: scratchWorktrees)
         if let newParentID, !lists.acceptsParent(newParentID) {
             logger.warning(
@@ -195,6 +203,19 @@ extension AppState {
     }
 }
 
+extension Worktree {
+    /// The order of one set of siblings, the daemon's: `sortOrder`, then
+    /// `createdAt`, then ID. `worktree.moveMany` renumbers a group in this
+    /// order, so every list that shows a group sorts it this way too: rows
+    /// that tie on `sortOrder` then show where the first move into their
+    /// group leaves them, instead of in whatever order the sort met them.
+    static func precedesSibling(_ lhs: Worktree, _ rhs: Worktree) -> Bool {
+        if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+}
+
 /// What a failed move restores: the carried rows' parents, and the
 /// `sortOrder` of every row in the groups they left and the group they
 /// joined, as they stood at the drop.
@@ -256,10 +277,10 @@ private struct WorktreeMoveLists {
         }
     }
 
-    /// Both lists, the scratch one sorted by `sortOrder` as `refreshWorktrees`
+    /// Both lists, the scratch one in sibling order as `refreshWorktrees`
     /// sorts it, when a row in it changed.
     var result: (worktrees: [UUID: [Worktree]], scratch: [Worktree]) {
-        (worktrees, scratchChanged ? scratch.sorted { $0.sortOrder < $1.sortOrder } : scratch)
+        (worktrees, scratchChanged ? scratch.sorted(by: Worktree.precedesSibling) : scratch)
     }
 
     func row(_ id: UUID) -> Worktree? {
@@ -285,19 +306,15 @@ private struct WorktreeMoveLists {
         }
     }
 
-    /// The listed rows of `group`, in the daemon's sibling order: `sortOrder`,
-    /// then `createdAt`, then ID.
+    /// The listed rows of `group`, in the daemon's sibling order
+    /// (`Worktree.precedesSibling`).
     private func siblingIDs(in group: WorktreeSiblingGroup) -> [UUID] {
         var members: [Worktree] = []
         for rows in worktrees.values {
             members.append(contentsOf: rows.filter { group.contains($0) })
         }
         members.append(contentsOf: scratch.filter { group.contains($0) })
-        members.sort { lhs, rhs in
-            if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
+        members.sort(by: Worktree.precedesSibling)
         return members.map(\.id)
     }
 

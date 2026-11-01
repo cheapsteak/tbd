@@ -415,6 +415,78 @@ struct SidebarDropPolicyTests {
         #expect(session.isEmpty)
     }
 
+    // MARK: Creating placeholders
+    //
+    // A creating placeholder — a local create's, or a remote lane's, which
+    // can stand for about a minute — is a row the daemon has never heard of:
+    // `worktree.moveMany` refuses it as a carried row, a parent or `before`.
+
+    /// Onto the main row, with a placeholder first among the repo's rows: the
+    /// rows land before the first row the daemon knows, never before the
+    /// placeholder.
+    @Test func ontoMainSkipsACreatingPlaceholder() {
+        let tree = Self.placeholderTree
+        let answer = Self.drop([Rows.p1a], onto: .worktree(Rows.mainP), in: tree)
+        #expect(answer.decision == .place(parent: nil, before: Rows.p1))
+        #expect(answer.retarget == Self.at(.repoHeader(Rows.repoP), 1))
+    }
+
+    /// The gap below main, and the one between the placeholder and the next
+    /// row, both land before that next row.
+    @Test func gapAboveAPlaceholderLandsBeforeTheNextRealRow() {
+        let tree = Self.placeholderTree
+        let belowMain = Self.drop([Rows.p1a], into: .repoHeader(Rows.repoP), at: 1, depth: 0, in: tree)
+        #expect(belowMain.decision == .place(parent: nil, before: Rows.p1))
+        #expect(belowMain.retarget == nil)
+
+        let belowPlaceholder = Self.drop([Rows.p1a], into: .repoHeader(Rows.repoP), at: 2, depth: 0, in: tree)
+        #expect(belowPlaceholder.decision == .place(parent: nil, before: Rows.p1))
+
+        // With only placeholders after the gap, the rows go to the end of
+        // the group.
+        let beforeLast = Self.drop([Rows.p1a], into: .repoHeader(Rows.repoP), at: 5, depth: 0, in: tree)
+        #expect(beforeLast.decision == .place(parent: nil, before: nil))
+
+        // Control: a real row after the gap is still the one named.
+        let beforeP2 = Self.drop([Rows.p1a], into: .repoHeader(Rows.repoP), at: 3, depth: 0, in: tree)
+        #expect(beforeP2.decision == .place(parent: nil, before: Rows.p2))
+    }
+
+    /// A placeholder never travels: a drag that starts on one carries
+    /// nothing, a selection drops it, and a payload naming it is rejected.
+    @Test func placeholderIsNeverCarried() {
+        let tree = Self.placeholderTree
+        let selection: [SidebarNodeID] = [.worktree(Rows.pending), .worktree(Rows.p2)]
+        let fromPlaceholder = Self.carried(selection, from: .worktree(Rows.pending), in: tree)
+        #expect(fromPlaceholder.isEmpty)
+        let fromRealRow = Self.carried(selection, from: .worktree(Rows.p2), in: tree)
+        #expect(fromRealRow == [Rows.p2])
+
+        let alone = Self.drop([Rows.pending], onto: .worktree(Rows.p1), in: tree)
+        #expect(alone.decision == .reject)
+        let withAnother = Self.drop([Rows.p2, Rows.pending], into: .repoHeader(Rows.repoP), at: 1, in: tree)
+        #expect(withAnother.decision == .reject)
+
+        // Control: the real row alone goes.
+        let control = Self.drop([Rows.p2], onto: .worktree(Rows.p1), in: tree)
+        #expect(control.decision == .nest(under: Rows.p1))
+    }
+
+    /// Nothing nests onto a placeholder, or into its children.
+    @Test func placeholderIsNeverANestTarget() {
+        let tree = Self.placeholderTree
+        let onto = Self.drop([Rows.p2], onto: .worktree(Rows.pending), in: tree)
+        #expect(onto.decision == .reject)
+
+        // Among a placeholder's children: the gap below its child, with the
+        // pointer at the child's depth.
+        let among = Self.drop([Rows.p2], into: .repoHeader(Rows.repoP), at: 5, depth: 1, in: tree)
+        #expect(among.decision == .reject)
+        // Control: the same gap at the top level goes ahead.
+        let topLevel = Self.drop([Rows.p2], into: .repoHeader(Rows.repoP), at: 5, depth: 0, in: tree)
+        #expect(topLevel.decision == .place(parent: nil, before: nil))
+    }
+
     // MARK: Cost
 
     /// A decision reads only the nodes on the paths it asks about. Over an
@@ -524,6 +596,8 @@ struct SidebarDropPolicyTests {
 
     enum Rows {
         static let s1 = id(101), s2 = id(102), s3 = id(103)
+        static let repoP = id(6), mainP = id(60), pending = id(61), p1 = id(62), p1a = id(63), p2 = id(64)
+        static let pendingParent = id(65), pendingChild = id(66), pendingLast = id(67)
         static let repoA = id(1), mainA = id(10), a = id(11), a1 = id(12), a1a = id(13), a2 = id(14), a2a = id(15)
         static let b = id(16), r1 = id(17), r2 = id(18), l1 = id(19), h1 = id(20), h2 = id(21)
         static let repoB = id(2), mainB = id(30), c = id(31), y = id(32), c1 = id(33), d = id(34), z = id(35)
@@ -580,15 +654,42 @@ struct SidebarDropPolicyTests {
         ])
     }
 
+    // Repo P, for the creating-placeholder rules:
+    //
+    // Repo P
+    //   main P
+    //   pending           a creating placeholder, first among the rows
+    //   p1
+    //     p1a
+    //   p2
+    //   pendingParent     a placeholder showing a child, for the policy's own guard
+    //     pendingChild
+    //   pendingLast       a placeholder, last
+    static var placeholderTree: SidebarTree {
+        let repoP = Rows.repoP
+        return SidebarTree(roots: [
+            repo(repoP, [
+                row(Rows.mainP, home: repoP, main: true),
+                row(Rows.pending, home: repoP, placeholder: true),
+                row(Rows.p1, home: repoP, [row(Rows.p1a, home: repoP)]),
+                row(Rows.p2, home: repoP),
+                row(Rows.pendingParent, home: repoP, [row(Rows.pendingChild, home: repoP)], placeholder: true),
+                row(Rows.pendingLast, home: repoP, placeholder: true),
+            ]),
+        ])
+    }
+
     /// A worktree row of `home`'s repo (nil for a scratch row). `label` is
     /// the "(repo)" suffix the row shows, which the policy never reads.
+    /// `placeholder` marks a creating placeholder.
     static func row(_ id: UUID, home: UUID?, _ children: [SidebarNode] = [], main: Bool = false,
-                    label: String? = nil) -> SidebarNode {
-        let model = WorktreeRowModel(
+                    label: String? = nil, placeholder: Bool = false) -> SidebarNode {
+        var model = WorktreeRowModel(
             name: "row", leading: nil, isNameBold: false, subtitles: [], suffix: nil,
             showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: label, homeRepoID: home,
             isPinned: false, depth: 0, isDimmed: false, isInHiddenSection: false, isMain: main,
             heightClass: .single)
+        model.isPlaceholder = placeholder
         return SidebarNode(id: .worktree(id), kind: .worktree(model), children: children, isExpanded: true)
     }
 
