@@ -369,19 +369,71 @@ struct MainToolbarControllerTests {
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
     }
 
-    /// A change of the window's toolbar to none is a removal, as window
-    /// teardown makes before the split is dismantled, not a competing
-    /// toolbar: it counts no replacement and queues nothing, and a later
-    /// apply leaves the window without a toolbar rather than putting ours
-    /// back on a closing window. Another toolbar after the removal is still
-    /// a replacement of ours: it counts once and is put back.
-    @Test func aRemovedToolbarIsNotAReplacement() async throws {
-        let fixture = ToolbarFixture(label: "aRemovedToolbarIsNotAReplacement")
+    /// A change of a visible window's toolbar to none is a replacement, as
+    /// another toolbar is: it counts, the clear alone brings ours back, and
+    /// it is held to the same cap. Past the cap the window stays without a
+    /// toolbar until the cooldown ends, which puts ours back.
+    @Test(.clockDriven) func aToolbarClearedOnAVisibleWindowIsAReplacement() async throws {
+        let clock = EventDrivenTestClock()
+        let fixture = ToolbarFixture(
+            label: "aToolbarClearedOnAVisibleWindowIsAReplacement",
+            now: TestDateSource().provider, clock: clock)
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
         let window = fixture.window
+        try #require(window.isVisible)
         try #require(controller.applyScheduled == false)
+        try #require(controller.recentReplacements.isEmpty)
+
+        let cap = MainToolbarController.maxReplacementsInWindow
+        for attempt in 1...cap {
+            window.toolbar = nil
+            // KVO reports synchronously, so the clear is already counted.
+            #expect(controller.recentReplacements.count == attempt)
+            let back = try await waitForMainActorCondition("clear \(attempt) of \(cap) to be put back") {
+                window.toolbar === controller.toolbar
+            }
+            try #require(back)
+        }
+        let quiet = try await waitForMainActorCondition("no apply queued before the clear past the cap") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
+        try #require(controller.isInReinstallCooldown == false)
+
+        window.toolbar = nil
+        #expect(controller.isInReinstallCooldown)
+        #expect(controller.applyScheduled == false)
+        #expect(window.toolbar == nil)
+
+        try await clock.requireAdvanceWhenArmed(
+            by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
+        let restored = try await waitForMainActorCondition("the toolbar to come back when the cooldown ends") {
+            window.toolbar === controller.toolbar
+        }
+        #expect(restored)
+    }
+
+    /// A change of a window's toolbar to none once the window is ordered out
+    /// is a removal, as teardown makes before the split is dismantled, not a
+    /// competing toolbar: it counts no replacement and queues nothing, and a
+    /// later apply leaves the window without a toolbar rather than putting
+    /// ours back on a closing window. Another toolbar after the removal is
+    /// still a replacement of ours: it counts once and is put back.
+    @Test func aToolbarClearedOnAHiddenWindowIsNotAReplacement() async throws {
+        let fixture = ToolbarFixture(label: "aToolbarClearedOnAHiddenWindowIsNotAReplacement")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        window.orderOut(nil)
+        try #require(window.isVisible == false)
+        let quiet = try await waitForMainActorCondition("no apply queued after ordering the window out") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
         try #require(controller.recentReplacements.isEmpty)
 
         window.toolbar = nil
