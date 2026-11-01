@@ -6,6 +6,15 @@ SwiftUI app target. See the repo-root `CLAUDE.md` and the `tbd-project` skill fo
 
 While a purely visual value — a gap, inset, opacity, duration — is being eyeballed, iterate with `scripts/swift-safe build`, the one filtered suite that pins it, and `scripts/restart.sh`; the full `scripts/test.sh` costs ~110s, cannot tell you whether the number looks right, and belongs once on the final tree before pushing.
 
+## AppKit traps
+
+Each of these looks right in review and fails only when it runs or builds.
+
+- **SwiftUI's `dismiss` does nothing in an `NSHostingController` presented with `presentAsSheet`.** The sheet's Cancel, Done and Escape silently stop working. Present SwiftUI sheet content with `.sheet(item:)` from a SwiftUI view, as `NativeSidebarSheetPresenter` does.
+- **An `NSBox` separator made at `.zero` is vertical.** A separator takes its orientation from its frame, and the vertical one's intrinsic width of 1 pt, hugged above the window's size priority, shrank a whole window to 1 pt wide. Make it wider than tall, as `SidebarContainerController` does.
+- **Between `beginUpdates` and `endUpdates`, `NSOutlineView.child(_:ofItem:)` asks the data source**, which already serves the new tree. Never infer the old tree from outline lookups during an update; keep your own copy of it.
+- **Don't capture a `Notification` or `NSEvent` into `MainActor.assumeIsolated` from a `nonisolated` delegate method.** Neither is `Sendable`, so Swift 6 rejects the capture as a data race. Extract what you need first, such as the sender's `ObjectIdentifier`.
+
 ## macOS 26 (Tahoe) Liquid Glass toolbars — grouping rules
 
 macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **adjacent toolbar items are automatically fused onto one shared capsule**. Getting items onto *separate* capsules is non-obvious and cost a long trial-and-error loop — here is what actually works (verified against WWDC25 session 323 "Build a SwiftUI app with the new design" and confirmed live in this app). The working example is the PR split button in `ContentView.swift`.

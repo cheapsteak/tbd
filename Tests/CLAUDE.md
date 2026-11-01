@@ -859,6 +859,34 @@ a callback" at a `RunLoop.run` call site. A rule banning the syntax would fire
 on both, would start life fully suppressed against the legitimate sites, and
 would be one people disable.
 
+## AppKit and Swift Testing traps
+
+The code most people write first fails each of these, and only a build or a
+CI run reveals it. Brief an agent that does not build locally with them up
+front.
+
+- **A test process can exit 0 in the middle of a run.** The test bundle's
+  entry point is an async `main`, which runs `CFRunLoopRun()` and calls
+  `exit(0)` when it returns. Anything that stops the main run loop while its
+  outermost activation is current ends the process with success, no summary
+  and no xUnit results. CI then reports `fast-pass-app ran no tests`, with no
+  failed test and no signal. `Tests/TestProcessDefaults/MainRunLoopGuard.m`
+  restarts the loop and writes `TBD test host: something stopped the main run
+  loop…` to stderr, so search a CI log for that line before suspecting a
+  crash. What stops the loop is unidentified: nothing in the repo calls
+  `CFRunLoopStop` or `NSApp.stop`.
+- **An `NSDraggingInfo` stub must not declare
+  `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
+  category already declares it, so the stub's own version fails with
+  "overriding declaration requires an 'override' keyword", and the inherited
+  one satisfies the protocol. Use `Tests/TBDAppTests/Support/StubDraggingInfo.swift`,
+  and never hand a stub to AppKit's own `super` drag handlers.
+- **Don't pass a key path or a function to a `rethrows` method inside
+  `#expect` or `#require`.** `#expect(rows.allSatisfy(\.isSelected))` fails
+  to compile, because the macro reads the call as one that can throw.
+  Evaluate into a `let` and assert on that. Keep anonymous `$0` closures out
+  of `#require` arguments for the same reason.
+
 ## Clock and date seams
 
 Governing rule: **`Duration` is behavior, `Date` is data.** The two seams are
