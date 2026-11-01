@@ -99,6 +99,37 @@ struct WorktreePanelStoreTests {
         #expect(try await panelRowCount(db, worktreeID: wtID) == 5, "a read deletes nothing")
     }
 
+    /// `panel.get`'s read: the surfaces and the panels come back from one
+    /// read, whole or narrowed to one tab, and a tab of another worktree
+    /// narrows to no tab while the panels still come back.
+    @Test func panelSnapshotReadsTabsAndPanelsTogether() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (_, wtID) = try await makeWorktree(db)
+        let (_, otherID) = try await makeWorktree(db, name: "other")
+        let first = try await seedTab(db, worktreeID: wtID, position: 0)
+        let second = try await seedEmptyTab(db, worktreeID: wtID, position: 1)
+        let foreign = try await seedTab(db, worktreeID: otherID, position: 0)
+        _ = try await db.panelSurface.openWorktreePanel(worktreeID: wtID, content: .changes, now: Date())
+        let panels = try await db.panelSurface.worktreePanels(worktreeID: wtID)
+        try #require(panels.count == 1)
+
+        let whole = try await db.panelSurface.panelSnapshot(worktreeID: wtID, tabID: nil)
+        #expect(whole.tabs.map(\.id) == [first.id, second.id])
+        #expect(whole.worktreePanels == panels)
+        let listsPerTab = whole.tabs.map(\.worktreePanels)
+        let expectedLists: [[WorktreePanel]] = [panels, panels]
+        #expect(listsPerTab == expectedLists)
+        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == whole.tabs)
+
+        let scoped = try await db.panelSurface.panelSnapshot(worktreeID: wtID, tabID: second.id)
+        #expect(scoped.tabs.map(\.id) == [second.id])
+        #expect(scoped.worktreePanels == panels)
+
+        let misattributed = try await db.panelSurface.panelSnapshot(worktreeID: wtID, tabID: foreign.id)
+        #expect(misattributed.tabs.isEmpty)
+        #expect(misattributed.worktreePanels == panels)
+    }
+
     @Test func recordRoundTripsBothKindsOfContent() throws {
         let worktreeID = UUID()
         for content in [WorktreePanelContent.note(noteID: UUID()), .changes] {
@@ -273,14 +304,10 @@ struct WorktreePanelStoreTests {
         #expect(try await panelRowCount(db, worktreeID: wtID) == 0)
     }
 
-    /// A scratch promote moves the scratch worktree's panels to the main
-    /// worktree, after its own. A scratch Changes panel is dropped when the
-    /// main worktree has one, and a moved tab that had it in front fronts the
-    /// main worktree's. Every surface under the main worktree reads with the
-    /// merged list, and the promote returns the main worktree's rewritten
-    /// surface with the moved one.
-    @Test func promoteMovesWorktreePanels() async throws {
-        let db = try TBDDatabase(inMemory: true)
+    /// A repo with a main worktree and a scratch worktree to promote into it.
+    private func makePromotePair(
+        _ db: TBDDatabase
+    ) async throws -> (repoID: UUID, scratch: Worktree, mainID: UUID) {
         let repo = try await db.repos.create(
             path: "/tmp/wps-promote-repo-\(UUID())", displayName: "r", defaultBranch: "main")
         let scratch = try await db.worktrees.createScratch(
@@ -288,14 +315,36 @@ struct WorktreePanelStoreTests {
         let main = try await db.worktrees.createMain(
             repoID: repo.id, name: "main", branch: "main",
             path: "/tmp/wps-main-\(UUID())", tmuxServer: "tbd-main")
+        return (repo.id, scratch, main.id)
+    }
 
-        let resident = try await seedTab(db, worktreeID: main.id, position: 0)
-        _ = try await db.panelSurface.openWorktreePanel(worktreeID: main.id, content: .changes, now: Date())
-        let mainChanges = try #require(try await db.panelSurface.worktreePanels(worktreeID: main.id).first)
+    /// Every `worktree_panel` row that shows `noteID`, in any worktree.
+    private func notePanelRowCount(_ db: TBDDatabase, noteID: UUID) async throws -> Int {
+        let content = try encodeJSONString(WorktreePanelContent.note(noteID: noteID))
+        return try await db.writerForTests.read { dbc in
+            try Int.fetchOne(
+                dbc, sql: "SELECT COUNT(*) FROM worktree_panel WHERE content = ?",
+                arguments: [content]) ?? -1
+        }
+    }
+
+    /// A scratch promote moves the scratch worktree's Changes panel to a
+    /// main worktree that has none, after the main worktree's own panels,
+    /// and deletes its note panels: the notes stay with the archived scratch
+    /// worktree. A moved tab that had a note panel in front brings its most
+    /// recent own panel forward, else the merged list's first panel. The main
+    /// worktree's own tab takes the merged list at a fresh revision, keeping
+    /// its front, and the promote returns it with the moved tabs.
+    @Test func promoteMovesTheChangesPanelAndDeletesNotePanels() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (repoID, scratch, mainID) = try await makePromotePair(db)
+        let resident = try await seedTab(db, worktreeID: mainID, position: 0)
         let residentBefore = try #require(try await db.panelSurface.surface(tabID: resident.id))
 
         let note = try await db.notes.create(worktreeID: scratch.id)
-        let movedTab = try await seedEmptyTab(db, worktreeID: scratch.id, position: 0)
+        let ownPanelID = UUID()
+        let withOwnPanel = try await seedTab(db, worktreeID: scratch.id, panelID: ownPanelID, position: 0)
+        let withoutPanels = try await seedEmptyTab(db, worktreeID: scratch.id, position: 1)
         _ = try await db.panelSurface.openWorktreePanel(
             worktreeID: scratch.id, content: .note(noteID: note.id), now: Date())
         _ = try await db.panelSurface.openWorktreePanel(worktreeID: scratch.id, content: .changes, now: Date())
@@ -305,30 +354,82 @@ struct WorktreePanelStoreTests {
         let scratchNote = scratchPanels[0]
         let scratchChanges = scratchPanels[1]
         _ = try await db.panelSurface.applyReducing(
+            operationID: UUID(), tabID: withOwnPanel.id, worktreeID: scratch.id, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.select(panelID: scratchNote.id), to: current)
+        }
+        // Preconditions: both scratch tabs show the note panel.
+        let scratchSurfaces = try await db.panelSurface.surfaces(worktreeID: scratch.id)
+        let frontsBefore: [PanelID?] = [scratchNote.id, scratchNote.id]
+        try #require(scratchSurfaces.map(\.side.activePanelID) == frontsBefore)
+
+        let returned = try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: mainID, repoID: repoID,
+            tmuxServer: scratch.tmuxServer)
+
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: mainID) == [scratchChanges],
+                "the Changes panel moves, keeping its ID")
+        #expect(try await panelRowCount(db, worktreeID: scratch.id) == 0)
+        #expect(try await notePanelRowCount(db, noteID: note.id) == 0, "no note panel survives anywhere")
+        #expect(try await db.notes.get(id: note.id)?.worktreeID == scratch.id,
+                "the note itself stays with the scratch worktree")
+
+        let surfaces = try await db.panelSurface.surfaces(worktreeID: mainID)
+        try #require(surfaces.map(\.id) == [resident.id, withOwnPanel.id, withoutPanels.id])
+        let shownLists = surfaces.map(\.worktreePanels)
+        let mergedForEach: [[WorktreePanel]] = [[scratchChanges], [scratchChanges], [scratchChanges]]
+        #expect(shownLists == mergedForEach)
+        #expect(surfaces[0].side == residentBefore.side, "the main worktree's own tab keeps its front")
+        #expect(surfaces[0].revision > residentBefore.revision)
+        #expect(surfaces[1].side.activePanelID == ownPanelID,
+                "a moved tab that fronted a note panel fronts its most recent own panel")
+        #expect(surfaces[2].side.activePanelID == scratchChanges.id,
+                "with no own panel, it fronts the merged list's first panel")
+        #expect(returned == surfaces)
+    }
+
+    /// When the main worktree already has a Changes panel, the scratch
+    /// worktree's is deleted, and a moved tab that had it in front fronts the
+    /// main worktree's. The scratch note panels are deleted all the same, and
+    /// the main worktree's list is unchanged, so its own tab is not
+    /// rewritten and the promote returns only the moved tab.
+    @Test func promoteDropsTheScratchChangesPanelWhenMainHasOne() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (repoID, scratch, mainID) = try await makePromotePair(db)
+        let resident = try await seedTab(db, worktreeID: mainID, position: 0)
+        _ = try await db.panelSurface.openWorktreePanel(worktreeID: mainID, content: .changes, now: Date())
+        let mainChanges = try #require(try await db.panelSurface.worktreePanels(worktreeID: mainID).first)
+        let residentBefore = try #require(try await db.panelSurface.surface(tabID: resident.id))
+
+        let note = try await db.notes.create(worktreeID: scratch.id)
+        let movedTab = try await seedEmptyTab(db, worktreeID: scratch.id, position: 0)
+        _ = try await db.panelSurface.openWorktreePanel(
+            worktreeID: scratch.id, content: .note(noteID: note.id), now: Date())
+        _ = try await db.panelSurface.openWorktreePanel(worktreeID: scratch.id, content: .changes, now: Date())
+        let scratchChanges = try #require(
+            try await db.panelSurface.worktreePanels(worktreeID: scratch.id).last)
+        _ = try await db.panelSurface.applyReducing(
             operationID: UUID(), tabID: movedTab.id, worktreeID: scratch.id, now: Date()
         ) { current in
             try PanelSurfaceReducer.apply(.select(panelID: scratchChanges.id), to: current)
         }
 
         let returned = try await db.worktrees.promoteScratchMigration(
-            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            scratchID: scratch.id, mainWorktreeID: mainID, repoID: repoID,
             tmuxServer: scratch.tmuxServer)
 
-        let mainPanels = try await db.panelSurface.worktreePanels(worktreeID: main.id)
-        #expect(mainPanels == [mainChanges, scratchNote], "the scratch panels follow the main worktree's")
-        #expect(try await db.panelSurface.worktreePanels(worktreeID: scratch.id).isEmpty)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: mainID) == [mainChanges])
         #expect(try await panelRowCount(db, worktreeID: scratch.id) == 0)
         #expect(try await panelRowExists(db, panelID: scratchChanges.id) == false,
                 "the scratch Changes panel is dropped and its row deleted")
+        #expect(try await notePanelRowCount(db, noteID: note.id) == 0, "no note panel survives anywhere")
 
-        let surfaces = try await db.panelSurface.surfaces(worktreeID: main.id)
+        let surfaces = try await db.panelSurface.surfaces(worktreeID: mainID)
         try #require(surfaces.map(\.id) == [resident.id, movedTab.id])
-        #expect(surfaces[0].worktreePanels == mainPanels)
-        #expect(surfaces[1].worktreePanels == mainPanels)
-        #expect(surfaces[0].side == residentBefore.side, "the main worktree's own tab keeps its front")
-        #expect(surfaces[0].revision > residentBefore.revision)
+        #expect(surfaces[0] == residentBefore, "the main worktree's list did not change")
+        #expect(surfaces[1].worktreePanels == [mainChanges])
         #expect(surfaces[1].side.activePanelID == mainChanges.id,
                 "a moved tab fronting the dropped Changes panel fronts the main worktree's")
-        #expect(returned == surfaces)
+        #expect(returned == [surfaces[1]])
     }
 }

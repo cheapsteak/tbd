@@ -1500,10 +1500,10 @@ public struct WorktreeStore: Sendable {
 
     /// The entire scratch-promote row migration in ONE write transaction:
     /// terminals re-parented, tab rows re-pointed, the tabs' panel surfaces
-    /// (with their histories) and the scratch worktree's panels moved along
-    /// with them, the main worktree inherits the scratch tmux server + tab
-    /// order/selection, and the scratch row is retired (archived +
-    /// `promotedToRepoID`). Any failure rolls the
+    /// (with their histories) and the scratch worktree's Changes panel moved
+    /// along with them, its note panels deleted, the main worktree inherits
+    /// the scratch tmux server + tab order/selection, and the scratch row is
+    /// retired (archived + `promotedToRepoID`). Any failure rolls the
     /// whole thing back, leaving the pre-promote state intact — in particular
     /// the scratch row stays un-promoted (retryable) and its terminals stay
     /// parented to it, so a later `scratch.delete` can never tmux-kill live
@@ -1516,12 +1516,12 @@ public struct WorktreeStore: Sendable {
     /// this transaction leaves no panel row on it: the surfaces move to the
     /// main worktree at fresh revisions, and the scratch worktree's operation
     /// receipts move with them, so a `panel.apply` retried across the promote
-    /// still replays. Its worktree panels join the main worktree's after
-    /// them, except one showing content the main worktree already shows, such
-    /// as a second Changes panel, which is dropped
-    /// (`PanelSurfaceStore.reparentSurfaces`). Returns the main worktree's
-    /// own surfaces that the merged panels rewrote, then the moved surfaces,
-    /// which the caller broadcasts under the main worktree.
+    /// still replays. Its Changes panel joins the main worktree's panels,
+    /// unless the main worktree has one, and its note panels are deleted:
+    /// the note rows stay with the retired scratch row, whose ID keys their
+    /// content files (`PanelSurfaceStore.reparentSurfaces`). Returns the main
+    /// worktree's own surfaces that the merged panels rewrote, then the moved
+    /// surfaces, which the caller broadcasts under the main worktree.
     ///
     /// `now` stamps the retired row's `archivedAt` and the moved surfaces'
     /// `updatedAt`.

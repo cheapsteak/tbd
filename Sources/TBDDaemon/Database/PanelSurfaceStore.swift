@@ -314,17 +314,7 @@ public struct PanelSurfaceStore: Sendable {
     /// position, with their panels' histories and the worktree's panels
     /// joined in. Unreadable rows are skipped with a logged warning.
     public func surfaces(worktreeID: UUID) async throws -> [WorkspaceTabSurface] {
-        try await writer.read { db in
-            let records = try WorkspaceTabSurfaceRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .order(Column("position"))
-                .fetchAll(db)
-            let historiesByTab = try Self.histories(tabKeys: records.map(\.id), db: db)
-            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
-            return records.compactMap {
-                $0.toModel(histories: historiesByTab[$0.id] ?? [:], worktreePanels: worktreePanels)
-            }
-        }
+        try await panelSnapshot(worktreeID: worktreeID, tabID: nil).tabs
     }
 
     /// A tab's surface with its panels' histories and its worktree's panels
@@ -863,8 +853,8 @@ public struct PanelSurfaceStore: Sendable {
     }
 
     /// Moves every surface of `fromWorktreeID` to `toWorktreeID` inside a
-    /// caller's write transaction, with `fromWorktreeID`'s worktree panels
-    /// and operation receipts. Histories go with their surfaces, because they
+    /// caller's write transaction, with `fromWorktreeID`'s Changes panel and
+    /// operation receipts. Histories go with their surfaces, because they
     /// key on the tab, which keeps its ID. Each moved row takes the counter's
     /// next revision, as a sync's re-parent does, and a position after every
     /// surface `toWorktreeID` already holds, in the order the rows had, so
@@ -872,13 +862,22 @@ public struct PanelSurfaceStore: Sendable {
     /// them. The receipts move rather than go, so a `panel.apply` retried
     /// across the move still replays.
     ///
-    /// The worktree panels join `toWorktreeID`'s after its own, in their
-    /// order. One showing content `toWorktreeID` already shows, such as a
-    /// second Changes panel, is dropped and its row deleted, and a moved tab
-    /// that had it in front fronts `toWorktreeID`'s panel on that content
-    /// instead. Every surface under `toWorktreeID` then carries the merged
-    /// list: when it differs from `toWorktreeID`'s own, its readable surfaces
-    /// are rewritten with it (`rewriteSurfaces`).
+    /// Of `fromWorktreeID`'s worktree panels (side panel notes spec, "Daemon
+    /// → Reclamation"):
+    ///
+    /// - **Note panels** are deleted. The notes stay with `fromWorktreeID`,
+    ///   whose ID keys their content files, so a panel moved with them would
+    ///   name a note `toWorktreeID` does not have, and `note.delete` would
+    ///   never find it. A moved tab that had one in front brings its most
+    ///   recent own panel forward, else the merged list's first panel
+    ///   (`PanelSurfaceReducer.adopting`, applied on read).
+    /// - **The Changes panel** joins `toWorktreeID`'s panels after its own,
+    ///   unless `toWorktreeID` already has one: then it is deleted, and a
+    ///   moved tab that had it in front fronts `toWorktreeID`'s instead.
+    ///
+    /// Every surface under `toWorktreeID` then carries the merged list: when
+    /// it differs from `toWorktreeID`'s own, its readable surfaces are
+    /// rewritten with it (`rewriteSurfaces`).
     ///
     /// Each moved row is marked `awaitingListing`. The app learns of the
     /// main worktree before this move, so a `panel.syncTabs` it built from
@@ -893,22 +892,28 @@ public struct PanelSurfaceStore: Sendable {
     /// but is not returned. `WorktreeStore.promoteScratchMigration` runs it
     /// in the transaction that retires a promoted scratch worktree, which
     /// archives that row without going through `WorktreeStore.archive`: the
-    /// tabs move to the main worktree, and their panels move with them.
+    /// tabs move to the main worktree, and their own panels move with them.
     static func reparentSurfaces(
         from fromWorktreeID: UUID, to toWorktreeID: UUID, now: Date, in db: GRDB.Database
     ) throws -> [WorkspaceTabSurface] {
         let ownPanels = try Self.storedWorktreePanels(worktreeKey: toWorktreeID.uuidString, db: db)
         var merged = ownPanels
-        // A dropped panel's ID, mapped to the kept panel on its content.
+        var droppedKeys: [String] = []
+        // A dropped Changes panel's ID, mapped to the kept one.
         var replacements: [PanelID: PanelID] = [:]
         for panel in try Self.storedWorktreePanels(worktreeKey: fromWorktreeID.uuidString, db: db) {
-            if let kept = merged.first(where: { $0.content == panel.content }) {
-                replacements[panel.id] = kept.id
-            } else {
-                merged.append(panel)
+            switch panel.content {
+            case .note:
+                droppedKeys.append(panel.id.uuidString)
+            case .changes:
+                if let kept = merged.first(where: { $0.content == .changes }) {
+                    droppedKeys.append(panel.id.uuidString)
+                    replacements[panel.id] = kept.id
+                } else {
+                    merged.append(panel)
+                }
             }
         }
-        let droppedKeys = replacements.keys.map(\.uuidString)
         try WorktreePanelRecord.filter(droppedKeys.contains(Column("id"))).deleteAll(db)
 
         // Before the moved rows arrive, so only `toWorktreeID`'s own

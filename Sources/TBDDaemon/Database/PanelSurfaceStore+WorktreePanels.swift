@@ -19,6 +19,31 @@ extension PanelSurfaceStore {
         }
     }
 
+    /// The worktree's readable surfaces and its panels, in one read, so the
+    /// two always agree: `panel.get`'s answer. `tabID` present narrows the
+    /// surfaces to that tab's, and to none when it has no readable surface
+    /// under this worktree; absent returns every surface of the worktree,
+    /// ordered by position. Unreadable rows are skipped as `surfaces` skips
+    /// them, and the panels are returned either way.
+    public func panelSnapshot(
+        worktreeID: UUID, tabID: UUID?
+    ) async throws -> (tabs: [WorkspaceTabSurface], worktreePanels: [WorktreePanel]) {
+        try await writer.read { db -> (tabs: [WorkspaceTabSurface], worktreePanels: [WorktreePanel]) in
+            let worktreeKey = worktreeID.uuidString
+            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeKey, db: db)
+            var request = WorkspaceTabSurfaceRecord.filter(Column("worktreeID") == worktreeKey)
+            if let tabID {
+                request = request.filter(Column("id") == tabID.uuidString)
+            }
+            let records = try request.order(Column("position")).fetchAll(db)
+            let historiesByTab = try Self.histories(tabKeys: records.map(\.id), db: db)
+            let tabs = records.compactMap {
+                $0.toModel(histories: historiesByTab[$0.id] ?? [:], worktreePanels: worktreePanels)
+            }
+            return (tabs: tabs, worktreePanels: worktreePanels)
+        }
+    }
+
     /// Appends a worktree panel showing `content` unless one already does,
     /// and rewrites every readable surface of the worktree with the new list,
     /// in one transaction. Returns the surfaces it rewrote, in position

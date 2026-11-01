@@ -23,6 +23,7 @@ struct NoteTabOnCreateTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setAutoCreateNotes(true)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 

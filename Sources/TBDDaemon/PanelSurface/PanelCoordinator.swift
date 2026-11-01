@@ -73,19 +73,13 @@ public actor PanelCoordinator {
     /// `worktree.setActiveTab`, one row to read — so a tab-scoped reply still
     /// says whether its tab is the one the user is looking at, and carries
     /// the worktree's panels, so a reader finds them even when no tab has a
-    /// surface.
+    /// surface. The tabs and the panels come from one store read
+    /// (`PanelSurfaceStore.panelSnapshot`), so they always agree.
     public func get(worktreeID: UUID, tabID: UUID?) async throws -> PanelGetResult {
         let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID)
-        let worktreePanels = try await db.panelSurface.worktreePanels(worktreeID: worktreeID)
-        guard let tabID else {
-            let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
-            return PanelGetResult(tabs: surfaces, activeTabID: activeTabID, worktreePanels: worktreePanels)
-        }
-        guard let surface = try await db.panelSurface.surface(tabID: tabID),
-              surface.worktreeID == worktreeID else {
-            return PanelGetResult(tabs: [], activeTabID: activeTabID, worktreePanels: worktreePanels)
-        }
-        return PanelGetResult(tabs: [surface], activeTabID: activeTabID, worktreePanels: worktreePanels)
+        let snapshot = try await db.panelSurface.panelSnapshot(worktreeID: worktreeID, tabID: tabID)
+        return PanelGetResult(
+            tabs: snapshot.tabs, activeTabID: activeTabID, worktreePanels: snapshot.worktreePanels)
     }
 
     public func apply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
