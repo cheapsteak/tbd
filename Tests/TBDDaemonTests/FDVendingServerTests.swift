@@ -41,18 +41,20 @@ struct FDVendingServerTests {
         } == .satisfied
     }
 
-    /// Both ends close-on-exec, because the tests below read a connection's
-    /// close from its far end, and that end sees end of file only once every
-    /// copy of the near one is closed. Every test target links into one
-    /// process, and sibling suites spawn children — `Foundation.Process`,
-    /// `posix_spawn` with no attributes, `forkpty` — that inherit every
-    /// descriptor lacking `FD_CLOEXEC`, some of them for the rest of the run.
-    /// A child holding a copy of the daemon-side end keeps it open after the
-    /// server closes its own, which reads exactly like a server that left the
-    /// connection open: the failure `HolderInvocationTests` measured at 5 in
-    /// about 1,500 CI runs for the same kind of pair. Darwin has no
-    /// `SOCK_CLOEXEC`, so the microseconds between `socketpair` and `fcntl`
-    /// stay open, the residual that test accepts too.
+    /// Both ends close-on-exec, for the one teardown whose far end needs every
+    /// copy of the near one closed: a refusal on arrival, which `close(2)`s
+    /// the daemon-side end (`adoptConnection(fd:stamp:)`). Supersession,
+    /// `disconnect` and `stop` use `shutdown(2)` instead, which reaches the
+    /// peer whatever copies exist. Every test target links into one process,
+    /// and sibling suites spawn children — `Foundation.Process`, `posix_spawn`
+    /// with no attributes, `forkpty` — that inherit every descriptor lacking
+    /// `FD_CLOEXEC`, some of them for the rest of the run. A child holding a
+    /// copy of a refused daemon-side end keeps it open after the server
+    /// closes its own, which reads exactly like a server that installed the
+    /// connection: the failure `HolderInvocationTests` measured at 5 in about
+    /// 1,500 CI runs for the same kind of pair. Darwin has no `SOCK_CLOEXEC`,
+    /// so the microseconds between `socketpair` and `fcntl` stay open, the
+    /// residual that test accepts too.
     private func makeSocketPair() throws -> (Int32, Int32) {
         var pair: [Int32] = [-1, -1]
         try pair.withUnsafeMutableBufferPointer { buf in
@@ -496,7 +498,7 @@ struct FDVendingServerTests {
     // MARK: peer identity at adopt
 
     /// What the client end of a socket pair can see of the daemon-side end.
-    private enum PeerEnd: Equatable {
+    private enum PeerEnd: Equatable, Sendable {
         /// `EAGAIN`: a copy of the daemon-side end is open, and nothing was
         /// written on it.
         case open
@@ -509,33 +511,86 @@ struct FDVendingServerTests {
         case failed(errno: Int32)
     }
 
-    /// Reads `PeerEnd` from the client end without blocking. Peeked, so it
-    /// consumes nothing and a second read sees what the first one saw.
+    /// Reads `PeerEnd` from the client end. Peeked, so it consumes nothing and
+    /// a second read sees what the first one saw; `MSG_DONTWAIT`, so it never
+    /// blocks and leaves the descriptor's own flags as they were. An
+    /// interrupted read answers `.open`, which a bounded wait simply reads
+    /// again.
     private static func peerEnd(_ clientSideFD: Int32) -> PeerEnd {
-        _ = fcntl(clientSideFD, F_SETFL, fcntl(clientSideFD, F_GETFL) | O_NONBLOCK)
         var byte: UInt8 = 0
-        let count = recv(clientSideFD, &byte, 1, MSG_PEEK)
+        let count = recv(clientSideFD, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
         if count > 0 { return .written }
         if count == 0 { return .closed }
         let code = errno
-        return code == EAGAIN ? .open : .failed(errno: code)
+        if code == EAGAIN || code == EWOULDBLOCK || code == EINTR { return .open }
+        return .failed(errno: code)
     }
 
-    /// `peerEnd`, for a check that the server closed a connection: read again
-    /// for as long as it answers `.open`, within the shared deadline, and
-    /// returned the moment it answers anything else.
+    /// A bounded wait on a client end that settled on the wrong `PeerEnd`,
+    /// with how long it took as well as the budget: `.failed(errno: 9)` after
+    /// a few milliseconds is a descriptor gone from under the test, while
+    /// still `.open` after the whole budget is a copy nobody let go of, and
+    /// only the elapsed time tells a slow pass from either.
+    private struct PeerEndMismatch: Error, CustomStringConvertible {
+        let what: String
+        let expected: PeerEnd
+        let observed: PeerEnd
+        let elapsed: Duration
+        let budget: Duration
+
+        var description: String {
+            let seen = observed == .open ? "still .\(observed)" : ".\(observed)"
+            return "\(what) — the client end read \(seen) after \(elapsed) (budget \(budget)), not .\(expected)"
+        }
+    }
+
+    /// Waits, within the shared deadline, for the client end to stop reading
+    /// `.open`, and records `PeerEndMismatch` at the caller unless it then
+    /// reads `expected`. Answers whether it did; a cancelled wait reports
+    /// nothing and answers false.
     ///
-    /// Waited for rather than read once because close-on-exec
-    /// (`makeSocketPair`) keeps a copy out of any image a sibling's child
-    /// execs, but not out of a child forked and not yet exec'd: that one holds
-    /// a copy until its exec drops it, and a read in between answers `EAGAIN`
-    /// for somebody else's child. A server that really did leave the
-    /// connection open still fails: the wait runs out and the answer is still
-    /// `.open`. One that wrote on it before closing fails at once, as
-    /// `.written`.
-    private func peerEndOnceSettled(_ clientSideFD: Int32) async -> PeerEnd {
-        _ = await waitUntil { Self.peerEnd(clientSideFD) != .open }
-        return Self.peerEnd(clientSideFD)
+    /// For the two checks one read cannot carry. **That a refused connection
+    /// was closed**: close-on-exec (`makeSocketPair`) keeps a copy out of any
+    /// image a sibling's child execs, but not out of a child forked and not
+    /// yet exec'd, which holds one until its exec drops it, and a single read
+    /// meanwhile answers `EAGAIN` for somebody else's child. **That a frame
+    /// reached a connection** (`expectFrameArrives`). Either way a server that
+    /// got it wrong still fails: one that left the connection open reads
+    /// `.open` when the wait runs out, and one that wrote on it before closing
+    /// reads `.written` at once.
+    @discardableResult
+    private func expectPeerEnd(
+        _ clientSideFD: Int32, settlesAt expected: PeerEnd, _ what: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> Bool {
+        let budget = TestDeadlines.saturatedPass
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(timeout: budget) { Self.peerEnd(clientSideFD) != .open }
+        if outcome == .cancelled { return false }
+        // The verdict is a fresh read, never the poll's exit.
+        let observed = Self.peerEnd(clientSideFD)
+        if observed == expected { return true }
+        Issue.record(
+            PeerEndMismatch(what: what, expected: expected, observed: observed,
+                            elapsed: ContinuousClock.now - start, budget: budget),
+            sourceLocation: sourceLocation)
+        return false
+    }
+
+    /// That the connection on `clientSideFD` works, not only that it reads
+    /// open: `frame`, which the server has just sent, arrives on it. The
+    /// positive half every "left open" check needs, because one read of
+    /// `.open` passes just as well for a socket the server wrongly closed
+    /// while a sibling's child holds a copy of it.
+    private func expectFrameArrives(
+        _ frame: Data, on clientSideFD: Int32, _ what: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        guard await expectPeerEnd(
+            clientSideFD, settlesAt: .written, what, sourceLocation: sourceLocation)
+        else { return }
+        let received = try FDChannel.receiveMessage(from: clientSideFD, capacity: 1024)
+        #expect(received.data == frame, Comment(rawValue: what), sourceLocation: sourceLocation)
     }
 
     /// A frame with no descriptor, for proving a connection is adopted:
@@ -614,8 +669,9 @@ struct FDVendingServerTests {
         let received = try FDChannel.receiveMessage(from: newClientFD, capacity: 1024)
         #expect(received.data == Self.probeFrame, "the new connection's peer did not receive the frame")
         // The replaced socket was shut down with nothing written on it: its
-        // peer reads end of file, not a frame.
-        #expect(await peerEndOnceSettled(oldClientFD) == .closed,
+        // peer reads end of file, not a frame. One read, because `shutdown`
+        // reaches the peer at once whatever copies of the socket exist.
+        #expect(Self.peerEnd(oldClientFD) == .closed,
                 "the replaced connection was left open or written to")
 
         await server.stop()
@@ -667,10 +723,13 @@ struct FDVendingServerTests {
             refusing an older connection reported a departure — the live app on the newer \
             connection would be arbitrated as gone
             """)
-        #expect(await peerEndOnceSettled(olderClientFD) == .closed,
-                "the refused connection's socket was left open")
+        await expectPeerEnd(olderClientFD, settlesAt: .closed,
+                            "the refused connection's socket was left open")
         #expect(Self.peerEnd(newerClientFD) == .open, "the newer connection was torn down")
         #expect(olderReads.count == 0, "a connection refused on arrival was identified first")
+        _ = try await server.sendFrame(Self.probeFrame)
+        try await expectFrameArrives(Self.probeFrame, on: newerClientFD,
+                                     "a frame sent to the newer connection never reached its peer")
 
         await server.stop()
     }
@@ -696,11 +755,11 @@ struct FDVendingServerTests {
         await #expect(throws: FDVendingServerError.notConnected) {
             try await server.sendFrame(Self.probeFrame)
         }
-        #expect(await peerEndOnceSettled(earlyClientFD) == .closed, """
+        await expectPeerEnd(earlyClientFD, settlesAt: .closed, """
             a connection accepted before the stop, adopted after it, was left open
             """)
-        #expect(await peerEndOnceSettled(lateClientFD) == .closed,
-                "a connection adopted after the stop was left open")
+        await expectPeerEnd(lateClientFD, settlesAt: .closed,
+                            "a connection adopted after the stop was left open")
         #expect(departures.count == 0)
     }
 
@@ -728,7 +787,7 @@ struct FDVendingServerTests {
         // Adopted first, so only the listen's floor can refuse it: no
         // connection accepted after it has been installed yet.
         await server.adoptConnection(fd: earlyServerFD, stamp: acceptedBeforeTheListen)
-        #expect(await peerEndOnceSettled(earlyClientFD) == .closed, """
+        await expectPeerEnd(earlyClientFD, settlesAt: .closed, """
             a connection accepted before the server listened again was installed in the new \
             lifetime
             """)
@@ -742,6 +801,8 @@ struct FDVendingServerTests {
         #expect(Self.peerEnd(lateClientFD) == .open,
                 "the connection accepted after the listen was torn down")
         _ = try await server.sendFrame(Self.probeFrame)
+        try await expectFrameArrives(Self.probeFrame, on: lateClientFD,
+                                     "a frame sent to the connection accepted after the listen never reached its peer")
 
         await server.stop()
     }
