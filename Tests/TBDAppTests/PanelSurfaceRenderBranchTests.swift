@@ -206,9 +206,11 @@ struct PanelSurfaceRenderBranchTests {
             primary: .file(FileReference(path: "/w/old.swift")), revision: 3)
 
         let view = PanelSurfaceWorkspaceView(
-            tab: tab, surface: surface, worktree: worktree, makeTabBar: Self.tabBar)
+            tab: tab, surface: surface, worktree: worktree, tabIDs: [tab.id],
+            showsPreSessionBanner: false, makeTabBar: Self.tabBar)
         let awaitingSurface = PanelSurfaceWorkspaceView(
-            tab: tab, surface: nil, worktree: worktree, makeTabBar: Self.tabBar)
+            tab: tab, surface: nil, worktree: worktree, tabIDs: [tab.id],
+            showsPreSessionBanner: false, makeTabBar: Self.tabBar)
 
         #expect(view.primaryContent == repointed)
         #expect(awaitingSurface.primaryContent == repointed, "the primary does not wait for the surface")
@@ -573,6 +575,26 @@ struct PanelSurfaceRenderBranchTests {
         #expect(measured == expected)
         // Shorter than the row: nothing to measure, rather than a negative height.
         let squashed = PanelSurfaceWorkspaceView.mainAreaSize(of: CGSize(width: 800, height: 10))
+        #expect(squashed.height == 0)
+    }
+
+    /// The banner sits under the bar in the primary's column, inside the
+    /// view's own measure, so the measure leaves it out as the legacy path's
+    /// does, which is taken below it.
+    @Test("while the pre-session banner shows, the main area is measured below it and its divider too")
+    func mainAreaExcludesThePreSessionBanner() {
+        let size = CGSize(width: 800, height: 600)
+        let bannerHeight: CGFloat = 29
+        let aboveContent: CGFloat = TabRowMetrics.height + 1 + bannerHeight + 1
+
+        let withBanner = PanelSurfaceWorkspaceView.mainAreaSize(of: size, bannerHeight: bannerHeight)
+        let withoutBanner = PanelSurfaceWorkspaceView.mainAreaSize(of: size, bannerHeight: nil)
+
+        let expectedWithBanner = CGSize(width: 800, height: 600 - aboveContent)
+        #expect(withBanner == expectedWithBanner)
+        #expect(withoutBanner == PanelSurfaceWorkspaceView.mainAreaSize(of: size))
+        let squashed = PanelSurfaceWorkspaceView.mainAreaSize(
+            of: CGSize(width: 800, height: 40), bannerHeight: bannerHeight)
         #expect(squashed.height == 0)
     }
 

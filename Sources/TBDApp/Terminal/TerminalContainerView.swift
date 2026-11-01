@@ -18,10 +18,11 @@ import TBDShared
 /// What each path posts:
 /// - **A tab on the daemon path:** `PanelSurfaceWorkspaceView`'s full width,
 ///   the side region included, and its height below the tab row and the
-///   divider under it.
+///   divider under it, and below the pre-session banner while that shows.
 /// - **Every other single-worktree path:** the active tab's slot inside
-///   SingleWorktreeView, below the full-width tab bar and its divider; a
-///   legacy split's panes all sit inside it.
+///   SingleWorktreeView, below the full-width tab bar, the pre-session banner
+///   while that shows, and their dividers; a legacy split's panes all sit
+///   inside it.
 /// - **Multi-select:** the first grid cell's content, below the cell's
 ///   header and divider.
 /// None includes the pinned-terminal dock.
@@ -144,6 +145,7 @@ struct SingleWorktreeView: View {
             let localWorktree = LocalWorktree(worktree)
             let daemonTab = daemonPathTab(worktree: localWorktree)
             let rendersDaemonPath = daemonTab != nil
+            let showsPreSessionBanner = appState.showsPreSessionBanner(for: worktree)
             VStack(spacing: 0) {
                 // The full-width tab bar on every path but the daemon one,
                 // where `PanelSurfaceWorkspaceView` draws it over the primary's
@@ -157,8 +159,10 @@ struct SingleWorktreeView: View {
 
                 // Thin header while a blocking pre-session hook runs and the
                 // user is watching it: the worktree is still `.creating`, so
-                // explain why no agent terminal exists yet.
-                if appState.showsPreSessionBanner(for: worktree) {
+                // explain why no agent terminal exists yet. On the daemon path
+                // `PanelSurfaceWorkspaceView` draws it under its own tab bar,
+                // so on every path it sits between the bar and the content.
+                if !rendersDaemonPath && showsPreSessionBanner {
                     PreSessionSetupBanner()
                     Divider()
                 }
@@ -168,8 +172,10 @@ struct SingleWorktreeView: View {
                 // matches the actual SwiftTerm pane area (tab bar + divider
                 // above and the resume banner below are excluded). On it,
                 // `PanelSurfaceWorkspaceView` posts the key itself, below its
-                // own tab row, so exactly one view posts it.
-                layoutContent(worktree: localWorktree, daemonTab: daemonTab)
+                // own tab row and banner, so exactly one view posts it.
+                layoutContent(
+                    worktree: localWorktree, daemonTab: daemonTab,
+                    showsPreSessionBanner: showsPreSessionBanner)
                     .background {
                         if !rendersDaemonPath {
                             GeometryReader { geometry in
@@ -364,9 +370,12 @@ struct SingleWorktreeView: View {
     /// layout takes the proven-local wrapper. A selection with no directory on
     /// this disk — the optimistic `.creating` placeholder, which writes
     /// `path: ""` — has no tabs either, so it falls through to the same empty
-    /// state it always did.
+    /// state it always did. `showsPreSessionBanner` goes to the daemon path's
+    /// view, which draws the banner under its tab bar.
     @ViewBuilder
-    private func layoutContent(worktree: LocalWorktree?, daemonTab: DaemonPathTab?) -> some View {
+    private func layoutContent(
+        worktree: LocalWorktree?, daemonTab: DaemonPathTab?, showsPreSessionBanner: Bool
+    ) -> some View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
         } else if let daemonTab {
@@ -380,6 +389,8 @@ struct SingleWorktreeView: View {
                 tab: daemonTab.tab,
                 surface: daemonTab.surface,
                 worktree: daemonTab.worktree,
+                tabIDs: worktreeTabs.map(\.id),
+                showsPreSessionBanner: showsPreSessionBanner,
                 makeTabBar: { tabBar($0) }
             )
         } else if let tab = activeTab, let worktree {
@@ -668,10 +679,12 @@ private struct QueuedPromptBanner: View {
 // MARK: - PreSessionSetupBanner
 
 /// Slim header bar shown above the terminal while a blocking `preSession`
-/// hook is still running (worktree `.creating`, pre-session tab active).
-/// Same visual idiom as the proxy-unreachable banner in TerminalPanelView,
-/// but informational rather than warning-toned.
-private struct PreSessionSetupBanner: View {
+/// hook is still running (worktree `.creating`, pre-session tab active),
+/// directly under the tab bar: `SingleWorktreeView` draws it off the daemon
+/// path, and `PanelSurfaceWorkspaceView` on it. Same visual idiom as the
+/// proxy-unreachable banner in TerminalPanelView, but informational rather
+/// than warning-toned.
+struct PreSessionSetupBanner: View {
     var body: some View {
         HStack(spacing: 6) {
             // Static icon, deliberately not a ProgressView: a spinner forces
