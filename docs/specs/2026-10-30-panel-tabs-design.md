@@ -35,7 +35,7 @@ viewers beside an agent's terminal, and there it causes two problems:
 - **Agents must reason about geometry.** `tbd panel open` asks for an anchor,
   an edge and a share, which is layout work an agent has no good basis for.
 
-Two daemon-side gaps also stand between the surface and graduation:
+Two daemon-side gaps also stand between the surface and everyday use:
 
 - **Per-panel history is not on the wire.** `PanelGetResult` carries tabs only,
   so the app cannot show a panel's back/forward state.
@@ -50,20 +50,19 @@ Two daemon-side gaps also stand between the surface and graduation:
 - The app renders that layout from the daemon, and routes its own gestures
   through `panel.apply`, so user and agent changes take one path.
 - Per-panel history travels with the surface.
-- While the feature is on, every workspace tab the app shows has a surface,
-  except a tab whose legacy layout still splits off a terminal (see "Legacy
-  import").
-- One Settings toggle turns the whole feature on, default off.
+- Every workspace tab the app shows has a surface, except a tab whose legacy
+  layout still splits off a terminal (see "Legacy import").
+- Chrome that names each thing once: one row of tabs across the window, and no
+  pane headers repeating what a tab already shows.
+- Everyone gets it. No setting turns it off.
 
 ## Non-goals
 
-- **Flipping the default.** This ships off; graduation is a later change.
 - **More than one region.** The model leaves room for a second region (see
   "Future extensions"), but only one is built.
 - **Dragging tabs to reorder them.**
-- **Note deletion.** Closing a note's tab removes the tab and keeps the note
-  (close ≠ delete). A delete affordance is required before graduation, not now.
-- **Retiring the legacy layout store.** It stays live as the flag-off path.
+- **Retiring the legacy layout store.** It stays live for the multi-worktree
+  grid and for tabs the converter skips.
 
 ## The model
 
@@ -169,8 +168,10 @@ edges, split IDs and ratio lists, `selectTab`, and the daemon's rewrite of
 
 ### The transcript button
 
-The transcript button sits in the primary terminal's header. On the daemon path
-the app decides what to send from its copy of the surface:
+The transcript button sits at the trailing end of the workspace tab bar (see
+"The renderer"), shown while the selected tab's primary is a Claude terminal
+and the transcript view is turned on. The app decides what to send from its
+copy of the surface:
 
 - **No transcript panel for this terminal:** send `open(.transcript(terminalID))`.
 - **The panel exists but another panel is in front, or the region is
@@ -189,7 +190,7 @@ same tab at the same revision and changes nothing.
 
 The daemon is a local Unix-socket process, so a commit costs far less than a
 frame. The pure reducer in `TBDShared` keeps an optimistic layer available if
-soak measurement ever shows a visible gap: the app could run the same reducer,
+measurement ever shows a visible gap: the app could run the same reducer,
 render at once, and let the reply confirm. It is not built.
 
 Revisions are daemon-wide. Every write that creates or changes a surface — an
@@ -245,19 +246,18 @@ zero.
   `ViewerPanel.history` when it reads a surface and splits them out when it
   writes one, inside the same transaction.
 - `panel_operation_receipt` keeps idempotent replay, for the tab the receipt
-  names (see "Coordinator and gating"); its stored result is a v2
+  names (see "Coordinator"); its stored result is a v2
   `PanelApplyResult`.
 
 `PanelSurfaceStore.applyReducing` keeps its shape: load, reduce and persist
 inside one write transaction, so concurrent applies to one tab cannot lose an
 update.
 
-### Coordinator and gating
+### Coordinator
 
-`PanelCoordinator.apply` keeps its pipeline: gate, idempotency replay,
+`PanelCoordinator.apply` keeps its pipeline: idempotency replay,
 resource-existence check for `open` and `navigate`, reduce, persist, broadcast.
-The gate reads one flag, `panel_tabs_enabled`, for every mutating origin, app
-and agent alike. `panel.get` stays ungated.
+No setting gates it: the app and agents mutate through it alike.
 
 A receipt replays only for the tab it names. An operation ID whose receipt
 names another tab is refused with `operationIDReused` and applies nothing:
@@ -279,8 +279,8 @@ struct PanelSyncTabsParams {
 }
 ```
 
-While the flag is on, the app sends it when it connects and whenever a workspace
-tab is created, closed, reordered or relabelled. In one transaction the daemon:
+The app sends it when it connects and whenever a workspace tab is created,
+closed, reordered or relabelled. In one transaction the daemon:
 
 - **imports each listed tab that has no surface,** converting its legacy layout
   (see "Legacy import");
@@ -350,9 +350,9 @@ write, so a moved tab the app never lists does not stay on the main worktree,
 which is never archived.
 
 The sync does not carry the selected tab. The app already records it in
-`worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or
-no flag, and `tbd panel` commands without `--tab` read that column, so they act
-on the tab the user is looking at.
+`worktree.activeTabID` through `worktree.setActiveTab` on every switch, and
+`tbd panel` commands without `--tab` read that column, so they act on the tab
+the user is looking at.
 
 ### Wire
 
@@ -363,7 +363,8 @@ only reports back what the app itself recorded.
 
 App and daemon ship in one build. A daemon left running an older binary sends
 surfaces the app cannot decode; the app treats an undecodable surface as absent
-and renders legacy.
+(see "The render branch"). An older app reads the capability field the daemon
+no longer sends as off, and keeps its legacy layout.
 
 ### Legacy import
 
@@ -389,27 +390,23 @@ The converter in `TBDShared` maps one legacy tab to one surface:
   exists, clamped to the valid range, else the default.
 - `collapsed` starts false.
 
-### Flag and rollout
+### Rollout
 
-One new `config` column, `panel_tabs_enabled`, added in a `.sql` migration with
-no SQL default, so NULL stays distinct from an explicit choice. The shipped
-default lives only in `?? Config.panelTabsDefault` (false) in
-`ConfigRecord.toModel()`, so graduation is a one-line change that preserves every
-explicit opt-out. The daemon reports the flag in its capabilities result as
-`panelTabsEnabled`, which the app already reads; the result's
-`panelSurfaceEnabled` field goes with its column.
-
-One Settings toggle sets it, with the working label "Side panel with tabs,
-shared with agents (experimental)", through a new `config.setPanelTabsEnabled`
-RPC; `tbd config` gains the matching key. It turns on the store, the tab sync,
-app rendering and agent control together.
-
-The one flag replaces three columns, retired through the column-retire
-checklist in `Sources/TBDDaemon/Database/CLAUDE.md` (one epoch bump): `config.daemon_panel_surface_enabled`,
+There is no feature flag: the store, the tab sync, app rendering and agent
+control are always on. Four columns are retired through the column-retire
+checklist in `Sources/TBDDaemon/Database/CLAUDE.md`:
+`config.panel_tabs_enabled`, `config.daemon_panel_surface_enabled`,
 `config.agent_panel_control_enabled`, and `worktree.panel_surface_imported_at`.
-The shadow comparator (`PanelShadowCompare.swift`) is deleted: it compared the
-legacy tree against the daemon's, and a tabbed region cannot be compared with a
-split tree.
+With them go `Config.panelTabsDefault`, the capabilities result's
+`panelTabsEnabled` and `panelSurfaceEnabled` fields, the
+`config.setPanelTabsEnabled` RPC, the `panel-tabs` key of `tbd config`, and the
+Settings toggle. The shadow comparator (`PanelShadowCompare.swift`) is deleted:
+it compared the legacy tree against the daemon's, and a tabbed region cannot be
+compared with a split tree.
+
+CLAUDE.md asks for a default-off flag when a change replaces a load-bearing
+path. The owner chose to ship this without one, having used it on their own
+install, so the way back is a revert and a release.
 
 ### CLI and agent guidance
 
@@ -437,21 +434,18 @@ worktree passes an absolute path.
 
 `move`, `select-tab`, and the anchor, edge, share and ratio options are removed.
 The agent guidance in `Sources/TBDShared/TBDSkillContent.swift` is rewritten to
-match: an agent opens content and lets the reuse rule place it.
+match: an agent opens content and lets the reuse rule place it. It names no
+setting, because none can refuse a command.
 
 ## App
 
 ### The app's copy of the surface
 
 `AppState+PanelSurface.swift` holds the surfaces per worktree as a tracked
-property of the `@Observable` `AppState`. It is filled by `panel.get` when the
-flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
-cleared when the daemon reports the flag off. A failed capabilities fetch
-reports nothing: the app keeps the capabilities it held, at connect as at any
-later refresh, and while it holds none it asks again on its regular poll. A
-delta or fetch while the flag is off leaves it untouched. A worktree's detail view loads it whenever the shown
-tab has no surface in the copy — when that tab is shown, or when the flag turns
-on — after sending any tab sync still pending. So a tab left without a surface
+property of the `@Observable` `AppState`. It is filled by `panel.get` and kept
+current by a `panelSurfaceChanged` case in `handleDelta`. A worktree's detail
+view loads it whenever the shown tab has no surface in the copy, after sending
+any tab sync still pending. So a tab left without a surface
 by a failed `panel.get`, or by an import delta missed while the subscription
 was down, loads again when it is shown, and a shown tab with a surface asks for
 no load. Neither does a tab the last sync named in `skippedTabIDs`: no load
@@ -464,8 +458,8 @@ and the result omits, is dropped, unless a delta or an apply reply changed it
 in flight; a listed tab goes through the revision guard; and a tab removed in
 flight is never put back by the result's listing.
 
-One rule recovers what a subscription gap missed. While the flag is on,
-every acknowledgement of a subscription refetches every worktree that has a
+One rule recovers what a subscription gap missed. Every acknowledgement of a
+subscription refetches every worktree that has a
 tab list in the app, whether or not the copy holds a surface for it. The
 refetch waits for the acknowledgement: the daemon registers the subscriber
 before it sends the ack, so a `panel.get` issued after the ack cannot miss a
@@ -476,15 +470,12 @@ refetches go out after any tab sync pending or in flight, and merge under the
 guard like any other `panel.get`: revisions are daemon-wide and never
 decrease, so a daemon restart leaves them comparable, and the merge makes a
 refetch that overlaps another load of the same worktree safe. The copy is kept
-meanwhile, so daemon-rendered tabs keep rendering instead of dropping to
-legacy and rebuilding their terminal views.
+meanwhile, so side regions stay on screen through a reconnect.
 
-The flag turning on marks every worktree with tabs dirty and syncs the ready
-ones. It loads them too only when the current subscription is already
-acknowledged, as when the Settings toggle turns the flag on at runtime; it
-loads after the sync, so a fetch taken before the sync's imports cannot drop
-them. At connect the flag turns on before the first acknowledgement, which
-then does the loading, so launch loads each worktree once.
+At connect the app marks every worktree with tabs dirty and syncs the ready
+ones before the first acknowledgement, which then does the loading: a fetch
+taken before the sync's imports could drop them, and launch loads each
+worktree once.
 
 One chokepoint, `applyPanelOperation`, builds the envelope (a fresh operation
 ID, origin `.appUser`, the copy's revision as `baseRevision`), sends it, and
@@ -515,54 +506,90 @@ set, every file-opening action becomes `open(.file(...))` and the reuse rule
 places it.
 
 - **`PaneActions.legacy`** closes over the legacy layout binding and does
-  exactly what `PanePlaceholder` does today. The rollback guarantee is checked
-  expression by expression against `PanePlaceholder` as it stands on main when
-  the seam lands.
+  exactly what `PanePlaceholder` did before the seam. It serves the
+  multi-worktree grid and tabs the converter skips.
 - **The daemon set** turns each action into an operation and reads history and
-  on-state from the app's copy. Close is disabled on the primary, which no
-  operation can remove.
+  on-state from the app's copy. No operation removes the primary.
+
+On the daemon path the leaf draws no header: a tab names and closes what it
+shows, and the controls the header held move into the tab row (see "The
+renderer"). The state only those controls read — the rendered/source toggle,
+whether a file can render, a web page's current address — lives above the
+leaf, in the view that draws the row, and is passed in. A leaf in a legacy
+split keeps its header, because no tab names it there.
 
 ### The renderer
 
-`PanelSurfaceWorkspaceView` lays out the primary on the left, the existing
-`SplitDivider`, and a `SideRegionView` on the right when the region has panels
-and is not collapsed.
+`PanelSurfaceWorkspaceView` draws a workspace tab in two columns: the primary
+on the left, the existing `SplitDivider`, and a `SideRegionView` on the right
+when the region has panels and is not collapsed. Each column starts with its
+own strip of tabs, and the two strips share one row: the workspace tab bar
+spans the primary's column, the side region's strip spans its own, and the
+divider runs through the row, so a drag resizes both. When the region is
+hidden, the workspace tab bar spans the whole width. No pane draws a header.
 
-- **The primary** renders through `PanePlaceholder` with the daemon action set,
-  so the terminal keeps its header and transcript button. Its content comes
-  from the app's own workspace tab, not from the surface: the primary is
-  app-owned, so a re-pointed primary shows at once rather than after the sync
-  carries it to the daemon.
-- **`SideRegionView`** shows a tab strip (each tab: icon, title, close button;
-  a click selects) with a collapse button, and below it the active panel through
-  `PanePlaceholder`, which keeps its history chevrons and actions. The leaf's own
-  title is hidden here, because the tab shows it.
-- **When the region is collapsed** but has panels, an expand button sits in the
-  primary's header.
-- **Shortcuts:** collapse/expand gets a keyboard shortcut, and a modifier-click
-  on a file link opens it with `newPanel` wherever the click handler can see
-  modifier keys. The plan chooses both after checking existing bindings.
+- **The workspace tab bar** is drawn by this view, not by
+  `TerminalContainerView` above it, so that it can share the row. Its trailing
+  end holds, in order: the selected tab's own control, Session History, and the
+  expand button while the region is collapsed and has panels. The selected
+  tab's control is the transcript button for a Claude terminal, the
+  rendered/source toggle for a file that can render, and copy-address for a web
+  page; a note or a plain terminal has none. A primary has no history, so the
+  bar carries no history buttons.
+- **The primary** renders through `PanePlaceholder` with the daemon action set.
+  Its content comes from the app's own workspace tab, not from the surface: the
+  primary is app-owned, so a re-pointed primary shows at once rather than after
+  the sync carries it to the daemon.
+- **The side region's strip** reads, left to right: history search (the
+  searchable history list), back and forward; the panel tabs (icon, title,
+  close; a click selects; a right-click offers the file menu); then the active
+  panel's own control (the rendered/source toggle for a file, copy-address for
+  a web page) and the collapse button at the trailing edge. The three history
+  buttons act on the active panel and stay in place, dimmed, when it has no
+  history to step through — a transcript or a note — so the tabs never shift
+  under the pointer. Below the strip, the active panel renders through
+  `PanePlaceholder`.
+- **The terminal's pin** is in its workspace tab's right-click menu (Pin or
+  Unpin). The pinned-terminal dock keeps its unpin.
+- **A note's title** is edited by renaming its tab, in the workspace tab bar or
+  the side region's strip, by double-click or Rename Tab. The rename writes the
+  note's title and clears any label the workspace tab carried, so the tab shows
+  the title.
+- **Closing a note's side-region tab** works as closing a workspace note tab
+  does: when the note has content the app asks first, then closes the panel
+  and deletes the note. Nothing in the app lists notes, so a note closed and
+  kept would be unreachable. The `close` operation itself keeps the note, so an
+  agent's `tbd panel close` does too.
+- **A web page's full address** shows in its tab's tooltip.
+- **While Session History is open,** no workspace tab is selected, so the
+  history view takes the whole width under a full-width tab bar.
+- **Shortcuts:** `⌘\` collapses and expands the region, bound on whichever of
+  the two buttons is showing, and a Shift-click on a file link opens it with
+  `newPanel`.
 
 ### The render branch
 
 `TerminalContainerView.layoutContent` asks one plain function,
-`workspaceRenderPath(worktreeID:tabID:)`, which returns the daemon path only when
-the daemon reports `panel_tabs_enabled` on **and** the app's copy holds a
-surface for that tab. Every other case renders the legacy `SplitLayoutView`,
-unchanged. The multi-worktree grid builds its own panes and stays legacy.
+`workspaceRenderPath(worktreeID:tabID:)`. It returns the legacy path only for a
+tab the last sync named in `skippedTabIDs`, whose layout still splits off a
+terminal. Every other tab takes the daemon path: with the copy's surface when it
+holds one, and with an empty side region until then. A new tab therefore draws
+the same layout before and after its surface arrives, and its terminal view is
+never rebuilt. A gesture on a tab with no surface yet sends the worktree's
+pending tab sync first, then applies. The multi-worktree grid builds its own
+panes and stays legacy.
 
 ## Testing
 
-Each gated branch is tested both ways, asserting opposite outcomes.
+Each branch is tested both ways, asserting opposite outcomes.
 
 - **Shared:** property tests over random operation sequences, checking every
   validator rule after each step; a table of `open` cases covering each step of
   the reuse rule and each kind; `close` choosing the next active panel by
   recency; and the legacy converter (pre-order, kind-filtered history, width
   from the ratio, and a skipped tab when a terminal sits outside the primary).
-- **Daemon:** the gate under NULL, false and true; a pre-migration config row
-  reads NULL, and an explicit false survives a change to the default constant;
-  the migration empties the three v1 tables; tab sync imports missing tabs,
+- **Daemon:** an app and an agent operation both apply with no config
+  consulted; the migration empties the three v1 tables; tab sync imports missing tabs,
   never overwrites a readable tab's panels, replaces an unreadable surface
   with its import and reports an unreadable one it cannot convert as skipped,
   updates order, labels and primaries,
@@ -576,24 +603,29 @@ Each gated branch is tested both ways, asserting opposite outcomes.
 - **CLI:** parsing for each new and changed command, and rejection of the
   removed options.
 - **App:**
-  - The copy: flag off leaves it untouched; a delta upserts; an older revision
-    is refused; a removal is applied whatever the revision; a full `get` drops
-    absent tabs; a delta's `activeTabID` does not move the selected tab;
-    resubscribing keeps rendering it and, only once the daemon acknowledges
-    the subscription, refetches every worktree with a tab list, one with no
-    surface included; a get that failed across the resubscribe is refetched
-    by the acknowledgement; launch loads each worktree once, after the sync;
-    a failed capability fetch at connect keeps the flag and the copy, and the
-    poll fetches again only while no capabilities are held.
+  - The copy: a delta upserts; an older revision is refused; a removal is
+    applied whatever the revision; a full `get` drops absent tabs; a delta's
+    `activeTabID` does not move the selected tab; resubscribing keeps
+    rendering it and, only once the daemon acknowledges the subscription,
+    refetches every worktree with a tab list, one with no surface included; a
+    get that failed across the resubscribe is refetched by the
+    acknowledgement; launch loads each worktree once, after the sync.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
-    one sync per worktree; an unrelated `AppState` change sends none; flag off
-    sends none.
-  - The render branch: flag off renders legacy; flag on with no surface renders
-    legacy; flag on with a surface renders the daemon path; daemon flag off
-    renders legacy.
+    one sync per worktree; an unrelated `AppState` change sends none.
+  - The render branch: a skipped tab renders legacy; a tab with a surface
+    renders the daemon path with it; a tab with no surface yet renders the
+    daemon path with an empty side region, and its primary keeps its view
+    identity when the surface arrives; a gesture on it syncs before it applies.
+  - The chrome, as values: the workspace tab bar's trailing control for each
+    primary kind; the strip's history buttons enabled for a file or web panel
+    and dimmed for a transcript or note; the strip's per-kind control; the
+    expand button only while the region is collapsed and has panels.
+  - Notes: closing a side-region note tab with content asks, then closes and
+    deletes; an empty one closes and deletes without asking; a declined
+    confirmation changes nothing; the `close` operation alone keeps the note.
+    Renaming a note's tab writes the note's title.
   - The transcript button's three states each send the right operation.
   - `PaneActions.legacy` passes the existing pane tests unchanged.
-  - The Settings toggle writes the config flag.
 
 ## Risks
 
@@ -603,15 +635,18 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   daemon-rendered tab they fall back to the tab's content, which is correct
   because the primary is the only place a terminal can appear. A future model
   that put a terminal anywhere else would break them.
-- **The legacy layout goes stale while the flag is on.** Gestures on a
-  daemon-rendered tab do not write the legacy store, so turning the flag off
-  shows the layout from before the soak.
+- **No switch to turn it off.** The way back is a revert and a release. The
+  legacy layout store is not written by gestures on a daemon-rendered tab, so
+  a reverted build shows each tab's layout from before its import.
 - **Old terminal splits keep a tab on legacy.** A workspace tab whose layout
-  predates the removal of terminal splits renders legacy while the flag is on,
-  and `tbd panel` cannot act on it. Closing the extra terminal, or moving it to
-  its own tab, brings the tab onto the surface at the next sync.
-- **Notes are only closable during the soak.** Close keeps the note, and there
-  is no delete affordance yet.
+  predates the removal of terminal splits renders legacy, and `tbd panel`
+  cannot act on it. Closing the extra terminal, or moving it to its own tab,
+  brings the tab onto the surface at the next sync.
+- **Links in a primary document open in the side region,** because no
+  operation re-points a primary.
+- **A note further back in a panel's history outlives the panel.** Closing a
+  note panel deletes the note it shows; notes the panel navigated away from
+  are kept, and nothing lists them.
 - **Local-daemon latency is assumed.** If `panel.apply` ever crossed a network,
   the single round trip would need the optimistic layer.
 
@@ -640,11 +675,22 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   but it widens the layout to three columns.
 - **The transcript as its own workspace tab.** It cannot sit beside the
   terminal.
-- **Three flags (store, render, agent).** The store-only rung existed for shadow
-  comparison, which cannot compare a tabbed region with a split tree; one toggle
-  is what a person turning the feature on needs.
+- **Ship behind a default-off flag and soak.** The repo's usual path for a
+  load-bearing change; the owner chose to ship without one (see "Rollout").
+- **Render a tab legacy until its surface arrives.** Every new tab would switch
+  layouts once and rebuild its terminal view.
 - **Keep the one-shot import.** New workspace tabs would render legacy, and
   `tbd panel` would silently do nothing on them.
+- **A header row under the strip for history and per-kind controls,** shown
+  only for files and web pages. It costs a row and moves the content's top edge
+  between kinds.
+- **Hiding the history buttons for a transcript or note.** The tabs would shift
+  sideways under the pointer on every switch to or from one.
+- **The transcript button on the terminal's own tab, or in the window
+  toolbar.** The tab already carries a status glyph, a title and a close
+  button; the window toolbar is per window, and the button acts on one tab.
+- **× keeps a side-region note.** Nothing lists notes, so a kept note would be
+  unreachable.
 
 ## Future extensions
 
@@ -655,5 +701,5 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   it. The terminal stays the anchor and its session keeps running; the
   one-transcript-view rule already covers it.
 - **Drag to reorder tabs,** as a `move(panelID, index)` operation.
-- **A note delete affordance,** required before graduation.
-- **Retiring the legacy layout store** after graduation.
+- **Retiring the legacy layout store,** once the grid renders from the surface
+  and no install holds a tab with a terminal split.
