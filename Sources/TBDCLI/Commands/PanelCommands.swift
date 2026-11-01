@@ -89,8 +89,9 @@ struct PanelOpen: AsyncParsableCommand {
         commandName: "open",
         abstract: "Show content in the side panel",
         discussion: """
-            Selects a panel already showing this content. Otherwise a file, web page \
-            or note goes into the active panel when it is the same kind, else into the \
+            Selects a panel already showing this content. A note or the Changes list \
+            (--changes) is worktree-wide: every tab of the worktree shows it, it has no \
+            history, and it is selected if already open. Otherwise a file or web page goes into the active panel when it is the same kind, else into the \
             most recently used panel of that kind, and the old content stays in that \
             panel's history. A transcript, --new-panel, or content with no panel of \
             its kind gets a new panel after the active one. Opening also expands a \
@@ -374,7 +375,7 @@ struct PanelResize: AsyncParsableCommand {
 
 // MARK: - Content flags (used by open and navigate)
 
-/// The four `PanelContent` sources as CLI flags. Exactly one must be given.
+/// The five `PanelContent` sources as CLI flags. Exactly one must be given.
 struct ContentOptions: ParsableArguments {
     @Option(name: .long, help: "Open/navigate to a file")
     var file: String?
@@ -394,11 +395,14 @@ struct ContentOptions: ParsableArguments {
     @Option(name: .long, help: "Open/navigate to a note (note ID)")
     var note: String?
 
+    @Flag(name: .long, help: "Open the worktree's Changes list")
+    var changes = false
+
     init() {}
 }
 
 /// Resolve `ContentOptions` into a `PanelContent`. Exactly one of
-/// --file/--web/--transcript/--note must be given.
+/// --file/--web/--transcript/--note/--changes must be given.
 func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
     var resolved: [PanelContent] = []
 
@@ -422,11 +426,15 @@ func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
         resolved.append(.note(noteID: try parseUUID(note, label: "note ID")))
     }
 
+    if opts.changes {
+        resolved.append(.changes)
+    }
+
     guard resolved.count == 1 else {
         throw CLIError.invalidArgument(
             resolved.isEmpty
-                ? "Specify one of --file, --web, --transcript, --note"
-                : "Specify only one of --file, --web, --transcript, --note")
+                ? "Specify one of --file, --web, --transcript, --note, --changes"
+                : "Specify only one of --file, --web, --transcript, --note, --changes")
     }
     let content = resolved[0]
     if opts.render || opts.source {
@@ -469,21 +477,28 @@ func describe(_ content: PrimaryContent) -> String {
     }
 }
 
-/// The side region, one line per panel in tab-strip order. Each panel line
+/// The side region, one line per panel in tab-strip order: the worktree's
+/// panels first, each marked `(worktree-wide)`, then the tab's own. Each panel line
 /// carries the panel ID — the handle `--panel` takes — and its content, which
 /// `describe` leads with the panel's kind; the active panel is marked
 /// `[ACTIVE]`. The header gives the width and notes a collapsed region.
 func renderSideRegion(_ surface: WorkspaceTabSurface) -> [String] {
     let side = surface.side
-    guard !side.panels.isEmpty else { return ["side region: no panels"] }
+    let total = surface.worktreePanels.count + side.panels.count
+    guard total > 0 else { return ["side region: no panels"] }
 
-    let count = side.panels.count == 1 ? "1 panel" : "\(side.panels.count) panels"
+    let count = total == 1 ? "1 panel" : "\(total) panels"
     var header = "side region: \(count), width \(String(format: "%.2f", side.width))"
     if side.collapsed {
         header += ", collapsed (hidden, panels kept; `tbd panel expand` shows it)"
     }
 
     var lines = [header]
+    for panel in surface.worktreePanels {
+        let marker = panel.id == side.activePanelID ? " [ACTIVE]" : ""
+        lines.append(
+            "  panel \(panel.id) (worktree-wide)\(marker): \(describe(panel.content.panelContent))")
+    }
     for panel in side.panels {
         let marker = panel.id == side.activePanelID ? " [ACTIVE]" : ""
         let shown = panel.content.map { describe($0) } ?? "(no content)"

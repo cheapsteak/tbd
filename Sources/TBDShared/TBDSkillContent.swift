@@ -29,7 +29,7 @@ TBD is a macOS app that manages git worktrees and terminal tabs (Claude Code, Co
 
 ## Discovering current commands
 
-Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd panel`, `tbd link`, `tbd notify`.
+Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd panel`, `tbd note`, `tbd link`, `tbd notify`.
 
 ## Common workflows
 
@@ -239,7 +239,9 @@ auto-archive off for the worktree instead.
 
 ## Panels
 
-Each worktree tab shows its **primary** content (its terminal, or a file/web/note/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, note, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
+Each worktree tab shows its **primary** content (its terminal, or a file/web/note/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
+
+Notes and the **Changes** list are different: they are **worktree-wide**. Showing one shows it in every tab of the worktree, ahead of each tab's own panels. They have no history, and each is open in at most one panel. Closing a panel never deletes a note. `tbd note list "$TBD_WORKTREE_ID"` lists the worktree's notes and the panel showing each (`--json` for the raw result).
 
 ### See
 
@@ -255,14 +257,14 @@ Read-only. Prints each tab's primary content and its side panel: every panel in 
 tbd panel open "$TBD_WORKTREE_ID" --file docs/notes.md
 ```
 
-Open content and let the reuse rule place it — don't pick a panel yourself. `open` selects a panel already showing that content. Otherwise a file, web page, or note goes into a panel of the same kind (the active one if it matches, else the most recently used), and that panel keeps the old content in its history; a transcript, or content with no panel of its kind, gets a new panel. Pass `--new-panel` only when what a same-kind panel shows now should stay open in its own tab rather than move into that panel's history. Content is one of `--file <path>`, `--web <url>`, `--transcript <terminal-id>`, `--note <note-id>`.
+Open content and let the reuse rule place it — don't pick a panel yourself. `open` selects a panel already showing that content. A note or the Changes list is worktree-wide: `open` selects it if it is open, else adds it for every tab. Otherwise a file or web page goes into a panel of the same kind (the active one if it matches, else the most recently used), and that panel keeps the old content in its history; a transcript, or content with no panel of its kind, gets a new panel. Pass `--new-panel` only when what a same-kind panel shows now should stay open in its own tab rather than move into that panel's history. Content is one of `--file <path>`, `--web <url>`, `--transcript <terminal-id>`, `--note <note-id>`, `--changes`.
 
 ### Arrange
 
 - `select --panel <id>` brings a panel to the front.
 - `navigate --panel <id>` points one panel at new content of its own kind.
 - `back`, `forward`, and `jump --index <n>` (each with `--panel <id>`) move through a panel's history.
-- `close --panel <id>` closes a panel and its history.
+- `close --panel <id>` closes a panel and its history. Closing a note's panel keeps the note.
 - `collapse` hides the side panel and keeps its panels; `expand` shows it again. `open` and `select` expand it too.
 - `resize --width <fraction>` sets the side panel's width as a fraction of the tab's width.
 
