@@ -14,8 +14,8 @@ import TestSupport
 /// (panel tabs spec, "The renderer"): renaming a note's tab writes the note's
 /// title and clears the tab's label, renaming any other tab sets its label, a
 /// rename asked for on one bar survives the bar moving to another view, the
-/// right-click menu offers the terminal's pin, and a web tab's tooltip is its
-/// full address.
+/// right-click menu offers the terminal's pin, a web tab's tooltip is its
+/// full address, and a tab's rename field keeps the label's width.
 @Suite("Tab rename, pin and tooltip")
 @MainActor
 struct TabRenameTests {
@@ -257,6 +257,20 @@ struct TabRenameTests {
             await Fixture.drainMainActor()
             #expect(state.noteRenameTails.isEmpty)
         }
+    }
+
+    // MARK: - The rename field's width
+
+    @Test("a tab's rename field keeps the label's width from when editing began, never under 60 pt")
+    func renameFieldKeepsTheLabelsWidth() {
+        let wideLabel: CGFloat = 140
+        let narrowLabel: CGFloat = 24
+        let unmeasured: CGFloat = 0
+        let floor: CGFloat = 60
+        #expect(TabRenameFieldWidth.minimum(labelWidth: wideLabel) == wideLabel)
+        #expect(TabRenameFieldWidth.minimum(labelWidth: narrowLabel) == floor)
+        #expect(TabRenameFieldWidth.minimum(labelWidth: unmeasured) == floor)
+        #expect(TabRenameFieldWidth.floor == floor)
     }
 
     // MARK: - A rename across a change of view

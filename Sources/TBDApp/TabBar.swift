@@ -125,7 +125,10 @@ struct TabBarTrailingItems {
 /// in the width it leaves, the + button sits right after the last one; once
 /// they overflow — a narrow primary column on the daemon path, beside a wide
 /// side region — they scroll horizontally, and the + button stays in view
-/// just after them (`TabsThenAddLayout`).
+/// just after them (`TabsThenAddLayout`). The selected tab is scrolled into
+/// view when the bar appears, when the selection changes and when the tab
+/// list does, so a tab appended and selected, or one selected by a shortcut
+/// or from the sidebar, is never left outside the visible tabs.
 struct TabBar: View {
     let tabs: [TBDShared.Tab]
     let worktreeID: UUID
@@ -148,6 +151,36 @@ struct TabBar: View {
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
+        ScrollViewReader { proxy in
+            row
+                .onAppear { scrollSelectedTabIntoView(proxy) }
+                .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
+                .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
+        }
+    }
+
+    private var selectedTabID: UUID? {
+        Self.tabIDToKeepInView(tabs: tabs, activeTabIndex: activeTabIndex, isHistorySelected: isHistorySelected)
+    }
+
+    /// The tab the bar keeps in view: the selected one, or none while Session
+    /// History is open or the active index names no tab.
+    static func tabIDToKeepInView(
+        tabs: [TBDShared.Tab], activeTabIndex: Int, isHistorySelected: Bool
+    ) -> UUID? {
+        guard !isHistorySelected, tabs.indices.contains(activeTabIndex) else { return nil }
+        return tabs[activeTabIndex].id
+    }
+
+    /// Scrolls the tabs the least distance that shows the selected one
+    /// whole; a tab already in view does not move.
+    private func scrollSelectedTabIntoView(_ proxy: ScrollViewProxy) {
+        guard let selectedTabID else { return }
+        proxy.scrollTo(selectedTabID)
+    }
+
+    /// The tabs, the + button and the trailing group, in one row.
+    private var row: some View {
         HStack(spacing: 0) {
             TabsThenAddLayout {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -755,6 +788,21 @@ enum TabRename: Equatable {
     }
 }
 
+/// The width a workspace tab's rename field keeps while it is open. Inside
+/// the tabs' horizontal scroll view the field is offered no width and takes
+/// its ideal one, which on its own is barely wider than the floor; it takes
+/// the label's width from when editing began instead, so the tab keeps its
+/// width as the field opens.
+enum TabRenameFieldWidth {
+    /// The narrowest a field is drawn, for a short or empty label.
+    static let floor: CGFloat = 60
+
+    /// The field's minimum (and ideal) width for a label `labelWidth` wide.
+    static func minimum(labelWidth: CGFloat) -> CGFloat {
+        max(floor, labelWidth)
+    }
+}
+
 /// What a tab bar item does with the pending rename
 /// (`AppState.pendingTabRenameID`) when it looks: the item showing that tab
 /// opens its rename field and clears the request; any other item leaves it.
@@ -840,6 +888,10 @@ private struct TabBarItem: View {
     @State private var isEditing: Bool = false
     @State private var dropEdge: DropEdge? = nil
     @State private var measuredWidth: CGFloat = 100
+    /// The label's width as last drawn. The label gives way to the rename
+    /// field while editing, so this holds its width from when editing began,
+    /// the rename field's minimum.
+    @State private var labelWidth: CGFloat = 0
     /// The applications Open With offers for `fileMenuTarget`'s file, looked
     /// up off the main actor when the item mounts or that file changes, and
     /// again each time the pointer enters the item, so the right-click that
@@ -855,6 +907,12 @@ private struct TabBarItem: View {
 
     private var showClose: Bool {
         isSelected || isHovering
+    }
+
+    /// The rename field's minimum width: the label's width when editing
+    /// began, and at least 60 pt.
+    private var renameFieldMinWidth: CGFloat {
+        TabRenameFieldWidth.minimum(labelWidth: labelWidth)
     }
 
     private var isCodeViewer: Bool {
@@ -956,7 +1014,11 @@ private struct TabBarItem: View {
                             }
                         )
                         .font(.system(size: 11))
-                        .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
+                        // The scroll view offers no width, so the field takes
+                        // its ideal one (`TabRenameFieldWidth`).
+                        .frame(
+                            minWidth: renameFieldMinWidth, idealWidth: renameFieldMinWidth,
+                            maxWidth: .infinity, alignment: .leading)
                     } else {
                         Text(tabLabel)
                             .font(.system(size: 11))
@@ -964,6 +1026,11 @@ private struct TabBarItem: View {
                             .lineLimit(1)
                             .fixedSize()
                             .foregroundStyle(isParked ? .tertiary : (isSelected ? .primary : .secondary))
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                proxy.size.width
+                            } action: { width in
+                                labelWidth = width
+                            }
                     }
 
                     if terminal?.pendingResumeAt != nil {

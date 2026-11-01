@@ -228,8 +228,20 @@ struct SideRegionView: View {
 
     /// The history buttons, the tabs, the active panel's control and the
     /// collapse button. The scroll view of tabs takes the width between the
-    /// two ends, which keep their full width however many tabs there are.
+    /// two ends, which keep their full width however many tabs there are,
+    /// and scrolls the active panel's tab into view when the strip appears,
+    /// when another panel comes to the front and when the tabs change.
     private func strip(tabs: [SideRegionTab], active: ActivePanel?) -> some View {
+        ScrollViewReader { proxy in
+            stripRow(tabs: tabs, active: active)
+                .onAppear { scrollActiveTabIntoView(proxy) }
+                .onChange(of: surface.side.activePanelID) { _, _ in scrollActiveTabIntoView(proxy) }
+                .onChange(of: tabs.map(\.id)) { _, _ in scrollActiveTabIntoView(proxy) }
+        }
+    }
+
+    /// The strip's row, without its scrolling.
+    private func stripRow(tabs: [SideRegionTab], active: ActivePanel?) -> some View {
         HStack(spacing: 0) {
             historyGroup(active: active)
                 .fixedSize(horizontal: true, vertical: false)
@@ -263,6 +275,13 @@ struct SideRegionView: View {
         // clipping keeps them off the divider.
         .clipped()
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// Scrolls the strip's tabs the least distance that shows the active
+    /// panel's tab whole; a tab already in view does not move.
+    private func scrollActiveTabIntoView(_ proxy: ScrollViewProxy) {
+        guard let activePanelID = surface.side.activePanelID else { return }
+        proxy.scrollTo(activePanelID)
     }
 
     // MARK: History buttons

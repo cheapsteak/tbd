@@ -627,6 +627,21 @@ struct PanelSurfaceRenderBranchTests {
         #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: nil) == fits)
     }
 
+    /// Overflowing tabs scroll, so the bar scrolls the selected one into view
+    /// whenever the selection or the tab list changes.
+    @Test("the bar keeps the selected tab in view, and none while Session History is open or no tab is selected")
+    func selectedTabIDToKeepInView() {
+        let tabs: [TBDShared.Tab] = [Fixture.terminalTab(label: "agent"), Fixture.terminalTab(label: "shell")]
+        let selected = TabBar.tabIDToKeepInView(tabs: tabs, activeTabIndex: 1, isHistorySelected: false)
+        let underHistory = TabBar.tabIDToKeepInView(tabs: tabs, activeTabIndex: 1, isHistorySelected: true)
+        let pastTheEnd = TabBar.tabIDToKeepInView(tabs: tabs, activeTabIndex: 2, isHistorySelected: false)
+        let unselected = TabBar.tabIDToKeepInView(tabs: tabs, activeTabIndex: -1, isHistorySelected: false)
+        #expect(selected == tabs[1].id)
+        #expect(underHistory == nil)
+        #expect(pastTheEnd == nil)
+        #expect(unselected == nil)
+    }
+
     @Test("the daemon path measures the main area below its tab row and the divider")
     func mainAreaExcludesTheTabRow() {
         let rowAndDivider: CGFloat = TabRowMetrics.height + 1
