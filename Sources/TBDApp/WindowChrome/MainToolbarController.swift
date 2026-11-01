@@ -22,7 +22,8 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   snapshot reads more than it shows, such as every worktree's dev-server
 ///   list, so an apply only an observed change asked for does nothing when
 ///   the snapshot, the collapse and the appearance are what the last apply
-///   showed and our toolbar is on the window. Every other apply runs in full.
+///   showed and it would not put the toolbar back on the window, as during a
+///   cooldown it would not. Every other apply runs in full.
 /// - **Apply.** Re-installs the toolbar if another toolbar replaced it on the
 ///   window, diffs the items against `MainToolbarLayout.identifiers(for:)`
 ///   through `ToolbarLayoutSync`, with inserts and removes only, so the items
@@ -375,7 +376,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // Anything scheduled while reading is covered by this apply; a change
         // after the tracking re-armed schedules afresh.
         applyScheduled = false
-        if !runsInFull, window?.toolbar === toolbar, appliedInputs == inputs(for: snapshot) {
+        // Never skipped when it would put the toolbar back. During a cooldown
+        // it would not, and the cooldown's end schedules an apply in full.
+        if !runsInFull, !reattachIsDue, appliedInputs == inputs(for: snapshot) {
             toolbarLogger.debug("Main toolbar apply skipped: nothing it shows changed")
             return
         }

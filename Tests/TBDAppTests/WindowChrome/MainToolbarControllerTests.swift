@@ -519,6 +519,62 @@ struct MainToolbarControllerTests {
         #expect(back)
     }
 
+    /// During a cooldown the window shows another toolbar, and an apply an
+    /// observed change asked for, finding nothing the toolbar shows changed,
+    /// still does nothing: no apply runs, so no content is updated on the
+    /// detached toolbar. A change the toolbar does show is still applied,
+    /// leaving the replacement on the window. The cooldown is never advanced,
+    /// so it runs throughout; the fixture's teardown cancels it.
+    @Test func anUnchangedObservedChangeDuringTheCooldownDoesNotReapply() async throws {
+        let fixture = ToolbarFixture(
+            label: "anUnchangedObservedChangeDuringTheCooldownDoesNotReapply",
+            now: TestDateSource().provider, clock: EventDrivenTestClock())
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        // The snapshot reads the dev-server lists only with one worktree
+        // selected.
+        fixture.showServers(url: "http://localhost:3000")
+        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
+            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
+        }
+        try #require(shown)
+
+        let kept = try await fixture.replaceUntilTheCooldownStarts(label: "observed")
+        try #require(controller.isInReinstallCooldown)
+        let quiet = try await waitForMainActorCondition("no apply queued once the cooldown started") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
+
+        let appliesBefore = controller.applyCount
+        let changesBefore = controller.observedChangeCount
+        let other = fixture.worktrees[1].id
+        try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
+        fixture.state.devServerLists[other] = fixture.list(
+            [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+        let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
+            controller.observedChangeCount > changesBefore && !controller.applyScheduled
+        }
+        try #require(ran)
+        #expect(controller.observedChangeCount == changesBefore + 1)
+        #expect(controller.applyCount == appliesBefore)
+        #expect(window.toolbar === kept)
+        #expect(controller.isInReinstallCooldown)
+
+        let repoID = fixture.repos[1].id
+        fixture.state.repoFilter = repoID
+        let applied = try await waitForMainActorCondition("the apply for a change the toolbar shows") {
+            controller.applyCount > appliesBefore
+        }
+        try #require(applied)
+        #expect(controller.appliedSnapshot?.filter.selected == repoID)
+        #expect(window.toolbar === kept)
+        #expect(controller.isInReinstallCooldown)
+    }
+
     /// Replacements older than `replacementWindow` stop counting: after the
     /// cap's worth inside one window and a quiet spell, one more is put back
     /// at once instead of starting the cooldown.
