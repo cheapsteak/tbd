@@ -14,10 +14,12 @@ import TestSupport
 /// neither left at its default nor ignored; a child still starts with SIGPIPE
 /// at its default, because exec resets a caught signal where it would keep an
 /// ignored one; and an unguarded write really does come back as `EPIPE`, with
-/// the catch counted.
+/// the catch count rising alongside it.
 ///
 /// They read SIGPIPE's disposition and never set it: it is process-wide, and
-/// every suite in the run shares it.
+/// every suite in the run shares it. This suite's type name starts with T, so
+/// it runs in the app pass that takes everything but `TBDAppTests` A–P;
+/// `HostSIGPIPECheckAToPTests` checks the disposition in the other one.
 @Suite("Test host SIGPIPE handler")
 struct TestHostSIGPIPEHandlerTests {
 
@@ -103,16 +105,21 @@ struct TestHostSIGPIPEHandlerTests {
 
     /// What the handler is for. A write to a socket without `SO_NOSIGPIPE` whose
     /// peer has closed raises SIGPIPE; with the handler the write fails with
-    /// `EPIPE`, the process carries on, and the catch is counted. The first
-    /// `#require` is load-bearing: were SIGPIPE at its default, the write would
-    /// end the whole run instead of failing this test, so it is not attempted
-    /// unless the handler is in place.
+    /// `EPIPE` and the process carries on. That `EPIPE` is the assertion this
+    /// test stands on. The first `#require` is load-bearing: were SIGPIPE at
+    /// its default, the write would end the whole run instead of failing this
+    /// test, so it is not attempted unless the handler is in place.
     ///
-    /// The count is polled, not read once: XNU raises the signal at the
-    /// process, so the handler may run on another thread after the write has
-    /// returned. The write is marked expected, so its stderr line says it is
-    /// this test's and not a finding.
-    @Test("a write to an unguarded socket whose peer closed fails with EPIPE, and the catch is counted")
+    /// The catch count is checked only for what it can show. Suites share the
+    /// process, so a SIGPIPE from any of them can raise the count, and this
+    /// write's own SIGPIPE can merge with one already pending. So "the count
+    /// rose by at least one during this test" is consistent with this write
+    /// being caught and proves no more than that. It is polled rather than read
+    /// once, because XNU raises the signal at the process and the handler may
+    /// run on another thread after the write has returned. The mark makes the
+    /// stderr line say the SIGPIPE was provoked on purpose, which is a hint for
+    /// the same reason: a concurrent stray catch can take it.
+    @Test("a write to an unguarded socket whose peer closed fails with EPIPE, and the catch count rises")
     func anUnguardedWriteToAClosedPeerFailsWithEPIPE() async throws {
         try #require(
             TBDTestHostSIGPIPEHandlerIsCurrent(),
@@ -142,7 +149,7 @@ struct TestHostSIGPIPEHandlerTests {
         }
         if outcome == .timedOut {
             Issue.record(BoundedWaitTimeout(
-                what: "the handler to count the write's SIGPIPE",
+                what: "the SIGPIPE catch count to rise after a write that raises SIGPIPE",
                 observed: "count still \(TBDTestHostSIGPIPECount()), \(before) before the write", deadline: budget))
         }
     }
@@ -170,26 +177,35 @@ struct TestHostSIGPIPEHandlerTests {
     /// every other suite's descriptors out of the child, which gets `/dev/null`
     /// on 0, 1 and 2 and an environment of `PATH` alone.
     private static func spawnShell(_ script: String) throws -> pid_t {
-        var actions: posix_spawn_file_actions_t?
-        guard posix_spawn_file_actions_init(&actions) == 0 else {
-            throw SpawnFailed(call: "posix_spawn_file_actions_init", code: errno)
+        // Every `posix_spawn*` call returns its error code instead of setting
+        // `errno`, and each one is checked: a probe that ran without
+        // SETSIGMASK or CLOEXEC_DEFAULT, or without its `/dev/null`s, would
+        // measure something else and still look like an answer.
+        func check(_ call: String, _ code: Int32) throws {
+            guard code == 0 else { throw SpawnFailed(call: call, code: code) }
         }
+
+        var actions: posix_spawn_file_actions_t?
+        try check("posix_spawn_file_actions_init", posix_spawn_file_actions_init(&actions))
         defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        let standardStreams: [(descriptor: Int32, flags: Int32)] = [(0, O_RDONLY), (1, O_WRONLY), (2, O_WRONLY)]
+        for stream in standardStreams {
+            try check(
+                "posix_spawn_file_actions_addopen(\(stream.descriptor))",
+                posix_spawn_file_actions_addopen(&actions, stream.descriptor, "/dev/null", stream.flags, 0))
+        }
 
         var attributes: posix_spawnattr_t?
-        guard posix_spawnattr_init(&attributes) == 0 else {
-            throw SpawnFailed(call: "posix_spawnattr_init", code: errno)
-        }
+        try check("posix_spawnattr_init", posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
         var emptyMask = sigset_t()
         sigemptyset(&emptyMask)
-        posix_spawnattr_setsigmask(&attributes, &emptyMask)
+        try check("posix_spawnattr_setsigmask", posix_spawnattr_setsigmask(&attributes, &emptyMask))
         // Deliberately no POSIX_SPAWN_SETSIGDEF: it would reset SIGPIPE in the
         // child whatever this process's disposition, and prove nothing.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        try check(
+            "posix_spawnattr_setflags",
+            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
 
         let words: [String] = ["/bin/sh", "-c", script]
         var argv: [UnsafeMutablePointer<CChar>?] = words.map { strdup($0) }
@@ -201,8 +217,7 @@ struct TestHostSIGPIPEHandlerTests {
         }
 
         var pid: pid_t = 0
-        let status = posix_spawn(&pid, "/bin/sh", &actions, &attributes, &argv, &envp)
-        guard status == 0 else { throw SpawnFailed(call: "posix_spawn", code: status) }
+        try check("posix_spawn", posix_spawn(&pid, "/bin/sh", &actions, &attributes, &argv, &envp))
         return pid
     }
 

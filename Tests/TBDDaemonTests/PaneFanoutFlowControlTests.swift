@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestProcessDefaults
 import TestSupport
 
 @testable import TBDDaemonLib
@@ -547,6 +548,12 @@ struct PaneFanoutFlowControlTests {
         Darwin.close(readFD)
 
         let chunk = patterned(count: 1024)
+        // This write raises SIGPIPE on purpose, so the handler's stderr line
+        // says so. One mark for the two routes below: their two SIGPIPEs often
+        // merge into one catch, and a mark left unused would label the next
+        // stray SIGPIPE in the process as deliberate. When they do not merge,
+        // the second catch logs as stray; Tests/CLAUDE.md lists this test.
+        TBDTestHostExpectSIGPIPE()
         fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.droppedEvents == 1, "a hard write error must count a dropped event")

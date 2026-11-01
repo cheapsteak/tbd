@@ -46,10 +46,12 @@
 /// writing thread. The write itself just returns EPIPE; the handler runs on
 /// whichever thread does not block SIGPIPE, and interrupts whatever that
 /// thread is blocked in. `SA_RESTART` resumes most interrupted `read`,
-/// `write`, `accept`, `connect` and `wait` calls. On Darwin it does not resume:
+/// `write`, `accept` and `wait` calls. On Darwin it does not resume:
 ///
 ///   - `select`, `poll` and `kevent` with a timeout;
 ///   - `nanosleep` and `usleep`;
+///   - `connect`, which turns the restart into EINTR and leaves the connection
+///     completing in the background;
 ///   - socket calls on a socket with `SO_RCVTIMEO` or `SO_SNDTIMEO` set.
 ///
 /// Those return EINTR whatever the flags. That is the trade: a stray SIGPIPE
@@ -101,7 +103,11 @@
 /// bundle with `--filter`/`--skip`, and the constructor runs when the runner
 /// loads it, before any test: in `swiftpm-testing-helper` for Swift Testing and
 /// in `xctest` for XCTest. `TestHostSIGPIPEHandlerTests` (in `TBDAppTests`)
-/// pins the disposition, the exec reset, the EPIPE and the count.
+/// pins the disposition, the exec reset, the EPIPE and the count, and a
+/// one-test suite in every other pass checks the disposition in that pass's
+/// own process: `HostSIGPIPECheckAToPTests` (`TBDAppTests` A–P),
+/// `HostSIGPIPECheckAToOTests` and `SIGPIPECheckPToZTests` (the two
+/// `TBDDaemonTests` halves) and `HostSIGPIPECheckLiveTests` (the quiet pass).
 ///
 /// This is a net under the per-descriptor guards, not a replacement for them.
 /// The app leaves SIGPIPE at its default, so its sockets and pipes still need
@@ -211,6 +217,17 @@ bool TBDTestHostSIGPIPEHandlerIsCurrent(void) {
     struct sigaction current;
     if (sigaction(SIGPIPE, NULL, &current) != 0) return false;
     return !(current.sa_flags & SA_SIGINFO) && current.sa_handler == TBDTestHostSIGPIPEHandler;
+}
+
+const char *TBDTestHostSIGPIPEDisposition(void) {
+    struct sigaction current;
+    if (sigaction(SIGPIPE, NULL, &current) != 0) return "unreadable";
+    if (current.sa_handler == SIG_DFL) return "default";
+    if (current.sa_handler == SIG_IGN) return "ignored";
+    if (!(current.sa_flags & SA_SIGINFO) && current.sa_handler == TBDTestHostSIGPIPEHandler) {
+        return "test host handler";
+    }
+    return "another handler";
 }
 
 long TBDTestHostSIGPIPECount(void) {

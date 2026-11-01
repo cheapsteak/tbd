@@ -471,19 +471,36 @@ custom_rules:
     # The test host catches SIGPIPE with a handler installed when the bundle
     # loads (Tests/TestProcessDefaults/SIGPIPEHandler.c). A test that sets the
     # disposition replaces that handler for every suite in the process, and
-    # SIG_IGN also survives exec into every child spawned afterwards.
+    # SIG_IGN also survives exec into every child spawned afterwards; so does a
+    # signal mask that blocks it.
     #
-    # Two shapes: `signal(SIGPIPE` with any receiver (`Darwin.signal(SIGPIPE`
-    # too), and `sigaction(SIGPIPE,` whose second argument is not `nil`.
-    # Reading the disposition, `sigaction(SIGPIPE, nil, &current)`, stays
-    # allowed: the lookahead sits right after the comma and spans the
-    # whitespace itself, so `\s*` cannot backtrack around it. `\s*` spans
-    # newlines, so a call split across lines still matches. `match_kinds` drops
-    # comments and string literals that only name one.
-    regex: '\b(?:signal\s*\(\s*SIGPIPE\b|sigaction\s*\(\s*SIGPIPE\s*,(?!\s*nil\b))'
+    # Four shapes:
+    #
+    #   - `signal(` on SIGPIPE, with any receiver (`Darwin.signal(` too), the
+    #     signal spelled `SIGPIPE`, `13`, `Int32(SIGPIPE)` or `CInt(SIGPIPE)`.
+    #     Every one sets a disposition, `nil` (SIG_DFL) included.
+    #   - `sigaction(` on SIGPIPE, spelled the same ways, whose second argument
+    #     is not `nil`. Reading the disposition, `sigaction(SIGPIPE, nil,
+    #     &current)`, stays allowed, with comments between the comma and the
+    #     `nil` too: the lookahead sits right after the comma and spans the
+    #     whitespace and comments itself, so nothing outside it can backtrack
+    #     around it.
+    #   - `sigaddset(` with SIGPIPE among its arguments: building a set to
+    #     block it. A set meant for `posix_spawnattr_setsigdefault` matches too;
+    #     `sigfillset` covers that, or suppress with a reason.
+    #   - a line naming `pthread_sigmask` or `sigprocmask` and SIGPIPE. Setting
+    #     an EMPTY mask (`sigemptyset` and `posix_spawnattr_setsigmask`, as the
+    #     handler's own test does) matches nothing.
+    #
+    # `\s*` spans newlines, so a call split across lines still matches.
+    # `match_kinds` drops comments and string literals that only name one.
+    regex: '\b(?:signal\s*\(\s*(?:(?:Int32|CInt)\s*\(\s*)?(?:SIGPIPE|13)\b|sigaction\s*\(\s*(?:(?:Int32|CInt)\s*\(\s*)?(?:SIGPIPE|13)\b\s*\)?\s*,(?!(?:\s|/\*(?:[^*]|\*(?!/))*\*/|//[^\n]*\n)*nil\b)|sigaddset\s*\([^)]*\bSIGPIPE\b|(?:pthread_sigmask|sigprocmask)\b[^\n]*\bSIGPIPE\b)'
     match_kinds:
       - identifier
-    message: "Never set SIGPIPE's disposition in a test. The test host already catches SIGPIPE (Tests/TestProcessDefaults/SIGPIPEHandler.c), so a write to a closed pipe or socket fails with EPIPE; signal(SIGPIPE, ...) or sigaction(SIGPIPE, &action, ...) replaces that handler for every suite in the process, and SIG_IGN leaks into every child spawned afterwards. Reading it with sigaction(SIGPIPE, nil, &current) is fine. See \"Never set SIGPIPE's disposition in a test\" in Tests/CLAUDE.md."
+      - typeidentifier
+      - keyword
+      - number
+    message: "Never set SIGPIPE's disposition or block it in a test. The test host already catches SIGPIPE (Tests/TestProcessDefaults/SIGPIPEHandler.c), so a write to a closed pipe or socket fails with EPIPE; signal(SIGPIPE, ...) or sigaction(SIGPIPE, &action, ...) replaces that handler for every suite in the process, and SIG_IGN or a mask that blocks it leaks into every child spawned afterwards. Reading it with sigaction(SIGPIPE, nil, &current) is fine. See \"Never set SIGPIPE's disposition in a test\" in Tests/CLAUDE.md."
     severity: error
 
   no_tui_scraping_literals:

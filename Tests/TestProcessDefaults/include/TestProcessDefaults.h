@@ -29,6 +29,12 @@ void TBDTestHostExpectMainRunLoopStop(void);
 /// handler's test.
 bool TBDTestHostSIGPIPEHandlerIsCurrent(void);
 
+/// SIGPIPE's disposition right now, in words, for a failure message:
+/// "test host handler", "default", "ignored", "another handler", or
+/// "unreadable" when `sigaction` cannot read it. Called from Swift by the
+/// check each test pass runs.
+const char *TBDTestHostSIGPIPEDisposition(void);
+
 /// How many SIGPIPEs SIGPIPEHandler.c's handler has caught in this process,
 /// expected or not. Catches, not writes: SIGPIPEs raised while one is pending
 /// merge into one. Any thread.
@@ -39,6 +45,13 @@ long TBDTestHostSIGPIPECount(void);
 /// a CI log. Call it immediately before the write that will raise it, and only
 /// when that write certainly will: an unused mark would go to the next stray
 /// SIGPIPE instead. Any thread.
+///
+/// The mark belongs to no test. Suites run concurrently in one process, and
+/// the handler hands the mark to whichever catch comes next, so a stray
+/// SIGPIPE from another suite landing between this call and the write takes
+/// it: the stray one is then labelled deliberate and the deliberate one stray.
+/// And SIGPIPEs raised while one is pending merge into one catch, which takes
+/// one mark. A label is a hint, not proof.
 void TBDTestHostExpectSIGPIPE(void);
 
 #endif

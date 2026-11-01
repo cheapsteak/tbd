@@ -3,6 +3,7 @@ import Darwin
 import Dispatch
 import Testing
 import Foundation
+import TestProcessDefaults
 import TestSupport
 @testable import TBDDaemonLib
 
@@ -141,6 +142,10 @@ struct BoundedProcessRunnerTests {
     /// assertion — so a green run of this test is itself part of the proof.
     @Test func childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess() async throws {
         let oversizedPayload = Data(repeating: 0x41, count: 200_000)
+        // The stdin write raises SIGPIPE on purpose, exactly once (the
+        // throwing write stops at the first EPIPE), so the handler's stderr
+        // line says so.
+        TBDTestHostExpectSIGPIPE()
         let outcome = try await runBoundedProcess(
             executable: "/bin/sh",
             arguments: ["-c", "exit 7"],

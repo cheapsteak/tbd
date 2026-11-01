@@ -136,9 +136,11 @@ struct PaneFanoutReplayTests {
 
     /// Closes a test's read end only after stopping any thread still writing
     /// to the pane. A writer thread outlives a wait that failed or was
-    /// cancelled; detaching first makes its next re-validation throw, where a
-    /// write into a pipe with no reader would raise SIGPIPE and kill the whole
-    /// test process.
+    /// cancelled; detaching first makes its next re-validation throw. A write
+    /// into a pipe with no reader would instead raise SIGPIPE: the test host's
+    /// handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) turns it into
+    /// EPIPE but logs a caught-SIGPIPE line that reads as an unguarded write,
+    /// and without the handler it ends the whole test process.
     private func detachThenClose(_ fanout: PaneFanout, key: PaneKey, readFD: Int32) {
         fanout.detach(key: key)
         Darwin.close(readFD)
