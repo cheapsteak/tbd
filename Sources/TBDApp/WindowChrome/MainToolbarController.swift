@@ -20,9 +20,11 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
 ///   registration acts on a change (see `observedChange(generation:)`).
 /// - **Apply.** Re-installs the toolbar if something replaced it on the window,
-///   diffs the items against `MainToolbarLayout.identifiers(for:)` with inserts
-///   and removes only, so the items both layouts share are never rebuilt, then
-///   updates the present items' content in place, setting only what changed.
+///   diffs the items against `MainToolbarLayout.identifiers(for:)` through
+///   `ToolbarLayoutSync`, with inserts and removes only, so the items both
+///   layouts share are never rebuilt and an edit that does not take stops the
+///   rest, then updates the present items' content in place, setting only
+///   what changed.
 /// - **Replacement.** A change of the window's `toolbar` away from ours
 ///   schedules an apply at once, through KVO on `window.toolbar`, so it does
 ///   not wait for an unrelated change. More than `maxReplacementsInWindow`
@@ -90,6 +92,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Bumped by each apply, which arms a fresh observation registration.
     private var observationGeneration = 0
+    /// Keeps the items in step with the layout, leaving out an item the
+    /// delegate could not serve until the layout changes or an install.
+    private var layoutSync = ToolbarLayoutSync()
     private var appearanceObservation: NSKeyValueObservation?
     private var toolbarObservation: NSKeyValueObservation?
 
@@ -168,6 +173,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         split.onSidebarCollapsedChange = { [weak self] collapsed in
             self?.sidebarCollapsedChanged(collapsed)
         }
+        // An item a layout could not get may be servable now, as the
+        // tracking separator is once the split is known.
+        layoutSync.reset()
         if cooldown == nil, window.toolbar !== toolbar {
             attach(to: window)
         }
@@ -212,6 +220,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         windowShowsOurToolbar = false
         // A registration still armed is stale from here on.
         observationGeneration &+= 1
+        layoutSync.reset()
     }
 
     private func attach(to window: NSWindow) {
@@ -362,23 +371,38 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         updateContent(snapshot)
     }
 
+    /// Brings the items to `target` through `layoutSync`. A pass that stops
+    /// short logs, and when the next pass would get further, schedules the
+    /// apply that re-diffs against the items as they then stand.
     private func applyLayout(_ target: [NSToolbarItem.Identifier]) {
-        let current = toolbar.items.map(\.itemIdentifier)
-        let edits = MainToolbarLayout.edits(from: current, to: target)
-        guard !edits.isEmpty else { return }
-        MainToolbarLayout.perform(
-            edits,
+        let toolbar = self.toolbar
+        // On a copy, so no access to the stored value is held while AppKit
+        // calls into the delegate for the inserts.
+        var sync = layoutSync
+        let outcome = sync.pass(
+            to: target,
+            from: toolbar.items.map(\.itemIdentifier),
+            count: { toolbar.items.count },
             remove: { index in toolbar.removeItem(at: index) },
             insert: { identifier, index in toolbar.insertItem(withItemIdentifier: identifier, at: index) })
-        let result = toolbar.items.map(\.itemIdentifier)
-        if result == target {
-            toolbarLogger.debug("Main toolbar applied \(edits.count, privacy: .public) edits")
-        } else {
-            // An insert the delegate could not serve leaves the item out.
-            let shown = result.map(\.rawValue).joined(separator: ",")
+        layoutSync = sync
+        switch outcome {
+        case .landed(let edits):
+            if edits > 0 {
+                toolbarLogger.debug("Main toolbar applied \(edits, privacy: .public) edits")
+            }
+        case .stopped(let stop, let retry):
+            let shown = toolbar.items.map(\.itemIdentifier.rawValue).joined(separator: ",")
             let wanted = target.map(\.rawValue).joined(separator: ",")
-            toolbarLogger.error(
-                "Main toolbar shows [\(shown, privacy: .public)], wanted [\(wanted, privacy: .public)]")
+            let next = retry ? "applying again without that item" : "waiting for the next apply"
+            toolbarLogger.error("""
+                Main toolbar layout stopped at \(String(describing: stop), privacy: .public): \
+                shows [\(shown, privacy: .public)], wanted [\(wanted, privacy: .public)]; \
+                \(next, privacy: .public)
+                """)
+            if retry {
+                scheduleApply()
+            }
         }
     }
 
