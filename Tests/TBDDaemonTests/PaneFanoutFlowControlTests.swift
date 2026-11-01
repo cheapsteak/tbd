@@ -535,7 +535,7 @@ struct PaneFanoutFlowControlTests {
     func routeHardErrorCountsDroppedRemainder() throws {
         // A write into a pipe whose read end is closed returns EPIPE here, as
         // it does in the daemon (which ignores SIGPIPE in main.swift), because
-        // the test host catches SIGPIPE with a no-op handler
+        // the test host catches SIGPIPE with a handler
         // (Tests/TestProcessDefaults/SIGPIPEHandler.c). Not set here: the
         // disposition is process-wide, shared with every concurrent suite.
         let fanout = PaneFanout()

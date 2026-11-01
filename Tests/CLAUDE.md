@@ -895,13 +895,32 @@ front.
   crash. What stops the loop is unidentified: nothing in the repo calls
   `CFRunLoopStop` or `NSApp.stop`.
 - **Never set SIGPIPE's disposition in a test.** The test host catches
-  SIGPIPE with a no-op handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`),
-  so a write to a closed pipe or socket already fails with `EPIPE` instead of
-  killing the pass, as one did on CI with "unexpected signal code 13". A
+  SIGPIPE with a handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`), so a
+  write to a closed pipe or socket fails with `EPIPE` instead of killing the
+  pass, as one did on CI with "unexpected signal code 13". A
   `signal(SIGPIPE, SIG_IGN)` in a test replaces that handler for every suite in
   the process, and `SIG_IGN`, unlike a handler, survives `exec` into every
-  child a plain `posix_spawn` or `forkpty` starts afterwards. Production sockets and pipes still need
-  `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`: the app has no such handler.
+  child a plain `posix_spawn` or `forkpty` starts afterwards. The SwiftLint
+  rule `no_sigpipe_disposition_in_tests` rejects `signal(SIGPIPE` and a
+  `sigaction(SIGPIPE, …)` that sets one; reading it with
+  `sigaction(SIGPIPE, nil, &current)` is fine.
+- **`TBD test host: caught SIGPIPE: …` in a CI log means a write lacks
+  `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`.** It reached a closed pipe or socket, and
+  only the handler kept the pass alive; if the write is the app's, the app has
+  no such handler and dies of it. XNU raises the signal at the process, so the
+  line names neither the test nor the thread: the suspects are the tests
+  started and not yet finished around it in the log. Find the write and
+  protect its descriptor where it is created: an app socket through
+  `SocketSIGPIPE.suppress(on:)`, a fixture's socket with `SO_NOSIGPIPE`, a
+  pipe's write end with `F_SETNOSIGPIPE`. Two exceptions are not findings. The
+  daemon ignores SIGPIPE in `main.swift` instead of guarding each descriptor,
+  so in the daemon passes the line can come from a suite that writes into a
+  closed pipe on purpose, such as
+  `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder` and
+  `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
+  And a test that provokes a SIGPIPE on purpose calls
+  `TBDTestHostExpectSIGPIPE()` first, as `TestHostSIGPIPEHandlerTests` does,
+  so its line says the SIGPIPE was provoked on purpose instead.
 - **An `NSDraggingInfo` stub must not declare
   `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
   category already declares it, so the stub's own version fails with

@@ -4,16 +4,17 @@ import Testing
 import TestProcessDefaults
 import TestSupport
 
-/// The test host's no-op SIGPIPE handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`).
+/// The test host's SIGPIPE handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`).
 ///
 /// One write to a pipe or socket whose reader had gone once ended a whole fast
 /// pass on CI ("unexpected signal code 13"): every test still to run went
 /// unreported, with no summary line and a truncated xUnit file. The handler
-/// turns such a write into an `EPIPE` for the test that made it. These tests
-/// pin what that has to mean: SIGPIPE is caught, neither left at its default
-/// nor ignored; a child still starts with SIGPIPE at its default, because exec
-/// resets a caught signal where it would keep an ignored one; and an unguarded
-/// write really does come back as `EPIPE`.
+/// turns such a write into an `EPIPE` for the code that made it, and counts and
+/// logs the catch. These tests pin what that has to mean: SIGPIPE is caught,
+/// neither left at its default nor ignored; a child still starts with SIGPIPE
+/// at its default, because exec resets a caught signal where it would keep an
+/// ignored one; and an unguarded write really does come back as `EPIPE`, with
+/// the catch counted.
 ///
 /// They read SIGPIPE's disposition and never set it: it is process-wide, and
 /// every suite in the run shares it.
@@ -22,8 +23,9 @@ struct TestHostSIGPIPEHandlerTests {
 
     /// Read from the kernel, not taken from the handler's own report, so a
     /// constructor that never ran goes red here rather than at the next stray
-    /// write. `SA_RESTART` is pinned because it is a choice: without it a
-    /// SIGPIPE sent with `kill` would fail a blocked `read` with `EINTR`.
+    /// write. `SA_RESTART` is pinned because it is a choice: XNU delivers a
+    /// write's SIGPIPE to any thread that does not block it, and without the
+    /// flag a thread blocked in `read`, `accept` or `waitpid` would see `EINTR`.
     @Test("SIGPIPE is caught by the host's handler, neither at its default nor ignored")
     func sigpipeIsCaughtByTheHostHandler() throws {
         var current = sigaction()
@@ -42,9 +44,9 @@ struct TestHostSIGPIPEHandlerTests {
 
     /// Why the host catches SIGPIPE instead of ignoring it. exec resets a
     /// caught signal to its default action and keeps an ignored one ignored, so
-    /// with the handler a child starts with SIGPIPE at its default: the premise
-    /// of `HolderLifecycleTests.theJobDoesNotStartWithSIGPIPEIgnored`, and what
-    /// makes `yes | head` end.
+    /// with the handler a child the test process starts itself, through
+    /// `posix_spawn` or `forkpty`, gets SIGPIPE at its default: what ends the
+    /// `yes` in a `yes | head` that a test's shell runs.
     ///
     /// The child is a shell that sends itself SIGPIPE. At the default action
     /// that ends it by signal 13; had it inherited `SIG_IGN` it would carry on
@@ -101,11 +103,17 @@ struct TestHostSIGPIPEHandlerTests {
 
     /// What the handler is for. A write to a socket without `SO_NOSIGPIPE` whose
     /// peer has closed raises SIGPIPE; with the handler the write fails with
-    /// `EPIPE` and the process carries on. The first `#require` is load-bearing:
-    /// were SIGPIPE at its default, the write would end the whole run instead of
-    /// failing this test, so it is not attempted unless the handler is in place.
-    @Test("a write to an unguarded socket whose peer closed fails with EPIPE")
-    func anUnguardedWriteToAClosedPeerFailsWithEPIPE() throws {
+    /// `EPIPE`, the process carries on, and the catch is counted. The first
+    /// `#require` is load-bearing: were SIGPIPE at its default, the write would
+    /// end the whole run instead of failing this test, so it is not attempted
+    /// unless the handler is in place.
+    ///
+    /// The count is polled, not read once: XNU raises the signal at the
+    /// process, so the handler may run on another thread after the write has
+    /// returned. The write is marked expected, so its stderr line says it is
+    /// this test's and not a finding.
+    @Test("a write to an unguarded socket whose peer closed fails with EPIPE, and the catch is counted")
+    func anUnguardedWriteToAClosedPeerFailsWithEPIPE() async throws {
         try #require(
             TBDTestHostSIGPIPEHandlerIsCurrent(),
             "SIGPIPE is not caught by the host's handler, so the write is not attempted")
@@ -120,11 +128,23 @@ struct TestHostSIGPIPEHandlerTests {
             !Self.suppressesSIGPIPE(on: writer),
             "a fresh socket already has SO_NOSIGPIPE, so this write would not raise SIGPIPE at all")
 
+        let before = TBDTestHostSIGPIPECount()
+        TBDTestHostExpectSIGPIPE()
         var byte: UInt8 = 0x2A
         let written = Darwin.write(writer, &byte, 1)
         let writeErrno = errno
         #expect(written == -1)
         #expect(writeErrno == EPIPE, "the write failed with errno \(writeErrno), not EPIPE")
+
+        let budget = TestDeadlines.saturatedPass
+        let outcome = await pollUntilTrue(timeout: budget, pollInterval: .milliseconds(20)) {
+            TBDTestHostSIGPIPECount() > before
+        }
+        if outcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the handler to count the write's SIGPIPE",
+                observed: "count still \(TBDTestHostSIGPIPECount()), \(before) before the write", deadline: budget))
+        }
     }
 
     // MARK: - Helpers

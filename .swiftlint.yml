@@ -11,9 +11,10 @@ included:
   - Tests/TBDKernelTests
   - Tests/TBDAppTests
   # In scope for custom rules only. Each of these dirs carries a nested
-  # .swiftlint.yml whose `only_rules:` names no_polling_test_clock and
-  # no_raw_userdefaults_suite (and, in TestSupport, no_daemon_import_in_app_tests),
-  # so no default rule reaches test code there. A custom rule added for tests
+  # .swiftlint.yml whose `only_rules:` names no_polling_test_clock,
+  # no_raw_userdefaults_suite and no_sigpipe_disposition_in_tests (and, in
+  # TestSupport, no_daemon_import_in_app_tests), so no default rule reaches test
+  # code there. A custom rule added for tests
   # reaches these dirs only once every one of those lists names it.
   - Tests/TBDDaemonTests
   - Tests/TBDDaemonLiveTests
@@ -455,6 +456,34 @@ custom_rules:
       - typeidentifier
       - keyword
     message: "Mint test UserDefaults suites through TestDefaultsSuite or withTestDefaults (Tests/TestSupport/UserDefaultsTestSupport.swift). Never construct one by name (UserDefaults(suiteName:), .init(suiteName:), a subclass's init(suiteName:)) or pass a raw suite name to a helper, never call removePersistentDomain/setPersistentDomain, and never reach CFPreferences directly. cfprefsd writes every named domain's plist into the developer's real ~/Library/Preferences whatever HOME says, and removePersistentDomain leaves that file behind forever; only the helper's TBDTests.suites container is unlinked at teardown and reclaimed by scripts/test.sh. A UserDefaults subclass pairs TestDefaults.makeSuiteName(label:) with TestDefaults.tearDown(suiteName:defaults:) under `// swiftlint:disable:next no_raw_userdefaults_suite - <reason>`."
+    severity: error
+
+  no_sigpipe_disposition_in_tests:
+    name: "No SIGPIPE disposition change in Tests/"
+    # included/excluded HERE take REGEX (not glob), matched against the file's
+    # ABSOLUTE path and unanchored, so the path is pinned to a `/Tests/<target>/`
+    # component for the reason given under no_raw_userdefaults_suite. Every test
+    # dir in the global lint scope above is reachable, but the ones with a
+    # nested .swiftlint.yml run this rule only because their `only_rules:`
+    # names it, so a new target needs that entry too.
+    included:
+      - "/Tests/(?:TBD\\w*Tests|TestSupport|DaemonTestSupport)/.*\\.swift"
+    # The test host catches SIGPIPE with a handler installed when the bundle
+    # loads (Tests/TestProcessDefaults/SIGPIPEHandler.c). A test that sets the
+    # disposition replaces that handler for every suite in the process, and
+    # SIG_IGN also survives exec into every child spawned afterwards.
+    #
+    # Two shapes: `signal(SIGPIPE` with any receiver (`Darwin.signal(SIGPIPE`
+    # too), and `sigaction(SIGPIPE,` whose second argument is not `nil`.
+    # Reading the disposition, `sigaction(SIGPIPE, nil, &current)`, stays
+    # allowed: the lookahead sits right after the comma and spans the
+    # whitespace itself, so `\s*` cannot backtrack around it. `\s*` spans
+    # newlines, so a call split across lines still matches. `match_kinds` drops
+    # comments and string literals that only name one.
+    regex: '\b(?:signal\s*\(\s*SIGPIPE\b|sigaction\s*\(\s*SIGPIPE\s*,(?!\s*nil\b))'
+    match_kinds:
+      - identifier
+    message: "Never set SIGPIPE's disposition in a test. The test host already catches SIGPIPE (Tests/TestProcessDefaults/SIGPIPEHandler.c), so a write to a closed pipe or socket fails with EPIPE; signal(SIGPIPE, ...) or sigaction(SIGPIPE, &action, ...) replaces that handler for every suite in the process, and SIG_IGN leaks into every child spawned afterwards. Reading it with sigaction(SIGPIPE, nil, &current) is fine. See \"Never set SIGPIPE's disposition in a test\" in Tests/CLAUDE.md."
     severity: error
 
   no_tui_scraping_literals:

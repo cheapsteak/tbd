@@ -48,7 +48,7 @@ import TBDKernel
 ///
 /// Every stub exits while the supervisor may still be writing `hello` or a
 /// keepalive into its stdin. The daemon ignores SIGPIPE (`main.swift`), so that
-/// write returns EPIPE there; here the test host's no-op SIGPIPE handler
+/// write returns EPIPE there; here the test host's SIGPIPE handler
 /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE. The
 /// suite does not set the disposition itself: it is process-wide, shared with
 /// every suite in the run.

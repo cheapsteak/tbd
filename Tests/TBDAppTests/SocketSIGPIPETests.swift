@@ -74,7 +74,7 @@ struct SocketSIGPIPETests {
     /// regression in the production path.
     ///
     /// The `#require` on `suppress` is what ties this test to the helper. The
-    /// write alone cannot: the test host catches SIGPIPE with a no-op handler
+    /// write alone cannot: the test host catches SIGPIPE with a handler
     /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`), so an unprotected socket
     /// would return the same `EPIPE` here. The app has no such handler, and
     /// `suppressSetsTheOption` is what asserts the option itself.

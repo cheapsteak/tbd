@@ -129,7 +129,7 @@ struct BoundedProcessRunnerTests {
     /// the reader (the child) draining it, so the write is guaranteed to
     /// observe the closed read end — no timing race with the child's exit.
     /// The daemon ignores SIGPIPE (`main.swift`), so there the write returns
-    /// EPIPE; here the test host's no-op SIGPIPE handler
+    /// EPIPE; here the test host's SIGPIPE handler
     /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE.
     /// The test must not set the disposition itself: that is process-wide, and
     /// would replace the handler for every suite running alongside it.

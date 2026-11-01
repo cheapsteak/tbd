@@ -311,9 +311,12 @@ let package = Package(
         // installs the main run loop guard (`MainRunLoopGuard.m`): Swift's
         // async test `main` exits 0 when the main run loop is stopped, and the
         // guard resumes it as `NSApplication.run()` would. A third installs a
-        // no-op SIGPIPE handler (`SIGPIPEHandler.c`), so a write to a closed
-        // pipe or socket fails with EPIPE instead of ending the pass, while
-        // children still start with SIGPIPE at its default. Test-only.
+        // SIGPIPE handler (`SIGPIPEHandler.c`), so a write to a closed pipe or
+        // socket fails with EPIPE and a line on stderr instead of ending the
+        // pass, while children still start with SIGPIPE at its default.
+        // SwiftPM links the test bundle from every target's object files, not
+        // archives, so each constructor is always in it; nothing has to call
+        // into this target to keep one. Test-only.
         .target(
             name: "TestProcessDefaults",
             path: "Tests/TestProcessDefaults",
@@ -396,8 +399,9 @@ let package = Package(
                 // Turns off NSTableView's row-height estimation for the whole
                 // test process before any table exists, keeps the process
                 // running through a stopped main run loop, and catches SIGPIPE;
-                // see the target. Linked into the one test bundle every test
-                // target shares, so it covers every pass, not just this target.
+                // see the target. Its object files are linked into the one test
+                // bundle every test target shares, so it covers every pass, not
+                // just this target.
                 "TestProcessDefaults",
                 "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),
