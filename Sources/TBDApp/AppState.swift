@@ -898,6 +898,12 @@ final class AppState {
     /// The legacy layouts of the tabs in `panelSyncSkippedTabIDs`, as the
     /// `layouts` observer last saw them; empty when nothing is skipped.
     @ObservationIgnored var panelSkippedTabLayouts: [UUID: LayoutNode] = [:]
+    /// The converter's verdict for each tab the render branch asked about
+    /// while the copy held no surface for it, with the content and layout it
+    /// was computed from, so a view body runs the converter again only when
+    /// one of them changes (`workspaceRenderPath`). Pruned to the tabs the
+    /// worktrees' lists hold when a list changes. A cache no view observes.
+    @ObservationIgnored var legacyConverterVerdicts: [UUID: LegacyConverterVerdict] = [:]
     /// A tab-sync flush is scheduled or running; later changes join it rather
     /// than scheduling another.
     @ObservationIgnored var panelSyncFlushScheduled = false

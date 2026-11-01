@@ -30,6 +30,15 @@ enum WorkspaceRenderPath: Equatable {
     case daemon(WorkspaceTabSurface?)
 }
 
+/// One tab's converter verdict for the render branch, with the inputs it was
+/// computed from (`AppState.legacyConverterVerdicts`).
+struct LegacyConverterVerdict {
+    let content: PaneContent
+    let layout: LayoutNode?
+    /// The converter would skip the tab.
+    let skips: Bool
+}
+
 extension AppState {
 
     // MARK: - Reading the copy
@@ -65,15 +74,44 @@ extension AppState {
 
     /// Whether the daemon's import would skip the tab: the converter's own
     /// verdict (`LegacyTabConverter.skipReason`, which runs `convert`), on
-    /// the payload the tab sync sends for it (`legacyTabPayload`) and the
-    /// pane histories, which `convert` reads by this tab's pane IDs as the
-    /// sync sends them. Pure and free of I/O; asked only while the copy holds
-    /// no surface for the tab. False for a tab this worktree's tab list does
-    /// not hold.
+    /// the payload the tab sync sends for it (`legacyTabPayload`). Free of
+    /// I/O; asked only while the copy holds no surface for the tab. False for
+    /// a tab this worktree's tab list does not hold.
+    ///
+    /// A view body asks it (`workspaceRenderPath`), so it is kept cheap and
+    /// narrow:
+    /// - **No pane histories.** `convert` reads a viewer pane's history only
+    ///   to build that panel's history, which it keeps to the pane's current
+    ///   kind, dedupes, caps, and points at the pane's current content, so the
+    ///   validator finds nothing in it to refuse, and no history changes the
+    ///   verdict. It is computed with none, so the body does not depend on
+    ///   `paneHistories`. Nor does the label change it: the validator does not
+    ///   read it.
+    /// - **Memoized** in `legacyConverterVerdicts`, by tab, with the content
+    ///   and legacy layout it was computed from. The converter runs again
+    ///   only when one of them differs; the body still reads `layouts`, so a
+    ///   change to the layout reaches it.
     private func legacyConverterSkips(worktreeID: UUID, tabID: UUID) -> Bool {
         guard let tab = tabs[worktreeID]?.first(where: { $0.id == tabID }) else { return false }
-        return LegacyTabConverter.skipReason(
-            worktreeID: worktreeID, tab: legacyTabPayload(for: tab), paneHistories: paneHistories) != nil
+        let payload = legacyTabPayload(for: tab)
+        if let held = legacyConverterVerdicts[tabID],
+           held.content == payload.content, held.layout == payload.layout {
+            return held.skips
+        }
+        let skips = LegacyTabConverter.skipReason(
+            worktreeID: worktreeID, tab: payload, paneHistories: [:]) != nil
+        legacyConverterVerdicts[tabID] = LegacyConverterVerdict(
+            content: payload.content, layout: payload.layout, skips: skips)
+        return skips
+    }
+
+    /// Drops the converter verdicts of tabs no worktree's tab list holds any
+    /// more. Free while none is held.
+    private func pruneLegacyConverterVerdicts() {
+        guard !legacyConverterVerdicts.isEmpty else { return }
+        let heldTabIDs = Set(tabs.values.joined().map(\.id))
+        guard legacyConverterVerdicts.keys.contains(where: { !heldTabIDs.contains($0) }) else { return }
+        legacyConverterVerdicts = legacyConverterVerdicts.filter { heldTabIDs.contains($0.key) }
     }
 
     // MARK: - Loading
@@ -404,16 +442,24 @@ extension AppState {
     /// terminal revival). A worktree's list arriving for the first time —
     /// at connect, or for a new worktree — differs from the absent signature,
     /// so it is marked dirty too.
+    ///
+    /// A change also drops the converter verdicts of tabs no list holds any
+    /// more (`legacyConverterVerdicts`).
     func notePanelTabsChanged() {
         var dirty = Set<UUID>()
         for (worktreeID, tabList) in tabs where panelTabSignatures[worktreeID] != tabList {
             dirty.insert(worktreeID)
             panelTabSignatures[worktreeID] = tabList
         }
+        var listWentAway = false
         // Every key of `tabs` is now a key here, so a larger count means a
         // worktree whose list went away.
         if panelTabSignatures.count > tabs.count {
             panelTabSignatures = panelTabSignatures.filter { tabs[$0.key] != nil }
+            listWentAway = true
+        }
+        if !dirty.isEmpty || listWentAway {
+            pruneLegacyConverterVerdicts()
         }
         markPanelSyncDirty(dirty)
     }

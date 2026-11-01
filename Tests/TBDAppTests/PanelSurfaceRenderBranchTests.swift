@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Observation
 import SwiftUI
 import Testing
 import TBDShared
@@ -169,6 +170,81 @@ struct PanelSurfaceRenderBranchTests {
 
             let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
             #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
+        }
+    }
+
+    /// `SingleWorktreeView.body` asks the render branch for its shown tab, so
+    /// the converter's verdict must not make that body depend on the pane
+    /// histories. `convert` reads one only to build a panel's history, which
+    /// it filters to the pane's kind and points at the pane's content, so no
+    /// history can change whether it skips a tab.
+    @Test("the converter's verdict for a tab with no surface neither reads nor follows the pane histories")
+    func converterVerdictIgnoresPaneHistories() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let skipped = Fixture.terminalTab(label: "agent")
+            let converted = Fixture.terminalTab(label: "shell")
+            let extraTerminal = PaneContent.terminal(terminalID: UUID())
+            let viewer = PaneContent.codeViewer(id: UUID(), path: "/w/a.md")
+            state.tabs[worktreeID] = [skipped, converted]
+            state.layouts[skipped.id] = Self.layout(around: skipped, beside: extraTerminal)
+            state.layouts[converted.id] = Self.layout(around: converted, beside: viewer)
+            let legacy: WorkspaceRenderPath = .legacy
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: skipped.id) == legacy)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: converted.id) == awaitingSurface)
+
+            // `onChange` is `@Sendable`, so the count lives in a reference box.
+            let readerNotified = BodyEvaluationCounter()
+            withObservationTracking {
+                _ = state.workspaceRenderPath(worktreeID: worktreeID, tabID: skipped.id)
+                _ = state.workspaceRenderPath(worktreeID: worktreeID, tabID: converted.id)
+            } onChange: {
+                MainActor.assumeIsolated { _ = readerNotified.bump() }
+            }
+            // A history of mixed kinds, among them the converted tab's own
+            // transcript, behind each pane beside a primary.
+            var history = PaneHistory()
+            history.recordReplacement(
+                outgoing: .liveTranscript(id: viewer.paneID, terminalID: converted.id),
+                incoming: .webview(id: viewer.paneID, url: Self.pageURL))
+            history.recordReplacement(outgoing: .webview(id: viewer.paneID, url: Self.pageURL), incoming: viewer)
+            state.paneHistories = [viewer.paneID: history, extraTerminal.paneID: history]
+
+            #expect(readerNotified.count == 0, "a pane history write notified a reader of the render branch")
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: skipped.id) == legacy)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: converted.id) == awaitingSurface)
+        }
+    }
+
+    /// The verdict is remembered per tab with the content and layout it was
+    /// computed from; a change to either computes it again.
+    @Test("the converter's verdict follows a change to the tab's layout or to its content")
+    func converterVerdictFollowsLayoutAndContent() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            let viewer = PaneContent.codeViewer(id: UUID(), path: "/w/a.md")
+            let terminalSplit = Self.layout(around: tab, beside: .terminal(terminalID: UUID()))
+            let viewerSplit = Self.layout(around: tab, beside: viewer)
+            let legacy: WorkspaceRenderPath = .legacy
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = terminalSplit
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == legacy)
+
+            // The extra terminal closes.
+            state.layouts[tab.id] = .pane(tab.content)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
+            state.layouts[tab.id] = terminalSplit
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == legacy)
+
+            // Over one layout, re-pointing the primary from the terminal to
+            // the viewer beside it leaves that terminal outside the primary.
+            state.layouts[tab.id] = viewerSplit
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
+            state.tabs[worktreeID]?[0].content = viewer
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == legacy)
         }
     }
 
