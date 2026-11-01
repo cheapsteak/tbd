@@ -935,6 +935,11 @@ final class AppState {
     /// the daemon applies a worktree's tab lists in the order the app built
     /// them; a later flush awaits this one before it starts.
     @ObservationIgnored var panelSyncFlushTask: Task<Void, Never>?
+    /// Worktree → how many of its `panel.syncTabs` in a row have failed. Only
+    /// the first failure of a run logs at `.error`; the poll's retries
+    /// (`retryPendingPanelTabSyncs`) log the rest at `.debug`. A success
+    /// removes the entry, and so does archiving the worktree.
+    @ObservationIgnored var panelSyncConsecutiveFailures: [UUID: Int] = [:]
     /// Worktrees whose tab list is complete enough to sync: both the
     /// terminal-backed and the note-backed tabs have been reconciled against a
     /// fetch since the current subscription. A sync deletes the surface of
@@ -4115,6 +4120,7 @@ final class AppState {
                 // than drifting earlier off wall-clock ticks that did no work.
                 await self.runPollCycleIfIdle {
                     await self.retryDaemonCapabilitiesIfMissing()
+                    self.retryPendingPanelTabSyncs()
                     await self.refreshAll()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()

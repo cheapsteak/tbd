@@ -495,7 +495,10 @@ store, marks dirty the worktree of a tab the last sync named in
 `skippedTabIDs` when that tab's layout changes, so it is offered again once its
 extra terminal closes. No other tab is marked this way: a tab with a surface
 has its legacy layout unread, and a tab the copy has merely not loaded would
-otherwise send a sync on every ordinary legacy layout write.
+otherwise send a sync on every ordinary legacy layout write. A sync that fails
+leaves its worktree dirty for the next flush, and while the app is connected
+the poll cycle schedules that flush when nothing else does, so a tab the
+daemon never imported does not wait for the user to touch it.
 
 ### The leaf seam
 

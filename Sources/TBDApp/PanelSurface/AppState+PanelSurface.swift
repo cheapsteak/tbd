@@ -476,6 +476,7 @@ extension AppState {
         }
         panelSyncDirty.remove(worktreeID)
         panelSyncReadyWorktrees.remove(worktreeID)
+        panelSyncConsecutiveFailures.removeValue(forKey: worktreeID)
         if let tabList = tabs[worktreeID] {
             setPanelSyncSkippedTabIDs(panelSyncSkippedTabIDs.subtracting(tabList.map(\.id)))
         }
@@ -572,7 +573,8 @@ extension AppState {
     /// A failed sync is logged, and its worktree is marked dirty again once
     /// the pass ends, so one flush never retries it and no flush is scheduled
     /// for it. The next flush sends it again: a gesture's flush before its
-    /// apply, the shown tab's load, a tab change, or a resubscribe.
+    /// apply, the shown tab's load, a tab change, a resubscribe, or the
+    /// poll's retry (`retryPendingPanelTabSyncs`), whichever comes first.
     func flushPanelTabSync() async {
         // The flush clears its own handle as its last step, so once a waiter
         // resumes the handle names a newer flush or none.
@@ -608,6 +610,7 @@ extension AppState {
                 // edited while that sync was in flight, and this send carried
                 // its latest list.
                 failed.remove(worktreeID)
+                panelSyncConsecutiveFailures.removeValue(forKey: worktreeID)
                 // This sync's verdict on the tabs it listed replaces the last.
                 setPanelSyncSkippedTabIDs(
                     panelSyncSkippedTabIDs
@@ -622,13 +625,39 @@ extension AppState {
                 }
             } catch {
                 failed.insert(worktreeID)
-                logger.error("""
-                    panel.syncTabs failed for worktree \(worktreeID, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
+                // The poll resends a failing sync every cycle, so only the
+                // first failure of a run is an error.
+                let failures = (panelSyncConsecutiveFailures[worktreeID] ?? 0) + 1
+                panelSyncConsecutiveFailures[worktreeID] = failures
+                if failures == 1 {
+                    logger.error("""
+                        panel.syncTabs failed for worktree \(worktreeID, privacy: .public): \
+                        \(error.localizedDescription, privacy: .public)
+                        """)
+                } else {
+                    logger.debug("""
+                        panel.syncTabs failed again (\(failures, privacy: .public) in a row) \
+                        for worktree \(worktreeID, privacy: .public): \
+                        \(error.localizedDescription, privacy: .public)
+                        """)
+                }
             }
         }
         panelSyncDirty.formUnion(failed.intersection(panelSyncReadyWorktrees))
+    }
+
+    /// Run on each poll cycle: while the app is connected, a dirty worktree
+    /// is ready to sync, and no flush is scheduled or sending, schedules one.
+    /// That is how a failed sync is sent again when nothing else asks for a
+    /// flush — no tab edit, no gesture, no resubscribe — so a tab the daemon
+    /// never imported does not wait for the user to touch it. Any other
+    /// dirty, ready worktree already has a flush scheduled for it.
+    func retryPendingPanelTabSyncs() {
+        guard isConnected,
+              !panelSyncFlushScheduled,
+              panelSyncFlushTask == nil,
+              !panelSyncDirty.isDisjoint(with: panelSyncReadyWorktrees) else { return }
+        schedulePanelTabSyncFlush()
     }
 
     // MARK: - Resubscribe

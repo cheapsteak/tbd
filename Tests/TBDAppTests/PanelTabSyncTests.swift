@@ -355,6 +355,155 @@ struct PanelTabSyncTests {
         }
     }
 
+    // MARK: - The poll's retry
+
+    /// Stubs `panel.syncTabs` to fail its first `failures` calls and let every
+    /// later one through, recording each payload.
+    private static func failingSyncs(_ state: AppState, failures: Int) -> PanelSyncCollector {
+        let syncs = PanelSyncCollector()
+        state.panelSyncTrigger = { @MainActor params in
+            syncs.record(params)
+            guard syncs.sent.count <= failures else { return PanelTabsFixture.emptySyncResult }
+            throw PanelTabsFixture.Rejected(message: "the daemon refused the sync")
+        }
+        return syncs
+    }
+
+    @Test("the poll's retry sends a failed sync again until it succeeds, and the success leaves the worktree clean")
+    func pollRetryResendsFailedSync() async throws {
+        try await Fixture.withState { state in
+            state.isConnected = true
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let syncs = Self.failingSyncs(state, failures: 2)
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+            try #require(syncs.sent.count == 1, "precondition: the sync went out once and failed")
+            try #require(state.panelSyncDirty.contains(worktreeID), "precondition: the failed sync is pending")
+            #expect(state.panelSyncConsecutiveFailures[worktreeID] == 1)
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.count == 2, "the retry resent the failed sync")
+            #expect(state.panelSyncDirty.contains(worktreeID), "a second failure stays pending")
+            #expect(state.panelSyncConsecutiveFailures[worktreeID] == 2)
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            let sentLabels: [String?] = syncs.sent.map { $0.tabs.first?.label }
+            let expectedLabels: [String?] = ["renamed", "renamed", "renamed"]
+            #expect(sentLabels == expectedLabels, "each retry resent the failed list")
+            #expect(!state.panelSyncDirty.contains(worktreeID), "the retry's success left the worktree dirty")
+            #expect(state.panelSyncConsecutiveFailures[worktreeID] == nil, "a success ends the run of failures")
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.count == 3, "a retry with nothing pending sent a sync")
+        }
+    }
+
+    @Test("the poll's retry sends nothing when no worktree is dirty")
+    func pollRetryWithNothingDirtySendsNothing() async {
+        await Fixture.withState { state in
+            state.isConnected = true
+            let syncs = Fixture.collectSyncs(state)
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            #expect(!state.panelSyncDirty.contains(worktreeID), "precondition: nothing is pending")
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.isEmpty, "observed \(syncs.sent.map(\.worktreeID))")
+            #expect(!state.panelSyncFlushScheduled)
+        }
+    }
+
+    @Test("the poll's retry sends nothing for a dirty worktree that is not ready to sync")
+    func pollRetryForUnreadyWorktreeSendsNothing() async {
+        await Fixture.withState { state in
+            state.isConnected = true
+            let syncs = Fixture.collectSyncs(state)
+            let worktreeID = UUID()
+            // Terminal-backed tabs landed; the notes fetch has not.
+            state.tabs[worktreeID] = [Fixture.terminalTab(label: "agent")]
+            await Fixture.drainMainActor()
+            #expect(state.panelSyncDirty.contains(worktreeID), "precondition: a sync is pending")
+            #expect(!state.panelSyncReadyWorktrees.contains(worktreeID), "precondition: not ready")
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.isEmpty, "observed \(syncs.sent.map(\.worktreeID))")
+            #expect(!state.panelSyncFlushScheduled)
+            #expect(state.panelSyncDirty.contains(worktreeID), "the sync waits until the worktree is ready")
+        }
+    }
+
+    @Test("the poll's retry sends nothing while the app is disconnected")
+    func pollRetryWhileDisconnectedSendsNothing() async throws {
+        try await Fixture.withState { state in
+            state.isConnected = false
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let syncs = Self.failingSyncs(state, failures: 1)
+            state.tabs[worktreeID]?[0].label = "renamed"
+            await Fixture.drainMainActor()
+            try #require(syncs.sent.count == 1, "precondition: the sync went out once and failed")
+            try #require(state.panelSyncDirty.contains(worktreeID), "precondition: the failed sync is pending")
+
+            state.retryPendingPanelTabSyncs()
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.count == 1, "the retry sent a sync while disconnected")
+            #expect(!state.panelSyncFlushScheduled)
+            #expect(state.panelSyncDirty.contains(worktreeID), "the failed sync stays pending")
+        }
+    }
+
+    /// A flush a caller awaits directly (a gesture's, a load's) is not marked
+    /// scheduled. A retry beside it would queue a second flush, which would
+    /// resend the in-flight sync the moment it failed.
+    @Test("the poll's retry schedules no flush while one is sending")
+    func pollRetryWhileFlushSendsSchedulesNothing() async throws {
+        try await Fixture.withState { state in
+            state.isConnected = true
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let other = await Fixture.readyWorktree(
+                state, tabs: [Fixture.terminalTab(label: "other")], syncs: Fixture.collectSyncs(state))
+            let gate = PanelCallGate()
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                guard syncs.sent.count == 1 else { return PanelTabsFixture.emptySyncResult }
+                await gate.wait()
+                throw PanelTabsFixture.Rejected(message: "the daemon refused the sync")
+            }
+            state.panelSyncDirty.insert(worktreeID)
+            let flush = Task { @MainActor in await state.flushPanelTabSync() }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the flush's sync is in flight")
+            try #require(!state.panelSyncFlushScheduled, "precondition: the sending flush is not a scheduled one")
+            // Another worktree is waiting dirty, so the retry has work to do.
+            state.panelSyncDirty.insert(other)
+
+            state.retryPendingPanelTabSyncs()
+
+            #expect(!state.panelSyncFlushScheduled, "the retry scheduled a flush beside the one sending")
+            gate.release()
+            await flush.value
+            await Fixture.drainMainActor()
+            let sentWorktrees: [UUID] = syncs.sent.map(\.worktreeID)
+            let expectedWorktrees: [UUID] = [worktreeID, other]
+            #expect(sentWorktrees == expectedWorktrees, "the failed sync was resent as soon as it failed")
+            #expect(state.panelSyncDirty.contains(worktreeID), "the failed sync waits for the next retry")
+        }
+    }
+
     @Test("a gesture on a tab whose sync failed sends that sync again before it applies")
     func gestureAfterFailedSyncResendsIt() async throws {
         try await Fixture.withState { state in
