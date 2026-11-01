@@ -292,7 +292,8 @@ No durable resource is added.
 - **Keeping glass off the compact buttons relies on forwarding.** They have
   none because their item is unbordered and its view forwards nothing. If a
   macOS release gives glass to view items by another rule, the three buttons
-  would share one capsule; the live check confirms none shows.
+  would share one capsule. No test can see glass, so only the live check on
+  screen shows whether a capsule appears.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.
