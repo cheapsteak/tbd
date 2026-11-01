@@ -167,8 +167,11 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     /// The row's opacity: a missing scratch directory, a hidden repo's
     /// section and a hovered chevron each dim it, and they compose.
     static func opacity(of model: WorktreeRowModel, dimmedByChevron: Bool) -> CGFloat {
-        (model.isDimmed ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
-            * (dimmedByChevron ? SidebarCellKit.chevronHoverOpacity : 1)
+        var opacity: CGFloat = 1
+        if model.isDimmed { opacity *= 0.5 }
+        if model.isInHiddenSection { opacity *= 0.55 }
+        if dimmedByChevron { opacity *= SidebarCellKit.chevronHoverOpacity }
+        return opacity
     }
 
     func setMenuOpen(_ open: Bool) {

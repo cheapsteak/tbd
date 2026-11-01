@@ -92,8 +92,11 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
     /// The row's opacity: a gone session, a hidden repo's section and a
     /// hovered chevron each dim it, and they compose.
     static func opacity(of model: RemoteSessionRowModel, dimmedByChevron: Bool) -> CGFloat {
-        (model.isGone ? 0.5 : 1) * (model.isInHiddenSection ? 0.55 : 1)
-            * (dimmedByChevron ? SidebarCellKit.chevronHoverOpacity : 1)
+        var opacity: CGFloat = 1
+        if model.isGone { opacity *= 0.5 }
+        if model.isInHiddenSection { opacity *= 0.55 }
+        if dimmedByChevron { opacity *= SidebarCellKit.chevronHoverOpacity }
+        return opacity
     }
 
     // MARK: Rename
