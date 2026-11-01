@@ -387,8 +387,10 @@ struct PanelSurfaceStoreTests {
         }
         #expect(try await db.panelSurface.surface(tabID: surface.id) == surface)
 
+        // Out of range, which no repair on the way in can heal: an import
+        // adopts the worktree's panels, and that fixes a missing front.
         var invalid = makeSurface(worktreeID: wtID)
-        invalid.side.activePanelID = nil
+        invalid.side.width = 5
         let valid = makeSurface(worktreeID: wtID)
         // The valid import is written before the invalid one throws.
         let entries = [entry(for: surface, position: 0), entry(for: valid, position: 2),
