@@ -54,6 +54,13 @@ final class NotePaneModel {
     /// The note this pane is currently showing, set by `load`.
     @ObservationIgnored private var current: NoteRef?
 
+    /// This model's entry in `AppState.noteSaveFlushers`, for the note it
+    /// shows: how a close of that note lands this model's pending save
+    /// before it decides whether to ask (`AppState.flushPendingNoteSave`).
+    /// `load` replaces it; `paneDisappeared` removes it once its flush has
+    /// landed.
+    @ObservationIgnored private(set) var saveFlusherRegistration: NoteSaveFlusherRegistration?
+
     /// What the current note's text was last known to be on disk — the value
     /// `load` read, or the value the last save wrote. An "edit" back to exactly
     /// that is not an edit; without this, the assignment `load` makes to `text`
@@ -105,6 +112,7 @@ final class NotePaneModel {
         text = ""
         savedText = nil
         current = NoteRef(noteID: noteID, worktreeID: worktreeID)
+        registerSaveFlusher(noteID: noteID, appState: appState)
 
         guard let content = await appState.noteContent(
             noteID: noteID, worktreeID: worktreeID
@@ -173,9 +181,34 @@ final class NotePaneModel {
     /// await, so the flush is spawned — the same shape the view has always
     /// used. The task is returned so a test can await the write; the view
     /// discards it.
+    ///
+    /// The model's save flusher is unregistered only once that write has
+    /// landed, so a close of the note asked for meanwhile still waits for it,
+    /// and only when no `load` has registered the model again since: the
+    /// pane can reappear before the flush ends.
     @discardableResult
     func paneDisappeared(appState: AppState) -> Task<Void, Never> {
-        Task { @MainActor in
+        let registration = saveFlusherRegistration
+        return Task { @MainActor in
+            await self.flushPendingSave(appState: appState)
+            guard let registration, self.saveFlusherRegistration == registration else { return }
+            appState.unregisterNoteSaveFlusher(registration)
+            self.saveFlusherRegistration = nil
+        }
+    }
+
+    /// Registers this model as the editor of `noteID` with `appState`,
+    /// replacing its registration for the note it showed before. A new token
+    /// every time, even for the same note, so a `paneDisappeared` still
+    /// finishing cannot unregister the pane that reappeared. The flusher
+    /// holds the model and `appState` weakly: the registry lives on
+    /// `appState` and must keep neither alive.
+    private func registerSaveFlusher(noteID: UUID, appState: AppState) {
+        if let saveFlusherRegistration {
+            appState.unregisterNoteSaveFlusher(saveFlusherRegistration)
+        }
+        saveFlusherRegistration = appState.registerNoteSaveFlusher(noteID: noteID) { [weak self, weak appState] in
+            guard let self, let appState else { return }
             await self.flushPendingSave(appState: appState)
         }
     }

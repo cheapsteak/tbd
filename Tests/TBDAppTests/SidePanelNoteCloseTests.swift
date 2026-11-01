@@ -10,7 +10,8 @@ import TestSupport
 
 /// Closing a note's side-region tab (panel tabs spec, "The renderer"):
 /// `AppState.closeSidePanel` asks first when the note has content — whether or
-/// not `notes` holds its summary yet — then closes the panel and deletes the
+/// not `notes` holds its summary yet, and counting an edit an open editor
+/// still holds on its save debounce — then closes the panel and deletes the
 /// note, and deletes nothing when the user declines or the daemon refuses the
 /// close. The `close` operation itself keeps the note, so the daemon action
 /// set's close never deletes one.
@@ -195,6 +196,63 @@ struct SidePanelNoteCloseTests {
             #expect(notes.deleted.isEmpty, "a refused close must not delete the note")
             #expect(state.notes[seeded.worktreeID]?.count == 1)
             state.dismissToast()
+        }
+    }
+
+    // MARK: - An edit still on the editor's debounce
+
+    @Test("closing a side-region note with an edit still pending asks, and declining closes and deletes nothing", .fastPassBounded)
+    func pendingEditAsksAndDeclineChangesNothing() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID))
+            let root = NoteEditorFixture.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let editor = await NoteEditorFixture.open(state, noteID: noteID, worktreeID: seeded.worktreeID)
+            let typed = "typed inside the debounce window"
+            NoteEditorFixture.type(typed, into: editor, state: state)
+            #expect(!state.noteHasContent(worktreeID: seeded.worktreeID, noteID: noteID),
+                    "precondition: the content file still reads as empty")
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            #expect(notes.confirmations == 1, "the pending edit makes the note non-empty, so × asks")
+            #expect(envelopes.envelopes.isEmpty, "a declined close sends nothing")
+            #expect(notes.deleted.isEmpty)
+            #expect(state.panelSurface(worktreeID: seeded.worktreeID, tabID: seeded.tabID) == seeded.surface)
+            let onDisk = NoteEditorFixture.onDisk(state, worktreeID: seeded.worktreeID, noteID: noteID)
+            #expect(onDisk == typed, "the edit landed in the content file before the check")
+        }
+    }
+
+    @Test("closing an empty side-region note whose open editor holds nothing closes and deletes without asking", .fastPassBounded)
+    func emptyNoteWithEditorClosesAndDeletesWithoutAsking() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID))
+            let root = NoteEditorFixture.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let editor = await NoteEditorFixture.open(state, noteID: noteID, worktreeID: seeded.worktreeID)
+            #expect(editor.loaded, "precondition: the editor loaded the note")
+            #expect(state.hasNoteSaveFlusher(noteID: noteID), "precondition: the editor registered")
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            // Declining would block the close, so a prompt cannot go unnoticed.
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            #expect(notes.confirmations == 0)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
         }
     }
 

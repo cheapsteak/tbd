@@ -259,6 +259,12 @@ final class AppState {
     /// titles in the order they were typed. An entry goes once its rename has
     /// persisted and no later one is queued behind it.
     @ObservationIgnored var noteRenameTails: [UUID: NoteRenameTail] = [:]
+    /// Note ID → registration token → how to land the save one open editor
+    /// of that note still holds on its debounce (`registerNoteSaveFlusher`,
+    /// `flushPendingNoteSave`). Each `NotePaneModel` registers a flusher for
+    /// the note it loads, holding the model weakly, so the registry never
+    /// keeps a model alive. Several editors of one note have one entry each.
+    @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the

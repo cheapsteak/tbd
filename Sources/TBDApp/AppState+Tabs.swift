@@ -392,7 +392,37 @@ extension AppState {
 
     /// Close one tab and clean up resources owned by that tab. This is shared
     /// by the tab bar close button and the Cmd-W menu shortcut.
-    func closeTab(worktreeID: UUID, index: Int) {
+    ///
+    /// Closing a note tab asks first when the note has content, and that is
+    /// read from the note's content file. So a note some editor has open is
+    /// closed on a task, which first lands the save that editor may still
+    /// hold on its debounce (`flushPendingNoteSave`) — a note typed into and
+    /// closed inside that window would otherwise read as empty, close without
+    /// asking, and lose the text — then finds the tab again by its ID, since
+    /// it may have moved or closed meanwhile. That task is returned, for a
+    /// caller that must wait for the close. Every other tab, including a note
+    /// no editor has open, closes before this returns, and nil is returned.
+    @discardableResult
+    func closeTab(worktreeID: UUID, index: Int) -> Task<Void, Never>? {
+        guard let arr = tabs[worktreeID],
+              arr.indices.contains(index) else { return nil }
+        let tabID = arr[index].id
+        guard case .note(let noteID) = arr[index].content,
+              hasNoteSaveFlusher(noteID: noteID) else {
+            closeTabNow(worktreeID: worktreeID, index: index)
+            return nil
+        }
+        return Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.flushPendingNoteSave(noteID: noteID)
+            guard let index = self.tabs[worktreeID]?.firstIndex(where: { $0.id == tabID }) else { return }
+            self.closeTabNow(worktreeID: worktreeID, index: index)
+        }
+    }
+
+    /// `closeTab` once nothing is left to flush: asks before closing a note
+    /// with content, then closes the tab at `index` at once.
+    private func closeTabNow(worktreeID: UUID, index: Int) {
         guard var arr = tabs[worktreeID],
               arr.indices.contains(index) else { return }
 
@@ -485,16 +515,19 @@ extension AppState {
         }
     }
 
-    func closeTab(worktreeID: UUID, tabID: UUID) {
+    /// `closeTab(worktreeID:index:)` for the tab with this ID, returning its
+    /// task the same way.
+    @discardableResult
+    func closeTab(worktreeID: UUID, tabID: UUID) -> Task<Void, Never>? {
         guard let arr = tabs[worktreeID],
               let index = arr.firstIndex(where: { $0.id == tabID }) else {
             if focusedTabCloseContext?.worktreeID == worktreeID,
                focusedTabCloseContext?.tabID == tabID {
                 focusedTabCloseContext = nil
             }
-            return
+            return nil
         }
-        closeTab(worktreeID: worktreeID, index: index)
+        return closeTab(worktreeID: worktreeID, index: index)
     }
 
     var canCloseFocusedTab: Bool {

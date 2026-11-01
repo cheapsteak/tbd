@@ -18,6 +18,14 @@ struct NoteRenameTail {
     var confirmedTitle: String?
 }
 
+/// One editor's entry in `AppState.noteSaveFlushers`: the note it registered
+/// for and a token unique to this registration, so unregistering it never
+/// removes a newer one, from the same editor or another.
+struct NoteSaveFlusherRegistration: Hashable, Sendable {
+    let noteID: UUID
+    let token: UUID
+}
+
 /// Outcome of reading a note's content file. Distinguishes a file that is
 /// absent (loads as empty) from one that is present but unreadable (must not
 /// load at all) — `try? String(contentsOfFile:)` alone collapses the two.
@@ -227,7 +235,9 @@ extension AppState {
     /// handful of rows the daemon's startup export never drained. Neither
     /// source alone is the answer, so the union lives here rather than at the
     /// call sites — `closeTab` hard-deletes the note row, so a wrong `false`
-    /// is a silent delete.
+    /// is a silent delete. For the same reason a close lands the note's
+    /// pending editor saves first (`flushPendingNoteSave`), so the file this
+    /// stats holds what was typed.
     ///
     /// Synchronous, and one stat: it runs on a user gesture (closing a tab),
     /// never on the poll. That is the whole reason it is allowed to touch the
@@ -259,6 +269,47 @@ extension AppState {
         } catch {
             logger.error("Failed to delete note: \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    // MARK: - Pending editor saves
+
+    /// Records `flush` as the way to land the save an editor of `noteID`
+    /// holds on its debounce, and returns the registration that removes it
+    /// (`unregisterNoteSaveFlusher`). `flush` must not hold its editor or
+    /// `AppState` strongly: the registry outlives both.
+    func registerNoteSaveFlusher(
+        noteID: UUID, _ flush: @escaping @MainActor () async -> Void
+    ) -> NoteSaveFlusherRegistration {
+        let registration = NoteSaveFlusherRegistration(noteID: noteID, token: UUID())
+        noteSaveFlushers[noteID, default: [:]][registration.token] = flush
+        return registration
+    }
+
+    /// Removes exactly `registration`. Any other registration of the note,
+    /// including a newer one from the same editor, stays.
+    func unregisterNoteSaveFlusher(_ registration: NoteSaveFlusherRegistration) {
+        guard var flushers = noteSaveFlushers[registration.noteID] else { return }
+        flushers.removeValue(forKey: registration.token)
+        noteSaveFlushers[registration.noteID] = flushers.isEmpty ? nil : flushers
+    }
+
+    /// Whether an editor has `noteID` open, and so may hold a save of it that
+    /// has not reached the content file yet.
+    func hasNoteSaveFlusher(noteID: UUID) -> Bool {
+        noteSaveFlushers[noteID]?.isEmpty == false
+    }
+
+    /// Lands every save of `noteID` an open editor still holds on its debounce
+    /// — none, one, or one per place the note is open — and returns once each
+    /// has been written, so the content file holds what was typed. A close
+    /// calls this before it asks `noteHasContent`: a note typed into and
+    /// closed inside the debounce window would otherwise read as empty, close
+    /// without asking, and take the typed text with it.
+    func flushPendingNoteSave(noteID: UUID) async {
+        guard let flushers = noteSaveFlushers[noteID]?.values else { return }
+        for flush in Array(flushers) {
+            await flush()
         }
     }
 

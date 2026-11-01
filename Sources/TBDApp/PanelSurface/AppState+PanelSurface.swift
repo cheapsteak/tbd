@@ -399,7 +399,10 @@ extension AppState {
     /// deleting the note removes its workspace tab too. Any other panel just
     /// closes.
     ///
-    /// Whether the note has content (`noteHasContent`) is asked whether or not
+    /// Whether the note has content (`noteHasContent`) is asked once any save
+    /// an open editor of the note still holds on its debounce has landed
+    /// (`flushPendingNoteSave`), so a note typed into and closed inside that
+    /// window asks rather than reading as empty. It is asked whether or not
     /// `notes` holds the note's summary yet — an agent can open a note just
     /// before the notes refresh lands. Without one, the confirmation names the
     /// note "Note", as the note's tab in the strip reads until the summary
@@ -415,6 +418,7 @@ extension AppState {
             await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close)
             return
         }
+        await flushPendingNoteSave(noteID: noteID)
         if noteHasContent(worktreeID: worktreeID, noteID: noteID) {
             let note = notes[worktreeID]?.first(where: { $0.id == noteID })
                 ?? NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")
