@@ -101,11 +101,12 @@ enum RemoteSessionSendPayload {
 /// terminal side — the Attach prompt, the sign-in prompt or the log — sits on
 /// the right. Attached, the terminal leads and the transcript sits on the
 /// right, where the toolbar's Transcript toggle can hide it. Attaching and
-/// detaching swap the halves without remounting `RemoteAttachPager` (see
-/// `contentArea`). The only other chrome is a compact warning strip, rendered
-/// only while a warning actually applies, and — only while neither a live
-/// attached terminal nor the transcript's enabled composer is showing — a send
-/// footer (see `RemoteSessionDetailGates.showsSendFooter`).
+/// detaching swap the halves without remounting `RemoteAttachPager`, which
+/// stays where the attached terminal is drawn (see `contentArea`). The only
+/// other chrome is a compact warning strip, rendered only while a warning
+/// actually applies, and — only while neither a live attached terminal nor the
+/// transcript's enabled composer is showing — a send footer (see
+/// `RemoteSessionDetailGates.showsSendFooter`).
 ///
 /// The caller deliberately does NOT key this view with `.id(selection)`:
 /// this view hosts `RemoteAttachPager`, which keeps recently-viewed
@@ -282,15 +283,16 @@ struct RemoteSessionDetailView: View {
     // MARK: - Content
 
     /// A horizontal split of the terminal side and the transcript, placed by
-    /// role (`RemoteDetailSplit`). `remoteSessionShowsTranscriptPane` says
-    /// whether the transcript shows, and `remoteSessionTranscriptLeads` whether
-    /// it is on the left: the transcript leads until the session attaches, and
-    /// the terminal leads once it has. The split is always the container, even
-    /// with one child, and keeps both halves at fixed positions in the view
-    /// tree: showing or hiding the transcript only adds or removes it, and a
-    /// swap changes only where each half is drawn. So `RemoteAttachPager` stays
-    /// mounted throughout (see `terminalArea`), and a swap keeps the
-    /// transcript's sync driver as well.
+    /// role (`RemoteDetailSplit`), over the live-terminal slot that holds
+    /// `attachPager`. `remoteSessionShowsTranscriptPane` says whether the
+    /// transcript shows, and `remoteSessionTranscriptLeads` whether it is on the
+    /// left: the transcript leads until the session attaches, and the terminal
+    /// leads once it has. The split is always the container, even with one
+    /// half, and keeps every part at a fixed position in the view tree: showing
+    /// or hiding the transcript only adds or removes it, and a swap changes only
+    /// where each half is drawn. So `RemoteAttachPager` stays mounted
+    /// throughout, laid out where the attached terminal is drawn whichever half
+    /// leads, and a swap keeps the transcript's sync driver as well.
     private var contentArea: some View {
         RemoteDetailSplit(
             showsTranscript: appState.remoteSessionShowsTranscriptPane(selection),
@@ -299,33 +301,50 @@ struct RemoteSessionDetailView: View {
             terminalArea
         } transcript: {
             RemoteTranscriptLivePane(selection: selection)
+        } liveTerminal: {
+            attachPager
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Every attached remote session's live terminal, in the split's
+    /// live-terminal slot.
+    ///
+    /// `RemoteAttachPager` is mounted UNCONDITIONALLY — never nested inside a
+    /// check scoped to the CURRENT selection's capabilities — because it hosts
+    /// every attached remote session, not just this one. Gating its existence
+    /// on this session's own content would tear down every OTHER (background,
+    /// recently-viewed) session's live connection the moment the user merely
+    /// LOOKS AT a session that can't attach — e.g. a gone session — exactly the
+    /// kind of accidental mass-teardown this pager exists to prevent.
+    /// Visibility (not existence) is controlled by opacity and hit-testing;
+    /// `showsAttachSlot` is already `false` whenever `content != .attach`, so
+    /// the pager simply stays transparent and non-hit-testable behind whatever
+    /// renders instead.
+    ///
+    /// It sits in its own slot rather than inside `terminalArea` so that a
+    /// kept-alive terminal of another session is never resized when the pane
+    /// swaps. While the session on screen has no mounted tab, the pager keeps
+    /// the previous tab selected and laid out, transparent, and each resize of
+    /// that terminal reaches its remote program. The slot is always laid out
+    /// where the attached terminal is drawn, so viewing a session that is not
+    /// attached — which moves `terminalArea` into the right half — leaves the
+    /// pager where it is.
+    private var attachPager: some View {
+        RemoteAttachPager(
+            mounts: appState.attachedRemoteMountKeys,
+            activeSelection: selection
+        )
+        .opacity(showsAttachSlot ? 1 : 0)
+        .allowsHitTesting(showsAttachSlot)
+    }
+
+    /// What the terminal side shows over the live-terminal slot: the detached
+    /// or sign-in prompt, the log, or the unsupported note. While attached it
+    /// renders nothing, so the live terminal in `attachPager` shows through.
     @ViewBuilder
     private var terminalArea: some View {
         ZStack {
-            // `RemoteAttachPager` is mounted UNCONDITIONALLY here — never
-            // nested inside a check scoped to the CURRENT selection's
-            // capabilities — because it hosts every attached remote session,
-            // not just this one. Gating its existence on this session's own
-            // content would tear down every OTHER (background,
-            // recently-viewed) session's live connection the moment the user
-            // merely LOOKS AT a session that can't attach — e.g. a gone
-            // session — exactly the kind of accidental mass-teardown this
-            // pager exists to prevent. Visibility (not existence) is
-            // controlled by opacity/hit-testing below; `showsAttachSlot` is
-            // already `false` whenever `content != .attach`, so the pager
-            // simply stays transparent and non-hit-testable behind whatever
-            // renders instead.
-            RemoteAttachPager(
-                mounts: appState.attachedRemoteMountKeys,
-                activeSelection: selection
-            )
-            .opacity(showsAttachSlot ? 1 : 0)
-            .allowsHitTesting(showsAttachSlot)
-
             switch content {
             case .attach:
                 if !isAttached {

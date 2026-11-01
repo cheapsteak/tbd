@@ -5,16 +5,18 @@ import Testing
 @testable import TBDApp
 
 /// `RemoteDetailSplit` exists for one property: showing, hiding or swapping
-/// the transcript never remounts either half. The terminal side's
+/// the transcript never remounts any of its parts. The live-terminal slot's
 /// `RemoteAttachPager` owns every live attach connection, and the transcript
 /// owns a sync driver. Asked of a real mount — an AppKit representable in each
-/// half counts how often SwiftUI makes and dismantles it, and keeps its view so
-/// a test can read where that half was drawn.
+/// slot counts how often SwiftUI makes and dismantles it, and keeps its view so
+/// a test can read where that slot was drawn. A swap must also leave the live
+/// terminal exactly where it is, because resizing a kept-alive terminal
+/// resizes its remote program.
 @MainActor
 @Suite("Remote detail split", .serialized)
 struct RemoteDetailSplitTests {
 
-    typealias Split = RemoteDetailSplit<EmptyView, EmptyView>
+    typealias Split = RemoteDetailSplit<EmptyView, EmptyView, EmptyView>
 
     @MainActor
     final class Counts {
@@ -23,16 +25,20 @@ struct RemoteDetailSplitTests {
         /// The probe's view, set when SwiftUI makes it.
         weak var view: NSView?
 
+        /// The probe's frame in window coordinates, or nil while it is not
+        /// mounted.
+        var frame: CGRect? {
+            guard let view else { return nil }
+            return view.convert(view.bounds, to: nil)
+        }
+
         /// The probe's left edge in window coordinates, or nil while it is not
         /// mounted.
-        var minX: CGFloat? {
-            guard let view else { return nil }
-            return view.convert(view.bounds, to: nil).minX
-        }
+        var minX: CGFloat? { frame?.minX }
 
         /// Where the probe was drawn, for a failure message.
         var drawnAt: String {
-            minX.map { "x = \($0)" } ?? "not mounted"
+            frame.map { "x = \($0.minX), width = \($0.width)" } ?? "not mounted"
         }
     }
 
@@ -76,6 +82,7 @@ struct RemoteDetailSplitTests {
         let model: Model
         let terminalCounts: Counts
         let transcriptCounts: Counts
+        let liveCounts: Counts
 
         var body: some View {
             RemoteDetailSplit(
@@ -85,6 +92,8 @@ struct RemoteDetailSplitTests {
                 Probe(counts: terminalCounts)
             } transcript: {
                 Probe(counts: transcriptCounts)
+            } liveTerminal: {
+                Probe(counts: liveCounts)
             }
         }
     }
@@ -94,18 +103,24 @@ struct RemoteDetailSplitTests {
     /// Two halves of one claim. The transcript probe proves the toggles really
     /// happened: made and dismantled once per show and hide, so the test cannot
     /// pass against a split that never renders its transcript. The terminal
-    /// probe is the property: made once, never dismantled.
-    @Test("toggling the transcript never remakes or dismantles the terminal side")
+    /// and live-terminal probes are the property: each made once, never
+    /// dismantled.
+    @Test("toggling the transcript never remakes or dismantles the terminal side or the live terminal")
     func togglingTheTranscriptNeverRemakesTheTerminal() async throws {
         let model = Model(showsTranscript: false, transcriptLeads: false)
         let terminalCounts = Counts()
         let transcriptCounts = Counts()
+        let liveCounts = Counts()
         let host = OffscreenHost(
-            root: Root(model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts),
+            root: Root(
+                model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts,
+                liveCounts: liveCounts),
             size: Self.hostSize)
         defer { host.tearDown() }
 
-        try #require(await host.settle { terminalCounts.made == 1 }, "the terminal side never mounted")
+        try #require(
+            await host.settle { terminalCounts.made == 1 && liveCounts.made == 1 },
+            "the terminal side or the live terminal never mounted")
         #expect(transcriptCounts.made == 0, "the transcript mounted while hidden")
 
         for (step, show) in [true, false, true, false].enumerated() {
@@ -125,32 +140,42 @@ struct RemoteDetailSplitTests {
         #expect(transcriptCounts.dismantled == 2)
         #expect(terminalCounts.made == 1, "the terminal side was rebuilt when the transcript changed")
         #expect(terminalCounts.dismantled == 0, "the terminal side was torn down when the transcript changed")
+        #expect(liveCounts.made == 1, "the live terminal was rebuilt when the transcript changed")
+        #expect(liveCounts.dismantled == 0, "the live terminal was torn down when the transcript changed")
     }
 
     /// Each step waits for the swap to be drawn — the terminal right of the
     /// transcript while the transcript leads, left of it otherwise — so the
     /// test cannot pass against a split that never moves its halves. Through
-    /// four swaps, neither half is made again or dismantled.
-    @Test("swapping the halves never remakes either one")
+    /// four swaps no part is made again or dismantled, and the live terminal
+    /// stays exactly where the attached terminal side was drawn: a live
+    /// terminal that moved with the terminal side would go from the left
+    /// half's width to the right half's.
+    @Test("swapping the halves never remakes either one or moves the live terminal")
     func swappingNeverRemakesEitherHalf() async throws {
         let model = Model(showsTranscript: true, transcriptLeads: false)
         let terminalCounts = Counts()
         let transcriptCounts = Counts()
+        let liveCounts = Counts()
         let host = OffscreenHost(
-            root: Root(model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts),
+            root: Root(
+                model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts,
+                liveCounts: liveCounts),
             size: Self.hostSize)
         defer { host.tearDown() }
 
         let mounted = await host.settle {
-            guard let terminalX = terminalCounts.minX, let transcriptX = transcriptCounts.minX else {
-                return false
-            }
-            return transcriptX > terminalX
+            guard let terminalX = terminalCounts.minX, let transcriptX = transcriptCounts.minX,
+                  let liveFrame = liveCounts.frame
+            else { return false }
+            return transcriptX > terminalX && liveFrame == terminalCounts.frame
         }
         try #require(mounted, """
-            the halves never mounted with the terminal on the left: terminal \
-            \(terminalCounts.drawnAt), transcript \(transcriptCounts.drawnAt)
+            the parts never mounted with the terminal side on the left and the live terminal \
+            under it: terminal \(terminalCounts.drawnAt), transcript \(transcriptCounts.drawnAt), \
+            live terminal \(liveCounts.drawnAt)
             """)
+        let attachedFrame = try #require(liveCounts.frame, "the live terminal was not mounted")
 
         for (step, leads) in [true, false, true, false].enumerated() {
             model.transcriptLeads = leads
@@ -164,28 +189,40 @@ struct RemoteDetailSplitTests {
                 step \(step): with transcriptLeads \(leads) the swap was never drawn: terminal \
                 \(terminalCounts.drawnAt), transcript \(transcriptCounts.drawnAt)
                 """)
+            let liveFrame = try #require(liveCounts.frame, "step \(step): the live terminal was not mounted")
+            #expect(liveFrame == attachedFrame, """
+                step \(step): with transcriptLeads \(leads) the live terminal was drawn at \
+                \(liveCounts.drawnAt), expected x = \(attachedFrame.minX), width = \(attachedFrame.width)
+                """)
         }
 
         #expect(terminalCounts.made == 1, "a swap rebuilt the terminal side")
         #expect(terminalCounts.dismantled == 0, "a swap tore down the terminal side")
         #expect(transcriptCounts.made == 1, "a swap rebuilt the transcript")
         #expect(transcriptCounts.dismantled == 0, "a swap tore down the transcript")
+        #expect(liveCounts.made == 1, "a swap rebuilt the live terminal")
+        #expect(liveCounts.dismantled == 0, "a swap tore down the live terminal")
     }
 
     /// Detaching while the transcript is hidden shows it and moves it to the
     /// left in the same update. Only the transcript is made; the terminal side
-    /// moves right without being remade.
+    /// moves right, and neither it nor the live terminal is remade.
     @Test("detaching while the transcript is hidden remakes only the transcript")
     func detachingWhileHiddenRemakesOnlyTheTranscript() async throws {
         let model = Model(showsTranscript: false, transcriptLeads: false)
         let terminalCounts = Counts()
         let transcriptCounts = Counts()
+        let liveCounts = Counts()
         let host = OffscreenHost(
-            root: Root(model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts),
+            root: Root(
+                model: model, terminalCounts: terminalCounts, transcriptCounts: transcriptCounts,
+                liveCounts: liveCounts),
             size: Self.hostSize)
         defer { host.tearDown() }
 
-        try #require(await host.settle { terminalCounts.made == 1 }, "the terminal side never mounted")
+        try #require(
+            await host.settle { terminalCounts.made == 1 && liveCounts.made == 1 },
+            "the terminal side or the live terminal never mounted")
         #expect(transcriptCounts.made == 0, "the transcript mounted while hidden")
 
         // Nothing suspends between the two writes, so SwiftUI sees them as one
@@ -207,9 +244,11 @@ struct RemoteDetailSplitTests {
         #expect(terminalCounts.made == 1, "detaching rebuilt the terminal side")
         #expect(terminalCounts.dismantled == 0, "detaching tore down the terminal side")
         #expect(transcriptCounts.dismantled == 0, "detaching tore down the transcript")
+        #expect(liveCounts.made == 1, "detaching rebuilt the live terminal")
+        #expect(liveCounts.dismantled == 0, "detaching tore down the live terminal")
     }
 
-    @Test("the halves are placed by role, and the right half takes the stored width")
+    @Test("the halves are placed by role, the right half takes the stored width, and the live terminal stays left")
     func columns() {
         let attached: RemoteDetailSplitColumns = Split.columns(
             totalWidth: 1000, rightWidth: 420, dividerWidth: 6,
@@ -217,22 +256,27 @@ struct RemoteDetailSplitTests {
         let attachedExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
             terminal: RemoteDetailSplitColumn(x: 0, width: 574),
             divider: RemoteDetailSplitColumn(x: 574, width: 6),
-            transcript: RemoteDetailSplitColumn(x: 580, width: 420))
+            transcript: RemoteDetailSplitColumn(x: 580, width: 420),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 574))
         #expect(attached == attachedExpected)
 
+        // The live terminal keeps the left half when the transcript leads:
+        // that is where the attached terminal is drawn.
         let notAttached: RemoteDetailSplitColumns = Split.columns(
             totalWidth: 1000, rightWidth: 420, dividerWidth: 6,
             showsTranscript: true, transcriptLeads: true)
         let notAttachedExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
             terminal: RemoteDetailSplitColumn(x: 580, width: 420),
             divider: RemoteDetailSplitColumn(x: 574, width: 6),
-            transcript: RemoteDetailSplitColumn(x: 0, width: 574))
+            transcript: RemoteDetailSplitColumn(x: 0, width: 574),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 574))
         #expect(notAttached == notAttachedExpected)
 
         let terminalOnlyExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
             terminal: RemoteDetailSplitColumn(x: 0, width: 1000),
             divider: nil,
-            transcript: nil)
+            transcript: nil,
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 1000))
         let terminalOnly: RemoteDetailSplitColumns = Split.columns(
             totalWidth: 1000, rightWidth: 420, dividerWidth: 6,
             showsTranscript: false, transcriptLeads: false)
@@ -242,14 +286,27 @@ struct RemoteDetailSplitTests {
             totalWidth: 1000, rightWidth: 420, dividerWidth: 6,
             showsTranscript: false, transcriptLeads: true)
         #expect(terminalOnlyLeading == terminalOnlyExpected)
+
+        // Too narrow for both minimums: the right half keeps the width it was
+        // clamped to, and the left half shrinks.
+        let narrow: RemoteDetailSplitColumns = Split.columns(
+            totalWidth: 400, rightWidth: 280, dividerWidth: 6,
+            showsTranscript: true, transcriptLeads: false)
+        let narrowExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
+            terminal: RemoteDetailSplitColumn(x: 0, width: 114),
+            divider: RemoteDetailSplitColumn(x: 114, width: 6),
+            transcript: RemoteDetailSplitColumn(x: 120, width: 280),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 114))
+        #expect(narrow == narrowExpected)
     }
 
-    @Test("the right half is clamped between its minimum and what leaves the left minimum")
+    @Test("the right half is clamped between its minimum and what leaves the left minimum for the left half and the divider")
     func clamp() {
         #expect(Split.clamp(100, totalWidth: 1000, leftMin: 240, rightMin: 280) == 280)
         #expect(Split.clamp(500, totalWidth: 1000, leftMin: 240, rightMin: 280) == 500)
         #expect(Split.clamp(900, totalWidth: 1000, leftMin: 240, rightMin: 280) == 760)
-        // Too narrow for both minimums: the right minimum wins.
+        // Too narrow for both minimums: the right minimum wins, and the left
+        // half shrinks.
         #expect(Split.clamp(500, totalWidth: 400, leftMin: 240, rightMin: 280) == 280)
     }
 }
