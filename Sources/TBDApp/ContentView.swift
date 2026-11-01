@@ -21,6 +21,17 @@ struct ContentView: View {
     /// was raised for even if the selection has moved on.
     @State private var remoteStopConfirm: RemoteSessionSelection?
 
+    /// Which split and toolbar the window is built with. A `let`: the app
+    /// resolves it once per launch, and the window keeps that structure until
+    /// the next one (spec, "Switching").
+    let chrome: MainWindowChrome
+
+    /// Spelled out because the private `@State` and `@AppStorage` properties
+    /// would make the memberwise initializer private.
+    init(chrome: MainWindowChrome) {
+        self.chrome = chrome
+    }
+
     var body: some View {
         @Bindable var appState = appState
         VStack(spacing: 0) {
@@ -62,325 +73,341 @@ struct ContentView: View {
                 .background(Color.blue.opacity(0.15))
             }
 
-            NavigationSplitView {
-                SidebarView()
-                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
-            } detail: {
-                // The tab choice is resolved HERE, in a real `body`, and handed
-                // down as a value. Reading these three properties inside
-                // `updateNSViewController` instead would register no
-                // dependency — Observation tracks what a `body` evaluation
-                // reads — so a selection change that touched nothing else this
-                // body reads would leave the detail area on the previous tab.
-                DetailSectionHostPager(
-                    targetTab: DetailSectionHostPager.targetTab(
-                        isConnected: appState.isConnected,
-                        selectedRemoteSession: appState.selectedRemoteSession,
-                        selectedRemoteProvider: appState.selectedRemoteProvider
-                    )
-                )
-            }
-            .toolbar(removing: .sidebarToggle)
-            .toolbar {
-                ToolbarItemGroup(placement: .navigation) {
-                    Button {
-                        appState.navigateBack()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                    }
-                    .disabled(!appState.canGoBack)
-                    .help("Back")
-
-                    Button {
-                        appState.navigateForward()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                    }
-                    .disabled(!appState.canGoForward)
-                    .help("Forward")
-                }
-
-                if #available(macOS 26.0, *) {
-                    ToolbarItem(placement: .principal) {
-                        ToolbarTitleCluster(appState: appState)
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                } else {
-                    ToolbarItem(placement: .principal) {
-                        ToolbarTitleCluster(appState: appState)
-                    }
-                }
-
-                // macOS 26 fuses ADJACENT bare toolbar items onto one Liquid Glass
-                // capsule, and `ToolbarItemGroup` fuses on purpose. The reliable
-                // capsule BOUNDARY is `ControlGroup` (→ NSToolbarItemGroup): the PR
-                // split button is its sole child, which separates it from both
-                // neighbors (confirmed earlier) with no internal gap, while keeping
-                // the split-button chevron + status-colored icon. Plain `Button`s
-                // for the filter / sidebar separate via placement-matched spacers.
-                ToolbarItem(placement: .primaryAction) {
-                    Picker("Filter", selection: $appState.repoFilter) {
-                        Text("All Repos").tag(UUID?.none)
-                        Divider()
-                        ForEach(appState.repos) { repo in
-                            Text(repo.displayName).tag(UUID?.some(repo.id))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    // macOS 27 draws toolbar menus icon-only by default; this
-                    // text-only Picker then rendered as an empty capsule.
-                    .labelStyle(.titleAndIcon)
-                    .help("Filter sidebar by repository")
-                }
-
-                if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.fixed, placement: .primaryAction)
-                }
-
-                // The PR control is gated on `effectivePRBindings`: every
-                // binding the worktree has, or — with none — the legacy single
-                // `prStatuses` entry lifted into one synthetic binding, so a
-                // worktree whose PRs cannot be bound (`gh` offline or
-                // unauthenticated, or the first poll after upgrade still in
-                // flight) keeps the control it had before multi-PR. The sidebar
-                // row indicator reads the same accessor, so the two surfaces
-                // cannot disagree. With neither, no control appears at all.
-                if let worktreeID = appState.selectedWorktreeIDs.first,
-                   appState.selectedWorktreeIDs.count == 1 {
-                    let bindings = appState.effectivePRBindings(worktreeID: worktreeID)
-                    if !bindings.isEmpty {
-                        let worktree = appState.findWorktree(id: worktreeID)
-                        let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
-                        let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
-                        let blocked = !appState.children(of: worktreeID).isEmpty
-                        // AppKit materializes this split button's NSMenu and
-                        // label ONCE; later SwiftUI re-evaluations of the
-                        // Toggle checkmark and armed badge never reach the
-                        // already-built NSMenuToolbarItem. Changing the id
-                        // forces the item to be recreated, so the key must
-                        // include EVERYTHING the label/menu render: worktree
-                        // + whether its row has loaded (gates the menu's
-                        // items), armed + hibernateArmed + blocked (menu +
-                        // help), the rendered fields of EVERY binding (number,
-                        // state, url, queue position, detached, and the reason
-                        // + head branch every menu row's title carries), and
-                        // colorScheme (baked icon colors).
-                        // Composed once and used in BOTH the help string and the
-                        // `.id` key: they must agree, or the item stops
-                        // rebuilding when the words it renders change. The
-                        // status it ages is the icon binding's — the same
-                        // selection rule the sidebar dot uses — so the two
-                        // surfaces never disagree about which PR they describe.
-                        //
-                        // `now: Date()` in the body is deliberate. Both facts it
-                        // ages come from `AppState`, and `prObservations` is
-                        // republished on every poll (its `observedAt` advances
-                        // each attempt), so this body re-evaluates on the same
-                        // ~30 s cadence as the facts — a coarse ticker driven by
-                        // the data instead of one running beside it, and much
-                        // finer than the five-minute buckets `checkedLabel`
-                        // renders. **If that republication is ever made
-                        // value-only, these clauses freeze and need a real
-                        // ticker.**
-                        let prFreshnessClauses = PRFreshness.clauses(
-                            status: PRBindingPresentation.iconBinding(bindings)?.status,
-                            observation: appState.prObservations[worktreeID],
-                            now: Date())
-                        let splitButtonID = PRButtonLabel.prSplitButtonID(
-                            worktreeID: worktreeID,
-                            worktreeFound: worktree != nil,
-                            armed: armed,
-                            hibernateArmed: hibernateArmed,
-                            blocked: blocked,
-                            bindings: bindings,
-                            freshnessClauses: prFreshnessClauses,
-                            colorScheme: colorScheme
+            // The window's split, built once per launch: `chrome` comes from
+            // `TBDAppMain` (spec "Switching"). Both branches sit in one
+            // container, so the modifier after it applies to either.
+            Group {
+                switch chrome {
+                case .appKit:
+                    // The split and its `NSToolbar`, all AppKit. The split
+                    // reaches up under the toolbar, as `NavigationSplitView`
+                    // does; each pane's hosted content keeps its own safe area.
+                    MainWindowSplitView(requestRemoteStop: { remoteStopConfirm = $0 })
+                        .ignoresSafeArea(.container, edges: .top)
+                case .swiftUI:
+                    NavigationSplitView {
+                        SidebarView()
+                            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
+                    } detail: {
+                        // The tab choice is resolved HERE, in a real `body`, and handed
+                        // down as a value. Reading these three properties inside
+                        // `updateNSViewController` instead would register no
+                        // dependency — Observation tracks what a `body` evaluation
+                        // reads — so a selection change that touched nothing else this
+                        // body reads would leave the detail area on the previous tab.
+                        DetailSectionHostPager(
+                            targetTab: DetailSectionHostPager.targetTab(
+                                isConnected: appState.isConnected,
+                                selectedRemoteSession: appState.selectedRemoteSession,
+                                selectedRemoteProvider: appState.selectedRemoteProvider
+                            )
                         )
-                        let helpText = Self.prSplitButtonHelp(
-                            bindings: bindings, armed: armed,
-                            hibernateArmed: hibernateArmed, blocked: blocked,
-                            freshnessClauses: prFreshnessClauses)
-
-                        // Exactly one PR whose URL parses keeps the split button
-                        // it has always been: the label is the primary click
-                        // (open the PR), the chevron opens the menu. Otherwise
-                        // there is no single PR a primary click could mean — a
-                        // several-PR worktree, or a lone binding whose stored
-                        // URL will not parse — so `primaryAction:` is dropped
-                        // and the whole button opens the list. The two shapes
-                        // are different `Menu` initializers, so the branch is at
-                        // toolbar-item level: a conditional INSIDE the
-                        // ControlGroup would risk the NSMenuToolbarItem lowering
-                        // the capsule depends on.
-                        let primaryURL = Self.prPrimaryActionURL(bindings)
-                        if let primaryURL {
-                            ToolbarItem(placement: .primaryAction) {
-                                ControlGroup {
-                                    Menu {
-                                        prSplitButtonMenu(
-                                            worktreeID: worktreeID, bindings: bindings,
-                                            showsBindingRows: false,
-                                            worktreeFound: worktree != nil, armed: armed,
-                                            hibernateArmed: hibernateArmed, blocked: blocked)
-                                    } label: {
-                                        PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
-                                    } primaryAction: {
-                                        appState.openPR(url: primaryURL, number: bindings[0].number, worktreeID: worktreeID)
-                                    }
-                                    // Keep "#123" neutral like the original plain Button (the
-                                    // split button otherwise accent-tints it); the icon keeps
-                                    // its baked status color via renderingMode(.original).
-                                    .labelStyle(.titleAndIcon)
-                                    .tint(.primary)
-                                    .help(helpText)
-                                    .id(splitButtonID)
-                                }
+                    }
+                    .toolbar(removing: .sidebarToggle)
+                    .toolbar {
+                        ToolbarItemGroup(placement: .navigation) {
+                            Button {
+                                appState.navigateBack()
+                            } label: {
+                                Image(systemName: "chevron.left")
                             }
+                            .disabled(!appState.canGoBack)
+                            .help("Back")
+
+                            Button {
+                                appState.navigateForward()
+                            } label: {
+                                Image(systemName: "chevron.right")
+                            }
+                            .disabled(!appState.canGoForward)
+                            .help("Forward")
+                        }
+
+                        if #available(macOS 26.0, *) {
+                            ToolbarItem(placement: .principal) {
+                                ToolbarTitleCluster(appState: appState)
+                            }
+                            .sharedBackgroundVisibility(.hidden)
                         } else {
-                            ToolbarItem(placement: .primaryAction) {
-                                ControlGroup {
-                                    Menu {
-                                        prSplitButtonMenu(
-                                            worktreeID: worktreeID, bindings: bindings,
-                                            showsBindingRows: true,
-                                            worktreeFound: worktree != nil, armed: armed,
-                                            hibernateArmed: hibernateArmed, blocked: blocked)
-                                    } label: {
-                                        PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
+                            ToolbarItem(placement: .principal) {
+                                ToolbarTitleCluster(appState: appState)
+                            }
+                        }
+
+                        // macOS 26 fuses ADJACENT bare toolbar items onto one Liquid Glass
+                        // capsule, and `ToolbarItemGroup` fuses on purpose. The reliable
+                        // capsule BOUNDARY is `ControlGroup` (→ NSToolbarItemGroup): the PR
+                        // split button is its sole child, which separates it from both
+                        // neighbors (confirmed earlier) with no internal gap, while keeping
+                        // the split-button chevron + status-colored icon. Plain `Button`s
+                        // for the filter / sidebar separate via placement-matched spacers.
+                        ToolbarItem(placement: .primaryAction) {
+                            Picker("Filter", selection: $appState.repoFilter) {
+                                Text("All Repos").tag(UUID?.none)
+                                Divider()
+                                ForEach(appState.repos) { repo in
+                                    Text(repo.displayName).tag(UUID?.some(repo.id))
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            // macOS 27 draws toolbar menus icon-only by default; this
+                            // text-only Picker then rendered as an empty capsule.
+                            .labelStyle(.titleAndIcon)
+                            .help("Filter sidebar by repository")
+                        }
+
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
+
+                        // The PR control is gated on `effectivePRBindings`: every
+                        // binding the worktree has, or — with none — the legacy single
+                        // `prStatuses` entry lifted into one synthetic binding, so a
+                        // worktree whose PRs cannot be bound (`gh` offline or
+                        // unauthenticated, or the first poll after upgrade still in
+                        // flight) keeps the control it had before multi-PR. The sidebar
+                        // row indicator reads the same accessor, so the two surfaces
+                        // cannot disagree. With neither, no control appears at all.
+                        if let worktreeID = appState.selectedWorktreeIDs.first,
+                           appState.selectedWorktreeIDs.count == 1 {
+                            let bindings = appState.effectivePRBindings(worktreeID: worktreeID)
+                            if !bindings.isEmpty {
+                                let worktree = appState.findWorktree(id: worktreeID)
+                                let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
+                                let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
+                                let blocked = !appState.children(of: worktreeID).isEmpty
+                                // AppKit materializes this split button's NSMenu and
+                                // label ONCE; later SwiftUI re-evaluations of the
+                                // Toggle checkmark and armed badge never reach the
+                                // already-built NSMenuToolbarItem. Changing the id
+                                // forces the item to be recreated, so the key must
+                                // include EVERYTHING the label/menu render: worktree
+                                // + whether its row has loaded (gates the menu's
+                                // items), armed + hibernateArmed + blocked (menu +
+                                // help), the rendered fields of EVERY binding (number,
+                                // state, url, queue position, detached, and the reason
+                                // + head branch every menu row's title carries), and
+                                // colorScheme (baked icon colors).
+                                // Composed once and used in BOTH the help string and the
+                                // `.id` key: they must agree, or the item stops
+                                // rebuilding when the words it renders change. The
+                                // status it ages is the icon binding's — the same
+                                // selection rule the sidebar dot uses — so the two
+                                // surfaces never disagree about which PR they describe.
+                                //
+                                // `now: Date()` in the body is deliberate. Both facts it
+                                // ages come from `AppState`, and `prObservations` is
+                                // republished on every poll (its `observedAt` advances
+                                // each attempt), so this body re-evaluates on the same
+                                // ~30 s cadence as the facts — a coarse ticker driven by
+                                // the data instead of one running beside it, and much
+                                // finer than the five-minute buckets `checkedLabel`
+                                // renders. **If that republication is ever made
+                                // value-only, these clauses freeze and need a real
+                                // ticker.**
+                                let prFreshnessClauses = PRFreshness.clauses(
+                                    status: PRBindingPresentation.iconBinding(bindings)?.status,
+                                    observation: appState.prObservations[worktreeID],
+                                    now: Date())
+                                let splitButtonID = PRButtonLabel.prSplitButtonID(
+                                    worktreeID: worktreeID,
+                                    worktreeFound: worktree != nil,
+                                    armed: armed,
+                                    hibernateArmed: hibernateArmed,
+                                    blocked: blocked,
+                                    bindings: bindings,
+                                    freshnessClauses: prFreshnessClauses,
+                                    colorScheme: colorScheme
+                                )
+                                let helpText = Self.prSplitButtonHelp(
+                                    bindings: bindings, armed: armed,
+                                    hibernateArmed: hibernateArmed, blocked: blocked,
+                                    freshnessClauses: prFreshnessClauses)
+
+                                // Exactly one PR whose URL parses keeps the split button
+                                // it has always been: the label is the primary click
+                                // (open the PR), the chevron opens the menu. Otherwise
+                                // there is no single PR a primary click could mean — a
+                                // several-PR worktree, or a lone binding whose stored
+                                // URL will not parse — so `primaryAction:` is dropped
+                                // and the whole button opens the list. The two shapes
+                                // are different `Menu` initializers, so the branch is at
+                                // toolbar-item level: a conditional INSIDE the
+                                // ControlGroup would risk the NSMenuToolbarItem lowering
+                                // the capsule depends on.
+                                let primaryURL = Self.prPrimaryActionURL(bindings)
+                                if let primaryURL {
+                                    ToolbarItem(placement: .primaryAction) {
+                                        ControlGroup {
+                                            Menu {
+                                                prSplitButtonMenu(
+                                                    worktreeID: worktreeID, bindings: bindings,
+                                                    showsBindingRows: false,
+                                                    worktreeFound: worktree != nil, armed: armed,
+                                                    hibernateArmed: hibernateArmed, blocked: blocked)
+                                            } label: {
+                                                PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
+                                            } primaryAction: {
+                                                appState.openPR(url: primaryURL, number: bindings[0].number, worktreeID: worktreeID)
+                                            }
+                                            // Keep "#123" neutral like the original plain Button (the
+                                            // split button otherwise accent-tints it); the icon keeps
+                                            // its baked status color via renderingMode(.original).
+                                            .labelStyle(.titleAndIcon)
+                                            .tint(.primary)
+                                            .help(helpText)
+                                            .id(splitButtonID)
+                                        }
                                     }
-                                    .labelStyle(.titleAndIcon)
-                                    .tint(.primary)
-                                    .help(helpText)
-                                    .id(splitButtonID)
+                                } else {
+                                    ToolbarItem(placement: .primaryAction) {
+                                        ControlGroup {
+                                            Menu {
+                                                prSplitButtonMenu(
+                                                    worktreeID: worktreeID, bindings: bindings,
+                                                    showsBindingRows: true,
+                                                    worktreeFound: worktree != nil, armed: armed,
+                                                    hibernateArmed: hibernateArmed, blocked: blocked)
+                                            } label: {
+                                                PRButtonLabel(bindings: bindings, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
+                                            }
+                                            .labelStyle(.titleAndIcon)
+                                            .tint(.primary)
+                                            .help(helpText)
+                                            .id(splitButtonID)
+                                        }
+                                    }
+                                }
+
+                                if #available(macOS 26.0, *) {
+                                    ToolbarSpacer(.fixed, placement: .primaryAction)
                                 }
                             }
                         }
 
-                        if #available(macOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        // Dev servers (docs/specs/2026-10-11-dev-servers-design.md):
+                        // shown only when the selected worktree declares or reports
+                        // one. Same two shapes as the PR button above, chosen at
+                        // toolbar-item level for the same reason: a split button whose
+                        // primary click opens the main URL when a running server has
+                        // one, else a plain menu button whose whole surface opens the
+                        // menu. The menu leads with "Open <main URL>" in both shapes.
+                        if let worktreeID = appState.selectedWorktreeIDs.first,
+                           appState.selectedWorktreeIDs.count == 1,
+                           let serverList = appState.devServerLists[worktreeID],
+                           AppState.showsServersButton(serverList) {
+                            let serversID = ServersButtonLabel.splitButtonID(
+                                worktreeID: worktreeID, list: serverList,
+                                messages: appState.devServerActionMessages[worktreeID] ?? [],
+                                colorScheme: colorScheme)
+                            if let primaryURL = AppState.primaryDevServerURL(serverList) {
+                                ToolbarItem(placement: .primaryAction) {
+                                    ControlGroup {
+                                        Menu {
+                                            serversMenu(worktreeID: worktreeID, list: serverList)
+                                        } label: {
+                                            ServersButtonLabel(list: serverList)
+                                        } primaryAction: {
+                                            appState.openDevServerURL(primaryURL)
+                                        }
+                                        .labelStyle(.titleAndIcon)
+                                        .tint(.primary)
+                                        .help("Open \(primaryURL) · more options")
+                                        .id(serversID)
+                                    }
+                                }
+                            } else {
+                                ToolbarItem(placement: .primaryAction) {
+                                    ControlGroup {
+                                        Menu {
+                                            serversMenu(worktreeID: worktreeID, list: serverList)
+                                        } label: {
+                                            ServersButtonLabel(list: serverList)
+                                        }
+                                        .labelStyle(.titleAndIcon)
+                                        .tint(.primary)
+                                        .help("Dev servers")
+                                        .id(serversID)
+                                    }
+                                }
+                            }
+                            if #available(macOS 26.0, *) {
+                                ToolbarSpacer(.fixed, placement: .primaryAction)
+                            }
                         }
-                    }
-                }
 
-                // Dev servers (docs/specs/2026-10-11-dev-servers-design.md):
-                // shown only when the selected worktree declares or reports
-                // one. Same two shapes as the PR button above, chosen at
-                // toolbar-item level for the same reason: a split button whose
-                // primary click opens the main URL when a running server has
-                // one, else a plain menu button whose whole surface opens the
-                // menu. The menu leads with "Open <main URL>" in both shapes.
-                if let worktreeID = appState.selectedWorktreeIDs.first,
-                   appState.selectedWorktreeIDs.count == 1,
-                   let serverList = appState.devServerLists[worktreeID],
-                   AppState.showsServersButton(serverList) {
-                    let serversID = ServersButtonLabel.splitButtonID(
-                        worktreeID: worktreeID, list: serverList,
-                        messages: appState.devServerActionMessages[worktreeID] ?? [],
-                        colorScheme: colorScheme)
-                    if let primaryURL = AppState.primaryDevServerURL(serverList) {
+                        // A selected remote session's actions, where a local
+                        // session's live: plain buttons (no badges to flatten) on
+                        // one fused capsule, like back/forward.
+                        if let selection = appState.selectedRemoteSession {
+                            let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+                            let showsStop = appState.remoteSessionShowsStop(selection)
+                            let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                            if showsReconnect || showsStop || showsTranscriptToggle {
+                                ToolbarItemGroup(placement: .primaryAction) {
+                                    if showsTranscriptToggle {
+                                        // One preference for every remote session
+                                        // (`remoteTranscriptOpen`), not per session.
+                                        Button {
+                                            appState.toggleRemoteTranscriptOpen()
+                                        } label: {
+                                            Image(systemName: appState.remoteTranscriptOpen
+                                                  ? "text.bubble.fill" : "text.bubble")
+                                        }
+                                        .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                                    }
+                                    if showsReconnect {
+                                        // Restarts the local `attach` child in place —
+                                        // the way out of a pane whose transport died
+                                        // without the child exiting, which nothing
+                                        // else can detect.
+                                        Button {
+                                            appState.reconnectRemoteSession(selection)
+                                        } label: {
+                                            Image(systemName: "arrow.clockwise")
+                                        }
+                                        .help("Reconnect — restart this session's attach connection")
+                                    }
+                                    if showsStop {
+                                        Button {
+                                            remoteStopConfirm = selection
+                                        } label: {
+                                            Image(systemName: "stop.circle")
+                                        }
+                                        .help("Stop this remote session")
+                                    }
+                                }
+
+                                if #available(macOS 26.0, *) {
+                                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                                }
+                            }
+                        }
+
                         ToolbarItem(placement: .primaryAction) {
-                            ControlGroup {
-                                Menu {
-                                    serversMenu(worktreeID: worktreeID, list: serverList)
-                                } label: {
-                                    ServersButtonLabel(list: serverList)
-                                } primaryAction: {
-                                    appState.openDevServerURL(primaryURL)
-                                }
-                                .labelStyle(.titleAndIcon)
-                                .tint(.primary)
-                                .help("Open \(primaryURL) · more options")
-                                .id(serversID)
+                            Button {
+                                // Defer the toggle one run-loop tick and skip the explicit
+                                // withAnimation wrapper. Stacking an easeInOut animation
+                                // on top of an in-flight NavigationSplitView selection
+                                // change blew the per-window constraint-update budget
+                                // (NSGenericException from _uncollapseArrangedView:animated:).
+                                // SwiftUI still animates the layout change implicitly.
+                                DispatchQueue.main.async { showFilePanel.toggle() }
+                            } label: {
+                                Image(systemName: "sidebar.right")
                             }
-                        }
-                    } else {
-                        ToolbarItem(placement: .primaryAction) {
-                            ControlGroup {
-                                Menu {
-                                    serversMenu(worktreeID: worktreeID, list: serverList)
-                                } label: {
-                                    ServersButtonLabel(list: serverList)
-                                }
-                                .labelStyle(.titleAndIcon)
-                                .tint(.primary)
-                                .help("Dev servers")
-                                .id(serversID)
-                            }
+                            .help("Toggle file panel (⌘⇧E)")
                         }
                     }
-                    if #available(macOS 26.0, *) {
-                        ToolbarSpacer(.fixed, placement: .primaryAction)
-                    }
-                }
-
-                // A selected remote session's actions, where a local
-                // session's live: plain buttons (no badges to flatten) on
-                // one fused capsule, like back/forward.
-                if let selection = appState.selectedRemoteSession {
-                    let showsReconnect = appState.attachedRemoteSelections.contains(selection)
-                    let showsStop = appState.remoteSessionShowsStop(selection)
-                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
-                    if showsReconnect || showsStop || showsTranscriptToggle {
-                        ToolbarItemGroup(placement: .primaryAction) {
-                            if showsTranscriptToggle {
-                                // One preference for every remote session
-                                // (`remoteTranscriptOpen`), not per session.
-                                Button {
-                                    appState.toggleRemoteTranscriptOpen()
-                                } label: {
-                                    Image(systemName: appState.remoteTranscriptOpen
-                                          ? "text.bubble.fill" : "text.bubble")
-                                }
-                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
-                            }
-                            if showsReconnect {
-                                // Restarts the local `attach` child in place —
-                                // the way out of a pane whose transport died
-                                // without the child exiting, which nothing
-                                // else can detect.
-                                Button {
-                                    appState.reconnectRemoteSession(selection)
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                }
-                                .help("Reconnect — restart this session's attach connection")
-                            }
-                            if showsStop {
-                                Button {
-                                    remoteStopConfirm = selection
-                                } label: {
-                                    Image(systemName: "stop.circle")
-                                }
-                                .help("Stop this remote session")
-                            }
-                        }
-
-                        if #available(macOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .primaryAction)
-                        }
-                    }
-                }
-
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        // Defer the toggle one run-loop tick and skip the explicit
-                        // withAnimation wrapper. Stacking an easeInOut animation
-                        // on top of an in-flight NavigationSplitView selection
-                        // change blew the per-window constraint-update budget
-                        // (NSGenericException from _uncollapseArrangedView:animated:).
-                        // SwiftUI still animates the layout change implicitly.
-                        DispatchQueue.main.async { showFilePanel.toggle() }
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help("Toggle file panel (⌘⇧E)")
                 }
             }
             // The Servers button's list whenever a single worktree becomes
             // selected (the toolbar menu exposes no reliable will-open hook).
             // Selection is not a gesture on the servers, so repo `status`
             // commands do not run here; actions, "Refresh status" and
-            // `devServersChanged` deltas refresh it from `AppState`.
+            // `devServersChanged` deltas refresh it from `AppState`. On the
+            // container, so it runs with either chrome: the AppKit toolbar's
+            // Servers item reads the same list.
             .task(id: appState.selectedWorktreeIDs.count == 1 ? appState.selectedWorktreeIDs.first : nil) {
                 guard appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first else { return }
                 await appState.refreshDevServers(worktreeID: id, trigger: .selection)

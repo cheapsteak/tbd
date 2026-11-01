@@ -128,7 +128,8 @@ final class OffscreenHost<Root: View> {
     /// as SwiftUI's lifecycle is concerned.
     static var offscreenOrigin: NSPoint { NSPoint(x: -20_000, y: -20_000) }
 
-    /// The window the hierarchy lives in. Borderless, offscreen, never key.
+    /// The window the hierarchy lives in. Offscreen and never key; borderless
+    /// unless the caller asked for another `styleMask`.
     var window: NSWindow { live(mountedWindow, "window") }
 
     /// The hosting view for `Root`, pinned to `contentView` at the requested
@@ -180,11 +181,15 @@ final class OffscreenHost<Root: View> {
     ///     setting; pass `nil` to inherit it deliberately.
     ///   - background: The ground's colour, resolved inside `appearance`. `nil`
     ///     leaves the ground clear, for a caller that wants alpha.
+    ///   - styleMask: The window's style. Borderless by default; a caller
+    ///     whose view puts a toolbar on its window passes a titled style,
+    ///     since a toolbar belongs to a titlebar.
     init(
         root: Root,
         size: NSSize,
         appearance: NSAppearance? = NSAppearance(named: .aqua),
-        background: NSColor? = .controlBackgroundColor
+        background: NSColor? = .controlBackgroundColor,
+        styleMask: NSWindow.StyleMask = [.borderless]
     ) {
         // Enough of an application for AppKit to have an app object at all;
         // `NSHostingView` and `NSWindow` both reach for one.
@@ -204,7 +209,7 @@ final class OffscreenHost<Root: View> {
 
         let window = NSWindow(
             contentRect: NSRect(origin: Self.offscreenOrigin, size: size),
-            styleMask: [.borderless], backing: .buffered, defer: false)
+            styleMask: styleMask, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = ground
 

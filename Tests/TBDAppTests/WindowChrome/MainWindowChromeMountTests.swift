@@ -1,0 +1,374 @@
+import AppKit
+import SwiftUI
+import Testing
+import TBDShared
+@testable import TBDApp
+import TestSupport
+
+// Tier 2: the whole `ContentView` hosted in an offscreen window. Waits are
+// bounded: pump counts for the mount, `pollUntilTrue` for main-queue work.
+
+/// `ContentView` built with each `MainWindowChrome`. The AppKit chrome mounts
+/// a `MainSplitViewController` and puts a `MainToolbarController`'s toolbar on
+/// the window; the SwiftUI chrome mounts neither. Unlike the toolbar
+/// controller's own suite, which builds the split into a window by hand, this
+/// is the production hosting path: the split inside SwiftUI's hosting view,
+/// reached through `MainWindowSplitView`. Spec:
+/// docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window structure",
+/// "Switching" and "Testing".
+///
+/// The toolbar is applied through `DispatchQueue.main.async`, so waits on it
+/// suspend (`waitForChrome`, over `pollUntilTrue`) rather than pump
+/// (Tests/CLAUDE.md, "`@MainActor` tests: suspend to drain, never pump").
+@MainActor
+@Suite("Main window chrome mount")
+struct MainWindowChromeMountTests {
+    // MARK: - Each chrome's structure
+
+    @Test func appKitChromeMountsTheSplitAndToolbar() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "appKitMounts")
+        defer { mount.tearDown() }
+        let controller = try await mount.appKitReady()
+
+        #expect(mount.splitRoots.count == 1)
+        #expect(mount.host.window.toolbar?.delegate is MainToolbarController)
+        #expect(controller.split === mount.mountedSplit)
+
+        // Nothing of SwiftUI's toolbar: every item is one the AppKit toolbar
+        // declares.
+        let identifiers = mount.toolbarIdentifiers
+        let allowed = Set(MainToolbarItemID.allowed)
+        let stray = identifiers.filter { !allowed.contains($0) }
+        #expect(identifiers.contains(MainToolbarItemID.toggleSidebar))
+        #expect(stray.isEmpty)
+    }
+
+    @Test func swiftUIChromeMountsNoAppKitSplit() async throws {
+        let mount = ChromeMount(chrome: .swiftUI, label: "swiftUIMounts")
+        defer { mount.tearDown() }
+
+        // Positive control: `NavigationSplitView` lowers to an `NSSplitView`.
+        let splitMounted = await mount.host.settle { !mount.host.descendants(NSSplitView.self).isEmpty }
+        try #require(splitMounted, "The NavigationSplitView never mounted; the negatives below would be vacuous")
+
+        #expect(mount.splitRoots.isEmpty)
+        #expect(mount.toolbarController == nil)
+    }
+
+    // MARK: - The toolbar in the hosted window
+
+    /// Review focus 1: a SwiftUI update of the window's hierarchy must leave
+    /// the AppKit toolbar on the window, or the next apply must put it back.
+    @Test func toolbarSurvivesAnAppStateChange() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "survives")
+        defer { mount.tearDown() }
+        let controller = try await mount.appKitReady()
+        let toolbar = try #require(mount.host.window.toolbar)
+
+        let state = mount.state
+        let repoID = mount.repo.id
+        let worktreeID = mount.worktrees[1].id
+        state.repoFilter = repoID
+        state.selectedWorktreeIDs = [worktreeID]
+
+        // Both sides took the change: the toolbar applied it, and
+        // `ContentView`'s own `onChange` ran in a SwiftUI update.
+        let landed = try await waitForChrome("the toolbar and ContentView to take the change") {
+            controller.appliedSnapshot?.filter.selected == repoID
+                && state.recentlyVisitedWorktreeIDs.first == worktreeID
+        }
+        try #require(landed)
+        // A few more turns for anything SwiftUI does to the window after that.
+        await mount.host.pump(times: 10)
+
+        #expect(mount.host.window.toolbar === toolbar)
+        #expect(mount.host.window.toolbar?.delegate === controller)
+        let identifiers = mount.toolbarIdentifiers
+        let allowed = Set(MainToolbarItemID.allowed)
+        let stray = identifiers.filter { !allowed.contains($0) }
+        #expect(stray.isEmpty)
+    }
+
+    /// The toolbar's tracking separator is bound to the split, with the split
+    /// inside SwiftUI's hosting view as in the app, rather than in a container
+    /// a test built.
+    @Test func appKitChromeBindsTheTrackingSeparatorToTheHostedSplit() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "trackingSeparator")
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+
+        let hasSeparator = try await waitForChrome("a tracking separator in the window's toolbar") {
+            mount.trackingSeparator != nil
+        }
+        try #require(hasSeparator)
+        let separator = try #require(mount.trackingSeparator)
+        let split = try #require(mount.mountedSplit)
+        try #require(split.view.isDescendant(of: mount.host.hostingView))
+
+        let bound: NSSplitView? = separator.splitView
+        #expect(bound === split.splitView)
+        #expect(separator.dividerIndex == 0)
+    }
+
+    // MARK: - The selection's server refresh, on both chromes
+
+    /// The `.task(id:)` that fetches a selected worktree's servers hangs on
+    /// the container of both chromes. On the AppKit one, the Servers item
+    /// appearing is what that fetch is for.
+    @Test func appKitChromeRefreshesTheSelectedWorktreesServers() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "serversAppKit")
+        defer { mount.tearDown() }
+        let fetches = mount.recordServerFetches()
+        _ = try await mount.appKitReady()
+        try #require(!mount.toolbarIdentifiers.contains(MainToolbarItemID.servers))
+
+        let worktreeID = mount.worktrees[1].id
+        mount.state.selectedWorktreeIDs = [worktreeID]
+
+        let fetched = try await waitForChrome("the selection's server fetch") {
+            fetches.worktreeIDs.contains(worktreeID)
+        }
+        #expect(fetched)
+        let shown = try await waitForChrome("the Servers item") {
+            mount.toolbarIdentifiers.contains(MainToolbarItemID.servers)
+        }
+        #expect(shown)
+    }
+
+    @Test func swiftUIChromeRefreshesTheSelectedWorktreesServers() async throws {
+        let mount = ChromeMount(chrome: .swiftUI, label: "serversSwiftUI")
+        defer { mount.tearDown() }
+        let fetches = mount.recordServerFetches()
+        let splitMounted = await mount.host.settle { !mount.host.descendants(NSSplitView.self).isEmpty }
+        try #require(splitMounted, "The NavigationSplitView never mounted")
+
+        let worktreeID = mount.worktrees[1].id
+        mount.state.selectedWorktreeIDs = [worktreeID]
+
+        let fetched = try await waitForChrome("the selection's server fetch") {
+            fetches.worktreeIDs.contains(worktreeID)
+        }
+        #expect(fetched)
+    }
+
+    // MARK: - Dismantling
+
+    /// SwiftUI dismantling the split takes the AppKit toolbar off the window,
+    /// and leaves a toolbar something else put there.
+    @Test func dismantleTakesOnlyItsOwnToolbarOffTheWindow() throws {
+        let suite = TestDefaultsSuite("MainWindowChromeMountTests.dismantle")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+
+        let ownWindow = Self.makeWindow()
+        let ownSplit = Self.makeSplit()
+        let own = MainWindowSplitView.Coordinator()
+        own.toolbarController = MainToolbarController(
+            appState: state, titleView: NSView(), requestRemoteStop: { _ in })
+        own.toolbarController?.install(on: ownWindow, split: ownSplit)
+        ownSplit.onViewDidAppear = { _ in }
+        try #require(ownWindow.toolbar != nil)
+        try #require(ownWindow.toolbar === own.toolbarController?.toolbar)
+
+        MainWindowSplitView.dismantleNSViewController(ownSplit, coordinator: own)
+        #expect(ownWindow.toolbar == nil)
+        #expect(own.toolbarController == nil)
+        let appearHookCleared = ownSplit.onViewDidAppear == nil
+        #expect(appearHookCleared)
+
+        let otherWindow = Self.makeWindow()
+        let otherSplit = Self.makeSplit()
+        let replaced = MainWindowSplitView.Coordinator()
+        replaced.toolbarController = MainToolbarController(
+            appState: state, titleView: NSView(), requestRemoteStop: { _ in })
+        replaced.toolbarController?.install(on: otherWindow, split: otherSplit)
+        let other = NSToolbar(identifier: "MainWindowChromeMountTests.other")
+        otherWindow.toolbar = other
+
+        MainWindowSplitView.dismantleNSViewController(otherSplit, coordinator: replaced)
+        #expect(otherWindow.toolbar === other)
+        #expect(replaced.toolbarController == nil)
+    }
+
+    // MARK: - Helpers
+
+    /// A titled window, never shown: a toolbar belongs to a titlebar.
+    private static func makeWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: ChromeMount.size),
+            styleMask: ChromeMount.styleMask, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    private static func makeSplit() -> MainSplitViewController {
+        MainSplitViewController(sidebar: makePane(), content: makePane(), autosaveName: nil)
+    }
+
+    private static func makePane() -> NSViewController {
+        let pane = NSViewController()
+        pane.view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: ChromeMount.size.height))
+        return pane
+    }
+}
+
+// MARK: - Waiting
+
+/// Polls `condition` on the main actor until it holds, bounded by the
+/// saturated pass's deadline. A timeout is recorded as an issue naming `what`
+/// and the time spent, and returns `false`.
+private func waitForChrome(
+    _ what: String, _ condition: @escaping @MainActor @Sendable () -> Bool
+) async throws -> Bool {
+    let start = ContinuousClock.now
+    let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+        await MainActor.run { condition() }
+    }
+    switch outcome {
+    case .satisfied:
+        return true
+    case .cancelled:
+        throw CancellationError()
+    case .timedOut:
+        Issue.record(ChromeWaitTimedOut(what: what, elapsed: ContinuousClock.now - start))
+        return false
+    }
+}
+
+private struct ChromeWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    let elapsed: Duration
+
+    var description: String {
+        "Timed out waiting for \(what) after \(elapsed)"
+    }
+}
+
+// MARK: - Fixture
+
+/// `ContentView` with one chrome, its `AppState` holding a repo and two
+/// worktrees, hosted offscreen in a titled window at the app's default size.
+@MainActor
+private final class ChromeMount {
+    static let size = NSSize(width: 1200, height: 800)
+    /// Titled, as the app's window is: the AppKit toolbar needs a titlebar.
+    static let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+
+    let suite: TestDefaultsSuite
+    let state: AppState
+    let repo: Repo
+    let worktrees: [Worktree]
+    let host: OffscreenHost<AnyView>
+
+    init(chrome: MainWindowChrome, label: String) {
+        let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
+        self.suite = suite
+        let state = AppState(userDefaults: suite.defaults)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let worktrees = [
+            Worktree(repoID: repo.id, name: "main", displayName: "main", branch: "main",
+                     path: "/tmp/acme", status: .main, tmuxServer: "acme"),
+            Worktree(repoID: repo.id, name: "feature", displayName: "feature", branch: "feature",
+                     path: "/tmp/acme-feature", tmuxServer: "acme"),
+        ]
+        state.repos = [repo]
+        state.worktrees = [repo.id: worktrees]
+        // Run and answered before the mount, so `ContentView.onAppear`'s call
+        // finds the check done and no "tmux Not Found" alert can be raised
+        // over the window, whatever the runner's PATH holds.
+        state.checkTmuxAvailabilityAtStartup()
+        state.dismissTmuxLocationPrompt()
+        self.state = state
+        self.repo = repo
+        self.worktrees = worktrees
+
+        // A themes directory that does not exist, so the appearance's lookup
+        // misses deterministically instead of reading the real `~/tbd`.
+        let appearance = AppearanceSettings(
+            defaults: suite.defaults,
+            userThemesDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("TBDAppTests.MainWindowChromeMount.\(UUID().uuidString)"))
+        let root = ContentView(chrome: chrome)
+            .environment(state)
+            .environmentObject(appearance)
+            .environmentObject(TranscriptOverlayCoordinator())
+            .defaultAppStorage(suite.defaults)
+        host = OffscreenHost(root: AnyView(root), size: ChromeMount.size, styleMask: ChromeMount.styleMask)
+    }
+
+    /// Takes the toolbar off the window before the host goes, so the window
+    /// shell AppKit keeps holds none of ours whatever SwiftUI's teardown does.
+    func tearDown() {
+        host.window.toolbar = nil
+        host.tearDown()
+        suite.tearDown()
+    }
+
+    /// Waits for the AppKit split to mount and for its appearance to install
+    /// the toolbar and apply it once, and returns the toolbar's controller.
+    func appKitReady() async throws -> MainToolbarController {
+        let splitMounted = await host.settle { !self.splitRoots.isEmpty }
+        try #require(splitMounted, "The AppKit split never mounted with the AppKit chrome")
+        let installed = try await waitForChrome("the AppKit toolbar to be installed and applied") {
+            self.toolbarController?.appliedSnapshot != nil
+        }
+        try #require(installed)
+        return try #require(toolbarController)
+    }
+
+    /// Answers the selection's server fetch with one running server, and
+    /// records each worktree it was asked for.
+    func recordServerFetches() -> ServerFetchLog {
+        let log = ServerFetchLog()
+        state.devServerListFetcher = { worktreeID, _ in
+            log.worktreeIDs.append(worktreeID)
+            let server = DevServerInfo(
+                name: "web", label: "web", source: "tbd.toml", state: .running, exitCode: nil,
+                endpoints: [DevServerEndpoint(name: "app", url: "http://localhost:3000")],
+                terminalID: nil, pid: nil, hasStopCommand: false,
+                stateFromStatusCommand: nil, hasStatusCommand: true, exitedTab: nil)
+            return DevServerListResult(
+                worktreeID: worktreeID, servers: [server], parseErrors: [], runningFileDiagnostics: [])
+        }
+        return log
+    }
+
+    // MARK: Lookups
+
+    /// Views carrying the AppKit split's identifier.
+    var splitRoots: [NSView] {
+        host.descendants(NSView.self).filter { $0.identifier == MainSplitViewController.viewIdentifier }
+    }
+
+    /// The AppKit split, found up the responder chain from its view.
+    var mountedSplit: MainSplitViewController? {
+        var responder: NSResponder? = splitRoots.first
+        while let current = responder {
+            if let split = current as? MainSplitViewController { return split }
+            responder = current.nextResponder
+        }
+        return nil
+    }
+
+    /// The window toolbar's delegate, when that is the AppKit toolbar's.
+    var toolbarController: MainToolbarController? {
+        host.window.toolbar?.delegate as? MainToolbarController
+    }
+
+    var toolbarIdentifiers: [NSToolbarItem.Identifier] {
+        (host.window.toolbar?.items ?? []).map(\.itemIdentifier)
+    }
+
+    var trackingSeparator: NSTrackingSeparatorToolbarItem? {
+        for item in host.window.toolbar?.items ?? [] {
+            if let separator = item as? NSTrackingSeparatorToolbarItem { return separator }
+        }
+        return nil
+    }
+}
+
+/// The worktrees a fixture's server fetcher was asked for.
+@MainActor
+private final class ServerFetchLog {
+    var worktreeIDs: [UUID] = []
+}
