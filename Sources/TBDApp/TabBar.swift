@@ -669,6 +669,71 @@ enum ContinueInClaudeMenu {
     }
 }
 
+// MARK: - Tab controls
+
+/// The terminal pin's item in a workspace tab's right-click menu (panel tabs
+/// spec, "The renderer"): "Unpin" for a pinned terminal, "Pin" for any other,
+/// and no item for a tab with no terminal behind it.
+enum TabPinMenu {
+    static func title(for terminal: TBDShared.Terminal?) -> String? {
+        guard let terminal else { return nil }
+        return terminal.pinnedAt != nil ? "Unpin" : "Pin"
+    }
+}
+
+/// What committing a tab's rename field writes (panel tabs spec, "The
+/// renderer"): a note tab's rename is its note's title, and any other tab's
+/// is the tab's label.
+enum TabRename: Equatable {
+    /// Set the tab's label to this text (`AppState.renameTab`, which trims it
+    /// and clears the label for blank text).
+    case label(String)
+    /// Write the note's title — nil leaves the title as it is — and clear the
+    /// tab's label, so the tab shows the title.
+    case note(noteID: UUID, title: String?)
+
+    /// The rename for a tab showing `content`, committed with `text`, while
+    /// its note (for a note tab) is titled `currentNoteTitle`.
+    static func commit(content: PaneContent, text: String, currentNoteTitle: String?) -> TabRename {
+        guard case .note(let noteID) = content else { return .label(text) }
+        return .note(noteID: noteID, title: noteTitle(text: text, currentNoteTitle: currentNoteTitle))
+    }
+
+    /// The title a note's rename writes: the trimmed text, or nil when it is
+    /// blank or already the note's title.
+    static func noteTitle(text: String, currentNoteTitle: String?) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != currentNoteTitle else { return nil }
+        return trimmed
+    }
+}
+
+/// What a tab bar item does with the pending rename
+/// (`AppState.pendingTabRenameID`) when it looks: the item showing that tab
+/// opens its rename field and clears the request; any other item leaves it.
+struct TabRenamePickUp: Equatable {
+    let startsEditing: Bool
+    /// The pending rename once the item has looked.
+    let pendingIDAfter: UUID?
+
+    static func decide(tabID: UUID, pendingID: UUID?) -> TabRenamePickUp {
+        guard pendingID == tabID else {
+            return TabRenamePickUp(startsEditing: false, pendingIDAfter: pendingID)
+        }
+        return TabRenamePickUp(startsEditing: true, pendingIDAfter: nil)
+    }
+}
+
+/// A workspace tab's hover text: a web page's full address, which its label
+/// (the host) leaves out. No other tab has one; a Claude tab has its account
+/// hover card instead.
+enum WorkspaceTabTooltip {
+    static func text(for content: PaneContent) -> String? {
+        guard case .webview(_, let url) = content else { return nil }
+        return url.absoluteString
+    }
+}
+
 // MARK: - TabTerminalTarget
 
 /// Pure resolution of the terminal a tab is backed by: the anchor its deep
@@ -791,10 +856,11 @@ private struct TabBarItem: View {
                             text: tabLabel,
                             isEditing: $isEditing,
                             onCommit: { newText in
-                                appState.renameTab(
+                                appState.commitTabRename(
                                     tabID: tab.id,
                                     worktreeID: worktreeID,
-                                    newLabel: newText
+                                    content: tab.content,
+                                    text: newText
                                 )
                             },
                             editorFont: .systemFont(ofSize: 11),
@@ -833,6 +899,7 @@ private struct TabBarItem: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .modifier(OptionalHelp(text: WorkspaceTabTooltip.text(for: tab.content)))
 
             // Close button — right side
             Button(action: onClose) {
@@ -890,10 +957,13 @@ private struct TabBarItem: View {
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
                 guard isRenameable else { return }
-                if !isSelected { onSelect() }
-                isEditing = true
+                beginRename()
             }
         )
+        .onAppear { pickUpPendingRename() }
+        .onChange(of: appState.pendingTabRenameID) { _, _ in
+            pickUpPendingRename()
+        }
         .opacity(appState.draggingTabID == tab.id ? 0.4 : 1)
         .overlay(alignment: dropEdge == .leading ? .leading : .trailing) {
             if dropEdge != nil {
@@ -1079,6 +1149,17 @@ private struct TabBarItem: View {
 
         Divider()
 
+        if let terminal, let pinTitle = TabPinMenu.title(for: terminal) {
+            let pinned = terminal.pinnedAt != nil
+            Button {
+                Task { await appState.setTerminalPin(id: terminal.id, pinned: !pinned) }
+            } label: {
+                Label(pinTitle, systemImage: pinned ? "pin.slash" : "pin")
+            }
+
+            Divider()
+        }
+
         // Shells move too, so this sits outside the Claude-only block.
         if TransportMigrationMenu.isOffered(
             for: terminal,
@@ -1170,8 +1251,7 @@ private struct TabBarItem: View {
 
         if isRenameable {
             Button("Rename Tab") {
-                if !isSelected { onSelect() }
-                isEditing = true
+                beginRename()
             }
             Divider()
         }
@@ -1179,6 +1259,21 @@ private struct TabBarItem: View {
         Button(action: onClose) {
             Label("Close Tab", systemImage: "xmark")
         }
+    }
+
+    /// Selects the tab and asks for its rename field through `AppState`
+    /// (`requestTabRename`), not this item's own state: selecting can move the
+    /// bar to another view, which rebuilds this item, and the item showing the
+    /// tab then — this one or its replacement — opens the field.
+    private func beginRename() {
+        if !isSelected { onSelect() }
+        appState.requestTabRename(tabID: tab.id)
+    }
+
+    /// Opens the rename field when the pending rename is this tab's.
+    private func pickUpPendingRename() {
+        guard appState.takePendingTabRename(tabID: tab.id) else { return }
+        isEditing = true
     }
 
     /// Viewer content shows the icon it shares with the side region's strip
@@ -1259,5 +1354,21 @@ private struct HistoryTabButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .help("Session History")
+    }
+}
+
+// MARK: - OptionalHelp
+
+/// `.help(text)` when there is text, and nothing otherwise, so a view with no
+/// tooltip gets no empty one.
+private struct OptionalHelp: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.help(text)
+        } else {
+            content
+        }
     }
 }

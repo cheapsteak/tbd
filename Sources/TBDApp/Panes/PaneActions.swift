@@ -41,7 +41,8 @@ struct PaneActions {
     /// Act on a link clicked in a terminal's live transcript.
     var openTranscriptLink: @MainActor (PaneContent, _ terminalID: UUID, TranscriptLinkTarget) -> Void
     /// Close the pane showing the given content. Takes the content, not just
-    /// the pane ID, because closing a note pane also deletes the note.
+    /// the pane ID, because the legacy set deletes a note pane's note as it
+    /// closes it; the daemon set's close keeps the note.
     var close: @MainActor (PaneContent) -> Void
     /// Show or hide a terminal's live transcript, from the pane showing the
     /// given content.

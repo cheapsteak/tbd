@@ -324,6 +324,35 @@ extension AppState {
         }
     }
 
+    /// Closes one side-region panel from its tab's ×. A note panel closes as
+    /// a workspace note tab does (`closeTab`): when the note has content the
+    /// user is asked first, and a declined confirmation sends nothing; then
+    /// the panel closes, and only once the daemon has applied that close is
+    /// the note deleted. Nothing in the app lists notes, so a note closed and
+    /// kept would be unreachable. Any other panel just closes.
+    ///
+    /// The `close` operation itself keeps the note — the daemon action set's
+    /// close sends it alone — so an agent's `tbd panel close` does too.
+    func closeSidePanel(
+        worktreeID: UUID, tabID: UUID, panelID: PanelID, content: PanelContent
+    ) async {
+        let close = PanelOperation.close(panelID: panelID)
+        guard case .note(let noteID) = content else {
+            await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close)
+            return
+        }
+        if let note = notes[worktreeID]?.first(where: { $0.id == noteID }),
+           noteHasContent(worktreeID: worktreeID, noteID: noteID),
+           !noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) {
+            return
+        }
+        // A refused close leaves the panel on screen, so its note must stay.
+        guard await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close) != nil else {
+            return
+        }
+        await deleteNote(noteID: noteID, worktreeID: worktreeID)
+    }
+
     // MARK: - Tab sync
 
     /// The observer on `tabs`. Marks a worktree dirty when its tab IDs, order,

@@ -35,19 +35,64 @@ extension AppState {
     /// the app writes the file itself (`saveNoteContent`).
     func updateNote(noteID: UUID, worktreeID: UUID, title: String) async {
         do {
-            let updated = try await daemonClient.updateNote(noteID: noteID, title: title)
-            if let idx = notes[worktreeID]?.firstIndex(where: { $0.id == noteID }) {
-                // Patch the fields this call changed rather than rebuilding the
-                // summary: the daemon's `Note.content` is the OVERLAID content,
-                // so `NoteSummary(from:)` would over-report `hasLegacyContent`
-                // for every file-backed note.
-                notes[worktreeID]?[idx].title = updated.title
-                notes[worktreeID]?[idx].updatedAt = updated.updatedAt
+            let updated = try await noteTitleUpdater(noteID, title)
+            // Patch the fields this call changed rather than rebuilding the
+            // summary: the daemon's `Note.content` is the OVERLAID content, so
+            // `NoteSummary(from:)` would over-report `hasLegacyContent` for
+            // every file-backed note.
+            patchNoteSummary(noteID: noteID, worktreeID: worktreeID) {
+                $0.title = updated.title
+                $0.updatedAt = updated.updatedAt
             }
         } catch {
             logger.error("Failed to update note: \(error)")
             handleConnectionError(error)
         }
+    }
+
+    /// Rename a note from its tab, in the workspace tab bar or the side
+    /// region's strip.
+    ///
+    /// Synchronous, like `renameTab`: the new title lands in `notes` at once,
+    /// in the same frame as the rename field closing, so the tab never flashes
+    /// the old title. The title then persists through `noteTitleUpdater` on a
+    /// task. A failure puts the previous title back — unless a later rename
+    /// has replaced this one meanwhile, which keeps its own — and is handed
+    /// to `handleConnectionError`.
+    func renameNote(noteID: UUID, worktreeID: UUID, title: String) {
+        let previousTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
+        patchNoteSummary(noteID: noteID, worktreeID: worktreeID) { $0.title = title }
+        Task {
+            do {
+                let updated = try await noteTitleUpdater(noteID, title)
+                // As `updateNote`: patch the fields the call changed.
+                patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
+                    $0.title = updated.title
+                    $0.updatedAt = updated.updatedAt
+                }
+            } catch {
+                logger.error("Failed to rename note: \(error, privacy: .public)")
+                if let previousTitle {
+                    patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
+                        $0.title = previousTitle
+                    }
+                }
+                handleConnectionError(error)
+            }
+        }
+    }
+
+    /// Applies `patch` to a note's summary in `notes`, when the worktree holds
+    /// one — and, given `whileTitled`, only while its title is still that one.
+    private func patchNoteSummary(
+        noteID: UUID, worktreeID: UUID, whileTitled title: String? = nil,
+        _ patch: (inout NoteSummary) -> Void
+    ) {
+        guard var summaries = notes[worktreeID],
+              let index = summaries.firstIndex(where: { $0.id == noteID }) else { return }
+        if let title, summaries[index].title != title { return }
+        patch(&summaries[index])
+        notes[worktreeID] = summaries
     }
 
     /// Load a note's text for an opening pane.
@@ -176,10 +221,10 @@ extension AppState {
         return size > 0
     }
 
-    /// Delete a note.
+    /// Delete a note, through `noteDeleter`.
     func deleteNote(noteID: UUID, worktreeID: UUID) async {
         do {
-            try await daemonClient.deleteNote(noteID: noteID)
+            try await noteDeleter(noteID)
             notes[worktreeID]?.removeAll { $0.id == noteID }
         } catch {
             logger.error("Failed to delete note: \(error)")

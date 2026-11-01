@@ -18,6 +18,13 @@ struct SideRegionTab: Equatable, Identifiable {
     /// The content as the leaf view, and the file menu, take it.
     var paneContent: PaneContent { content.paneContent(panelID: id) }
 
+    /// The note a note tab shows, which its rename titles and its × deletes;
+    /// nil for the other kinds.
+    var noteID: UUID? {
+        guard case .note(let noteID) = content else { return nil }
+        return noteID
+    }
+
     /// The symbol the workspace tab bar shows for the same kind.
     var systemImage: String { content.kind.tabSystemImage }
 
@@ -121,13 +128,20 @@ enum SideRegionStrip {
 /// leaf view.
 ///
 /// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`), so
-/// the two read as one row split by the divider. Left to right it holds
-/// history search, back and forward for the active panel; the panel tabs, each
-/// selecting on a click, closing from its ×, offering the file menu on a
-/// right-click for a file or transcript, and showing its tooltip on hover;
-/// then, at the trailing edge, the active panel's own control and the collapse
-/// button, which carries `⌘\` while the region shows. The history buttons are
-/// always drawn and only disabled, so the tabs never shift under the pointer.
+/// the two read as one row split by the divider, and clipped to its frame, so
+/// it never draws over the divider. Left to right it holds history search,
+/// back and forward for the active panel; the panel tabs, each selecting on a
+/// click, closing from its ×, offering the file menu on a right-click for a
+/// file or transcript, and showing its tooltip on hover; then, at the
+/// trailing edge, the active panel's own control and the collapse button,
+/// which carries `⌘\` while the region shows. The history buttons are always
+/// drawn and only disabled, so the tabs never shift under the pointer.
+///
+/// A note tab is renamed in place, by a double-click or the Rename Tab item
+/// its right-click offers, and the rename writes the note's title
+/// (`AppState.renameNote`). Its × closes the panel and deletes the note,
+/// asking first when the note has content (`AppState.closeSidePanel`); every
+/// other tab's × only closes its panel.
 ///
 /// The leaf draws no header: the tab names and closes the panel, and the strip
 /// carries its history buttons and its control. The control reads the
@@ -150,6 +164,8 @@ struct SideRegionView: View {
     /// to the region's panels as they change.
     @State private var chromeStore = PaneChromeStore()
     @State private var showHistoryPalette = false
+    /// The note tab whose rename field is open, if any.
+    @State private var renamingPanelID: PanelID?
 
     /// The active panel, with what the strip and the leaf act on for it.
     private struct ActivePanel {
@@ -243,6 +259,9 @@ struct SideRegionView: View {
             .layoutPriority(1)
         }
         .frame(height: TabRowMetrics.height)
+        // At the region's minimum width the two ends can outgrow the strip;
+        // clipping keeps them off the divider.
+        .clipped()
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -251,13 +270,12 @@ struct SideRegionView: View {
     /// Search, back and forward, acting on the active panel. Each is disabled
     /// where `SideRegionStrip.historyButtons` says it cannot act, and with no
     /// active panel all three are.
-    @ViewBuilder
     private func historyGroup(active: ActivePanel?) -> some View {
         let enabled = active.map {
             SideRegionStrip.historyButtons(for: $0.tab.content, history: $0.history)
         } ?? SideStripHistoryButtons(search: false, back: false, forward: false)
 
-        HStack(spacing: 0) {
+        return HStack(spacing: 0) {
             historySearchButton(active: active)
                 .disabled(!enabled.search)
 
@@ -303,8 +321,7 @@ struct SideRegionView: View {
         }
     }
 
-    /// A back or forward chevron: a plain button, so a right-click reaches
-    /// nothing it would swallow.
+    /// A back or forward chevron, 22 pt wide at the row's full height.
     private func historyStepButton(
         icon: String,
         help: String,
@@ -326,9 +343,11 @@ struct SideRegionView: View {
 
     /// A tab: a select button over the icon and title, and a close button
     /// beside it — siblings, not nested, so each takes its own clicks. A
-    /// right-click offers the file menu for file and transcript tabs.
+    /// right-click offers the file menu for file and transcript tabs, and
+    /// Rename Tab alone for a note tab, which a double-click also renames.
+    @ViewBuilder
     private func tabItem(_ tab: SideRegionTab) -> some View {
-        HStack(spacing: 0) {
+        let item = HStack(spacing: 0) {
             Button {
                 send(.select(panelID: tab.id))
             } label: {
@@ -336,12 +355,7 @@ struct SideRegionView: View {
                     Image(systemName: tab.systemImage)
                         .font(.system(size: 10))
                         .foregroundStyle(tab.isActive ? .primary : .tertiary)
-                    Text(tab.title)
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 180, alignment: .leading)
-                        .foregroundStyle(tab.isActive ? .primary : .secondary)
+                    tabTitle(tab)
                 }
                 .padding(.leading, 8)
                 .frame(maxHeight: .infinity)
@@ -349,9 +363,19 @@ struct SideRegionView: View {
             }
             .buttonStyle(.plain)
             .help(tab.tooltip)
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded {
+                    guard tab.noteID != nil else { return }
+                    renamingPanelID = tab.id
+                }
+            )
 
             Button {
-                send(.close(panelID: tab.id))
+                Task {
+                    await appState.closeSidePanel(
+                        worktreeID: surface.worktreeID, tabID: surface.id,
+                        panelID: tab.id, content: tab.content)
+                }
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -372,7 +396,61 @@ struct SideRegionView: View {
                     .frame(height: 2)
             }
         }
-        .headerFileContextMenu(for: tab.paneContent, transcriptPath: tab.transcriptPath)
+
+        if tab.noteID != nil {
+            item.contextMenu {
+                Button("Rename Tab") {
+                    renamingPanelID = tab.id
+                }
+            }
+        } else {
+            item.headerFileContextMenu(for: tab.paneContent, transcriptPath: tab.transcriptPath)
+        }
+    }
+
+    /// The tab's title, or, while a note tab is being renamed, its rename
+    /// field. A note's rename commits a new title when the trimmed text is not
+    /// blank and differs from the note's title (`TabRename.noteTitle`).
+    @ViewBuilder
+    private func tabTitle(_ tab: SideRegionTab) -> some View {
+        let title = Text(tab.title)
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: 180, alignment: .leading)
+            .foregroundStyle(tab.isActive ? .primary : .secondary)
+
+        if let noteID = tab.noteID, renamingPanelID == tab.id {
+            RenameableLabel(
+                text: tab.title,
+                isEditing: Binding(
+                    get: { renamingPanelID == tab.id },
+                    set: { editing in
+                        if editing {
+                            renamingPanelID = tab.id
+                        } else if renamingPanelID == tab.id {
+                            renamingPanelID = nil
+                        }
+                    }
+                ),
+                onCommit: { text in
+                    commitNoteRename(noteID: noteID, text: text)
+                },
+                editorFont: .systemFont(ofSize: 11),
+                selectAllOnEnterEditing: true,
+                displayContent: { title }
+            )
+            .font(.system(size: 11))
+            .frame(minWidth: 60, maxWidth: 180, alignment: .leading)
+        } else {
+            title
+        }
+    }
+
+    private func commitNoteRename(noteID: UUID, text: String) {
+        let currentTitle = appState.notes[worktree.id]?.first(where: { $0.id == noteID })?.title
+        guard let title = TabRename.noteTitle(text: text, currentNoteTitle: currentTitle) else { return }
+        appState.renameNote(noteID: noteID, worktreeID: worktree.id, title: title)
     }
 
     // MARK: Trailing edge

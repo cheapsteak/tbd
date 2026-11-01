@@ -955,6 +955,17 @@ final class AppState {
     /// rows — so a single retry is always enough; the extra one is slack.
     static let maxTabStateHydrationAttempts = 3
     var draggingTabID: UUID? = nil
+    /// The workspace tab whose rename field should open: set where the tab
+    /// bar asks for a rename (a double-click or Rename Tab, through
+    /// `requestTabRename`), and taken by the tab bar item showing that tab
+    /// (`takePendingTabRename`) as it appears or as this changes. Held here
+    /// rather than in the item, because selecting the tab can move the bar
+    /// between `SingleWorktreeView` and `PanelSurfaceWorkspaceView` —
+    /// closing Session History, or moving between a skipped tab and a
+    /// daemon-path tab — which rebuilds every item and would drop an editing
+    /// flag set on the old one. Written only when it changes: every item
+    /// reads it.
+    var pendingTabRenameID: UUID? = nil
     var repoFilter: UUID? = nil
     var pendingWorktreeIDs: Set<UUID> = []
     /// Remote lanes drawn optimistically while `remote.create` is in flight,
@@ -2389,10 +2400,20 @@ final class AppState {
     /// test can prove that ordinary (non-empty) saves never reach it.
     @ObservationIgnored lazy var noteEmptier: @MainActor (UUID) async throws -> Note =
         { [daemonClient] noteID in try await daemonClient.updateNote(noteID: noteID, content: "") }
+    /// How a note's new title reaches the daemon (`updateNote`, `renameNote`).
+    /// Injectable so a test can drive a rename that persists and one that
+    /// fails, without a daemon.
+    @ObservationIgnored lazy var noteTitleUpdater: @MainActor (UUID, String) async throws -> Note =
+        { [daemonClient] noteID, title in try await daemonClient.updateNote(noteID: noteID, title: title) }
+    /// How a note's row is deleted on the daemon (`deleteNote`). Injectable so
+    /// a test can tell the closes that delete a note from the ones that keep
+    /// it.
+    @ObservationIgnored lazy var noteDeleter: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
     /// Asks the user to confirm closing a note tab whose note has content —
-    /// closing a note tab hard-deletes the note row (`closeTab` →
-    /// `deleteNote`). Injectable so tests can exercise both branches without
-    /// a real modal NSAlert.
+    /// closing a note's workspace tab or side-region tab hard-deletes the note
+    /// row (`closeTab` and `closeSidePanel` → `deleteNote`). Injectable so
+    /// tests can exercise both branches without a real modal NSAlert.
     ///
     /// Takes the content-file path rather than deriving one: the alert
     /// advertises where the text is kept, and `noteContentPathResolver` is the

@@ -332,6 +332,45 @@ extension AppState {
         }
     }
 
+    /// Commit a workspace tab's rename field (`TabRename.commit`). A note tab
+    /// writes the note's title — when the text is new and not blank — and
+    /// clears the tab's label either way, so the tab shows the title. Any
+    /// other tab sets its label through `renameTab`.
+    func commitTabRename(tabID: UUID, worktreeID: UUID, content: PaneContent, text: String) {
+        var currentNoteTitle: String?
+        if case .note(let noteID) = content {
+            currentNoteTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
+        }
+        switch TabRename.commit(content: content, text: text, currentNoteTitle: currentNoteTitle) {
+        case .label(let label):
+            renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: label)
+        case .note(let noteID, let title):
+            if let title {
+                renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
+            }
+            renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "")
+        }
+    }
+
+    /// Ask the tab bar item showing `tabID` to open its rename field
+    /// (`pendingTabRenameID`).
+    func requestTabRename(tabID: UUID) {
+        guard pendingTabRenameID != tabID else { return }
+        pendingTabRenameID = tabID
+    }
+
+    /// Asked by the tab bar item showing `tabID` as it appears and whenever
+    /// `pendingTabRenameID` changes: true when the pending rename is that
+    /// tab's, which this takes, clearing the request
+    /// (`TabRenamePickUp.decide`).
+    func takePendingTabRename(tabID: UUID) -> Bool {
+        let pickUp = TabRenamePickUp.decide(tabID: tabID, pendingID: pendingTabRenameID)
+        if pendingTabRenameID != pickUp.pendingIDAfter {
+            pendingTabRenameID = pickUp.pendingIDAfter
+        }
+        return pickUp.startsEditing
+    }
+
     // MARK: - Close
 
     /// Close one tab and clean up resources owned by that tab. This is shared

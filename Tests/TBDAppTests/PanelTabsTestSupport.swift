@@ -9,8 +9,8 @@ import TestSupport
 // `UserDefaults` suite so the developer's real `TBDApp.plist` is never touched.
 
 /// Fixtures shared by the panel-tabs app suites: an `AppState` whose panel
-/// seams fail loudly unless a test stubs them, surface and tab builders, and
-/// the collectors the stubs record into.
+/// and note seams fail loudly unless a test stubs them, surface and tab
+/// builders, and the collectors the stubs record into.
 @MainActor
 enum PanelTabsFixture {
 
@@ -44,6 +44,19 @@ enum PanelTabsFixture {
         state.panelSyncTrigger = { @MainActor _ in
             Issue.record("unexpected panel.syncTabs")
             throw UnstubbedSeam(seam: "panel.syncTabs")
+        }
+        // The real confirmer runs a modal alert, which would hang a test.
+        state.noteCloseConfirmer = { _, _ in
+            Issue.record("unexpected note close confirmation")
+            return false
+        }
+        state.noteTitleUpdater = { @MainActor _, _ in
+            Issue.record("unexpected note title update")
+            throw UnstubbedSeam(seam: "note.update")
+        }
+        state.noteDeleter = { @MainActor _ in
+            Issue.record("unexpected note.delete")
+            throw UnstubbedSeam(seam: "note.delete")
         }
         try await body(state)
     }
