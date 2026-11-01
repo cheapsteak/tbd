@@ -350,22 +350,22 @@ way to a green run of nothing. Keep them updated.
 **Pass 2 is split by main-thread time, because the main thread binds it.** Its
 `@MainActor` tests run one at a time (see the main-thread stall below), so a
 test's reported time is mostly the main-actor work queued ahead of it. Measured
-on five green runs with pass 2 as one step, its slowest test reported
-67.2–94.5 s. The spread follows the runner: one runner finished pass 1a in 52 s
-and still put 94.5 s on pass 2's slowest test. The trigger to split is a green
-maximum near 100 s, which is `saturatedPass` less the 18 s margin below.
-94.5 s is within about 6 s of it, and pass 2's timing tests flake in that tail;
-one failed after 94.2 s. A split does not reduce the main-thread work, and it
-adds an invocation's startup, about 26 s. What it buys is a shorter tail,
-because a test queues behind only its own half's main-actor work. So the cut
-halves main-thread time, not test count. Through `P`, TBDAppTests holds 51.6%
-and 53.6% of pass 2's main-thread samples in two whole-pass profiles, and 52%
-of its own tests. Measured on one green run with the split, 2a executed 2,501
+on five green runs with pass 2 as one step, its slowest test reported 67.2–94.5
+s. The spread follows the runner: one runner finished pass 1a in 52 s and still
+put 94.5 s on pass 2's slowest test. The trigger to split is a green maximum
+near 102 s, which is `saturatedPass`'s 120 s less the ~18 s margin below. 94.5
+s is within about 8 s of it, and pass 2's timing tests flake in that tail; one
+failed after 94.2 s. A split does not reduce the main-thread work, and it adds
+an invocation's startup, about 26 s. What it buys is a shorter tail, because a
+test queues behind only its own half's main-actor work. So the cut halves
+main-thread time, not test count. Through `P`, TBDAppTests holds 51.6% and
+53.6% of pass 2's main-thread samples in two whole-pass profiles, and 52% of
+its own tests. Measured on one green run with the split, 2a executed 2,501
 tests and 2b 4,739, because 2b also holds the targets that do little on the
 main thread. The slowest test reported 41.0 s in 2a (p99 40.9 s) and 37.5 s in
-2b (p99 36.0 s), against 67.2–94.5 s with one step. The two steps took 61 s
-and 57 s, 118 s together, against 87–123 s for the single step on recent runs
-of `main`, so on that run the split cost no measurable job time: halving the
+2b (p99 36.0 s), against 67.2–94.5 s with one step. The two steps took 61 s and
+57 s, 118 s together, against 87–123 s for the single step on recent runs of
+`main`, so on that run the split cost no measurable job time: halving the
 main-thread queue saved about what the extra startup costs. That is one run.
 When the halves' tails drift apart, re-cut from a whole-pass profile, not from
 test counts.
@@ -494,7 +494,10 @@ seconds. Fast pass 1a (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a
 slowest test of 51.7–74.2 s, and fast pass 1b (~3900 tests) 22.5–34.2 s.
 Measured on one green run with pass 2 split, 2a (`^TBDAppTests\.[A-P]`, 2,501
 tests) reported p90 34.1 s, p99 40.9 s and a slowest test of 41.0 s, and 2b
-(4,739 tests) p90 29.4 s, p99 36.0 s and 37.5 s. Reported duration is almost
+(4,739 tests) p90 29.4 s, p99 36.0 s and 37.5 s. On a slow runner, in a run
+that went red on two unrelated flakes, the slowest tests reported 86.5 s in 1a
+(p99 74.7 s), 38.5 s in 1b, 43.5 s in 2a and 35.7 s in 2b, so pass 1a's range
+on recent runs is 51.7–86.5 s. Reported duration is almost
 entirely time suspended behind other runnable tests. In pass 1 it also
 includes the time a test waits for its body to start at all, which no bound
 inside the body pays, so pass 1's figures bound a wait only loosely. Pass 2 as
@@ -516,18 +519,21 @@ the shared constant.
 
 **`saturatedPass` stays at 120 s.** The sizing rule clears the worst green
 tail by about 18 s, because runner noise alone moves that tail by about twenty
-seconds. 120 s clears the worst green pass-2 maximum on record, 101.7 s with
-pass 2 as one step (cited under "Clock and date seams" below), by about 18 s.
-It clears the worst measured with the stall remedies below in place, 94.5 s,
-by about 25 s. Split into 2a and 2b, pass 2's slowest tests reported 41.0 s
-and 37.5 s on one green run. The deadline is sized against the record and is
-not re-derived from those halves. Re-deriving it would also move the values
-coupled to it: `TestGate.deadline`, the `.fastPassBounded` limit, and the
-tier-3 suite limits summed from chains of `saturatedPass` waits. Pass 1's
-tails, at 74.2 s or less, are not near 120 s. On green runs where every
-in-memory database ran the whole migration chain, pass 1 reported 111.7 s in
-1a and 107.4 s in 1b, so the template copy in `TBDDatabase.init(inMemory:)`
-(see the pool stall below) is what keeps pass 1 clear of 120 s.
+seconds. The rule is applied to pass 2's tail, not pass 1's, because pass 1's
+reported time includes the time a test waits for its body to start, which no
+bounded wait inside the body pays. 120 s clears the worst green pass-2 maximum
+on record, 101.7 s with pass 2 as one step (cited under "Clock and date seams"
+below), by about 18 s. It clears the worst measured with the stall remedies
+below in place, 94.5 s, by about 25 s. Split into 2a and 2b, pass 2's slowest
+tests reported 41.0 s and 37.5 s on one green run. The deadline is sized
+against the record and is not re-derived from those halves. Re-deriving it
+would also move the values coupled to it: `TestGate.deadline`, the
+`.fastPassBounded` limit, and the tier-3 suite limits summed from chains of
+`saturatedPass` waits. Pass 1's figures are evidence, not the sizing input. Its
+1a tail is 51.7–86.5 s on recent runs. On green runs where every in-memory
+database ran the whole migration chain, pass 1 reported 111.7 s in 1a and
+107.4 s in 1b, so the template copy in `TBDDatabase.init(inMemory:)` (see the
+pool stall below) is what keeps pass 1 clear of 120 s.
 
 One more thing a reader should not have to mine a log for: the **"72 known
 issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
@@ -1279,9 +1285,10 @@ red on ordinary CI with every logic assertion a consequence and every sibling
 test passing in milliseconds. With pass 2 split, one green run measured p90
 34.1 s and 29.4 s and p99 40.9 s and 36.0 s in 2a and 2b. A 45 s guard sits
 only about 4–9 s above those tails, and runner noise alone has moved a pass's
-tail by about 20 s, so 45 s still fires on a healthy slow runner. 120 s clears
-the halves' tails by about 80 s and the one-step record by about 18 s, which is
-why these guards take `saturatedPass`. Pass the budget through the strict
+tail by about 20 s; on a slow runner 2a's slowest test reported 43.5 s. So 45 s
+still fires on a healthy slow runner. 120 s clears the halves' slowest tests
+by more than 75 s and the one-step record by about 18 s, which is why these
+guards take `saturatedPass`. Pass the budget through the strict
 `requireAdvanceWhenArmed(by:timeout:)` and `next(timeout:)`, so a missed
 arming ends the test instead of paying the
 recorder's guard as well — a two-step chain then costs at most two guards,
