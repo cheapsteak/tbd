@@ -605,7 +605,8 @@ private struct HeaderFileContextMenu: ViewModifier {
                     RevealAndOpenWithMenuItems(path: target.path, apps: apps)
                 }
                 .task(id: target.path) {
-                    apps = openWithApps(forPath: target.path)
+                    let found = openWithApps(forPath: target.path)
+                    if found != apps { apps = found }
                 }
         } else {
             content

@@ -1030,7 +1030,10 @@ private struct TabBarItem: View {
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
         .task(id: fileMenuTarget?.path) {
-            fileMenuApps = fileMenuTarget.map { openWithApps(forPath: $0.path) } ?? []
+            // Most tabs have no file: their list stays empty, and an equal
+            // write would only re-evaluate this item.
+            let apps = fileMenuTarget.map { openWithApps(forPath: $0.path) } ?? []
+            if apps != fileMenuApps { fileMenuApps = apps }
         }
         .onHover { hovering in
             isHovering = hovering
