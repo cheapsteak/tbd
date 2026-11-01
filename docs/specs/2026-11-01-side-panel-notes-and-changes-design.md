@@ -177,8 +177,8 @@ revision guard needs nothing new.
   - **What goes:** the right-hand column, its divider, the `filePanel.isVisible`
     and `filePanel.width` keys, and the toolbar's file-panel button.
 - **The side panel toggle.** ◫ shows in the workspace tab bar whenever the
-  region is hidden. On a collapsed region with panels it expands it; on an empty
-  region it opens Changes.
+  region is hidden, once the tab's surface has loaded. On a collapsed region
+  with panels it expands it; on an empty region it opens Changes.
 - **⌘⇧E** follows the transcript button's rule for Changes:
   - no Changes panel: open one;
   - open but not in front, or the region collapsed: select it;
