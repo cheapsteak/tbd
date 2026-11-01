@@ -1285,12 +1285,13 @@ jobs:
       # Measured on five green runs with pass 2 as one step, its slowest test
       # reported 67.2–94.5 s, and the spread follows the runner: one runner
       # finished pass 1a in 52 s and still put 94.5 s on pass 2's slowest test.
-      # That is within about 6 s of the 100 s at which `Tests/CLAUDE.md`
-      # ("Population is the scheduler") says to split — `saturatedPass` less
-      # its 18 s margin — and pass 2's timing tests flake in that tail; one
-      # failed after 94.2 s. A split does not reduce the main-thread work, and
-      # it adds an invocation's startup, ~26 s. What it buys is a shorter tail,
-      # because a test queues behind only its own half's main-actor work.
+      # That is within about 8 s of the ~102 s at which `Tests/CLAUDE.md`
+      # ("Population is the scheduler") says to split — `saturatedPass`'s
+      # 120 s less its ~18 s margin — and pass 2's timing tests flake in that
+      # tail; one failed after 94.2 s. A split does not reduce the main-thread
+      # work, and it adds an invocation's startup, ~26 s. What it buys is a
+      # shorter tail, because a test queues behind only its own half's
+      # main-actor work.
       #
       # Measured on the split's first green run (41352611270): 2a's slowest
       # test reported 41.0 s (p90 34.1 s, p99 40.9 s) and 2b's 37.5 s (p90
@@ -1381,6 +1382,11 @@ jobs:
       # only about 60 above that and could miss it on a run with a few more
       # tests; 3200 catches that over-skip and still sits about 1,500 below
       # the 4,739 2b executed.
+      #
+      # That rests on one assumption: what such an over-skip would leave 2b
+      # running — the targets other than TBDAppTests, plus any suite-less app
+      # tests the over-skip spares — stays under 3200. It is about 2,440 on
+      # that run. Raise this floor if it grows past about 3,000.
       #
       # No two steps share a floor, so `scripts/nightly-flake-stress.test.sh`
       # catches a change to any one step's floor on its own.

@@ -1000,10 +1000,11 @@ class DriverTests(unittest.TestCase):
         self.assertIn("passed", self.output())
 
     def test_a_passing_run_states_the_population_it_executed(self):
-        # SIX CALL SITES GREP FOR THIS EXACT LINE — `scripts/git-hooks/pre-push`,
-        # `scripts/nightly-flake-stress.sh` and three steps of `test.yml` — and
-        # read its absence as a collapsed or truncated suite. Without it a GREEN
-        # remote verdict blocks the push naming the wrong cause.
+        # EVERY FLOOR CHECK GREPS FOR THIS EXACT LINE —
+        # `scripts/git-hooks/pre-push`, `scripts/nightly-flake-stress.sh`, and
+        # `scripts/ci/watched-test-pass.sh` for every pass of `test.yml` — and
+        # reads its absence as a collapsed or truncated suite. Without it a
+        # GREEN remote verdict blocks the push naming the wrong cause.
         runner = self.passing_runner(
             **{"xunit-daemon": XCTEST_STYLE, "xunit-app": SWIFT_TESTING_STYLE, "xunit-quiet": CLEAN_STYLE}
         )

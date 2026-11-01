@@ -463,14 +463,16 @@ test_an_unanswerable_pr_query_refuses_rather_than_assuming_nobody_owns_the_ref()
 # --- the verdict -------------------------------------------------------------
 
 test_a_passing_remote_run_states_the_population_it_executed() {
-  # SIX CALL SITES GREP FOR THIS EXACT LINE — `scripts/git-hooks/pre-push`,
-  # `scripts/nightly-flake-stress.sh` and three steps of `.github/workflows/
-  # test.yml` — and read its absence as a truncated or collapsed suite. A GREEN
-  # remote verdict without it blocks the push naming the wrong cause.
+  # EVERY FLOOR CHECK GREPS FOR THIS EXACT LINE — `scripts/git-hooks/pre-push`,
+  # `scripts/nightly-flake-stress.sh`, and `scripts/ci/watched-test-pass.sh`
+  # for every pass of `.github/workflows/test.yml` — and reads its absence as a
+  # truncated or collapsed suite. A GREEN remote verdict without it blocks the
+  # push naming the wrong cause.
   local root; root="$(setup)"
   run_verify "$root"
   assert_eq "a passing remote run exits 0" "0" "$RC"
-  # 3 + 3 + 1, summed across the three passes exactly as the files declare them.
+  # 3 + 3 + 1, summed across this fixture's three result files exactly as they
+  # declare them.
   assert_contains "and states the population it ran" "$OUT" "Test run with 7 tests passed"
   assert_contains "in the wording the callers grep for" \
     "$(printf '%s' "$OUT" | grep -oE 'Test run with [0-9]+ tests?' | head -1)" "Test run with 7 tests"

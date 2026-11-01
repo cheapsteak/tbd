@@ -853,61 +853,60 @@ test_the_pass_table_matches_test_yml() {
   rm -rf "$d"
 }
 
-# The argument after flag $3 (`--filter` or `--skip`) on pass $2's line of
-# workflow $1's pass table, or nothing.
-pass_arg() {
-  local line i
-  local -a parts
-  line="$(pass_table_from_workflow "$1" | grep "^$2|")"
-  read -r -a parts <<< "${line#*|*|}"
-  for ((i = 0; i + 1 < ${#parts[@]}; i++)); do
-    [[ "${parts[i]}" == "$3" ]] && { printf '%s' "${parts[i + 1]}"; return 0; }
-  done
-  return 1
+# Pass $2's swift-test args in workflow $1, exactly as the script's own
+# `pass_table_from_workflow` reads them (so this harness has no second parser
+# for test.yml), or nothing.
+pass_args() {
+  local line
+  line="$(pass_table_from_workflow "$1" | grep "^$2|")" || return 1
+  printf '%s' "${line#*|*|}"
 }
 
-# 2a's `[X-Y]` range, read from a `--filter` that must be exactly
-# `^TBDAppTests\.[X-Y]`, or nothing.
+# 2a's `[X-Y]` range, from args that must be exactly
+# `--parallel --filter ^TBDAppTests\.[X-Y]`: one filter and no skip. Nothing
+# when they are anything else.
 app_cut_range() {
-  local filter re='^\^TBDAppTests\\\.(\[[^]]+\])$'
-  filter="$(pass_arg "$1" fast-pass-app-a --filter)" || return 1
-  [[ "$filter" =~ $re ]] && printf '%s' "${BASH_REMATCH[1]}"
+  local args re='^--parallel --filter \^TBDAppTests\\\.(\[[^]]+\])$'
+  args="$(pass_args "$1" fast-pass-app-a)" || return 1
+  [[ "$args" =~ $re ]] && printf '%s' "${BASH_REMATCH[1]}"
 }
 
-# The `--skip` 2b must carry for 2a's range $1: the two daemon targets and that
-# range of TBDAppTests, and nothing else.
-expected_app_b_skip() { printf '^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.%s)' "$1"; }
+# The args 2b must carry for 2a's range $1: one skip of the two daemon targets
+# and that range of TBDAppTests, and nothing else.
+expected_app_b_args() {
+  printf -- '--parallel --skip ^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.%s)' "$1"
+}
 
-# Exit 0 when 2b's whole `--skip` in workflow $1 is the one 2a's range asks
-# for. Comparing the whole regex, not one group of it, is what catches an
-# extra alternative.
+# Exit 0 when workflow $1's 2a args are one filter of a TBDAppTests range, and
+# its 2b args are exactly the skip that range asks for. Comparing whole args,
+# not one group of a regex, is what catches an extra alternative, a skip on 2a
+# or a filter on 2b.
 check_app_cut() {
-  local range skip
+  local range
   range="$(app_cut_range "$1")" && [[ -n "$range" ]] || return 1
-  skip="$(pass_arg "$1" fast-pass-app-b --skip)" || return 1
-  [[ "$skip" == "$(expected_app_b_skip "$range")" ]]
+  [[ "$(pass_args "$1" fast-pass-app-b)" == "$(expected_app_b_args "$range")" ]]
 }
 
 # 2a runs the TBDAppTests suites in one letter range, and 2b skips exactly that
 # range beside the two daemon targets, so every TBDAppTests suite runs in one
 # half. Move 2a's range alone and the suites between the two ranges run twice
-# or nowhere; add a TBDAppTests alternative to 2b's skip and the suites it
-# names run nowhere.
+# or nowhere; add a TBDAppTests alternative to 2b's skip, or a skip to 2a, and
+# the suites it names run nowhere.
 test_the_app_halves_cut_at_one_range() {
-  local wf="$HERE/../.github/workflows/test.yml" d
-  assert_eq "2a's filter is one TBDAppTests range" "1" "$(app_cut_range "$wf" | grep -c '^\[.*\]$')"
-  assert_eq "2b skips the daemon targets and exactly 2a's range" \
-    "$(expected_app_b_skip "$(app_cut_range "$wf")")" "$(pass_arg "$wf" fast-pass-app-b --skip)"
+  local wf="$HERE/../.github/workflows/test.yml" d rc
+  assert_eq "2a's args are one filter of a TBDAppTests range" "1" "$(app_cut_range "$wf" | grep -c '^\[.*\]$')"
+  assert_eq "2b's args are exactly the skip 2a's range asks for" \
+    "$(expected_app_b_args "$(app_cut_range "$wf")")" "$(pass_args "$wf" fast-pass-app-b)"
   assert_eq "real test.yml cuts at one range" "0" "$(check_app_cut "$wf"; echo $?)"
   d="$(mktmpd)"
   # MUTATION: only 2a's range moves to [A-Q].
   sed '/--name fast-pass-app-a /,/xunit-app-a\.xml/ s/\[A-P\]/[A-Q]/' "$wf" > "$d/a.yml"
   assert_eq "the mutant moved 2a's range" "[A-Q]" "$(app_cut_range "$d/a.yml")"
-  assert_contains "and left 2b's" "$(pass_arg "$d/a.yml" fast-pass-app-b --skip)" "TBDAppTests\\.[A-P])"
+  assert_contains "and left 2b's" "$(pass_args "$d/a.yml" fast-pass-app-b)" 'TBDAppTests\.[A-P])'
   assert_eq "mutation: 2a's range moved alone is caught" "1" "$(check_app_cut "$d/a.yml"; echo $?)"
   # MUTATION: only 2b's range moves to [A-Q].
   sed '/--name fast-pass-app-b /,/xunit-app-b\.xml/ s/\[A-P\]/[A-Q]/' "$wf" > "$d/b.yml"
-  assert_contains "the mutant moved 2b's range" "$(pass_arg "$d/b.yml" fast-pass-app-b --skip)" "TBDAppTests\\.[A-Q])"
+  assert_contains "the mutant moved 2b's range" "$(pass_args "$d/b.yml" fast-pass-app-b)" 'TBDAppTests\.[A-Q])'
   assert_eq "and left 2a's" "[A-P]" "$(app_cut_range "$d/b.yml")"
   assert_eq "mutation: 2b's range moved alone is caught" "1" "$(check_app_cut "$d/b.yml"; echo $?)"
   # MUTATION: an extra TBDAppTests alternative in 2b's skip only. Its first
@@ -915,16 +914,38 @@ test_the_app_halves_cut_at_one_range() {
   # would pass it.
   sed '/--name fast-pass-app-b /,/xunit-app-b\.xml/ s/TBDAppTests\\\.\[A-P\])/TBDAppTests\\.[A-P]|TBDAppTests\\.Q)/' \
     "$wf" > "$d/extra.yml"
-  assert_contains "the mutant added an alternative" "$(pass_arg "$d/extra.yml" fast-pass-app-b --skip)" \
-    "TBDAppTests\\.[A-P]|TBDAppTests\\.Q)"
+  assert_contains "the mutant added an alternative" "$(pass_args "$d/extra.yml" fast-pass-app-b)" \
+    'TBDAppTests\.[A-P]|TBDAppTests\.Q)'
   assert_eq "and left 2a's range" "[A-P]" "$(app_cut_range "$d/extra.yml")"
   assert_eq "mutation: an extra TBDAppTests alternative in 2b's skip is caught" "1" \
     "$(check_app_cut "$d/extra.yml"; echo $?)"
+  # MUTATION: a --skip added to 2a, in test.yml AND in CI_PASSES, so the table
+  # check agrees with the workflow and only this check is left to catch it.
+  # The sed program sits in a quoted heredoc so no shell quoting touches it.
+  cat > "$d/skip2a.sed" <<'SED'
+/--name fast-pass-app-a /,/xunit-app-a\.xml/ s/\[A-P\]' /[A-P]' --skip '^TBDAppTests\\.PanelTabTests' /
+SED
+  sed -f "$d/skip2a.sed" "$wf" > "$d/skip2a.yml"
+  assert_contains "the mutant gave 2a a skip" "$(pass_args "$d/skip2a.yml" fast-pass-app-a)" \
+    '--skip ^TBDAppTests\.PanelTabTests'
+  rc="$(
+    mutated=()
+    for e in "${CI_PASSES[@]}"; do
+      case "$e" in
+        'fast-pass-app-a|'*) mutated+=("$e"' --skip ^TBDAppTests\.PanelTabTests') ;;
+        *) mutated+=("$e") ;;
+      esac
+    done
+    CI_PASSES=("${mutated[@]}")
+    check_pass_table "$d/skip2a.yml" >/dev/null 2>&1; echo $?
+  )"
+  assert_eq "the table check alone passes the mutant" "0" "$rc"
+  assert_eq "mutation: a skip on 2a is caught" "1" "$(check_app_cut "$d/skip2a.yml"; echo $?)"
   # Both moved together is a re-cut, not drift: the check compares the two,
   # it does not pin one range.
   sed '/--name fast-pass-app-[ab] /,/xunit-app-[ab]\.xml/ s/\[A-P\]/[A-Q]/' "$wf" > "$d/both.yml"
   assert_eq "the mutant moved 2a's range" "[A-Q]" "$(app_cut_range "$d/both.yml")"
-  assert_contains "and 2b's" "$(pass_arg "$d/both.yml" fast-pass-app-b --skip)" "TBDAppTests\\.[A-Q])"
+  assert_contains "and 2b's" "$(pass_args "$d/both.yml" fast-pass-app-b)" 'TBDAppTests\.[A-Q])'
   assert_eq "a re-cut that moves both ranges passes" "0" "$(check_app_cut "$d/both.yml"; echo $?)"
   rm -rf "$d"
 }

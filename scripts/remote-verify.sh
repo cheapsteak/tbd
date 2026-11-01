@@ -18,9 +18,9 @@
 # `--narrowed` says the caller selected a subset of the suite with `--filter` or
 # `--skip`, so it will re-run locally rather than adopt a failing whole-suite
 # verdict. It changes nothing about routing; it suppresses the `Test run with N
-# tests` line on a failure, because six consumers grep that line and take the
-# first match — a whole-suite count printed ahead of the local re-run's own would
-# clear the very floor that exists to catch a filter matching nothing.
+# tests` line on a failure, because every floor check greps that line and takes
+# the first match — a whole-suite count printed ahead of the local re-run's own
+# would clear the very floor that exists to catch a filter matching nothing.
 #
 # 78 is what keeps this an optimisation rather than a gate. Every refusal names
 # its condition on stderr: NO SILENT FALLBACK. A quiet fall-back to a local run

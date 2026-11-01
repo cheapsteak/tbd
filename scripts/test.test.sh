@@ -2145,8 +2145,8 @@ mk_repo_fixture() {
 # the argv it was handed, and returns whichever verdict the case is exercising.
 #
 # IT MODELS THE ONE PART OF THE DRIVER'S OUTPUT ANYTHING DOWNSTREAM READS: the
-# `Test run with N tests` line, which six floor consumers grep out of a log and
-# take the FIRST of. `FAKE_REMOTE_VERIFY_COUNT` is the whole-suite population it
+# `Test run with N tests` line, which every floor check greps out of a log and
+# takes the FIRST of. `FAKE_REMOTE_VERIFY_COUNT` is the whole-suite population it
 # claims; unset prints nothing, which is what every case outside the count ones
 # wants.
 #

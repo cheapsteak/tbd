@@ -87,15 +87,20 @@ MIN_N=20
 # step, and CI runs it as two, 2a and 2b, each a subset of it. A warm
 # iteration of either half takes no longer than the whole, so 171 and 169 are
 # an upper bound for both: their cap is conservative, and a half's run fits
-# the allotment at least as well as the whole did. test.yml's step times do not
-# replace them. On run 41352611270,
-# 2a's step took 61 s (42.4 s of tests, 14.6 s before them, 4.2 s after) and
-# 2b's 57 s (39.8 s, 10.6 s, 5.8 s), against 87-123 s for the single pass-2
-# step, so a half takes about half to two thirds of the whole there. But those
-# steps ran without induced load, with `--skip-build` and with no warm-up
-# iteration, so they measure neither t nor W. Lower these only from a
-# verifier run at pass scope on a half. Fast passes 1a and 1b and the quiet pass were not
-# measured either; they use these figures until they are.
+# the allotment at least as well as the whole did.
+#
+# W is mostly the first iteration's build and warm-up. That cost does not
+# scale with a pass's test count, so W is not lowered in proportion for a
+# half. t is the part that would shrink, and only a measurement may lower it.
+#
+# test.yml's step times do not replace either figure. On run 41352611270, 2a's
+# step took 61 s (42.4 s of tests, 14.6 s before them, 4.2 s after) and 2b's
+# 57 s (39.8 s, 10.6 s, 5.8 s), against 87-123 s for the single pass-2 step,
+# so a half takes about half to two thirds of the whole there. But those steps
+# ran without induced load, with `--skip-build` and with no warm-up iteration,
+# so they measure neither t nor W. Lower t only from a verifier run at pass
+# scope on a half. Fast passes 1a and 1b and the quiet pass were not measured
+# either; they use these figures until they are.
 ALLOTMENT_S=1440
 REBUILD_S=300
 TEST_T_S=25

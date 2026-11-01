@@ -99,7 +99,7 @@ mkfix() {
 # nothing, and changes nothing this harness is testing. Keep this file POSIX sh.
 #
 # STUB_MODE picks the shape:
-#   summary  print the population line six floor consumers grep for, then exit
+#   summary  print the population line every floor check greps for, then exit
 #            STUB_RC. STUB_COUNT unset prints no summary line at all, which is
 #            the truncated-run shape the floor exists to catch.
 #   stall    record this pid (the exec below keeps it) and block until killed.
