@@ -4,8 +4,8 @@ import TBDShared
 /// "Reclaimed" collapsed section rendered at the bottom of
 /// `ArchivedWorktreesView`'s leftRail, below the archived-worktree List.
 /// Shows orphan-GC's reap history for the repo (Task 12) — hand-rolled
-/// disclosure per `FileStatusSection` (FileViewer/FileViewerPanel.swift
-/// ~259-301), collapsed by default. Caller renders this only when
+/// disclosure per `FileStatusSection` (FileViewer/ChangesPanelView.swift),
+/// collapsed by default. Caller renders this only when
 /// `appState.reapRecords[repoID]` is non-empty.
 struct ReclaimedSectionView: View {
     let repoID: UUID

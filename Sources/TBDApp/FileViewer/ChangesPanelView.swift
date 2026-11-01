@@ -141,12 +141,41 @@ private func parseBranchDiff(_ output: String) -> [BranchFileChange] {
     }
 }
 
-// MARK: - FileViewerPanel
+// MARK: - ChangesPanelClick
 
-struct FileViewerPanel: View {
+/// What a click on a file in the Changes list sends (side panel notes and
+/// Changes spec, "Changes"): `open` of the file at its absolute path, which
+/// the daemon's reuse rule places, and with `newPanel` when Shift was held.
+/// Pure, so each click can be asserted without standing up a view; the row
+/// reads the modifier when it is clicked.
+enum ChangesPanelClick {
+    static func operation(worktreePath: String, relativePath: String, shift: Bool) -> PanelOperation {
+        .open(
+            content: .file(FileReference(path: absolutePath(worktreePath: worktreePath, relativePath: relativePath))),
+            newPanel: shift)
+    }
+}
+
+// MARK: - ChangesPanelView
+
+/// The worktree's Changes list as a side-panel tab: its staged, changed,
+/// untracked and branch files, in sections that fold.
+///
+/// The strip around it names it, closes it and carries its refresh control
+/// (`PaneChromeControl.refresh`), so it draws no header of its own. It loads
+/// when it appears and again whenever that control bumps
+/// `chrome.refreshCount`.
+///
+/// A click on a file hands its worktree-relative path to `onOpenFile`, with
+/// whether Shift was held, read as the click lands. A double-click opens the
+/// file in its default app, and a right-click offers Copy Path.
+struct ChangesPanelView: View {
     /// Every read below is of a directory on this disk, so the panel takes the
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
+    /// The panel's control state, whose `refreshCount` the list reloads on.
+    let chrome: PaneChromeState
+    let onOpenFile: @MainActor (_ relativePath: String, _ newPanel: Bool) -> Void
     @Environment(AppState.self) var appState
 
     @State private var staged: [GitFileStatus] = []
@@ -156,33 +185,9 @@ struct FileViewerPanel: View {
     @State private var isLoading = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            fileList
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .task(id: worktree.id) { await refresh() }
-    }
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text("Changes")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-            Spacer()
-            if isLoading {
-                ProgressView().controlSize(.small)
-            } else {
-                Button { Task { await refresh() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh")
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        fileList
+            .background(Color(nsColor: .controlBackgroundColor))
+            .task(id: chrome.refreshCount) { await refresh() }
     }
 
     private var fileList: some View {
@@ -196,44 +201,19 @@ struct FileViewerPanel: View {
                         .padding(.vertical, 20)
                 }
                 if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: onOpenFile)
                 }
                 if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
                 }
                 if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
+                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
                 }
                 if !branchChanges.isEmpty {
-                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: handleFileClick)
+                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: onOpenFile)
                 }
             }
             .padding(.vertical, 4)
-        }
-    }
-
-    private func handleFileClick(_ relativePath: String, cmdClick: Bool) {
-        let fullPath = URL(fileURLWithPath: worktree.path).appendingPathComponent(relativePath).path
-        var tabs = appState.tabs[worktree.id, default: []]
-        let fileName = URL(fileURLWithPath: relativePath).lastPathComponent
-
-        if !cmdClick, let existingIndex = tabs.firstIndex(where: {
-            if case .codeViewer = $0.content { return true }
-            return false
-        }) {
-            // Replace existing code viewer tab content and clear stale layout
-            let newID = UUID()
-            appState.layouts.removeValue(forKey: tabs[existingIndex].id)
-            tabs[existingIndex].content = .codeViewer(id: newID, path: fullPath)
-            tabs[existingIndex].label = fileName
-            appState.tabs[worktree.id] = tabs
-            appState.activeTabIndices[worktree.id] = existingIndex
-        } else {
-            // Create new code viewer tab
-            let newID = UUID()
-            let tab = TBDShared.Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: fileName)
-            appState.tabs[worktree.id, default: []].append(tab)
-            appState.activeTabIndices[worktree.id] = (appState.tabs[worktree.id]?.count ?? 1) - 1
         }
     }
 
@@ -256,6 +236,23 @@ struct FileViewerPanel: View {
     }
 }
 
+// MARK: - RetiredFilePanelDefaults
+
+/// Defaults keys nothing reads: whether a Changes column at the window's
+/// right edge showed, and its width. The Changes list is a side-panel tab
+/// (`ChangesPanelView`), and `AppState` removes both keys at launch.
+enum RetiredFilePanelDefaults {
+    static let keys = ["filePanel.isVisible", "filePanel.width"]
+
+    /// Removes each key `defaults` holds, and writes nothing for one it does
+    /// not.
+    static func remove(from defaults: UserDefaults) {
+        for key in keys where defaults.object(forKey: key) != nil {
+            defaults.removeObject(forKey: key)
+        }
+    }
+}
+
 // MARK: - FileStatusSection
 
 private struct FileStatusSection: View {
@@ -265,7 +262,7 @@ private struct FileStatusSection: View {
     /// Staged section uses index; Changes/Untracked sections use working tree.
     let useIndexStatus: Bool
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isExpanded = true
 
     var body: some View {
@@ -308,7 +305,7 @@ private struct GitFileRow: View {
     let file: GitFileStatus
     let statusChar: Character
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -334,9 +331,8 @@ private struct GitFileRow: View {
             NSWorkspace.shared.open(url)
         }
         .onTapGesture(count: 1) {
-            // Single-click: open in code viewer pane
-            let cmdClick = NSEvent.modifierFlags.contains(.command)
-            onFileClick(file.path, cmdClick)
+            // Single-click: open in a side panel, a new one with Shift held.
+            onFileClick(file.path, NSEvent.modifierFlags.contains(.shift))
         }
         .onHover { isHovered = $0 }
         .contextMenu {
@@ -353,7 +349,7 @@ private struct BranchChangeSection: View {
     let title: String
     let files: [BranchFileChange]
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isExpanded = true
 
     var body: some View {
@@ -394,7 +390,7 @@ private struct BranchChangeSection: View {
 private struct BranchFileRow: View {
     let file: BranchFileChange
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -419,8 +415,8 @@ private struct BranchFileRow: View {
             NSWorkspace.shared.open(url)
         }
         .onTapGesture(count: 1) {
-            let cmdClick = NSEvent.modifierFlags.contains(.command)
-            onFileClick(file.path, cmdClick)
+            // Single-click: open in a side panel, a new one with Shift held.
+            onFileClick(file.path, NSEvent.modifierFlags.contains(.shift))
         }
         .onHover { isHovered = $0 }
         .contextMenu {

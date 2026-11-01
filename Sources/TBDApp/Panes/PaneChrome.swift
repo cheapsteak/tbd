@@ -5,7 +5,8 @@ import TBDShared
 
 /// The state a pane's per-kind controls read: whether a file shows its
 /// rendered view or its source, whether it can render at all, a web page's
-/// current address, and the checkmark a copy of that address shows.
+/// current address, the checkmark a copy of that address shows, and the
+/// Changes list's refresh count.
 ///
 /// It lives apart from the leaf (`PanePlaceholder`) so that the view drawing
 /// the controls can own it. On the daemon path the controls sit in the tab
@@ -30,6 +31,10 @@ final class PaneChromeState {
 
     /// True for ``copyConfirmation`` after ``copyAddress(_:)``.
     private(set) var didCopyAddress = false
+
+    /// How many times the refresh control has been pressed. The Changes list
+    /// reloads whenever it changes (`ChangesPanelView`).
+    private(set) var refreshCount = 0
 
     /// A web pane's live state, whose `currentURL` follows in-page navigation.
     /// It is an `ObservableObject`, and this class does not forward its
@@ -74,12 +79,12 @@ final class PaneChromeState {
     }
 
     /// Does what `control`'s button does to this state: the render toggle
-    /// flips the file between its rendered view and its source, and
+    /// flips the file between its rendered view and its source,
     /// copy-address copies the page's current address, which follows in-page
     /// navigation, or `contentURL`, the address its content opened with,
-    /// until the page reports one. The transcript control changes the
-    /// layout, not this state, so the view that draws it sends that itself
-    /// and this does nothing for it.
+    /// until the page reports one, and refresh bumps ``refreshCount``. The
+    /// transcript control changes the layout, not this state, so the view
+    /// that draws it sends that itself and this does nothing for it.
     func perform(_ control: PaneChromeControl, contentURL: URL?) {
         switch control {
         case .renderToggle:
@@ -87,6 +92,8 @@ final class PaneChromeState {
         case .copyAddress:
             guard let url = webviewState.currentURL ?? contentURL else { return }
             copyAddress(url)
+        case .refresh:
+            refreshCount += 1
         case .transcript:
             break
         }
@@ -144,12 +151,14 @@ enum PaneChromeControl: Equatable {
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
     case copyAddress(copied: Bool)
+    /// The Changes list's reload.
+    case refresh
 
     /// The control viewer content of `kind` puts in its tab row, wherever
     /// that row is — the workspace tab bar for a primary, the side region's
     /// strip for a panel: the rendered/source toggle for a file that can
-    /// render, and copy-address for a web page. A file that cannot render, a
-    /// note, a transcript and the Changes list have none.
+    /// render, copy-address for a web page, and refresh for the Changes list.
+    /// A file that cannot render, a note and a transcript have none.
     static func viewerControl(
         for kind: PanelKind, canRender: Bool, showingSource: Bool, copied: Bool
     ) -> PaneChromeControl? {
@@ -159,7 +168,9 @@ enum PaneChromeControl: Equatable {
             return .renderToggle(showingSource: showingSource)
         case .web:
             return .copyAddress(copied: copied)
-        case .note, .transcript, .changes:
+        case .changes:
+            return .refresh
+        case .note, .transcript:
             return nil
         }
     }
@@ -179,6 +190,8 @@ enum PaneChromeControl: Equatable {
             return "chevron.left.forwardslash.chevron.right"
         case .copyAddress(let copied):
             return copied ? "checkmark" : "doc.on.doc"
+        case .refresh:
+            return "arrow.clockwise"
         }
     }
 
@@ -189,7 +202,7 @@ enum PaneChromeControl: Equatable {
             return isOn ? .accent : .primary
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
-        case .copyAddress:
+        case .copyAddress, .refresh:
             return nil
         }
     }
@@ -205,6 +218,8 @@ enum PaneChromeControl: Equatable {
             return showingSource ? "Show rendered view" : "Show source code"
         case .copyAddress:
             return "Copy URL"
+        case .refresh:
+            return "Refresh"
         }
     }
 }

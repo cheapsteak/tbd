@@ -167,7 +167,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `Services/` — Mac notifications, notification sounds
 - `Helpers/` — `KeyboardShortcuts` (text-finder action routing via responder chain), `StatusBarView` (source/selection status display)
 - `Toolbar/OpenInEditorButton.swift` — lists installed editors, opens the worktree externally
-- `FileViewer/FileViewerPanel.swift` — git status file viewer
+- `FileViewer/ChangesPanelView.swift` — the Changes side-panel tab: git status and branch files
 
 ## Tests/
 Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).

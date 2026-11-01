@@ -505,9 +505,15 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.trailingControl(
             for: web, canRender: true, showingSource: true, copied: false) == notCopied)
 
-        // A note, a transcript and the Changes list have none, whatever the
-        // inputs say.
-        let withoutControl: [PanelContent] = [note, transcript, .changes]
+        // The Changes list: refresh, whatever the inputs say.
+        let refresh: PaneChromeControl? = .refresh
+        #expect(SideRegionStrip.trailingControl(
+            for: .changes, canRender: false, showingSource: false, copied: false) == refresh)
+        #expect(SideRegionStrip.trailingControl(
+            for: .changes, canRender: true, showingSource: true, copied: true) == refresh)
+
+        // A note and a transcript have none, whatever the inputs say.
+        let withoutControl: [PanelContent] = [note, transcript]
         for content in withoutControl {
             #expect(SideRegionStrip.trailingControl(
                 for: content, canRender: true, showingSource: true, copied: true) == nil, "\(content)")

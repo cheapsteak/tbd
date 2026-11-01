@@ -1,0 +1,256 @@
+import Foundation
+import Testing
+import TBDShared
+@testable import TBDApp
+import TestSupport
+
+// Tier 1: deterministic, in-process state only (see `PanelTabsTestSupport`).
+// Every operation goes through the stubbed `panel.apply` seam; no socket
+// opens, and every `AppState` and `UserDefaults` is a throwaway suite's.
+
+/// The Changes list as a side-panel tab (side panel notes and Changes spec,
+/// "Changes", "⌘⇧E"): what a file click sends, ⌘⇧E's three states and its
+/// target, the strip's refresh control, and the retired column's keys.
+@Suite("Changes panel")
+@MainActor
+struct ChangesPanelTests {
+    private typealias Fixture = PanelTabsFixture
+
+    // MARK: - Fixtures
+
+    private static func surface(
+        tabID: UUID = UUID(), worktreeID: UUID = UUID(),
+        worktreePanels: [WorktreePanel], active: PanelID?, collapsed: Bool = false
+    ) -> WorkspaceTabSurface {
+        WorkspaceTabSurface(
+            id: tabID, worktreeID: worktreeID,
+            primary: .terminal(terminalID: tabID),
+            side: SideRegion(panels: [], activePanelID: active, recency: [], collapsed: collapsed),
+            worktreePanels: worktreePanels,
+            revision: 1)
+    }
+
+    private static func worktree(id: UUID, repoID: UUID) -> Worktree {
+        Worktree(
+            id: id, repoID: repoID, name: "wt-\(id.uuidString.prefix(8))",
+            displayName: "Worktree \(id.uuidString.prefix(8))", branch: "main",
+            path: "/tmp/acme/\(id.uuidString.prefix(8))", status: .active, tmuxServer: "acme-server")
+    }
+
+    /// One local worktree, selected, holding `tabs`, with `activeIndex` the
+    /// selected tab. Its tabs are not marked ready, so no tab sync is
+    /// scheduled behind the test's back.
+    private static func selectWorktree(
+        _ state: AppState, tabs: [TBDShared.Tab], activeIndex: Int = 0
+    ) -> UUID {
+        let repoID = UUID()
+        let worktreeID = UUID()
+        state.worktrees[repoID] = [Self.worktree(id: worktreeID, repoID: repoID)]
+        state.tabs[worktreeID] = tabs
+        state.activeTabIndices[worktreeID] = activeIndex
+        state.selectedWorktreeIDs = [worktreeID]
+        return worktreeID
+    }
+
+    // MARK: - A file click
+
+    @Test("a click on a file opens it, by absolute path, where the reuse rule places it")
+    func fileClickOpensFileInSidePanel() {
+        let operation = ChangesPanelClick.operation(
+            worktreePath: "/tmp/acme/wt", relativePath: "Sources/App/main.swift", shift: false)
+        let expected: PanelOperation = .open(
+            content: .file(FileReference(path: "/tmp/acme/wt/Sources/App/main.swift")), newPanel: false)
+        #expect(operation == expected)
+    }
+
+    @Test("a Shift-click on a file opens it in a new panel")
+    func shiftClickAddsNewPanel() {
+        let operation = ChangesPanelClick.operation(
+            worktreePath: "/tmp/acme/wt", relativePath: "README.md", shift: true)
+        let expected: PanelOperation = .open(
+            content: .file(FileReference(path: "/tmp/acme/wt/README.md")), newPanel: true)
+        #expect(operation == expected)
+    }
+
+    // MARK: - ⌘⇧E's decision
+
+    @Test("⌘⇧E opens Changes when none shows it, selects it when hidden, and closes it when in front")
+    func changesToggleDecisionThreeStates() {
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+
+        // No surface known, or no Changes panel: open one.
+        #expect(PaneActions.changesToggleDecision(surface: nil) == .open)
+        #expect(PaneActions.changesToggleDecision(
+            surface: Self.surface(worktreePanels: [note], active: note.id)) == .open)
+
+        // Open but behind another panel: select it.
+        #expect(PaneActions.changesToggleDecision(
+            surface: Self.surface(worktreePanels: [note, changes], active: note.id))
+            == .select(changes.id))
+
+        // In front of a collapsed region: select it, which expands the region.
+        #expect(PaneActions.changesToggleDecision(
+            surface: Self.surface(worktreePanels: [changes], active: changes.id, collapsed: true))
+            == .select(changes.id))
+
+        // In front and visible: close it.
+        #expect(PaneActions.changesToggleDecision(
+            surface: Self.surface(worktreePanels: [note, changes], active: changes.id))
+            == .close(changes.id))
+    }
+
+    @Test("each decision sends its operation, an open showing the content it is handed")
+    func toggleDecisionOperations() {
+        let panelID = UUID()
+        let opensChanges: PanelOperation = .open(content: .changes, newPanel: false)
+        let selectsPanel: PanelOperation = .select(panelID: panelID)
+        let closesPanel: PanelOperation = .close(panelID: panelID)
+
+        #expect(PanelToggleDecision.open.operation(opening: .changes) == opensChanges)
+        #expect(PanelToggleDecision.select(panelID).operation(opening: .changes) == selectsPanel)
+        #expect(PanelToggleDecision.close(panelID).operation(opening: .changes) == closesPanel)
+    }
+
+    // MARK: - ⌘⇧E's target
+
+    @Test("⌘⇧E with no worktree, several, or a tab with no surface yet sends nothing")
+    func toggleChangesPanelWithoutTargetDoesNothing() async {
+        await Fixture.withState { state in
+            let envelopes = Fixture.collectEnvelopes(
+                state, replying: Self.surface(worktreePanels: [], active: nil))
+            let syncs = Fixture.collectSyncs(state)
+
+            // No selection.
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            #expect(envelopes.envelopes.isEmpty)
+
+            // A selected worktree whose active tab the copy holds no surface for.
+            let tab = Fixture.terminalTab()
+            let worktreeID = Self.selectWorktree(state, tabs: [tab])
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == nil)
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            #expect(envelopes.envelopes.isEmpty)
+            #expect(syncs.sent.isEmpty, "nothing flushes a tab sync for a toggle that sends nothing")
+
+            // Two worktrees selected, each with a surface: no single target.
+            let otherTab = Fixture.terminalTab()
+            let otherID = Self.selectWorktree(state, tabs: [otherTab])
+            state.panelSurfaces = [
+                worktreeID: [tab.id: Self.surface(
+                    tabID: tab.id, worktreeID: worktreeID, worktreePanels: [], active: nil)],
+                otherID: [otherTab.id: Self.surface(
+                    tabID: otherTab.id, worktreeID: otherID, worktreePanels: [], active: nil)],
+            ]
+            state.selectedWorktreeIDs = [worktreeID, otherID]
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            #expect(envelopes.envelopes.isEmpty)
+        }
+    }
+
+    @Test("⌘⇧E sends its decision to the selected worktree's active tab")
+    func toggleChangesPanelSendsDecisionToActiveTab() async throws {
+        try await Fixture.withState { state in
+            let first = Fixture.terminalTab()
+            let second = Fixture.terminalTab()
+            let worktreeID = Self.selectWorktree(state, tabs: [first, second], activeIndex: 1)
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let withoutChanges = Self.surface(
+                tabID: second.id, worktreeID: worktreeID, worktreePanels: [], active: nil)
+            let changesInFront = Self.surface(
+                tabID: second.id, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id)
+            let firstSurface = Self.surface(
+                tabID: first.id, worktreeID: worktreeID, worktreePanels: [], active: nil)
+
+            // No Changes panel: open one, on the active tab, not the first.
+            state.panelSurfaces = [worktreeID: [first.id: firstSurface, second.id: withoutChanges]]
+            let opens = Fixture.collectEnvelopes(state, replying: withoutChanges)
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            let opening = try Fixture.single(opens.envelopes)
+            let expectedOpen: PanelOperation = .open(content: .changes, newPanel: false)
+            #expect(opening.operation == expectedOpen)
+            #expect(opening.worktreeID == worktreeID)
+            #expect(opening.tabID == second.id)
+
+            // The Changes panel in front of a visible region: close it.
+            state.panelSurfaces = [worktreeID: [first.id: firstSurface, second.id: changesInFront]]
+            let closes = Fixture.collectEnvelopes(state, replying: changesInFront)
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            let closing = try Fixture.single(closes.envelopes)
+            let expectedClose: PanelOperation = .close(panelID: changes.id)
+            #expect(closing.operation == expectedClose)
+            #expect(closing.tabID == second.id)
+        }
+    }
+
+    // MARK: - The refresh control
+
+    @Test("the Changes list's control is refresh, whatever the other inputs say")
+    func changesViewerControlIsRefresh() {
+        let refresh: PaneChromeControl? = .refresh
+        #expect(PaneChromeControl.viewerControl(
+            for: .changes, canRender: false, showingSource: false, copied: false) == refresh)
+        #expect(PaneChromeControl.viewerControl(
+            for: .changes, canRender: true, showingSource: true, copied: true) == refresh)
+    }
+
+    @Test("refresh bumps the refresh count, and no other control does")
+    func refreshControlBumpsCount() {
+        let state = PaneChromeState(pasteboard: { _ in Issue.record("unexpected pasteboard write") })
+
+        state.perform(.renderToggle(showingSource: false), contentURL: nil)
+        state.perform(.copyAddress(copied: false), contentURL: nil)
+        state.perform(.transcript(isOn: true), contentURL: nil)
+        #expect(state.refreshCount == 0)
+
+        state.perform(.refresh, contentURL: nil)
+        state.perform(.refresh, contentURL: nil)
+        #expect(state.refreshCount == 2)
+        #expect(!state.didCopyAddress)
+        #expect(state.showSourceCode, "only the one render toggle flipped it")
+    }
+
+    @Test("the refresh control draws an arrow in the button style's own colour")
+    func refreshControlAppearance() {
+        let refresh = PaneChromeControl.refresh
+        #expect(refresh.systemImage == "arrow.clockwise")
+        #expect(refresh.help == "Refresh")
+        #expect(refresh.tint == nil)
+    }
+
+    // MARK: - The retired column's keys
+
+    @Test("the retired column's keys are removed, and nothing else")
+    func retiredFilePanelKeysAreRemoved() {
+        withTestDefaults("ChangesPanelTests.retiredKeys") { defaults in
+            defaults.set(false, forKey: "filePanel.isVisible")
+            defaults.set(320.0, forKey: "filePanel.width")
+            defaults.set("kept", forKey: "acme.unrelated")
+
+            RetiredFilePanelDefaults.remove(from: defaults)
+
+            #expect(defaults.object(forKey: "filePanel.isVisible") == nil)
+            #expect(defaults.object(forKey: "filePanel.width") == nil)
+            #expect(defaults.string(forKey: "acme.unrelated") == "kept")
+        }
+    }
+
+    @Test("launching removes the retired column's keys")
+    func launchRemovesRetiredFilePanelKeys() {
+        let suite = TestDefaultsSuite("ChangesPanelTests.launch")
+        defer { suite.tearDown() }
+        suite.defaults.set(true, forKey: "filePanel.isVisible")
+        suite.defaults.set(280.0, forKey: "filePanel.width")
+
+        _ = AppState(userDefaults: suite.defaults)
+
+        for key in RetiredFilePanelDefaults.keys {
+            #expect(suite.defaults.object(forKey: key) == nil, "\(key)")
+        }
+    }
+}

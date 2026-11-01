@@ -194,9 +194,9 @@ enum SideRegionStrip {
 
     /// The active panel's own control, drawn before the collapse button:
     /// its kind's viewer control (`PaneChromeControl.viewerControl`), the
-    /// rendered/source toggle for a file that can render and copy-address for
-    /// a web page. A file that cannot render, a note, a transcript and the
-    /// Changes list have none.
+    /// rendered/source toggle for a file that can render, copy-address for a
+    /// web page and refresh for the Changes list. A file that cannot render,
+    /// a note and a transcript have none.
     static func trailingControl(
         for content: PanelContent,
         canRender: Bool,
@@ -245,9 +245,14 @@ enum SideRegionStrip {
 /// first `WebviewState` it is given, so one leaf must keep one state for its
 /// whole life.
 ///
+/// The Changes list has no leaf form, so it draws `ChangesPanelView` in the
+/// leaf's place, keyed and handed its state the same way. A click on one of
+/// its files opens the file here (`ChangesPanelClick`), in a new panel when
+/// Shift is held.
+///
 /// History steps go out as panel operations through the active panel's
-/// daemon action set. The render toggle and copy-address act on the chrome
-/// state and send nothing.
+/// daemon action set. The render toggle, copy-address and refresh act on the
+/// chrome state and send nothing.
 struct SideRegionView: View {
     let surface: WorkspaceTabSurface
     let worktree: LocalWorktree
@@ -294,6 +299,16 @@ struct SideRegionView: View {
                     tabID: surface.id,
                     actions: active.actions,
                     chrome: active.chrome
+                )
+                .id(active.tab.id)
+            } else if let active, case .changes = active.tab.content {
+                ChangesPanelView(
+                    worktree: worktree,
+                    chrome: active.chrome,
+                    onOpenFile: { relativePath, newPanel in
+                        send(ChangesPanelClick.operation(
+                            worktreePath: worktree.path, relativePath: relativePath, shift: newPanel))
+                    }
                 )
                 .id(active.tab.id)
             } else {

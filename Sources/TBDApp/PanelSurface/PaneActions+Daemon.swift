@@ -1,20 +1,34 @@
 import AppKit
 import TBDShared
 
-// MARK: - The transcript button's decision
+// MARK: - A panel toggle's decision
 
-/// What the transcript button sends on the daemon path, where it sits at the
-/// trailing end of the workspace tab bar while a Claude terminal's tab is
-/// selected and the transcript view setting is on (panel tabs spec, "The
-/// transcript button").
-enum TranscriptToggleDecision: Equatable {
-    /// No transcript panel for the terminal: open one.
+/// What a panel toggle sends on the daemon path: the transcript button,
+/// which sits at the trailing end of the workspace tab bar while a Claude
+/// terminal's tab is selected and the transcript view setting is on (panel
+/// tabs spec, "The transcript button"), and ⌘⇧E for the Changes list (side
+/// panel notes and Changes spec, "⌘⇧E").
+enum PanelToggleDecision: Equatable {
+    /// No panel shows the content: open one.
     case open
     /// The panel exists but another panel is in front, or the region is
     /// collapsed: bring it to the front, which also expands the region.
     case select(PanelID)
     /// The panel is in front and visible: close it.
     case close(PanelID)
+
+    /// The operation the decision sends, where `content` is what an `open`
+    /// shows.
+    func operation(opening content: PanelContent) -> PanelOperation {
+        switch self {
+        case .open:
+            return .open(content: content, newPanel: false)
+        case .select(let panelID):
+            return .select(panelID: panelID)
+        case .close(let panelID):
+            return .close(panelID: panelID)
+        }
+    }
 }
 
 extension PaneHistoryStep {
@@ -35,10 +49,22 @@ extension PaneActions {
     /// side region. Acting on the copy means an agent mutation landing between
     /// the read and the click can make one click act on a stale picture; the
     /// reply corrects the copy, and the next click acts on the truth.
-    static func transcriptToggleDecision(side: SideRegion, terminalID: UUID) -> TranscriptToggleDecision {
+    static func transcriptToggleDecision(side: SideRegion, terminalID: UUID) -> PanelToggleDecision {
         let transcript = PanelContent.transcript(terminalID: terminalID)
         guard let panel = side.panels.first(where: { $0.content == transcript }) else { return .open }
         return side.activePanelID == panel.id && side.isVisible ? .close(panel.id) : .select(panel.id)
+    }
+
+    /// ⌘⇧E's operation for one workspace tab, decided from the app's copy of
+    /// its surface as `transcriptToggleDecision` is: open when the worktree
+    /// has no Changes panel, or no surface is known; close when the Changes
+    /// panel is in front of a visible region; otherwise select it, which also
+    /// expands a collapsed region. Visibility counts the worktree's panels
+    /// (`isSideVisible`), because the Changes panel is one of them.
+    static func changesToggleDecision(surface: WorkspaceTabSurface?) -> PanelToggleDecision {
+        guard let surface, let panel = surface.worktreePanel(showing: .changes) else { return .open }
+        return surface.side.activePanelID == panel.id && surface.isSideVisible
+            ? .close(panel.id) : .select(panel.id)
     }
 
     /// The daemon-owned surface: every structural change a leaf asks for
@@ -117,14 +143,8 @@ extension PaneActions {
                 send(.close(panelID: panelID))
             },
             toggleTranscript: { _, terminalID in
-                switch PaneActions.transcriptToggleDecision(side: currentSide(), terminalID: terminalID) {
-                case .open:
-                    send(.open(content: .transcript(terminalID: terminalID), newPanel: false))
-                case .select(let transcriptPanelID):
-                    send(.select(panelID: transcriptPanelID))
-                case .close(let transcriptPanelID):
-                    send(.close(panelID: transcriptPanelID))
-                }
+                let decision = PaneActions.transcriptToggleDecision(side: currentSide(), terminalID: terminalID)
+                send(decision.operation(opening: .transcript(terminalID: terminalID)))
             },
             isTranscriptOpen: { terminalID in
                 let transcript = PanelContent.transcript(terminalID: terminalID)

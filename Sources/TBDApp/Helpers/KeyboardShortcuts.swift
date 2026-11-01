@@ -94,6 +94,16 @@ struct TBDCommands: Commands {
             .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
+        // Ungated, like the prompt commands: it does nothing without a selected
+        // local worktree whose active tab has a surface
+        // (`AppState.toggleChangesPanel`).
+        CommandGroup(after: .sidebar) {
+            Button("Toggle Changes") {
+                Task { @MainActor in appState.toggleChangesPanel() }
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+        }
+
         // Worktree commands
         CommandMenu("Worktree") {
             WorktreeCommandsContent().environment(appState)

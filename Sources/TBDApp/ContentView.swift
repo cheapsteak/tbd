@@ -2,16 +2,9 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-private enum FilePanelStorageKey {
-    static let isVisible = "filePanel.isVisible"
-    static let width = "filePanel.width"
-}
-
 struct ContentView: View {
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
-    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
-    @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.
@@ -143,8 +136,9 @@ struct ContentView: View {
                 // capsule BOUNDARY is `ControlGroup` (→ NSToolbarItemGroup): the PR
                 // split button is its sole child, which separates it from both
                 // neighbors (confirmed earlier) with no internal gap, while keeping
-                // the split-button chevron + status-colored icon. Plain `Button`s
-                // for the filter / sidebar separate via placement-matched spacers.
+                // the split-button chevron + status-colored icon. Each group after
+                // the filter picker leads with a placement-matched spacer, so the
+                // groups shown separate and the last one ends the toolbar.
                 ToolbarItem(placement: .primaryAction) {
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
@@ -160,10 +154,6 @@ struct ContentView: View {
                     .help("Filter sidebar by repository")
                 }
 
-                if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.fixed, placement: .primaryAction)
-                }
-
                 // The PR control is gated on `effectivePRBindings`: every
                 // binding the worktree has, or — with none — the legacy single
                 // `prStatuses` entry lifted into one synthetic binding, so a
@@ -176,6 +166,10 @@ struct ContentView: View {
                    appState.selectedWorktreeIDs.count == 1 {
                     let bindings = appState.effectivePRBindings(worktreeID: worktreeID)
                     if !bindings.isEmpty {
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
+
                         let worktree = appState.findWorktree(id: worktreeID)
                         let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
                         let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
@@ -282,10 +276,6 @@ struct ContentView: View {
                                 }
                             }
                         }
-
-                        if #available(macOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .primaryAction)
-                        }
                     }
                 }
 
@@ -300,6 +290,9 @@ struct ContentView: View {
                    appState.selectedWorktreeIDs.count == 1,
                    let serverList = appState.devServerLists[worktreeID],
                    AppState.showsServersButton(serverList) {
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.fixed, placement: .primaryAction)
+                    }
                     let serversID = ServersButtonLabel.splitButtonID(
                         worktreeID: worktreeID, list: serverList,
                         messages: appState.devServerActionMessages[worktreeID] ?? [],
@@ -335,9 +328,6 @@ struct ContentView: View {
                             }
                         }
                     }
-                    if #available(macOS 26.0, *) {
-                        ToolbarSpacer(.fixed, placement: .primaryAction)
-                    }
                 }
 
                 // A selected remote session's actions, where a local
@@ -351,6 +341,10 @@ struct ContentView: View {
                     let showsTranscriptToggle = transcriptPresentation.showsToggle
                     let transcriptShown = transcriptPresentation.showsPane
                     if showsReconnect || showsStop || showsTranscriptToggle {
+                        if #available(macOS 26.0, *) {
+                            ToolbarSpacer(.fixed, placement: .primaryAction)
+                        }
+
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
                                 // Shown only while attached; hides the transcript for this
@@ -383,27 +377,7 @@ struct ContentView: View {
                                 .help("Stop this remote session")
                             }
                         }
-
-                        if #available(macOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .primaryAction)
-                        }
                     }
-                }
-
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        // Defer the toggle one run-loop tick and skip the explicit
-                        // withAnimation wrapper. Stacking an easeInOut animation
-                        // on top of an in-flight NavigationSplitView selection
-                        // change blew the per-window constraint-update budget
-                        // (NSGenericException from _uncollapseArrangedView:animated:).
-                        // SwiftUI still animates the layout change implicitly.
-                        DispatchQueue.main.async { showFilePanel.toggle() }
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help("Toggle file panel (⌘⇧E)")
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
             }
             // The Servers button's list whenever a single worktree becomes
@@ -961,9 +935,6 @@ private struct ProviderDeskHostSlot: View {
 /// remote-session branch (now `RemoteSessionHostSlot`'s job) — same
 /// conditions, same order, same views.
 private struct OtherSectionContent: View {
-    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
-    @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
-
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var showingClone = false
@@ -992,7 +963,7 @@ private struct OtherSectionContent: View {
             Text("Select a worktree or click + to create one")
                 .foregroundStyle(.secondary)
         } else {
-            WorktreeDetailAreaView(showFilePanel: $showFilePanel, filePanelWidth: $filePanelWidth)
+            WorktreeDetailAreaView()
         }
     }
 
@@ -1078,77 +1049,44 @@ private struct OtherSectionContent: View {
 
 /// The terminal-grid branch of `OtherSectionContent` (`DetailSectionHostPager`'s
 /// `.other` tab) — rendered when a worktree (not a remote session, scratch
-/// section, or repo-only selection) is what's showing: `TerminalContainerView`
-/// + the optional file panel, the overlay coordinator's transcript overlay,
-/// and the window-wide click-outside catcher.
-///
-/// `showFilePanel`/`filePanelWidth` stay `@Binding`: the stable
-/// `OtherSectionContent` host owns the corresponding `@AppStorage` values and
-/// passes live bindings into this branch. `ContentView` independently observes
-/// the same centralized visibility key for its toolbar action.
-/// `contentAreaHeight` moves in as this view's own `@State` instead: nothing
-/// outside this branch ever read it in `ContentView`.
+/// section, or repo-only selection) is what's showing: `TerminalContainerView`,
+/// the overlay coordinator's transcript overlay, and the window-wide
+/// click-outside catcher.
 private struct WorktreeDetailAreaView: View {
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
-    @Binding var showFilePanel: Bool
-    @Binding var filePanelWidth: Double
-    @State private var contentAreaHeight: CGFloat = 600
-
-    /// The file panel reads a directory, so it binds to the local-only
-    /// selection. `LocalWorktree` subsumes the empty-path check this used to
-    /// spell out — the optimistic `.creating` placeholder has no directory yet
-    /// and does not convert.
-    private var selectedLocalWorktree: LocalWorktree? {
-        appState.selectedLocalWorktree
-    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            TerminalContainerView()
-            if showFilePanel, let worktree = selectedLocalWorktree {
-                FilePanelDivider(panelWidth: Binding(
-                    get: { CGFloat(filePanelWidth) },
-                    set: { filePanelWidth = Double($0) }
-                ))
-                FileViewerPanel(worktree: worktree)
-                    .frame(width: CGFloat(filePanelWidth))
-                    .id(worktree.id)
+        TerminalContainerView()
+            .overlay {
+                // Uses the canonical tab-keyed set — never iterate
+                // `layouts.values` unkeyed: stale worktree-keyed
+                // entries persisted by the pre-split grid path would
+                // make hidden terminals look visible. Those entries
+                // are not pruned at restore time (keys can't be
+                // classified at init; Phase 2 import drops them).
+                if let frame = overlayCoordinator.current,
+                   overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
+                    TranscriptOverlayView(
+                        frame: frame,
+                        hasBack: overlayCoordinator.hasBack,
+                        onBack: { overlayCoordinator.pop() },
+                        onClose: { overlayCoordinator.close() }
+                    )
+                    .frame(maxWidth: 900, maxHeight: 700)
+                    .padding(20)
+                }
             }
-        }
-        .background(GeometryReader { geometry in
-            Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
-        })
-        .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
-        .overlay {
-            // Uses the canonical tab-keyed set — never iterate
-            // `layouts.values` unkeyed: stale worktree-keyed
-            // entries persisted by the pre-split grid path would
-            // make hidden terminals look visible. Those entries
-            // are not pruned at restore time (keys can't be
-            // classified at init; Phase 2 import drops them).
-            if let frame = overlayCoordinator.current,
-               overlayFrameIsWindowRoot(frame, visibleTerminalIDs: appState.visibleTerminalIDs) {
-                TranscriptOverlayView(
-                    frame: frame,
-                    hasBack: overlayCoordinator.hasBack,
-                    onBack: { overlayCoordinator.pop() },
-                    onClose: { overlayCoordinator.close() }
-                )
-                .frame(maxWidth: 900, maxHeight: 700)
-                .padding(20)
+            .background {
+                // Window-wide click-outside catcher. Renders transparently behind
+                // the entire detail area; only consumes taps when an overlay is
+                // currently open, so it doesn't interfere with normal interaction.
+                if overlayCoordinator.isOpen {
+                    Color.black.opacity(0.001)
+                        .onTapGesture { overlayCoordinator.close() }
+                        .allowsHitTesting(true)
+                }
             }
-        }
-        .background {
-            // Window-wide click-outside catcher. Renders transparently behind
-            // the entire detail area; only consumes taps when an overlay is
-            // currently open, so it doesn't interfere with normal interaction.
-            if overlayCoordinator.isOpen {
-                Color.black.opacity(0.001)
-                    .onTapGesture { overlayCoordinator.close() }
-                    .allowsHitTesting(true)
-            }
-        }
     }
 }
 
@@ -1442,40 +1380,5 @@ struct PRButtonLabel: View {
         img.isTemplate = false
         Self.bakedIconCache[cacheKey] = img
         return img
-    }
-}
-
-// MARK: - ContentHeightKey
-
-private struct ContentHeightKey: PreferenceKey {
-    nonisolated(unsafe) static var defaultValue: CGFloat = 600
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-// MARK: - FilePanelDivider
-
-/// A draggable 1pt divider that resizes the file panel.
-/// Uses an 8pt hit target (invisible) centered over the visible line.
-private struct FilePanelDivider: View {
-    @Binding var panelWidth: CGFloat
-    let minWidth: CGFloat = 180
-    let maxWidth: CGFloat = 700
-    @State private var dragStartWidth: CGFloat = 0
-
-    var body: some View {
-        Color.clear
-            .frame(width: 8)
-            .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
-            .pointerStyle(.columnResize)
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        if dragStartWidth == 0 { dragStartWidth = panelWidth }
-                        // Dragging left → wider panel, dragging right → narrower
-                        let proposed = dragStartWidth - value.translation.width
-                        panelWidth = max(minWidth, min(maxWidth, proposed))
-                    }
-                    .onEnded { _ in dragStartWidth = 0 }
-            )
     }
 }

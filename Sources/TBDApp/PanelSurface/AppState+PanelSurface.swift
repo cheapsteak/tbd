@@ -429,6 +429,24 @@ extension AppState {
         await deleteNote(noteID: noteID, worktreeID: worktreeID)
     }
 
+    /// ⌘⇧E (side panel notes and Changes spec, "⌘⇧E"): toggles the Changes
+    /// panel in the tab on screen — the single selected local worktree's
+    /// resolved active tab — by `PaneActions.changesToggleDecision`, so it
+    /// opens Changes, brings it forward, or closes it.
+    ///
+    /// Does nothing without that tab: no selection, several worktrees, a
+    /// remote one, or a worktree with no tabs. Nor without the tab's surface
+    /// in the copy, which the decision reads: a tab the daemon has not
+    /// imported yet, or skipped and draws legacy, has none.
+    func toggleChangesPanel() {
+        guard selectedWorktreeIDs.count == 1,
+              let worktree = selectedLocalWorktree,
+              let tab = resolvedActiveTab(worktreeID: worktree.id),
+              let surface = panelSurface(worktreeID: worktree.id, tabID: tab.id) else { return }
+        let decision = PaneActions.changesToggleDecision(surface: surface)
+        sendPanelOperation(worktreeID: worktree.id, tabID: tab.id, decision.operation(opening: .changes))
+    }
+
     // MARK: - Tab sync
 
     /// The observer on `tabs`. Marks a worktree dirty when its tab IDs, order,

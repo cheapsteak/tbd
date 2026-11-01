@@ -867,7 +867,7 @@ final class AppState {
     /// changes.
     var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
-    /// inside DockSplitView, excluding the pinned dock and file panel).
+    /// inside DockSplitView, excluding the pinned dock).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
     /// 800 tall window − toolbar (~24) ≈ 776. Conservative fallback for the
     /// first RPC before the GeometryReader publishes a real value.
@@ -2785,6 +2785,7 @@ final class AppState {
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
+        RetiredFilePanelDefaults.remove(from: userDefaults)
         restoreLayouts()
         restorePaneHistories()
         restoreNavigationHistory()
