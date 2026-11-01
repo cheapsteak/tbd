@@ -252,7 +252,8 @@ final class AppState {
     @ObservationIgnored var terminalReplacementObservedGeneration: [UUID: UInt64] = [:]
     /// Polled note METADATA — never content. `note.list` touches no file (see
     /// `NoteStore`); a pane that needs content reads it off disk with
-    /// `noteContent(noteID:worktreeID:)`.
+    /// `noteContent(noteID:worktreeID:)`. A worktree's entry is nil until a
+    /// notes poll covers it, then its notes, empty included (`adoptNotes`).
     var notes: [UUID: [NoteSummary]] = [:]
     /// Each note's latest rename still persisting (`renameNote`), which the
     /// next rename of that note waits for, so the daemon commits a note's

@@ -174,8 +174,9 @@ enum PaneChromeControl: Equatable {
     case transcript(isOn: Bool)
     /// The workspace tab bar's Notes button, on while the worktree's first
     /// note is in front of a visible side region
-    /// (`NotesToggleDecision.isOn`).
-    case notes(isOn: Bool)
+    /// (`NotesToggleDecision.isOn`), and disabled while it cannot act
+    /// (`NotesToggleDecision.isEnabled`).
+    case notes(isOn: Bool, isEnabled: Bool)
     /// A renderable file's rendered/source toggle.
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
@@ -229,13 +230,23 @@ enum PaneChromeControl: Equatable {
     /// Nil leaves the symbol in the button style's own colour.
     var tint: Tint? {
         switch self {
-        case .transcript(let isOn), .notes(let isOn):
+        case .transcript(let isOn):
+            return isOn ? .accent : .primary
+        case .notes(let isOn, let isEnabled):
+            guard isEnabled else { return .secondary }
             return isOn ? .accent : .primary
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
         case .copyAddress, .refresh:
             return nil
         }
+    }
+
+    /// Whether the button can be pressed: false only for the Notes button
+    /// while it cannot act.
+    var isEnabled: Bool {
+        if case .notes(_, let isEnabled) = self { return isEnabled }
+        return true
     }
 
     /// The tooltip, which also names the button for accessibility.
@@ -245,7 +256,8 @@ enum PaneChromeControl: Equatable {
             return isOn
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"
-        case .notes(let isOn):
+        case .notes(let isOn, let isEnabled):
+            guard isEnabled else { return "Notes are loading" }
             return isOn ? "Hide notes" : "Show notes"
         case .renderToggle(let showingSource):
             return showingSource ? "Show rendered view" : "Show source code"
@@ -274,6 +286,7 @@ struct PaneChromeControlButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
+        .disabled(!control.isEnabled)
         .help(control.help)
         .accessibilityLabel(Text(control.help))
     }

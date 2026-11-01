@@ -274,7 +274,7 @@ struct PanelSurfaceWorkspaceView: View {
                     break
                 }
             },
-            notesControl: Self.notesControl(surface: surface, notes: appState.notes[worktreeID] ?? []),
+            notesControl: Self.notesControl(surface: surface, notes: appState.notes[worktreeID]),
             onNotesControl: {
                 Task { @MainActor in
                     await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
@@ -363,9 +363,12 @@ struct PanelSurfaceWorkspaceView: View {
 
     /// The Notes button as the bar draws it: on while the worktree's first
     /// note is in front of a visible side region, so a press would close it
-    /// (`NotesToggleDecision.isOn`).
-    static func notesControl(surface: WorkspaceTabSurface?, notes: [NoteSummary]) -> PaneChromeControl {
-        .notes(isOn: PaneActions.notesToggleDecision(surface: surface, notes: notes).isOn)
+    /// (`NotesToggleDecision.isOn`), and disabled while the worktree's notes,
+    /// `notes`, have not loaded and the tab shows no note panel
+    /// (`NotesToggleDecision.unavailable`).
+    static func notesControl(surface: WorkspaceTabSurface?, notes: [NoteSummary]?) -> PaneChromeControl {
+        let decision = PaneActions.notesToggleDecision(surface: surface, notes: notes)
+        return .notes(isOn: decision.isOn, isEnabled: decision.isEnabled)
     }
 
     /// The expand button shows once the tab's surface is known and its side

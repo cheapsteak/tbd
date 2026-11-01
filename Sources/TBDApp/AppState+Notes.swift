@@ -80,34 +80,39 @@ extension AppState {
     /// close sends the `close` operation alone, which keeps the note — never
     /// `closeSidePanel`, which deletes it.
     ///
-    /// In a worktree with no note it creates one titled
+    /// In a worktree whose notes are listed and empty it creates one titled
     /// `NotesToggleDecision.createdNoteTitle` and opens it (`createNote`). A
     /// press while that create is still in flight sends nothing
     /// (`notesButtonCreatesInFlight`), so a double click makes one note.
+    /// While the worktree's notes have not loaded and the tab shows no note
+    /// panel, a press sends nothing (`NotesToggleDecision.unavailable`).
     func toggleNotesPanel(worktreeID: UUID, tabID: UUID) async {
         let decision = PaneActions.notesToggleDecision(
             surface: panelSurface(worktreeID: worktreeID, tabID: tabID),
-            notes: notes[worktreeID] ?? [])
-        guard let operation = decision.operation else {
-            guard notesButtonCreatesInFlight.insert(worktreeID).inserted else { return }
-            defer { notesButtonCreatesInFlight.remove(worktreeID) }
-            await createNote(
-                worktreeID: worktreeID, tabID: tabID, title: NotesToggleDecision.createdNoteTitle)
+            notes: notes[worktreeID])
+        if let operation = decision.operation {
+            await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
             return
         }
-        await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
+        guard decision == .create, notesButtonCreatesInFlight.insert(worktreeID).inserted else { return }
+        defer { notesButtonCreatesInFlight.remove(worktreeID) }
+        await createNote(
+            worktreeID: worktreeID, tabID: tabID, title: NotesToggleDecision.createdNoteTitle)
     }
 
     /// Adopts one `note.list` answer for `worktreeIDs`: each worktree's
     /// summaries replace its entry in `notes` when they differ, and a
-    /// worktree the answer names no note for is left with none. A note shows
-    /// in the side panel as a worktree panel, never as a workspace tab, so
-    /// this touches no tab.
+    /// worktree the answer names no note for gets an empty list. So every
+    /// worktree an answer covered has an entry, and a nil entry means the
+    /// worktree's notes have not loaded yet — which the Notes button tells
+    /// apart from a worktree with none (`NotesToggleDecision.unavailable`).
+    /// A note shows in the side panel as a worktree panel, never as a
+    /// workspace tab, so this touches no tab.
     func adoptNotes(_ fetched: [NoteSummary], worktreeIDs: Set<UUID>) {
         let byWorktree = Dictionary(grouping: fetched, by: { $0.worktreeID })
         for worktreeID in worktreeIDs {
             let summaries = byWorktree[worktreeID] ?? []
-            if summaries != notes[worktreeID] ?? [] {
+            if notes[worktreeID] != summaries {
                 notes[worktreeID] = summaries
             }
         }

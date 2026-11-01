@@ -134,8 +134,8 @@ struct PaneChromeTests {
         state.perform(.copyAddress(copied: false), contentURL: nil)
         state.perform(.transcript(isOn: false), contentURL: opened)
         state.perform(.transcript(isOn: true), contentURL: opened)
-        state.perform(.notes(isOn: false), contentURL: opened)
-        state.perform(.notes(isOn: true), contentURL: opened)
+        state.perform(.notes(isOn: false, isEnabled: true), contentURL: opened)
+        state.perform(.notes(isOn: true, isEnabled: true), contentURL: opened)
 
         #expect(written.values.isEmpty)
         #expect(!state.didCopyAddress)
