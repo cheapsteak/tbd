@@ -91,11 +91,12 @@ struct PanelOpen: AsyncParsableCommand {
         discussion: """
             Selects a panel already showing this content. A note or the Changes list \
             (--changes) is worktree-wide: every tab of the worktree shows it, it has no \
-            history, and it is selected if already open. Otherwise a file or web page goes into the active panel when it is the same kind, else into the \
-            most recently used panel of that kind, and the old content stays in that \
-            panel's history. A transcript, --new-panel, or content with no panel of \
-            its kind gets a new panel after the active one. Opening also expands a \
-            collapsed side panel.
+            history, and it is selected if already open, else added to the worktree's \
+            panels. A file or web page goes into the active panel when it is the same \
+            kind, else into the most recently used panel of that kind, and the old \
+            content stays in that panel's history. A transcript, --new-panel on a file \
+            or web page, or content with no panel of its kind gets a new panel after \
+            the active one. Opening also expands a collapsed side panel.
             """
     )
 
@@ -107,7 +108,7 @@ struct PanelOpen: AsyncParsableCommand {
 
     @OptionGroup var content: ContentOptions
 
-    @Flag(name: .long, help: "Always open a new panel instead of reusing one of the same kind")
+    @Flag(name: .long, help: "Open a file or web page in a new panel instead of reusing one of the same kind (no effect on a note or Changes)")
     var newPanel = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -145,7 +146,7 @@ struct PanelNavigate: AsyncParsableCommand {
     func operation() throws -> PanelOperation {
         .navigate(
             panelID: try parseUUID(panel, label: "panel ID"),
-            destination: try resolvePanelContent(content))
+            destination: try resolveNavigateDestination(content))
     }
 
     mutating func run() async throws {
@@ -156,7 +157,7 @@ struct PanelNavigate: AsyncParsableCommand {
 struct PanelClose: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "close",
-        abstract: "Close a panel and its history"
+        abstract: "Close a panel and its history (a note or Changes panel closes in every tab; the note is kept)"
     )
 
     @Argument(help: "Worktree name or ID")
@@ -371,6 +372,17 @@ struct PanelResize: AsyncParsableCommand {
     mutating func run() async throws {
         try runPanelOperation(worktree: worktree, tab: tab, json: json, operation: operation())
     }
+}
+
+/// `navigate` points a panel at new content of its own kind; a note or the
+/// Changes list is worktree-wide and has no history, so it is refused.
+func resolveNavigateDestination(_ opts: ContentOptions) throws -> PanelContent {
+    if opts.note != nil || opts.changes {
+        throw CLIError.invalidArgument(
+            "navigate does not apply to a note or the Changes list: it has no history. "
+                + "Use `tbd panel open` with --note or --changes instead")
+    }
+    return try resolvePanelContent(opts)
 }
 
 // MARK: - Content flags (used by open and navigate)

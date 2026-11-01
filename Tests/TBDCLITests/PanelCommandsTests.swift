@@ -96,6 +96,18 @@ struct PanelContentResolutionTests {
         #expect(try cmd.operation() == .open(content: .changes, newPanel: false))
     }
 
+    @Test func navigateRefusesNoteAndChanges() throws {
+        for flag in [["--note", UUID().uuidString], ["--changes"]] {
+            let cmd = try PanelNavigate.parse(["wt", "--panel", UUID().uuidString] + flag)
+            #expect(throws: CLIError.self) { _ = try cmd.operation() }
+        }
+    }
+
+    @Test func navigateStillAcceptsAFile() throws {
+        let cmd = try PanelNavigate.parse(["wt", "--panel", UUID().uuidString, "--file", "/tmp/a.txt"])
+        _ = try cmd.operation()
+    }
+
     @Test func noContentSourceIsInvalid() throws {
         let opts = try ContentOptions.parse([])
         #expect(throws: CLIError.self) {

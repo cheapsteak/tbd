@@ -163,4 +163,6 @@ import Foundation
     #expect(body.contains("`--changes`"))
     #expect(body.contains("tbd note list"))
     #expect(body.contains("`tbd note`"))
+    #expect(body.contains("a note or Changes panel closes in every tab, and the note is kept"))
+    #expect(body.contains("It does not apply to a note or Changes panel"))
 }

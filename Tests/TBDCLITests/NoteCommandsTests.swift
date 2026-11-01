@@ -46,6 +46,16 @@ struct NoteCommandsTests {
         #expect(lines[1] == "\(without.id)  B  no panel")
     }
 
+    @Test func anUntitledNoteReadsNoteInTextButKeepsItsTitleInJSON() {
+        let entry = NoteListEntry(id: UUID(), title: "", hasPanel: false, panelID: nil)
+        #expect(noteListLines([entry]) == ["\(entry.id)  Note  no panel"])
+        #expect(entry.title.isEmpty)
+    }
+
+    @Test func topLevelCommandRegistersNote() {
+        #expect(TBDCommand.configuration.subcommands.contains { $0._commandName == "note" })
+    }
+
     @Test func noNotesSaysSo() {
         #expect(noteListLines([]) == ["No notes found."])
     }

@@ -239,7 +239,7 @@ auto-archive off for the worktree instead.
 
 ## Panels
 
-Each worktree tab shows its **primary** content (its terminal, or a file/web/note/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
+Each worktree tab shows its **primary** content (its terminal, or a file/web/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
 
 Notes and the **Changes** list are different: they are **worktree-wide**. Showing one shows it in every tab of the worktree, ahead of each tab's own panels. They have no history, and each is open in at most one panel. Closing a panel never deletes a note. `tbd note list "$TBD_WORKTREE_ID"` lists the worktree's notes and the panel showing each (`--json` for the raw result).
 
@@ -262,13 +262,13 @@ Open content and let the reuse rule place it — don't pick a panel yourself. `o
 ### Arrange
 
 - `select --panel <id>` brings a panel to the front.
-- `navigate --panel <id>` points one panel at new content of its own kind.
+- `navigate --panel <id>` points one panel at new content of its own kind. It does not apply to a note or Changes panel; `open` them instead.
 - `back`, `forward`, and `jump --index <n>` (each with `--panel <id>`) move through a panel's history.
-- `close --panel <id>` closes a panel and its history. Closing a note's panel keeps the note.
+- `close --panel <id>` closes a panel and its history; a note or Changes panel closes in every tab, and the note is kept.
 - `collapse` hides the side panel and keeps its panels; `expand` shows it again. `open` and `select` expand it too.
 - `resize --width <fraction>` sets the side panel's width as a fraction of the tab's width.
 
-Every command acts on the worktree's active tab unless you pass `--tab <id>`. Run `tbd panel <verb> --help` for flags.
+Every command acts on the worktree's active tab unless you pass `--tab <id>`, except that opening or closing a note or Changes panel affects every tab of the worktree (selecting one stays per tab). Run `tbd panel <verb> --help` for flags.
 
 ## Scratch spaces & promotion
 

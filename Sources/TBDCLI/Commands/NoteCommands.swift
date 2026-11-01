@@ -78,14 +78,16 @@ func noteListEntries(notes: [NoteSummary], worktreePanels: [WorktreePanel]) -> [
     }
 }
 
-/// The text `tbd note list` prints, or a note when there is none.
+/// The text `tbd note list` prints (an untitled note reads "Note"), or a
+/// message when there is none.
 func noteListLines(_ entries: [NoteListEntry]) -> [String] {
     guard !entries.isEmpty else { return ["No notes found."] }
     return entries.map { entry in
+        let title = entry.title.isEmpty ? "Note" : entry.title
         if let panelID = entry.panelID {
-            return "\(entry.id)  \(entry.title)  panel \(panelID)"
+            return "\(entry.id)  \(title)  panel \(panelID)"
         }
-        return "\(entry.id)  \(entry.title)  no panel"
+        return "\(entry.id)  \(title)  no panel"
     }
 }
 
