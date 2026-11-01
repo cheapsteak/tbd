@@ -85,11 +85,15 @@ currently has none.
 an archived worktree row, or the deletion queue TBD renamed the directory into.
 
 **Out of scope, tracked as issue #678:** leaked tmux servers and their
-`tmux -CC attach` control-mode clients. A tmux server `chdir`s to `/` when it
-daemonizes — measured directly against a live TBD server, which reported
-`cwd=/` — so a cwd-keyed rule structurally cannot see one. That class needs a
-matcher keyed on server identity instead, and it carries a second half about
-test-suite cleanup that does not belong here.
+`tmux -CC attach` control-mode clients. A tmux server's cwd says nothing
+dependable about which worktree it serves. One live TBD server reported
+`cwd=/`, where a cwd-keyed rule cannot see it at all. Another, on tmux 3.6a,
+reported one worktree's directory — the cwd of the daemon that started it, and
+also its first session's directory — while serving every worktree of its repo.
+Neither carries a TBD environment marker, so the environment rules in
+[`2026-11-01-env-marker-attribution-design.md`](2026-11-01-env-marker-attribution-design.md)
+keep both. That class needs a matcher keyed on server identity instead, and it
+carries a second half about test-suite cleanup that does not belong here.
 
 **Out of scope, deliberately deferred to its own spec:** making teardown itself
 reap. Eleven of TBD's fifteen teardown call sites use a bare `tmux.killWindow`
@@ -125,7 +129,7 @@ names — none of which lsof carries. It is the same `/bin/ps` invocation shape
 care `WorktreeLifecycle+Archive.swift` already takes when matching a worktree
 path against `git worktree list` output.
 
-A process is a candidate for reclamation when **all** of these hold:
+The cwd route admits a process for reclamation when **all** of these hold:
 
 - `ppid == 1`. It has been reparented to launchd, i.e. it really did escape.
   A process still held by a live parent is that parent's business.
@@ -139,6 +143,13 @@ A process is a candidate for reclamation when **all** of these hold:
   - the directory sitting in a `<pool>/.deleting/<uuid>` queue entry, which is
     where TBD itself renamed it on the way to deleting it.
 - It is at least as old as the cwd reading it was matched against.
+
+The process's environment markers, `TBD_WORKTREE_ID` and `TBD_TERMINAL_ID`,
+refine this rule in both directions. A marker naming a live worktree, or a
+readable environment with no marker at all, keeps a process the cwd route
+would reclaim. A marker naming an archived worktree admits an escaped process
+whose cwd left it, behind guards against user-wide daemons. Those rules live in
+[`2026-11-01-env-marker-attribution-design.md`](2026-11-01-env-marker-attribution-design.md).
 
 A cwd inside a **live** worktree is never a candidate, whatever the process is.
 That is what keeps the rule narrow: a deliberately detached dev server is
@@ -326,7 +337,7 @@ These are the safety core, and the first is not hypothetical.
   is gone is a real orphan, and the sweep must still be able to reach it. The
   exemption is built only once the phase has a candidate, because the job check
   costs a `ps` per session.
-- **Nothing TBD spawns to outlive the daemon carries a worktree cwd.**
+- **Holders and the model proxy start outside every worktree.**
   `HolderSpawner` and `ModelProxySpawner` start their process in `/` through a
   `posix_spawn` chdir file action, and a spawn whose chdir cannot be recorded
   fails rather than inheriting the daemon's cwd. Without it, both would carry
@@ -336,6 +347,15 @@ These are the safety core, and the first is not hypothetical.
   holder between fork and exec. A cwd is fixed at spawn, so a holder or proxy
   started by a daemon built without this keeps its launching worktree's cwd for
   as long as it runs — which is why the two exclusions above do not rely on cwd.
+  A per-repo tmux server is spawned without that file action and does carry a
+  worktree's directory as its cwd while it serves every worktree of its repo.
+  What keeps it is its environment, which holds no TBD marker (next bullet).
+- **Processes the environment vetoes, and the daemon keep-list.** A readable
+  environment that names a live worktree or terminal, or names neither, keeps
+  the process, and a planned tree with any member naming a live worktree is
+  kept whole. A process whose command line matches the daemon keep-list is
+  protected beside the binary-name check. Both are specified in
+  [`2026-11-01-env-marker-attribution-design.md`](2026-11-01-env-marker-attribution-design.md).
 - **pid <= 1**, already refused inside `ProcessSignaller`.
 - **Processes not owned by our uid.** The gate sits in the protected set, next
   to the binary-name check, rather than only on the orphan root — a root-only
@@ -500,7 +520,7 @@ should have caught them. It is also the destructive-at-a-user-gesture path and i
 reverses the `isTBDOwned` position. Deferred to its own spec rather than
 rejected outright.
 
-**Identify by TBD ancestry fingerprint rather than cwd.** `pnpm` and
+**Identify by TBD ancestry fingerprint alone, in place of cwd.** `pnpm` and
 `process-compose` inherit no TBD marker in their argv, but they do inherit
 `TBD_WORKTREE_ID` and `TBD_TERMINAL_ID` from the pane. macOS lets a process
 running as the same user read that environment, as it stood at exec, through
@@ -518,6 +538,11 @@ for the observed cases. It is still a poor sole basis for a kill:
   returns argv but no environment, and so do a few other apps (Dia, Chrome,
   Postgres.app). An orphaned shell or script runner carries no readable
   marker.
+
+The marker is used as evidence beside cwd instead:
+[`2026-11-01-env-marker-attribution-design.md`](2026-11-01-env-marker-attribution-design.md)
+lets it veto a cwd kill, and lets it admit an escaped process only behind
+guards against user-wide daemons.
 
 **Reclaim any orphan under a TBD worktree whose terminal row is gone, without
 requiring the worktree to be dead.** Catches more, and reclaims processes inside
