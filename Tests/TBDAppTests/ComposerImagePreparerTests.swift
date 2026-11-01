@@ -135,10 +135,25 @@ struct ComposerImagePreparerTests {
     /// operation onto one of its threads, and `body` never suspends, so it runs
     /// start to finish there. Assertions inside still attribute to the test:
     /// it is the same task.
+    ///
+    /// The thread is checked by name before `body` runs, so a preference that
+    /// stopped reaching this closure goes red here instead of quietly putting
+    /// the work back on the pool.
     private func onTestOwnedThread(_ body: () throws -> Void) async throws {
         try await withTaskExecutorPreference(GateExecutor.shared) {
+            #expect(Self.runningThreadName() == GateExecutor.threadName)
             try body()
         }
+    }
+
+    /// Which thread is running this code.
+    ///
+    /// Synchronous on purpose: `Thread.current` is unavailable from an async
+    /// context, because the answer can change across a suspension point. Called
+    /// from the async closure above with no suspension between it and `body`,
+    /// so it names the thread `body` runs on.
+    private static func runningThreadName() -> String? {
+        Thread.current.name
     }
 
     @Test func tiffInPngOut() throws {

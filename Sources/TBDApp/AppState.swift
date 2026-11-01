@@ -847,17 +847,21 @@ final class AppState {
     /// spawn-time account picker. Toggleable from the picker itself and
     /// Settings → Model Profiles. Persisted per-user.
     ///
-    /// Written only when it differs from what the key already holds. `init`
-    /// restores it from that key, and writing the value straight back cost a
-    /// synchronous `cfprefsd` round trip on every construction while saving
-    /// nothing. The comparison is with the stored value, not `oldValue`: the
-    /// property starts at `false`, so restoring a stored `true` changes it, yet
-    /// there is nothing to write. An absent key reads as `false`, so `false`
-    /// over an absent key writes nothing either.
+    /// An unchanged value is not written back: each write is a synchronous
+    /// `cfprefsd` round trip, and `init` restores this from the same key, so
+    /// constructing an `AppState` over an absent or `false` key writes nothing.
+    /// A stored `true` is still written back once per `init`, because the
+    /// property starts at `false` and the restore changes it; that is one write
+    /// per launch for anyone who turned the setting on.
+    ///
+    /// The guard compares with `oldValue`, not with the stored value. Reading
+    /// the stored value with `bool(forKey:)` searches every defaults domain —
+    /// launch arguments, global and registered defaults — so a value from one
+    /// of those would make a real choice look already saved and leave it
+    /// unwritten. Against `oldValue`, every real change is saved.
     var skipAccountPicker: Bool = false {
         didSet {
-            guard userDefaults.bool(forKey: Self.skipAccountPickerKey) != skipAccountPicker
-            else { return }
+            guard skipAccountPicker != oldValue else { return }
             userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey)
         }
     }

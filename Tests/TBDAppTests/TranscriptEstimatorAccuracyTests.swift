@@ -286,10 +286,8 @@ struct TranscriptEstimatorAccuracyTests {
         // `recognizePastes: true`. The corpus holds no paste tags, so for these
         // paragraphs the two renders should match, but a change to paste
         // unwrapping would not show here.
-        var renderedCorpus: [[MessageBlock]] = []
-        for text in Self.paragraphCorpus {
-            renderedCorpus.append(MarkdownAttributedRenderer.renderBlocks(
-                text, theme: .chatBubble, linkResolver: nil))
+        let renderedCorpus: [[MessageBlock]] = Self.paragraphCorpus.map { text in
+            MarkdownAttributedRenderer.renderBlocks(text, theme: .chatBubble, linkResolver: nil)
         }
         let measurer = MessageBlockMeasurer()
 
@@ -452,22 +450,21 @@ struct TranscriptEstimatorAccuracyTests {
             // column width, so each arm is rendered once here and measured at both
             // widths below. The measuring runs width first, then arm: the order
             // the thresholds below were swept in.
-            var renderedArms: [RenderedArm] = []
-            for arm in Self.corpusArms {
+            let renderedArms: [RenderedArm] = Self.corpusArms.map { arm -> RenderedArm in
                 let usage = Self.corpusUsage(badged: arm.badged)
                 let item: TranscriptItem = arm.role == .user
                     ? .userPrompt(id: "corpus", text: text, timestamp: nil)
                     : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
-                renderedArms.append(RenderedArm(
-                    arm: arm, item: item,
+                return RenderedArm(
+                    arm: arm, item: item, usage: usage,
                     blocks: TranscriptBubbleGeometry.composedBlocks(
-                        for: item, badgeUsage: usage, linkResolver: nil)))
+                        for: item, badgeUsage: usage, linkResolver: nil))
             }
             for width in Self.widths {
                 for rendered in renderedArms {
                     let arm = rendered.arm
                     let role = arm.role
-                    let usage = Self.corpusUsage(badged: arm.badged)
+                    let usage = rendered.usage
                     let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(rendered.item),
                                                     badgeUsage: usage)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
@@ -549,6 +546,7 @@ struct TranscriptEstimatorAccuracyTests {
     private struct RenderedArm {
         let arm: CorpusArm
         let item: TranscriptItem
+        let usage: TokenUsage?
         let blocks: [MessageBlock]
     }
 
