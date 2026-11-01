@@ -254,9 +254,9 @@ struct MainToolbarControllerTests {
 
     // MARK: - Compact leading buttons
 
-    /// The toggle, back and forward are view items, each a borderless button
-    /// held at the compact size by required constraints, highlighting only
-    /// under the pointer, with its tool tip, label and accessibility
+    /// The toggle, back and forward are view items, each a bordered button
+    /// that shows its border only under the pointer, held at the compact size
+    /// by required constraints, with its tool tip, label and accessibility
     /// description, and its target and action on the button, on the item,
     /// which forwards them, and on its overflow row.
     @Test func leadingButtonsAreCompactViewItems() async throws {
@@ -566,8 +566,9 @@ struct MainToolbarControllerTests {
 
     /// The filter's overflow row is "Filter" with a submenu of the popup's
     /// rows. It checks the current choice, or none for a repo that is gone;
-    /// choosing a row sets the filter; and it follows the options as they
-    /// change, rebuilt in the same row.
+    /// choosing a row sets the filter; and it follows the options and the
+    /// choice as they change. Each check reads the item's current row, as a
+    /// change replaces the row rather than editing it.
     @Test func filterOverflowRowMirrorsThePopup() async throws {
         let fixture = ToolbarFixture(label: "filterOverflowRowMirrorsThePopup")
         defer { fixture.tearDown() }
@@ -577,8 +578,7 @@ struct MainToolbarControllerTests {
 
         fixture.state.repoFilter = fixture.repos[1].id
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let filterItem = try #require(controller.item(MainToolbarItemID.repoFilter))
-        let form = try #require(filterItem.menuFormRepresentation)
+        let form = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
         let rows = try #require(form.submenu)
         #expect(form.title == "Filter")
         #expect(form.action == nil)
@@ -599,59 +599,138 @@ struct MainToolbarControllerTests {
         let wired = choosable.allSatisfy { $0.target === controller && $0.action == chooseAction }
         #expect(wired)
 
-        // Choosing a row sets the filter, and the next apply checks it.
+        // Choosing a row sets the filter, and the next apply's row checks it.
         let chose = NSApplication.shared.sendAction(chooseAction, to: controller, from: choosable[1])
         #expect(chose)
         #expect(fixture.state.repoFilter == fixture.repos[0].id)
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let checkedAcme = Self.checkedTitles(rows)
+        let acmeRows = try #require(Self.filterOverflowRows(of: controller))
+        let checkedAcme = Self.checkedTitles(acmeRows)
         let expectedAcme: [String] = ["acme"]
         #expect(checkedAcme == expectedAcme)
 
         // A filter naming a repo that is gone checks none.
         fixture.state.repoFilter = UUID()
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let checkedMissing = Self.checkedTitles(rows)
+        let missingRows = try #require(Self.filterOverflowRows(of: controller))
+        let checkedMissing = Self.checkedTitles(missingRows)
         #expect(checkedMissing.isEmpty)
+        #expect(Self.describeFilterRows(missingRows) == expectedTitles)
 
-        // A new repo is rebuilt into the same row, and checked when chosen.
+        // A new repo is in the next row, and checked when chosen.
         let gadgets = Repo(path: "/tmp/gadgets", displayName: "gadgets")
         fixture.state.repos.append(gadgets)
         fixture.state.repoFilter = gadgets.id
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(filterItem.menuFormRepresentation === form)
-        #expect(form.submenu === rows)
-        let grownTitles = Self.describeFilterRows(rows)
+        let grownRows = try #require(Self.filterOverflowRows(of: controller))
+        let grownTitles = Self.describeFilterRows(grownRows)
         let expectedGrown: [String] = ["All Repos", "-", "acme", "widgets", "gadgets"]
         #expect(grownTitles == expectedGrown)
-        let checkedGadgets = Self.checkedTitles(rows)
+        let checkedGadgets = Self.checkedTitles(grownRows)
         let expectedGadgets: [String] = ["gadgets"]
         #expect(checkedGadgets == expectedGadgets)
+        #expect(grownRows.delegate === controller.filterMenuTracker)
         let popup = try #require(fixture.filterPopup)
         #expect(popup.titleOfSelectedItem == "gadgets")
     }
 
-    /// While one of the filter's menus is open its rows are not rebuilt
-    /// under the pointer; the close catches the overflow rows up, with no
-    /// apply but the one it schedules.
+    /// The title's and the filter's overflow rows are replaced, never
+    /// edited, and only when what they show changes: an apply that changes
+    /// nothing leaves the same rows on the items, a new title replaces only
+    /// the title's row, and a new choice replaces only the filter's.
+    @Test func overflowRowsAreReplacedOnlyWhenTheyChange() async throws {
+        let fixture = ToolbarFixture(label: "overflowRowsAreReplacedOnlyWhenTheyChange")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+
+        fixture.state.selectedWorktreeIDs = [fixture.worktrees[0].id]
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let firstTitle = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        let firstFilter = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
+        #expect(firstTitle.title == "main")
+
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(controller.item(MainToolbarItemID.title)?.menuFormRepresentation === firstTitle)
+        #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === firstFilter)
+
+        fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let secondTitle = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        #expect(secondTitle !== firstTitle)
+        #expect(secondTitle.title == "feature")
+        #expect(firstTitle.title == "main")
+        #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === firstFilter)
+
+        fixture.state.repoFilter = fixture.repos[0].id
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let secondFilter = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
+        #expect(secondFilter !== firstFilter)
+        #expect(controller.item(MainToolbarItemID.title)?.menuFormRepresentation === secondTitle)
+        let firstRows = try #require(firstFilter.submenu)
+        let secondRows = try #require(secondFilter.submenu)
+        let checkedBefore = Self.checkedTitles(firstRows)
+        let checkedAfter = Self.checkedTitles(secondRows)
+        let expectedBefore: [String] = ["All Repos"]
+        let expectedAfter: [String] = ["acme"]
+        #expect(checkedBefore == expectedBefore)
+        #expect(checkedAfter == expectedAfter)
+    }
+
+    /// A filter item made before any apply carries an empty "Filter" row; one
+    /// made after an apply starts from the filter that apply showed, so a
+    /// filter item the toolbar re-inserts, as after a collapse, never shows
+    /// an empty row in between.
+    @Test func aNewFilterItemStartsFromTheLastAppliedFilter() async throws {
+        let fixture = ToolbarFixture(label: "aNewFilterItemStartsFromTheLastAppliedFilter")
+        defer { fixture.tearDown() }
+        let unapplied = MainToolbarController(
+            appState: fixture.state, split: ToolbarFixture.makeSplit(), titleView: NSView(),
+            requestRemoteStop: { _ in })
+        try #require(unapplied.appliedSnapshot == nil)
+        let emptyItem = try #require(unapplied.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
+        let emptyForm = try #require(emptyItem.menuFormRepresentation)
+        #expect(emptyForm.title == "Filter")
+        let emptyRows = try #require(emptyForm.submenu)
+        #expect(emptyRows.items.isEmpty)
+        #expect(emptyRows.delegate === unapplied.filterMenuTracker)
+
+        try await fixture.ready()
+        fixture.state.repoFilter = fixture.repos[1].id
+        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let item = try #require(fixture.controller.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
+        let rows = try #require(item.menuFormRepresentation?.submenu)
+        let titles = Self.describeFilterRows(rows)
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        #expect(titles == expectedTitles)
+        let checked = Self.checkedTitles(rows)
+        let expectedChecked: [String] = ["widgets"]
+        #expect(checked == expectedChecked)
+    }
+
+    /// While one of the filter's menus is open its row is not replaced under
+    /// the pointer; the close catches it up, with no apply but the one it
+    /// schedules.
     @Test func filterOverflowRowsWaitForAnOpenMenuToClose() async throws {
         let fixture = ToolbarFixture(label: "filterOverflowRowsWaitForAnOpenMenuToClose")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
-        let rows = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation?.submenu)
-        let before = Self.describeFilterRows(rows)
+        let openForm = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
+        let openRows = try #require(openForm.submenu)
+        let before = Self.describeFilterRows(openRows)
 
-        controller.filterMenuTracker.menuWillOpen(rows)
+        controller.filterMenuTracker.menuWillOpen(openRows)
         fixture.state.repos.append(Repo(path: "/tmp/gadgets", displayName: "gadgets"))
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let whileOpen = Self.describeFilterRows(rows)
+        #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === openForm)
+        let whileOpen = Self.describeFilterRows(openRows)
         #expect(whileOpen == before)
 
-        controller.filterMenuTracker.menuDidClose(rows)
-        let caughtUp = try await waitForMainActorCondition("the filter's overflow rows to catch up once it closes") {
-            let shown = controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation?.submenu
-            return shown.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
+        controller.filterMenuTracker.menuDidClose(openRows)
+        let caughtUp = try await waitForMainActorCondition("the filter's overflow row to catch up once it closes") {
+            let rows = MainToolbarControllerTests.filterOverflowRows(of: controller)
+            return rows.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
         }
         #expect(caughtUp)
     }
@@ -710,41 +789,48 @@ struct MainToolbarControllerTests {
 
     /// The title's overflow row is inert and shows the cluster's main title:
     /// hidden with nothing selected, the worktree's name, a remote session's
-    /// name when only it is selected, and hidden again once neither is.
+    /// name when only it is selected, and hidden again once neither is. Each
+    /// check reads the item's current row, as a change replaces it.
     @Test func titleOverflowRowShowsTheTitle() async throws {
         let fixture = ToolbarFixture(label: "titleOverflowRowShowsTheTitle")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
-        let form = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
-        #expect(form.isHidden)
-        #expect(form.isEnabled == false)
-        #expect(form.action == nil)
+        let empty = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        #expect(empty.isHidden)
+        #expect(empty.isEnabled == false)
+        #expect(empty.action == nil)
 
         fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(form.title == "feature")
-        #expect(form.isHidden == false)
+        let worktreeRow = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        #expect(worktreeRow.title == "feature")
+        #expect(worktreeRow.isHidden == false)
+        #expect(worktreeRow.isEnabled == false)
+        #expect(worktreeRow.action == nil)
 
         fixture.state.selectedWorktreeIDs = []
         let selection = fixture.showRemoteSession()
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let sessionRow = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
         let sessionName = fixture.state.remoteSessionDisplayName(for: selection)
-        #expect(form.title == sessionName)
-        #expect(form.isHidden == false)
+        #expect(sessionRow.title == sessionName)
+        #expect(sessionRow.isHidden == false)
 
         fixture.state.selectedRemoteSession = nil
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(form.isHidden)
-        #expect(controller.item(MainToolbarItemID.title)?.menuFormRepresentation === form)
-        #expect(form.isEnabled == false)
+        let clearedRow = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
+        #expect(clearedRow.isHidden)
+        #expect(clearedRow.isEnabled == false)
     }
 
     /// The shared title view holds a flexible width set once at init: a
-    /// required minimum and maximum, a preference for the maximum below a
-    /// fitting-size measurement's pull, and hugging and compression
-    /// resistance below that. So its fitting width is the minimum whatever
-    /// its text says, where a plain label's follows the text.
+    /// required minimum and maximum, and a preference for the maximum that
+    /// outweighs its hugging but not a fitting measurement's pull, which its
+    /// compression resistance outweighs in turn. So a fitting measurement of
+    /// the title's hosting view gives the constant ideal width, for a short
+    /// title and a long one alike, where plain hosting views of the same
+    /// titles fall either side of it.
     @Test func titleViewHoldsAFlexibleWidth() async throws {
         let fixture = ToolbarFixture(label: "titleViewHoldsAFlexibleWidth")
         defer { fixture.tearDown() }
@@ -755,27 +841,31 @@ struct MainToolbarControllerTests {
         #expect(constraints.isTheFlexibleSet)
         let hugging = titleView.contentHuggingPriority(for: .horizontal)
         let resistance = titleView.contentCompressionResistancePriority(for: .horizontal)
-        #expect(hugging == MainToolbarController.titleContentPriority)
-        #expect(resistance == MainToolbarController.titleContentPriority)
-        let content = MainToolbarController.titleContentPriority.rawValue
-        let fill = MainToolbarController.titleFillPriority.rawValue
-        let fitting = NSLayoutConstraint.Priority.fittingSizeCompression.rawValue
-        #expect(content < fill)
-        #expect(fill < fitting)
+        #expect(hugging == MainToolbarController.titleHuggingPriority)
+        #expect(resistance == MainToolbarController.titleCompressionResistance)
+        let huggingValue = MainToolbarController.titleHuggingPriority.rawValue
+        let fillValue = MainToolbarController.titleFillPriority.rawValue
+        let fittingValue = NSLayoutConstraint.Priority.fittingSizeCompression.rawValue
+        let resistanceValue = MainToolbarController.titleCompressionResistance.rawValue
+        #expect(huggingValue < fillValue)
+        #expect(fillValue < fittingValue)
+        #expect(fittingValue < resistanceValue)
 
-        // Measured on fresh labels outside the toolbar, so nothing AppKit
-        // holds the item's view to enters the measurement. The plain label
-        // is the control: its fitting width follows the long text past the
-        // minimum.
-        let longText = String(repeating: "acme-widgets-", count: 8)
-        let plain = NSTextField(labelWithString: longText)
-        try #require(plain.fittingSize.width > MainToolbarMetrics.titleMinimumWidth)
-        let short = NSTextField(labelWithString: "x")
-        let long = NSTextField(labelWithString: longText)
-        MainToolbarController.prepareTitleView(short)
-        MainToolbarController.prepareTitleView(long)
-        #expect(short.fittingSize.width == MainToolbarMetrics.titleMinimumWidth)
-        #expect(long.fittingSize.width == MainToolbarMetrics.titleMinimumWidth)
+        // Measured on fresh hosting views outside the toolbar, so nothing
+        // AppKit holds the item's view to enters the measurement.
+        let short = Text("x")
+        let long = Text(String(repeating: "acme-widgets-", count: 8))
+        let shortPlain = NSHostingView(rootView: short).fittingSize.width
+        let longPlain = NSHostingView(rootView: long).fittingSize.width
+        try #require(shortPlain > 0)
+        try #require(shortPlain < MainToolbarMetrics.titleIdealWidth)
+        try #require(longPlain > MainToolbarMetrics.titleIdealWidth)
+        let shortTitle = MainWindowSplitView.makeTitleView(short)
+        let longTitle = MainWindowSplitView.makeTitleView(long)
+        MainToolbarController.prepareTitleView(shortTitle)
+        MainToolbarController.prepareTitleView(longTitle)
+        #expect(shortTitle.fittingSize.width == MainToolbarMetrics.titleIdealWidth)
+        #expect(longTitle.fittingSize.width == MainToolbarMetrics.titleIdealWidth)
     }
 
     // MARK: - Servers
@@ -1547,6 +1637,11 @@ struct MainToolbarControllerTests {
     /// The filter rows' titles, "-" for a separator.
     static func describeFilterRows(_ menu: NSMenu) -> [String] {
         menu.items.map { $0.isSeparatorItem ? "-" : $0.title }
+    }
+
+    /// The submenu of the filter item's current overflow row.
+    static func filterOverflowRows(of controller: MainToolbarController) -> NSMenu? {
+        controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation?.submenu
     }
 
     /// The titles of the rows carrying a check.

@@ -50,7 +50,9 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   menu as its menu form. Every view item has an explicit one that acts as
 ///   the item does, or for the title shows it inertly, and every action the
 ///   toolbar wires takes `Any?`, so a row sending it from an `NSMenuItem`
-///   never meets a method typed for another sender. `validateMenuItem(_:)`
+///   never meets a method typed for another sender. The title's and the
+///   filter's rows are replaced, never edited, when what they show changes,
+///   as AppKit may build the menu from copies. `validateMenuItem(_:)`
 ///   disables the Back and Forward rows when history has nowhere to go.
 /// - **Title.** The title view is shared by every title item, so its width
 ///   constraints are set once, at init (`prepareTitleView(_:)`).
@@ -173,6 +175,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// Filter selections set so far, for the debug log and for tests. An
     /// apply that finds the popup already showing the filter sets none.
     var filterSelectionCount = 0
+    /// The filter's overflow row as last set, and the filter it shows.
+    var shownFilterForm: FilterFormKey?
     /// The Servers icon per running state, appearance and accessibility label.
     var serversImages: [String: NSImage] = [:]
     /// Per item, the key its image was last derived from, so an unchanged

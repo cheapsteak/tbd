@@ -18,6 +18,14 @@ final class ServersMenuCommandBox: NSObject {
     }
 }
 
+/// The filter's overflow row as last set and the filter it was built for,
+/// so an apply that finds both unchanged sets no new row. The row is held
+/// weakly: one the item no longer holds is never taken for its current row.
+struct FilterFormKey {
+    weak var form: NSMenuItem?
+    var filter: RepoFilterPresentation
+}
+
 /// The key a toolbar item's image was last derived from, such as its symbol
 /// name, and the item it was set on: an item rebuilt since then gets its image
 /// whatever the key says.
@@ -73,10 +81,11 @@ extension MainToolbarController {
 
     /// A compact leading button: a view item whose view is an accessory-bar
     /// `NSButton`, `iconButtonWidth` by `iconButtonHeight`, with the symbol at
-    /// `iconGlyphPointSize`. The button draws its bezel only while the pointer
-    /// is over it, so it highlights on hover and shows no border at rest. A
-    /// view item's target and action are its view's, and its overflow row is
-    /// an explicit menu form carrying the same target and action.
+    /// `iconGlyphPointSize`. The button is bordered but shows its border only
+    /// while the pointer is inside it, so it highlights on hover and shows no
+    /// bezel at rest. A view item's target and action are its view's, and its
+    /// overflow row is an explicit menu form carrying the same target and
+    /// action.
     private func makeIconButtonItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
     ) -> NSToolbarItem {
@@ -174,21 +183,31 @@ extension MainToolbarController {
         item.view = popup
         item.label = "Filter"
         item.toolTip = "Filter sidebar by repository"
-        item.menuFormRepresentation = makeFilterForm()
+        // Built from what the last apply showed; the next apply replaces it
+        // with one for the current filter.
+        item.menuFormRepresentation = makeFilterForm(appliedSnapshot?.filter)
         return item
     }
 
-    /// The filter's overflow row: "Filter", with a submenu of the popup's
-    /// rows, each choosing its repo through `filterChosen(_:)`.
-    /// `updateFilter` fills and checks the rows alongside the popup's. Without
-    /// it, AppKit's default row would send the popup's action from a bare
-    /// menu item. The submenu reports its opening to `filterMenuTracker`, so
-    /// its rows are not rebuilt under the pointer either.
-    private func makeFilterForm() -> NSMenuItem {
+    /// The filter's overflow row: "Filter", with a submenu of the same rows
+    /// as the popup, each choosing its repo through `filterChosen(_:)`, and
+    /// the row `filter` names checked, or none when it names a repo that is
+    /// gone. Empty without a filter. Without it, AppKit's default row would
+    /// send the popup's action from a bare menu item. The submenu reports its
+    /// opening to `filterMenuTracker`, so it is not replaced under the
+    /// pointer.
+    private func makeFilterForm(_ filter: RepoFilterPresentation?) -> NSMenuItem {
         let form = NSMenuItem(title: "Filter", action: nil, keyEquivalent: "")
         let rows = NSMenu(title: "Filter")
         rows.autoenablesItems = false
         rows.delegate = filterMenuTracker
+        if let filter {
+            fillFilterRows(rows, options: filter.options, action: #selector(filterChosen(_:)))
+            let checked = Self.filterRow(in: rows.items, for: filter)
+            if checked >= 0 {
+                rows.item(at: checked)?.state = .on
+            }
+        }
         form.submenu = rows
         return form
     }
@@ -197,40 +216,42 @@ extension MainToolbarController {
     /// `prepareTitleView(_:)` set once. Its visibility priority stays
     /// standard, below the right-hand items' `.high`, so a long title gives
     /// way before they overflow. Its overflow row is inert, showing the
-    /// title; `updateContent(_:)` fills it in.
+    /// title; `updateContent(_:)` replaces it whenever the title changes.
     private func makeTitleItem(withView: Bool) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.title)
         item.isBordered = false
-        item.menuFormRepresentation = Self.makeTitleForm()
+        item.menuFormRepresentation = Self.makeTitleForm("")
         if withView {
             item.view = titleView
         }
         return item
     }
 
-    /// An inert overflow row for the title: disabled, with no action, and
-    /// hidden until there is a title to show. AppKit's default would be a
-    /// clickable row titled with the item's label, which is empty.
-    private static func makeTitleForm() -> NSMenuItem {
-        let form = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    /// An inert overflow row showing `title`: disabled, with no action, and
+    /// hidden when the title is empty. AppKit's default would be a clickable
+    /// row titled with the item's label, which is empty.
+    private static func makeTitleForm(_ title: String) -> NSMenuItem {
+        let form = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         form.isEnabled = false
-        form.isHidden = true
+        form.isHidden = title.isEmpty
         return form
     }
 
     /// Makes `view` a flexible toolbar item view whose width never follows
-    /// its content. The toolbar measures a view item through its
-    /// constraints, so the view holds a required minimum and maximum and
-    /// prefers the maximum, which fills the space up to the right-hand items.
-    /// Its own hugging and compression resistance sit below
-    /// `.fittingSizeCompression`, and the preference for the maximum sits
-    /// between the two, so a fitting-size measurement reaches the minimum
-    /// and the content's width never decides the item's. Called once, from
-    /// `init`: the view is shared by every title item.
+    /// its content. It holds a required minimum and maximum and prefers the
+    /// maximum, so when AppKit measures the item's range through its
+    /// constraints the item can shrink toward the minimum or grow toward the
+    /// maximum, filling the space up to the right-hand items. Its compression
+    /// resistance sits just above `.fittingSizeCompression`, so a fitting
+    /// measurement gives its intrinsic width, which for the title cluster's
+    /// hosting view is the constant `titleIdealWidth`; its hugging sits below
+    /// the preference for the maximum, which sits below a fitting
+    /// measurement's pull. Called once, from `init`: the view is shared by
+    /// every title item.
     static func prepareTitleView(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.setContentHuggingPriority(titleContentPriority, for: .horizontal)
-        view.setContentCompressionResistancePriority(titleContentPriority, for: .horizontal)
+        view.setContentHuggingPriority(titleHuggingPriority, for: .horizontal)
+        view.setContentCompressionResistancePriority(titleCompressionResistance, for: .horizontal)
         let minimum = view.widthAnchor.constraint(greaterThanOrEqualToConstant: MainToolbarMetrics.titleMinimumWidth)
         minimum.identifier = titleMinimumWidthID
         let maximum = view.widthAnchor.constraint(lessThanOrEqualToConstant: MainToolbarMetrics.titleMaximumWidth)
@@ -247,14 +268,21 @@ extension MainToolbarController {
     static let titleMaximumWidthID = "tbd.toolbar.title.maximumWidth"
     static let titleFillWidthID = "tbd.toolbar.title.fillWidth"
 
-    /// The title view's horizontal hugging and compression resistance: the
-    /// lowest there is, so its content's width never holds the item open or
-    /// shut.
-    static let titleContentPriority = NSLayoutConstraint.Priority(rawValue: 1)
+    /// The title view's horizontal hugging: the lowest there is, so in
+    /// layout the preference for the maximum outweighs it and the item fills.
+    static let titleHuggingPriority = NSLayoutConstraint.Priority(rawValue: 1)
+
+    /// The title view's horizontal compression resistance: just above
+    /// `.fittingSizeCompression`, so a fitting measurement stops at its
+    /// intrinsic width, the constant `titleIdealWidth` for the title
+    /// cluster's hosting view, rather than at the minimum. The required
+    /// minimum still lets the toolbar shrink it below that.
+    static let titleCompressionResistance = NSLayoutConstraint.Priority(
+        rawValue: NSLayoutConstraint.Priority.fittingSizeCompression.rawValue + 1)
 
     /// The title view's preference for `titleMaximumWidth`: above its
     /// hugging, so in layout it fills, and below `.fittingSizeCompression`,
-    /// so a fitting-size measurement still compresses it to the minimum.
+    /// so it does not decide a fitting measurement.
     static let titleFillPriority = NSLayoutConstraint.Priority(
         rawValue: NSLayoutConstraint.Priority.fittingSizeCompression.rawValue - 1)
 
@@ -300,10 +328,10 @@ extension MainToolbarController {
             updateEnabled(forward, snapshot.canGoForward)
         }
         if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
-            updateFilter(popup, form: filterItem.menuFormRepresentation?.submenu, snapshot.filter)
+            updateFilter(filterItem, popup, snapshot.filter)
         }
-        if let titleForm = item(MainToolbarItemID.title)?.menuFormRepresentation {
-            updateTitleForm(titleForm, snapshot.title)
+        if let titleItem = item(MainToolbarItemID.title) {
+            updateTitleForm(titleItem, snapshot.title)
         }
         if let servers = snapshot.servers,
            let serversItem = item(MainToolbarItemID.servers) as? NSMenuToolbarItem {
@@ -326,15 +354,13 @@ extension MainToolbarController {
         }
     }
 
-    /// Shows `title` in the title's overflow row, hidden when there is none.
-    private func updateTitleForm(_ form: NSMenuItem, _ title: String?) {
+    /// Gives the title item a fresh overflow row showing `title`, hidden when
+    /// there is none, when its row shows other text. A fresh row rather than
+    /// an edit: AppKit may build the overflow menu from a copy of the row.
+    private func updateTitleForm(_ item: NSToolbarItem, _ title: String?) {
         let text = title ?? ""
-        if form.title != text {
-            form.title = text
-        }
-        if form.isHidden != text.isEmpty {
-            form.isHidden = text.isEmpty
-        }
+        if let shown = item.menuFormRepresentation, shown.title == text { return }
+        item.menuFormRepresentation = Self.makeTitleForm(text)
     }
 
     /// Sets `item`'s image from `make` when `key`, what the image is derived
@@ -358,34 +384,38 @@ extension MainToolbarController {
         }
     }
 
-    /// Brings the popup and the filter's overflow rows, `form`, to `filter`.
-    /// The two are built from one list of options, so their rows match.
-    private func updateFilter(_ popup: NSPopUpButton, form: NSMenu?, _ filter: RepoFilterPresentation) {
+    /// Brings the popup and the filter item's overflow row to `filter`. Both
+    /// are built from the same options, so their rows match.
+    private func updateFilter(_ item: NSToolbarItem, _ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
         // Never under the pointer: the menu's close schedules an apply that
         // catches up.
         guard !filterMenuTracker.isOpen else { return }
         if popup !== builtFilterPopup || filter.options != builtFilterOptions {
-            rebuildFilterItems(popup, form: form, options: filter.options)
+            rebuildFilterItems(popup, options: filter.options)
         }
         selectFilter(popup, filter)
-        if let form {
-            checkFilterRow(in: form, filter)
-        }
+        updateFilterForm(item, filter)
     }
 
-    /// Rebuilds the popup's rows and the overflow rows. The popup's rows have
-    /// no action, as the popup sends its own; each overflow row sends
-    /// `filterChosen(_:)` itself. They are rebuilt together because they are
-    /// made together, in `makeFilterItem()`.
-    private func rebuildFilterItems(
-        _ popup: NSPopUpButton, form: NSMenu?, options: [RepoFilterPresentation.Option]
-    ) {
-        popup.removeAllItems()
+    /// Gives the filter item a fresh overflow row for `filter` when its row
+    /// was built for other options or another choice, or the item is not the
+    /// one the last row was set on. A fresh row rather than an edit: AppKit
+    /// may build the overflow menu from a copy of the row.
+    private func updateFilterForm(_ item: NSToolbarItem, _ filter: RepoFilterPresentation) {
+        if let shown = shownFilterForm, let form = shown.form, form === item.menuFormRepresentation,
+           shown.filter == filter {
+            return
+        }
+        let form = makeFilterForm(filter)
+        item.menuFormRepresentation = form
+        shownFilterForm = FilterFormKey(form: form, filter: filter)
+    }
+
+    /// Rebuilds the popup's rows. They have no action, as the popup sends its
+    /// own.
+    private func rebuildFilterItems(_ popup: NSPopUpButton, options: [RepoFilterPresentation.Option]) {
         if let menu = popup.menu {
             fillFilterRows(menu, options: options, action: nil)
-        }
-        if let form {
-            fillFilterRows(form, options: options, action: #selector(filterChosen(_:)))
         }
         builtFilterPopup = popup
         builtFilterOptions = options
@@ -423,20 +453,6 @@ extension MainToolbarController {
         }
         filterSelectionCount += 1
         itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public): row \(target, privacy: .public)")
-    }
-
-    /// Puts the check on the overflow row the filter names and takes it off
-    /// the rest, or checks none when it names a repo that is gone, as
-    /// `selectFilter` does for the popup. Sets only the rows whose state
-    /// differs.
-    private func checkFilterRow(in menu: NSMenu, _ filter: RepoFilterPresentation) {
-        let target = Self.filterRow(in: menu.items, for: filter)
-        for (index, row) in menu.items.enumerated() where !row.isSeparatorItem {
-            let state: NSControl.StateValue = index == target ? .on : .off
-            if row.state != state {
-                row.state = state
-            }
-        }
     }
 
     /// The index among `rows` of the row `filter` names, or -1, the popup's

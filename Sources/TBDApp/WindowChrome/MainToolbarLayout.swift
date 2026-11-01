@@ -267,19 +267,25 @@ enum MainToolbarMetrics {
     /// inset; toggle, back and forward, each followed by one spacing, the
     /// third being the one before the filter, as the flexible space between
     /// them is empty at this width; the filter at its widest; and the margin
-    /// before the separator. 302 pt with the estimates above.
+    /// before the separator. 302 pt with the estimates above. Three buttons
+    /// and three spacings are three pitches, so the thickness does not
+    /// depend on how the pitch splits between button and spacing.
     static let sidebarMinimumThickness: CGFloat =
         firstItemLeadingInset + 3 * iconButtonWidth + 3 * interItemSpacing + filterMaxWidth + sectionPadding
     static let sidebarMaximumThickness: CGFloat = 400
 
-    /// The title item's narrowest. The title view holds it as a required
-    /// minimum, so the toolbar can always lay the item out; a title wider
-    /// than the space it gets is cut at the trailing edge. A choice, not a
-    /// measurement.
+    /// The title item's narrowest, which the title view holds as a required
+    /// minimum: when AppKit measures the item's range through its
+    /// constraints, the item can shrink this far before the right-hand items
+    /// overflow. A title wider than the space it gets is cut at the trailing
+    /// edge. A choice, not a measurement.
     static let titleMinimumWidth: CGFloat = 80
-    /// The width the title cluster's hosting view reports as its intrinsic
-    /// width. A constant, so the item's measurement never follows the text;
-    /// any value between the minimum and the maximum serves. A choice, not a
+    /// The width a fitting measurement gives the title item: the title
+    /// cluster's hosting view reports it as its intrinsic width, and its
+    /// compression resistance outweighs a fitting measurement's pull, so the
+    /// measurement lands here whatever the text says. When AppKit measures
+    /// the item's range through its constraints, the item can still shrink
+    /// toward the minimum or grow toward the maximum. A choice, not a
     /// measurement.
     static let titleIdealWidth: CGFloat = 240
     /// The title item's widest. The title view prefers it at a low priority,

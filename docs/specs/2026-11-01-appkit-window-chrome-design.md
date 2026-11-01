@@ -112,7 +112,8 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    constant minimum and maximum, and the cluster sits at its leading edge. So
    the cluster starts just past the separator and stays put when back,
    forward or a new selection changes the title. A title wider than the item
-   is cut at the item's trailing edge.
+   is cut at the item's trailing edge, and nothing else is cut: the notes
+   button's hover label reaches past the cluster's leading and bottom edges.
 8. **Flexible space.**
 9. **The right-hand items,** with today's behavior: the Servers split button
    and the remote session buttons (Reconnect, Stop with its confirmation, and
@@ -134,15 +135,16 @@ turn, never during a SwiftUI update, which can re-enter layout.
 The toggle, back and forward match the leading buttons of a macOS 27 toolbar
 whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
 
-- **View** – each is a view item whose view is a borderless `NSButton`, 20 pt
-  wide and 28 pt tall, held by required constraints. AppKit centres items
-  vertically, which puts the glyphs on the window buttons' line.
+- **View** – each is a view item whose view is an `NSButton`, 20 pt wide and
+  28 pt tall, held by required constraints. AppKit centres items vertically,
+  which puts the glyphs on the window buttons' line.
 - **Pitch** – 28 pt: the 20 pt button plus AppKit's spacing between items,
   which is not public and is estimated at 8 pt.
 - **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt and
   regular weight. Back and forward draw grey while disabled.
-- **Hover** – the button draws its bezel only while the pointer is over it, so
-  it highlights on hover and shows no border at rest.
+- **Hover** – the button is bordered with `showsBorderOnlyWhileMouseInside`,
+  so its bezel shows only while the pointer is over it: it highlights on hover
+  and shows no border at rest.
 - **No capsule** – AppKit has no public API to remove a view item's Liquid
   Glass background, so the live check confirms that none shows.
 
@@ -159,6 +161,9 @@ an explicit form:
   current choice checked, kept in step with the popup.
 - **Title cluster** – an inert row showing the title, hidden when nothing is
   selected.
+
+The title's and the filter's rows are replaced, never edited, when what they
+show changes, since AppKit may build the overflow menu from copies of them.
 
 Every action the toolbar wires takes any sender and checks its class, so a row
 sending it from an `NSMenuItem` never meets a method typed for another sender.
@@ -225,7 +230,8 @@ No durable resource is added.
   none, sends its action from a menu item without raising; the filter's form
   mirrors the popup and sets the filter.
 - **Title width:** the title item keeps its frame as the title goes from short
-  to long and back, and starts at or after the divider.
+  to long and back, and starts at or after the divider; a fitting measurement
+  of the title view gives its constant ideal width whatever the text.
 - **Shortcuts:** the three commands exist on both paths.
 - **Live, before merge,** on the owner's machine: positions with the sidebar
   shown and collapsed and in full screen, no separator line, the filter hiding,

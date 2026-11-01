@@ -94,15 +94,16 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     ///   the toolbar gives the item, so it starts just past the tracking
     ///   separator and does not move as the width changes.
     /// - **Overflow.** A title wider than the item is cut at the item's
-    ///   trailing edge, and only there: the notes button's hover label draws
-    ///   below the cluster.
+    ///   trailing edge. Nothing past the leading, top or bottom edge is cut,
+    ///   so the notes button's hover label, which reaches below the cluster
+    ///   and left of its leading edge, still shows.
     /// - **Hosting.** `sceneBridgingOptions = []`, so the view never claims
     ///   the window's toolbar or title.
     static func makeTitleView<Root: View>(_ root: Root) -> NSView {
         let content = root
             .frame(minWidth: 0, idealWidth: MainToolbarMetrics.titleIdealWidth, maxWidth: .infinity,
                    alignment: .leading)
-            .clipShape(HorizontalEdgeClip())
+            .clipShape(TrailingEdgeClip())
         let view = NSHostingView(rootView: content)
         view.sceneBridgingOptions = []
         view.sizingOptions = [.intrinsicContentSize]
@@ -154,12 +155,15 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     }
 }
 
-/// A clip at the leading and trailing edges only: the shape reaches well
-/// past the top and bottom, so nothing drawn above or below the content is
-/// cut.
-private struct HorizontalEdgeClip: Shape {
+/// A clip at the trailing edge only: the shape stops exactly there and
+/// reaches far past the leading, top and bottom edges, so nothing drawn
+/// beyond those is cut.
+private struct TrailingEdgeClip: Shape {
     func path(in rect: CGRect) -> Path {
-        Path(rect.insetBy(dx: 0, dy: -rect.height - 100))
+        let reach: CGFloat = 1_000
+        return Path(CGRect(
+            x: rect.minX - reach, y: rect.minY - reach,
+            width: rect.width + reach, height: rect.height + 2 * reach))
     }
 }
 
