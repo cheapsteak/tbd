@@ -1,8 +1,17 @@
 import Foundation
+import Observation
 import Testing
 import TestSupport
 @testable import TBDApp
 import TBDShared
+
+/// Counts a `withObservationTracking` probe's `onChange` calls. `onChange` is
+/// `@Sendable`, so the count lives in a main-actor box rather than a captured
+/// local `var`.
+@MainActor
+private final class PresentationChangeRecord {
+    var count = 0
+}
 
 /// Whether a remote session's detail pane shows its transcript, which half
 /// leads, and whether the toolbar offers the Transcript toggle — through
@@ -572,6 +581,50 @@ struct RemoteTranscriptVisibilityTests {
                 attached: true, showsToggle: false, showsPane: false, transcriptLeads: false)
             #expect(noCapabilityAnswers == noCapabilityWrappers)
             #expect(noCapability == noCapabilityExpected)
+        }
+    }
+
+    /// Spawn reports write `remoteAttachGenerations` for every session, so
+    /// the presentation reads a restart generation only while a hide exists.
+    /// With nothing hidden, B's spawn report leaves A's presentation alone.
+    /// The control hides A and arms the probe again: the same report then
+    /// reaches it once, so the probe can see the dependency when it is there.
+    @Test func presentationIgnoresSpawnReportsWhileNothingIsHidden() {
+        withState { state in
+            seedProvider(state)
+            seedSession(state, id: "a")
+            seedSession(state, id: "b")
+            let a = sel("a")
+            let b = sel("b")
+            attach(state, b)
+            attach(state, a)
+            #expect(state.selectedRemoteSession == a)
+            #expect(state.remoteSessionIsAttached(a))
+            #expect(state.remoteSessionIsAttached(b))
+            #expect(state.remoteTranscriptHiddenAttach == nil)
+
+            let shown = PresentationChangeRecord()
+            withObservationTracking {
+                _ = state.remoteTranscriptPresentation(for: a)
+            } onChange: {
+                MainActor.assumeIsolated { shown.count += 1 }
+            }
+            state.markRemoteAttachStarted(
+                b, generation: state.remoteAttachGeneration(for: b), at: Date(timeIntervalSince1970: 1))
+            #expect(shown.count == 0, "B's spawn report re-evaluated A's presentation with nothing hidden")
+
+            // The control: hidden, A's presentation reads the generation.
+            state.toggleRemoteTranscript(a)
+            #expect(state.remoteTranscriptHiddenAttach == mountKey(a))
+            let hidden = PresentationChangeRecord()
+            withObservationTracking {
+                _ = state.remoteTranscriptPresentation(for: a)
+            } onChange: {
+                MainActor.assumeIsolated { hidden.count += 1 }
+            }
+            state.markRemoteAttachStarted(
+                b, generation: state.remoteAttachGeneration(for: b), at: Date(timeIntervalSince1970: 2))
+            #expect(hidden.count == 1, "B's spawn report never reached A's presentation while A was hidden")
         }
     }
 

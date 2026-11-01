@@ -54,11 +54,13 @@ extension AppState {
                 capabilities: capabilities, attached: attached),
             showsPane: RemoteSessionDetailGates.showsTranscriptPane(
                 capabilities: capabilities, attached: attached,
-                // The restart generation is read only while a hide exists:
-                // spawn and unmount reports write it for every session, and
-                // reading it unconditionally re-renders views on that traffic.
+                // The restart generation is read only while a hide exists for
+                // this selection: spawn and unmount reports write it for every
+                // session, and reading it unconditionally re-renders views on
+                // that traffic. The `selection` check short-circuits before
+                // `remoteAttachMountKey` reads it.
                 hiddenByToggle: remoteTranscriptHiddenAttach.map {
-                    $0.selection == selection && $0.generation == remoteAttachGeneration(for: selection)
+                    $0.selection == selection && $0 == remoteAttachMountKey(for: selection)
                 } ?? false),
             transcriptLeads: RemoteSessionDetailGates.transcriptLeads(
                 capabilities: capabilities, attached: attached))
