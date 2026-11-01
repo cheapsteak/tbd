@@ -29,7 +29,7 @@ private let tabHelp: ArgumentHelp = "Tab ID (default: the worktree's active tab)
 struct PanelList: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "Show each tab's primary content and side panel — read-only, works even when the side panel is off"
+        abstract: "Show each tab's primary content and side panel — read-only"
     )
 
     @Argument(help: "Worktree name or ID")
@@ -580,9 +580,10 @@ private func runPanelOperation(
 
 /// The envelope an Arrange verb sends, as `origin: .agentCLI`. `baseRevision`
 /// is the tab's revision in `current`, or nil when `current` holds no surface
-/// for the tab. The apply still goes out then, so the daemon names the real
-/// reason: the side panel is off (no surfaces exist until it is turned on),
-/// or no surface exists for that tab.
+/// for the tab. The apply still goes out then, so the daemon gives its own
+/// answer: it refuses a tab with no surface — one the app has not synced yet,
+/// one whose legacy layout it could not import, or no tab at all — and
+/// applies to a tab whose surface appeared after `current` was read.
 func panelEnvelope(
     worktreeID: UUID, tabID: UUID, current: PanelGetResult, operation: PanelOperation,
     operationID: UUID = UUID()
