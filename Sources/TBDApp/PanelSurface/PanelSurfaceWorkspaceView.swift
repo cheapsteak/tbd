@@ -111,6 +111,9 @@ struct PanelSurfaceWorkspaceView: View {
         let side = self.side
         let tabID = tab.id
         let chrome = primaryChromes.state(for: tabID)
+        // Read here, not in the `GeometryReader` closure, so what the bar's
+        // trailing items read is a dependency of this body.
+        let trailing = trailingItems(side: side, chrome: chrome)
         GeometryReader { geometry in
             let showsSide = side.isVisible
             let thickness = SplitDividerMetrics.lineThickness
@@ -121,7 +124,7 @@ struct PanelSurfaceWorkspaceView: View {
             // region does, so showing or hiding the region never rebuilds the
             // primary's terminal view.
             HStack(spacing: 0) {
-                primaryColumn(side: side, chrome: chrome)
+                primaryColumn(trailing: trailing, chrome: chrome)
                     .frame(width: showsSide ? shares[0] * availableSpace : geometry.size.width)
 
                 if showsSide, let surface {
@@ -157,13 +160,14 @@ struct PanelSurfaceWorkspaceView: View {
     /// to the daemon fails.
     var primaryContent: PaneContent { tab.content }
 
-    /// The workspace tab bar, a divider, and the primary's leaf, which draws
-    /// no header. The bar keeps its identity across tabs; the leaf is keyed by
-    /// the tab, so each tab gets a fresh terminal view and web view, the
-    /// latter reporting to that tab's `chrome`.
-    private func primaryColumn(side: SideRegion, chrome: PaneChromeState) -> some View {
+    /// The workspace tab bar with `trailing` at its end, a divider, and the
+    /// primary's leaf, which draws no header. The bar keeps its identity
+    /// across tabs; the leaf is keyed by the tab, so each tab gets a fresh
+    /// terminal view and web view, the latter reporting to that tab's
+    /// `chrome`.
+    private func primaryColumn(trailing: TabBarTrailingItems, chrome: PaneChromeState) -> some View {
         VStack(spacing: 0) {
-            makeTabBar(trailingItems(side: side, chrome: chrome))
+            makeTabBar(trailing)
 
             Divider()
 

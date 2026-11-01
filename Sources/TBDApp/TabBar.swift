@@ -253,12 +253,15 @@ private struct AddTabButton: View {
     /// A `@State` default-value expression runs on EVERY call to the memberwise
     /// initializer — `@State` only preserves the stored value after first
     /// mount, it does not stop the expression from re-evaluating. `AddTabButton`
-    /// is built inside `TabBar.body`, itself built inside `SingleWorktreeView.body`,
-    /// and `WorktreePager` keeps one of those mounted per kept-alive worktree, all
-    /// reading `AppState` — so a change to any property they read (the 2 s poll,
-    /// terminal churn) re-ran `detect()` for every mounted worktree, each doing
-    /// `2 × (PATH dirs + 8)` synchronous `stat`s on the main thread. The two real refresh paths below cover the value: `.task`
-    /// on appear, and a synchronous re-detect in `showMenu()`.
+    /// is built inside `TabBar.body`. The bar is built by
+    /// `SingleWorktreeView.tabBar(_:)` and drawn by `SingleWorktreeView.body`,
+    /// or on the daemon path by `PanelSurfaceWorkspaceView.body`, and
+    /// `WorktreePager` keeps one worktree view mounted per kept-alive worktree,
+    /// all reading `AppState`. A `detect()` default would therefore re-run on a
+    /// change to any property they read (the 2 s poll, terminal churn) for
+    /// every mounted worktree, each doing `2 × (PATH dirs + 8)` synchronous
+    /// `stat`s on the main thread. The two real refresh paths below cover the
+    /// value: `.task` on appear, and a synchronous re-detect in `showMenu()`.
     @State private var availability = AgentExecutableAvailability.allAvailable
 
     var body: some View {

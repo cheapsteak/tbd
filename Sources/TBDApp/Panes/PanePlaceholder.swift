@@ -92,13 +92,15 @@ struct PanePlaceholder: View {
             paneBody
         }
         .onPreferenceChange(HasRenderableContentKey.self) { newValue in
-            // Defer @State writes to the next runloop tick.
+            // Defer writes to the chrome state to the next runloop tick.
             //
             // SwiftUI propagates preference values during its layout / render
             // pass — and on pane teardown the preference resets to its
             // default, which fires this handler *while* the host view is
-            // mid-layout. Mutating @State synchronously here re-invalidates
-            // the view inside the same pass, producing
+            // mid-layout. Writing the chrome state synchronously here
+            // re-invalidates the views that read it — this leaf, or the tab
+            // row that owns the state and draws its controls — inside the
+            // same pass, producing
             // "NSHostingView is being laid out reentrantly while rendering
             // its SwiftUI content" and (with our FilePreviewView changes
             // adding @StateObject + .task teardown work in the same phase)
@@ -565,8 +567,9 @@ extension View {
     /// menu. `transcriptPath` supplies the `.jsonl` path for live-transcript
     /// panes (resolving it needs the terminal model, so the caller passes it in).
     ///
-    /// Also hung on a side-region tab (`SideRegionView`), whose leaf hides
-    /// the title this menu otherwise sits on.
+    /// Where the leaf draws its header, the menu hangs on the header's title.
+    /// On the daemon path a side panel's leaf draws none, so the menu hangs on
+    /// the panel's tab in the side region's strip (`SideRegionView`).
     @ViewBuilder
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
         if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {

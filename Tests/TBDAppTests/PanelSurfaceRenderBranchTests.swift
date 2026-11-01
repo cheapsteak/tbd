@@ -116,6 +116,28 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    /// `SingleWorktreeView` draws the tab bar full width above the content on
+    /// every path but the daemon one, where the workspace view draws it over
+    /// the primary's column.
+    @Test("only a daemon-path tab with Session History closed renders the daemon path, with or without a surface")
+    func rendersDaemonPathOnlyForADaemonTabOutsideHistory() {
+        let surface = Fixture.surface(tabID: UUID(), worktreeID: UUID(), revision: 1)
+        let withSurface: WorkspaceRenderPath = .daemon(surface)
+        let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+        let skipped: WorkspaceRenderPath = .legacy
+
+        // A daemon-path tab, with its surface or without one yet.
+        #expect(SingleWorktreeView.rendersDaemonPath(historyActive: false, renderPath: withSurface))
+        #expect(SingleWorktreeView.rendersDaemonPath(historyActive: false, renderPath: awaitingSurface))
+        // Session History open, over the same tabs.
+        #expect(!SingleWorktreeView.rendersDaemonPath(historyActive: true, renderPath: withSurface))
+        #expect(!SingleWorktreeView.rendersDaemonPath(historyActive: true, renderPath: awaitingSurface))
+        // No tab shown.
+        #expect(!SingleWorktreeView.rendersDaemonPath(historyActive: false, renderPath: nil))
+        // A tab the last tab sync skipped.
+        #expect(!SingleWorktreeView.rendersDaemonPath(historyActive: false, renderPath: skipped))
+    }
+
     // MARK: - The primary
 
     @Test("the primary renders the app's tab, not the surface's copy of it")

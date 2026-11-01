@@ -12,12 +12,19 @@ import TBDShared
 
 // MARK: - MainAreaSizeKey
 
-/// Preference key carrying the px size of the actual terminal-rendering area
-/// — the active tab's slot inside SingleWorktreeView, or the grid inside
-/// MultiWorktreeView. Excludes the tab bar, divider, dock, and any file
-/// panel. AppState reads this via `.onPreferenceChange` to drive the
-/// daemon-side resize broadcast so tmux pane dimensions match what SwiftTerm
-/// actually renders.
+/// Preference key carrying the px size of the area the active content renders
+/// in. AppState reads this via `.onPreferenceChange` to drive the daemon-side
+/// resize broadcast, so tmux pane dimensions follow what SwiftTerm renders.
+/// What each path posts:
+/// - **A tab on the daemon path:** `PanelSurfaceWorkspaceView`'s full width,
+///   the side region included, and its height below the tab row and the
+///   divider under it.
+/// - **Every other single-worktree path:** the active tab's slot inside
+///   SingleWorktreeView, below the full-width tab bar and its divider; a
+///   legacy split's panes all sit inside it.
+/// - **Multi-select:** the first grid cell's content, below the cell's
+///   header and divider.
+/// None includes the pinned-terminal dock.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
     /// Three views can post this key: `PanelSurfaceWorkspaceView` for a tab on
@@ -89,8 +96,8 @@ struct TerminalContainerView: View {
 
 /// Shows the tab bar and the active tab for a single selected worktree.
 ///
-/// On the daemon path (`AppState.workspaceRenderPath`) the active tab draws as
-/// a `PanelSurfaceWorkspaceView`, which draws the tab bar itself over the
+/// On the daemon path (`rendersDaemonPath`) the active tab draws as a
+/// `PanelSurfaceWorkspaceView`, which draws the tab bar itself over the
 /// primary's column, so the bar shares one row with the side region's strip.
 /// On every other path — Session History open, a tab the last tab sync
 /// skipped, no tabs — this view draws the bar full width above the content.
@@ -326,15 +333,30 @@ struct SingleWorktreeView: View {
     }
 
     /// The active tab as the daemon path draws it, or nil when this worktree
-    /// shows anything else: Session History, no tabs, a tab the last tab sync
-    /// skipped, or a selection with no checkout on this disk. Decided once per
-    /// body, so the tab bar, the size reader and `layoutContent` agree.
+    /// shows anything else (`rendersDaemonPath`). Decided once per body, so
+    /// the tab bar, the size reader and `layoutContent` agree.
     private func daemonPathTab(worktree: LocalWorktree?) -> DaemonPathTab? {
-        guard !appState.historyActiveWorktrees.contains(worktreeID),
-              let tab = activeTab, let worktree,
-              case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id)
+        // A selection with no checkout on this disk shows no tab.
+        let shownTab = worktree != nil ? activeTab : nil
+        let historyActive = appState.historyActiveWorktrees.contains(worktreeID)
+        let renderPath = shownTab.map { appState.workspaceRenderPath(worktreeID: worktreeID, tabID: $0.id) }
+        guard Self.rendersDaemonPath(historyActive: historyActive, renderPath: renderPath),
+              let shownTab, let worktree, case .daemon(let surface)? = renderPath
         else { return nil }
-        return DaemonPathTab(tab: tab, surface: surface, worktree: worktree)
+        return DaemonPathTab(tab: shownTab, surface: surface, worktree: worktree)
+    }
+
+    /// Whether the worktree's active tab draws on the daemon path, which
+    /// draws the tab bar over the primary's column instead of full width
+    /// above the content. `renderPath` is the shown tab's
+    /// (`AppState.workspaceRenderPath`), or nil when no tab is shown: none
+    /// is active, or the selection has no checkout on this disk. Only a
+    /// daemon render path with Session History closed takes it, with a
+    /// surface or without one yet; Session History, no tab, and a tab the
+    /// last tab sync skipped (`.legacy`) do not.
+    static func rendersDaemonPath(historyActive: Bool, renderPath: WorkspaceRenderPath?) -> Bool {
+        guard !historyActive, case .daemon? = renderPath else { return false }
+        return true
     }
 
     /// Panes root a terminal's working directory at the checkout, so the split
