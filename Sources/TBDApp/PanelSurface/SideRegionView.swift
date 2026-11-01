@@ -247,10 +247,11 @@ enum SideRegionStrip {
 ///
 /// The Changes list has no leaf form, so it draws `ChangesPanelView` in the
 /// leaf's place, keyed and handed its state the same way, with the worktree's
-/// last loaded list (`AppState.changesSnapshot`) to show while it loads. Its
-/// control is `PaneRefreshControl`, a spinner while the list loads. A click
-/// on one of its files opens the file here (`ChangesPanelClick`), in a new
-/// panel when Shift is held.
+/// last loaded list (`AppState.changesSnapshot`) to show at once; it reads git
+/// again on appearing only when that list is missing or old. Its control is
+/// `PaneRefreshControl`, a spinner while the list loads. A click on one of
+/// its files opens the file here (`ChangesPanelClick`), in a new panel when
+/// Shift is held.
 ///
 /// History steps go out as panel operations through the active panel's
 /// daemon action set. The render toggle, copy-address and refresh act on the

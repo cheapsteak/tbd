@@ -193,18 +193,59 @@ struct ChangesSnapshot {
     }
 }
 
+// MARK: - ChangesSnapshotCache
+
+/// The per-worktree cache of the Changes list: what it holds for a worktree,
+/// and whether a run of the list's load task reads git again or shows what
+/// it holds.
+enum ChangesSnapshotCache {
+    /// How old, in seconds, a worktree's cached list may be and still be
+    /// shown, without a load, by a list that appears.
+    static let maxAge: TimeInterval = 10
+
+    /// A worktree's Changes list as the cache holds it, with when the load
+    /// that read it finished.
+    struct Entry {
+        let snapshot: ChangesSnapshot
+        let loadedAt: Date
+    }
+
+    /// Whether a run of the list's load task reads git. A run the refresh
+    /// control began (`refresh`) always does. The run the list's appearing
+    /// began does when the worktree has no cached list (`loadedAt` nil), when
+    /// the cached one is at least `maxAge` old at `now`, or when it is dated
+    /// after `now`, which only a clock set back produces. Otherwise the list
+    /// shows the cached one as it is.
+    static func needsLoad(refresh: Bool, loadedAt: Date?, now: Date) -> Bool {
+        if refresh { return true }
+        guard let loadedAt else { return true }
+        let age = now.timeIntervalSince(loadedAt)
+        return age < 0 || age >= maxAge
+    }
+}
+
 // MARK: - The Changes cache
 
 extension AppState {
     /// The worktree's Changes list as its last load left it, or nil before
     /// any load of it has finished.
     func changesSnapshot(worktreeID: UUID) -> ChangesSnapshot? {
-        changesSnapshots[worktreeID]
+        changesSnapshots[worktreeID]?.snapshot
+    }
+
+    /// Whether this run of the worktree's list's load task reads git
+    /// (`ChangesSnapshotCache.needsLoad`): always for a `refresh`, and for
+    /// the run its appearing began only when its cached list is missing or
+    /// at least `ChangesSnapshotCache.maxAge` old at `now()`.
+    func changesSnapshotNeedsLoad(worktreeID: UUID, refresh: Bool) -> Bool {
+        ChangesSnapshotCache.needsLoad(
+            refresh: refresh, loadedAt: changesSnapshots[worktreeID]?.loadedAt, now: now())
     }
 
     /// Loads the worktree's Changes list through `changesLoader`, against its
     /// repo's default branch ("main" when the repo is not known), stores it
-    /// in `changesSnapshots`, and returns it.
+    /// in `changesSnapshots` stamped with `now()` as the load finishes, and
+    /// returns it.
     ///
     /// A load whose task was cancelled by the time it returned stores nothing
     /// and returns nil. The list cancels its load when a refresh begins a
@@ -214,7 +255,7 @@ extension AppState {
         let defaultBranch = repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
         let snapshot = await changesLoader(worktree, defaultBranch)
         guard !Task.isCancelled else { return nil }
-        changesSnapshots[worktree.id] = snapshot
+        changesSnapshots[worktree.id] = ChangesSnapshotCache.Entry(snapshot: snapshot, loadedAt: now())
         return snapshot
     }
 
@@ -236,9 +277,12 @@ extension AppState {
 /// It is a worktree panel, but a new view is made whenever it comes to the
 /// front or another workspace tab is selected. So it starts from the
 /// worktree's last loaded list (`AppState.changesSnapshot`), handed in as
-/// `cachedSnapshot`, and loads again when it appears and whenever the refresh
-/// control bumps `chrome.refreshCount`. While a load runs, the strip shows a
-/// spinner in place of the refresh control (`PaneChromeState.isRefreshing`).
+/// `cachedSnapshot`. When it appears it loads again only if that list is
+/// missing or at least `ChangesSnapshotCache.maxAge` old, so switching tabs
+/// back and forth within that window shows the cached list without running
+/// git; it always loads when the refresh control bumps
+/// `chrome.refreshCount`. While a load runs, the strip shows a spinner in
+/// place of the refresh control (`PaneChromeState.isRefreshing`).
 ///
 /// A click on a file hands its worktree-relative path to `onOpenFile`, with
 /// whether Shift was held, read as the click lands. A double-click opens the
@@ -257,6 +301,10 @@ struct ChangesPanelView: View {
     /// own loads'. Nil until one of those exists, when the list is blank
     /// rather than saying "No changes".
     @State private var snapshot: ChangesSnapshot?
+    /// Whether the load task has run since the list was made. Its first run
+    /// is the one the list's appearing began; every later run follows the
+    /// refresh control's bump of `chrome.refreshCount`.
+    @State private var loadTaskHasRun = false
 
     init(
         worktree: LocalWorktree,
@@ -273,7 +321,7 @@ struct ChangesPanelView: View {
     var body: some View {
         fileList
             .background(Color(nsColor: .controlBackgroundColor))
-            .task(id: chrome.refreshCount) { await refresh() }
+            .task(id: chrome.refreshCount) { await load() }
     }
 
     private var fileList: some View {
@@ -305,11 +353,17 @@ struct ChangesPanelView: View {
         }
     }
 
-    /// Loads the list (`AppState.loadChangesSnapshot`) and shows the result,
-    /// with the strip's spinner up meanwhile. A load cancelled before it
-    /// returns shows nothing, and leaves the spinner to the load that
-    /// superseded it, if any.
-    private func refresh() async {
+    /// One run of the load task. The run the list's appearing began keeps
+    /// the cached list it was made with when that is fresh
+    /// (`AppState.changesSnapshotNeedsLoad`); any other run loads the list
+    /// (`AppState.loadChangesSnapshot`) and shows the result, with the
+    /// strip's spinner up meanwhile. A load cancelled before it returns shows
+    /// nothing, and leaves the spinner to the load that superseded it, if
+    /// any.
+    private func load() async {
+        let refresh = loadTaskHasRun
+        loadTaskHasRun = true
+        guard appState.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: refresh) else { return }
         let token = chrome.beginRefresh()
         defer { chrome.endRefresh(token) }
         guard let loaded = await appState.loadChangesSnapshot(worktree: worktree) else { return }

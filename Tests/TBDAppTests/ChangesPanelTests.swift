@@ -11,7 +11,8 @@ import TestSupport
 /// The Changes list as a side-panel tab (side panel notes and Changes spec,
 /// "Changes", "⌘⇧E"): what a file click sends, ⌘⇧E's three states and its
 /// target, the strip's refresh control and loading flag, the per-worktree
-/// cache of the list, and the retired column's keys.
+/// cache of the list and when appearing reads git again rather than show
+/// it, and the retired column's keys.
 @Suite("Changes panel")
 @MainActor
 struct ChangesPanelTests {
@@ -368,6 +369,68 @@ struct ChangesPanelTests {
             let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
             #expect(returned == expected)
             #expect(stored == expected)
+        }
+    }
+
+    @Test("appearing loads only when no list is cached or it is at least 10 seconds old; a refresh always loads")
+    func reloadDecisionOnAppearAndRefresh() {
+        let maxAge: TimeInterval = 10
+        #expect(ChangesSnapshotCache.maxAge == maxAge)
+        let loadedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let justLoaded = loadedAt
+        let fresh = loadedAt.addingTimeInterval(9.9)
+        let atMaxAge = loadedAt.addingTimeInterval(maxAge)
+        let old = loadedAt.addingTimeInterval(60)
+        let clockSetBack = loadedAt.addingTimeInterval(-5)
+
+        // The run the list's appearing began.
+        #expect(!ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: loadedAt, now: justLoaded))
+        #expect(!ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: loadedAt, now: fresh),
+                "a list under 10 seconds old is shown as it is")
+        #expect(ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: loadedAt, now: atMaxAge),
+                "a list 10 seconds old loads again")
+        #expect(ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: loadedAt, now: old))
+        #expect(ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: nil, now: fresh),
+                "no cached list loads")
+        #expect(ChangesSnapshotCache.needsLoad(refresh: false, loadedAt: loadedAt, now: clockSetBack),
+                "a list dated after now loads")
+
+        // A run the refresh control began.
+        #expect(ChangesSnapshotCache.needsLoad(refresh: true, loadedAt: loadedAt, now: justLoaded))
+        #expect(ChangesSnapshotCache.needsLoad(refresh: true, loadedAt: loadedAt, now: fresh))
+        #expect(ChangesSnapshotCache.needsLoad(refresh: true, loadedAt: nil, now: fresh))
+    }
+
+    @Test("a load stamps the worktree's list as it finishes, and the list appearing within 10 seconds of that reads no git")
+    func loadStampsListAndFreshListSkipsLoadOnAppear() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let loaded = Self.snapshot(unstaged: "a.swift")
+            state.changesLoader = { @MainActor _, _ in
+                // The git reads take three seconds.
+                dates.advance(by: 3)
+                return loaded
+            }
+            let start = dates.now
+            let loadsBeforeAny = state.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: false)
+            #expect(loadsBeforeAny, "nothing cached: appearing loads")
+
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let loadedAt = state.changesSnapshots[worktree.id]?.loadedAt
+            let expectedLoadedAt = start.addingTimeInterval(3)
+            #expect(loadedAt == expectedLoadedAt, "stamped as the load finishes, not as it begins")
+
+            dates.advance(by: 9)
+            let loadsWhenFresh = state.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: false)
+            let loadsOnRefresh = state.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: true)
+            #expect(!loadsWhenFresh, "9 seconds old: appearing shows the cached list")
+            #expect(loadsOnRefresh, "the refresh control loads regardless")
+
+            dates.advance(by: 1)
+            let loadsWhenStale = state.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: false)
+            #expect(loadsWhenStale, "10 seconds old: appearing loads")
         }
     }
 
