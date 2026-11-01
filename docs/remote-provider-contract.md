@@ -145,7 +145,7 @@ A provider MAY leave sessions beyond the horizon out of `list` and the `events` 
 
 **What the caller can still browse.** The caller keeps every session it saw archived, so browsing those and reviving one works from its own mirror. A session archived from elsewhere that passed the horizon before the caller ever saw it archived cannot be browsed through this contract. A provider that wants such sessions reachable offers that on its own surface.
 
-**TBD's caller does not read `archive_horizon_seconds` yet.** It counts a session beyond the horizon toward `gone` like any other absence. A lane TBD has archived stays revivable even so: the mirror keeps a gone row with its last payload, and revive calls `unarchive` for a session that payload reports archived.
+**What TBD's caller does.** It reads `archive_horizon_seconds` from `describe` and treats a malformed value as absent. For a provider that declares a horizon, the absence pass of a complete snapshot, whether from `list` or the `events` snapshot, skips any session whose last sighting had `archived: true`: the session stays an archived row rather than becoming a gone row. A row whose last payload cannot be read is not known to be archived and follows the ordinary drift rule, as does every session last seen unarchived. TBD does not display `hidden_archived`. A lane TBD has archived stays revivable: revive calls `unarchive` for a session whose last payload reports it archived. Until a provider's `describe` is on file, TBD holds sessions last seen archived the same way, because it cannot yet rule out a horizon.
 
 ### Pending question (optional)
 
