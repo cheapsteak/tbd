@@ -38,10 +38,12 @@ private enum NoteContentRead: Sendable {
 extension AppState {
     // MARK: - Note Actions
 
-    /// Create a note in a worktree from the side strip's New Note, and show
-    /// it in the side panel of the workspace tab `tabID`: the note is opened
-    /// as a worktree panel, so every workspace tab of the worktree shows it,
-    /// and it comes to the front in `tabID`. A note is never a workspace tab.
+    /// Create a note in a worktree — from the side strip's New Note, or from
+    /// the Notes button in a worktree with no note — and show it in the side
+    /// panel of the workspace tab `tabID`: the note is opened as a worktree
+    /// panel, so every workspace tab of the worktree shows it, and it comes
+    /// to the front in `tabID`. A note is never a workspace tab. `title` is
+    /// the note's title; nil takes the daemon's default, as New Note does.
     ///
     /// The note's summary lands in `notes` before the open goes out, so its
     /// tab reads the note's title, and the + menu does not list it, from the
@@ -51,10 +53,10 @@ extension AppState {
     ///
     /// A failed create opens nothing and shows an error toast; a failed open
     /// leaves the note, which the + menu then lists.
-    func createNote(worktreeID: UUID, tabID: UUID) async {
+    func createNote(worktreeID: UUID, tabID: UUID, title: String? = nil) async {
         let note: Note
         do {
-            note = try await noteCreator(worktreeID)
+            note = try await noteCreator(worktreeID, title)
         } catch {
             logger.error("Failed to create note: \(error, privacy: .public)")
             showErrorToast("Couldn't create a note: \(error.localizedDescription)")
@@ -69,6 +71,31 @@ extension AppState {
         await applyPanelOperation(
             worktreeID: worktreeID, tabID: tabID,
             .open(content: .note(noteID: note.id), newPanel: false))
+    }
+
+    /// The Notes button in the workspace tab bar of `tabID`: shows, brings
+    /// forward or closes the worktree's first note, as
+    /// `PaneActions.notesToggleDecision` decides from the app's copy of the
+    /// tab's surface and the worktree's `notes` as they are at the press. A
+    /// close sends the `close` operation alone, which keeps the note — never
+    /// `closeSidePanel`, which deletes it.
+    ///
+    /// In a worktree with no note it creates one titled
+    /// `NotesToggleDecision.createdNoteTitle` and opens it (`createNote`). A
+    /// press while that create is still in flight sends nothing
+    /// (`notesButtonCreatesInFlight`), so a double click makes one note.
+    func toggleNotesPanel(worktreeID: UUID, tabID: UUID) async {
+        let decision = PaneActions.notesToggleDecision(
+            surface: panelSurface(worktreeID: worktreeID, tabID: tabID),
+            notes: notes[worktreeID] ?? [])
+        guard let operation = decision.operation else {
+            guard notesButtonCreatesInFlight.insert(worktreeID).inserted else { return }
+            defer { notesButtonCreatesInFlight.remove(worktreeID) }
+            await createNote(
+                worktreeID: worktreeID, tabID: tabID, title: NotesToggleDecision.createdNoteTitle)
+            return
+        }
+        await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
     }
 
     /// Adopts one `note.list` answer for `worktreeIDs`: each worktree's

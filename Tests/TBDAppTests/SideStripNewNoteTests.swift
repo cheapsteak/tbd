@@ -8,9 +8,11 @@ import TBDShared
 // `PanelTabsFixture`), so no socket opens.
 
 /// The side strip's New Note (side panel notes spec, "App"): a note is made
-/// only there, so it is born where it lives. `AppState.createNote` creates the
-/// note, lists its summary in `notes`, and opens it as a worktree panel in the
-/// workspace tab whose strip it came from. It never makes a workspace tab.
+/// in the side panel, so it is born where it lives. `AppState.createNote`
+/// creates the note with the daemon's default title, lists its summary in
+/// `notes`, and opens it as a worktree panel in the workspace tab whose strip
+/// it came from. It never makes a workspace tab. The Notes button's create,
+/// in a worktree with no note, is `NotesButtonTests`'.
 @Suite("Side strip New Note")
 @MainActor
 struct SideStripNewNoteTests {
@@ -25,8 +27,8 @@ struct SideStripNewNoteTests {
             state.panelSurfaces = [worktreeID: [tabID: surface]]
             let created = Note(worktreeID: worktreeID, title: "Note")
             let creates = PanelEventLog()
-            state.noteCreator = { @MainActor worktreeID in
-                creates.record("create \(worktreeID)")
+            state.noteCreator = { @MainActor worktreeID, title in
+                creates.record("create \(worktreeID) title \(title ?? "<default>")")
                 return created
             }
             let panelID = UUID()
@@ -38,7 +40,8 @@ struct SideStripNewNoteTests {
 
             await state.createNote(worktreeID: worktreeID, tabID: tabID)
 
-            let expectedCreates: [String] = ["create \(worktreeID)"]
+            // New Note names no title, so the daemon's default applies.
+            let expectedCreates: [String] = ["create \(worktreeID) title <default>"]
             #expect(creates.events == expectedCreates)
             let applied = envelopes.envelopes.map(\.operation)
             let expectedApplied: [PanelOperation] = [.open(content: .note(noteID: created.id), newPanel: false)]
@@ -57,7 +60,7 @@ struct SideStripNewNoteTests {
         await Fixture.withState { state in
             let worktreeID = UUID()
             let tabID = UUID()
-            state.noteCreator = { @MainActor _ in
+            state.noteCreator = { @MainActor _, _ in
                 throw PanelTabsFixture.Rejected(message: "note.create refused")
             }
             // The fixture's `panel.apply` records an issue if it is reached.
@@ -81,7 +84,7 @@ struct SideStripNewNoteTests {
             let surface = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 1)
             state.panelSurfaces = [worktreeID: [tabID: surface]]
             let created = Note(worktreeID: worktreeID, title: "Note")
-            state.noteCreator = { @MainActor [weak state] worktreeID in
+            state.noteCreator = { @MainActor [weak state] worktreeID, _ in
                 // The refresh lists the new note before the create's reply lands.
                 state?.adoptNotes([NoteSummary(from: created)], worktreeIDs: [worktreeID])
                 return created

@@ -227,7 +227,7 @@ extension AppState {
         }
     }
 
-    /// Set whether ordinary new worktrees start with an empty Notes panel.
+    /// Set whether ordinary new worktrees start with an empty "Notes" note.
     func setAutoCreateNotesEnabled(_ enabled: Bool) async {
         do {
             try await autoCreateNotesSetter(enabled)

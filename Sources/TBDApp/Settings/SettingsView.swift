@@ -31,9 +31,10 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
-    static let autoCreateNotesLabel = "Open a Notes panel for new worktrees"
+    static let autoCreateNotesLabel = "Create a starter note for new worktrees"
     static let autoCreateNotesHelp =
-        "Turn this off to skip the empty Notes panel in ordinary new worktrees. " +
+        "On: each ordinary new worktree gets an empty \"Notes\" note, which opens from the Notes button " +
+        "in the tab bar. Turn this off to skip it. " +
         "Conversations revived on a fresh branch still receive their populated provenance note."
 
     @Environment(AppState.self) var appState

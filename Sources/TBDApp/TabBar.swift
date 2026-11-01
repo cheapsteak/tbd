@@ -88,21 +88,26 @@ enum TabRowMetrics {
 // MARK: - TabBarTrailingItems
 
 /// What the workspace tab bar draws at its trailing end besides Session
-/// History: the selected tab's own control before it, and the expand button
-/// after it. `PanelSurfaceWorkspaceView` decides both from the tab and its
-/// side region; a bar drawn anywhere else (Session History open, a tab whose
-/// layout still splits off a terminal, no tabs) takes `none`.
+/// History: the selected tab's own control and the Notes button before it,
+/// and the expand button after it. `PanelSurfaceWorkspaceView` decides all
+/// three from the tab, its side region and the worktree's notes; a bar drawn
+/// anywhere else (Session History open, a tab whose layout still splits off a
+/// terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
     /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
     /// or nil when its kind has none.
     var selectedTabControl: PaneChromeControl?
     var onSelectedTabControl: @MainActor () -> Void
+    /// The Notes button (`PaneChromeControl.notes`), drawn right after the
+    /// selected tab's control, or nil for a bar that has none.
+    var notesControl: PaneChromeControl?
+    var onNotesControl: @MainActor () -> Void = {}
     /// True while the tab's loaded side region is hidden: collapsed, or
     /// without a panel (`PanelSurfaceWorkspaceView.showsExpandButton`).
     var showsExpandButton: Bool
     var onExpand: @MainActor () -> Void
 
-    /// No selected-tab control and no expand button.
+    /// No selected-tab control, no Notes button and no expand button.
     ///
     /// Computed rather than stored: Swift 6 accepts a stored static only of a
     /// `Sendable` type, which a struct of closures is not, and building an
@@ -120,8 +125,8 @@ struct TabBarTrailingItems {
 /// Replaces the former TerminalTabBar.
 ///
 /// Reads, left to right: the tabs, the + button, then a trailing group of the
-/// selected tab's control, Session History and the expand button, the first
-/// and last only as `trailing` asks. The trailing group keeps its full width
+/// selected tab's control, the Notes button, Session History and the expand
+/// button, all but Session History only as `trailing` asks. The trailing group keeps its full width
 /// at the row's trailing edge however many tabs there are. While the tabs fit
 /// in the width it leaves, the + button sits right after the last one; once
 /// they overflow — a narrow primary column on the daemon path, beside a wide
@@ -146,8 +151,8 @@ struct TabBar: View {
     // the profile-picker "Fork Session" menu (#361). No tab-level closures.
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
-    /// The selected tab's control and the expand button, drawn around Session
-    /// History.
+    /// The selected tab's control, the Notes button and the expand button,
+    /// drawn around Session History.
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
@@ -236,12 +241,19 @@ struct TabBar: View {
         }
     }
 
-    /// The selected tab's control, Session History, and the expand button.
+    /// The selected tab's control, the Notes button, Session History, and the
+    /// expand button.
     private var trailingGroup: some View {
         HStack(spacing: 0) {
             if let control = trailing.selectedTabControl {
                 PaneChromeControlButton(control: control) {
                     trailing.onSelectedTabControl()
+                }
+            }
+
+            if let notesControl = trailing.notesControl {
+                PaneChromeControlButton(control: notesControl) {
+                    trailing.onNotesControl()
                 }
             }
 

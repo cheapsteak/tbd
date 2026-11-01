@@ -265,6 +265,10 @@ final class AppState {
     /// the note it loads, holding the model weakly, so the registry never
     /// keeps a model alive. Several editors of one note have one entry each.
     @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
+    /// Worktrees whose Notes button is creating their first note
+    /// (`toggleNotesPanel`). A press while that create is in flight sends
+    /// nothing, so a double click makes one note, not two.
+    @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
@@ -1286,7 +1290,7 @@ final class AppState {
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     var gcEnabled: Bool = true
-    /// Whether ordinary new worktrees start with an empty Notes panel. Loaded
+    /// Whether ordinary new worktrees start with an empty "Notes" note. Loaded
     /// from the daemon alongside the other config-backed worktree defaults.
     var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
@@ -2511,11 +2515,13 @@ final class AppState {
     /// it.
     @ObservationIgnored lazy var noteDeleter: @MainActor (UUID) async throws -> Void =
         { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
-    /// How a note is created in a worktree on the daemon (`createNote`).
-    /// Injectable so a test can drive the side strip's New Note without a
-    /// daemon.
-    @ObservationIgnored lazy var noteCreator: @MainActor (UUID) async throws -> Note =
-        { [daemonClient] worktreeID in try await daemonClient.createNote(worktreeID: worktreeID) }
+    /// How a note is created in a worktree on the daemon (`createNote`),
+    /// given the worktree and the title to create it with, or nil for the
+    /// daemon's default. Injectable so a test can drive the side strip's New
+    /// Note and the Notes button without a daemon.
+    @ObservationIgnored lazy var noteCreator: @MainActor (UUID, String?) async throws -> Note =
+        { [daemonClient] worktreeID, title in
+            try await daemonClient.createNote(worktreeID: worktreeID, title: title) }
     /// Asks the user to confirm closing a note's side-panel tab whose note has
     /// content — that close hard-deletes the note row (`closeSidePanel` →
     /// `deleteNote`). Injectable so tests can exercise both branches without

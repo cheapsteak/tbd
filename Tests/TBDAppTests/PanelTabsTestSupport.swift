@@ -58,7 +58,7 @@ enum PanelTabsFixture {
             Issue.record("unexpected note.delete")
             throw UnstubbedSeam(seam: "note.delete")
         }
-        state.noteCreator = { @MainActor _ in
+        state.noteCreator = { @MainActor _, _ in
             Issue.record("unexpected note.create")
             throw UnstubbedSeam(seam: "note.create")
         }

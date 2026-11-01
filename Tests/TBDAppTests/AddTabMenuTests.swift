@@ -128,8 +128,9 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(menu.items.contains { $0.title == "Codex" } == false)
 }
 
-/// A note is made only from the side strip's + menu, as a worktree panel; the
-/// workspace tab bar's + menu offers terminals alone, whatever is installed.
+/// A note is made as a worktree panel — from the side strip's + menu, or by
+/// the Notes button in a worktree with no note — never from the workspace tab
+/// bar's + menu, which offers terminals alone, whatever is installed.
 @MainActor
 @Test func workspacePlusMenuHasNoNoteItem() {
     let availabilities: [AgentExecutableAvailability] = [

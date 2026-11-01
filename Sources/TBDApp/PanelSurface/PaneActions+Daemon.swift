@@ -31,6 +31,54 @@ enum PanelToggleDecision: Equatable {
     }
 }
 
+// MARK: - The Notes button's decision
+
+/// What the Notes button sends, for the worktree's first note: the oldest
+/// by `createdAt` (`PaneActions.notesToggleDecision`). The button sits in the
+/// workspace tab bar's trailing controls, after the transcript button, on
+/// every tab that renders on the daemon path, and follows the transcript
+/// button's three states. Nothing opens a note panel by itself.
+enum NotesToggleDecision: Equatable {
+    /// The worktree has no note: create one titled `createdNoteTitle`, then
+    /// open it.
+    case create
+    /// The first note has no worktree panel: open one, which comes to the
+    /// front in this tab and expands its region.
+    case open(noteID: UUID)
+    /// The first note's panel exists but another panel is in front, or the
+    /// region is collapsed: bring it to the front, which also expands the
+    /// region.
+    case select(PanelID)
+    /// The first note's panel is in front and visible: close it. The close
+    /// keeps the note.
+    case close(PanelID)
+
+    /// The title of the note the button creates in a worktree with none.
+    static let createdNoteTitle = "Notes"
+
+    /// The operation the decision sends; nil for `create`, which sends its
+    /// `open` once the note exists (`AppState.createNote`).
+    var operation: PanelOperation? {
+        switch self {
+        case .create:
+            return nil
+        case .open(let noteID):
+            return .open(content: .note(noteID: noteID), newPanel: false)
+        case .select(let panelID):
+            return .select(panelID: panelID)
+        case .close(let panelID):
+            return .close(panelID: panelID)
+        }
+    }
+
+    /// Whether the button draws on: the first note is in front of a visible
+    /// region, so a press closes it.
+    var isOn: Bool {
+        if case .close = self { return true }
+        return false
+    }
+}
+
 extension PaneHistoryStep {
     /// The same step in the daemon's operation vocabulary.
     var panelHistoryAction: PanelHistoryAction {
@@ -66,6 +114,28 @@ extension PaneActions {
     /// (`AppState.toggleChangesPanel`).
     static func changesToggleDecision(surface: WorkspaceTabSurface?) -> PanelToggleDecision {
         guard let surface, let panel = surface.worktreePanel(showing: .changes) else { return .open }
+        return surface.side.activePanelID == panel.id && surface.isSideVisible
+            ? .close(panel.id) : .select(panel.id)
+    }
+
+    /// The Notes button's operation for one workspace tab on the daemon path,
+    /// decided from the app's copy as `changesToggleDecision` is, for the
+    /// worktree's first note: the oldest in `notes` by `createdAt`, whatever
+    /// order the list is in. Create when `notes` is empty; open when the first
+    /// note has no worktree panel, or when `surface` is nil — a tab the copy
+    /// holds no surface for yet; close when its panel is in front of a visible
+    /// region; otherwise select it, which also expands a collapsed region.
+    ///
+    /// One pass over the worktree's notes (`min(by:)`, no sort), so it is
+    /// cheap enough for the tab bar to decide the button's on state as it
+    /// draws.
+    static func notesToggleDecision(
+        surface: WorkspaceTabSurface?, notes: [NoteSummary]
+    ) -> NotesToggleDecision {
+        guard let first = notes.min(by: { $0.createdAt < $1.createdAt }) else { return .create }
+        guard let surface, let panel = surface.worktreePanel(showing: .note(noteID: first.id)) else {
+            return .open(noteID: first.id)
+        }
         return surface.side.activePanelID == panel.id && surface.isSideVisible
             ? .close(panel.id) : .select(panel.id)
     }

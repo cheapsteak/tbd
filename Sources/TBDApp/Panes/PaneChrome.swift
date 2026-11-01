@@ -107,8 +107,9 @@ final class PaneChromeState {
     /// copy-address copies the page's current address, which follows in-page
     /// navigation, or `contentURL`, the address its content opened with,
     /// until the page reports one, and refresh bumps ``refreshCount``. The
-    /// transcript control changes the layout, not this state, so the view
-    /// that draws it sends that itself and this does nothing for it.
+    /// transcript and Notes controls change the layout, not this state, so
+    /// the view that draws each sends that itself and this does nothing for
+    /// them.
     func perform(_ control: PaneChromeControl, contentURL: URL?) {
         switch control {
         case .renderToggle:
@@ -118,7 +119,7 @@ final class PaneChromeState {
             copyAddress(url)
         case .refresh:
             refreshCount += 1
-        case .transcript:
+        case .transcript, .notes:
             break
         }
     }
@@ -164,13 +165,17 @@ final class PaneChromeStore {
 
 // MARK: - PaneChromeControl
 
-/// The control a pane's kind puts in its tab row, as a value, so the row can
-/// decide which one to show and the button can draw it without reading
-/// anything else.
+/// A control a tab row draws — one a pane's kind puts there, or the
+/// workspace tab bar's Notes button — as a value, so the row can decide which
+/// one to show and the button can draw it without reading anything else.
 enum PaneChromeControl: Equatable {
     /// A Claude terminal's transcript toggle, on while its transcript panel
     /// exists, whether or not that panel is in front.
     case transcript(isOn: Bool)
+    /// The workspace tab bar's Notes button, on while the worktree's first
+    /// note is in front of a visible side region
+    /// (`NotesToggleDecision.isOn`).
+    case notes(isOn: Bool)
     /// A renderable file's rendered/source toggle.
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
@@ -210,6 +215,8 @@ enum PaneChromeControl: Equatable {
         switch self {
         case .transcript(let isOn):
             return isOn ? "text.bubble.fill" : "text.bubble"
+        case .notes:
+            return PanelKind.note.tabSystemImage
         case .renderToggle:
             return "chevron.left.forwardslash.chevron.right"
         case .copyAddress(let copied):
@@ -222,7 +229,7 @@ enum PaneChromeControl: Equatable {
     /// Nil leaves the symbol in the button style's own colour.
     var tint: Tint? {
         switch self {
-        case .transcript(let isOn):
+        case .transcript(let isOn), .notes(let isOn):
             return isOn ? .accent : .primary
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
@@ -238,6 +245,8 @@ enum PaneChromeControl: Equatable {
             return isOn
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"
+        case .notes(let isOn):
+            return isOn ? "Hide notes" : "Show notes"
         case .renderToggle(let showingSource):
             return showingSource ? "Show rendered view" : "Show source code"
         case .copyAddress:

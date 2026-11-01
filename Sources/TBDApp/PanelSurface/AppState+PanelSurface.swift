@@ -406,8 +406,9 @@ extension AppState {
     /// arrives.
     ///
     /// The `close` operation itself keeps the note — the daemon action set's
-    /// close sends it alone — so an agent's `tbd panel close` does too, and
-    /// the strip's + menu then lists the note.
+    /// close sends it alone — so an agent's `tbd panel close` and the Notes
+    /// button (`toggleNotesPanel`) do too, and the strip's + menu then lists
+    /// the note.
     func closeSidePanel(
         worktreeID: UUID, tabID: UUID, panelID: PanelID, content: PanelContent
     ) async {

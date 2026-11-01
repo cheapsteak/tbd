@@ -122,9 +122,10 @@ struct PaneChromeTests {
         #expect(!state.showSourceCode, "a copy leaves the rendered/source toggle alone")
     }
 
-    /// The transcript control opens or closes a panel, which the view that
-    /// draws it sends; the chrome state has nothing to do for it.
-    @Test("copy-address with no address to copy, and the transcript control, change nothing")
+    /// The transcript and Notes controls open or close a panel, which the
+    /// view that draws each sends; the chrome state has nothing to do for
+    /// them.
+    @Test("copy-address with no address to copy, and the transcript and Notes controls, change nothing")
     func performingWithoutAnEffectChangesNothing() throws {
         let opened = try #require(URL(string: "https://example.com/opened"))
         let written = FireRecorder<String>()
@@ -133,6 +134,8 @@ struct PaneChromeTests {
         state.perform(.copyAddress(copied: false), contentURL: nil)
         state.perform(.transcript(isOn: false), contentURL: opened)
         state.perform(.transcript(isOn: true), contentURL: opened)
+        state.perform(.notes(isOn: false), contentURL: opened)
+        state.perform(.notes(isOn: true), contentURL: opened)
 
         #expect(written.values.isEmpty)
         #expect(!state.didCopyAddress)

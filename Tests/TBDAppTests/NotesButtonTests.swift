@@ -1,0 +1,349 @@
+import Foundation
+import Testing
+import TBDShared
+@testable import TBDApp
+
+// Tier 1: deterministic, in-process state only (see `PanelTabsTestSupport`).
+// `note.create`, `note.delete` and `panel.apply` go through injected seams, so
+// no socket opens, and every `AppState` is on a throwaway defaults suite.
+
+/// The Notes button in the workspace tab bar: nothing opens a note panel by
+/// itself, so the button shows, brings forward or closes the worktree's first
+/// note — the oldest by `createdAt` — with the transcript button's three
+/// states, and in a worktree with no note creates one titled "Notes" and
+/// opens it. Its close keeps the note.
+@Suite("Notes button")
+@MainActor
+struct NotesButtonTests {
+    private typealias Fixture = PanelTabsFixture
+
+    // MARK: - Fixtures
+
+    private static func surface(
+        tabID: UUID = UUID(), worktreeID: UUID = UUID(),
+        worktreePanels: [WorktreePanel], active: PanelID?, collapsed: Bool = false
+    ) -> WorkspaceTabSurface {
+        WorkspaceTabSurface(
+            id: tabID, worktreeID: worktreeID,
+            primary: .terminal(terminalID: tabID),
+            side: SideRegion(panels: [], activePanelID: active, recency: [], collapsed: collapsed),
+            worktreePanels: worktreePanels,
+            revision: 1)
+    }
+
+    /// A note created `seconds` after the epoch.
+    private static func note(worktreeID: UUID = UUID(), createdAt seconds: TimeInterval) -> NoteSummary {
+        let date = Date(timeIntervalSince1970: seconds)
+        return NoteSummary(worktreeID: worktreeID, title: "Note", createdAt: date, updatedAt: date)
+    }
+
+    /// Seeds the copy with `surface` and the worktree's `notes`, presses the
+    /// Notes button on the surface's tab, and returns every operation it sent.
+    private static func press(
+        _ state: AppState, surface: WorkspaceTabSurface, notes: [NoteSummary]
+    ) async -> [PanelOperation] {
+        state.panelSurfaces = [surface.worktreeID: [surface.id: surface]]
+        state.notes = [surface.worktreeID: notes]
+        let envelopes = Fixture.collectEnvelopes(state, replying: surface)
+        await state.toggleNotesPanel(worktreeID: surface.worktreeID, tabID: surface.id)
+        return envelopes.envelopes.map(\.operation)
+    }
+
+    // MARK: - The decision
+
+    @Test("a worktree with no note creates one, whatever the surface holds")
+    func noNotesCreates() {
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+
+        #expect(PaneActions.notesToggleDecision(surface: nil, notes: []) == .create)
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [changes], active: changes.id), notes: []) == .create)
+    }
+
+    @Test("the first note with no worktree panel opens, as it does before the tab's surface loads")
+    func firstNoteWithoutPanelOpens() {
+        let first = Self.note(createdAt: 1_000)
+        let second = Self.note(createdAt: 2_000)
+        let secondPanel = WorktreePanel(id: UUID(), content: .note(noteID: second.id))
+
+        #expect(PaneActions.notesToggleDecision(surface: nil, notes: [first, second])
+            == .open(noteID: first.id))
+        // Another note's panel in front does not stand in for the first note.
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [secondPanel], active: secondPanel.id),
+            notes: [first, second])
+            == .open(noteID: first.id))
+    }
+
+    @Test("the first note's panel behind another panel is selected")
+    func firstNoteBehindSelects() {
+        let first = Self.note(createdAt: 1_000)
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [firstPanel, changes], active: changes.id),
+            notes: [first])
+            == .select(firstPanel.id))
+    }
+
+    @Test("the first note's panel in front of a collapsed region is selected, which expands it")
+    func firstNoteCollapsedSelects() {
+        let first = Self.note(createdAt: 1_000)
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id, collapsed: true),
+            notes: [first])
+            == .select(firstPanel.id))
+    }
+
+    @Test("the first note's panel in front of a visible region is closed")
+    func firstNoteInFrontCloses() {
+        let first = Self.note(createdAt: 1_000)
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [changes, firstPanel], active: firstPanel.id),
+            notes: [first])
+            == .close(firstPanel.id))
+    }
+
+    @Test("the first note is the oldest by createdAt, not the first in the list")
+    func firstNoteIsOldestByCreatedAt() {
+        let newer = Self.note(createdAt: 2_000)
+        let older = Self.note(createdAt: 1_000)
+        let newest = Self.note(createdAt: 3_000)
+        let newerPanel = WorktreePanel(id: UUID(), content: .note(noteID: newer.id))
+        let olderPanel = WorktreePanel(id: UUID(), content: .note(noteID: older.id))
+
+        #expect(PaneActions.notesToggleDecision(surface: nil, notes: [newer, older, newest])
+            == .open(noteID: older.id))
+        // The list's first note in front is not the first note in front.
+        #expect(PaneActions.notesToggleDecision(
+            surface: Self.surface(worktreePanels: [newerPanel, olderPanel], active: newerPanel.id),
+            notes: [newer, older, newest])
+            == .select(olderPanel.id))
+    }
+
+    @Test("each decision's operation, and the button is on only while a press would close")
+    func decisionOperationsAndOnState() {
+        let noteID = UUID()
+        let panelID = UUID()
+        let opensNote: PanelOperation = .open(content: .note(noteID: noteID), newPanel: false)
+        let selectsPanel: PanelOperation = .select(panelID: panelID)
+        let closesPanel: PanelOperation = .close(panelID: panelID)
+
+        #expect(NotesToggleDecision.create.operation == nil, "a create sends its open once the note exists")
+        #expect(NotesToggleDecision.open(noteID: noteID).operation == opensNote)
+        #expect(NotesToggleDecision.select(panelID).operation == selectsPanel)
+        #expect(NotesToggleDecision.close(panelID).operation == closesPanel)
+
+        #expect(!NotesToggleDecision.create.isOn)
+        #expect(!NotesToggleDecision.open(noteID: noteID).isOn)
+        #expect(!NotesToggleDecision.select(panelID).isOn)
+        #expect(NotesToggleDecision.close(panelID).isOn)
+    }
+
+    // MARK: - The button
+
+    @Test("the button draws note.text, accent and \"Hide notes\" while on, plain and \"Show notes\" while off")
+    func notesControlAppearance() {
+        let on = PaneChromeControl.notes(isOn: true)
+        let off = PaneChromeControl.notes(isOn: false)
+
+        #expect(on.systemImage == "note.text")
+        #expect(on.systemImage == PanelKind.note.tabSystemImage)
+        #expect(on.tint == .accent)
+        #expect(on.help == "Hide notes")
+        #expect(off.systemImage == "note.text")
+        #expect(off.tint == .primary)
+        #expect(off.help == "Show notes")
+    }
+
+    @Test("the bar draws the button on exactly while the first note is in front of a visible region")
+    func workspaceBarNotesControl() {
+        let first = Self.note(createdAt: 1_000)
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+        let on: PaneChromeControl = .notes(isOn: true)
+        let off: PaneChromeControl = .notes(isOn: false)
+
+        #expect(PanelSurfaceWorkspaceView.notesControl(
+            surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id), notes: [first])
+            == on)
+        #expect(PanelSurfaceWorkspaceView.notesControl(
+            surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id, collapsed: true),
+            notes: [first])
+            == off)
+        #expect(PanelSurfaceWorkspaceView.notesControl(surface: nil, notes: [first]) == off)
+        #expect(PanelSurfaceWorkspaceView.notesControl(surface: nil, notes: []) == off)
+    }
+
+    @Test("a bar drawn off the daemon path has no Notes button")
+    func noneHasNoNotesButton() {
+        #expect(TabBarTrailingItems.none.notesControl == nil)
+    }
+
+    // MARK: - A press
+
+    @Test("a press opens the first note when it has no panel")
+    func pressOpensFirstNote() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let first = Self.note(worktreeID: worktreeID, createdAt: 1_000)
+            let second = Self.note(worktreeID: worktreeID, createdAt: 2_000)
+            let surface = Self.surface(worktreeID: worktreeID, worktreePanels: [], active: nil)
+
+            let sent = await Self.press(state, surface: surface, notes: [second, first])
+
+            let expected: [PanelOperation] = [.open(content: .note(noteID: first.id), newPanel: false)]
+            #expect(sent == expected)
+        }
+    }
+
+    @Test("a press selects the first note's panel when it is behind another")
+    func pressSelectsPanelBehind() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let first = Self.note(worktreeID: worktreeID, createdAt: 1_000)
+            let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let surface = Self.surface(
+                worktreeID: worktreeID, worktreePanels: [firstPanel, changes], active: changes.id)
+
+            let sent = await Self.press(state, surface: surface, notes: [first])
+
+            let expected: [PanelOperation] = [.select(panelID: firstPanel.id)]
+            #expect(sent == expected)
+        }
+    }
+
+    @Test("a press selects the first note's panel when the region is collapsed")
+    func pressSelectsPanelInCollapsedRegion() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let first = Self.note(worktreeID: worktreeID, createdAt: 1_000)
+            let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+            let surface = Self.surface(
+                worktreeID: worktreeID, worktreePanels: [firstPanel], active: firstPanel.id, collapsed: true)
+
+            let sent = await Self.press(state, surface: surface, notes: [first])
+
+            let expected: [PanelOperation] = [.select(panelID: firstPanel.id)]
+            #expect(sent == expected)
+        }
+    }
+
+    @Test("a press closes the first note's panel in front, and keeps the note")
+    func pressClosesAndKeepsNote() async {
+        await Fixture.withState { state in
+            let deletes = PanelEventLog()
+            state.noteDeleter = { @MainActor noteID in deletes.record("delete \(noteID)") }
+            // The fixture's confirmer records an issue if a close asks.
+            let worktreeID = UUID()
+            let first = Self.note(worktreeID: worktreeID, createdAt: 1_000)
+            let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+            let surface = Self.surface(worktreeID: worktreeID, worktreePanels: [firstPanel], active: firstPanel.id)
+
+            let sent = await Self.press(state, surface: surface, notes: [first])
+            await Fixture.drainMainActor()
+
+            let expected: [PanelOperation] = [.close(panelID: firstPanel.id)]
+            #expect(sent == expected)
+            #expect(deletes.events.isEmpty, "the Notes button's close never deletes the note")
+            let listed: [UUID] = state.notes[worktreeID]?.map(\.id) ?? []
+            let expectedListed: [UUID] = [first.id]
+            #expect(listed == expectedListed)
+        }
+    }
+
+    @Test("a press in a worktree with no note creates one titled Notes, then opens it in this tab")
+    func pressCreatesThenOpens() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let surface = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 1)
+            state.panelSurfaces = [worktreeID: [tabID: surface]]
+            let created = Note(worktreeID: worktreeID, title: "Notes")
+            let creates = PanelEventLog()
+            state.noteCreator = { @MainActor worktreeID, title in
+                creates.record("create \(worktreeID) title \(title ?? "<default>")")
+                return created
+            }
+            let envelopes = Fixture.collectEnvelopes(state, replying: surface)
+
+            await state.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+
+            let expectedCreates: [String] = ["create \(worktreeID) title Notes"]
+            #expect(creates.events == expectedCreates)
+            let applied: [PanelOperation] = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.open(content: .note(noteID: created.id), newPanel: false)]
+            #expect(applied == expectedApplied)
+            #expect(envelopes.envelopes.first?.tabID == tabID, "the note opens in the tab whose button was pressed")
+            let listed: [UUID] = state.notes[worktreeID]?.map(\.id) ?? []
+            let expectedListed: [UUID] = [created.id]
+            #expect(listed == expectedListed)
+            #expect(state.notesButtonCreatesInFlight.isEmpty)
+        }
+    }
+
+    @Test("a second press while the create is in flight sends nothing, so a double click makes one note")
+    func pressDuringCreateSendsNothing() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let surface = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 1)
+            state.panelSurfaces = [worktreeID: [tabID: surface]]
+            let created = Note(worktreeID: worktreeID, title: "Notes")
+            let creates = PanelEventLog()
+            let gate = PanelCallGate()
+            state.noteCreator = { @MainActor worktreeID, _ in
+                creates.record("create \(worktreeID)")
+                await gate.wait()
+                return created
+            }
+            let envelopes = Fixture.collectEnvelopes(state, replying: surface)
+
+            let firstPress = Task { @MainActor in
+                await state.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+            }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the first press's create is in flight")
+
+            await state.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+            gate.release()
+            await firstPress.value
+
+            let expectedCreates: [String] = ["create \(worktreeID)"]
+            #expect(creates.events == expectedCreates)
+            let applied: [PanelOperation] = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.open(content: .note(noteID: created.id), newPanel: false)]
+            #expect(applied == expectedApplied)
+            #expect(state.notesButtonCreatesInFlight.isEmpty)
+        }
+    }
+
+    @Test("a failed create opens nothing, and the next press tries again")
+    func failedCreateLetsNextPressRetry() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let creates = PanelEventLog()
+            state.noteCreator = { @MainActor worktreeID, _ in
+                creates.record("create \(worktreeID)")
+                throw PanelTabsFixture.Rejected(message: "note.create refused")
+            }
+            // The fixture's `panel.apply` records an issue if it is reached.
+
+            await state.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+            await state.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+
+            let expectedCreates: [String] = ["create \(worktreeID)", "create \(worktreeID)"]
+            #expect(creates.events == expectedCreates)
+            #expect(state.notes[worktreeID] == nil)
+            #expect(state.notesButtonCreatesInFlight.isEmpty)
+            #expect(state.activeToast?.style == .error)
+        }
+    }
+}

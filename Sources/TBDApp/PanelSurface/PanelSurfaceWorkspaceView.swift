@@ -39,8 +39,8 @@ struct PanelSurfaceLoadKey: Equatable {
 /// and the side region's strip meet at the divider, which runs through the
 /// row. With the region hidden, the bar spans the whole width. The bar's
 /// trailing end carries the selected tab's own control
-/// (`WorkspaceTabBarChrome`), Session History, and the expand button while
-/// the region is hidden. No pane draws a header: the
+/// (`WorkspaceTabBarChrome`), the Notes button, Session History, and the
+/// expand button while the region is hidden. No pane draws a header: the
 /// primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
@@ -70,10 +70,12 @@ struct PanelSurfaceLoadKey: Equatable {
 /// the divider under it and, while it shows, the pre-session banner and its
 /// divider.
 ///
-/// A divider drag, the expand button and the transcript control each send one
-/// panel operation through `AppState.applyPanelOperation` and adopt the tab
-/// the daemon returns. The rendered/source toggle and copy-address act on the
-/// tab's chrome state and send nothing.
+/// A divider drag, the expand button, the transcript control and the Notes
+/// button each send one panel operation through
+/// `AppState.applyPanelOperation` and adopt the tab the daemon returns; the
+/// Notes button in a worktree with no note creates one first
+/// (`AppState.toggleNotesPanel`). The rendered/source toggle and copy-address
+/// act on the tab's chrome state and send nothing.
 struct PanelSurfaceWorkspaceView: View {
     let tab: TBDShared.Tab
     /// The copy's surface for this tab, or nil while it holds none yet.
@@ -221,7 +223,9 @@ struct PanelSurfaceWorkspaceView: View {
     }
 
     /// The bar's trailing items: the primary's control, read from `chrome`,
-    /// and the expand button while the tab's loaded side region is hidden.
+    /// the Notes button, on while the worktree's first note is in front of
+    /// the visible region (`NotesToggleDecision.isOn`), and the expand button
+    /// while the tab's loaded side region is hidden.
     private func trailingItems(chrome: PaneChromeState) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
@@ -268,6 +272,12 @@ struct PanelSurfaceWorkspaceView: View {
                     chrome.perform(viewerControl, contentURL: contentURL)
                 case nil:
                     break
+                }
+            },
+            notesControl: Self.notesControl(surface: surface, notes: appState.notes[worktreeID] ?? []),
+            onNotesControl: {
+                Task { @MainActor in
+                    await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
                 }
             },
             showsExpandButton: Self.showsExpandButton(surface: surface),
@@ -349,6 +359,13 @@ struct PanelSurfaceWorkspaceView: View {
     /// they lay out, as the slot every other path measures leaves them out.
     static func mainAreaSize(width: CGFloat, primaryLeafHeight: CGFloat) -> CGSize {
         CGSize(width: width, height: primaryLeafHeight)
+    }
+
+    /// The Notes button as the bar draws it: on while the worktree's first
+    /// note is in front of a visible side region, so a press would close it
+    /// (`NotesToggleDecision.isOn`).
+    static func notesControl(surface: WorkspaceTabSurface?, notes: [NoteSummary]) -> PaneChromeControl {
+        .notes(isOn: PaneActions.notesToggleDecision(surface: surface, notes: notes).isOn)
     }
 
     /// The expand button shows once the tab's surface is known and its side
