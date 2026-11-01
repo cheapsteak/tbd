@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 import Testing
 import TBDShared
 @testable import TBDApp
@@ -9,13 +10,21 @@ import TBDShared
 /// The render branch, and the view-level decisions behind the daemon renderer
 /// (panel tabs spec, "The render branch" and "The renderer"): which path a
 /// workspace tab takes, what the side region's strip shows, what the divider
-/// sends on release, and when the expand button shows.
+/// sends on release, which control the workspace tab bar carries for the
+/// selected tab, and when the expand button shows.
 @Suite("Panel surface render branch")
 @MainActor
 struct PanelSurfaceRenderBranchTests {
     private typealias Fixture = PanelTabsFixture
 
     private static let pageURL = URL(string: "https://example.com/docs/page")!
+
+    /// A workspace tab bar for a view the test never draws.
+    private static func tabBar(_ trailing: TabBarTrailingItems) -> TabBar {
+        TabBar(
+            tabs: [], worktreeID: UUID(), activeTabIndex: .constant(0),
+            onCloseTab: { _ in }, trailing: trailing)
+    }
 
     /// Seeds the copy with one surface and returns it.
     private static func seed(_ state: AppState) -> WorkspaceTabSurface {
@@ -122,8 +131,10 @@ struct PanelSurfaceRenderBranchTests {
             id: tab.id, worktreeID: worktree.id,
             primary: .file(FileReference(path: "/w/old.swift")), revision: 3)
 
-        let view = PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
-        let awaitingSurface = PanelSurfaceWorkspaceView(tab: tab, surface: nil, worktree: worktree)
+        let view = PanelSurfaceWorkspaceView(
+            tab: tab, surface: surface, worktree: worktree, makeTabBar: Self.tabBar)
+        let awaitingSurface = PanelSurfaceWorkspaceView(
+            tab: tab, surface: nil, worktree: worktree, makeTabBar: Self.tabBar)
 
         #expect(view.primaryContent == repointed)
         #expect(awaitingSurface.primaryContent == repointed, "the primary does not wait for the surface")
@@ -262,9 +273,98 @@ struct PanelSurfaceRenderBranchTests {
         #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: [], currentWidth: 0.4) == nil)
     }
 
+    // MARK: - The workspace tab bar
+
+    /// `WorkspaceTabBarChrome.trailingControl` with every input off unless
+    /// named.
+    private static func trailingControl(
+        _ primary: PaneContent,
+        isClaudeTerminal: Bool = false,
+        transcriptViewEnabled: Bool = false,
+        transcriptOpen: Bool = false,
+        canRender: Bool = false,
+        showingSource: Bool = false,
+        copied: Bool = false
+    ) -> PaneChromeControl? {
+        WorkspaceTabBarChrome.trailingControl(
+            primary: primary,
+            isClaudeTerminal: isClaudeTerminal,
+            transcriptViewEnabled: transcriptViewEnabled,
+            transcriptOpen: transcriptOpen,
+            canRender: canRender,
+            showingSource: showingSource,
+            copied: copied)
+    }
+
+    @Test("the workspace tab bar's trailing control for each primary kind")
+    func trailingControlPerPrimaryKind() {
+        let terminal = PaneContent.terminal(terminalID: UUID())
+        let file = PaneContent.codeViewer(id: UUID(), path: "/w/README.md")
+        let web = PaneContent.webview(id: UUID(), url: Self.pageURL)
+        let note = PaneContent.note(noteID: UUID())
+        let transcript = PaneContent.liveTranscript(id: UUID(), terminalID: UUID())
+
+        // A Claude terminal with the transcript view on: the transcript
+        // button, on exactly while its panel exists.
+        let transcriptOn: PaneChromeControl? = .transcript(isOn: true)
+        let transcriptOff: PaneChromeControl? = .transcript(isOn: false)
+        #expect(Self.trailingControl(
+            terminal, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: true)
+            == transcriptOn)
+        #expect(Self.trailingControl(
+            terminal, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: false)
+            == transcriptOff)
+        // The same terminal with the transcript view off has none.
+        #expect(Self.trailingControl(
+            terminal, isClaudeTerminal: true, transcriptViewEnabled: false, transcriptOpen: true)
+            == nil)
+        // A plain terminal has none, whatever the other inputs say.
+        #expect(Self.trailingControl(
+            terminal, isClaudeTerminal: false, transcriptViewEnabled: true, transcriptOpen: true,
+            canRender: true, copied: true)
+            == nil)
+
+        // A file that can render: the rendered/source toggle, showing which.
+        let showingSource: PaneChromeControl? = .renderToggle(showingSource: true)
+        let showingRendered: PaneChromeControl? = .renderToggle(showingSource: false)
+        #expect(Self.trailingControl(file, canRender: true, showingSource: true) == showingSource)
+        #expect(Self.trailingControl(file, canRender: true, showingSource: false) == showingRendered)
+        // A file that cannot render has none.
+        #expect(Self.trailingControl(
+            file, isClaudeTerminal: true, transcriptViewEnabled: true, canRender: false,
+            showingSource: true, copied: true)
+            == nil)
+
+        // A web page: copy-address, with its checkmark after a copy.
+        let copied: PaneChromeControl? = .copyAddress(copied: true)
+        let notCopied: PaneChromeControl? = .copyAddress(copied: false)
+        #expect(Self.trailingControl(web, copied: true) == copied)
+        #expect(Self.trailingControl(web, copied: false) == notCopied)
+
+        // A note and a transcript primary have none, whatever the inputs say.
+        let withoutControl: [PaneContent] = [note, transcript]
+        for primary in withoutControl {
+            #expect(Self.trailingControl(
+                primary, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: true,
+                canRender: true, showingSource: true, copied: true)
+                == nil, "\(primary)")
+        }
+    }
+
+    @Test("the daemon path measures the main area below its tab row and the divider")
+    func mainAreaExcludesTheTabRow() {
+        let rowAndDivider: CGFloat = TabRowMetrics.height + 1
+        let measured = PanelSurfaceWorkspaceView.mainAreaSize(of: CGSize(width: 800, height: 600))
+        let expected = CGSize(width: 800, height: 600 - rowAndDivider)
+        #expect(measured == expected)
+        // Shorter than the row: nothing to measure, rather than a negative height.
+        let squashed = PanelSurfaceWorkspaceView.mainAreaSize(of: CGSize(width: 800, height: 10))
+        #expect(squashed.height == 0)
+    }
+
     // MARK: - Collapse and expand
 
-    @Test("the expand button shows only for a collapsed region that has panels")
+    @Test("the expand button shows only while the region is collapsed and has panels")
     func expandButtonShowsOnlyWhenCollapsedWithPanels() {
         let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
         let collapsed = SideRegion(
@@ -276,5 +376,31 @@ struct PanelSurfaceRenderBranchTests {
         #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: expanded))
         #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: emptyCollapsed))
         #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: .empty))
+    }
+
+    /// `⌘\` is bound on the expand button in the workspace tab bar and on the
+    /// collapse button in the side region's strip, which draws while the region
+    /// is visible. Shown together, the shortcut would fire one of them
+    /// arbitrarily.
+    @Test("the expand and collapse buttons never show together")
+    func expandAndCollapseNeverShowTogether() {
+        let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
+        let empty: SideRegion = .empty
+        let emptyCollapsed: SideRegion = SideRegion(collapsed: true)
+        let panels: SideRegion = SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id])
+        let panelsCollapsed: SideRegion = SideRegion(
+            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true)
+        let regions: [SideRegion] = [empty, emptyCollapsed, panels, panelsCollapsed]
+
+        for side in regions {
+            let showsExpand = PanelSurfaceWorkspaceView.showsExpandButton(side: side)
+            let showsCollapse = side.isVisible
+            let both = showsExpand && showsCollapse
+            #expect(!both, "\(side)")
+        }
+        // Each button does show for one of the four, so the check above is
+        // not satisfied by a button that never shows.
+        #expect(PanelSurfaceWorkspaceView.showsExpandButton(side: panelsCollapsed))
+        #expect(panels.isVisible)
     }
 }

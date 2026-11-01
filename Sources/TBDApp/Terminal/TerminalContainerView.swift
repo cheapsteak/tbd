@@ -5,24 +5,25 @@ import TBDShared
 
 /// Manages the terminal area for the selected worktree(s).
 ///
-/// - Single worktree selected: Shows TerminalTabBar at top + SplitLayoutView below
-///   for the active tab's layout.
+/// - Single worktree selected: the worktree's tab bar and its active tab (see
+///   `SingleWorktreeView`).
 /// - Multi-select (Cmd-click): Auto-grid layout, one panel per selected worktree
 ///   showing its primary terminal. No tab bar.
 
 // MARK: - MainAreaSizeKey
 
 /// Preference key carrying the px size of the actual terminal-rendering area
-/// — the SplitLayoutView slot inside SingleWorktreeView, or the grid inside
+/// — the active tab's slot inside SingleWorktreeView, or the grid inside
 /// MultiWorktreeView. Excludes the tab bar, divider, dock, and any file
 /// panel. AppState reads this via `.onPreferenceChange` to drive the
 /// daemon-side resize broadcast so tmux pane dimensions match what SwiftTerm
 /// actually renders.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
-    /// Two views in the hierarchy can post this key — SingleWorktreeView's
-    /// layoutContent or MultiWorktreeView's grid — but only one is rendered
-    /// at a time, so taking the latest value is fine.
+    /// Three views can post this key: `PanelSurfaceWorkspaceView` for a tab on
+    /// the daemon path, SingleWorktreeView's `layoutContent` on every other
+    /// path, or the first cell of MultiWorktreeView's grid. Exactly one of
+    /// them is rendered at a time, so taking the latest value is fine.
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
@@ -59,9 +60,10 @@ struct TerminalContainerView: View {
             }
         }
         .onPreferenceChange(MainAreaSizeKey.self) { newSize in
-            // The producing GeometryReader lives deeper, in
-            // SingleWorktreeView.layoutContent or MultiWorktreeView's grid,
-            // so the measurement excludes the tab bar / divider chrome.
+            // The producing GeometryReader lives deeper — in
+            // PanelSurfaceWorkspaceView, SingleWorktreeView.layoutContent or
+            // MultiWorktreeView's grid — so the measurement excludes the tab
+            // bar / divider chrome.
             // SwiftUI fires .onPreferenceChange with .zero in some early
             // layout passes; ignore those so we don't broadcast a degenerate
             // size to the daemon.
@@ -85,7 +87,15 @@ struct TerminalContainerView: View {
 
 // MARK: - SingleWorktreeView
 
-/// Shows the tab bar and split layout for a single selected worktree.
+/// Shows the tab bar and the active tab for a single selected worktree.
+///
+/// On the daemon path (`AppState.workspaceRenderPath`) the active tab draws as
+/// a `PanelSurfaceWorkspaceView`, which draws the tab bar itself over the
+/// primary's column, so the bar shares one row with the side region's strip.
+/// On every other path — Session History open, a tab the last tab sync
+/// skipped, no tabs — this view draws the bar full width above the content.
+/// The bar's tabs, + menu actions and account picker are this view's on both
+/// paths (`tabBar(_:)`).
 struct SingleWorktreeView: View {
     let worktreeID: UUID
     @Environment(AppState.self) var appState
@@ -123,72 +133,19 @@ struct SingleWorktreeView: View {
 
     var body: some View {
         if let worktree {
+            let localWorktree = LocalWorktree(worktree)
+            let daemonTab = daemonPathTab(worktree: localWorktree)
+            let rendersDaemonPath = daemonTab != nil
             VStack(spacing: 0) {
-                // Tab bar — always visible, even with no tabs, so the + menu
-                // and history button remain reachable from the empty state.
-                TabBar(
-                    tabs: worktreeTabs,
-                    worktreeID: worktreeID,
-                    activeTabIndex: Binding(
-                        get: { activeTabIndex },
-                        set: { activeTabIndex = $0 }
-                    ),
-                    onAddShell: {
-                        Task {
-                            await appState.createTerminal(worktreeID: worktreeID)
-                            selectLastTab()
-                        }
-                    },
-                    onAddClaude: {
-                        // "I get the data and I pick": plain Claude opens the
-                        // account picker unless the user opted out.
-                        if appState.skipAccountPicker {
-                            Task {
-                                await appState.createClaudeTerminal(worktreeID: worktreeID)
-                                selectLastTab()
-                            }
-                        } else {
-                            showAccountPicker = true
-                        }
-                    },
-                    onAddClaudeProfile: { profileID in
-                        Task {
-                            await appState.createClaudeTerminal(
-                                worktreeID: worktreeID, profileID: profileID
-                            )
-                            selectLastTab()
-                        }
-                    },
-                    onChooseAccount: { showAccountPicker = true },
-                    onAddCodex: {
-                        Task {
-                            await appState.createCodexTerminal(worktreeID: worktreeID)
-                            selectLastTab()
-                        }
-                    },
-                    onAddNote: {
-                        Task {
-                            await appState.createNote(worktreeID: worktreeID)
-                            selectLastTab()
-                        }
-                    },
-                    onCloseTab: { index in
-                        closeTab(at: index)
-                    },
-                    terminalForTab: { tabID in
-                        guard let terminalID = terminalID(for: tabID) else { return nil }
-                        return appState.terminals[worktreeID]?.first { $0.id == terminalID }
-                    },
-                    // Tab-level suspend/resume and fork closures are gone:
-                    // park is a row-level action, and fork moved to the
-                    // in-menu "Fork Session" profile picker (#361).
-                    isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
-                    onHistoryTab: {
-                        appState.toggleHistory(worktreeID: worktreeID)
-                    }
-                )
+                // The full-width tab bar on every path but the daemon one,
+                // where `PanelSurfaceWorkspaceView` draws it over the primary's
+                // column. Drawn even with no tabs, so the + menu and history
+                // button remain reachable from the empty state.
+                if !rendersDaemonPath {
+                    tabBar()
 
-                Divider()
+                    Divider()
+                }
 
                 // Thin header while a blocking pre-session hook runs and the
                 // user is watching it: the worktree is still `.creating`, so
@@ -198,14 +155,20 @@ struct SingleWorktreeView: View {
                     Divider()
                 }
 
-                // Split layout view for the active tab's layout. Publish its
-                // measured size to MainAreaSizeKey so the daemon-side tmux
-                // resize matches the actual SwiftTerm pane area (tab bar +
-                // divider above and the resume banner below are excluded).
-                layoutContent(worktree: LocalWorktree(worktree))
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
-                    })
+                // The active tab's content. Off the daemon path, its measured
+                // size goes to MainAreaSizeKey so the daemon-side tmux resize
+                // matches the actual SwiftTerm pane area (tab bar + divider
+                // above and the resume banner below are excluded). On it,
+                // `PanelSurfaceWorkspaceView` posts the key itself, below its
+                // own tab row, so exactly one view posts it.
+                layoutContent(worktree: localWorktree, daemonTab: daemonTab)
+                    .background {
+                        if !rendersDaemonPath {
+                            GeometryReader { geometry in
+                                Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
+                            }
+                        }
+                    }
 
                 // Thin footer for the active tab's LIVE terminal (decision in
                 // HibernatedBannerModel.banner(for:)):
@@ -284,22 +247,117 @@ struct SingleWorktreeView: View {
         }
     }
 
+    /// The worktree's tab bar, with `trailing` for its trailing end. Drawn
+    /// full width by `body` off the daemon path, and handed to
+    /// `PanelSurfaceWorkspaceView` on it, which draws it over the primary's
+    /// column with the items it decides. Either way its actions are this
+    /// view's, the account picker sheet included.
+    private func tabBar(_ trailing: TabBarTrailingItems = .none) -> TabBar {
+        TabBar(
+            tabs: worktreeTabs,
+            worktreeID: worktreeID,
+            activeTabIndex: Binding(
+                get: { activeTabIndex },
+                set: { activeTabIndex = $0 }
+            ),
+            onAddShell: {
+                Task {
+                    await appState.createTerminal(worktreeID: worktreeID)
+                    selectLastTab()
+                }
+            },
+            onAddClaude: {
+                // "I get the data and I pick": plain Claude opens the
+                // account picker unless the user opted out.
+                if appState.skipAccountPicker {
+                    Task {
+                        await appState.createClaudeTerminal(worktreeID: worktreeID)
+                        selectLastTab()
+                    }
+                } else {
+                    showAccountPicker = true
+                }
+            },
+            onAddClaudeProfile: { profileID in
+                Task {
+                    await appState.createClaudeTerminal(
+                        worktreeID: worktreeID, profileID: profileID
+                    )
+                    selectLastTab()
+                }
+            },
+            onChooseAccount: { showAccountPicker = true },
+            onAddCodex: {
+                Task {
+                    await appState.createCodexTerminal(worktreeID: worktreeID)
+                    selectLastTab()
+                }
+            },
+            onAddNote: {
+                Task {
+                    await appState.createNote(worktreeID: worktreeID)
+                    selectLastTab()
+                }
+            },
+            onCloseTab: { index in
+                closeTab(at: index)
+            },
+            terminalForTab: { tabID in
+                guard let terminalID = terminalID(for: tabID) else { return nil }
+                return appState.terminals[worktreeID]?.first { $0.id == terminalID }
+            },
+            // Tab-level suspend/resume and fork closures are gone:
+            // park is a row-level action, and fork moved to the
+            // in-menu "Fork Session" profile picker (#361).
+            isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
+            onHistoryTab: {
+                appState.toggleHistory(worktreeID: worktreeID)
+            },
+            trailing: trailing
+        )
+    }
+
+    /// The active tab on the daemon path, with the surface and checkout it
+    /// draws from.
+    private struct DaemonPathTab {
+        let tab: TBDShared.Tab
+        let surface: WorkspaceTabSurface?
+        let worktree: LocalWorktree
+    }
+
+    /// The active tab as the daemon path draws it, or nil when this worktree
+    /// shows anything else: Session History, no tabs, a tab the last tab sync
+    /// skipped, or a selection with no checkout on this disk. Decided once per
+    /// body, so the tab bar, the size reader and `layoutContent` agree.
+    private func daemonPathTab(worktree: LocalWorktree?) -> DaemonPathTab? {
+        guard !appState.historyActiveWorktrees.contains(worktreeID),
+              let tab = activeTab, let worktree,
+              case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id)
+        else { return nil }
+        return DaemonPathTab(tab: tab, surface: surface, worktree: worktree)
+    }
+
     /// Panes root a terminal's working directory at the checkout, so the split
     /// layout takes the proven-local wrapper. A selection with no directory on
     /// this disk — the optimistic `.creating` placeholder, which writes
     /// `path: ""` — has no tabs either, so it falls through to the same empty
     /// state it always did.
     @ViewBuilder
-    private func layoutContent(worktree: LocalWorktree?) -> some View {
+    private func layoutContent(worktree: LocalWorktree?, daemonTab: DaemonPathTab?) -> some View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
-        } else if let tab = activeTab, let worktree,
-                  case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) {
+        } else if let daemonTab {
             // The daemon-owned surface, nil until the copy holds the tab's:
             // every tab but one the last tab sync skipped, which falls through
-            // to the legacy branch below, unchanged.
-            PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
-                .id(tab.id) // Force new view hierarchy when switching tabs
+            // to the legacy branch below, unchanged. The view draws the tab
+            // bar itself, over the primary's column.
+            PanelSurfaceWorkspaceView(
+                tab: daemonTab.tab,
+                surface: daemonTab.surface,
+                worktree: daemonTab.worktree,
+                makeTabBar: { tabBar($0) }
+            )
+            .id(daemonTab.tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },

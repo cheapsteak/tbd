@@ -77,10 +77,52 @@ private struct TabDropDelegate: DropDelegate {
     }
 }
 
+// MARK: - TabRowMetrics
+
+/// The tab row's dimensions. The workspace tab bar and the side region's strip
+/// share one row across the window, so both take their height from here.
+enum TabRowMetrics {
+    static let height: CGFloat = 30
+}
+
+// MARK: - TabBarTrailingItems
+
+/// What the workspace tab bar draws at its trailing end besides Session
+/// History: the selected tab's own control before it, and the expand button
+/// after it. `PanelSurfaceWorkspaceView` decides both from the tab and its
+/// side region; a bar drawn anywhere else (Session History open, a tab the
+/// tab sync skipped, no tabs) takes `none`.
+struct TabBarTrailingItems {
+    /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
+    /// or nil when its kind has none.
+    var selectedTabControl: PaneChromeControl?
+    var onSelectedTabControl: @MainActor () -> Void
+    /// True while the side region is collapsed and has panels.
+    var showsExpandButton: Bool
+    var onExpand: @MainActor () -> Void
+
+    /// No selected-tab control and no expand button.
+    ///
+    /// Computed rather than stored: Swift 6 accepts a stored static only of a
+    /// `Sendable` type, which a struct of closures is not, and building an
+    /// empty value costs nothing.
+    static var none: TabBarTrailingItems {
+        TabBarTrailingItems(
+            selectedTabControl: nil, onSelectedTabControl: {},
+            showsExpandButton: false, onExpand: {})
+    }
+}
+
 // MARK: - TabBar
 
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
+///
+/// Reads, left to right: the tabs, the + button, then a trailing group of the
+/// selected tab's control, Session History and the expand button, the first
+/// and last only as `trailing` asks. The trailing group keeps its full width
+/// when the tabs overflow a narrow column: the tabs and + button clip at its
+/// edge instead of pushing it out of the row.
 struct TabBar: View {
     let tabs: [TBDShared.Tab]
     let worktreeID: UUID
@@ -98,39 +140,50 @@ struct TabBar: View {
     // the profile-picker "Fork Session" menu (#361). No tab-level closures.
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
+    /// The selected tab's control and the expand button, drawn around Session
+    /// History.
+    var trailing: TabBarTrailingItems = .none
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                TabBarItem(
-                    tab: tab,
-                    index: index,
-                    worktreeID: worktreeID,
-                    isSelected: index == activeTabIndex,
-                    terminal: terminalForTab(tab.id),
-                    onSelect: { activeTabIndex = index },
-                    onClose: { onCloseTab(index) }
+            HStack(spacing: 0) {
+                ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                    TabBarItem(
+                        tab: tab,
+                        index: index,
+                        worktreeID: worktreeID,
+                        isSelected: index == activeTabIndex,
+                        terminal: terminalForTab(tab.id),
+                        onSelect: { activeTabIndex = index },
+                        onClose: { onCloseTab(index) }
+                    )
+                }
+
+                AddTabButton(
+                    profiles: appState.modelProfiles,
+                    onAddShell: onAddShell,
+                    onAddClaude: onAddClaude,
+                    onAddClaudeProfile: onAddClaudeProfile,
+                    onChooseAccount: onChooseAccount,
+                    onAddCodex: onAddCodex,
+                    onAddNote: onAddNote
                 )
+                Spacer()
             }
+            // Exactly the width the trailing group leaves, however wide the
+            // tabs are: `minWidth: 0` stops the frame from reporting an
+            // overflowing child's width, which would push the trailing group
+            // past the row's end. The overflow clips here instead.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
-            AddTabButton(
-                profiles: appState.modelProfiles,
-                onAddShell: onAddShell,
-                onAddClaude: onAddClaude,
-                onAddClaudeProfile: onAddClaudeProfile,
-                onChooseAccount: onChooseAccount,
-                onAddCodex: onAddCodex,
-                onAddNote: onAddNote
-            )
-            Spacer()
-
-            HistoryTabButton(
-                isSelected: isHistorySelected,
-                action: onHistoryTab
-            )
+            trailingGroup
+                // Its full width, at the row's height, sized before the tabs.
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
         }
         .padding(.horizontal, 0)
-        .frame(height: 30)
+        .frame(height: TabRowMetrics.height)
         .background(Color(nsColor: .windowBackgroundColor))
         // Catch-all so dropping a tab on the +/history button or empty
         // strip space still clears `draggingTabID`. Returns false (no
@@ -140,6 +193,44 @@ struct TabBar: View {
             appState.draggingTabID = nil
             return false
         }
+    }
+
+    /// The selected tab's control, Session History, and the expand button.
+    private var trailingGroup: some View {
+        HStack(spacing: 0) {
+            if let control = trailing.selectedTabControl {
+                PaneChromeControlButton(control: control) {
+                    trailing.onSelectedTabControl()
+                }
+            }
+
+            HistoryTabButton(
+                isSelected: isHistorySelected,
+                action: onHistoryTab
+            )
+
+            if trailing.showsExpandButton {
+                expandButton
+            }
+        }
+    }
+
+    /// Brings back the collapsed side region. It shows only while the region
+    /// is collapsed, and the strip's collapse button only while it is
+    /// visible, so `⌘\` is bound on one of the two at a time.
+    private var expandButton: some View {
+        Button {
+            trailing.onExpand()
+        } label: {
+            Image(systemName: "sidebar.right")
+                .font(.system(size: 11))
+                .frame(width: 28)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .keyboardShortcut("\\", modifiers: .command)
+        .help("Show the side panel (⌘\\)")
     }
 }
 
