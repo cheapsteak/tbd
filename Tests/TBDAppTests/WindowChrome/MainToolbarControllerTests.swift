@@ -309,9 +309,12 @@ struct MainToolbarControllerTests {
 
     /// Each leading glyph, as its button carries it, against the size the
     /// same glyph draws at in the reference toolbar: about 16 by 13 pt for
-    /// the sidebar toggle and 6 by 11 pt for each chevron. A glyph outside
-    /// the tolerance records its measured size, so the failure carries the
-    /// real numbers.
+    /// the sidebar toggle and 6 by 11 pt for each chevron. The image's own
+    /// size includes the symbol's padding, so what is compared is its ink:
+    /// the extent of what it draws (`inkSize(of:)`). A glyph outside the
+    /// tolerance records its image and ink sizes, so the failure carries the
+    /// real numbers. The button does not scale its image, so the image must
+    /// also fit the button's width.
     @Test func leadingGlyphsMatchTheReferenceSizes() async throws {
         let fixture = ToolbarFixture(label: "leadingGlyphsMatchTheReferenceSizes")
         defer { fixture.tearDown() }
@@ -324,14 +327,16 @@ struct MainToolbarControllerTests {
         ]
         for (identifier, symbol, reference) in references {
             let button = try #require(fixture.controller.item(identifier)?.view as? NSButton)
+            #expect(button.imageScaling == .scaleNone)
             let glyph = try #require(button.image)
-            let measured = glyph.size
-            let widthOff = abs(measured.width - reference.width) > tolerance
-            let heightOff = abs(measured.height - reference.height) > tolerance
+            let imageSize = glyph.size
+            #expect(imageSize.width <= MainToolbarMetrics.iconButtonWidth)
+            let ink = try #require(Self.inkSize(of: glyph))
+            let widthOff = abs(ink.width - reference.width) > tolerance
+            let heightOff = abs(ink.height - reference.height) > tolerance
             if widthOff || heightOff {
                 Issue.record(GlyphSizeOutsideReference(
-                    symbol: symbol, measured: measured, reference: reference, tolerance: tolerance,
-                    alignment: glyph.alignmentRect))
+                    symbol: symbol, ink: ink, image: imageSize, reference: reference, tolerance: tolerance))
             }
         }
     }
@@ -603,7 +608,9 @@ struct MainToolbarControllerTests {
         let form = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
         let rows = try #require(form.submenu)
         #expect(form.title == "Filter")
-        #expect(form.action == nil)
+        // A row with a submenu only opens it; AppKit gives it
+        // `submenuAction:`, so its rows are what is checked.
+        #expect(form.hasSubmenu)
         #expect(rows.autoenablesItems == false)
         #expect(rows.delegate === controller.filterMenuTracker)
         let titles = Self.describeFilterRows(rows)
@@ -1704,6 +1711,47 @@ struct MainToolbarControllerTests {
         #expect(shownAfterShow)
     }
 
+    // MARK: - Glyph ink
+
+    /// The extent of what `image` draws, in points: the bounding box of the
+    /// pixels whose alpha is above one half, with the image drawn at twice
+    /// its size into a bitmap of its own. Nil when it draws nothing.
+    @MainActor
+    static func inkSize(of image: NSImage) -> NSSize? {
+        let scale: CGFloat = 2
+        let pixelsWide = Int((image.size.width * scale).rounded(.up))
+        let pixelsHigh = Int((image.size.height * scale).rounded(.up))
+        guard pixelsWide > 0, pixelsHigh > 0,
+              let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: pixelsWide, pixelsHigh: pixelsHigh,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        // The context counts in pixels, so the image fills the bitmap at
+        // twice its size.
+        let pixels = NSRect(x: 0, y: 0, width: CGFloat(pixelsWide), height: CGFloat(pixelsHigh))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        image.draw(in: pixels, from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        var minX = pixelsWide
+        var minY = pixelsHigh
+        var maxX = -1
+        var maxY = -1
+        for y in 0..<pixelsHigh {
+            for x in 0..<pixelsWide {
+                guard let pixel = bitmap.colorAt(x: x, y: y), pixel.alphaComponent > 0.5 else { continue }
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return NSSize(width: CGFloat(maxX - minX + 1) / scale, height: CGFloat(maxY - minY + 1) / scale)
+    }
+
     // MARK: - Menu projections
 
     /// The filter rows' titles, "-" for a separator.
@@ -2041,13 +2089,19 @@ private final class ToolbarFixture {
     /// its view's.
     static func overflowRow(of item: NSToolbarItem) -> OverflowRow {
         let form = item.menuFormRepresentation
+        let title = form?.title ?? item.label
+        // A row with a submenu only opens it: AppKit gives it
+        // `submenuAction:`, which is never sent, and it stands in for no
+        // item action. Its submenu's rows are what act.
+        if let submenu = form?.submenu {
+            return OverflowRow(title: title, target: nil, action: nil, subrows: submenu.items)
+        }
         let ownAction = form?.action
-        let subrows = form?.submenu?.items ?? (item as? NSMenuToolbarItem)?.menu.items ?? []
         return OverflowRow(
-            title: form?.title ?? item.label,
+            title: title,
             target: ownAction == nil ? item.target : form?.target,
             action: ownAction ?? item.action,
-            subrows: subrows)
+            subrows: (item as? NSMenuToolbarItem)?.menu.items ?? [])
     }
 
     /// The sender to send `row`'s action from: `row` itself, except for a
@@ -2207,19 +2261,17 @@ private struct TitleWidthConstraints: Equatable {
     }
 }
 
-/// A leading glyph whose size lies outside the reference's tolerance, as the
-/// error its issue records, so the summary carries the measured size.
+/// A leading glyph whose ink lies outside the reference's tolerance, as the
+/// error its issue records, so the summary carries its ink and image sizes.
 private struct GlyphSizeOutsideReference: Error, CustomStringConvertible {
     let symbol: String
-    let measured: NSSize
+    let ink: NSSize
+    let image: NSSize
     let reference: NSSize
     let tolerance: CGFloat
 
-    let alignment: NSRect
-
     var description: String {
-        "\(symbol) measures \(measured.width) × \(measured.height) pt (alignment rect "
-            + "\(alignment.width) × \(alignment.height) pt), outside ±\(tolerance) pt of the "
-            + "reference \(reference.width) × \(reference.height) pt"
+        "\(symbol) draws \(ink.width) × \(ink.height) pt of ink in a \(image.width) × \(image.height) pt "
+            + "image, outside ±\(tolerance) pt of the reference \(reference.width) × \(reference.height) pt"
     }
 }
