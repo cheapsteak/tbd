@@ -35,8 +35,8 @@ struct LegacyTabConverterTests {
         let terminalID = UUID()
         let noteID = UUID()
         let url = try #require(URL(string: "https://example.com/docs"))
-        // Pre-order visits /a, the web page, then (past the primary) the note
-        // and the primary terminal's transcript.
+        // Pre-order visits /a, the web page, then (past the primary) the note,
+        // which is dropped, and the primary terminal's transcript.
         let layout = Fixture.hsplit([
             Fixture.vsplit(
                 [.pane(.codeViewer(id: UUID(), path: "/a")), .pane(.webview(id: UUID(), url: url))],
@@ -53,12 +53,11 @@ struct LegacyTabConverterTests {
 
         let outcome = Fixture.convert(tab, makeID: { ids.next() })
 
-        try #require(ids.minted.count == 4)
+        try #require(ids.minted.count == 3)
         let panels = [
             ViewerPanel(id: ids.minted[0], content: Fixture.file("/a")),
             ViewerPanel(id: ids.minted[1], content: .web(url)),
-            ViewerPanel(id: ids.minted[2], content: .note(noteID: noteID)),
-            ViewerPanel(id: ids.minted[3], content: .transcript(terminalID: terminalID)),
+            ViewerPanel(id: ids.minted[2], content: .transcript(terminalID: terminalID)),
         ]
         let expected = WorkspaceTabSurface(
             id: tab.tabID, worktreeID: Fixture.worktreeID, label: "claude",
@@ -94,19 +93,27 @@ struct LegacyTabConverterTests {
         let panelIDs = surface.side.panels.map(\.id)
         let legacyIDs: Set<UUID> = [tab.tabID, terminalID, noteID, viewerID, webID, transcriptID]
         #expect(panelIDs == ids.minted, "every panel ID comes from makeID")
-        #expect(Set(panelIDs).count == 4)
-        #expect(Set(panelIDs).isDisjoint(with: legacyIDs), "no legacy pane ID is reused, the note's included")
+        #expect(Set(panelIDs).count == 3, "the note pane is dropped")
+        #expect(Set(panelIDs).isDisjoint(with: legacyIDs), "no legacy pane ID is reused")
+    }
 
-        // One note open in two tabs: the second tab's panel gets its own ID.
-        let otherTerminal = UUID()
-        let otherTab = Fixture.tab(
-            .terminal(terminalID: otherTerminal),
-            layout: Fixture.hsplit(
-                [.pane(.terminal(terminalID: otherTerminal)), .pane(.note(noteID: noteID))], [0.5, 0.5]))
-        let otherSurface = try #require(Fixture.surface(Fixture.convert(otherTab)))
-        let otherIDs = Set(otherSurface.side.panels.map(\.id))
-        #expect(otherIDs.count == 1)
-        #expect(otherIDs.isDisjoint(with: Set(panelIDs)))
+    /// A note shows only in its worktree panel, so a tab's note pane becomes
+    /// no panel of the tab's own, and the tab is converted, not skipped.
+    @Test func convertDropsNotePanes() {
+        let terminalID = UUID()
+        let noteID = UUID()
+        let layout = Fixture.hsplit(
+            [.pane(.terminal(terminalID: terminalID)), .pane(.note(noteID: noteID))], [0.6, 0.4])
+        let tab = Fixture.tab(.terminal(terminalID: terminalID), layout: layout, label: "claude")
+
+        let outcome = Fixture.convert(tab)
+
+        let expected = WorkspaceTabSurface(
+            id: tab.tabID, worktreeID: Fixture.worktreeID, label: "claude",
+            primary: .terminal(terminalID: terminalID), side: .empty, revision: 0)
+        #expect(outcome == .converted(expected))
+        #expect(LegacyTabConverter.skipReason(
+            worktreeID: Fixture.worktreeID, tab: tab, paneHistories: [:]) == nil)
     }
 
     @Test func primaryOnlyTabHasEmptyRegion() throws {
@@ -118,12 +125,13 @@ struct LegacyTabConverterTests {
         #expect(Fixture.convert(terminalTab) == .converted(expectedTerminal))
 
         // An explicit single-pane layout reads the same as no layout.
-        let noteID = UUID()
-        let noteTab = Fixture.tab(.note(noteID: noteID), layout: .pane(.note(noteID: noteID)))
-        let expectedNote = WorkspaceTabSurface(
-            id: noteTab.tabID, worktreeID: Fixture.worktreeID, label: nil,
-            primary: .note(noteID: noteID), side: .empty, revision: 0)
-        #expect(Fixture.convert(noteTab) == .converted(expectedNote))
+        let url = try #require(URL(string: "https://example.com"))
+        let webPaneID = UUID()
+        let webTab = Fixture.tab(.webview(id: webPaneID, url: url), layout: .pane(.webview(id: webPaneID, url: url)))
+        let expectedWeb = WorkspaceTabSurface(
+            id: webTab.tabID, worktreeID: Fixture.worktreeID, label: nil,
+            primary: .web(url), side: .empty, revision: 0)
+        #expect(Fixture.convert(webTab) == .converted(expectedWeb))
     }
 
     @Test func skipsTabWithTerminalOutsidePrimary() {
@@ -377,7 +385,6 @@ struct LegacyTabConverterTests {
             cursor: 2)
         let tabs: [LegacyTabPayload] = [
             Fixture.tab(.terminal(terminalID: terminalID)),
-            Fixture.tab(.note(noteID: noteID)),
             Fixture.tab(.webview(id: UUID(), url: url)),
             Fixture.tab(.liveTranscript(id: UUID(), terminalID: terminalID)),
             Fixture.tab(
@@ -415,6 +422,12 @@ struct LegacyTabConverterTests {
                 == .transcript(terminalID: terminalID))
     }
 
+    @Test func skipsATabWhoseContentIsANote() {
+        let noteID = UUID()
+        let tab = Fixture.tab(.note(noteID: noteID))
+        #expect(Fixture.convert(tab) == .skipped("tab \(tab.tabID): its content has no primary form"))
+    }
+
     @Test func primaryContentMapsEveryVariant() throws {
         let url = try #require(URL(string: "https://example.com"))
         let noteID = UUID()
@@ -424,7 +437,7 @@ struct LegacyTabConverterTests {
         #expect(LegacyTabConverter.primaryContent(from: .codeViewer(id: UUID(), path: "/a"))
                 == .file(FileReference(path: "/a")))
         #expect(LegacyTabConverter.primaryContent(from: .webview(id: UUID(), url: url)) == .web(url))
-        #expect(LegacyTabConverter.primaryContent(from: .note(noteID: noteID)) == .note(noteID: noteID))
+        #expect(LegacyTabConverter.primaryContent(from: .note(noteID: noteID)) == nil)
         #expect(LegacyTabConverter.primaryContent(from: .liveTranscript(id: UUID(), terminalID: terminalID))
                 == .transcript(terminalID: terminalID))
     }

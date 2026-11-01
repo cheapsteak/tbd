@@ -7,11 +7,12 @@ import CoreGraphics
 ///
 /// The tab's content becomes the primary. Every other leaf of the tree is a
 /// viewer pane and becomes one `ViewerPanel`, in pre-order, under a freshly
-/// minted ID: a note pane's legacy ID is the note's own ID, so reusing pane
-/// IDs would collide when one note is open in two tabs, and panel IDs are a
-/// table-wide key. A terminal anywhere but the primary has no panel form, and
-/// workspace tabs are app-owned, so it cannot become a tab of its own either:
-/// such a tab is skipped and keeps rendering legacy.
+/// minted ID, since panel IDs are a table-wide key. A note pane is dropped:
+/// a note is shown by its worktree panel, never by a tab's own panel (side
+/// panel notes spec, "The model"), and the converter makes no worktree panel.
+/// A terminal anywhere but the primary has no panel form, and workspace tabs
+/// are app-owned, so it cannot become a tab of its own either: such a tab is
+/// skipped and keeps rendering legacy.
 public enum LegacyTabConverter {
     public enum Outcome: Equatable, Sendable {
         case converted(WorkspaceTabSurface)
@@ -37,6 +38,8 @@ public enum LegacyTabConverter {
 
         var panels: [ViewerPanel] = []
         for pane in viewerPanes {
+            // A note shows only in its worktree panel.
+            if case .note = pane { continue }
             guard let content = panelContent(from: pane) else { continue }
             panels.append(ViewerPanel(
                 id: makeID(), history: history(paneHistories[pane.paneID], current: content)))
@@ -114,9 +117,11 @@ public enum LegacyTabConverter {
         }
     }
 
-    /// Maps a legacy pane to primary content. Every legacy variant has a
-    /// primary form today; the optional leaves room for one without, whose
-    /// tab `convert` skips.
+    /// Maps a legacy pane to primary content. A note has none: it is shown
+    /// by its worktree panel, never as a workspace tab's primary
+    /// (`PrimaryContent.note` stays only so old rows decode). `convert` skips
+    /// a tab whose content has no primary form, and `panel.syncTabs` keeps the
+    /// stored primary for it.
     public static func primaryContent(from legacy: PaneContent) -> PrimaryContent? {
         switch legacy {
         case .terminal(let id):
@@ -125,8 +130,8 @@ public enum LegacyTabConverter {
             return .web(url)
         case .codeViewer(_, let path):
             return .file(FileReference(path: path))
-        case .note(let noteID):
-            return .note(noteID: noteID)
+        case .note:
+            return nil
         case .liveTranscript(_, let terminalID):
             return .transcript(terminalID: terminalID)
         }

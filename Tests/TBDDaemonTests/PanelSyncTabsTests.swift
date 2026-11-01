@@ -162,6 +162,49 @@ struct PanelSyncTabsTests {
         #expect(delta.originOperationID == nil)
     }
 
+    /// A worktree panel opened before the app synced a tab joins the tab
+    /// when the sync imports it: the import, the delta and a later read all
+    /// carry the list, and a tab with no panel of its own shows the first
+    /// worktree panel in front, open, since the worktree's panels follow
+    /// across tabs.
+    @Test("an imported tab joins the worktree's panels, fronting the first")
+    func syncImportJoinsWorktreePanels() async throws {
+        let (router, db, deltas) = try makeRouterAndDB()
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        try await db.openWorktreePanelForTests(worktreeID: wtID, content: .note(noteID: note.id))
+        try await db.openWorktreePanelForTests(worktreeID: wtID, content: .changes)
+        let panels = try await db.panelSurface.worktreePanels(worktreeID: wtID)
+        try #require(panels.count == 2)
+        let tab = terminalTab(label: "A")
+
+        let response = try await sync(router, worktreeID: wtID, [tab])
+
+        #expect(response.success)
+        let result = try response.decodeResult(PanelSyncTabsResult.self)
+        #expect(result.importedTabIDs == [tab.tabID])
+        let delta = try #require(panelSurfaceDeltas(deltas).last)
+        let imported = try #require(delta.tabs.first)
+        #expect(delta.tabs.count == 1)
+        #expect(imported.id == tab.tabID)
+        #expect(imported.worktreePanels == panels)
+        #expect(imported.side.panels.isEmpty)
+        #expect(imported.side.activePanelID == panels[0].id)
+        #expect(imported.side.collapsed == false)
+        #expect(try await db.panelSurface.surface(tabID: tab.tabID) == imported)
+
+        // A relabel updates the row, and the surface it reports still
+        // carries the list.
+        let relabelled = LegacyTabPayload(
+            tabID: tab.tabID, label: "A renamed", content: tab.content, layout: nil)
+        _ = try await sync(router, worktreeID: wtID, [relabelled])
+        let updated = try #require(panelSurfaceDeltas(deltas).last?.tabs.first)
+        #expect(updated.label == "A renamed")
+        #expect(updated.worktreePanels == panels)
+        #expect(updated.side == imported.side)
+        #expect(try await db.panelSurface.surface(tabID: tab.tabID) == updated)
+    }
+
     @Test("a tab with a terminal outside its primary is skipped with a reason and gets no surface")
     func syncSkipsATerminalSplitTab() async throws {
         let (router, db, deltas) = try makeRouterAndDB()

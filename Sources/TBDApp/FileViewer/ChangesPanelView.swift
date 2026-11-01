@@ -141,118 +141,267 @@ private func parseBranchDiff(_ output: String) -> [BranchFileChange] {
     }
 }
 
-// MARK: - FileViewerPanel
+// MARK: - ChangesPanelClick
 
-struct FileViewerPanel: View {
+/// What a click on a file in the Changes list sends (side panel notes and
+/// Changes spec, "Changes"): `open` of the file at its absolute path, which
+/// the daemon's reuse rule places, and with `newPanel` when Shift was held.
+/// Pure, so each click can be asserted without standing up a view; the row
+/// reads the modifier when it is clicked.
+enum ChangesPanelClick {
+    static func operation(worktreePath: String, relativePath: String, shift: Bool) -> PanelOperation {
+        .open(
+            content: .file(FileReference(path: absolutePath(worktreePath: worktreePath, relativePath: relativePath))),
+            newPanel: shift)
+    }
+}
+
+// MARK: - ChangesSnapshot
+
+/// One load of a worktree's Changes list: its staged, changed and untracked
+/// files from `git status`, and the files its branch changed since it left
+/// the default branch.
+struct ChangesSnapshot {
+    var staged: [GitFileStatus]
+    var unstaged: [GitFileStatus]
+    var untracked: [GitFileStatus]
+    var branch: [BranchFileChange]
+
+    /// Sorts `statuses` into the three `git status` lists. A file with both
+    /// staged and unstaged edits is in both of those.
+    init(statuses: [GitFileStatus], branch: [BranchFileChange]) {
+        staged = statuses.filter(\.isStaged)
+        unstaged = statuses.filter(\.isUnstaged)
+        untracked = statuses.filter(\.isUntracked)
+        self.branch = branch
+    }
+
+    /// No file in any list.
+    var isEmpty: Bool {
+        staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && branch.isEmpty
+    }
+
+    /// Runs `git status` and, for any worktree but the main one, the branch
+    /// diff against `origin/<defaultBranch>`, side by side, each on a
+    /// background queue.
+    static func load(worktree: LocalWorktree, defaultBranch: String) async -> ChangesSnapshot {
+        async let statuses = loadGitStatus(at: worktree.path)
+        async let branch = worktree.status == .main
+            ? [BranchFileChange]()
+            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
+        return await ChangesSnapshot(statuses: statuses, branch: branch)
+    }
+}
+
+// MARK: - ChangesSnapshotCache
+
+/// The per-worktree cache of the Changes list: what it holds for a worktree,
+/// and whether a run of the list's load task reads git again or shows what
+/// it holds.
+enum ChangesSnapshotCache {
+    /// How old, in seconds, a worktree's cached list may be and still be
+    /// shown, without a load, by a list that appears.
+    static let maxAge: TimeInterval = 10
+
+    /// A worktree's Changes list as the cache holds it, with when the load
+    /// that read it began and when it finished.
+    struct Entry {
+        let snapshot: ChangesSnapshot
+        let startedAt: Date
+        let loadedAt: Date
+    }
+
+    /// Whether a run of the list's load task reads git. A run the refresh
+    /// control began (`refresh`) always does. The run the list's appearing
+    /// began does when the worktree has no cached list (`loadedAt` nil), when
+    /// the cached one is at least `maxAge` old at `now`, or when it is dated
+    /// after `now`, which only a clock set back produces. Otherwise the list
+    /// shows the cached one as it is.
+    static func needsLoad(refresh: Bool, loadedAt: Date?, now: Date) -> Bool {
+        if refresh { return true }
+        guard let loadedAt else { return true }
+        let age = now.timeIntervalSince(loadedAt)
+        return age < 0 || age >= maxAge
+    }
+}
+
+// MARK: - The Changes cache
+
+extension AppState {
+    /// The worktree's Changes list as its last load left it, or nil before
+    /// any load of it has finished.
+    func changesSnapshot(worktreeID: UUID) -> ChangesSnapshot? {
+        changesSnapshots[worktreeID]?.snapshot
+    }
+
+    /// Whether this run of the worktree's list's load task reads git
+    /// (`ChangesSnapshotCache.needsLoad`): always for a `refresh`, and for
+    /// the run its appearing began only when its cached list is missing or
+    /// at least `ChangesSnapshotCache.maxAge` old at `now()`.
+    func changesSnapshotNeedsLoad(worktreeID: UUID, refresh: Bool) -> Bool {
+        ChangesSnapshotCache.needsLoad(
+            refresh: refresh, loadedAt: changesSnapshots[worktreeID]?.loadedAt, now: now())
+    }
+
+    /// Loads the worktree's Changes list through `changesLoader`, against its
+    /// repo's default branch ("main" when the repo is not known), stores it
+    /// in `changesSnapshots` stamped with `now()` as the load begins and as
+    /// it finishes, and returns it.
+    ///
+    /// When its git reads return, a load stores nothing and returns nil if
+    /// the cache already holds a list from a load that began at or after
+    /// this one began: that newer load won. A list whose load began after
+    /// this one finished does not count, since only a clock set back
+    /// produces one.
+    ///
+    /// Whether the task running the load was cancelled does not matter. The
+    /// list cancels its load when it goes away or a refresh begins a newer
+    /// one, and the git reads run on regardless; a reading no newer load
+    /// replaced is the freshest there is, so it is kept, and the list shows
+    /// it when it comes back instead of running git again.
+    func loadChangesSnapshot(worktree: LocalWorktree) async -> ChangesSnapshot? {
+        let defaultBranch = repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
+        let startedAt = now()
+        let snapshot = await changesLoader(worktree, defaultBranch)
+        let finishedAt = now()
+        if let stored = changesSnapshots[worktree.id],
+           stored.startedAt >= startedAt, stored.startedAt <= finishedAt {
+            return nil
+        }
+        changesSnapshots[worktree.id] = ChangesSnapshotCache.Entry(
+            snapshot: snapshot, startedAt: startedAt, loadedAt: finishedAt)
+        return snapshot
+    }
+
+    /// Drops a worktree's cached Changes list when the worktree leaves app
+    /// state: archived, or removed with its repo.
+    func forgetChangesSnapshot(worktreeID: UUID) {
+        changesSnapshots.removeValue(forKey: worktreeID)
+    }
+}
+
+// MARK: - ChangesPanelView
+
+/// The worktree's Changes list as a side-panel tab: its staged, changed,
+/// untracked and branch files, in sections that fold.
+///
+/// The strip around it names it, closes it and carries its refresh control
+/// (`PaneRefreshControl`), so it draws no header of its own.
+///
+/// It is a worktree panel, but a new view is made whenever it comes to the
+/// front or another workspace tab is selected. So it starts from the
+/// worktree's last loaded list (`AppState.changesSnapshot`), handed in as
+/// `cachedSnapshot`. When it appears it loads again only if that list is
+/// missing or at least `ChangesSnapshotCache.maxAge` old, so switching tabs
+/// back and forth within that window shows the cached list without running
+/// git; it always loads when the refresh control bumps
+/// `chrome.refreshCount`. While a load runs, the strip shows a spinner in
+/// place of the refresh control (`PaneChromeState.isRefreshing`).
+///
+/// A click on a file hands its worktree-relative path to `onOpenFile`, with
+/// whether Shift was held, read as the click lands. A double-click opens the
+/// file in its default app, and a right-click offers Copy Path.
+struct ChangesPanelView: View {
     /// Every read below is of a directory on this disk, so the panel takes the
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
+    /// The panel's control state, whose `refreshCount` the list reloads on
+    /// and whose `isRefreshing` it raises while it loads.
+    let chrome: PaneChromeState
+    let onOpenFile: @MainActor (_ relativePath: String, _ newPanel: Bool) -> Void
     @Environment(AppState.self) var appState
 
-    @State private var staged: [GitFileStatus] = []
-    @State private var unstaged: [GitFileStatus] = []
-    @State private var untracked: [GitFileStatus] = []
-    @State private var branchChanges: [BranchFileChange] = []
-    @State private var isLoading = false
+    /// What the list shows: the snapshot it was made with, then each of its
+    /// own loads'. Nil until one of those exists, when the list is blank
+    /// rather than saying "No changes".
+    @State private var snapshot: ChangesSnapshot?
+    /// Whether the load task has run since the list was made. Its first run
+    /// is the one the list's appearing began; every later run follows the
+    /// refresh control's bump of `chrome.refreshCount`.
+    @State private var loadTaskHasRun = false
 
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            fileList
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .task(id: worktree.id) { await refresh() }
+    init(
+        worktree: LocalWorktree,
+        chrome: PaneChromeState,
+        cachedSnapshot: ChangesSnapshot?,
+        onOpenFile: @escaping @MainActor (_ relativePath: String, _ newPanel: Bool) -> Void
+    ) {
+        self.worktree = worktree
+        self.chrome = chrome
+        self.onOpenFile = onOpenFile
+        _snapshot = State(initialValue: cachedSnapshot)
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
-            Text("Changes")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-            Spacer()
-            if isLoading {
-                ProgressView().controlSize(.small)
-            } else {
-                Button { Task { await refresh() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh")
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+    var body: some View {
+        fileList
+            .background(Color(nsColor: .controlBackgroundColor))
+            .task(id: chrome.refreshCount) { await load() }
     }
 
     private var fileList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && branchChanges.isEmpty && !isLoading {
-                    Text("No changes")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 20)
-                }
-                if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: handleFileClick)
-                }
-                if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
-                }
-                if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
-                }
-                if !branchChanges.isEmpty {
-                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: handleFileClick)
+                if let snapshot {
+                    if snapshot.isEmpty {
+                        Text("No changes")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 20)
+                    }
+                    if !snapshot.staged.isEmpty {
+                        FileStatusSection(title: "Staged", files: snapshot.staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.unstaged.isEmpty {
+                        FileStatusSection(title: "Changes", files: snapshot.unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.untracked.isEmpty {
+                        FileStatusSection(title: "Untracked", files: snapshot.untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.branch.isEmpty {
+                        BranchChangeSection(title: "Branch", files: snapshot.branch, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
                 }
             }
             .padding(.vertical, 4)
         }
     }
 
-    private func handleFileClick(_ relativePath: String, cmdClick: Bool) {
-        let fullPath = URL(fileURLWithPath: worktree.path).appendingPathComponent(relativePath).path
-        var tabs = appState.tabs[worktree.id, default: []]
-        let fileName = URL(fileURLWithPath: relativePath).lastPathComponent
+    /// One run of the load task. The run the list's appearing began keeps
+    /// the cached list it was made with when that is fresh
+    /// (`AppState.changesSnapshotNeedsLoad`); any other run loads the list
+    /// (`AppState.loadChangesSnapshot`) and shows the result, with the
+    /// strip's spinner up meanwhile. A load cancelled before it returns shows
+    /// nothing, though the cache may keep its list. Cancelled or not, it
+    /// lowers the spinner once its git reads return, unless a newer load
+    /// took the spinner over, so a list that went away leaves no spinner
+    /// running.
+    private func load() async {
+        let refresh = loadTaskHasRun
+        loadTaskHasRun = true
+        guard appState.changesSnapshotNeedsLoad(worktreeID: worktree.id, refresh: refresh) else { return }
+        let token = chrome.beginRefresh()
+        defer { chrome.endRefresh(token) }
+        guard let loaded = await appState.loadChangesSnapshot(worktree: worktree),
+              !Task.isCancelled else { return }
+        snapshot = loaded
+    }
+}
 
-        if !cmdClick, let existingIndex = tabs.firstIndex(where: {
-            if case .codeViewer = $0.content { return true }
-            return false
-        }) {
-            // Replace existing code viewer tab content and clear stale layout
-            let newID = UUID()
-            appState.layouts.removeValue(forKey: tabs[existingIndex].id)
-            tabs[existingIndex].content = .codeViewer(id: newID, path: fullPath)
-            tabs[existingIndex].label = fileName
-            appState.tabs[worktree.id] = tabs
-            appState.activeTabIndices[worktree.id] = existingIndex
-        } else {
-            // Create new code viewer tab
-            let newID = UUID()
-            let tab = TBDShared.Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: fileName)
-            appState.tabs[worktree.id, default: []].append(tab)
-            appState.activeTabIndices[worktree.id] = (appState.tabs[worktree.id]?.count ?? 1) - 1
+// MARK: - RetiredFilePanelDefaults
+
+/// Defaults keys nothing reads: whether a Changes column at the window's
+/// right edge showed, and its width. The Changes list is a side-panel tab
+/// (`ChangesPanelView`), and `AppState` removes both keys at launch.
+enum RetiredFilePanelDefaults {
+    static let keys = ["filePanel.isVisible", "filePanel.width"]
+
+    /// Removes each key `defaults` holds, and writes nothing for one it does
+    /// not.
+    static func remove(from defaults: UserDefaults) {
+        for key in keys where defaults.object(forKey: key) != nil {
+            defaults.removeObject(forKey: key)
         }
-    }
-
-    private var defaultBranch: String {
-        appState.repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
-    }
-
-    private func refresh() async {
-        isLoading = true
-        async let statusTask = loadGitStatus(at: worktree.path)
-        async let branchTask = worktree.status == .main
-            ? [BranchFileChange]()
-            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
-        let statuses = await statusTask
-        staged = statuses.filter(\.isStaged)
-        unstaged = statuses.filter(\.isUnstaged)
-        untracked = statuses.filter(\.isUntracked)
-        branchChanges = await branchTask
-        isLoading = false
     }
 }
 
@@ -265,7 +414,7 @@ private struct FileStatusSection: View {
     /// Staged section uses index; Changes/Untracked sections use working tree.
     let useIndexStatus: Bool
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isExpanded = true
 
     var body: some View {
@@ -308,7 +457,7 @@ private struct GitFileRow: View {
     let file: GitFileStatus
     let statusChar: Character
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -334,9 +483,8 @@ private struct GitFileRow: View {
             NSWorkspace.shared.open(url)
         }
         .onTapGesture(count: 1) {
-            // Single-click: open in code viewer pane
-            let cmdClick = NSEvent.modifierFlags.contains(.command)
-            onFileClick(file.path, cmdClick)
+            // Single-click: open in a side panel, a new one with Shift held.
+            onFileClick(file.path, NSEvent.modifierFlags.contains(.shift))
         }
         .onHover { isHovered = $0 }
         .contextMenu {
@@ -353,7 +501,7 @@ private struct BranchChangeSection: View {
     let title: String
     let files: [BranchFileChange]
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isExpanded = true
 
     var body: some View {
@@ -394,7 +542,7 @@ private struct BranchChangeSection: View {
 private struct BranchFileRow: View {
     let file: BranchFileChange
     let worktreePath: String
-    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    let onFileClick: @MainActor (String, Bool) -> Void
     @State private var isHovered = false
 
     var body: some View {
@@ -419,8 +567,8 @@ private struct BranchFileRow: View {
             NSWorkspace.shared.open(url)
         }
         .onTapGesture(count: 1) {
-            let cmdClick = NSEvent.modifierFlags.contains(.command)
-            onFileClick(file.path, cmdClick)
+            // Single-click: open in a side panel, a new one with Shift held.
+            onFileClick(file.path, NSEvent.modifierFlags.contains(.shift))
         }
         .onHover { isHovered = $0 }
         .contextMenu {

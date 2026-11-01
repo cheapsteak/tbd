@@ -88,20 +88,26 @@ enum TabRowMetrics {
 // MARK: - TabBarTrailingItems
 
 /// What the workspace tab bar draws at its trailing end besides Session
-/// History: the selected tab's own control before it, and the expand button
-/// after it. `PanelSurfaceWorkspaceView` decides both from the tab and its
-/// side region; a bar drawn anywhere else (Session History open, a tab whose
-/// layout still splits off a terminal, no tabs) takes `none`.
+/// History: the selected tab's own control and the Notes button before it,
+/// and the expand button after it. `PanelSurfaceWorkspaceView` decides all
+/// three from the tab, its side region and the worktree's notes; a bar drawn
+/// anywhere else (Session History open, a tab whose layout still splits off a
+/// terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
     /// The selected tab's control (`WorkspaceTabBarChrome.trailingControl`),
     /// or nil when its kind has none.
     var selectedTabControl: PaneChromeControl?
     var onSelectedTabControl: @MainActor () -> Void
-    /// True while the side region is collapsed and has panels.
+    /// The Notes button (`PaneChromeControl.notes`), drawn right after the
+    /// selected tab's control, or nil for a bar that has none.
+    var notesControl: PaneChromeControl?
+    var onNotesControl: @MainActor () -> Void = {}
+    /// True while the tab's loaded side region is hidden: collapsed, or
+    /// without a panel (`PanelSurfaceWorkspaceView.showsExpandButton`).
     var showsExpandButton: Bool
     var onExpand: @MainActor () -> Void
 
-    /// No selected-tab control and no expand button.
+    /// No selected-tab control, no Notes button and no expand button.
     ///
     /// Computed rather than stored: Swift 6 accepts a stored static only of a
     /// `Sendable` type, which a struct of closures is not, and building an
@@ -119,8 +125,8 @@ struct TabBarTrailingItems {
 /// Replaces the former TerminalTabBar.
 ///
 /// Reads, left to right: the tabs, the + button, then a trailing group of the
-/// selected tab's control, Session History and the expand button, the first
-/// and last only as `trailing` asks. The trailing group keeps its full width
+/// selected tab's control, the Notes button, Session History and the expand
+/// button, all but Session History only as `trailing` asks. The trailing group keeps its full width
 /// at the row's trailing edge however many tabs there are. While the tabs fit
 /// in the width it leaves, the + button sits right after the last one; once
 /// they overflow — a narrow primary column on the daemon path, beside a wide
@@ -139,15 +145,14 @@ struct TabBar: View {
     var onAddClaudeProfile: (UUID) -> Void = { _ in }
     var onChooseAccount: () -> Void = {}
     var onAddCodex: () -> Void = {}
-    var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     // Park (formerly suspend/resume) is a row-level action now; fork moved to
     // the profile-picker "Fork Session" menu (#361). No tab-level closures.
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
-    /// The selected tab's control and the expand button, drawn around Session
-    /// History.
+    /// The selected tab's control, the Notes button and the expand button,
+    /// drawn around Session History.
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
@@ -207,8 +212,7 @@ struct TabBar: View {
                     onAddClaude: onAddClaude,
                     onAddClaudeProfile: onAddClaudeProfile,
                     onChooseAccount: onChooseAccount,
-                    onAddCodex: onAddCodex,
-                    onAddNote: onAddNote
+                    onAddCodex: onAddCodex
                 )
             }
             // Exactly the width the trailing group leaves, the tabs and the +
@@ -237,7 +241,8 @@ struct TabBar: View {
         }
     }
 
-    /// The selected tab's control, Session History, and the expand button.
+    /// The selected tab's control, the Notes button, Session History, and the
+    /// expand button.
     private var trailingGroup: some View {
         HStack(spacing: 0) {
             if let control = trailing.selectedTabControl {
@@ -246,14 +251,20 @@ struct TabBar: View {
                 }
             }
 
+            if let notesControl = trailing.notesControl {
+                PaneChromeControlButton(control: notesControl) {
+                    trailing.onNotesControl()
+                }
+            }
+
             HistoryTabButton(
                 isSelected: isHistorySelected,
                 action: onHistoryTab
             )
 
-            // Brings back the collapsed side region. It shows only while the
-            // region is collapsed, and the strip's collapse button only while
-            // it is visible, so `⌘\` is bound on one of the two at a time.
+            // Shows the hidden side region. It shows only while the region is
+            // hidden, and the strip's collapse button only while it is
+            // visible, so `⌘\` is bound on at most one of the two at a time.
             if trailing.showsExpandButton {
                 SidePanelToggleButton(collapsed: true) {
                     trailing.onExpand()
@@ -344,7 +355,6 @@ private struct AddTabButton: View {
     let onAddClaudeProfile: (UUID) -> Void
     let onChooseAccount: () -> Void
     let onAddCodex: () -> Void
-    let onAddNote: () -> Void
     @State private var isHovering = false
     /// Optimistic placeholder, deliberately NOT `.detect()`.
     ///
@@ -392,8 +402,7 @@ private struct AddTabButton: View {
             onClaude: onAddClaude,
             onClaudeProfile: onAddClaudeProfile,
             onChooseAccount: onChooseAccount,
-            onCodex: onAddCodex,
-            onNote: onAddNote
+            onCodex: onAddCodex
         )
         let menu = AddTabMenu.build(
             profiles: profiles,
@@ -470,29 +479,25 @@ final class MenuCoordinator: NSObject {
     let onClaudeProfile: (UUID) -> Void
     let onChooseAccount: () -> Void
     let onCodex: () -> Void
-    let onNote: () -> Void
 
     init(
         onShell: @escaping () -> Void,
         onClaude: @escaping () -> Void,
         onClaudeProfile: @escaping (UUID) -> Void,
         onChooseAccount: @escaping () -> Void = {},
-        onCodex: @escaping () -> Void,
-        onNote: @escaping () -> Void
+        onCodex: @escaping () -> Void
     ) {
         self.onShell = onShell
         self.onClaude = onClaude
         self.onClaudeProfile = onClaudeProfile
         self.onChooseAccount = onChooseAccount
         self.onCodex = onCodex
-        self.onNote = onNote
     }
 
     @objc func addShell() { onShell() }
     @objc func addClaude() { onClaude() }
     @objc func chooseAccount() { onChooseAccount() }
     @objc func addCodex() { onCodex() }
-    @objc func addNote() { onNote() }
 
     /// Profile menu items carry their `ModelProfile.id` in `representedObject`.
     /// A nil representedObject (should not happen for profile items) is a no-op.
@@ -586,15 +591,6 @@ enum AddTabMenu {
             codexItem.target = coordinator
             menu.addItem(codexItem)
         }
-
-        menu.addItem(.separator())
-
-        let noteItem = NSMenuItem(
-            title: "Note", action: #selector(MenuCoordinator.addNote), keyEquivalent: ""
-        )
-        noteItem.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
-        noteItem.target = coordinator
-        menu.addItem(noteItem)
 
         return menu
     }
@@ -782,24 +778,11 @@ enum TabPinMenu {
     }
 }
 
-/// What committing a tab's rename field writes (panel tabs spec, "The
-/// renderer"): a note tab's rename is its note's title, and any other tab's
-/// is the tab's label.
-enum TabRename: Equatable {
-    /// Set the tab's label to this text (`AppState.renameTab`, which trims it
-    /// and clears the label for blank text).
-    case label(String)
-    /// Write the note's title — nil leaves the title as it is — and clear the
-    /// tab's label, so the tab shows the title.
-    case note(noteID: UUID, title: String?)
-
-    /// The rename for a tab showing `content`, committed with `text`, while
-    /// its note (for a note tab) is titled `currentNoteTitle`.
-    static func commit(content: PaneContent, text: String, currentNoteTitle: String?) -> TabRename {
-        guard case .note(let noteID) = content else { return .label(text) }
-        return .note(noteID: noteID, title: noteTitle(text: text, currentNoteTitle: currentNoteTitle))
-    }
-
+/// What renaming a note writes (panel tabs spec, "The renderer"): a note's
+/// tab in the side region's strip (`AppState.commitSideNoteRename`) and its
+/// pane's title field rename the note itself. A workspace tab's rename field
+/// sets the tab's label (`AppState.renameTab`).
+enum TabRename {
     /// The title a note's rename writes: the trimmed text, or nil when it is
     /// blank or already the note's title.
     static func noteTitle(text: String, currentNoteTitle: String?) -> String? {
@@ -1016,11 +999,10 @@ private struct TabBarItem: View {
                             text: tabLabel,
                             isEditing: $isEditing,
                             onCommit: { newText in
-                                appState.commitTabRename(
+                                appState.renameTab(
                                     tabID: tab.id,
                                     worktreeID: worktreeID,
-                                    content: tab.content,
-                                    text: newText
+                                    newLabel: newText
                                 )
                             },
                             editorFont: .systemFont(ofSize: 11),

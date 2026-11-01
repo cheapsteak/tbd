@@ -56,6 +56,20 @@ public struct MRUHistory<Element: Codable & Equatable & Sendable>: Codable, Equa
         MRUHistory<T>(entries: entries.map(transform), cursor: cursor)
     }
 
+    /// The same history over transformed entries, or nil when the transform
+    /// has no result for some entry. Order and cursor are kept as `map` keeps
+    /// them, unvalidated.
+    public func compactMap<T: Codable & Equatable & Sendable>(
+        _ transform: (Element) throws -> T?
+    ) rethrows -> MRUHistory<T>? {
+        var mapped: [T] = []
+        for entry in entries {
+            guard let value = try transform(entry) else { return nil }
+            mapped.append(value)
+        }
+        return MRUHistory<T>(entries: mapped, cursor: cursor)
+    }
+
     /// Back moves toward older entries (higher indices).
     public var canGoBack: Bool { !entries.isEmpty && cursor < entries.count - 1 }
     /// Forward moves toward newer entries (lower indices).

@@ -11,8 +11,10 @@ public enum PanelHistoryAction: Codable, Sendable, Equatable {
 public enum PanelOperation: Codable, Sendable, Equatable {
     /// The one entry point for command-clicks, transcript links and
     /// `tbd panel open`: selects a panel already showing `content`, else
-    /// reuses a same-kind panel (file, web, note) unless `newPanel`, else
-    /// adds a panel after the active one.
+    /// reuses a same-kind panel (file, web) unless `newPanel`, else adds a
+    /// panel after the active one. Note and Changes content opens a worktree
+    /// panel instead, the one already showing it or a new one at the end of
+    /// the worktree's list, whatever `newPanel` says.
     case open(content: PanelContent, newPanel: Bool)
     /// Points one panel at new content of its own kind, committing history.
     case navigate(panelID: PanelID, destination: PanelContent)

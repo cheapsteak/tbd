@@ -169,10 +169,11 @@ struct PreSessionHookTests {
         #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(setupBody.contains("export TBD_BRANCH='\(wt.branch)'"))
 
-        // Tab order [claude, setup, initial note], active = claude.
-        let note = try #require(try await db.notes.list(worktreeID: wt.id).first)
-        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id)
-                == [claude.id, setup.id, note.id])
+        // Tab order [claude, setup], active = claude; the initial note stays
+        // out of the tab order and opens no worktree panel.
+        #expect(try await db.notes.list(worktreeID: wt.id).count == 1)
+        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id])
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wt.id).isEmpty)
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
     }
@@ -304,10 +305,12 @@ struct PreSessionHookTests {
                 "a clean hook run must delete its own terminal row")
         let claude = try #require(terminals.first { $0.label == "Claude Code" })
         let setup = try #require(terminals.first { $0.label == "setup" })
-        let note = try #require(try await db.notes.list(worktreeID: pending.id).first)
+        #expect(try await db.notes.list(worktreeID: pending.id).count == 1)
         #expect(try await db.worktrees.getTabOrder(worktreeID: pending.id)
-                == [claude.id, setup.id, note.id],
-                "tab order must be [claude, setup, note] once the pre-session tab is closed")
+                == [claude.id, setup.id],
+                "tab order must be [claude, setup] once the pre-session tab is closed")
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: pending.id).isEmpty,
+                "the initial note stays out of the tab order and opens no worktree panel")
         #expect(try await db.worktrees.getActiveTabID(worktreeID: pending.id) == claude.id)
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
         // Exit 0 → no notification.

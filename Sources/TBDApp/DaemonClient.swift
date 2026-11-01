@@ -1212,7 +1212,7 @@ actor DaemonClient {
         try await callVoidAsync(method: method, params: params)
     }
 
-    /// Set whether ordinary new worktrees start with an empty Notes tab.
+    /// Set whether ordinary new worktrees start with an empty "Notes" note.
     func setAutoCreateNotes(enabled: Bool) async throws {
         try await callVoidAsync(
             method: RPCMethod.configSetAutoCreateNotes,
@@ -2016,11 +2016,12 @@ actor DaemonClient {
 
     // MARK: - Notes
 
-    /// Create a new note in a worktree.
-    func createNote(worktreeID: UUID) async throws -> Note {
+    /// Create a new note in a worktree, titled `title`, or with the daemon's
+    /// default title when it is nil.
+    func createNote(worktreeID: UUID, title: String? = nil) async throws -> Note {
         return try await callAsync(
             method: RPCMethod.noteCreate,
-            params: NoteCreateParams(worktreeID: worktreeID),
+            params: NoteCreateParams(worktreeID: worktreeID, title: title),
             resultType: Note.self
         )
     }

@@ -42,9 +42,11 @@ struct PanelSurfaceContentMappingTests {
         // A note keeps its note ID: the note case carries nothing else.
         #expect(PanelContent.note(noteID: noteID).paneContent(panelID: panelID)
             == .note(noteID: noteID))
+        // The Changes list has no leaf form.
+        #expect(PanelContent.changes.paneContent(panelID: panelID) == nil)
     }
 
-    @Test("every panel content survives the round trip through the leaf content")
+    @Test("every panel content with a leaf form survives the round trip through it")
     func panelContentRoundTrips() {
         let panelID = UUID()
         let cases: [PanelContent] = [
@@ -54,13 +56,31 @@ struct PanelSurfaceContentMappingTests {
             .note(noteID: UUID()),
         ]
         for content in cases {
-            #expect(Self.panelContent(of: content.paneContent(panelID: panelID)) == content,
-                    "lost in the mapping: \(content)")
+            var mappedBack: PanelContent?
+            if let leaf = content.paneContent(panelID: panelID) {
+                mappedBack = Self.panelContent(of: leaf)
+            }
+            #expect(mappedBack == content, "lost in the mapping: \(content)")
         }
     }
 
+    @Test("a history holding content with no leaf form has no leaf history")
+    func paneHistoryIsNilWithChangesContent() {
+        let history = PanelHistory.seeded(with: .changes)
+        #expect(history.paneHistory(panelID: UUID()) == nil)
+    }
+
+    @Test("one entry with no leaf form is enough to leave a history without a leaf history")
+    func paneHistoryIsNilWithAnyChangesEntry() {
+        let file = PanelContent.file(FileReference(path: "/w/a.md"))
+        var history = PanelHistory.seeded(with: file)
+        history.recordReplacement(outgoing: file, incoming: .changes)
+        #expect(history.entries.count == 2, "precondition: a leaf entry beside the Changes one")
+        #expect(history.paneHistory(panelID: UUID()) == nil)
+    }
+
     @Test("a history maps entry by entry, keeping order and cursor")
-    func paneHistoryKeepsOrderAndCursor() {
+    func paneHistoryKeepsOrderAndCursor() throws {
         let panelID = UUID()
         let first = PanelContent.file(FileReference(path: "/w/a.md"))
         let second = PanelContent.file(FileReference(path: "/w/b.md"))
@@ -73,9 +93,10 @@ struct PanelSurfaceContentMappingTests {
             return built
         }()
 
-        let mapped = history.paneHistory(panelID: panelID)
+        let mapped = try #require(history.paneHistory(panelID: panelID))
 
-        let expectedEntries = history.entries.map { $0.paneContent(panelID: panelID) }
+        let expectedEntries: [PaneContent] = history.entries.compactMap { $0.paneContent(panelID: panelID) }
+        #expect(expectedEntries.count == history.entries.count, "precondition: every entry has a leaf form")
         #expect(mapped.entries == expectedEntries)
         #expect(mapped.cursor == history.cursor)
         #expect(mapped.cursor == 1, "precondition: the cursor is off the front")
@@ -95,11 +116,13 @@ struct PanelSurfaceContentMappingTests {
         let web = PanelContent.web(Self.pageURL)
         let note = PanelContent.note(noteID: noteID)
         let transcript = PanelContent.transcript(terminalID: UUID())
+        let changes = PanelContent.changes
 
         #expect(file.kind.tabSystemImage == "doc.text")
         #expect(web.kind.tabSystemImage == "globe")
         #expect(note.kind.tabSystemImage == "note.text")
         #expect(transcript.kind.tabSystemImage == "text.bubble")
+        #expect(changes.kind.tabSystemImage == "plus.forwardslash.minus")
 
         #expect(file.tabTitle(noteTitle: titled, untitledNote: "Note") == "a.swift")
         #expect(web.tabTitle(noteTitle: titled, untitledNote: "Note") == "example.com")
@@ -107,6 +130,7 @@ struct PanelSurfaceContentMappingTests {
             .tabTitle(noteTitle: titled, untitledNote: "Note") == "Web")
         #expect(note.tabTitle(noteTitle: titled, untitledNote: "Note") == "Plan")
         #expect(transcript.tabTitle(noteTitle: titled, untitledNote: "Note") == "Transcript")
+        #expect(changes.tabTitle(noteTitle: titled, untitledNote: "Note") == "Changes")
 
         // The one deliberate difference: an untitled note is numbered in the
         // tab bar and plain in the strip.

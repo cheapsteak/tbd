@@ -252,7 +252,8 @@ final class AppState {
     @ObservationIgnored var terminalReplacementObservedGeneration: [UUID: UInt64] = [:]
     /// Polled note METADATA — never content. `note.list` touches no file (see
     /// `NoteStore`); a pane that needs content reads it off disk with
-    /// `noteContent(noteID:worktreeID:)`.
+    /// `noteContent(noteID:worktreeID:)`. A worktree's entry is nil until a
+    /// notes poll covers it, then its notes, empty included (`adoptNotes`).
     var notes: [UUID: [NoteSummary]] = [:]
     /// Each note's latest rename still persisting (`renameNote`), which the
     /// next rename of that note waits for, so the daemon commits a note's
@@ -265,6 +266,10 @@ final class AppState {
     /// the note it loads, holding the model weakly, so the registry never
     /// keeps a model alive. Several editors of one note have one entry each.
     @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
+    /// Worktrees whose Notes button is creating their first note
+    /// (`toggleNotesPanel`). A press while that create is in flight sends
+    /// nothing, so a double click makes one note, not two.
+    @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
@@ -755,6 +760,11 @@ final class AppState {
     /// once something has touched `NSApplication.shared`, never active).
     @ObservationIgnored var isAppActive: @MainActor () -> Bool = { NSApp?.isActive ?? false }
 
+    /// The system alert sound a refused command plays, such as ⌘⇧E on a tab
+    /// that renders legacy (`toggleChangesPanel`). Injectable so a test can
+    /// count beeps without playing any.
+    @ObservationIgnored var refusalBeep: @MainActor () -> Void = { NSSound.beep() }
+
     /// Worktree IDs the user is actually looking at: `visibleWorktreeIDs`
     /// while TBD is active, and none while it is in the background. A selected
     /// or pinned worktree is not being watched while the user is in another
@@ -867,7 +877,7 @@ final class AppState {
     /// changes.
     var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
-    /// inside DockSplitView, excluding the pinned dock and file panel).
+    /// inside DockSplitView, excluding the pinned dock).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
     /// 800 tall window − toolbar (~24) ≈ 776. Conservative fallback for the
     /// first RPC before the GeometryReader publishes a real value.
@@ -946,11 +956,11 @@ final class AppState {
     /// (`retryPendingPanelTabSyncs`) log the rest at `.debug`. A success
     /// removes the entry, and so does archiving the worktree.
     @ObservationIgnored var panelSyncConsecutiveFailures: [UUID: Int] = [:]
-    /// Worktrees whose tab list is complete enough to sync: both the
-    /// terminal-backed and the note-backed tabs have been reconciled against a
-    /// fetch since the current subscription. A sync deletes the surface of
-    /// every tab it does not list, so a list holding only one of the two
-    /// would delete the other's panels. Cleared on resubscribe.
+    /// Worktrees whose tab list is complete enough to sync: their tabs have
+    /// been reconciled against a fetch since the current subscription. A sync
+    /// deletes the surface of every tab it does not list, so a list sent
+    /// before then would delete the panels of the tabs it lacks. Cleared on
+    /// resubscribe.
     @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
     /// Workspace tabs the last `panel.syncTabs` of their worktree left without
     /// a surface (`PanelSyncTabsResult.skippedTabIDs`): the daemon could not
@@ -972,6 +982,29 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
+    /// Worktree → its Changes list as the last load left it, with when that
+    /// load began and finished (`loadChangesSnapshot`). The list is made
+    /// anew whenever it comes to the front or another workspace tab is
+    /// selected, so it shows this at once, and loads again on appearing only
+    /// when this is missing or old (`ChangesSnapshotCache.needsLoad`). In
+    /// memory only.
+    /// Dropped when the worktree is archived or removed with its repo
+    /// (`forgetChangesSnapshot`). A cache no view observes: the list reads it
+    /// when it is made and when it appears.
+    @ObservationIgnored var changesSnapshots: [UUID: ChangesSnapshotCache.Entry] = [:]
+    /// The current time, as `loadChangesSnapshot` stamps a load as it begins
+    /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
+    /// Injectable so a test can set how old a cached list is and the order
+    /// loads began in.
+    @ObservationIgnored var now: @Sendable () -> Date = { Date() }
+    /// How `loadChangesSnapshot` reads a worktree's Changes list, given the
+    /// checkout and the default branch its branch diff compares against: git
+    /// on background queues (`ChangesSnapshot.load`). Injectable so a test
+    /// can hold a load in flight without a checkout.
+    @ObservationIgnored var changesLoader: @MainActor (LocalWorktree, String) async -> ChangesSnapshot =
+        { worktree, defaultBranch in
+            await ChangesSnapshot.load(worktree: worktree, defaultBranch: defaultBranch)
+        }
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -1260,7 +1293,7 @@ final class AppState {
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     var gcEnabled: Bool = true
-    /// Whether ordinary new worktrees start with an empty Notes tab. Loaded
+    /// Whether ordinary new worktrees start with an empty "Notes" note. Loaded
     /// from the daemon alongside the other config-backed worktree defaults.
     var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
@@ -2485,10 +2518,17 @@ final class AppState {
     /// it.
     @ObservationIgnored lazy var noteDeleter: @MainActor (UUID) async throws -> Void =
         { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
-    /// Asks the user to confirm closing a note tab whose note has content —
-    /// closing a note's workspace tab or side-region tab hard-deletes the note
-    /// row (`closeTab` and `closeSidePanel` → `deleteNote`). Injectable so
-    /// tests can exercise both branches without a real modal NSAlert.
+    /// How a note is created in a worktree on the daemon (`createNote`),
+    /// given the worktree and the title to create it with, or nil for the
+    /// daemon's default. Injectable so a test can drive the side strip's New
+    /// Note and the Notes button without a daemon.
+    @ObservationIgnored lazy var noteCreator: @MainActor (UUID, String?) async throws -> Note =
+        { [daemonClient] worktreeID, title in
+            try await daemonClient.createNote(worktreeID: worktreeID, title: title) }
+    /// Asks the user to confirm closing a note's side-panel tab whose note has
+    /// content — that close hard-deletes the note row (`closeSidePanel` →
+    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// a real modal NSAlert.
     ///
     /// Takes the content-file path rather than deriving one: the alert
     /// advertises where the text is kept, and `noteContentPathResolver` is the
@@ -2780,6 +2820,7 @@ final class AppState {
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
+        RetiredFilePanelDefaults.remove(from: userDefaults)
         restoreLayouts()
         restorePaneHistories()
         restoreNavigationHistory()
@@ -4532,15 +4573,7 @@ final class AppState {
             let allNotes = try await daemonClient.listNotes(
                 worktreeIDs: Array(visibleWorktreeIDs)
             )
-            let notesByWorktree = Dictionary(grouping: allNotes, by: { $0.worktreeID })
-            for wtID in visibleWorktreeIDs {
-                let fetched = notesByWorktree[wtID] ?? []
-                let existing = notes[wtID] ?? []
-                if fetched != existing {
-                    notes[wtID] = fetched
-                    reconcileNoteTabs(worktreeID: wtID, notes: fetched)
-                }
-            }
+            adoptNotes(allNotes, worktreeIDs: visibleWorktreeIDs)
 
             // Prune slot histories only after every visible worktree's tabs
             // have been reconciled this cycle. Doing it inside the per-worktree
@@ -4550,14 +4583,12 @@ final class AppState {
             // history was lost on every restart because of that.
             prunePaneHistories()
 
-            // Both of each visible worktree's tab sources have now been
-            // reconciled against a fetch: terminal-backed tabs through
-            // `adoptTerminalSnapshot` -> `reconcileTabs`, note-backed tabs
-            // through `reconcileNoteTabs`. Each reconcile runs only when its
-            // list changed, so readiness is marked here, where the fetch was
-            // adopted, rather than inside the reconcilers: a worktree with no
-            // notes, or one whose lists were already current after a
-            // resubscribe, would otherwise never become ready.
+            // Each visible worktree's tabs have now been reconciled against a
+            // fetch, through `adoptTerminalSnapshot` -> `reconcileTabs`. That
+            // reconcile runs only when the terminal list changed, so readiness
+            // is marked here, where the fetch was adopted, rather than inside
+            // the reconciler: a worktree whose list was already current after
+            // a resubscribe would otherwise never become ready.
             markPanelSyncReady(worktreeIDs: visibleWorktreeIDs)
         } catch {
             logger.error("Failed to list worktrees: \(error)")
@@ -4583,24 +4614,31 @@ final class AppState {
     /// Reconcile tabs with the current terminal list for a worktree.
     /// Removes tabs whose root terminal no longer exists. Adds tabs for
     /// terminals that aren't already represented (either as a tab root or
-    /// embedded in another tab's split layout).
+    /// embedded in another tab's split layout). Drops any note tab, with its
+    /// layout: a note shows in the side panel as a worktree panel, never as a
+    /// workspace tab, so one held in memory from an older build never shows.
     func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
         // Capture the active tab's IDENTITY before touching the array: every
         // mutation below shifts indices, so a stored index re-binds to whatever
         // slid into its slot. The auto-close of the `setup` tab makes that a
-        // routine event, not an edge case, and the note tab is always last.
+        // routine event, not an edge case.
         let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
 
-        // 1. Remove tabs whose root terminal no longer exists,
-        //    and clean up their persisted layouts.
+        // 1. Remove tabs whose root terminal no longer exists, and note
+        //    tabs, and clean up their persisted layouts.
         currentTabs.removeAll { tab in
-            if case .terminal(let id) = tab.content, !terminalIDs.contains(id) {
-                layouts.removeValue(forKey: tab.id)
-                return true
+            let drops: Bool
+            switch tab.content {
+            case .terminal(let id): drops = !terminalIDs.contains(id)
+            case .note: drops = true
+            case .webview, .codeViewer, .liveTranscript: drops = false
             }
-            return false
+            if drops {
+                layouts.removeValue(forKey: tab.id)
+            }
+            return drops
         }
 
         // 2. Now collect terminal IDs from surviving tabs' layouts.
@@ -4651,36 +4689,6 @@ final class AppState {
         // and no hydrated selection. The scheduler owns the dedup and the
         // attempt cap that keep this from becoming a poll loop.
         scheduleTabStateHydration(worktreeID: worktreeID)
-    }
-
-    /// Reconcile note tabs — remove tabs whose note no longer exists,
-    /// add tabs for notes not already represented.
-    func reconcileNoteTabs(worktreeID: UUID, notes: [NoteSummary]) {
-        // Same identity capture as reconcileTabs — see the comment there.
-        let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
-        var currentTabs = tabs[worktreeID] ?? []
-        let noteIDs = Set(notes.map(\.id))
-
-        // Collect note IDs already in tabs
-        var noteIDsInTabs = Set<UUID>()
-        currentTabs.removeAll { tab in
-            if case .note(let id) = tab.content {
-                if !noteIDs.contains(id) {
-                    layouts.removeValue(forKey: tab.id)
-                    return true
-                }
-                noteIDsInTabs.insert(id)
-            }
-            return false
-        }
-
-        // Add tabs for notes not already represented
-        for note in notes where !noteIDsInTabs.contains(note.id) {
-            currentTabs.append(TBDShared.Tab(id: note.id, content: .note(noteID: note.id), label: nil))
-        }
-
-        tabs[worktreeID] = currentTabs
-        applyStoredOrder(worktreeID: worktreeID, anchor: .pinned(previousActiveTabID))
     }
 
     /// Poll all cached PR statuses from the daemon (background, every ~30s).

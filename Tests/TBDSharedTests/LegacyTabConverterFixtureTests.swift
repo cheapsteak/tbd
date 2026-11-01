@@ -132,36 +132,29 @@ struct LegacyTabConverterFixtureTests {
         #expect(outcome == .skipped("tab \(tab.tabID): terminal \(firstExtra) outside the primary"))
     }
 
-    // MARK: - Notes, as primary and as panel
+    // MARK: - Notes as panes
 
-    @Test func notePrimaryIsNeverAPanel() throws {
-        let noteID = UUID()
-        let layout = Fixture.hsplit(
-            [.pane(.note(noteID: noteID)), .pane(.codeViewer(id: UUID(), path: "/y"))], [0.5, 0.5])
-        let tab = Fixture.tab(.note(noteID: noteID), layout: layout)
-
-        let surface = try #require(Fixture.surface(Fixture.convert(tab)))
-
-        let expectedContents: [PanelContent?] = [Fixture.file("/y")]
-        #expect(surface.primary == .note(noteID: noteID))
-        #expect(surface.side.panels.map(\.content) == expectedContents)
-        #expect(!surface.side.panels.map(\.id).contains(noteID))
-    }
-
-    @Test func notePaneBesideAViewerPrimaryBecomesANotePanel() throws {
+    @Test func notePaneBesideAViewerPrimaryIsDropped() throws {
         let noteID = UUID()
         let primary = PaneContent.codeViewer(id: UUID(), path: "/x")
-        let layout = Fixture.vsplit([.pane(primary), .pane(.note(noteID: noteID))], [0.5, 0.5])
+        let webID = UUID()
+        let url = try #require(URL(string: "https://example.com/docs"))
+        let layout = Fixture.vsplit(
+            [.pane(primary), .pane(.note(noteID: noteID)), .pane(.webview(id: webID, url: url))],
+            [0.4, 0.3, 0.3])
         let tab = Fixture.tab(primary, layout: layout)
         let ids = IDMinter()
 
         let surface = try #require(Fixture.surface(Fixture.convert(tab, makeID: { ids.next() })))
 
+        // Only the web pane becomes a panel: a note shows in its worktree
+        // panel, never in a tab's own.
         let panelID = try #require(ids.minted.first)
-        let expectedPanels = [ViewerPanel(id: panelID, content: .note(noteID: noteID))]
+        let expectedPanels = [ViewerPanel(id: panelID, content: .web(url))]
+        #expect(ids.minted.count == 1)
         #expect(surface.primary == .file(FileReference(path: "/x")))
         #expect(surface.side.panels == expectedPanels)
-        #expect(panelID != noteID, "a note pane's ID is the note's, never the panel's")
+        #expect(surface.worktreePanels.isEmpty, "the converter makes no worktree panel")
         #expect(surface.side.width == SideRegion.defaultWidth, "a vertical root sets no width")
     }
 

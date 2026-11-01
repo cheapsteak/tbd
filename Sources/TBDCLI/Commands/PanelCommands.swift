@@ -43,7 +43,7 @@ struct PanelList: AsyncParsableCommand {
 
     mutating func run() async throws {
         let client = SocketClient()
-        let worktreeID = try resolveWorktreeArg(worktree, client: client)
+        let worktreeID = try resolveWorktreeNameOrID(worktree, client: client)
         let tabID = try tab.map { try parseUUID($0, label: "tab ID") }
 
         // `list` reads through `panel.get`. Scoped to `--tab` when given;
@@ -89,12 +89,14 @@ struct PanelOpen: AsyncParsableCommand {
         commandName: "open",
         abstract: "Show content in the side panel",
         discussion: """
-            Selects a panel already showing this content. Otherwise a file, web page \
-            or note goes into the active panel when it is the same kind, else into the \
-            most recently used panel of that kind, and the old content stays in that \
-            panel's history. A transcript, --new-panel, or content with no panel of \
-            its kind gets a new panel after the active one. Opening also expands a \
-            collapsed side panel.
+            Selects a panel already showing this content. A note or the Changes list \
+            (--changes) is worktree-wide: every tab of the worktree shows it, it has no \
+            history, and it is selected if already open, else added to the worktree's \
+            panels. A file or web page goes into the active panel when it is the same \
+            kind, else into the most recently used panel of that kind, and the old \
+            content stays in that panel's history. A transcript, --new-panel on a file \
+            or web page, or content with no panel of its kind gets a new panel after \
+            the active one. Opening also expands a collapsed side panel.
             """
     )
 
@@ -106,7 +108,7 @@ struct PanelOpen: AsyncParsableCommand {
 
     @OptionGroup var content: ContentOptions
 
-    @Flag(name: .long, help: "Always open a new panel instead of reusing one of the same kind")
+    @Flag(name: .long, help: "Open a file or web page in a new panel instead of reusing one of the same kind (no effect on a note or Changes)")
     var newPanel = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -144,7 +146,7 @@ struct PanelNavigate: AsyncParsableCommand {
     func operation() throws -> PanelOperation {
         .navigate(
             panelID: try parseUUID(panel, label: "panel ID"),
-            destination: try resolvePanelContent(content))
+            destination: try resolveNavigateDestination(content))
     }
 
     mutating func run() async throws {
@@ -155,7 +157,7 @@ struct PanelNavigate: AsyncParsableCommand {
 struct PanelClose: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "close",
-        abstract: "Close a panel and its history"
+        abstract: "Close a panel and its history (a note or Changes panel closes in every tab; the note is kept)"
     )
 
     @Argument(help: "Worktree name or ID")
@@ -372,9 +374,20 @@ struct PanelResize: AsyncParsableCommand {
     }
 }
 
+/// `navigate` points a panel at new content of its own kind; a note or the
+/// Changes list is worktree-wide and has no history, so it is refused.
+func resolveNavigateDestination(_ opts: ContentOptions) throws -> PanelContent {
+    if opts.note != nil || opts.changes {
+        throw CLIError.invalidArgument(
+            "navigate does not apply to a note or the Changes list: it has no history. "
+                + "Use `tbd panel open` with --note or --changes instead")
+    }
+    return try resolvePanelContent(opts)
+}
+
 // MARK: - Content flags (used by open and navigate)
 
-/// The four `PanelContent` sources as CLI flags. Exactly one must be given.
+/// The five `PanelContent` sources as CLI flags. Exactly one must be given.
 struct ContentOptions: ParsableArguments {
     @Option(name: .long, help: "Open/navigate to a file")
     var file: String?
@@ -394,11 +407,14 @@ struct ContentOptions: ParsableArguments {
     @Option(name: .long, help: "Open/navigate to a note (note ID)")
     var note: String?
 
+    @Flag(name: .long, help: "Open the worktree's Changes list")
+    var changes = false
+
     init() {}
 }
 
 /// Resolve `ContentOptions` into a `PanelContent`. Exactly one of
-/// --file/--web/--transcript/--note must be given.
+/// --file/--web/--transcript/--note/--changes must be given.
 func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
     var resolved: [PanelContent] = []
 
@@ -422,11 +438,15 @@ func resolvePanelContent(_ opts: ContentOptions) throws -> PanelContent {
         resolved.append(.note(noteID: try parseUUID(note, label: "note ID")))
     }
 
+    if opts.changes {
+        resolved.append(.changes)
+    }
+
     guard resolved.count == 1 else {
         throw CLIError.invalidArgument(
             resolved.isEmpty
-                ? "Specify one of --file, --web, --transcript, --note"
-                : "Specify only one of --file, --web, --transcript, --note")
+                ? "Specify one of --file, --web, --transcript, --note, --changes"
+                : "Specify only one of --file, --web, --transcript, --note, --changes")
     }
     let content = resolved[0]
     if opts.render || opts.source {
@@ -449,6 +469,8 @@ func describe(_ content: PanelContent) -> String {
         return "transcript \(terminalID)"
     case .note(let noteID):
         return "note \(noteID)"
+    case .changes:
+        return "changes"
     }
 }
 
@@ -467,21 +489,28 @@ func describe(_ content: PrimaryContent) -> String {
     }
 }
 
-/// The side region, one line per panel in tab-strip order. Each panel line
+/// The side region, one line per panel in tab-strip order: the worktree's
+/// panels first, each marked `(worktree-wide)`, then the tab's own. Each panel line
 /// carries the panel ID — the handle `--panel` takes — and its content, which
 /// `describe` leads with the panel's kind; the active panel is marked
 /// `[ACTIVE]`. The header gives the width and notes a collapsed region.
 func renderSideRegion(_ surface: WorkspaceTabSurface) -> [String] {
     let side = surface.side
-    guard !side.panels.isEmpty else { return ["side region: no panels"] }
+    let total = surface.worktreePanels.count + side.panels.count
+    guard total > 0 else { return ["side region: no panels"] }
 
-    let count = side.panels.count == 1 ? "1 panel" : "\(side.panels.count) panels"
+    let count = total == 1 ? "1 panel" : "\(total) panels"
     var header = "side region: \(count), width \(String(format: "%.2f", side.width))"
     if side.collapsed {
         header += ", collapsed (hidden, panels kept; `tbd panel expand` shows it)"
     }
 
     var lines = [header]
+    for panel in surface.worktreePanels {
+        let marker = panel.id == side.activePanelID ? " [ACTIVE]" : ""
+        lines.append(
+            "  panel \(panel.id) (worktree-wide)\(marker): \(describe(panel.content.panelContent))")
+    }
     for panel in side.panels {
         let marker = panel.id == side.activePanelID ? " [ACTIVE]" : ""
         let shown = panel.content.map { describe($0) } ?? "(no content)"
@@ -560,7 +589,7 @@ private func runPanelOperation(
     worktree: String, tab: String?, json: Bool, operation: PanelOperation
 ) throws {
     let client = SocketClient()
-    let worktreeID = try resolveWorktreeArg(worktree, client: client)
+    let worktreeID = try resolveWorktreeNameOrID(worktree, client: client)
     let target = try resolvePanelTarget(tab: tab) { scopedTabID in
         try client.call(
             method: RPCMethod.panelGet,
@@ -592,28 +621,4 @@ func panelEnvelope(
         operationID: operationID, worktreeID: worktreeID, tabID: tabID,
         baseRevision: current.tabs.first(where: { $0.id == tabID })?.revision,
         origin: .agentCLI, operation: operation)
-}
-
-/// Resolve a worktree argument that could be a UUID or a name. Duplicated
-/// from `TerminalCommands.swift` (that copy is `private` there) rather than
-/// promoted to a shared internal helper — see PR brief.
-private func resolveWorktreeArg(_ nameOrID: String, client: SocketClient) throws -> UUID {
-    if let id = UUID(uuidString: nameOrID) {
-        return id
-    }
-
-    let worktrees: [Worktree] = try client.call(
-        method: RPCMethod.worktreeList,
-        params: WorktreeListParams(),
-        resultType: [Worktree].self
-    )
-
-    let matches = worktrees.filter { $0.name == nameOrID || $0.displayName == nameOrID }
-    guard let match = matches.first else {
-        throw CLIError.invalidArgument("No worktree found with name or ID: \(nameOrID)")
-    }
-    if matches.count > 1 {
-        throw CLIError.invalidArgument("Multiple worktrees match '\(nameOrID)'. Use the full ID instead.")
-    }
-    return match.id
 }

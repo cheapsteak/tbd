@@ -6,7 +6,8 @@ import TBDShared
 private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 private let panelSyncLogger = Logger(subsystem: "com.tbd.daemon", category: "panel.sync")
 
-private func encodeJSONString<T: Encodable>(_ value: T) throws -> String {
+/// `value` as a JSON string, for a panel table's text column.
+func encodeJSONString<T: Encodable>(_ value: T) throws -> String {
     let data = try JSONEncoder().encode(value)
     guard let string = String(bytes: data, encoding: .utf8) else {
         throw DecodingError.dataCorrupted(
@@ -15,7 +16,9 @@ private func encodeJSONString<T: Encodable>(_ value: T) throws -> String {
     return string
 }
 
-private func decodeJSON<T: Decodable>(_ type: T.Type, from string: String) -> T? {
+/// A panel table's JSON text column decoded as `type`, or nil when it does
+/// not decode.
+func decodeJSON<T: Decodable>(_ type: T.Type, from string: String) -> T? {
     guard let data = string.data(using: .utf8) else { return nil }
     return try? JSONDecoder().decode(T.self, from: data)
 }
@@ -23,7 +26,8 @@ private func decodeJSON<T: Decodable>(_ type: T.Type, from string: String) -> T?
 /// The `layout` column's JSON: a workspace tab's side region without its
 /// panels' histories, which live one row per panel in `panel_history` and are
 /// joined back on read. A row in any other shape — spec C's layout tree among
-/// them — does not decode and reads as no surface.
+/// them — does not decode and reads as no surface. `activePanelID` may name
+/// one of the worktree's panels, which live in `worktree_panel`.
 private struct StoredSideRegion: Codable {
     var panelIDs: [PanelID]
     var activePanelID: PanelID?
@@ -76,8 +80,13 @@ struct WorkspaceTabSurfaceRecord: Codable, FetchableRecord, PersistableRecord, S
     /// Failable decode: returns nil after a logged warning, never traps, when
     /// a field fails to parse, a panel in the layout has no entry in
     /// `histories`, or the assembled surface fails `PanelSurfaceValidator`.
-    /// `histories` must hold this tab's rows only.
-    func toModel(histories: [PanelID: PanelHistory]) -> WorkspaceTabSurface? {
+    /// `histories` must hold this tab's rows only. The surface takes
+    /// `worktreePanels`, its worktree's stored list, through
+    /// `PanelSurfaceReducer.adopting` before it is validated, so a front
+    /// naming a panel the list no longer holds reads as repaired.
+    func toModel(
+        histories: [PanelID: PanelHistory], worktreePanels: [WorktreePanel]
+    ) -> WorkspaceTabSurface? {
         guard let uuid = UUID(uuidString: id) else {
             decodeLogger.warning("Skipping workspace_tab_surface row \(id, privacy: .public): malformed id")
             return nil
@@ -110,9 +119,9 @@ struct WorkspaceTabSurfaceRecord: Codable, FetchableRecord, PersistableRecord, S
         let side = SideRegion(
             panels: panels, activePanelID: stored.activePanelID, recency: stored.recency,
             collapsed: stored.collapsed, width: stored.width)
-        let surface = WorkspaceTabSurface(
+        let surface = PanelSurfaceReducer.adopting(worktreePanels, into: WorkspaceTabSurface(
             id: uuid, worktreeID: wtID, label: label,
-            primary: primary, side: side, revision: UInt64(revision))
+            primary: primary, side: side, revision: UInt64(revision)))
         let violations = PanelSurfaceValidator.violations(in: surface)
         guard violations.isEmpty else {
             let reason = violations.map { "\($0)" }.joined(separator: ", ")
@@ -190,6 +199,13 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
     /// the legacy converter for an imported one — so this should never fire;
     /// it turns a silent data-loss path into a loud failure.
     case panelHistoryOwnedByOtherTab(panelID: PanelID, existingTabID: WorkspaceTabID, incomingTabID: WorkspaceTabID)
+    /// A write tried to store a worktree panel whose `worktree_panel` row
+    /// already belongs to another worktree. The row's `id` is a table-wide
+    /// key, so a blind upsert would move the panel out of the other
+    /// worktree's list; the write is refused instead. Only a scratch promote
+    /// moves worktree panels between worktrees, and it re-points them
+    /// explicitly.
+    case worktreePanelOwnedByOtherWorktree(panelID: PanelID, existingWorktreeID: UUID, incomingWorktreeID: UUID)
     /// A write tried to store a surface that fails `PanelSurfaceValidator`.
     /// Such a row would read back as no surface, and a tab sync never
     /// replaces a row it cannot read, so the tab would be stranded; the write
@@ -199,17 +215,30 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
     /// is gone, so no write can take a revision; the write is refused rather
     /// than given one that could fall below a stored revision.
     case revisionCounterMissing
+    /// An operation added a worktree panel showing a note that has no `note`
+    /// row in the operation's worktree, because the note was deleted, or
+    /// never existed, or belongs to another worktree. Checked inside the
+    /// operation's transaction, so a `note.delete` that commits between a
+    /// caller's own check and the operation cannot leave every tab of the
+    /// worktree showing a panel for a missing note; nothing is written.
+    case noteNotInWorktree(noteID: UUID, worktreeID: UUID)
 
     public var errorDescription: String? {
         switch self {
         case .panelHistoryOwnedByOtherTab(let panelID, let existingTabID, let incomingTabID):
             return "panel history for panel \(panelID.uuidString) already belongs to tab "
                 + "\(existingTabID.uuidString); refusing a write from tab \(incomingTabID.uuidString)"
+        case .worktreePanelOwnedByOtherWorktree(let panelID, let existingWorktreeID, let incomingWorktreeID):
+            return "worktree panel \(panelID.uuidString) already belongs to worktree "
+                + "\(existingWorktreeID.uuidString); refusing a write from worktree \(incomingWorktreeID.uuidString)"
         case .invalidSurface(let tabID, let violations):
             let reason = violations.map { "\($0)" }.joined(separator: ", ")
             return "refusing to store tab \(tabID.uuidString)'s panel surface: it breaks the panel model (\(reason))"
         case .revisionCounterMissing:
             return "refusing to store a panel surface: the panel_revision_counter row is missing"
+        case .noteNotInWorktree(let noteID, let worktreeID):
+            return "refusing to open note \(noteID.uuidString) as a worktree panel: "
+                + "no such note belongs to worktree \(worktreeID.uuidString)"
         }
     }
 }
@@ -264,12 +293,19 @@ public struct SyncOutcome: Sendable, Equatable {
 }
 
 /// Store for the panel-surface tables (workspace tab surfaces, per-panel
-/// histories, operation receipts). See the panel tabs spec, "Daemon → Store".
+/// histories, worktree panels, operation receipts). See the panel tabs spec,
+/// "Daemon → Store", and the side panel notes spec, "Daemon".
 ///
 /// A surface is written as one `workspace_tab_surface` row plus one
-/// `panel_history` row per panel, and read back by joining the two inside one
-/// transaction. A row that fails to decode, lacks a panel's history, or fails
-/// the validator reads as no surface.
+/// `panel_history` row per panel, and read back by joining the two, and its
+/// worktree's `worktree_panel` rows, inside one transaction. A row that fails
+/// to decode, lacks a panel's history, or fails the validator reads as no
+/// surface.
+///
+/// The worktree's panels are one list per worktree, which every surface of
+/// the worktree carries. A change to the list rewrites every other readable
+/// surface of the worktree in the same transaction, each at a fresh revision,
+/// so every snapshot the app holds of the worktree's tabs agrees on it.
 ///
 /// Revisions are daemon-wide: every write that creates or changes a surface
 /// takes its revision from the one-row `panel_revision_counter`, incremented
@@ -285,21 +321,14 @@ public struct PanelSurfaceStore: Sendable {
     }
 
     /// All readable workspace-tab surfaces for a worktree, ordered by
-    /// position, with their panels' histories joined in. Unreadable rows are
-    /// skipped with a logged warning.
+    /// position, with their panels' histories and the worktree's panels
+    /// joined in. Unreadable rows are skipped with a logged warning.
     public func surfaces(worktreeID: UUID) async throws -> [WorkspaceTabSurface] {
-        try await writer.read { db in
-            let records = try WorkspaceTabSurfaceRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .order(Column("position"))
-                .fetchAll(db)
-            let historiesByTab = try Self.histories(tabKeys: records.map(\.id), db: db)
-            return records.compactMap { $0.toModel(histories: historiesByTab[$0.id] ?? [:]) }
-        }
+        try await panelSnapshot(worktreeID: worktreeID, tabID: nil).tabs
     }
 
-    /// A tab's surface with its panels' histories joined in, or nil when the
-    /// tab has no row or its row cannot be read.
+    /// A tab's surface with its panels' histories and its worktree's panels
+    /// joined in, or nil when the tab has no row or its row cannot be read.
     public func surface(tabID: UUID) async throws -> WorkspaceTabSurface? {
         try await writer.read { db in
             guard let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabID.uuidString) else {
@@ -323,6 +352,10 @@ public struct PanelSurfaceStore: Sendable {
     /// The surface is stored at the revision it carries, since its caller
     /// owns it whole; the revision counter is raised to at least that
     /// revision, so every later write still takes a higher one.
+    ///
+    /// The surface's `worktreePanels` are validated with it but not stored:
+    /// the list is the worktree's, written only by an operation that changes
+    /// it, and a read joins in the stored list.
     public func commit(
         surface: WorkspaceTabSurface, position: Int?, receipt: PanelOperationReceiptRecord?,
         now: Date = Date()
@@ -342,7 +375,7 @@ public struct PanelSurfaceStore: Sendable {
     /// Each listed tab's readable panel histories, keyed by tab ID string,
     /// then panel ID. A malformed history row is left out (and logged), so the
     /// surface that names its panel reads as no surface.
-    private static func histories(
+    static func histories(
         tabKeys: [String], db: GRDB.Database
     ) throws -> [String: [PanelID: PanelHistory]] {
         guard !tabKeys.isEmpty else { return [:] }
@@ -360,7 +393,7 @@ public struct PanelSurfaceStore: Sendable {
     /// The daemon-wide revision counter's next value, against an
     /// already-open write transaction: it is incremented and read in the
     /// caller's transaction, so a write that rolls back takes nothing.
-    private static func nextRevision(db: GRDB.Database) throws -> UInt64 {
+    static func nextRevision(db: GRDB.Database) throws -> UInt64 {
         try db.execute(sql: "UPDATE panel_revision_counter SET value = value + 1 WHERE id = 1")
         guard let value = try Int64.fetchOne(
             db, sql: "SELECT value FROM panel_revision_counter WHERE id = 1"
@@ -392,13 +425,24 @@ public struct PanelSurfaceStore: Sendable {
             arguments: [tabKey])
     }
 
-    /// One row's surface with its own histories joined in, or nil when the
-    /// row cannot be read.
-    private static func loadSurface(
+    /// One row's surface with its own histories and the panels of the
+    /// worktree it names joined in, or nil when the row cannot be read.
+    static func loadSurface(
         _ record: WorkspaceTabSurfaceRecord, db: GRDB.Database
     ) throws -> WorkspaceTabSurface? {
+        let worktreePanels = try Self.storedWorktreePanels(worktreeKey: record.worktreeID, db: db)
+        return try Self.loadSurface(record, worktreePanels: worktreePanels, db: db)
+    }
+
+    /// One row's surface with its own histories and `worktreePanels` joined
+    /// in, or nil when the row cannot be read. `worktreePanels` must be the
+    /// stored list of the worktree the row names, for a caller that has
+    /// already read it.
+    static func loadSurface(
+        _ record: WorkspaceTabSurfaceRecord, worktreePanels: [WorktreePanel], db: GRDB.Database
+    ) throws -> WorkspaceTabSurface? {
         let historiesByTab = try Self.histories(tabKeys: [record.id], db: db)
-        return record.toModel(histories: historiesByTab[record.id] ?? [:])
+        return record.toModel(histories: historiesByTab[record.id] ?? [:], worktreePanels: worktreePanels)
     }
 
     /// Writes ONE tab's surface row and its full history set against an
@@ -413,7 +457,9 @@ public struct PanelSurfaceStore: Sendable {
     ///
     /// `position: nil` keeps the row's existing position (0 for a new row),
     /// and `awaitingListing: nil` keeps its marker (false for a new row).
-    private static func writeSurface(
+    /// The surface's `worktreePanels` are validated with it and not written:
+    /// `writeWorktreePanels` stores the worktree's list.
+    static func writeSurface(
         _ surface: WorkspaceTabSurface, position: Int?, awaitingListing: Bool?,
         db: GRDB.Database, now: Date
     ) throws {
@@ -471,7 +517,10 @@ public struct PanelSurfaceStore: Sendable {
     /// Outcome of a transactional `applyReducing` call.
     public enum ApplyOutcome: Sendable, Equatable {
         /// A fresh commit — the reducer ran and its result was persisted.
-        case applied(PanelApplyResult)
+        /// `siblings` are the worktree's other surfaces the commit rewrote,
+        /// in position order, because the operation changed the worktree's
+        /// panel list; empty when it did not.
+        case applied(PanelApplyResult, siblings: [WorkspaceTabSurface])
         /// `operationID` already had a receipt for this tab — the stored
         /// result is replayed, nothing was re-applied.
         case replayed(PanelApplyResult)
@@ -537,6 +586,18 @@ public struct PanelSurfaceStore: Sendable {
     /// reducer gave it. The row keeps its position and its `awaitingListing`
     /// marker, since an operation lists no tab; the receipt stores the
     /// result.
+    ///
+    /// When the reduced surface's `worktreePanels` differ from the stored
+    /// list, the same transaction stores the new list and rewrites every
+    /// other readable surface of the worktree with it
+    /// (`rewriteSurfaces`), and the outcome carries them in `siblings`. A
+    /// sibling row that cannot be read is left as it is.
+    ///
+    /// Throws `noteNotInWorktree`, writing nothing, when the reduced list
+    /// adds a panel showing a note with no `note` row in `worktreeID`. The
+    /// check reads the note inside this transaction, so a `note.delete`
+    /// committing after the caller's own check, which finds no panel to
+    /// remove, cannot be followed by a write that shows the deleted note.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
         reduce: @Sendable (WorkspaceTabSurface) throws -> WorkspaceTabSurface
@@ -557,10 +618,19 @@ public struct PanelSurfaceStore: Sendable {
             }
 
             var next = try reduce(current)
+            try Self.requireNotesOfAddedPanels(in: next, beyond: current, worktreeID: worktreeID, db: db)
             next.revision = try Self.nextRevision(db: db)
 
             try Self.writeSurface(
                 next, position: record.position, awaitingListing: record.awaitingListing, db: db, now: now)
+
+            var siblings: [WorkspaceTabSurface] = []
+            if next.worktreePanels != current.worktreePanels {
+                try Self.writeWorktreePanels(next.worktreePanels, worktreeID: worktreeID, db: db)
+                siblings = try Self.rewriteSurfaces(
+                    worktreeID: worktreeID, worktreePanels: next.worktreePanels, except: tabID,
+                    db: db, now: now)
+            }
 
             let result = PanelApplyResult(tab: next, replayed: false)
             let receipt = PanelOperationReceiptRecord(
@@ -569,7 +639,26 @@ public struct PanelSurfaceStore: Sendable {
                 result: try encodeJSONString(result), appliedAt: now)
             try receipt.save(db)
             try self.pruneReceipts(db: db, worktreeID: worktreeID, now: now)
-            return .applied(result)
+            return .applied(result, siblings: siblings)
+        }
+    }
+
+    /// Throws `noteNotInWorktree` for the first worktree panel of `next`
+    /// that `current` does not hold and that shows a note with no `note` row
+    /// in `worktreeID`, against an open transaction. A panel already in
+    /// `current`'s list is not checked: the operation did not add it.
+    private static func requireNotesOfAddedPanels(
+        in next: WorkspaceTabSurface, beyond current: WorkspaceTabSurface, worktreeID: UUID,
+        db: GRDB.Database
+    ) throws {
+        let heldIDs = Set(current.worktreePanels.map(\.id))
+        for panel in next.worktreePanels where !heldIDs.contains(panel.id) {
+            guard case .note(let noteID) = panel.content else { continue }
+            let owner = try String.fetchOne(
+                db, sql: "SELECT worktreeID FROM note WHERE id = ?", arguments: [noteID.uuidString])
+            guard owner.flatMap(UUID.init(uuidString:)) == worktreeID else {
+                throw PanelSurfaceStoreError.noteNotInWorktree(noteID: noteID, worktreeID: worktreeID)
+            }
         }
     }
 
@@ -595,6 +684,13 @@ public struct PanelSurfaceStore: Sendable {
     ///   only when non-nil). When any of those changed, the surface takes the
     ///   revision counter's next value and is reported in `changed`. Panels
     ///   and histories are never touched.
+    ///
+    /// Every surface the sync inserts or reports carries this worktree's
+    /// panels: an import adopts the list before it is written
+    /// (`PanelSurfaceReducer.adopting`), so a tab with no panel of its own
+    /// shows the first worktree panel in front, and an updated surface
+    /// carries the list a read of it joins in. An import keeps the
+    /// candidate's collapse state, and an update never changes it.
     ///
     /// Listing a tab clears its row's `awaitingListing` marker, whichever
     /// case applies. Clearing it alone changes nothing the app sees, so it
@@ -622,6 +718,8 @@ public struct PanelSurfaceStore: Sendable {
             let status = try String.fetchOne(
                 db, sql: "SELECT status FROM worktree WHERE id = ?", arguments: [worktreeID.uuidString])
             guard status != WorktreeStatus.archived.rawValue else { return outcome }
+            let worktreeKey = worktreeID.uuidString
+            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeKey, db: db)
 
             let listedKeys = entries.map(\.tabID.uuidString)
             let graceCutoff = now.addingTimeInterval(-Self.awaitingListingGrace)
@@ -643,7 +741,15 @@ public struct PanelSurfaceStore: Sendable {
                 guard seen.insert(entry.tabID).inserted else { continue }
 
                 let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: entry.tabID.uuidString)
-                let current = try record.flatMap { try Self.loadSurface($0, db: db) }
+                // A row under this worktree joins in the list read above; one
+                // still under another worktree joins in that worktree's, as
+                // any read of it does.
+                let current = try record.flatMap { stored -> WorkspaceTabSurface? in
+                    if stored.worktreeID == worktreeKey {
+                        return try Self.loadSurface(stored, worktreePanels: worktreePanels, db: db)
+                    }
+                    return try Self.loadSurface(stored, db: db)
+                }
                 guard let record, let current else {
                     guard let candidate = entry.importCandidate else {
                         if let record, record.awaitingListing {
@@ -662,10 +768,10 @@ public struct PanelSurfaceStore: Sendable {
                         // Its histories cascade.
                         try WorkspaceTabSurfaceRecord.deleteOne(db, key: record.id)
                     }
-                    let imported = WorkspaceTabSurface(
+                    let imported = PanelSurfaceReducer.adopting(worktreePanels, into: WorkspaceTabSurface(
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
                         primary: entry.primary ?? candidate.primary, side: candidate.side,
-                        revision: try Self.nextRevision(db: db))
+                        revision: try Self.nextRevision(db: db)))
                     try Self.writeSurface(
                         imported, position: entry.position, awaitingListing: false, db: db, now: now)
                     outcome.imported.append(entry.tabID)
@@ -682,9 +788,12 @@ public struct PanelSurfaceStore: Sendable {
                     }
                     continue
                 }
-                let updated = WorkspaceTabSurface(
+                // This worktree's list, which a read of the row joins in. It
+                // differs from `current`'s only when the tab moves here from
+                // another worktree.
+                let updated = PanelSurfaceReducer.adopting(worktreePanels, into: WorkspaceTabSurface(
                     id: current.id, worktreeID: worktreeID, label: entry.label,
-                    primary: primary, side: current.side, revision: try Self.nextRevision(db: db))
+                    primary: primary, side: current.side, revision: try Self.nextRevision(db: db)))
 
                 // Only the row's own columns; `layout` and `panel_history`
                 // stay as they are.
@@ -765,9 +874,10 @@ public struct PanelSurfaceStore: Sendable {
     }
 
     /// Delete all surfaces (and, via `ON DELETE CASCADE`, their histories)
-    /// plus any operation receipts for a worktree. History rows cascade
-    /// through the surface's FK; receipts reference the worktree directly
-    /// (not the surface), so they're deleted explicitly here.
+    /// plus the worktree's panels and any operation receipts for a worktree.
+    /// History rows cascade through the surface's FK; worktree panels and
+    /// receipts reference the worktree directly (not the surface), so they're
+    /// deleted explicitly here.
     public func deleteSurfaces(worktreeID: UUID) async throws {
         try await writer.write { db in
             try Self.deleteSurfaces(worktreeID: worktreeID, in: db)
@@ -779,14 +889,17 @@ public struct PanelSurfaceStore: Sendable {
     /// can name them in a delta's `removedTabIDs`. `WorktreeStore.archive`
     /// runs it in the transaction that archives the worktree: an archived
     /// worktree keeps its row, so the cascade from that row never fires, and
-    /// this is what reclaims its panel rows. A row awaiting its tab's first
-    /// listing goes too.
+    /// this is what reclaims its panel rows, its worktree panels among them.
+    /// A row awaiting its tab's first listing goes too.
     @discardableResult
     static func deleteSurfaces(worktreeID: UUID, in db: Database) throws -> [UUID] {
         let tabKeys = try String.fetchAll(
             db, sql: "SELECT id FROM workspace_tab_surface WHERE worktreeID = ? ORDER BY position",
             arguments: [worktreeID.uuidString])
         try WorkspaceTabSurfaceRecord
+            .filter(Column("worktreeID") == worktreeID.uuidString)
+            .deleteAll(db)
+        try WorktreePanelRecord
             .filter(Column("worktreeID") == worktreeID.uuidString)
             .deleteAll(db)
         try PanelOperationReceiptRecord
@@ -796,14 +909,36 @@ public struct PanelSurfaceStore: Sendable {
     }
 
     /// Moves every surface of `fromWorktreeID` to `toWorktreeID` inside a
-    /// caller's write transaction, with `fromWorktreeID`'s operation
-    /// receipts. Histories go with their surfaces, because they key on the
-    /// tab, which keeps its ID. Each moved row takes the counter's next
-    /// revision, as a sync's re-parent does, and a position after every
+    /// caller's write transaction, with `fromWorktreeID`'s Changes panel and
+    /// operation receipts. Histories go with their surfaces, because they
+    /// key on the tab, which keeps its ID. Each moved row takes the counter's
+    /// next revision, as a sync's re-parent does, and a position after every
     /// surface `toWorktreeID` already holds, in the order the rows had, so
     /// no two of its surfaces share a position before the next sync sets
     /// them. The receipts move rather than go, so a `panel.apply` retried
     /// across the move still replays.
+    ///
+    /// Of `fromWorktreeID`'s worktree panels (side panel notes spec, "Daemon
+    /// → Reclamation"):
+    ///
+    /// - **Note panels** are deleted. The notes stay with `fromWorktreeID`,
+    ///   whose ID keys their content files, so a panel moved with them would
+    ///   name a note `toWorktreeID` does not have, and `note.delete` would
+    ///   never find it.
+    /// - **The Changes panel** joins `toWorktreeID`'s panels after its own,
+    ///   unless `toWorktreeID` already has one: then it is deleted.
+    ///
+    /// Every surface under `toWorktreeID` then carries the merged list: when
+    /// it differs from `toWorktreeID`'s own, its readable surfaces are
+    /// rewritten with it (`rewriteSurfaces`). A moved tab that had the
+    /// deleted Changes panel in front is first pointed at `toWorktreeID`'s
+    /// Changes panel, which shows the same list. Each readable moved surface
+    /// then adopts the merged list (`PanelSurfaceReducer.adopting`) and is
+    /// stored whole, as `rewriteSurfaces` stores one, so a moved tab whose
+    /// note panel in front was deleted is stored fronting its most recent own
+    /// panel, else the merged list's first panel. A moved row that cannot be
+    /// read moves with its columns re-pointed and its `layout` and histories
+    /// as they were.
     ///
     /// Each moved row is marked `awaitingListing`. The app learns of the
     /// main worktree before this move, so a `panel.syncTabs` it built from
@@ -812,34 +947,101 @@ public struct PanelSurfaceStore: Sendable {
     /// lists the tab or `awaitingListingGrace` passes. `WorktreeStore.archive`
     /// still deletes a marked row.
     ///
-    /// Returns the moved surfaces as stored, ordered by position, for a
-    /// delta's `tabs`; a row that cannot be read still moves but is not
-    /// returned. `WorktreeStore.promoteScratchMigration` runs it in the
-    /// transaction that retires a promoted scratch worktree, which archives
-    /// that row without going through `WorktreeStore.archive`: the tabs move
-    /// to the main worktree, and their panels move with them.
+    /// Returns, for a delta's `tabs`, `toWorktreeID`'s own surfaces that the
+    /// merged list rewrote, then the moved surfaces, each group ordered by
+    /// position and as stored; a moved row that cannot be read still moves
+    /// but is not returned. `WorktreeStore.promoteScratchMigration` runs it
+    /// in the transaction that retires a promoted scratch worktree, which
+    /// archives that row without going through `WorktreeStore.archive`: the
+    /// tabs move to the main worktree, and their own panels move with them.
     static func reparentSurfaces(
         from fromWorktreeID: UUID, to toWorktreeID: UUID, now: Date, in db: GRDB.Database
     ) throws -> [WorkspaceTabSurface] {
-        var rows = try WorkspaceTabSurfaceRecord
+        let ownPanels = try Self.storedWorktreePanels(worktreeKey: toWorktreeID.uuidString, db: db)
+        var merged = ownPanels
+        var droppedKeys: [String] = []
+        // The deleted Changes panel and the kept one that takes its place.
+        var changesReplacement: (dropped: PanelID, kept: PanelID)?
+        for panel in try Self.storedWorktreePanels(worktreeKey: fromWorktreeID.uuidString, db: db) {
+            switch panel.content {
+            case .note:
+                droppedKeys.append(panel.id.uuidString)
+            case .changes:
+                if let kept = merged.first(where: { $0.content == .changes }) {
+                    droppedKeys.append(panel.id.uuidString)
+                    changesReplacement = (panel.id, kept.id)
+                } else {
+                    merged.append(panel)
+                }
+            }
+        }
+        try WorktreePanelRecord.filter(droppedKeys.contains(Column("id"))).deleteAll(db)
+
+        // Before the moved rows arrive, so only `toWorktreeID`'s own
+        // surfaces are rewritten here.
+        var rewritten: [WorkspaceTabSurface] = []
+        if merged != ownPanels {
+            rewritten = try Self.rewriteSurfaces(
+                worktreeID: toWorktreeID, worktreePanels: merged, except: nil, db: db, now: now)
+        }
+
+        let rows = try WorkspaceTabSurfaceRecord
             .filter(Column("worktreeID") == fromWorktreeID.uuidString)
             .order(Column("position"))
             .fetchAll(db)
         let firstFreePosition = try Int.fetchOne(
             db, sql: "SELECT MAX(position) + 1 FROM workspace_tab_surface WHERE worktreeID = ?",
             arguments: [toWorktreeID.uuidString]) ?? 0
-        for index in rows.indices {
-            rows[index].worktreeID = toWorktreeID.uuidString
-            rows[index].position = firstFreePosition + index
-            rows[index].revision = Int64(try Self.nextRevision(db: db))
-            rows[index].updatedAt = now
-            rows[index].awaitingListing = true
-            try rows[index].update(db)
+        let historiesByTab = try Self.histories(tabKeys: rows.map(\.id), db: db)
+        var moved: [WorkspaceTabSurface] = []
+        for (index, record) in rows.enumerated() {
+            let position = firstFreePosition + index
+            // A front naming the deleted Changes panel moves to the kept one
+            // first, so the tab keeps Changes in front. Then read with the
+            // merged list, which repairs a front naming a deleted note panel,
+            // and stored whole, so the row names only panels that exist.
+            let toRead = try changesReplacement.map {
+                try Self.movingFront(of: record, from: $0.dropped, to: $0.kept)
+            } ?? record
+            guard let readable = toRead.toModel(
+                histories: historiesByTab[record.id] ?? [:], worktreePanels: merged) else {
+                var row = record
+                row.worktreeID = toWorktreeID.uuidString
+                row.position = position
+                row.revision = Int64(try Self.nextRevision(db: db))
+                row.updatedAt = now
+                row.awaitingListing = true
+                try row.update(db)
+                continue
+            }
+            let surface = WorkspaceTabSurface(
+                id: readable.id, worktreeID: toWorktreeID, label: readable.label,
+                primary: readable.primary, side: readable.side, worktreePanels: readable.worktreePanels,
+                revision: try Self.nextRevision(db: db))
+            try Self.writeSurface(surface, position: position, awaitingListing: true, db: db, now: now)
+            moved.append(surface)
         }
+        try db.execute(
+            sql: "UPDATE worktree_panel SET worktreeID = ? WHERE worktreeID = ?",
+            arguments: [toWorktreeID.uuidString, fromWorktreeID.uuidString])
+        try Self.writeWorktreePanels(merged, worktreeID: toWorktreeID, db: db)
         try db.execute(
             sql: "UPDATE panel_operation_receipt SET worktreeID = ? WHERE worktreeID = ?",
             arguments: [toWorktreeID.uuidString, fromWorktreeID.uuidString])
-        let historiesByTab = try Self.histories(tabKeys: rows.map(\.id), db: db)
-        return rows.compactMap { $0.toModel(histories: historiesByTab[$0.id] ?? [:]) }
+        return rewritten + moved
+    }
+
+    /// `record` with the panel in front of its stored side region changed
+    /// from `oldFront` to `newFront`. Unchanged when another panel, or none,
+    /// is in front, or when its `layout` does not decode.
+    private static func movingFront(
+        of record: WorkspaceTabSurfaceRecord, from oldFront: PanelID, to newFront: PanelID
+    ) throws -> WorkspaceTabSurfaceRecord {
+        guard var stored = decodeJSON(StoredSideRegion.self, from: record.layout),
+              stored.activePanelID == oldFront else { return record }
+        stored.activePanelID = newFront
+        var moved = record
+        moved.layout = try encodeJSONString(stored)
+        return moved
     }
 }

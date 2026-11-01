@@ -5,7 +5,8 @@ import TBDShared
 
 /// The state a pane's per-kind controls read: whether a file shows its
 /// rendered view or its source, whether it can render at all, a web page's
-/// current address, and the checkmark a copy of that address shows.
+/// current address, the checkmark a copy of that address shows, and the
+/// Changes list's refresh count and whether it is loading.
 ///
 /// It lives apart from the leaf (`PanePlaceholder`) so that the view drawing
 /// the controls can own it. On the daemon path the controls sit in the tab
@@ -30,6 +31,18 @@ final class PaneChromeState {
 
     /// True for ``copyConfirmation`` after ``copyAddress(_:)``.
     private(set) var didCopyAddress = false
+
+    /// How many times the refresh control has been pressed. The Changes list
+    /// reloads whenever it changes (`ChangesPanelView`).
+    private(set) var refreshCount = 0
+
+    /// True while the Changes list is loading, from ``beginRefresh()`` until
+    /// the latest load's ``endRefresh(_:)``. The strip draws a spinner in
+    /// place of the refresh control meanwhile (`PaneRefreshControl`).
+    private(set) var isRefreshing = false
+
+    /// The token of the latest load ``beginRefresh()`` began.
+    @ObservationIgnored private var latestRefresh = 0
 
     /// A web pane's live state, whose `currentURL` follows in-page navigation.
     /// It is an `ObservableObject`, and this class does not forward its
@@ -73,13 +86,30 @@ final class PaneChromeState {
         }
     }
 
+    /// Marks a load of the Changes list begun, and returns the token its
+    /// ``endRefresh(_:)`` hands back.
+    func beginRefresh() -> Int {
+        latestRefresh &+= 1
+        if !isRefreshing { isRefreshing = true }
+        return latestRefresh
+    }
+
+    /// Marks the load `token` names ended, cancelled or not. Only the latest
+    /// load clears ``isRefreshing``: one a newer load superseded leaves it to
+    /// that one, which is still running.
+    func endRefresh(_ token: Int) {
+        guard token == latestRefresh, isRefreshing else { return }
+        isRefreshing = false
+    }
+
     /// Does what `control`'s button does to this state: the render toggle
-    /// flips the file between its rendered view and its source, and
+    /// flips the file between its rendered view and its source,
     /// copy-address copies the page's current address, which follows in-page
     /// navigation, or `contentURL`, the address its content opened with,
-    /// until the page reports one. The transcript control changes the
-    /// layout, not this state, so the view that draws it sends that itself
-    /// and this does nothing for it.
+    /// until the page reports one, and refresh bumps ``refreshCount``. The
+    /// transcript and Notes controls change the layout, not this state, so
+    /// the view that draws each sends that itself and this does nothing for
+    /// them.
     func perform(_ control: PaneChromeControl, contentURL: URL?) {
         switch control {
         case .renderToggle:
@@ -87,7 +117,9 @@ final class PaneChromeState {
         case .copyAddress:
             guard let url = webviewState.currentURL ?? contentURL else { return }
             copyAddress(url)
-        case .transcript:
+        case .refresh:
+            refreshCount += 1
+        case .transcript, .notes:
             break
         }
     }
@@ -133,23 +165,30 @@ final class PaneChromeStore {
 
 // MARK: - PaneChromeControl
 
-/// The control a pane's kind puts in its tab row, as a value, so the row can
-/// decide which one to show and the button can draw it without reading
-/// anything else.
+/// A control a tab row draws — one a pane's kind puts there, or the
+/// workspace tab bar's Notes button — as a value, so the row can decide which
+/// one to show and the button can draw it without reading anything else.
 enum PaneChromeControl: Equatable {
     /// A Claude terminal's transcript toggle, on while its transcript panel
     /// exists, whether or not that panel is in front.
     case transcript(isOn: Bool)
+    /// The workspace tab bar's Notes button, on while the worktree's first
+    /// note is in front of a visible side region
+    /// (`NotesToggleDecision.isOn`), and disabled while it cannot act
+    /// (`NotesToggleDecision.isEnabled`).
+    case notes(isOn: Bool, isEnabled: Bool)
     /// A renderable file's rendered/source toggle.
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
     case copyAddress(copied: Bool)
+    /// The Changes list's reload.
+    case refresh
 
     /// The control viewer content of `kind` puts in its tab row, wherever
     /// that row is — the workspace tab bar for a primary, the side region's
     /// strip for a panel: the rendered/source toggle for a file that can
-    /// render, and copy-address for a web page. A file that cannot render, a
-    /// note and a transcript have none.
+    /// render, copy-address for a web page, and refresh for the Changes list.
+    /// A file that cannot render, a note and a transcript have none.
     static func viewerControl(
         for kind: PanelKind, canRender: Bool, showingSource: Bool, copied: Bool
     ) -> PaneChromeControl? {
@@ -159,6 +198,8 @@ enum PaneChromeControl: Equatable {
             return .renderToggle(showingSource: showingSource)
         case .web:
             return .copyAddress(copied: copied)
+        case .changes:
+            return .refresh
         case .note, .transcript:
             return nil
         }
@@ -175,10 +216,14 @@ enum PaneChromeControl: Equatable {
         switch self {
         case .transcript(let isOn):
             return isOn ? "text.bubble.fill" : "text.bubble"
+        case .notes:
+            return PanelKind.note.tabSystemImage
         case .renderToggle:
             return "chevron.left.forwardslash.chevron.right"
         case .copyAddress(let copied):
             return copied ? "checkmark" : "doc.on.doc"
+        case .refresh:
+            return "arrow.clockwise"
         }
     }
 
@@ -187,11 +232,21 @@ enum PaneChromeControl: Equatable {
         switch self {
         case .transcript(let isOn):
             return isOn ? .accent : .primary
+        case .notes(let isOn, let isEnabled):
+            guard isEnabled else { return .secondary }
+            return isOn ? .accent : .primary
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
-        case .copyAddress:
+        case .copyAddress, .refresh:
             return nil
         }
+    }
+
+    /// Whether the button can be pressed: false only for the Notes button
+    /// while it cannot act.
+    var isEnabled: Bool {
+        if case .notes(_, let isEnabled) = self { return isEnabled }
+        return true
     }
 
     /// The tooltip, which also names the button for accessibility.
@@ -201,10 +256,15 @@ enum PaneChromeControl: Equatable {
             return isOn
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"
+        case .notes(let isOn, let isEnabled):
+            guard isEnabled else { return "Notes are loading" }
+            return isOn ? "Hide notes" : "Show notes"
         case .renderToggle(let showingSource):
             return showingSource ? "Show rendered view" : "Show source code"
         case .copyAddress:
             return "Copy URL"
+        case .refresh:
+            return "Refresh"
         }
     }
 }
@@ -226,6 +286,7 @@ struct PaneChromeControlButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
+        .disabled(!control.isEnabled)
         .help(control.help)
         .accessibilityLabel(Text(control.help))
     }
@@ -243,6 +304,31 @@ struct PaneChromeControlButton: View {
             image.foregroundStyle(.secondary)
         case nil:
             image
+        }
+    }
+}
+
+// MARK: - PaneRefreshControl
+
+/// The Changes list's refresh control: the ``PaneChromeControl/refresh``
+/// button, or, while the list loads (`PaneChromeState.isRefreshing`), a small
+/// spinner in the same 28 pt slot. It is its own view so that only it, not
+/// the strip around it, redraws as a load begins and ends.
+struct PaneRefreshControl: View {
+    let chrome: PaneChromeState
+
+    var body: some View {
+        if chrome.isRefreshing {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 28)
+                .frame(maxHeight: .infinity)
+                .help("Refreshing")
+                .accessibilityLabel(Text("Refreshing"))
+        } else {
+            PaneChromeControlButton(control: .refresh) {
+                chrome.perform(.refresh, contentURL: nil)
+            }
         }
     }
 }

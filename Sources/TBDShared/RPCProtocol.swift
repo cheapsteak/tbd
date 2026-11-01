@@ -972,7 +972,8 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
     public let gcEnabled: Bool
-    /// Whether ordinary new worktrees start with an empty Notes tab.
+    /// Whether creating an ordinary new worktree makes an empty "Notes"
+    /// starter note, which the Notes button opens.
     public let autoCreateNotesEnabled: Bool
     /// The machine-wide remote create-param defaults (config scope), keyed by
     /// the provider's own `create_params` field names. Carried alongside the
@@ -3471,8 +3472,9 @@ public struct ConfigSetQueuedPromptParams: Codable, Sendable {
 }
 
 /// Params for `config.setAutoCreateNotes` — the default-ON preference for
-/// adding an empty Notes tab to ordinary new worktrees. Conversation carryover
-/// creates its populated provenance note independently of this preference.
+/// creating an empty "Notes" starter note in ordinary new worktrees, opened
+/// from the Notes button. Conversation carryover creates its populated
+/// provenance note independently of this preference.
 public struct ConfigSetAutoCreateNotesParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
@@ -4388,9 +4390,17 @@ public struct TerminalRecreateWindowParams: Codable, Sendable {
     }
 }
 
+/// `note.create`'s parameters. `title` names the new note; nil, or a title
+/// of only whitespace, gives it the next free "Note N". A client that sends
+/// no `title` key decodes as nil.
 public struct NoteCreateParams: Codable, Sendable {
     public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    public let title: String?
+
+    public init(worktreeID: UUID, title: String? = nil) {
+        self.worktreeID = worktreeID
+        self.title = title
+    }
 }
 
 public struct NoteGetParams: Codable, Sendable {

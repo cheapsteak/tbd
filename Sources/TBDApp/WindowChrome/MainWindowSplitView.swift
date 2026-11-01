@@ -24,10 +24,9 @@ import SwiftUI
 ///   settings and the transcript overlay coordinator again. Its `@AppStorage`
 ///   store is `appStorage` when one is given, and otherwise `.standard`. The
 ///   app passes `nil`: the window's root sets no `defaultAppStorage`, so it
-///   and the menu commands, ⌘⇧E among them, read `.standard`, and the hosted
-///   panes must read the same store. `appState.userDefaults` is not that
-///   store under `TBD_MOCK`. The controllers' `sizingOptions` are `[]`: the
-///   split items size the panes.
+///   reads `.standard`, and the hosted panes must read the same store.
+///   `appState.userDefaults` is not that store under `TBD_MOCK`. The
+///   controllers' `sizingOptions` are `[]`: the split items size the panes.
 ///
 /// `updateNSViewController` refreshes only the Stop confirmation's closure.
 /// The panes and the toolbar follow `AppState` themselves, so no AppKit

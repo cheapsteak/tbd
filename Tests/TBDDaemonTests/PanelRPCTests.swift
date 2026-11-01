@@ -93,6 +93,44 @@ struct PanelRPCTests {
         #expect(result.tabs.map(\.id) == [tab.id])
     }
 
+    /// `panel.get` names the worktree's panels once more beside its tabs,
+    /// whole or tab-scoped, and also for a worktree with no surfaces yet.
+    @Test("panel.get carries the worktree's panels, with or without surfaces")
+    func getCarriesWorktreePanels() async throws {
+        let (router, db) = try makeRouterAndDB()
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let open = PanelOperationEnvelope(
+            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil, origin: .agentCLI,
+            operation: .open(content: .note(noteID: note.id), newPanel: false))
+        let applyResponse = await router.handle(
+            try RPCRequest(method: RPCMethod.panelApply, params: PanelApplyParams(envelope: open)))
+        #expect(applyResponse.success)
+        let panels = try await db.panelSurface.worktreePanels(worktreeID: wtID)
+        let expectedContent: [WorktreePanelContent] = [.note(noteID: note.id)]
+        try #require(panels.map(\.content) == expectedContent)
+
+        for params in [PanelGetParams(worktreeID: wtID), PanelGetParams(worktreeID: wtID, tabID: tab.id)] {
+            let response = await router.handle(try RPCRequest(method: RPCMethod.panelGet, params: params))
+            #expect(response.success)
+            let result = try response.decodeResult(PanelGetResult.self)
+            #expect(result.worktreePanels == panels)
+            #expect(result.tabs.map(\.id) == [tab.id])
+            #expect(result.tabs.first?.worktreePanels == panels)
+        }
+
+        let bareID = try await makeWorktree(db, name: "bare")
+        try await db.openWorktreePanelForTests(worktreeID: bareID, content: .changes)
+        let bareResponse = await router.handle(
+            try RPCRequest(method: RPCMethod.panelGet, params: PanelGetParams(worktreeID: bareID)))
+        #expect(bareResponse.success)
+        let bare = try bareResponse.decodeResult(PanelGetResult.self)
+        #expect(bare.tabs.isEmpty)
+        let changesOnly: [WorktreePanelContent] = [.changes]
+        #expect(bare.worktreePanels.map(\.content) == changesOnly)
+    }
+
     // MARK: - panel.apply happy path + panel.get reflects it
 
     @Test("panel.apply commits for the app and an agent alike, and panel.get reflects it",

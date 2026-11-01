@@ -217,7 +217,7 @@ struct PanelSurfaceStoreTests {
         }
 
         let applied = try #require(outcome)
-        guard case .applied(let result) = applied else {
+        guard case .applied(let result, _) = applied else {
             Issue.record("expected .applied, got \(applied)")
             return
         }
@@ -242,7 +242,7 @@ struct PanelSurfaceStoreTests {
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
         let first = try #require(firstOutcome)
-        guard case .applied(let applied) = first else {
+        guard case .applied(let applied, _) = first else {
             Issue.record("expected .applied, got \(first)")
             return
         }
@@ -275,7 +275,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = firstOutcome else {
+        guard case .applied(let applied, _)? = firstOutcome else {
             Issue.record("expected .applied, got \(String(describing: firstOutcome))")
             return
         }
@@ -387,8 +387,10 @@ struct PanelSurfaceStoreTests {
         }
         #expect(try await db.panelSurface.surface(tabID: surface.id) == surface)
 
+        // Out of range, which no repair on the way in can heal: an import
+        // adopts the worktree's panels, and that fixes a missing front.
         var invalid = makeSurface(worktreeID: wtID)
-        invalid.side.activePanelID = nil
+        invalid.side.width = 5
         let valid = makeSurface(worktreeID: wtID)
         // The valid import is written before the invalid one throws.
         let entries = [entry(for: surface, position: 0), entry(for: valid, position: 2),
@@ -789,7 +791,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = outcome else {
+        guard case .applied(let applied, _)? = outcome else {
             Issue.record("expected .applied, got \(String(describing: outcome))")
             return
         }
@@ -1027,7 +1029,7 @@ struct PanelSurfaceStoreTests {
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
         let first = try #require(firstOutcome)
-        guard case .applied(let applied) = first else {
+        guard case .applied(let applied, _) = first else {
             Issue.record("expected .applied, got \(first)")
             return
         }
@@ -1202,7 +1204,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = outcome else {
+        guard case .applied(let applied, _)? = outcome else {
             Issue.record("expected .applied, got \(String(describing: outcome))")
             return
         }

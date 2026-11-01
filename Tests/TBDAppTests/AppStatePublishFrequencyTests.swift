@@ -825,8 +825,8 @@ struct TerminalPollTickTests {
     /// `AppState+Tabs.swift:117` says this happens "constantly" — so the guard
     /// opens and `reconcileTabs` runs. `reconcileTabs` then assigns
     /// `tabs[worktreeID]` unconditionally (`AppState.swift:2836`) even though
-    /// the tab set is byte-identical, and `reconcileNoteTabs` and
-    /// `applyStoredOrder` add more writes on the same path.
+    /// the tab set is byte-identical, and `applyStoredOrder` adds more writes
+    /// on the same path.
     @Test("a snapshot whose only change is activity state")
     func activityFlipInSnapshot() {
         withEmissionState { state in

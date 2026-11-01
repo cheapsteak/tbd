@@ -15,13 +15,14 @@ extension PanelKind {
         case .web: return "globe"
         case .note: return "note.text"
         case .transcript: return "text.bubble"
+        case .changes: return "plus.forwardslash.minus"
         }
     }
 }
 
 extension PanelContent {
     /// The title a tab shows for this content: a file's name, a page's host,
-    /// a note's title, or "Transcript".
+    /// a note's title, "Transcript", or "Changes".
     ///
     /// A note with no title shows `untitledNote`, which the two callers
     /// choose differently on purpose: the tab bar numbers it by its tab's
@@ -38,6 +39,8 @@ extension PanelContent {
             return untitledNote
         case .transcript:
             return "Transcript"
+        case .changes:
+            return "Changes"
         }
     }
 }

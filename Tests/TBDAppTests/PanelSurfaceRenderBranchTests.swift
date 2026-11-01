@@ -10,9 +10,10 @@ import TBDShared
 
 /// The render branch, and the view-level decisions behind the daemon renderer
 /// (panel tabs spec, "The render branch" and "The renderer"): which path a
-/// workspace tab takes, what the side region's strip shows, what the divider
+/// workspace tab takes, what the side region's strip shows — the worktree's
+/// panels, then the tab's own — and what its + menu offers, what the divider
 /// sends on release, which control the workspace tab bar carries for the
-/// selected tab, and when the expand button shows.
+/// selected tab, and when the expand button shows and what it sends.
 @Suite("Panel surface render branch")
 @MainActor
 struct PanelSurfaceRenderBranchTests {
@@ -25,6 +26,16 @@ struct PanelSurfaceRenderBranchTests {
         TabBar(
             tabs: [], worktreeID: UUID(), activeTabIndex: .constant(0),
             onCloseTab: { _ in }, trailing: trailing)
+    }
+
+    /// A workspace tab's surface around `side`, carrying `worktreePanels`.
+    private static func surface(
+        side: SideRegion, worktreePanels: [WorktreePanel] = []
+    ) -> WorkspaceTabSurface {
+        let tabID = UUID()
+        return WorkspaceTabSurface(
+            id: tabID, worktreeID: UUID(), primary: .terminal(terminalID: tabID),
+            side: side, worktreePanels: worktreePanels, revision: 1)
     }
 
     /// Seeds the copy with one surface and returns it.
@@ -340,32 +351,34 @@ struct PanelSurfaceRenderBranchTests {
         let side = SideRegion(
             panels: [empty, shown], activePanelID: shown.id, recency: [shown.id, empty.id])
 
-        let tabs = SideRegionStrip.tabs(for: side, noteTitle: { _ in nil }, transcriptPath: { _ in nil })
+        let tabs = SideRegionStrip.tabs(
+            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in nil })
 
         #expect(tabs.map(\.id) == [shown.id])
     }
 
-    @Test("each kind gets its icon and title, in the region's order, with the active one marked")
+    @Test("each kind gets its icon and title, in the strip's order, with the active one marked")
     func stripTitlesAndIconsPerKind() {
         let noteID = UUID()
         let terminalID = UUID()
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: noteID))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
         let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/src/main.swift")))
         let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
-        let note = ViewerPanel(id: UUID(), content: .note(noteID: noteID))
         let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
         let side = SideRegion(
-            panels: [file, web, note, transcript], activePanelID: web.id,
-            recency: [web.id, file.id, note.id, transcript.id])
+            panels: [file, web, transcript], activePanelID: web.id,
+            recency: [web.id, file.id, transcript.id])
 
         let tabs = SideRegionStrip.tabs(
-            for: side,
+            for: Self.surface(side: side, worktreePanels: [note, changes]),
             noteTitle: { $0 == noteID ? "Plan" : nil },
             transcriptPath: { _ in nil })
 
-        let ids: [PanelID] = [file.id, web.id, note.id, transcript.id]
-        let titles = ["main.swift", "example.com", "Plan", "Transcript"]
-        let icons = ["doc.text", "globe", "note.text", "text.bubble"]
-        let active = [false, true, false, false]
+        let ids: [PanelID] = [note.id, changes.id, file.id, web.id, transcript.id]
+        let titles = ["Plan", "Changes", "main.swift", "example.com", "Transcript"]
+        let icons = ["note.text", "plus.forwardslash.minus", "doc.text", "globe", "text.bubble"]
+        let active = [false, false, false, true, false]
         #expect(tabs.map(\.id) == ids)
         #expect(tabs.map(\.title) == titles)
         #expect(tabs.map(\.systemImage) == icons)
@@ -379,29 +392,34 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.title(for: note, noteTitle: { _ in "" }) == "Note")
     }
 
-    @Test("file and transcript tabs carry the file menu; web and note tabs carry none")
+    @Test("file and transcript tabs carry the file menu; web, note and Changes tabs carry none")
     func fileAndTranscriptTabsCarryTheFileMenu() throws {
         let terminalID = UUID()
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
         let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
         let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
         let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
-        let note = ViewerPanel(id: UUID(), content: .note(noteID: UUID()))
         let side = SideRegion(
-            panels: [file, transcript, web, note], activePanelID: file.id,
-            recency: [file.id, transcript.id, web.id, note.id])
+            panels: [file, transcript, web], activePanelID: file.id,
+            recency: [file.id, transcript.id, web.id])
 
         let tabs = SideRegionStrip.tabs(
-            for: side,
+            for: Self.surface(side: side, worktreePanels: [note, changes]),
             noteTitle: { _ in nil },
             transcriptPath: { $0 == terminalID ? "/w/session.jsonl" : nil })
-        // What the tab hands `headerFileContextMenu`, resolved the same way.
-        let targets = tabs.map { headerMenuTarget(for: $0.paneContent, transcriptPath: $0.transcriptPath) }
+        // What the tab hands `headerFileContextMenu`, resolved the same way;
+        // a tab with no leaf content gets no menu, as `SideRegionView` does.
+        let targets: [HeaderMenuTarget?] = tabs.map { tab in
+            tab.paneContent.flatMap { headerMenuTarget(for: $0, transcriptPath: tab.transcriptPath) }
+        }
 
-        try #require(targets.count == 4)
-        #expect(targets[0] == HeaderMenuTarget(path: "/w/a.md", copyLabel: "Copy Path"))
-        #expect(targets[1] == HeaderMenuTarget(path: "/w/session.jsonl", copyLabel: "Copy Conversation Path"))
-        #expect(targets[2] == nil)
-        #expect(targets[3] == nil)
+        try #require(targets.count == 5)
+        #expect(targets[0] == nil, "a note")
+        #expect(targets[1] == nil, "the Changes list")
+        #expect(targets[2] == HeaderMenuTarget(path: "/w/a.md", copyLabel: "Copy Path"))
+        #expect(targets[3] == HeaderMenuTarget(path: "/w/session.jsonl", copyLabel: "Copy Conversation Path"))
+        #expect(targets[4] == nil, "a web page")
     }
 
     @Test("a transcript whose terminal has no session file yet carries no menu")
@@ -409,11 +427,13 @@ struct PanelSurfaceRenderBranchTests {
         let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
         let side = SideRegion(panels: [transcript], activePanelID: transcript.id, recency: [transcript.id])
 
-        let tabs = SideRegionStrip.tabs(for: side, noteTitle: { _ in nil }, transcriptPath: { _ in "" })
+        let tabs = SideRegionStrip.tabs(
+            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in "" })
 
         let tab = try #require(tabs.first)
+        let paneContent = try #require(tab.paneContent)
         #expect(tab.transcriptPath == nil)
-        #expect(headerMenuTarget(for: tab.paneContent, transcriptPath: tab.transcriptPath) == nil)
+        #expect(headerMenuTarget(for: paneContent, transcriptPath: tab.transcriptPath) == nil)
     }
 
     @Test("the strip's history buttons are enabled for a file or web panel and dimmed for a transcript or note")
@@ -437,6 +457,7 @@ struct PanelSurfaceRenderBranchTests {
         let web = PanelContent.web(Self.pageURL)
         let note = PanelContent.note(noteID: UUID())
         let transcript = PanelContent.transcript(terminalID: UUID())
+        let changes = PanelContent.changes
 
         let backOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: true, forward: false)
         let forwardOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: false, forward: true)
@@ -447,11 +468,12 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.historyButtons(for: file, history: onOlder) == forwardOnly)
         #expect(SideRegionStrip.historyButtons(for: web, history: onNewer) == backOnly)
         #expect(SideRegionStrip.historyButtons(for: web, history: single) == searchOnly)
-        // A note or a transcript is dimmed, even over a history a file would
-        // step through.
+        // A note, a transcript or the Changes list is dimmed, even over a
+        // history a file would step through.
         #expect(SideRegionStrip.historyButtons(for: note, history: onNewer) == dimmed)
         #expect(SideRegionStrip.historyButtons(for: transcript, history: onNewer) == dimmed)
         #expect(SideRegionStrip.historyButtons(for: transcript, history: onOlder) == dimmed)
+        #expect(SideRegionStrip.historyButtons(for: changes, history: onNewer) == dimmed)
         // A file whose history is unknown has nothing to step through.
         #expect(SideRegionStrip.historyButtons(for: file, history: nil) == dimmed)
     }
@@ -483,6 +505,13 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.trailingControl(
             for: web, canRender: true, showingSource: true, copied: false) == notCopied)
 
+        // The Changes list: refresh, whatever the inputs say.
+        let refresh: PaneChromeControl? = .refresh
+        #expect(SideRegionStrip.trailingControl(
+            for: .changes, canRender: false, showingSource: false, copied: false) == refresh)
+        #expect(SideRegionStrip.trailingControl(
+            for: .changes, canRender: true, showingSource: true, copied: true) == refresh)
+
         // A note and a transcript have none, whatever the inputs say.
         let withoutControl: [PanelContent] = [note, transcript]
         for content in withoutControl {
@@ -494,27 +523,115 @@ struct PanelSurfaceRenderBranchTests {
     @Test("a web tab's tooltip is its full address; other tabs show their title")
     func stripTooltips() throws {
         let noteID = UUID()
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: noteID))
         let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/src/main.swift")))
         let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
-        let note = ViewerPanel(id: UUID(), content: .note(noteID: noteID))
         let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
         let side = SideRegion(
-            panels: [file, web, note, transcript], activePanelID: file.id,
-            recency: [file.id, web.id, note.id, transcript.id])
+            panels: [file, web, transcript], activePanelID: file.id,
+            recency: [file.id, web.id, transcript.id])
 
         let tabs = SideRegionStrip.tabs(
-            for: side,
+            for: Self.surface(side: side, worktreePanels: [note]),
             noteTitle: { $0 == noteID ? "Plan" : nil },
             transcriptPath: { _ in nil })
         try #require(tabs.count == 4)
 
         // The web tab's title is only the host; its tooltip is the whole URL.
-        #expect(tabs[1].title == "example.com")
-        #expect(tabs[1].tooltip == "https://example.com/docs/page")
+        #expect(tabs[2].title == "example.com")
+        #expect(tabs[2].tooltip == "https://example.com/docs/page")
         // Every other tab's tooltip is its title.
-        let titles = ["main.swift", "Plan", "Transcript"]
-        let tooltips = [tabs[0].tooltip, tabs[2].tooltip, tabs[3].tooltip]
+        let titles = ["Plan", "main.swift", "Transcript"]
+        let tooltips = [tabs[0].tooltip, tabs[1].tooltip, tabs[3].tooltip]
         #expect(tooltips == titles)
+    }
+
+    // MARK: - Worktree panels in the strip
+
+    @Test("the strip lists the worktree's panels first, in their order, then the tab's own")
+    func stripListsWorktreePanelsFirst() throws {
+        let firstNoteID = UUID()
+        let secondNoteID = UUID()
+        let terminalID = UUID()
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        let firstNote = WorktreePanel(id: UUID(), content: .note(noteID: firstNoteID))
+        let secondNote = WorktreePanel(id: UUID(), content: .note(noteID: secondNoteID))
+        let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
+        let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
+        // The worktree panel in front: `activePanelID` may name one.
+        let side = SideRegion(
+            panels: [transcript, file], activePanelID: secondNote.id,
+            recency: [file.id, transcript.id])
+
+        let tabs = SideRegionStrip.tabs(
+            for: Self.surface(side: side, worktreePanels: [changes, firstNote, secondNote]),
+            noteTitle: { $0 == firstNoteID ? "Plan" : nil },
+            transcriptPath: { $0 == terminalID ? "/w/session.jsonl" : nil })
+
+        let ids: [PanelID] = [changes.id, firstNote.id, secondNote.id, transcript.id, file.id]
+        let worktreeWide: [Bool] = [true, true, true, false, false]
+        let active: [Bool] = [false, false, true, false, false]
+        let titles: [String] = ["Changes", "Plan", "Note", "Transcript", "a.md"]
+        let paths: [String?] = [nil, nil, nil, "/w/session.jsonl", nil]
+        try #require(tabs.count == 5)
+        #expect(tabs.map(\.id) == ids)
+        #expect(tabs.map(\.isWorktreeWide) == worktreeWide)
+        #expect(tabs.map(\.isActive) == active)
+        #expect(tabs.map(\.title) == titles)
+        #expect(tabs.map(\.transcriptPath) == paths)
+        #expect(tabs[1].noteID == firstNoteID, "a note tab names its note, for rename and ×")
+        #expect(tabs[0].noteID == nil)
+
+        // A tab with no worktree panels lists its own alone.
+        let ownOnly = SideRegionStrip.tabs(
+            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in nil })
+        let ownIDs: [PanelID] = [transcript.id, file.id]
+        let ownWorktreeWide: [Bool] = ownOnly.map(\.isWorktreeWide)
+        let expectedOwnWorktreeWide: [Bool] = [false, false]
+        #expect(ownOnly.map(\.id) == ownIDs)
+        #expect(ownWorktreeWide == expectedOwnWorktreeWide)
+    }
+
+    @Test("the + menu offers New Note and Changes, then exactly the notes no panel shows, in order")
+    func addMenuListsExactlyNotesWithoutPanel() {
+        let worktreeID = UUID()
+        let shown = NoteSummary(worktreeID: worktreeID, title: "Shown")
+        let untitled = NoteSummary(worktreeID: worktreeID, title: "")
+        let hidden = NoteSummary(worktreeID: worktreeID, title: "Hidden")
+        let panels: [WorktreePanel] = [
+            WorktreePanel(id: UUID(), content: .changes),
+            WorktreePanel(id: UUID(), content: .note(noteID: shown.id)),
+        ]
+
+        let items = SideRegionStrip.addMenuItems(notes: [untitled, shown, hidden], worktreePanels: panels)
+
+        let expected: [SideStripAddItem] = [
+            .newNote,
+            .changes,
+            .note(id: untitled.id, title: "Note"),
+            .note(id: hidden.id, title: "Hidden"),
+        ]
+        #expect(items == expected)
+        let titles: [String] = ["New Note", "Changes", "Note", "Hidden"]
+        #expect(items.map(\.title) == titles)
+        let distinctIDs = Set(items.map(\.id))
+        #expect(distinctIDs.count == items.count, "each item has its own ID")
+
+        // No notes, or every note shown: the two fixed items alone, Changes
+        // offered even while its panel is open.
+        let fixed: [SideStripAddItem] = [.newNote, .changes]
+        #expect(SideRegionStrip.addMenuItems(notes: [], worktreePanels: []) == fixed)
+        #expect(SideRegionStrip.addMenuItems(notes: [shown], worktreePanels: panels) == fixed)
+    }
+
+    @Test("Changes and a listed note send open; New Note sends nothing itself")
+    func addMenuItemsSendOpen() {
+        let noteID = UUID()
+        let openChanges: PanelOperation? = .open(content: .changes, newPanel: false)
+        let openNote: PanelOperation? = .open(content: .note(noteID: noteID), newPanel: false)
+        #expect(SideRegionStrip.addMenuOperation(for: .changes) == openChanges)
+        #expect(SideRegionStrip.addMenuOperation(for: .note(id: noteID, title: "Plan")) == openNote)
+        #expect(SideRegionStrip.addMenuOperation(for: .newNote) == nil)
     }
 
     // MARK: - The divider
@@ -733,18 +850,57 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - Collapse and expand
 
-    @Test("the expand button shows only while the region is collapsed and has panels")
-    func expandButtonShowsOnlyWhenCollapsedWithPanels() {
+    /// Before the copy holds a surface for the tab, the region's real state
+    /// is unknown: it may be collapsed over panels, where an expand that
+    /// opened Changes would be the wrong operation. So the button waits for
+    /// the surface.
+    @Test("the expand button shows while a loaded region is hidden, never while it shows, and not before it loads")
+    func expandButtonShowsWhileHidden() {
         let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
-        let collapsed = SideRegion(
-            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true)
-        let expanded = SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id])
-        let emptyCollapsed = SideRegion(collapsed: true)
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let ownCollapsed = Self.surface(side: SideRegion(
+            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true))
+        let worktreeCollapsed = Self.surface(
+            side: SideRegion(activePanelID: note.id, collapsed: true), worktreePanels: [note])
+        let empty = Self.surface(side: .empty)
+        let emptyCollapsed = Self.surface(side: SideRegion(collapsed: true))
+        let ownVisible = Self.surface(side: SideRegion(
+            panels: [panel], activePanelID: panel.id, recency: [panel.id]))
+        // `SideRegion.isVisible` alone would call this one hidden: it has no
+        // panel of its own.
+        let worktreeVisible = Self.surface(
+            side: SideRegion(activePanelID: note.id), worktreePanels: [note])
 
-        #expect(PanelSurfaceWorkspaceView.showsExpandButton(side: collapsed))
-        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: expanded))
-        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: emptyCollapsed))
-        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: .empty))
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: nil), "no surface yet")
+        #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: empty))
+        #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: emptyCollapsed))
+        #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: ownCollapsed))
+        #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: worktreeCollapsed))
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: ownVisible))
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: worktreeVisible))
+    }
+
+    @Test("expanding a region with no panel opens the Changes list")
+    func expandOpensChangesOnEmptyRegion() {
+        let openChanges: PanelOperation = .open(content: .changes, newPanel: false)
+        #expect(PanelSurfaceWorkspaceView.expandOperation(surface: nil) == openChanges, "no surface yet")
+        #expect(PanelSurfaceWorkspaceView.expandOperation(surface: Self.surface(side: .empty)) == openChanges)
+        #expect(PanelSurfaceWorkspaceView.expandOperation(
+            surface: Self.surface(side: SideRegion(collapsed: true))) == openChanges)
+    }
+
+    @Test("expanding a collapsed region with panels, its own or the worktree's, uncollapses it")
+    func expandUncollapsesRegionWithPanels() {
+        let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let ownCollapsed = Self.surface(side: SideRegion(
+            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true))
+        let worktreeCollapsed = Self.surface(
+            side: SideRegion(activePanelID: note.id, collapsed: true), worktreePanels: [note])
+
+        let uncollapse: PanelOperation = .setCollapsed(false)
+        #expect(PanelSurfaceWorkspaceView.expandOperation(surface: ownCollapsed) == uncollapse)
+        #expect(PanelSurfaceWorkspaceView.expandOperation(surface: worktreeCollapsed) == uncollapse)
     }
 
     @Test("the side panel button offers to show the region while it is collapsed, and to hide it otherwise")
@@ -756,26 +912,35 @@ struct PanelSurfaceRenderBranchTests {
     /// `⌘\` is bound on the expand button in the workspace tab bar and on the
     /// collapse button in the side region's strip, which draws while the region
     /// is visible. Shown together, the shortcut would fire one of them
-    /// arbitrarily.
-    @Test("the expand and collapse buttons never show together")
+    /// arbitrarily; with the expand button showing whenever a loaded region is
+    /// hidden, one of the two is there to take it once the surface loads.
+    /// Before that, the region draws empty and neither button shows.
+    @Test("exactly one of the expand and collapse buttons shows once the surface loads, and neither before")
     func expandAndCollapseNeverShowTogether() {
         let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
-        let empty: SideRegion = .empty
-        let emptyCollapsed: SideRegion = SideRegion(collapsed: true)
-        let panels: SideRegion = SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id])
-        let panelsCollapsed: SideRegion = SideRegion(
-            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true)
-        let regions: [SideRegion] = [empty, emptyCollapsed, panels, panelsCollapsed]
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let empty = Self.surface(side: .empty)
+        let emptyCollapsed = Self.surface(side: SideRegion(collapsed: true))
+        let panels = Self.surface(side: SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id]))
+        let panelsCollapsed = Self.surface(side: SideRegion(
+            panels: [panel], activePanelID: panel.id, recency: [panel.id], collapsed: true))
+        let worktreePanels = Self.surface(side: SideRegion(activePanelID: note.id), worktreePanels: [note])
+        let worktreePanelsCollapsed = Self.surface(
+            side: SideRegion(activePanelID: note.id, collapsed: true), worktreePanels: [note])
+        let surfaces: [WorkspaceTabSurface] = [
+            empty, emptyCollapsed, panels, panelsCollapsed, worktreePanels, worktreePanelsCollapsed,
+        ]
 
-        for side in regions {
-            let showsExpand = PanelSurfaceWorkspaceView.showsExpandButton(side: side)
-            let showsCollapse = side.isVisible
-            let both = showsExpand && showsCollapse
-            #expect(!both, "\(side)")
+        for surface in surfaces {
+            let showsExpand = PanelSurfaceWorkspaceView.showsExpandButton(surface: surface)
+            // The strip, and with it the collapse button, draws exactly while
+            // the region shows.
+            let showsCollapse = surface.isSideVisible
+            #expect(showsExpand != showsCollapse, "exactly one of the two shows: \(surface)")
         }
-        // Each button does show for one of the four, so the check above is
-        // not satisfied by a button that never shows.
-        #expect(PanelSurfaceWorkspaceView.showsExpandButton(side: panelsCollapsed))
-        #expect(panels.isVisible)
+
+        // With no surface yet the view draws no side region, so the strip and
+        // its collapse button do not draw, and the expand button waits too.
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: nil), "neither shows before the surface loads")
     }
 }

@@ -17,9 +17,10 @@ import TestSupport
 // (`daemonCapabilitiesFetcher`, `panelGetFetcher`, ...), so nothing touches
 // the network or `~/tbd`.
 //
-// Regression coverage for "a new worktree opens on its Notes tab": the daemon
-// appends the note LAST in tab order, so every `?? 0` / `min(idx, count - 1)`
-// fallback in the app resolved a missing or stale selection to Notes.
+// Regression coverage for a missing or stale selection landing on the last
+// tab: every `?? 0` / `min(idx, count - 1)` fallback in the app spelled its
+// own default, and the clamp resolved a stale selection to whatever tab was
+// last rather than to the agent at the front.
 
 @MainActor
 @Suite("Active tab resolution")
@@ -72,31 +73,25 @@ struct ActiveTabResolutionTests {
         TBDShared.Tab(id: id, content: .note(noteID: id), label: nil)
     }
 
+    /// A file viewer tab: no terminal backs it, so a terminal reconcile keeps it.
+    private func fileTab(_ id: UUID) -> TBDShared.Tab {
+        TBDShared.Tab(id: id, content: .codeViewer(id: id, path: "/w/a.md"), label: nil)
+    }
+
     // MARK: - Resolver defaults
 
-    @Test("nothing selected resolves to the agent tab, never the trailing note")
-    func unselectedWorktreeResolvesToAgentNotNote() {
+    @Test("nothing selected resolves to the first tab, never the trailing one")
+    func unselectedWorktreeResolvesToFirstTab() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), noteTab(note)]
+            let shell = UUID()
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), terminalTab(shell), fileTab(file)]
 
             #expect(state.activeTabIndices[worktreeID] == nil)
             #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
-        }
-    }
-
-    @Test("a note-only worktree still shows its note at index 0")
-    func noteOnlyWorktreeResolvesToTheNote() {
-        withState { state in
-            let worktreeID = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [noteTab(note)]
-
-            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == note)
         }
     }
 
@@ -110,34 +105,33 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    @Test("an in-range selection is returned verbatim, note tab or not")
+    @Test("an in-range selection is returned verbatim")
     func inRangeSelectionIsNeverOverridden() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude), noteTab(note)]
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude), fileTab(file)]
             state.activeTabIndices[worktreeID] = 1
 
             #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 1)
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == note)
+            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == file)
         }
     }
 
     // MARK: - Stale index
 
-    @Test("a stale out-of-range index falls forward to the first non-note tab")
-    func staleIndexResolvesToFirstNonNoteTab() {
+    @Test("a stale out-of-range index falls back to the first tab, not a clamp onto the last")
+    func staleIndexResolvesToFirstTab() {
         withState { state in
             let worktreeID = UUID()
-            let leadingNote = UUID()
             let claude = UUID()
-            let trailingNote = UUID()
-            // A leading note proves the fallback is "first NON-NOTE", not "first".
-            state.tabs[worktreeID] = [noteTab(leadingNote), terminalTab(claude), noteTab(trailingNote)]
+            let shell = UUID()
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), terminalTab(shell), fileTab(file)]
             state.activeTabIndices[worktreeID] = 7  // stale — the array used to be longer
 
-            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 1)
+            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
         }
     }
@@ -151,43 +145,22 @@ struct ActiveTabResolutionTests {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let note = UUID()
+            let shell = UUID()
             let arrivals = (0..<6).map { _ in UUID() }
-            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), noteTab(note)]
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), terminalTab(shell, label: "shell")]
             state.tabStateHydratedWorktreeIDs.insert(worktreeID)
             // Out of range now (2 tabs), back in range once the array grows to 8.
             state.activeTabIndices[worktreeID] = 5
 
             state.reconcileTabs(
                 worktreeID: worktreeID,
-                terminals: ([claude] + arrivals).map {
+                terminals: ([claude, shell] + arrivals).map {
                     terminal($0, worktreeID: worktreeID, label: "t")
                 }
             )
 
             #expect(state.activeTabIndices[worktreeID] == nil,
                     "a stale index must be cleared, never re-bound to whatever slid into it")
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
-        }
-    }
-
-    @Test("a stale index that lands back in range is not pinned by reconcileNoteTabs")
-    func staleIndexIsNotPinnedByReconcileNoteTabs() {
-        withState { state in
-            let worktreeID = UUID()
-            let claude = UUID()
-            let noteIDs = (0..<4).map { _ in UUID() }
-            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude")]
-            // Out of range now (1 tab), back in range once the notes arrive.
-            state.activeTabIndices[worktreeID] = 3
-
-            state.reconcileNoteTabs(
-                worktreeID: worktreeID,
-                notes: noteIDs.map { NoteSummary(id: $0, worktreeID: worktreeID, title: "n") }
-            )
-
-            #expect(state.activeTabIndices[worktreeID] == nil,
-                    "a stale index must be cleared, never re-bound to an arriving note")
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
         }
     }
@@ -314,34 +287,37 @@ struct ActiveTabResolutionTests {
 
     // MARK: - Auto-close of the `setup` tab
 
-    /// `[claude, setup, note] -> [claude, note]`, the shape produced on every
-    /// worktree create while `auto_close_setup_enabled` is on.
+    /// `[claude, setup, shell] -> [claude, shell]`, the shape produced on
+    /// every worktree create while `auto_close_setup_enabled` is on.
     private func runSetupAutoClose(
         startingOn startIndex: Int?,
-        _ assertions: (AppState, _ worktreeID: UUID, _ claude: UUID, _ note: UUID) -> Void
+        _ assertions: (AppState, _ worktreeID: UUID, _ claude: UUID, _ shell: UUID) -> Void
     ) {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
             let setup = UUID()
-            let note = UUID()
+            let shell = UUID()
             state.tabs[worktreeID] = [
                 terminalTab(claude, label: "Claude"),
                 terminalTab(setup, label: "setup"),
-                noteTab(note),
+                terminalTab(shell, label: "shell"),
             ]
-            state.worktreeTabOrders[worktreeID] = [claude, setup, note]
+            state.worktreeTabOrders[worktreeID] = [claude, setup, shell]
             // Already hydrated, so reconcileTabs schedules no tab-state re-fetch.
             state.tabStateHydratedWorktreeIDs.insert(worktreeID)
             if let startIndex { state.activeTabIndices[worktreeID] = startIndex }
 
             state.reconcileTabs(
                 worktreeID: worktreeID,
-                terminals: [terminal(claude, worktreeID: worktreeID, label: "Claude")]
+                terminals: [
+                    terminal(claude, worktreeID: worktreeID, label: "Claude"),
+                    terminal(shell, worktreeID: worktreeID, label: "shell"),
+                ]
             )
 
-            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, note])
-            assertions(state, worktreeID, claude, note)
+            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, shell])
+            assertions(state, worktreeID, claude, shell)
         }
     }
 
@@ -352,7 +328,7 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    @Test("removing the setup tab while on setup falls back to claude, not the note")
+    @Test("removing the setup tab while on setup falls back to claude, not the tab that slid into its slot")
     func setupAutoCloseFromSetupFallsBackToClaude() {
         runSetupAutoClose(startingOn: 1) { state, worktreeID, claude, _ in
             #expect(state.activeTabIndices[worktreeID] == nil,
@@ -368,20 +344,20 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    // MARK: - Deliberate note selections survive reconciles
+    // MARK: - Deliberate selections survive reconciles
 
-    @Test("an explicit note selection survives a reconcile that adds and removes tabs")
-    func explicitNoteSelectionSurvivesReconcileTabs() {
+    @Test("an explicit selection of a viewer tab survives a reconcile that adds and removes tabs")
+    func explicitViewerSelectionSurvivesReconcileTabs() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
             let setup = UUID()
-            let note = UUID()
+            let file = UUID()
             let newShell = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude), terminalTab(setup), noteTab(note)]
-            state.worktreeTabOrders[worktreeID] = [claude, setup, note]
+            state.tabs[worktreeID] = [terminalTab(claude), terminalTab(setup), fileTab(file)]
+            state.worktreeTabOrders[worktreeID] = [claude, setup, file]
             state.tabStateHydratedWorktreeIDs.insert(worktreeID)
-            state.activeTabIndices[worktreeID] = 2  // the user deliberately opened Notes
+            state.activeTabIndices[worktreeID] = 2  // the user deliberately opened the file
 
             // setup disappears and a brand new shell appears in the same poll.
             state.reconcileTabs(worktreeID: worktreeID, terminals: [
@@ -389,49 +365,51 @@ struct ActiveTabResolutionTests {
                 terminal(newShell, worktreeID: worktreeID, label: "shell"),
             ])
 
-            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, note, newShell])
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == note,
-                    "a deliberate note selection must never be overridden")
+            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, file, newShell])
+            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == file,
+                    "a deliberate selection must never be overridden")
         }
     }
 
-    @Test("appending a note tab never steals the selection")
-    func reconcileNoteTabsDoesNotStealSelection() {
+    // MARK: - Notes are never workspace tabs
+
+    /// A note shows in the side panel as a worktree panel. Adopting the notes
+    /// poll adds no tab, and a reconcile drops a note tab still in memory from
+    /// an older build, with its layout, keeping the selection on its tab.
+    @Test("no note becomes a workspace tab: adopting notes adds none, and a reconcile drops one already there")
+    func noNoteBecomesWorkspaceTab() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let setup = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude), terminalTab(setup)]
-            state.activeTabIndices[worktreeID] = 1  // on setup
+            let shell = UUID()
+            let note = NoteSummary(worktreeID: worktreeID, title: "Notes")
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude")]
+            state.tabStateHydratedWorktreeIDs.insert(worktreeID)
 
-            state.reconcileNoteTabs(
-                worktreeID: worktreeID,
-                notes: [NoteSummary(id: note, worktreeID: worktreeID, title: "Notes")]
-            )
+            state.adoptNotes([note], worktreeIDs: [worktreeID])
 
-            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, setup, note])
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == setup)
-        }
-    }
+            let expectedNotes: [NoteSummary] = [note]
+            #expect(state.notes[worktreeID] == expectedNotes)
+            let afterAdopt: [UUID] = state.tabs[worktreeID]?.map(\.id) ?? []
+            let claudeOnly: [UUID] = [claude]
+            #expect(afterAdopt == claudeOnly, "adopting notes adds no tab")
 
-    @Test("an explicit note selection survives a note reconcile that drops another note")
-    func explicitNoteSelectionSurvivesNoteReconcile() {
-        withState { state in
-            let worktreeID = UUID()
-            let claude = UUID()
-            let deletedNote = UUID()
-            let keptNote = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude), noteTab(deletedNote), noteTab(keptNote)]
-            state.activeTabIndices[worktreeID] = 2  // on the kept note
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), noteTab(note.id), terminalTab(shell)]
+            state.layouts[note.id] = .pane(.note(noteID: note.id))
+            state.activeTabIndices[worktreeID] = 2  // on shell
 
-            state.reconcileNoteTabs(
-                worktreeID: worktreeID,
-                notes: [NoteSummary(id: keptNote, worktreeID: worktreeID, title: "Kept")]
-            )
+            state.reconcileTabs(worktreeID: worktreeID, terminals: [
+                terminal(claude, worktreeID: worktreeID, label: "Claude"),
+                terminal(shell, worktreeID: worktreeID, label: "shell"),
+            ])
 
-            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, keptNote])
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == keptNote)
+            let afterReconcile: [UUID] = state.tabs[worktreeID]?.map(\.id) ?? []
+            let terminalsOnly: [UUID] = [claude, shell]
+            #expect(afterReconcile == terminalsOnly, "the note tab is dropped")
+            #expect(state.layouts[note.id] == nil, "and its layout with it")
+            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == shell,
+                    "the selection stays on the tab it was on")
+            #expect(state.notes[worktreeID] == expectedNotes, "the note itself stays")
         }
     }
 
@@ -561,14 +539,14 @@ struct ActiveTabResolutionTests {
             let worktreeID = UUID()
             let claude = UUID()
             let setup = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [noteTab(note)]
+            let file = UUID()
+            state.tabs[worktreeID] = [fileTab(file)]
             var hydrated = false
             var fetchCount = 0
             state.tabStatesFetcher = { _ in
                 fetchCount += 1
                 return hydrated
-                    ? TabListResponse(tabs: [], order: [claude, setup, note], activeTabID: claude)
+                    ? TabListResponse(tabs: [], order: [claude, setup, file], activeTabID: claude)
                     : TabListResponse(tabs: [], order: [], activeTabID: nil)
             }
             // In-memory append order from the terminal list — NOT the daemon's.
@@ -590,7 +568,7 @@ struct ActiveTabResolutionTests {
             #expect(state.tabStateHydratedWorktreeIDs.contains(worktreeID),
                     "the retry must latch once the daemon's answer carries content")
 
-            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, setup, note])
+            #expect(state.tabs[worktreeID]?.map(\.id) == [claude, setup, file])
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude,
                     "the daemon's persisted active tab must win once it exists")
         }

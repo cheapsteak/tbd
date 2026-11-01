@@ -66,6 +66,48 @@ struct PanelContentResolutionTests {
         #expect(noteID == id)
     }
 
+    @Test func changesResolvesToChanges() throws {
+        let opts = try ContentOptions.parse(["--changes"])
+        #expect(try resolvePanelContent(opts) == .changes)
+    }
+
+    @Test func changesWithAnotherContentFlagIsRefusedNamingAllFive() throws {
+        let opts = try ContentOptions.parse(["--changes", "--web", "https://example.com"])
+        do {
+            _ = try resolvePanelContent(opts)
+            Issue.record("expected a refusal")
+        } catch {
+            let message = "\(error)"
+            for flag in ["--file", "--web", "--transcript", "--note", "--changes"] {
+                #expect(message.contains(flag))
+            }
+        }
+    }
+
+    @Test func renderWithChangesIsRefused() throws {
+        let opts = try ContentOptions.parse(["--changes", "--render"])
+        #expect(throws: CLIError.self) {
+            _ = try resolvePanelContent(opts)
+        }
+    }
+
+    @Test func panelOpenChangesIsAnOpenOfChanges() throws {
+        let cmd = try PanelOpen.parse(["wt", "--changes"])
+        #expect(try cmd.operation() == .open(content: .changes, newPanel: false))
+    }
+
+    @Test func navigateRefusesNoteAndChanges() throws {
+        for flag in [["--note", UUID().uuidString], ["--changes"]] {
+            let cmd = try PanelNavigate.parse(["wt", "--panel", UUID().uuidString] + flag)
+            #expect(throws: CLIError.self) { _ = try cmd.operation() }
+        }
+    }
+
+    @Test func navigateStillAcceptsAFile() throws {
+        let cmd = try PanelNavigate.parse(["wt", "--panel", UUID().uuidString, "--file", "/tmp/a.txt"])
+        _ = try cmd.operation()
+    }
+
     @Test func noContentSourceIsInvalid() throws {
         let opts = try ContentOptions.parse([])
         #expect(throws: CLIError.self) {
@@ -432,6 +474,42 @@ struct PanelSideRegionRenderingTests {
         #expect(lines.first?.contains("width 0.40") == true)
     }
 
+    @Test func worktreePanelsComeFirstMarkedWorktreeWide() throws {
+        let noteID = UUID()
+        let notePanelID = UUID()
+        let changesPanelID = UUID()
+        var tab = surface(active: webID)
+        tab.worktreePanels = [
+            WorktreePanel(id: notePanelID, content: .note(noteID: noteID)),
+            WorktreePanel(id: changesPanelID, content: .changes),
+        ]
+        let lines = renderSideRegion(tab)
+        #expect(lines.first?.contains("5 panels") == true)
+        let note = try #require(lines.firstIndex(where: { $0.contains("panel \(notePanelID)") }))
+        let changes = try #require(lines.firstIndex(where: { $0.contains("panel \(changesPanelID)") }))
+        let file = try #require(lines.firstIndex(where: { $0.contains("panel \(fileID)") }))
+        #expect(note < changes && changes < file)
+        #expect(lines[note].contains("(worktree-wide)") && lines[note].contains("note \(noteID)"))
+        #expect(lines[changes].contains("(worktree-wide)") && lines[changes].hasSuffix("changes"))
+        #expect(!lines[file].contains("worktree-wide"))
+    }
+
+    @Test func aWorktreePanelInFrontIsTheOnlyActiveOne() throws {
+        let changesPanelID = UUID()
+        var tab = surface(active: changesPanelID)
+        tab.worktreePanels = [WorktreePanel(id: changesPanelID, content: .changes)]
+        let marked = renderSideRegion(tab).filter { $0.contains("[ACTIVE]") }
+        #expect(marked.count == 1)
+        #expect(marked.first?.contains("panel \(changesPanelID)") == true)
+    }
+
+    @Test func aRegionOfOnlyWorktreePanelsIsNotEmpty() {
+        var tab = WorkspaceTabSurface(
+            id: UUID(), worktreeID: UUID(), primary: .terminal(terminalID: UUID()))
+        tab.worktreePanels = [WorktreePanel(id: UUID(), content: .changes)]
+        #expect(renderSideRegion(tab).first?.contains("1 panel,") == true)
+    }
+
     @Test func anEmptyRegionSaysSo() {
         let tab = WorkspaceTabSurface(
             id: UUID(), worktreeID: UUID(), primary: .terminal(terminalID: UUID()))
@@ -468,6 +546,11 @@ struct PanelSideRegionRenderingTests {
     @Test func filePresentationShownWhenNonAutomatic() {
         let content = PanelContent.file(FileReference(path: "/a.md", presentation: .rendered))
         #expect(describe(content) == "file /a.md (rendered)")
+    }
+
+    @Test func changesIsDescribedByItsKind() {
+        let content = PanelContent.changes
+        #expect(describe(content) == "changes")
     }
 }
 

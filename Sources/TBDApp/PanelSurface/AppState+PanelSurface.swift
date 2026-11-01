@@ -389,15 +389,12 @@ extension AppState {
         }
     }
 
-    /// Closes one side-region panel from its tab's ×. A note panel closes as
-    /// a workspace note tab does (`closeTab`): when the note has content the
-    /// user is asked first, and a declined confirmation sends nothing; then
-    /// the panel closes, and only once the daemon has applied that close is
-    /// the note deleted. One rule holds on every tab: every note in a
-    /// worktree has its own workspace tab, whose × already asks and then
-    /// deletes the note, so × on the note's side tab does the same, and
-    /// deleting the note removes its workspace tab too. Any other panel just
-    /// closes.
+    /// Closes one side-region panel from its tab's ×. A note panel, which
+    /// every workspace tab of the worktree shows, closes and takes its note
+    /// with it: when the note has content the user is asked first, and a
+    /// declined confirmation sends nothing; then the panel closes, and only
+    /// once the daemon has applied that close is the note deleted. Any other
+    /// panel, the Changes list included, just closes.
     ///
     /// Whether the note has content (`noteHasContent`) is asked once any save
     /// an open editor of the note still holds on its debounce has landed
@@ -409,7 +406,9 @@ extension AppState {
     /// arrives.
     ///
     /// The `close` operation itself keeps the note — the daemon action set's
-    /// close sends it alone — so an agent's `tbd panel close` does too.
+    /// close sends it alone — so an agent's `tbd panel close` and the Notes
+    /// button (`toggleNotesPanel`) do too, and the strip's + menu then lists
+    /// the note.
     func closeSidePanel(
         worktreeID: UUID, tabID: UUID, panelID: PanelID, content: PanelContent
     ) async {
@@ -431,6 +430,36 @@ extension AppState {
         await deleteNote(noteID: noteID, worktreeID: worktreeID)
     }
 
+    /// ⌘⇧E (side panel notes and Changes spec, "⌘⇧E"): toggles the Changes
+    /// panel in the tab on screen — the single selected local worktree's
+    /// resolved active tab — by `PaneActions.changesToggleDecision`, so it
+    /// opens Changes, brings it forward, or closes it.
+    ///
+    /// A tab on the daemon path with no surface in the copy yet opens
+    /// Changes, though the workspace tab bar draws no ◫ there until the
+    /// surface loads; `applyPanelOperation` sends any pending tab sync first,
+    /// so the daemon knows the tab. A tab that renders legacy (`workspaceRenderPath`) has
+    /// no side region, so ⌘⇧E sends nothing there and beeps
+    /// (`refusalBeep`). So does a worktree showing Session History
+    /// (`historyActiveWorktrees`), which fills the detail area in place of
+    /// the tab and its side region.
+    ///
+    /// Does nothing without that tab: no selection, several worktrees, a
+    /// remote one, or a worktree with no tabs.
+    func toggleChangesPanel() {
+        guard selectedWorktreeIDs.count == 1,
+              let worktree = selectedLocalWorktree,
+              let tab = resolvedActiveTab(worktreeID: worktree.id) else { return }
+        guard !historyActiveWorktrees.contains(worktree.id),
+              case .daemon(let surface) = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id)
+        else {
+            refusalBeep()
+            return
+        }
+        let decision = PaneActions.changesToggleDecision(surface: surface)
+        sendPanelOperation(worktreeID: worktree.id, tabID: tab.id, decision.operation(opening: .changes))
+    }
+
     // MARK: - Tab sync
 
     /// The observer on `tabs`. Marks a worktree dirty when its tab IDs, order,
@@ -442,10 +471,10 @@ extension AppState {
     ///
     /// Hung off the property rather than its call sites because tabs are
     /// created, closed, reordered, relabelled and re-pointed from many places
-    /// (terminal and note reconciliation, notes, the PR tab, the file viewer,
-    /// terminal revival). A worktree's list arriving for the first time —
-    /// at connect, or for a new worktree — differs from the absent signature,
-    /// so it is marked dirty too.
+    /// (terminal reconciliation, the PR tab, the file viewer, terminal
+    /// revival). A worktree's list arriving for the first time — at connect,
+    /// or for a new worktree — differs from the absent signature, so it is
+    /// marked dirty too.
     ///
     /// A change also drops the converter verdicts of tabs no list holds any
     /// more (`legacyConverterVerdicts`).
@@ -540,9 +569,9 @@ extension AppState {
         schedulePanelTabSyncFlush()
     }
 
-    /// Records that both of these worktrees' tab sources have been reconciled
-    /// against a fetch (see `panelSyncReadyWorktrees`), and flushes any that
-    /// were waiting dirty.
+    /// Records that these worktrees' tabs have been reconciled against a
+    /// fetch (see `panelSyncReadyWorktrees`), and flushes any that were
+    /// waiting dirty.
     func markPanelSyncReady(worktreeIDs: Set<UUID>) {
         let newlyReady = worktreeIDs.subtracting(panelSyncReadyWorktrees)
         guard !newlyReady.isEmpty else { return }

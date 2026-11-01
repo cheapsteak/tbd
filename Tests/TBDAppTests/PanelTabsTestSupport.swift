@@ -58,6 +58,14 @@ enum PanelTabsFixture {
             Issue.record("unexpected note.delete")
             throw UnstubbedSeam(seam: "note.delete")
         }
+        state.noteCreator = { @MainActor _, _ in
+            Issue.record("unexpected note.create")
+            throw UnstubbedSeam(seam: "note.create")
+        }
+        // The real one plays the system alert sound.
+        state.refusalBeep = { @MainActor in
+            Issue.record("unexpected refusal beep")
+        }
         try await body(state)
     }
 

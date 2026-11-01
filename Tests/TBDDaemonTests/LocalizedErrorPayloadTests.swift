@@ -96,6 +96,7 @@ struct LocalizedErrorPayloadTests {
     private static let panelID = PanelID()
     private static let owningTabID = WorkspaceTabID()
     private static let incomingTabID = WorkspaceTabID()
+    private static let noteID = UUID()
 
     private static let gitCommand = "git worktree add /private/tmp/acme/wt-7 feature/acme-7"
     private static let gitStderr = "fatal: 'feature/acme-7' is already checked out"
@@ -169,8 +170,20 @@ struct LocalizedErrorPayloadTests {
                 )
             ),
             (
+                "PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree",
+                PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree(
+                    panelID: Self.panelID,
+                    existingWorktreeID: Self.worktreeID,
+                    incomingWorktreeID: Self.repoID
+                )
+            ),
+            (
                 "PanelSurfaceStoreError.invalidSurface",
                 PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel])
+            ),
+            (
+                "PanelSurfaceStoreError.noteNotInWorktree",
+                PanelSurfaceStoreError.noteNotInWorktree(noteID: Self.noteID, worktreeID: Self.worktreeID)
             ),
         ]
     }
@@ -266,9 +279,23 @@ struct LocalizedErrorPayloadTests {
             "PanelSurfaceStoreError.panelHistoryOwnedByOtherTab"
         )
         assertRenders(
+            PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree(
+                panelID: Self.panelID,
+                existingWorktreeID: Self.worktreeID,
+                incomingWorktreeID: Self.repoID
+            ),
+            [Self.panelID.uuidString, Self.worktreeID.uuidString, Self.repoID.uuidString],
+            "PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree"
+        )
+        assertRenders(
             PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel]),
             [Self.incomingTabID.uuidString, "noActivePanel"],
             "PanelSurfaceStoreError.invalidSurface"
+        )
+        assertRenders(
+            PanelSurfaceStoreError.noteNotInWorktree(noteID: Self.noteID, worktreeID: Self.worktreeID),
+            [Self.noteID.uuidString, Self.worktreeID.uuidString],
+            "PanelSurfaceStoreError.noteNotInWorktree"
         )
     }
 

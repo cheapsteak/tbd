@@ -25,11 +25,89 @@ struct PanelSurfaceWireTests {
             revision: 7)
     }
 
+    /// `sampleSurface()` with a note panel in front and a Changes panel,
+    /// both worktree panels.
+    private func sampleSurfaceWithWorktreePanels() -> WorkspaceTabSurface {
+        var surface = sampleSurface()
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        surface.worktreePanels = [note, changes]
+        surface.side.activePanelID = note.id
+        return surface
+    }
+
+    /// `value` encoded, then with `key` removed from the top-level object and
+    /// from each object in `nestedIn`'s array: the JSON a build that predates
+    /// the field writes. Records an issue when `key` was not there to remove.
+    private func encodedWithout<T: Encodable>(
+        _ key: String, from value: T, nestedIn arrayKey: String? = nil
+    ) throws -> Data {
+        let encoded = try JSONEncoder().encode(value)
+        let json = try JSONSerialization.jsonObject(with: encoded)
+        var object = try #require(json as? [String: Any])
+        let hadKey = object.removeValue(forKey: key) != nil
+        #expect(hadKey, "precondition: \(key) was encoded")
+        if let arrayKey {
+            let nested = try #require(object[arrayKey] as? [[String: Any]])
+            object[arrayKey] = nested.map { element -> [String: Any] in
+                var stripped = element
+                stripped.removeValue(forKey: key)
+                return stripped
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
     @Test func panelGetRoundTrips() throws {
         let result = PanelGetResult(tabs: [sampleSurface()], activeTabID: UUID())
         #expect(try roundTrip(result) == result)
         let params = PanelGetParams(worktreeID: UUID(), tabID: nil)
         #expect(try roundTrip(params) == params)
+    }
+
+    @Test func roundTripKeepsWorktreePanelsAndChanges() throws {
+        let surface = sampleSurfaceWithWorktreePanels()
+        #expect(PanelSurfaceValidator.violations(in: surface).isEmpty, "precondition: a valid surface")
+        let decoded = try roundTrip(surface)
+        #expect(decoded == surface)
+        let decodedContents: [WorktreePanelContent] = decoded.worktreePanels.map(\.content)
+        #expect(decodedContents.contains(.changes))
+
+        let result = PanelGetResult(
+            tabs: [surface], activeTabID: surface.id, worktreePanels: surface.worktreePanels)
+        let decodedResult = try roundTrip(result)
+        #expect(decodedResult == result)
+        #expect(decodedResult.worktreePanels == surface.worktreePanels)
+
+        let open = PanelOperation.open(content: .changes, newPanel: false)
+        #expect(try roundTrip(open) == open)
+    }
+
+    /// An app or CLI built before worktree panels talks to this daemon, or the
+    /// reverse: a surface without the key decodes, with no worktree panels.
+    @Test func surfaceWithoutWorktreePanelsKeyDecodes() throws {
+        let surface = sampleSurfaceWithWorktreePanels()
+        let data = try encodedWithout("worktreePanels", from: surface)
+
+        let decoded = try JSONDecoder().decode(WorkspaceTabSurface.self, from: data)
+
+        var expected = surface
+        expected.worktreePanels = []
+        #expect(decoded == expected)
+    }
+
+    @Test func getResultWithoutWorktreePanelsKeyDecodes() throws {
+        let surface = sampleSurfaceWithWorktreePanels()
+        let result = PanelGetResult(
+            tabs: [surface], activeTabID: surface.id, worktreePanels: surface.worktreePanels)
+        let data = try encodedWithout("worktreePanels", from: result, nestedIn: "tabs")
+
+        let decoded = try JSONDecoder().decode(PanelGetResult.self, from: data)
+
+        var expectedTab = surface
+        expectedTab.worktreePanels = []
+        #expect(decoded == PanelGetResult(tabs: [expectedTab], activeTabID: surface.id))
+        #expect(decoded.worktreePanels.isEmpty)
     }
 
     @Test func panelApplyRoundTrips() throws {

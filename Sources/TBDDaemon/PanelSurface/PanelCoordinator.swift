@@ -71,18 +71,15 @@ public actor PanelCoordinator {
     /// tab in the worktree. Either way the result names the worktree's active
     /// tab — the `worktree.activeTabID` column the app writes through
     /// `worktree.setActiveTab`, one row to read — so a tab-scoped reply still
-    /// says whether its tab is the one the user is looking at.
+    /// says whether its tab is the one the user is looking at, and carries
+    /// the worktree's panels, so a reader finds them even when no tab has a
+    /// surface. The tabs and the panels come from one store read
+    /// (`PanelSurfaceStore.panelSnapshot`), so they always agree.
     public func get(worktreeID: UUID, tabID: UUID?) async throws -> PanelGetResult {
         let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID)
-        guard let tabID else {
-            let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
-            return PanelGetResult(tabs: surfaces, activeTabID: activeTabID)
-        }
-        guard let surface = try await db.panelSurface.surface(tabID: tabID),
-              surface.worktreeID == worktreeID else {
-            return PanelGetResult(tabs: [], activeTabID: activeTabID)
-        }
-        return PanelGetResult(tabs: [surface], activeTabID: activeTabID)
+        let snapshot = try await db.panelSurface.panelSnapshot(worktreeID: worktreeID, tabID: tabID)
+        return PanelGetResult(
+            tabs: snapshot.tabs, activeTabID: activeTabID, worktreePanels: snapshot.worktreePanels)
     }
 
     public func apply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
@@ -97,9 +94,12 @@ public actor PanelCoordinator {
             return try reply(to: prior, for: envelope)
         }
 
-        // 2. Resource existence for open/navigate destinations. It reads other
-        // tables, so it stays outside the apply transaction; a resource
-        // vanishing right after this is a separate, inherent race.
+        // 2. Resource existence for open/navigate destinations, a cheap check
+        // outside the apply transaction. A note can still be deleted right
+        // after it, so `applyReducing` checks a note panel the operation adds
+        // again inside its transaction, and that refusal maps to the same
+        // `invalidResource`. A terminal vanishing after this is a separate,
+        // inherent race.
         try await validateResourceExists(in: envelope.operation, worktreeID: envelope.worktreeID)
 
         // 3. Transactional load → reduce → persist. Loading inside the store's
@@ -126,9 +126,14 @@ public actor PanelCoordinator {
             }
         }
 
-        let outcome = try await db.panelSurface.applyReducing(
-            operationID: envelope.operationID, tabID: envelope.tabID,
-            worktreeID: envelope.worktreeID, now: now(), reduce: reduce)
+        let outcome: PanelSurfaceStore.ApplyOutcome?
+        do {
+            outcome = try await db.panelSurface.applyReducing(
+                operationID: envelope.operationID, tabID: envelope.tabID,
+                worktreeID: envelope.worktreeID, now: now(), reduce: reduce)
+        } catch PanelSurfaceStoreError.noteNotInWorktree(let noteID, _) {
+            throw PanelCoordinatorError.invalidResource("note \(noteID) not in worktree")
+        }
 
         guard let outcome else {
             // No readable surface row for this tab under the claimed worktree.
@@ -142,7 +147,8 @@ public actor PanelCoordinator {
     /// result without broadcasting; a reused operation ID is refused; and a
     /// fresh commit is broadcast (step 5), AFTER the commit, never before: a
     /// thrown reduce or persist rolls the transaction back and never gets
-    /// here.
+    /// here. The one delta carries the operated tab, then every other tab
+    /// the commit rewrote because the worktree's panel list changed.
     private func reply(
         to outcome: PanelSurfaceStore.ApplyOutcome, for envelope: PanelOperationEnvelope
     ) throws -> PanelApplyResult {
@@ -151,10 +157,10 @@ public actor PanelCoordinator {
             return PanelApplyResult(tab: prior.tab, replayed: true)
         case .operationIDReused:
             throw PanelCoordinatorError.operationIDReused(envelope.operationID)
-        case .applied(let result):
+        case .applied(let result, let siblings):
             broadcast(.panelSurfaceChanged(PanelSurfaceDelta(
                 worktreeID: envelope.worktreeID,
-                tabs: [result.tab],
+                tabs: [result.tab] + siblings,
                 removedTabIDs: [],
                 activeTabID: nil,
                 originOperationID: envelope.operationID)))
@@ -273,7 +279,7 @@ public actor PanelCoordinator {
                   note.worktreeID == worktreeID else {
                 throw PanelCoordinatorError.invalidResource("note \(noteID) not in worktree")
             }
-        case .file, .web:
+        case .file, .web, .changes:
             break
         }
     }
@@ -291,13 +297,20 @@ extension StateSubscriptionManager {
             via: { broadcast(delta: $0) })
     }
 
-    /// Tells the app that a scratch promote moved these panel surfaces to
-    /// `worktreeID`, the new repo's main worktree, with their tabs
-    /// (`WorktreeStore.promoteScratchMigration` returns them), as one
-    /// `panelSurfaceChanged` carrying them. The app adopts each under
-    /// `worktreeID`, which drops it from the scratch worktree's entry. Sent
-    /// after the promote commits; nothing is sent when nothing moved.
-    func broadcastPanelSurfacesMoved(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
+    /// Tells the app that a write outside a panel operation stored these
+    /// surfaces under `worktreeID`, as one `panelSurfaceChanged` carrying
+    /// them; the app adopts each under `worktreeID`. Sent after the write
+    /// commits, and nothing is sent when no surface changed. The writes:
+    ///
+    /// - **A scratch promote** moved these surfaces to `worktreeID`, the new
+    ///   repo's main worktree, with their tabs, and rewrote the main
+    ///   worktree's own surfaces that the merged worktree panels changed
+    ///   (`WorktreeStore.promoteScratchMigration` returns both). Adopting a
+    ///   moved surface under `worktreeID` drops it from the scratch
+    ///   worktree's entry.
+    /// - **A change to `worktreeID`'s panel list** rewrote these surfaces:
+    ///   `note.delete` removing the note's panel (`NoteStore.delete`).
+    func broadcastPanelSurfacesChanged(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
         broadcastPanelSurfaceChanged(
             worktreeID: worktreeID, tabs: surfaces, removedTabIDs: [],
             via: { broadcast(delta: $0) })

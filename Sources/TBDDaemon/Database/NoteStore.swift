@@ -47,6 +47,20 @@ struct NoteRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     }
 }
 
+/// What `NoteStore.delete` changed besides the note row: the workspace tab
+/// surfaces of the note's worktree it rewrote to drop the note's worktree
+/// panel, in position order, for the caller to broadcast. Empty when no
+/// panel showed the note.
+public struct NoteDeletion: Sendable, Equatable {
+    public let worktreeID: UUID
+    public let changedSurfaces: [WorkspaceTabSurface]
+
+    public init(worktreeID: UUID, changedSurfaces: [WorkspaceTabSurface]) {
+        self.worktreeID = worktreeID
+        self.changedSurfaces = changedSurfaces
+    }
+}
+
 /// Provides CRUD operations for notes.
 ///
 /// Note CONTENT is file-backed at `~/tbd/notes/<worktreeID>/<noteID>.md`
@@ -217,12 +231,30 @@ public struct NoteStore: Sendable {
         return overlayContent(updated)
     }
 
-    /// Delete a note by ID. Deliberately does NOT delete the note's content
-    /// file — closing a note tab removes the row, the `.md` survives on disk.
-    /// (Orphan-file GC is out of scope; files are intentionally retained.)
-    public func delete(id: UUID) async throws {
-        _ = try await writer.write { db in
-            try NoteRecord.deleteOne(db, key: id.uuidString)
+    /// Delete a note by ID, and the worktree panel showing it, in one
+    /// transaction (side panel notes spec, "Notes follow their panels"), so
+    /// no panel is left showing a deleted note. Every readable surface of the
+    /// worktree is rewritten without the panel
+    /// (`PanelSurfaceStore.removeWorktreePanels`), and the result names them
+    /// for the caller to broadcast. Nil when no row existed, or when its
+    /// worktree ID does not parse, so no panel can name it.
+    ///
+    /// Deliberately does NOT delete the note's content file — deleting a
+    /// note removes the row, the `.md` survives on disk. (Orphan-file GC is
+    /// out of scope; files are intentionally retained.)
+    @discardableResult
+    public func delete(id: UUID, now: Date = Date()) async throws -> NoteDeletion? {
+        try await writer.write { db -> NoteDeletion? in
+            guard let record = try NoteRecord.fetchOne(db, key: id.uuidString) else { return nil }
+            try record.delete(db)
+            guard let worktreeID = UUID(uuidString: record.worktreeID) else {
+                decodeLogger.warning(
+                    "Deleted note row \(record.id, privacy: .public) with malformed worktreeID \(record.worktreeID, privacy: .public)")
+                return nil
+            }
+            let changedSurfaces = try PanelSurfaceStore.removeWorktreePanels(
+                showing: .note(noteID: id), worktreeID: worktreeID, now: now, in: db)
+            return NoteDeletion(worktreeID: worktreeID, changedSurfaces: changedSurfaces)
         }
     }
 

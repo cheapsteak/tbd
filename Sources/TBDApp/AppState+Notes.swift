@@ -38,25 +38,90 @@ private enum NoteContentRead: Sendable {
 extension AppState {
     // MARK: - Note Actions
 
-    /// Create a note in a worktree and add a new tab for it.
-    func createNote(worktreeID: UUID) async {
+    /// Create a note in a worktree — from the side strip's New Note, or from
+    /// the Notes button in a worktree with no note — and show it in the side
+    /// panel of the workspace tab `tabID`: the note is opened as a worktree
+    /// panel, so every workspace tab of the worktree shows it, and it comes
+    /// to the front in `tabID`. A note is never a workspace tab. `title` is
+    /// the note's title; nil takes the daemon's default, as New Note does.
+    ///
+    /// The note's summary lands in `notes` before the open goes out, so its
+    /// tab reads the note's title, and the + menu does not list it, from the
+    /// moment the panel arrives. It is appended only when `notes` does not
+    /// list the note already: a notes refresh can land while the create is
+    /// in flight and bring the new note with it.
+    ///
+    /// A failed create opens nothing and shows an error toast; a failed open
+    /// leaves the note, which the + menu then lists.
+    func createNote(worktreeID: UUID, tabID: UUID, title: String? = nil) async {
+        let note: Note
         do {
-            let note = try await daemonClient.createNote(worktreeID: worktreeID)
-            // `notes` holds metadata only — the daemon hands back a full
-            // `Note` here, so summarize it rather than caching content.
-            notes[worktreeID, default: []].append(NoteSummary(from: note))
-            let tab = Tab(id: note.id, content: .note(noteID: note.id), label: nil)
-            tabs[worktreeID, default: []].append(tab)
+            note = try await noteCreator(worktreeID, title)
         } catch {
-            logger.error("Failed to create note: \(error)")
+            logger.error("Failed to create note: \(error, privacy: .public)")
+            showErrorToast("Couldn't create a note: \(error.localizedDescription)")
             handleConnectionError(error)
+            return
+        }
+        // `notes` holds metadata only — the daemon hands back a full `Note`
+        // here, so summarize it rather than caching content.
+        if notes[worktreeID]?.contains(where: { $0.id == note.id }) != true {
+            notes[worktreeID, default: []].append(NoteSummary(from: note))
+        }
+        await applyPanelOperation(
+            worktreeID: worktreeID, tabID: tabID,
+            .open(content: .note(noteID: note.id), newPanel: false))
+    }
+
+    /// The Notes button in the workspace tab bar of `tabID`: shows, brings
+    /// forward or closes the worktree's first note, as
+    /// `PaneActions.notesToggleDecision` decides from the app's copy of the
+    /// tab's surface and the worktree's `notes` as they are at the press. A
+    /// close sends the `close` operation alone, which keeps the note — never
+    /// `closeSidePanel`, which deletes it.
+    ///
+    /// In a worktree whose notes are listed and empty it creates one titled
+    /// `NotesToggleDecision.createdNoteTitle` and opens it (`createNote`). A
+    /// press while that create is still in flight sends nothing
+    /// (`notesButtonCreatesInFlight`), so a double click makes one note.
+    /// While the worktree's notes have not loaded and the tab shows no note
+    /// panel, a press sends nothing (`NotesToggleDecision.unavailable`).
+    func toggleNotesPanel(worktreeID: UUID, tabID: UUID) async {
+        let decision = PaneActions.notesToggleDecision(
+            surface: panelSurface(worktreeID: worktreeID, tabID: tabID),
+            notes: notes[worktreeID])
+        if let operation = decision.operation {
+            await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
+            return
+        }
+        guard decision == .create, notesButtonCreatesInFlight.insert(worktreeID).inserted else { return }
+        defer { notesButtonCreatesInFlight.remove(worktreeID) }
+        await createNote(
+            worktreeID: worktreeID, tabID: tabID, title: NotesToggleDecision.createdNoteTitle)
+    }
+
+    /// Adopts one `note.list` answer for `worktreeIDs`: each worktree's
+    /// summaries replace its entry in `notes` when they differ, and a
+    /// worktree the answer names no note for gets an empty list. So every
+    /// worktree an answer covered has an entry, and a nil entry means the
+    /// worktree's notes have not loaded yet — which the Notes button tells
+    /// apart from a worktree with none (`NotesToggleDecision.unavailable`).
+    /// A note shows in the side panel as a worktree panel, never as a
+    /// workspace tab, so this touches no tab.
+    func adoptNotes(_ fetched: [NoteSummary], worktreeIDs: Set<UUID>) {
+        let byWorktree = Dictionary(grouping: fetched, by: { $0.worktreeID })
+        for worktreeID in worktreeIDs {
+            let summaries = byWorktree[worktreeID] ?? []
+            if notes[worktreeID] != summaries {
+                notes[worktreeID] = summaries
+            }
         }
     }
 
     /// Rename a note. TITLE ONLY — note content no longer travels this path;
     /// the app writes the file itself (`saveNoteContent`). Every control that
-    /// edits a note's title comes here: its tab, in the workspace tab bar or
-    /// the side region's strip, and the legacy pane header's title.
+    /// edits a note's title comes here: its tab in the side region's strip,
+    /// and the legacy pane header's title.
     ///
     /// Synchronous, like `renameTab`: the new title lands in `notes` at once,
     /// in the same frame as the rename field closing, so the tab never flashes
@@ -232,14 +297,14 @@ extension AppState {
     /// Content lives in the file; the legacy DB column still holds it for the
     /// handful of rows the daemon's startup export never drained. Neither
     /// source alone is the answer, so the union lives here rather than at the
-    /// call sites — `closeTab` hard-deletes the note row, so a wrong `false`
-    /// is a silent delete. For the same reason a close lands the note's
-    /// pending editor saves first (`flushPendingNoteSave`), so the file this
-    /// stats holds what was typed.
+    /// call sites — `closeSidePanel` hard-deletes the note row, so a wrong
+    /// `false` is a silent delete. For the same reason a close lands the
+    /// note's pending editor saves first (`flushPendingNoteSave`), so the file
+    /// this stats holds what was typed.
     ///
-    /// Synchronous, and one stat: it runs on a user gesture (closing a tab),
-    /// never on the poll. That is the whole reason it is allowed to touch the
-    /// filesystem at all.
+    /// Synchronous, and one stat: it runs on a user gesture (closing a note's
+    /// side-panel tab), never on the poll. That is the whole reason it is
+    /// allowed to touch the filesystem at all.
     func noteHasContent(worktreeID: UUID, noteID: UUID) -> Bool {
         if notes[worktreeID]?.first(where: { $0.id == noteID })?.hasLegacyContent == true {
             return true

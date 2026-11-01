@@ -768,6 +768,11 @@ public struct WorktreeStore: Sendable {
     /// is passed, both columns keep what they hold — the state a revive that
     /// kept its sessions (`revive(clearSessions: false)`) leaves behind.
     ///
+    /// Deletes the worktree's panel rows in the same transaction: its
+    /// workspace tab surfaces with their histories, its worktree panels and
+    /// its operation receipts (`PanelSurfaceStore.deleteSurfaces`). Its note
+    /// rows stay.
+    ///
     /// Returns the IDs of the workspace tabs whose panel surfaces the archive
     /// deleted. The caller that drives the archive broadcasts them
     /// (`StateSubscriptionManager.broadcastPanelSurfacesRemoved`), so the app
@@ -804,12 +809,13 @@ public struct WorktreeStore: Sendable {
             }
             try record.update(db)
             // The row stays, so its FK cascade never clears the panel
-            // surfaces, their histories or their receipts: this is what
-            // reclaims them, for every archive path that comes through here.
+            // surfaces, their histories, its worktree panels or its receipts:
+            // this is what reclaims them, for every archive path that comes
+            // through here.
             // The one that does not, a scratch promote, moves them to the main
             // worktree first (`promoteScratchMigration`), so it leaves none
-            // behind. A revive needs nothing back — the next tab sync
-            // re-imports from the legacy layout.
+            // behind. A revive brings none of them back: the next tab sync
+            // imports the tabs again, and a note shows once someone opens it.
             return try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
         }
     }
@@ -1494,9 +1500,10 @@ public struct WorktreeStore: Sendable {
 
     /// The entire scratch-promote row migration in ONE write transaction:
     /// terminals re-parented, tab rows re-pointed, the tabs' panel surfaces
-    /// (with their histories) moved along with them, the main worktree
-    /// inherits the scratch tmux server + tab order/selection, and the scratch
-    /// row is retired (archived + `promotedToRepoID`). Any failure rolls the
+    /// (with their histories) and the scratch worktree's Changes panel moved
+    /// along with them, its note panels deleted, the main worktree inherits
+    /// the scratch tmux server + tab order/selection, and the scratch row is
+    /// retired (archived + `promotedToRepoID`). Any failure rolls the
     /// whole thing back, leaving the pre-promote state intact — in particular
     /// the scratch row stays un-promoted (retryable) and its terminals stay
     /// parented to it, so a later `scratch.delete` can never tmux-kill live
@@ -1509,8 +1516,12 @@ public struct WorktreeStore: Sendable {
     /// this transaction leaves no panel row on it: the surfaces move to the
     /// main worktree at fresh revisions, and the scratch worktree's operation
     /// receipts move with them, so a `panel.apply` retried across the promote
-    /// still replays. Returns the moved surfaces, which the caller broadcasts
-    /// under the main worktree.
+    /// still replays. Its Changes panel joins the main worktree's panels,
+    /// unless the main worktree has one, and its note panels are deleted:
+    /// the note rows stay with the retired scratch row, whose ID keys their
+    /// content files (`PanelSurfaceStore.reparentSurfaces`). Returns the main
+    /// worktree's own surfaces that the merged panels rewrote, then the moved
+    /// surfaces, which the caller broadcasts under the main worktree.
     ///
     /// `now` stamps the retired row's `archivedAt` and the moved surfaces'
     /// `updatedAt`.

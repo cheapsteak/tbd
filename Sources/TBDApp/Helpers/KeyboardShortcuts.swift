@@ -58,13 +58,13 @@ enum TextFinderCommand {
 enum MainWindowCommand: CaseIterable {
     case back
     case forward
-    case toggleFilePanel
+    case toggleChanges
 
     var title: String {
         switch self {
         case .back: "Back"
         case .forward: "Forward"
-        case .toggleFilePanel: "Toggle File Panel"
+        case .toggleChanges: "Toggle Changes"
         }
     }
 
@@ -72,14 +72,14 @@ enum MainWindowCommand: CaseIterable {
         switch self {
         case .back: "["
         case .forward: "]"
-        case .toggleFilePanel: "e"
+        case .toggleChanges: "e"
         }
     }
 
     var modifiers: EventModifiers {
         switch self {
         case .back, .forward: .command
-        case .toggleFilePanel: [.command, .shift]
+        case .toggleChanges: [.command, .shift]
         }
     }
 }
@@ -126,8 +126,17 @@ struct TBDCommands: Commands {
             .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
+        // Ungated, like the prompt commands: it does nothing without a single
+        // selected local worktree with an active tab, and beeps on a tab that
+        // renders legacy (`AppState.toggleChangesPanel`).
         CommandGroup(after: .sidebar) {
-            FilePanelCommandContent()
+            Button(MainWindowCommand.toggleChanges.title) {
+                Task { @MainActor in appState.toggleChangesPanel() }
+            }
+            .keyboardShortcut(
+                MainWindowCommand.toggleChanges.key,
+                modifiers: MainWindowCommand.toggleChanges.modifiers
+            )
         }
 
         // Worktree commands
@@ -278,22 +287,5 @@ private struct NavigationCommandsContent: View {
         }
         .keyboardShortcut(MainWindowCommand.forward.key, modifiers: MainWindowCommand.forward.modifiers)
         .disabled(!appState.canGoForward)
-    }
-}
-
-private struct FilePanelCommandContent: View {
-    @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
-
-    var body: some View {
-        Button(MainWindowCommand.toggleFilePanel.title) {
-            // Deferred one run-loop tick, as the toolbar button does: toggling
-            // during an in-flight NavigationSplitView selection change blew the
-            // per-window constraint-update budget.
-            DispatchQueue.main.async { showFilePanel.toggle() }
-        }
-        .keyboardShortcut(
-            MainWindowCommand.toggleFilePanel.key,
-            modifiers: MainWindowCommand.toggleFilePanel.modifiers
-        )
     }
 }

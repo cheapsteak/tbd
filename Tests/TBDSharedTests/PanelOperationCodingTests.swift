@@ -10,6 +10,7 @@ struct PanelOperationCodingTests {
         .open(content: .web(URL(string: "https://example.com/pr/1")!), newPanel: true),
         .open(content: .note(noteID: UUID()), newPanel: false),
         .open(content: .transcript(terminalID: UUID()), newPanel: false),
+        .open(content: .changes, newPanel: true),
         .navigate(panelID: UUID(), destination: .file(FileReference(path: "b.md"))),
         .history(panelID: UUID(), action: .back),
         .history(panelID: UUID(), action: .forward),

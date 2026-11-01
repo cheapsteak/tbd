@@ -309,12 +309,6 @@ struct SingleWorktreeView: View {
                     selectLastTab()
                 }
             },
-            onAddNote: {
-                Task {
-                    await appState.createNote(worktreeID: worktreeID)
-                    selectLastTab()
-                }
-            },
             onCloseTab: { index in
                 closeTab(at: index)
             },

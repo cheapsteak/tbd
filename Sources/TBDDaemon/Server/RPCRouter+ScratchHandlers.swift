@@ -578,7 +578,7 @@ extension RPCRouter {
                 subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
                     terminalID: terminal.id, worktreeID: mainWorktree.id, label: terminal.label)))
             }
-            subscriptions.broadcastPanelSurfacesMoved(
+            subscriptions.broadcastPanelSurfacesChanged(
                 worktreeID: mainWorktree.id, surfaces: movedPanelSurfaces)
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
         } else {

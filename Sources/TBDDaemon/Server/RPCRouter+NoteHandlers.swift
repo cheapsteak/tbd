@@ -12,7 +12,10 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
-        let note = try await db.notes.create(worktreeID: params.worktreeID)
+        // A blank title takes the "Note N" default, as no title does.
+        let title = params.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = try await db.notes.create(
+            worktreeID: params.worktreeID, title: title?.isEmpty == false ? title : nil)
         return try RPCResponse(result: note)
     }
 
@@ -41,12 +44,19 @@ extension RPCRouter {
         return try RPCResponse(result: note)
     }
 
-    /// Removes the note row + tab row only. The note's content file under
-    /// `~/tbd/notes/` is intentionally retained (orphan-file GC out of scope)
-    /// — closing a notes tab must never destroy content on disk.
+    /// Removes the note row with its worktree panel, broadcasts the
+    /// workspace tab surfaces that lost the panel, then removes its tab row.
+    /// The broadcast comes first, so a failing tab-row delete cannot keep the
+    /// app from learning of a removal that has already committed. The note's
+    /// content file under `~/tbd/notes/` is intentionally retained
+    /// (orphan-file GC out of scope) — deleting a note must never destroy
+    /// content on disk.
     func handleNoteDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NoteDeleteParams.self, from: paramsData)
-        try await db.notes.delete(id: params.noteID)
+        if let deletion = try await db.notes.delete(id: params.noteID) {
+            subscriptions.broadcastPanelSurfacesChanged(
+                worktreeID: deletion.worktreeID, surfaces: deletion.changedSurfaces)
+        }
         try await db.tabs.delete(tabID: params.noteID)
         return .ok()
     }
