@@ -524,7 +524,10 @@ and 37.5 s on one green run. The deadline is sized against the record and is
 not re-derived from those halves. Re-deriving it would also move the values
 coupled to it: `TestGate.deadline`, the `.fastPassBounded` limit, and the
 tier-3 suite limits summed from chains of `saturatedPass` waits. Pass 1's
-tails, at 74.2 s or less, are not near 120 s.
+tails, at 74.2 s or less, are not near 120 s. On green runs where every
+in-memory database ran the whole migration chain, pass 1 reported 111.7 s in
+1a and 107.4 s in 1b, so the template copy in `TBDDatabase.init(inMemory:)`
+(see the pool stall below) is what keeps pass 1 clear of 120 s.
 
 One more thing a reader should not have to mine a log for: the **"72 known
 issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
@@ -1267,12 +1270,18 @@ test is `@MainActor`.** A `@MainActor` debouncer fires through
 `Task { @MainActor }`, so its timer arms only once that task has had a turn on
 the main actor — a process-wide queue every `@MainActor` test body in the pass
 is waiting on, deepest at pass start — and the fire needs the main actor again
-after `advance`. Measured on green fast pass 2 runs: the same shape took 84 s
-to arm (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`), about
-30% of the pass's tests report over 45 s on every run, and the slowest test of a
+after `advance`. Measured on green runs with fast pass 2 as one step: the same
+shape took 84 s to arm
+(`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`), about 30%
+of the pass's tests reported over 45 s, and the slowest test of a
 green run reported 101.7 s; at 45 s the first test of both debounce suites went
 red on ordinary CI with every logic assertion a consequence and every sibling
-test passing in milliseconds. Pass the budget through the strict
+test passing in milliseconds. With pass 2 split, one green run measured p90
+34.1 s and 29.4 s and p99 40.9 s and 36.0 s in 2a and 2b. A 45 s guard sits
+only about 4–9 s above those tails, and runner noise alone has moved a pass's
+tail by about 20 s, so 45 s still fires on a healthy slow runner. 120 s clears
+the halves' tails by about 80 s and the one-step record by about 18 s, which is
+why these guards take `saturatedPass`. Pass the budget through the strict
 `requireAdvanceWhenArmed(by:timeout:)` and `next(timeout:)`, so a missed
 arming ends the test instead of paying the
 recorder's guard as well — a two-step chain then costs at most two guards,
