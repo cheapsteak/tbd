@@ -127,10 +127,12 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// ``TestDeadlines/saturatedPass`` rather than by a snappier number. It is not
 /// pinning a thread, and no call-site change can move it. What can move it is
 /// the callee taking the executor itself: `ShutdownLatch(executor:)` exists
-/// for tests that hold a latch of their own, and `ServerShutdownLatchTests`
-/// builds one on `GateExecutor.shared` so nothing it waits on touches the
-/// pool. A test that reaches a latch through a server's `stop()` has no such
-/// handle — the servers build their latches with the default — so there the
+/// for tests, and `ServerShutdownLatchTests` builds a latch on
+/// `GateExecutor.shared` so nothing it waits on touches the pool. A server
+/// whose internal init forwards the executor — `SocketServer`'s
+/// `shutdownExecutor:` — gives a test that reaches the latch through `stop()`
+/// the same handle, as `SocketServerSocketOwnershipTests` uses it. Where a
+/// server builds its latch with the default, there is no such handle, and the
 /// bound is still the only thing yours to get right. `BoundedGateWaitTests`
 /// pins the rule.
 public func gateHoldingTask<Success: Sendable>(

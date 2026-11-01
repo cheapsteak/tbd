@@ -39,7 +39,11 @@ public final class SocketServer: Sendable {
     /// Keeps the shutdown to one run, however many `stop()` calls arrive. See
     /// `ShutdownLatch` for why a second run would hang rather than merely
     /// repeat itself.
-    private let shutdownLatch = ShutdownLatch()
+    private let shutdownLatch: ShutdownLatch
+
+    /// Where the event-loop group delivers its shutdown completion. See
+    /// `stop()` for why this is not `DispatchQueue.global()`.
+    private let shutdownQueue = DispatchQueue(label: "com.tbd.daemon.socket-server.shutdown")
 
     /// Runs in `start()` between `bind(2)` and NIO adopting the bound
     /// descriptor, and may throw to fail the start from inside that window.
@@ -86,7 +90,10 @@ public final class SocketServer: Sendable {
         router: RPCRouter,
         socketPath: String?,
         beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?,
-        duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)? = nil
+        duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)? = nil,
+        // Tests only: where the shutdown latch schedules its single run.
+        // Production passes nil, the cooperative pool. See `ShutdownLatch`.
+        shutdownExecutor: (any TaskExecutor)? = nil
     ) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
@@ -94,6 +101,7 @@ public final class SocketServer: Sendable {
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         self.beforeAdoptingBoundSocket = beforeAdoptingBoundSocket
         self.duringIdentityClaim = duringIdentityClaim
+        self.shutdownLatch = ShutdownLatch(executor: shutdownExecutor)
     }
 
     /// Start listening on the Unix domain socket.
@@ -183,7 +191,18 @@ public final class SocketServer: Sendable {
             } catch {
                 // Already closed
             }
-            try? await self.group.shutdownGracefully()
+            // Deliver the group's shutdown completion on this server's own
+            // serial queue. NIO's async `shutdownGracefully()` delivers on
+            // `DispatchQueue.global()`, which is non-overcommit and only
+            // CPU-count wide, so the shutdown would wait behind any blocked
+            // dispatch worker in the process. A private serial queue targets
+            // the overcommit pool and cannot be starved that way. The error is
+            // ignored: a group already shut down has nothing left to stop.
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                self.group.shutdownGracefully(queue: self.shutdownQueue) { _ in
+                    cont.resume()
+                }
+            }
             self.unlinkOwnedSocketFile()
         }
     }
