@@ -56,7 +56,8 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     private static var dividerHitWidth: CGFloat { 6 }
 
     /// The right half's width (420 pt by default), whichever role sits there,
-    /// kept across hide, show and swap within one mount.
+    /// kept across hide, show and swap within one mount, and across a pane too
+    /// narrow for both minimums (`fitsBothMinimums`).
     @State private var rightWidth: CGFloat = 420
     /// The width a drag started from, so the drag is relative to it.
     @State private var dragOrigin: CGFloat?
@@ -98,11 +99,10 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     ///
     /// Without the transcript the terminal side and the live terminal span the
     /// whole width and `transcriptLeads` changes nothing. With it, the right
-    /// half is `rightWidth` wide (already clamped), the divider sits just left
-    /// of it, and the left half takes what remains. As a last guard the right
-    /// half never extends past the pane: in a pane narrower than `rightWidth`
-    /// plus the divider, it takes what the divider leaves and the left half is
-    /// empty. (`clamp` already keeps the left half's minimum before this.)
+    /// half is `rightWidth` wide, the divider sits just left of it, and the
+    /// left half takes what remains. `rightWidth` arrives clamped (`clamp`),
+    /// so in a pane too narrow for both minimums both halves have already
+    /// shrunk in proportion and neither collapses.
     /// The terminal side takes the right half when `transcriptLeads`, the left
     /// half otherwise. The live terminal takes the left half either way, which
     /// is where the terminal side is drawn while attached.
@@ -115,11 +115,10 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
             return RemoteDetailSplitColumns(
                 terminal: whole, divider: nil, transcript: nil, liveTerminal: whole)
         }
-        let cappedRightWidth = min(rightWidth, max(0, totalWidth - dividerWidth))
-        let leftWidth = max(0, totalWidth - cappedRightWidth - dividerWidth)
+        let leftWidth = max(0, totalWidth - rightWidth - dividerWidth)
         let left = RemoteDetailSplitColumn(x: 0, width: leftWidth)
         let middle = RemoteDetailSplitColumn(x: leftWidth, width: dividerWidth)
-        let right = RemoteDetailSplitColumn(x: leftWidth + dividerWidth, width: cappedRightWidth)
+        let right = RemoteDetailSplitColumn(x: leftWidth + dividerWidth, width: rightWidth)
         return RemoteDetailSplitColumns(
             terminal: transcriptLeads ? right : left,
             divider: middle,
@@ -128,25 +127,45 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     }
 
     /// The stored right-half width, clamped for a pane `totalWidth` wide (see
-    /// `clamp`). The left half is the main side, so it keeps `leftMinWidth`
-    /// and the right half gives way first in a narrow pane.
+    /// `clamp`). The left half is the main side. In a pane too narrow for
+    /// both minimums, both halves shrink in proportion and neither collapses.
     private func clampedRightWidth(totalWidth: CGFloat) -> CGFloat {
         Self.clamp(
             rightWidth, totalWidth: totalWidth,
             leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth, dividerWidth: Self.dividerHitWidth)
     }
 
-    /// Clamps the right half's width to at least `rightMin`, and to at most
-    /// what leaves `leftMin` for the left half beside the divider. The left
-    /// half is the main side (the live terminal while attached, the transcript
-    /// while not), so in a pane narrower than `leftMin + rightMin +
-    /// dividerWidth` the upper bound wins: the right half shrinks, down to 0,
-    /// and the left half keeps `leftMin`. The left half shrinks only once the
-    /// pane is narrower than `leftMin + dividerWidth`.
+    /// Whether a pane `totalWidth` wide holds both halves at their minimums
+    /// beside the divider. While it does, `clamp` applies the stored width
+    /// and the divider sets it. While it does not, `clamp` ignores the stored
+    /// width and the divider writes none, so the width the user set returns
+    /// once the pane widens again.
+    nonisolated static func fitsBothMinimums(
+        totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
+    ) -> Bool {
+        totalWidth - dividerWidth >= leftMin + rightMin
+    }
+
+    /// The right half's width in a pane `totalWidth` wide, from the stored
+    /// `width`. The left half is the main side (the live terminal while
+    /// attached, the transcript while not).
+    ///
+    /// While the pane holds both minimums beside the divider
+    /// (`fitsBothMinimums`), `width` is kept to at least `rightMin` and to at
+    /// most what leaves `leftMin` for the left half. In a pane too narrow for
+    /// both minimums, both halves shrink in proportion to their minimums and
+    /// neither collapses: the right half takes `rightMin / (leftMin +
+    /// rightMin)` of what the divider leaves, whatever `width` is.
     nonisolated static func clamp(
         _ width: CGFloat, totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
     ) -> CGFloat {
-        max(0, min(max(width, rightMin), totalWidth - leftMin - dividerWidth))
+        guard fitsBothMinimums(
+            totalWidth: totalWidth, leftMin: leftMin, rightMin: rightMin, dividerWidth: dividerWidth)
+        else {
+            let available = max(0, totalWidth - dividerWidth)
+            return available * rightMin / (leftMin + rightMin)
+        }
+        return min(max(width, rightMin), totalWidth - leftMin - dividerWidth)
     }
 
     private func divider(totalWidth: CGFloat) -> some View {
@@ -160,6 +179,12 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
+                        // Too narrow for both minimums, `clamp` ignores the
+                        // stored width, so a write here would only lose it.
+                        guard Self.fitsBothMinimums(
+                            totalWidth: totalWidth, leftMin: Self.leftMinWidth,
+                            rightMin: Self.rightMinWidth, dividerWidth: Self.dividerHitWidth)
+                        else { return }
                         let origin = dragOrigin ?? clampedRightWidth(totalWidth: totalWidth)
                         if dragOrigin == nil { dragOrigin = origin }
                         rightWidth = Self.clamp(

@@ -286,35 +286,70 @@ struct RemoteDetailSplitTests {
             totalWidth: 1000, rightWidth: 420, dividerWidth: 6,
             showsTranscript: false, transcriptLeads: true)
         #expect(terminalOnlyLeading == terminalOnlyExpected)
-
-        // Too narrow for both minimums: the right half keeps the width it was
-        // clamped to, and the left half shrinks.
-        let narrow: RemoteDetailSplitColumns = Split.columns(
-            totalWidth: 400, rightWidth: 280, dividerWidth: 6,
-            showsTranscript: true, transcriptLeads: false)
-        let narrowExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
-            terminal: RemoteDetailSplitColumn(x: 0, width: 114),
-            divider: RemoteDetailSplitColumn(x: 114, width: 6),
-            transcript: RemoteDetailSplitColumn(x: 120, width: 280),
-            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 114))
-        #expect(narrow == narrowExpected)
-
-        // Narrower than the right half plus the divider: the right half is
-        // capped at what the divider leaves, so it never extends past the
-        // pane, and the left half is empty.
-        let tooNarrow: RemoteDetailSplitColumns = Split.columns(
-            totalWidth: 250, rightWidth: 280, dividerWidth: 6,
-            showsTranscript: true, transcriptLeads: false)
-        let tooNarrowExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
-            terminal: RemoteDetailSplitColumn(x: 0, width: 0),
-            divider: RemoteDetailSplitColumn(x: 0, width: 6),
-            transcript: RemoteDetailSplitColumn(x: 6, width: 244),
-            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 0))
-        #expect(tooNarrow == tooNarrowExpected)
     }
 
-    @Test("the right half is clamped between its minimum and what leaves the left minimum beside the divider")
-    func clamp() {
+    /// The path production takes: the stored width goes through `clamp`, and
+    /// `columns` places the result. A 400 pt pane is too narrow for both
+    /// minimums, so the stored 420 is ignored and both halves shrink in
+    /// proportion to their minimums: the right half takes 280 / 520 of the
+    /// 394 pt the divider leaves, and the left half the rest.
+    @Test("in a pane too narrow for both minimums, both halves shrink in proportion and neither collapses")
+    func narrowPaneShrinksBothHalves() {
+        let right: CGFloat = Split.clamp(
+            420, totalWidth: 400, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let rightExpected: CGFloat = 394 * 280 / 520
+        #expect(right == rightExpected)
+        let leftExpected: CGFloat = 394 - rightExpected
+        let rightXExpected: CGFloat = leftExpected + 6
+
+        let attached: RemoteDetailSplitColumns = Split.columns(
+            totalWidth: 400, rightWidth: right, dividerWidth: 6,
+            showsTranscript: true, transcriptLeads: false)
+        let attachedExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
+            terminal: RemoteDetailSplitColumn(x: 0, width: leftExpected),
+            divider: RemoteDetailSplitColumn(x: leftExpected, width: 6),
+            transcript: RemoteDetailSplitColumn(x: rightXExpected, width: rightExpected),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: leftExpected))
+        #expect(attached == attachedExpected)
+        let attachedLeft: CGFloat = attached.terminal.width
+        let attachedRight: CGFloat = attached.transcript?.width ?? 0
+        #expect(attachedLeft > 0)
+        #expect(attachedRight > 0)
+
+        // Not attached, the terminal side is on the right; the live terminal
+        // keeps the left half.
+        let notAttached: RemoteDetailSplitColumns = Split.columns(
+            totalWidth: 400, rightWidth: right, dividerWidth: 6,
+            showsTranscript: true, transcriptLeads: true)
+        let notAttachedExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
+            terminal: RemoteDetailSplitColumn(x: rightXExpected, width: rightExpected),
+            divider: RemoteDetailSplitColumn(x: leftExpected, width: 6),
+            transcript: RemoteDetailSplitColumn(x: 0, width: leftExpected),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: leftExpected))
+        #expect(notAttached == notAttachedExpected)
+        let notAttachedLeft: CGFloat = notAttached.transcript?.width ?? 0
+        let notAttachedRight: CGFloat = notAttached.terminal.width
+        #expect(notAttachedLeft > 0)
+        #expect(notAttachedRight > 0)
+    }
+
+    @Test("the pane fits both halves from exactly both minimums plus the divider")
+    func fitsBothMinimumsAtTheBoundary() {
+        let leftMin: CGFloat = 240
+        let rightMin: CGFloat = 280
+        let dividerWidth: CGFloat = 6
+        let exactFit: CGFloat = 526
+        let onePointShort: CGFloat = 525
+        let fitsAtExactFit: Bool = Split.fitsBothMinimums(
+            totalWidth: exactFit, leftMin: leftMin, rightMin: rightMin, dividerWidth: dividerWidth)
+        let fitsOnePointShort: Bool = Split.fitsBothMinimums(
+            totalWidth: onePointShort, leftMin: leftMin, rightMin: rightMin, dividerWidth: dividerWidth)
+        #expect(fitsAtExactFit)
+        #expect(!fitsOnePointShort)
+    }
+
+    @Test("the right half keeps the stored width within both minimums, and both halves shrink in proportion in a pane too narrow for both")
+    func clampKeepsBothMinimumsOrShrinksBothInProportion() {
         let belowMinimum: CGFloat = Split.clamp(
             100, totalWidth: 1000, leftMin: 240, rightMin: 280, dividerWidth: 6)
         let belowMinimumExpected: CGFloat = 280
@@ -331,23 +366,30 @@ struct RemoteDetailSplitTests {
         let aboveMaximumExpected: CGFloat = 754
         #expect(aboveMaximum == aboveMaximumExpected)
 
-        // Too narrow for both minimums and the divider: the left half keeps
-        // its minimum and the right half takes the rest: 400 − 240 − 6.
-        let tooNarrow: CGFloat = Split.clamp(
-            500, totalWidth: 400, leftMin: 240, rightMin: 280, dividerWidth: 6)
-        let tooNarrowExpected: CGFloat = 154
-        #expect(tooNarrow == tooNarrowExpected)
-
-        // Narrower than the left minimum plus the divider: nothing is left.
-        let belowLeftMinimum: CGFloat = Split.clamp(
-            500, totalWidth: 200, leftMin: 240, rightMin: 280, dividerWidth: 6)
-        let belowLeftMinimumExpected: CGFloat = 0
-        #expect(belowLeftMinimum == belowLeftMinimumExpected)
-
-        // Exactly both minimums and the divider.
+        // Exactly both minimums and the divider: still the wide-pane rule.
         let exactFit: CGFloat = Split.clamp(
             526, totalWidth: 526, leftMin: 240, rightMin: 280, dividerWidth: 6)
         let exactFitExpected: CGFloat = 280
         #expect(exactFit == exactFitExpected)
+
+        // Too narrow for both minimums and the divider: the stored width is
+        // ignored, and the right half takes 280 / 520 of what the divider
+        // leaves, 400 − 6.
+        let tooNarrow: CGFloat = Split.clamp(
+            500, totalWidth: 400, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let tooNarrowExpected: CGFloat = 394 * 280 / 520
+        #expect(tooNarrow == tooNarrowExpected)
+
+        // Narrower than the left minimum alone: the same proportion of 200 − 6.
+        let belowLeftMinimum: CGFloat = Split.clamp(
+            500, totalWidth: 200, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let belowLeftMinimumExpected: CGFloat = 194 * 280 / 520
+        #expect(belowLeftMinimum == belowLeftMinimumExpected)
+
+        // Narrower than the divider: nothing is left for either half.
+        let belowDivider: CGFloat = Split.clamp(
+            500, totalWidth: 4, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let belowDividerExpected: CGFloat = 0
+        #expect(belowDivider == belowDividerExpected)
     }
 }
