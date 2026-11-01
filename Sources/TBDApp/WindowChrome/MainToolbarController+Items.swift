@@ -416,8 +416,8 @@ extension MainToolbarController {
     // on the session selected now, not the one the item was built for.
 
     @objc func remoteTranscriptClicked(_ sender: Any?) {
-        guard appState.selectedRemoteSession != nil else { return }
-        appState.toggleRemoteTranscriptOpen()
+        guard let selection = appState.selectedRemoteSession else { return }
+        appState.toggleRemoteTranscript(selection)
     }
 
     @objc func remoteReconnectClicked(_ sender: Any?) {

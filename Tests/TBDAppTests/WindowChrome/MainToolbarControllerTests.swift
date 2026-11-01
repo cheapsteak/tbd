@@ -488,7 +488,7 @@ struct MainToolbarControllerTests {
         #expect(servers.image === serversImage)
         #expect(transcript.toolTip == transcriptTip)
 
-        snapshot.remote?.transcriptOpen = !remote.transcriptOpen
+        snapshot.remote?.transcriptShown = !remote.transcriptShown
         let toggledHelp = try #require(snapshot.remote?.transcriptHelp)
         try #require(toggledHelp != remote.transcriptHelp)
         fixture.controller.apply(snapshot)
@@ -519,6 +519,35 @@ struct MainToolbarControllerTests {
         #expect(sent)
         let expected: [RemoteSessionSelection] = [selection]
         #expect(fixture.stopRequests == expected)
+    }
+
+    /// The Transcript item runs the toggle for the selected session: a click
+    /// hides the attached session's transcript, and a second shows it again.
+    @Test func transcriptRoutesToTheToggle() async throws {
+        let fixture = ToolbarFixture(label: "transcriptRoutesToTheToggle")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+
+        let selection = fixture.showRemoteSession()
+        let snapshot = MainToolbarSnapshot.make(from: fixture.state)
+        try #require(snapshot.remote?.showsTranscript == true)
+        let shownBefore = fixture.state.remoteTranscriptPresentation(for: selection).showsPane
+        try #require(shownBefore)
+        fixture.controller.apply(snapshot)
+        let transcript = try #require(fixture.controller.item(MainToolbarItemID.remoteTranscript))
+        let action = try #require(transcript.action)
+
+        let hid = NSApplication.shared.sendAction(action, to: transcript.target, from: transcript)
+        #expect(hid)
+        #expect(fixture.state.remoteTranscriptHiddenSelection == selection)
+        let shownAfterHide = fixture.state.remoteTranscriptPresentation(for: selection).showsPane
+        #expect(!shownAfterHide)
+
+        let showed = NSApplication.shared.sendAction(action, to: transcript.target, from: transcript)
+        #expect(showed)
+        #expect(fixture.state.remoteTranscriptHiddenSelection == nil)
+        let shownAfterShow = fixture.state.remoteTranscriptPresentation(for: selection).showsPane
+        #expect(shownAfterShow)
     }
 
     // MARK: - Menu projections
@@ -735,19 +764,23 @@ private final class ToolbarFixture {
         return result
     }
 
-    /// Selects a running remote session whose provider reads transcripts, so
-    /// the snapshot shows Transcript and Stop.
+    /// Selects and attaches a running remote session whose provider attaches
+    /// and reads transcripts, so the snapshot shows Transcript, Reconnect and
+    /// Stop: the Transcript toggle is offered only while attached. Attached
+    /// the way the Attach button does it: select, then request the connection.
     @discardableResult
     func showRemoteSession() -> RemoteSessionSelection {
         let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
+        let capabilities: [String] = ["attach", RemoteCapability.transcriptRead]
         state.remoteProviders = [RemoteProviderStatus(
             config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
-            describe: ProviderDescribe(name: "acme", capabilities: [RemoteCapability.transcriptRead]),
+            describe: ProviderDescribe(name: "acme", capabilities: capabilities),
             health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)]
         state.remoteSessions = [RemoteSessionInfo(
             provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
             gone: false, dismissed: false, lastSeen: Date())]
         state.selectedRemoteSession = selection
+        state.reattachRemoteSession(selection)
         return selection
     }
 

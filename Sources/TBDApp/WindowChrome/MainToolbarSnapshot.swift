@@ -27,13 +27,15 @@ struct ServersPresentation: Equatable {
 /// The selected remote session's toolbar buttons.
 struct RemotePresentation: Equatable {
     var selection: RemoteSessionSelection
+    /// The Transcript toggle is offered: only while the session is attached.
     var showsTranscript: Bool
     var showsReconnect: Bool
     var showsStop: Bool
-    var transcriptOpen: Bool
+    /// The detail pane shows the transcript, so the toggle reads "Hide".
+    var transcriptShown: Bool
 
-    var transcriptSymbolName: String { transcriptOpen ? "text.bubble.fill" : "text.bubble" }
-    var transcriptHelp: String { transcriptOpen ? "Hide transcript" : "Show transcript" }
+    var transcriptSymbolName: String { transcriptShown ? "text.bubble.fill" : "text.bubble" }
+    var transcriptHelp: String { transcriptShown ? "Hide transcript" : "Show transcript" }
 }
 
 /// Everything the AppKit main toolbar reads from `AppState`, as plain values,
@@ -83,16 +85,19 @@ struct MainToolbarSnapshot: Equatable {
 
         var remote: RemotePresentation?
         if let selection = appState.selectedRemoteSession {
-            let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+            // One read of the attach state for Transcript and Reconnect, as
+            // `ContentView` does.
+            let transcript = appState.remoteTranscriptPresentation(for: selection)
+            let showsReconnect = transcript.attached
             let showsStop = appState.remoteSessionShowsStop(selection)
-            let showsTranscript = appState.remoteSessionShowsTranscriptToggle(selection)
+            let showsTranscript = transcript.showsToggle
             if showsReconnect || showsStop || showsTranscript {
                 remote = RemotePresentation(
                     selection: selection,
                     showsTranscript: showsTranscript,
                     showsReconnect: showsReconnect,
                     showsStop: showsStop,
-                    transcriptOpen: appState.remoteTranscriptOpen)
+                    transcriptShown: transcript.showsPane)
             }
         }
 

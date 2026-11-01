@@ -121,38 +121,68 @@ struct MainToolbarSnapshotTests {
             gone: false, dismissed: false, lastSeen: Date())
     }
 
-    @Test func remoteFlagsMirrorAppState() {
-        withState { state, _, _ in
+    /// Each of `remote`'s flags against the `AppState` answer it mirrors:
+    /// the transcript presentation for Transcript, Reconnect and the shown
+    /// pane, and `remoteSessionShowsStop` for Stop.
+    private func expectMirrors(
+        _ remote: RemotePresentation, _ state: AppState, _ selection: RemoteSessionSelection,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let presentation = state.remoteTranscriptPresentation(for: selection)
+        #expect(remote.selection == selection, sourceLocation: sourceLocation)
+        #expect(remote.showsTranscript == presentation.showsToggle, sourceLocation: sourceLocation)
+        #expect(remote.showsReconnect == presentation.attached, sourceLocation: sourceLocation)
+        #expect(remote.transcriptShown == presentation.showsPane, sourceLocation: sourceLocation)
+        #expect(remote.showsStop == state.remoteSessionShowsStop(selection), sourceLocation: sourceLocation)
+    }
+
+    @Test func remoteFlagsMirrorAppState() throws {
+        try withState { state, _, _ in
             let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
             #expect(MainToolbarSnapshot.make(from: state).remote == nil)
 
-            // Transcript only: the provider declares transcript.read, and the
-            // session has not been attached.
-            state.remoteProviders = [provider(capabilities: [RemoteCapability.transcriptRead])]
+            // Not attached: selecting only browses, so the provider's
+            // transcript.read leads the pane with the transcript but offers
+            // no toggle, and there is nothing to reconnect.
+            state.remoteProviders = [provider(capabilities: ["attach", RemoteCapability.transcriptRead])]
             state.remoteSessions = [runningSession()]
             state.selectedRemoteSession = selection
-            let transcriptOnly = MainToolbarSnapshot.make(from: state).remote
-            #expect(transcriptOnly?.selection == selection)
-            #expect(transcriptOnly?.showsTranscript == true)
-            #expect(transcriptOnly?.showsReconnect == false)
-            #expect(transcriptOnly?.showsStop == true)
-            #expect(transcriptOnly?.showsTranscript == state.remoteSessionShowsTranscriptToggle(selection))
-            #expect(transcriptOnly?.showsStop == state.remoteSessionShowsStop(selection))
-            #expect(transcriptOnly?.transcriptOpen == state.remoteTranscriptOpen)
+            let notAttached = try #require(MainToolbarSnapshot.make(from: state).remote)
+            #expect(!notAttached.showsTranscript)
+            #expect(!notAttached.showsReconnect)
+            #expect(notAttached.showsStop)
+            #expect(notAttached.transcriptShown)
+            expectMirrors(notAttached, state, selection)
 
-            // Reconnect: an attach-capable session the user has attached.
+            // Attached with transcript.read: Transcript and Reconnect.
+            state.reattachRemoteSession(selection)
+            let attached = try #require(MainToolbarSnapshot.make(from: state).remote)
+            #expect(attached.showsTranscript)
+            #expect(attached.showsReconnect)
+            #expect(attached.transcriptShown)
+            expectMirrors(attached, state, selection)
+
+            // The toggle's hide takes the pane away and keeps the toggle.
+            state.toggleRemoteTranscript(selection)
+            let hidden = try #require(MainToolbarSnapshot.make(from: state).remote)
+            #expect(hidden.showsTranscript)
+            #expect(!hidden.transcriptShown)
+            expectMirrors(hidden, state, selection)
+
+            // Attached without transcript.read: Reconnect, and no Transcript.
             state.remoteProviders = [provider(capabilities: ["attach"])]
-            state.touchAttachedRemoteSession(selection)
-            let attached = MainToolbarSnapshot.make(from: state).remote
-            #expect(state.attachedRemoteSelections.contains(selection))
-            #expect(attached?.showsReconnect == true)
-            #expect(attached?.showsTranscript == false)
+            let terminalOnly = try #require(MainToolbarSnapshot.make(from: state).remote)
+            #expect(!terminalOnly.showsTranscript)
+            #expect(terminalOnly.showsReconnect)
+            #expect(!terminalOnly.transcriptShown)
+            expectMirrors(terminalOnly, state, selection)
 
             // A session the mirror no longer holds offers none of the three.
             state.remoteSessions = []
+            let presentation = state.remoteTranscriptPresentation(for: selection)
             let anyFlag = state.remoteSessionShowsStop(selection)
-                || state.attachedRemoteSelections.contains(selection)
-                || state.remoteSessionShowsTranscriptToggle(selection)
+                || presentation.attached
+                || presentation.showsToggle
             #expect(!anyFlag)
             #expect(MainToolbarSnapshot.make(from: state).remote == nil)
         }
@@ -160,15 +190,15 @@ struct MainToolbarSnapshotTests {
 
     @Test func remotePresentationSymbolAndHelp() {
         let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
-        let open = RemotePresentation(
-            selection: selection, showsTranscript: true, showsReconnect: false,
-            showsStop: false, transcriptOpen: true)
-        var closed = open
-        closed.transcriptOpen = false
-        #expect(open.transcriptSymbolName == "text.bubble.fill")
-        #expect(open.transcriptHelp == "Hide transcript")
-        #expect(closed.transcriptSymbolName == "text.bubble")
-        #expect(closed.transcriptHelp == "Show transcript")
+        let shown = RemotePresentation(
+            selection: selection, showsTranscript: true, showsReconnect: true,
+            showsStop: false, transcriptShown: true)
+        var hidden = shown
+        hidden.transcriptShown = false
+        #expect(shown.transcriptSymbolName == "text.bubble.fill")
+        #expect(shown.transcriptHelp == "Hide transcript")
+        #expect(hidden.transcriptSymbolName == "text.bubble")
+        #expect(hidden.transcriptHelp == "Show transcript")
     }
 
     @Test func layoutStateMapsPresence() {
@@ -180,7 +210,7 @@ struct MainToolbarSnapshotTests {
             help: "Dev servers", accessibilityLabel: "Dev servers")
         let remote = RemotePresentation(
             selection: selection, showsTranscript: true, showsReconnect: false,
-            showsStop: true, transcriptOpen: false)
+            showsStop: true, transcriptShown: false)
 
         let bare = MainToolbarSnapshot(
             canGoBack: false, canGoForward: false, filter: filter, servers: nil, remote: nil)
