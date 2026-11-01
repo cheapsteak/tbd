@@ -309,11 +309,7 @@ extension StateSubscriptionManager {
     ///   moved surface under `worktreeID` drops it from the scratch
     ///   worktree's entry.
     /// - **A change to `worktreeID`'s panel list** rewrote these surfaces:
-    ///   `note.delete` removing the note's panel (`NoteStore.delete`),
-    ///   worktree creation opening the initial note
-    ///   (`PanelSurfaceStore.openWorktreePanel`), or a revive reopening a
-    ///   panel for each note (`WorktreeStore.revive`, and
-    ///   `WorktreeStore.updateStatus` for a row it takes out of `archived`).
+    ///   `note.delete` removing the note's panel (`NoteStore.delete`).
     func broadcastPanelSurfacesChanged(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
         broadcastPanelSurfaceChanged(
             worktreeID: worktreeID, tabs: surfaces, removedTabIDs: [],

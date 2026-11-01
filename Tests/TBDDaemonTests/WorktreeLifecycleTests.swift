@@ -121,7 +121,7 @@ import Testing
 
     #expect(primary.kind == .codex)
     #expect(primary.label == "Codex")
-    // The initial note opens as a worktree panel, outside the tab order.
+    // The initial note stays out of the tab order.
     #expect(try await db.worktrees.getTabOrder(worktreeID: result.id) == terminals.map(\.id))
     #expect(try await db.worktrees.getActiveTabID(worktreeID: result.id) == primary.id)
 }

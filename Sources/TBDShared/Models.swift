@@ -1595,8 +1595,8 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
-    /// Whether ordinary new worktrees open an empty "Notes" note as a
-    /// worktree panel in the side panel.
+    /// Whether ordinary new worktrees start with an empty "Notes" note. The
+    /// note opens no panel by itself.
     ///
     /// **Resolved, not stored.** The backing column carries no SQL default and
     /// stays NULL until somebody touches the toggle, so this property is

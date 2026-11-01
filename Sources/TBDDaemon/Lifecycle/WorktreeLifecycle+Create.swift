@@ -27,7 +27,7 @@ public enum WorktreeCreateCompletion: Sendable {
 /// "you have been moved" context prompt as the spawn's trailing argument,
 /// which Claude answered immediately — an unwanted turn on every revive.
 /// Provenance lives solely in `notesSeed`, which seeds the initial "Notes"
-/// note, opened as a worktree panel.
+/// note.
 ///
 /// `claudeSpawnExtras` are the plugin folders and settings overlay the source
 /// session's terminal carried when its worktree was archived: the carried-over
@@ -592,7 +592,7 @@ extension WorktreeLifecycle {
                         preparedCodexLaunch: preparedCodexLaunch
                     )
                     if shouldCreateInitialNote {
-                        await createInitialNotePanel(
+                        await createInitialNote(
                             worktreeID: worktree.id,
                             seed: carryover?.notesSeed
                         )
@@ -626,10 +626,10 @@ extension WorktreeLifecycle {
 
             // 3c. Conversation carryover always gets a seeded provenance note;
             // ordinary creates get an empty note only when configured. Either
-            // opens as a worktree panel in the side panel, outside the tab
-            // order, so the primary terminal keeps focus.
+            // stays out of the tab order and opens no panel, so the primary
+            // terminal keeps focus.
             if shouldCreateInitialNote {
-                await createInitialNotePanel(
+                await createInitialNote(
                     worktreeID: worktreeID,
                     seed: carryover?.notesSeed
                 )
@@ -814,27 +814,16 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Creates the initial "Notes" note and opens it as a worktree panel
-    /// (side panel notes spec, "New worktrees"), which every workspace tab of
-    /// the worktree carries in its side panel. The note stays out of the tab
-    /// order, so the primary terminal keeps focus. Ordinary creates leave it
-    /// empty; a conversation carryover supplies the populated provenance
-    /// seed.
-    ///
-    /// Opening the panel selects nothing. So that the starter note shows,
-    /// the worktree's active tab, the primary terminal, gets its surface
-    /// written open with the note in front when it has none yet
-    /// (`activeTerminalTabSeed`), in the transaction that opens the panel
-    /// (`PanelSurfaceStore.openWorktreePanel(seeding:)`). A tab a sync
-    /// imports after the panel opened comes out collapsed; a tab the app
-    /// synced before then keeps its open region, and the open's rewrite
-    /// fronts the note there when nothing else was in front. The seeded
-    /// surface and any surface the open rewrote are broadcast together.
+    /// Creates the initial "Notes" note. Ordinary creates leave it empty; a
+    /// conversation carryover supplies the populated provenance seed. The
+    /// note stays out of the tab order, so the primary terminal keeps focus,
+    /// and it opens no panel: the app's Notes toggle opens it on demand
+    /// (side panel notes spec).
     ///
     /// Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
     /// terminals are already valid.
-    func createInitialNotePanel(worktreeID: UUID, seed: String? = nil) async {
+    func createInitialNote(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
             if let seed {
@@ -844,36 +833,9 @@ extension WorktreeLifecycle {
                     content: seed
                 )
             }
-            let mainTab: SurfaceSeed?
-            do {
-                mainTab = try await activeTerminalTabSeed(worktreeID: worktreeID)
-            } catch {
-                mainTab = nil
-                logger.warning("failed to find the main tab of \(worktreeID, privacy: .public) to open the initial note panel in: \(error.localizedDescription, privacy: .public)")
-            }
-            let changedSurfaces = try await db.panelSurface.openWorktreePanel(
-                worktreeID: worktreeID, content: .note(noteID: note.id), seeding: mainTab, now: now())
-            subscriptions?.broadcastPanelSurfacesChanged(
-                worktreeID: worktreeID, surfaces: changedSurfaces)
         } catch {
-            logger.warning("failed to create initial note panel for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to create initial note for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-    }
-
-    /// The worktree's active tab as the tab whose surface the initial note
-    /// panel opens in, or nil when the active tab is not a terminal of this
-    /// worktree (a terminal tab's ID is its terminal's). It sits at the tab's
-    /// index in the tab order, 0 when the order does not name it.
-    private func activeTerminalTabSeed(worktreeID: UUID) async throws -> SurfaceSeed? {
-        guard let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID),
-              let terminal = try await db.terminals.get(id: activeTabID),
-              terminal.worktreeID == worktreeID else {
-            return nil
-        }
-        let tabOrder = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
-        return SurfaceSeed(
-            tabID: activeTabID, primary: .terminal(terminalID: terminal.id),
-            position: tabOrder.firstIndex(of: activeTabID) ?? 0)
     }
 
     /// Attempts to create a git worktree, trying origin/<default> then falling back

@@ -162,19 +162,18 @@ struct PanelSyncTabsTests {
         #expect(delta.originOperationID == nil)
     }
 
-    /// A worktree panel opened before the app synced a tab, as worktree
-    /// creation's initial note is, joins the tab when the sync imports it:
-    /// the import, the delta and a later read all carry the list. A tab with
-    /// no panel of its own fronts the first worktree panel, collapsed, so the
-    /// import opens no side region by itself.
-    @Test("an imported tab joins the worktree's panels, fronting the first, collapsed")
+    /// A worktree panel opened before the app synced a tab joins the tab
+    /// when the sync imports it: the import, the delta and a later read all
+    /// carry the list, and a tab with no panel of its own shows the first
+    /// worktree panel in front, open, since the worktree's panels follow
+    /// across tabs.
+    @Test("an imported tab joins the worktree's panels, fronting the first")
     func syncImportJoinsWorktreePanels() async throws {
         let (router, db, deltas) = try makeRouterAndDB()
         let wtID = try await makeWorktree(db)
         let note = try await db.notes.create(worktreeID: wtID)
-        _ = try await db.panelSurface.openWorktreePanel(
-            worktreeID: wtID, content: .note(noteID: note.id), now: Date())
-        _ = try await db.panelSurface.openWorktreePanel(worktreeID: wtID, content: .changes, now: Date())
+        try await db.openWorktreePanelForTests(worktreeID: wtID, content: .note(noteID: note.id))
+        try await db.openWorktreePanelForTests(worktreeID: wtID, content: .changes)
         let panels = try await db.panelSurface.worktreePanels(worktreeID: wtID)
         try #require(panels.count == 2)
         let tab = terminalTab(label: "A")
@@ -191,11 +190,11 @@ struct PanelSyncTabsTests {
         #expect(imported.worktreePanels == panels)
         #expect(imported.side.panels.isEmpty)
         #expect(imported.side.activePanelID == panels[0].id)
-        #expect(imported.side.collapsed == true)
+        #expect(imported.side.collapsed == false)
         #expect(try await db.panelSurface.surface(tabID: tab.tabID) == imported)
 
         // A relabel updates the row, and the surface it reports still
-        // carries the list and keeps the collapse.
+        // carries the list.
         let relabelled = LegacyTabPayload(
             tabID: tab.tabID, label: "A renamed", content: tab.content, layout: nil)
         _ = try await sync(router, worktreeID: wtID, [relabelled])
@@ -422,19 +421,13 @@ struct PanelSyncTabsTests {
         let imported = try await harness.db.panelSurface.syncTabs(
             worktreeID: worktreeID, entries: entries, now: Date())
         #expect(imported.imported == tabIDs, "precondition: the worktree has surfaces")
-        // Creation also wrote the main tab's surface, open on the starter
-        // note, and the sync above, which does not list it, keeps it.
-        let surfaceIDs = try await harness.db.panelSurface.surfaces(worktreeID: worktreeID).map(\.id)
-        let deltasBefore = panelSurfaceDeltas(deltas).count
 
         try await harness.lifecycle.archiveWorktree(worktreeID: worktreeID)
 
-        let removals = panelSurfaceDeltas(deltas).dropFirst(deltasBefore).filter { $0.worktreeID == worktreeID }
+        let removals = panelSurfaceDeltas(deltas).filter { $0.worktreeID == worktreeID }
         try #require(removals.count == 1, "one removal per archive, observed \(removals)")
         let removal = removals[0]
-        #expect(Set(removal.removedTabIDs) == Set(surfaceIDs))
-        #expect(removal.removedTabIDs.count == surfaceIDs.count)
-        #expect(Set(tabIDs).isSubset(of: Set(removal.removedTabIDs)))
+        #expect(removal.removedTabIDs == tabIDs)
         #expect(removal.tabs.isEmpty)
         #expect(removal.originOperationID == nil)
         #expect(try await harness.db.panelSurface.surfaces(worktreeID: worktreeID).isEmpty)

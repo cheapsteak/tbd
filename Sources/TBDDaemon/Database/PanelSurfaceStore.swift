@@ -687,18 +687,10 @@ public struct PanelSurfaceStore: Sendable {
     ///
     /// Every surface the sync inserts or reports carries this worktree's
     /// panels: an import adopts the list before it is written
-    /// (`PanelSurfaceReducer.adopting`), and an updated surface carries the
-    /// list a read of it joins in. An import with no panel of its own, in a
-    /// worktree with panels, fronts the first worktree panel and is written
-    /// collapsed, so a tab the app lists for the first time, after an update
-    /// or for a new terminal, never opens a side region the user did not
-    /// ask for; the worktree's panels are one toggle away. An import with
-    /// panels of its own keeps the candidate's collapse state, and an update
-    /// never changes it. The rule covers imports only: worktree creation
-    /// writes its main tab's surface open in the transaction that opens the
-    /// starter note (`openWorktreePanel(seeding:)`), and a tab the app synced
-    /// before a panel opened keeps its open region, the open's rewrite
-    /// fronting the panel when nothing else was in front.
+    /// (`PanelSurfaceReducer.adopting`), so a tab with no panel of its own
+    /// shows the first worktree panel in front, and an updated surface
+    /// carries the list a read of it joins in. An import keeps the
+    /// candidate's collapse state, and an update never changes it.
     ///
     /// Listing a tab clears its row's `awaitingListing` marker, whichever
     /// case applies. Clearing it alone changes nothing the app sees, so it
@@ -776,15 +768,10 @@ public struct PanelSurfaceStore: Sendable {
                         // Its histories cascade.
                         try WorkspaceTabSurfaceRecord.deleteOne(db, key: record.id)
                     }
-                    var imported = PanelSurfaceReducer.adopting(worktreePanels, into: WorkspaceTabSurface(
+                    let imported = PanelSurfaceReducer.adopting(worktreePanels, into: WorkspaceTabSurface(
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
                         primary: entry.primary ?? candidate.primary, side: candidate.side,
                         revision: try Self.nextRevision(db: db)))
-                    if imported.side.panels.isEmpty && !worktreePanels.isEmpty {
-                        // Nothing of its own to show: the worktree's panels
-                        // wait one toggle away rather than narrowing the tab.
-                        imported.side.collapsed = true
-                    }
                     try Self.writeSurface(
                         imported, position: entry.position, awaitingListing: false, db: db, now: now)
                     outcome.imported.append(entry.tabID)

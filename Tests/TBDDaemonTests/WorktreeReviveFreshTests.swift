@@ -325,9 +325,8 @@ struct WorktreeReviveFreshTests {
         )
         let order = try await db.worktrees.getTabOrder(worktreeID: created.id)
         #expect(!order.contains(note.id))
-        let panelContent = try await db.panelSurface.worktreePanels(worktreeID: created.id).map(\.content)
-        let expectedContent: [WorktreePanelContent] = [.note(noteID: note.id)]
-        #expect(panelContent == expectedContent, "the seeded note opens as a worktree panel")
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: created.id).isEmpty,
+                "the seeded note opens no worktree panel")
     }
 
     /// The source session's plugin folders and settings overlay, kept by the

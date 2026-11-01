@@ -121,7 +121,7 @@ struct PanelRPCTests {
         }
 
         let bareID = try await makeWorktree(db, name: "bare")
-        _ = try await db.panelSurface.openWorktreePanel(worktreeID: bareID, content: .changes, now: Date())
+        try await db.openWorktreePanelForTests(worktreeID: bareID, content: .changes)
         let bareResponse = await router.handle(
             try RPCRequest(method: RPCMethod.panelGet, params: PanelGetParams(worktreeID: bareID)))
         #expect(bareResponse.success)

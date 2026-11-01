@@ -338,9 +338,9 @@ struct WorktreeConversationCarryoverTests {
         #expect(try await db.notes.get(id: note.id)?.content == notesSeed)
         let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         #expect(!order.contains(note.id))
-        let panelContent = try await db.panelSurface.worktreePanels(worktreeID: worktree.id).map(\.content)
-        let expectedContent: [WorktreePanelContent] = [.note(noteID: note.id)]
-        #expect(panelContent == expectedContent, "the seeded note opens as a worktree panel")
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: worktree.id).isEmpty,
+                "the seeded note opens no worktree panel")
+        #expect(try await db.panelSurface.surfaces(worktreeID: worktree.id).isEmpty)
     }
 }
 }

@@ -242,8 +242,7 @@ import TestSupport
                 id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: UUID()))
             try await db.panelSurface.commit(surface: surface, position: position, receipt: nil, now: Date())
         }
-        _ = try await db.panelSurface.openWorktreePanel(
-            worktreeID: worktreeID, content: .note(noteID: note.id), now: Date())
+        try await db.openWorktreePanelForTests(worktreeID: worktreeID, content: .note(noteID: note.id))
         let deltasBefore = recorder.count
 
         let response = await router.handle(try RPCRequest(
