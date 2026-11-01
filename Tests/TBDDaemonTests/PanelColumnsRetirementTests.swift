@@ -4,12 +4,12 @@ import TBDShared
 import Testing
 @testable import TBDDaemonLib
 
-/// The v1 panel model's three columns are retired at schema epoch 5, replaced
-/// by `config.panel_tabs_enabled` (docs/specs/2026-10-30-panel-tabs-design.md,
-/// "Flag and rollout"): the store's master switch
+/// The panel model's four columns are retired (docs/specs/2026-10-30-panel-tabs-design.md,
+/// "Rollout"). At schema epoch 5: the store's master switch
 /// `config.daemon_panel_surface_enabled`, the agent gate
 /// `config.agent_panel_control_enabled`, and the legacy-import stamp
-/// `worktree.panel_surface_imported_at`. Nothing reads or writes them, and
+/// `worktree.panel_surface_imported_at`. At epoch 6: the soak flag
+/// `config.panel_tabs_enabled`. Nothing reads or writes them, and
 /// `RetiredColumnReconciler` drops them once the kept rollback bundle no
 /// longer uses them. See "Retiring a column" in
 /// `Sources/TBDDaemon/Database/CLAUDE.md`.
@@ -19,10 +19,11 @@ import Testing
         RetiredColumn(table: "config", column: "daemon_panel_surface_enabled", epoch: 5),
         RetiredColumn(table: "config", column: "agent_panel_control_enabled", epoch: 5),
         RetiredColumn(table: "worktree", column: "panel_surface_imported_at", epoch: 5),
+        RetiredColumn(table: "config", column: "panel_tabs_enabled", epoch: 6),
     ]
 
-    @Test func theColumnsAreRetiredAtEpochFive() throws {
-        #expect(SchemaEpoch.current >= 5)
+    @Test func theColumnsAreRetiredAtTheirEpochs() throws {
+        #expect(SchemaEpoch.current >= 6)
         for column in Self.retired {
             let index = try #require(RetiredColumns.all.firstIndex(of: column),
                                      "\(column) is not listed in RetiredColumns.all")
@@ -34,16 +35,31 @@ import Testing
                 "an entry names an epoch this tree has not reached")
     }
 
+    /// The soak flag's column is dropped once the kept bundle was built from
+    /// a tree that had retired it (epoch 6), and kept while the bundle still
+    /// reads it (epoch 5, or no recorded epoch).
+    @Test func theSoakFlagColumnDropsAtEpochSixAndHoldsBelow() {
+        let entry = RetiredColumn(table: "config", column: "panel_tabs_enabled", epoch: 6)
+        #expect(RetiredColumns.all.contains(entry))
+        #expect(RetiredColumnReconciler.decision(
+            for: entry, keptBundle: KeptBundle(path: "/kept/TBD.app", schemaEpoch: 6)) == .drop)
+        #expect(RetiredColumnReconciler.decision(
+            for: entry, keptBundle: KeptBundle(path: "/kept/TBD.app", schemaEpoch: 5)) == .hold)
+        #expect(RetiredColumnReconciler.decision(
+            for: entry, keptBundle: KeptBundle(path: "/kept/TBD.app", schemaEpoch: nil)) == .hold)
+        #expect(RetiredColumnReconciler.decision(for: entry, keptBundle: nil) == .drop)
+    }
+
     // MARK: - The record mirrors
 
     /// A GRDB record writes every property it declares, so a record that
     /// still declared a column would fail every write once it is dropped.
-    /// `composer_draft_enabled` and `panel_tabs_enabled` are the controls: the
-    /// reflection does see the record's columns.
+    /// `composer_draft_enabled` is the control: the reflection does see the
+    /// record's columns.
     @Test func configRecordNoLongerDeclaresTheColumns() {
         let labels = Mirror(reflecting: ConfigRecord(id: "unstored")).children.compactMap(\.label)
         #expect(labels.contains("composer_draft_enabled"))
-        #expect(labels.contains("panel_tabs_enabled"))
+        #expect(!labels.contains("panel_tabs_enabled"))
         #expect(!labels.contains("daemon_panel_surface_enabled"))
         #expect(!labels.contains("agent_panel_control_enabled"))
     }
@@ -64,25 +80,26 @@ import Testing
     /// The shared models lose the fields the columns fed.
     @Test func theSharedModelsNoLongerCarryTheFlags() {
         let configLabels = Mirror(reflecting: Config()).children.compactMap(\.label)
-        #expect(configLabels.contains("panelTabsEnabled"))
+        #expect(!configLabels.contains("panelTabsEnabled"))
         #expect(!configLabels.contains("panelSurfaceEnabled"))
         #expect(!configLabels.contains("agentPanelControlEnabled"))
 
         let capsLabels = Mirror(reflecting: DaemonCapabilitiesResult(controlModeEnabled: false))
             .children.compactMap(\.label)
-        #expect(capsLabels.contains("panelTabsEnabled"))
+        #expect(!capsLabels.contains("panelTabsEnabled"))
         #expect(!capsLabels.contains("panelSurfaceEnabled"))
     }
 
     // MARK: - Round trips against a schema the columns are dropped from
 
-    /// The config row is written through the record and the store, and read
-    /// back, against a schema both config columns have been dropped from.
+    /// The config row is written through the record and read back, against a
+    /// schema all three config columns have been dropped from.
     @Test func theConfigRowRoundTripsWithoutTheColumns() async throws {
         let db = try TBDDatabase(inMemory: true)
         let record = try await db.writerForTests.write { conn -> ConfigRecord? in
             try conn.execute(sql: "ALTER TABLE config DROP COLUMN daemon_panel_surface_enabled")
             try conn.execute(sql: "ALTER TABLE config DROP COLUMN agent_panel_control_enabled")
+            try conn.execute(sql: "ALTER TABLE config DROP COLUMN panel_tabs_enabled")
             return try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)
         }
         let seeded = try #require(record)
@@ -90,10 +107,10 @@ import Testing
             _ = try ConfigRecord.deleteOne(conn, key: ConfigStore.singletonID)
             try seeded.insert(conn)
         }
-        try await db.config.setPanelTabsEnabled(true)
+        try await db.config.setAutoCreateNotes(false)
 
         let config = try await db.config.get()
-        #expect(config.panelTabsEnabled)
+        #expect(!config.autoCreateNotesEnabled)
     }
 
     /// A worktree row is inserted, updated and read back through the store
@@ -113,8 +130,8 @@ import Testing
 
     // MARK: - The wire
 
-    /// A daemon built before the retirement still sends `panelSurfaceEnabled`
-    /// and `agentPanelControlEnabled` in every `Config`. A newer client
+    /// A daemon built before the retirement still sends `panelSurfaceEnabled`,
+    /// `agentPanelControlEnabled` and `panelTabsEnabled` in every `Config`. A newer client
     /// ignores the keys rather than failing the decode.
     @Test func aConfigThatStillCarriesTheFlagsDecodes() throws {
         let data = try JSONEncoder().encode(Config())
@@ -122,20 +139,19 @@ import Testing
             try JSONSerialization.jsonObject(with: data) as? [String: Any])
         object["panelSurfaceEnabled"] = true
         object["agentPanelControlEnabled"] = true
+        object["panelTabsEnabled"] = true
         let withFlags = try JSONSerialization.data(withJSONObject: object)
 
         let expected = try JSONDecoder().decode(Config.self, from: data)
         #expect(try JSONDecoder().decode(Config.self, from: withFlags) == expected)
     }
 
-    /// The same for `daemon.capabilities`. An old daemon's
-    /// `panelSurfaceEnabled: true` is not read as the new flag: the result
-    /// carries the shipped default for `panelTabsEnabled`.
-    @Test func capabilitiesThatStillCarryTheFlagDecode() throws {
-        let json = #"{"controlModeEnabled":true,"panelSurfaceEnabled":true}"#
+    /// The same for `daemon.capabilities`: an old daemon's panel flags are
+    /// ignored rather than read.
+    @Test func capabilitiesThatStillCarryTheFlagsDecode() throws {
+        let json = #"{"controlModeEnabled":true,"panelSurfaceEnabled":true,"panelTabsEnabled":true}"#
         let caps = try JSONDecoder().decode(DaemonCapabilitiesResult.self, from: Data(json.utf8))
         #expect(caps.controlModeEnabled == true)
-        #expect(caps.panelTabsEnabled == Config.panelTabsDefault)
     }
 
     // MARK: - Helpers

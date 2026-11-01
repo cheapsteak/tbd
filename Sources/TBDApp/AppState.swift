@@ -254,6 +254,17 @@ final class AppState {
     /// `NoteStore`); a pane that needs content reads it off disk with
     /// `noteContent(noteID:worktreeID:)`.
     var notes: [UUID: [NoteSummary]] = [:]
+    /// Each note's latest rename still persisting (`renameNote`), which the
+    /// next rename of that note waits for, so the daemon commits a note's
+    /// titles in the order they were typed. An entry goes once its rename has
+    /// persisted and no later one is queued behind it.
+    @ObservationIgnored var noteRenameTails: [UUID: NoteRenameTail] = [:]
+    /// Note ID → registration token → how to land the save one open editor
+    /// of that note still holds on its debounce (`registerNoteSaveFlusher`,
+    /// `flushPendingNoteSave`). Each `NotePaneModel` registers a flusher for
+    /// the note it loads, holding the model weakly, so the registry never
+    /// keeps a model alive. Several editors of one note have one entry each.
+    @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
@@ -901,23 +912,28 @@ final class AppState {
     }
     /// The app's copy of the daemon-owned panel surfaces: worktree → workspace
     /// tab → surface. Filled by `panel.get` and kept current by
-    /// `panelSurfaceChanged` deltas while `panel_tabs_enabled` is on; empty
-    /// otherwise. Carries no tab order — the renderer looks tabs up by ID.
+    /// `panelSurfaceChanged` deltas. Carries no tab order — the renderer looks
+    /// tabs up by ID.
     /// Written only when a value actually changes, because every reader of a
     /// dictionary-keyed tracked property is notified on any write.
     var panelSurfaces: [UUID: [WorkspaceTabID: WorkspaceTabSurface]] = [:]
     /// Worktrees whose workspace tabs changed since their last `panel.syncTabs`.
     @ObservationIgnored var panelSyncDirty: Set<UUID> = []
     /// Each worktree's tab list — every field the sync sends: IDs, order,
-    /// labels and contents — as the `tabs` observer last marked it, taken
-    /// while the flag is on and empty while it is off. The observer compares
-    /// `tabs` against this rather than against `oldValue`. It shares each
-    /// worktree's array with `tabs`, never the dictionary itself, so an
-    /// in-place edit with the flag on copies at most that worktree's tabs.
+    /// labels and contents — as the `tabs` observer last marked it. The
+    /// observer compares `tabs` against this rather than against `oldValue`.
+    /// It shares each worktree's array with `tabs`, never the dictionary
+    /// itself, so an in-place edit copies at most that worktree's tabs.
     @ObservationIgnored var panelTabSignatures: [UUID: [TBDShared.Tab]] = [:]
     /// The legacy layouts of the tabs in `panelSyncSkippedTabIDs`, as the
     /// `layouts` observer last saw them; empty when nothing is skipped.
     @ObservationIgnored var panelSkippedTabLayouts: [UUID: LayoutNode] = [:]
+    /// The converter's verdict for each tab the render branch asked about
+    /// while the copy held no surface for it, with the content and layout it
+    /// was computed from, so a view body runs the converter again only when
+    /// one of them changes (`workspaceRenderPath`). Pruned to the tabs the
+    /// worktrees' lists hold when a list changes. A cache no view observes.
+    @ObservationIgnored var legacyConverterVerdicts: [UUID: LegacyConverterVerdict] = [:]
     /// A tab-sync flush is scheduled or running; later changes join it rather
     /// than scheduling another.
     @ObservationIgnored var panelSyncFlushScheduled = false
@@ -925,6 +941,11 @@ final class AppState {
     /// the daemon applies a worktree's tab lists in the order the app built
     /// them; a later flush awaits this one before it starts.
     @ObservationIgnored var panelSyncFlushTask: Task<Void, Never>?
+    /// Worktree → how many of its `panel.syncTabs` in a row have failed. Only
+    /// the first failure of a run logs at `.error`; the poll's retries
+    /// (`retryPendingPanelTabSyncs`) log the rest at `.debug`. A success
+    /// removes the entry, and so does archiving the worktree.
+    @ObservationIgnored var panelSyncConsecutiveFailures: [UUID: Int] = [:]
     /// Worktrees whose tab list is complete enough to sync: both the
     /// terminal-backed and the note-backed tabs have been reconciled against a
     /// fetch since the current subscription. A sync deletes the surface of
@@ -951,11 +972,6 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
-    /// The daemon has acknowledged the subscription `startSubscription()` last
-    /// opened. Until it has, the flag turning on syncs but loads nothing: the
-    /// acknowledgement refetches every worktree itself
-    /// (`panelSubscriptionRegistered`).
-    @ObservationIgnored var panelSubscriptionAcknowledged = false
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -985,6 +1001,17 @@ final class AppState {
     /// rows — so a single retry is always enough; the extra one is slack.
     static let maxTabStateHydrationAttempts = 3
     var draggingTabID: UUID? = nil
+    /// The workspace tab whose rename field should open: set where the tab
+    /// bar asks for a rename (a double-click or Rename Tab, through
+    /// `requestTabRename`), and taken by the tab bar item showing that tab
+    /// (`takePendingTabRename`) as it appears or as this changes. Held here
+    /// rather than in the item, because selecting the tab can move the bar
+    /// between `SingleWorktreeView` and `PanelSurfaceWorkspaceView` —
+    /// closing Session History, or moving between a skipped tab and a
+    /// daemon-path tab — which rebuilds every item and would drop an editing
+    /// flag set on the old one. Written only when it changes: every item
+    /// reads it.
+    var pendingTabRenameID: UUID? = nil
     var repoFilter: UUID? = nil
     var pendingWorktreeIDs: Set<UUID> = []
     /// Remote lanes drawn optimistically while `remote.create` is in flight,
@@ -2172,10 +2199,6 @@ final class AppState {
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
-    /// How `setPanelTabsEnabled` persists the panel tabs soak flag —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var panelTabsFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setPanelTabsEnabled(enabled) }
     /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
     /// the same reason as `controlModeSetter`, so the sweep's cadence and its
     /// answers are testable without a daemon.
@@ -2437,15 +2460,35 @@ final class AppState {
     /// `prBindingsFetcher` — `DaemonClient` is concrete, no protocol.
     @ObservationIgnored lazy var noteLegacyContentFetcher: @MainActor (UUID) async throws -> String =
         { [daemonClient] noteID in try await daemonClient.getNote(noteID: noteID).content }
+    /// How a non-empty save writes a note's content file
+    /// (`saveNoteContent`): given the text and the file's path, off the main
+    /// thread, throwing on failure. Injectable so a test can hold a write in
+    /// flight.
+    @ObservationIgnored lazy var noteContentWriter: @MainActor (String, String) async throws -> Void =
+        { content, path in
+            try await Task.detached(priority: .userInitiated) {
+                try NotesFileStore().writeOrThrow(content, to: path)
+            }.value
+        }
     /// How an emptying save is handed back to the daemon, which deletes the
     /// content file and clears the legacy column together. Injectable so a
     /// test can prove that ordinary (non-empty) saves never reach it.
     @ObservationIgnored lazy var noteEmptier: @MainActor (UUID) async throws -> Note =
         { [daemonClient] noteID in try await daemonClient.updateNote(noteID: noteID, content: "") }
+    /// How a note's new title reaches the daemon (`renameNote`).
+    /// Injectable so a test can drive a rename that persists and one that
+    /// fails, without a daemon.
+    @ObservationIgnored lazy var noteTitleUpdater: @MainActor (UUID, String) async throws -> Note =
+        { [daemonClient] noteID, title in try await daemonClient.updateNote(noteID: noteID, title: title) }
+    /// How a note's row is deleted on the daemon (`deleteNote`). Injectable so
+    /// a test can tell the closes that delete a note from the ones that keep
+    /// it.
+    @ObservationIgnored lazy var noteDeleter: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
     /// Asks the user to confirm closing a note tab whose note has content —
-    /// closing a note tab hard-deletes the note row (`closeTab` →
-    /// `deleteNote`). Injectable so tests can exercise both branches without
-    /// a real modal NSAlert.
+    /// closing a note's workspace tab or side-region tab hard-deletes the note
+    /// row (`closeTab` and `closeSidePanel` → `deleteNote`). Injectable so
+    /// tests can exercise both branches without a real modal NSAlert.
     ///
     /// Takes the content-file path rather than deriving one: the alert
     /// advertises where the text is kept, and `noteContentPathResolver` is the
@@ -2640,27 +2683,22 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
-            let wasPanelTabsEnabled = panelTabsActive
             daemonCapabilities = capabilities
-            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
         }
     }
 
     /// The capability fetch `connectAndLoadInitialState` makes before its
     /// first `refreshAll`. Keeps the last known value on failure, as
     /// `refreshDaemonCapabilities` does: a transient hiccup at connect must
-    /// not switch panel tabs off for the session by clearing the copy. Runs
-    /// the panel-tabs hook only after a successful fetch. A failure with
+    /// not switch every capability flag off for the session. A failure with
     /// nothing to keep is retried on the poll
     /// (`retryDaemonCapabilitiesIfMissing`).
     func fetchDaemonCapabilitiesAtConnect() async {
-        let wasPanelTabsEnabled = panelTabsActive
         guard let capabilities = await daemonCapabilitiesFetcher() else {
             logger.warning("Daemon capabilities fetch failed at connect; keeping the last known value")
             return
         }
         daemonCapabilities = capabilities
-        panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
     }
 
     /// Run on each poll cycle: while the app is connected and holds no
@@ -3118,10 +3156,10 @@ final class AppState {
         guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
         let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
-            let layout = layouts[tab.id]
+            let payload = legacyTabPayload(for: tab)
             includedPaneIDs.insert(tab.content.paneID)
-            if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
-            return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
+            if let layout = payload.layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
+            return payload
         }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
         return PanelSyncTabsParams(
@@ -3129,6 +3167,12 @@ final class AppState {
             tabs: legacyTabs,
             paneHistories: includedPaneHistories
         )
+    }
+
+    /// One tab as `panel.syncTabs` sends it: its label, content and legacy
+    /// layout.
+    func legacyTabPayload(for tab: TBDShared.Tab) -> LegacyTabPayload {
+        LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layouts[tab.id])
     }
 
     // MARK: - Selection Persistence
@@ -4092,6 +4136,7 @@ final class AppState {
                 // than drifting earlier off wall-clock ticks that did no work.
                 await self.runPollCycleIfIdle {
                     await self.retryDaemonCapabilitiesIfMissing()
+                    self.retryPendingPanelTabSyncs()
                     await self.refreshAll()
                     if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
                         self.startSubscription()

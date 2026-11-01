@@ -28,12 +28,6 @@ final class BroadcastRecorder: @unchecked Sendable {
 @Suite("PanelCoordinatorTests")
 struct PanelCoordinatorTests {
 
-    /// The three states of `panel_tabs_enabled`: never chosen (NULL), and
-    /// each explicit choice.
-    enum FlagState: Sendable, CaseIterable {
-        case unset, off, on
-    }
-
     private static func file(_ path: String) -> PanelContent {
         .file(FileReference(path: path))
     }
@@ -45,14 +39,6 @@ struct PanelCoordinatorTests {
             repoID: repo.id, name: name, branch: "b",
             path: "/tmp/pc-wt-\(UUID())", tmuxServer: "srv")
         return wt.id
-    }
-
-    private func setFlag(_ db: TBDDatabase, _ state: FlagState) async throws {
-        switch state {
-        case .unset: break
-        case .off: try await db.config.setPanelTabsEnabled(false)
-        case .on: try await db.config.setPanelTabsEnabled(true)
-        }
     }
 
     /// Seeds one tab through the store: a terminal primary plus one side
@@ -119,33 +105,33 @@ struct PanelCoordinatorTests {
         }
     }
 
-    // MARK: - Gating: one flag, every origin
+    // MARK: - No setting gates an operation
 
-    @Test(arguments: [FlagState.unset, .off], [PanelOperationOrigin.appUser, .agentCLI])
-    func gateRefusesWhenFlagNotOn(state: FlagState, origin: PanelOperationOrigin) async throws {
+    /// The retired `config.panel_tabs_enabled` column still exists in a fresh
+    /// test database until the reconciler drops it. Writing 0 into it proves
+    /// no code path consults it: a gate that read the old flag would refuse.
+    @Test("an app and an agent operation both apply with no config consulted")
+    func operationsApplyWhateverTheRetiredColumnHolds() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, state)
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "UPDATE config SET panel_tabs_enabled = 0")
+        }
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
 
-        let refused = envelope(
-            worktreeID: wtID, tabID: tab.id, origin: origin,
-            .open(content: Self.file("/b.txt"), newPanel: false))
-        await #expect(throws: PanelCoordinatorError.surfaceDisabled) {
-            _ = try await coordinator.apply(refused)
-        }
+        let fromApp = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, origin: .appUser, .setCollapsed(true)))
+        let fromAgent = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, origin: .agentCLI, .setCollapsed(false)))
 
-        #expect(recorder.count == 0)
-        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
-        #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
+        #expect(fromApp.tab.side.collapsed == true)
+        #expect(fromAgent.tab.side.collapsed == false)
     }
 
     @Test(arguments: [PanelOperationOrigin.appUser, .agentCLI])
-    func gateAppliesWhenFlagOn(origin: PanelOperationOrigin) async throws {
+    func operationAppliesForEveryOrigin(origin: PanelOperationOrigin) async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
@@ -161,16 +147,10 @@ struct PanelCoordinatorTests {
         #expect(recorder.count == 1)
     }
 
-    @Test func surfaceDisabledDescriptionNamesTheFlag() {
-        let description = PanelCoordinatorError.surfaceDisabled.errorDescription ?? ""
-        #expect(description.contains("panel_tabs_enabled"))
-    }
-
-    // MARK: - get (ungated)
+    // MARK: - get
 
     @Test func getReturnsHistories() async throws {
         let db = try TBDDatabase(inMemory: true)
-        // Flag never set: get is ungated.
         let wtID = try await makeWorktree(db)
         let history: PanelHistory = {
             var built = PanelHistory.seeded(with: Self.file("/a.txt"))
@@ -196,7 +176,6 @@ struct PanelCoordinatorTests {
     /// worktree's active tab, so `tbd panel list --tab` can mark it.
     @Test func getScopedReportsActiveTab() async throws {
         let db = try TBDDatabase(inMemory: true)
-        // Flag never set: get is ungated.
         let wtID = try await makeWorktree(db)
         let active = try await seedTab(db, worktreeID: wtID, position: 0)
         let inactive = try await seedTab(db, worktreeID: wtID, position: 1)
@@ -222,7 +201,6 @@ struct PanelCoordinatorTests {
 
     @Test func openOfMissingNoteIsInvalidResource() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
@@ -246,7 +224,6 @@ struct PanelCoordinatorTests {
 
     @Test func openOfOwnNoteApplies() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let note = try await db.notes.create(worktreeID: wtID)
         let tab = try await seedTab(db, worktreeID: wtID)
@@ -260,7 +237,6 @@ struct PanelCoordinatorTests {
 
     @Test func transcriptOfForeignTerminalIsInvalidResource() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
         let foreignTerminal = try await db.terminals.create(
@@ -286,7 +262,6 @@ struct PanelCoordinatorTests {
 
     @Test func staleBaseRelabelsPanelNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
         let recorder = BroadcastRecorder()
@@ -303,7 +278,6 @@ struct PanelCoordinatorTests {
 
     @Test func freshBaseKeepsPanelNotFoundAsOperation() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
         let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
@@ -325,7 +299,6 @@ struct PanelCoordinatorTests {
     /// base stays an operation error.
     @Test func staleBaseKeepsOtherErrorsAsOperation() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
         let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 5)
@@ -344,7 +317,6 @@ struct PanelCoordinatorTests {
 
     @Test func staleBaseWithSurvivingTargetApplies() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
         let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 5)
@@ -364,7 +336,6 @@ struct PanelCoordinatorTests {
 
     @Test func applyBroadcastsTheCommittedTab() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID, revision: 3)
         let recorder = BroadcastRecorder()
@@ -393,7 +364,6 @@ struct PanelCoordinatorTests {
 
     @Test func replayDoesNotBroadcast() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
@@ -421,7 +391,6 @@ struct PanelCoordinatorTests {
     /// the second tab.
     @Test func reusedOperationIDForAnotherTabIsRefused() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let firstTab = try await seedTab(db, worktreeID: wtID)
         let secondTab = try await seedTab(db, worktreeID: wtID, position: 1)
@@ -452,7 +421,6 @@ struct PanelCoordinatorTests {
 
     @Test func missingTabIsTabNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
@@ -468,7 +436,6 @@ struct PanelCoordinatorTests {
 
     @Test func tabOfAnotherWorktreeIsTabNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
         let tab = try await seedTab(db, worktreeID: wtID)
@@ -490,7 +457,6 @@ struct PanelCoordinatorTests {
 
     @Test func closeLeavesNoHistoryRow() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
         let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID)
@@ -517,7 +483,6 @@ struct PanelCoordinatorTests {
     /// broadcast, and the target tab is unchanged.
     @Test func failedCommitAfterReduceDoesNotBroadcast() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let collisionID = UUID()
         try await seedTab(db, worktreeID: wtID, panelID: collisionID, position: 0)
@@ -553,7 +518,6 @@ struct PanelCoordinatorTests {
                 try? FileManager.default.removeItem(atPath: tmp.path + suffix)
             }
         }
-        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
         let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID)

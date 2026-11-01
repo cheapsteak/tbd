@@ -5,10 +5,8 @@ import TBDShared
 private let panelCoordinatorLog = Logger(subsystem: "com.tbd.daemon", category: "panelCoordinator")
 
 /// Errors `PanelCoordinator.apply` and `syncTabs` can throw (panel tabs spec,
-/// "Coordinator and gating").
+/// "Coordinator").
 public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
-    /// `panel_tabs_enabled` is off — no mutating origin may proceed.
-    case surfaceDisabled
     /// The envelope's `tabID` has no readable surface under its worktree.
     case tabNotFound(UUID)
     /// `baseRevision` was stale AND the reducer's target panel is gone — the
@@ -27,8 +25,6 @@ public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .surfaceDisabled:
-            return "the side panel with tabs is disabled (panel_tabs_enabled is off)"
         case .tabNotFound(let tabID):
             return "no panel surface exists for tab \(tabID.uuidString)"
         case .staleTarget(let underlying):
@@ -49,10 +45,9 @@ public enum PanelCoordinatorError: LocalizedError, Equatable, Sendable {
 /// call — one global actor for now (shard per worktree if cross-worktree
 /// throughput ever matters; nothing here depends on the single-actor shape).
 ///
-/// `apply` runs gating → idempotency → resource check → reduce → persist →
-/// broadcast. `syncTabs` runs gating → legacy conversion → one store
-/// transaction → broadcast. Both gate on `panel_tabs_enabled` for every
-/// origin; `get` is ungated.
+/// `apply` runs idempotency → resource check → reduce → persist → broadcast.
+/// `syncTabs` runs legacy conversion → one store transaction → broadcast. No
+/// setting gates either; `get` is a read.
 public actor PanelCoordinator {
     private let db: TBDDatabase
     private let broadcast: @Sendable (StateDelta) -> Void
@@ -71,7 +66,7 @@ public actor PanelCoordinator {
         self.makeID = makeID
     }
 
-    /// Ungated read. `tabID` present narrows to that one tab, and to none
+    /// Read. `tabID` present narrows to that one tab, and to none
     /// when the tab has no surface under this worktree; absent returns every
     /// tab in the worktree. Either way the result names the worktree's active
     /// tab — the `worktree.activeTabID` column the app writes through
@@ -91,10 +86,7 @@ public actor PanelCoordinator {
     }
 
     public func apply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
-        // 1. Gating: one flag for every origin. `origin` is diagnostics only.
-        try await requireEnabled()
-
-        // 2. Idempotency fast path: a prior committed result for this tab
+        // 1. Idempotency fast path: a prior committed result for this tab
         // replays verbatim — no re-application, no re-persist, no broadcast,
         // and no resource check below — and a receipt for another tab refuses
         // the reused ID. The authoritative check also runs inside
@@ -105,12 +97,12 @@ public actor PanelCoordinator {
             return try reply(to: prior, for: envelope)
         }
 
-        // 3. Resource existence for open/navigate destinations. It reads other
+        // 2. Resource existence for open/navigate destinations. It reads other
         // tables, so it stays outside the apply transaction; a resource
         // vanishing right after this is a separate, inherent race.
         try await validateResourceExists(in: envelope.operation, worktreeID: envelope.worktreeID)
 
-        // 4. Transactional load → reduce → persist. Loading inside the store's
+        // 3. Transactional load → reduce → persist. Loading inside the store's
         // write transaction is what makes concurrent same-tab applies safe on
         // a production DatabasePool: actor isolation does not span `await`,
         // and a separate pre-write read would observe a stale revision.
@@ -187,8 +179,6 @@ public actor PanelCoordinator {
     /// Broadcasts exactly one `panelSurfaceChanged` when anything was
     /// inserted, updated or deleted, and none otherwise.
     public func syncTabs(_ params: PanelSyncTabsParams) async throws -> PanelSyncTabsResult {
-        try await requireEnabled()
-
         // Never trust the wire: drop any history whose legacy pane ID appears
         // in no listed tab's tree before handing histories to the converter.
         var liveLegacyPaneIDs = Set<UUID>()
@@ -259,14 +249,6 @@ public actor PanelCoordinator {
             removedTabIDs: outcome.removed,
             skippedTabIDs: skippedTabIDs,
             skipped: skipped)
-    }
-
-    /// The one gate for every mutating call and origin.
-    private func requireEnabled() async throws {
-        let config = try await db.config.get()
-        guard config.panelTabsEnabled else {
-            throw PanelCoordinatorError.surfaceDisabled
-        }
     }
 
     /// Referenced notes and transcripts must belong to this worktree. Only

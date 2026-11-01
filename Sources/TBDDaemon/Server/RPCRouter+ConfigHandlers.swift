@@ -522,18 +522,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the side panel with tabs gate (default OFF, soaking). Every
-    /// panel operation and tab sync reads it, so a change takes effect at the
-    /// next request. Design: docs/specs/2026-10-30-panel-tabs-design.md.
-    func handleConfigSetPanelTabsEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetPanelTabsParams.self, from: paramsData)
-        try await db.config.setPanelTabsEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config
-        // and its capabilities.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the the agent background priority command flag (default OFF). Read on every use, so a
     /// change takes effect at the next request. Turning it off also ends a live lease and restores
     /// what it lowered, so the flag is an off switch and not only a gate on `on`.

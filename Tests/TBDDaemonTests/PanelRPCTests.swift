@@ -6,12 +6,10 @@ import DaemonTestSupport
 import TestSupport
 
 /// Router-level tests for `panel.get` / `panel.apply` / `panel.syncTabs`.
-/// Exercises ROUTING only — `PanelCoordinator`'s gating, reduce and
-/// broadcast behavior is covered by `PanelCoordinatorTests`, and the sync's
-/// behavior by `PanelSyncTabsTests`. Here we check that each method reaches
-/// the coordinator, that the gate error surfaces as a string naming
-/// `panel_tabs_enabled`, and that a malformed payload decodes to an error
-/// response.
+/// Exercises ROUTING only — `PanelCoordinator`'s reduce and broadcast
+/// behavior is covered by `PanelCoordinatorTests`, and the sync's behavior by
+/// `PanelSyncTabsTests`. Here we check that each method reaches the
+/// coordinator and that a malformed payload decodes to an error response.
 @Suite("Panel RPC Tests")
 struct PanelRPCTests {
 
@@ -68,9 +66,9 @@ struct PanelRPCTests {
             operation: .open(content: .file(FileReference(path: "/b.txt")), newPanel: false))
     }
 
-    // MARK: - panel.get (ungated)
+    // MARK: - panel.get
 
-    @Test("panel.get on an empty store returns an empty result, no error, flag unset")
+    @Test("panel.get on an empty store returns an empty result, no error")
     func getOnEmptyStoreReturnsEmptyResult() async throws {
         let (router, _) = try makeRouterAndDB()
         let request = try RPCRequest(
@@ -81,7 +79,7 @@ struct PanelRPCTests {
         #expect(result.tabs.isEmpty)
     }
 
-    @Test("panel.get reflects a committed tab with the flag unset")
+    @Test("panel.get reflects a committed tab")
     func getReflectsCommittedTab() async throws {
         let (router, db) = try makeRouterAndDB()
         let wtID = try await makeWorktree(db)
@@ -95,35 +93,12 @@ struct PanelRPCTests {
         #expect(result.tabs.map(\.id) == [tab.id])
     }
 
-    // MARK: - panel.apply gating surfaces the flag by name
-
-    @Test("panel.apply names panel_tabs_enabled when the flag is unset or off",
-          arguments: [PanelOperationOrigin.appUser, .agentCLI])
-    func applyDisabledNamesFlag(origin: PanelOperationOrigin) async throws {
-        let (router, db) = try makeRouterAndDB()
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID)
-        let params = PanelApplyParams(envelope: openEnvelope(worktreeID: wtID, tabID: tab.id, origin: origin))
-
-        // Never chosen.
-        let unsetResponse = await router.handle(try RPCRequest(method: RPCMethod.panelApply, params: params))
-        #expect(!unsetResponse.success)
-        #expect(unsetResponse.error?.contains("panel_tabs_enabled") == true)
-
-        // Explicitly off.
-        try await db.config.setPanelTabsEnabled(false)
-        let offResponse = await router.handle(try RPCRequest(method: RPCMethod.panelApply, params: params))
-        #expect(!offResponse.success)
-        #expect(offResponse.error?.contains("panel_tabs_enabled") == true)
-    }
-
     // MARK: - panel.apply happy path + panel.get reflects it
 
-    @Test("panel.apply commits with the flag on, for the app and an agent alike, and panel.get reflects it",
+    @Test("panel.apply commits for the app and an agent alike, and panel.get reflects it",
           arguments: [PanelOperationOrigin.appUser, .agentCLI])
     func applyHappyPathThenGetReflectsResult(origin: PanelOperationOrigin) async throws {
         let (router, db) = try makeRouterAndDB()
-        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
 
@@ -164,14 +139,14 @@ struct PanelRPCTests {
 
     // MARK: - panel.syncTabs dispatch (behavior lives in PanelSyncTabsTests)
 
-    @Test("panel.syncTabs dispatches to its handler and names the flag when it is unset")
+    @Test("panel.syncTabs dispatches to its handler and succeeds for an empty tab list")
     func syncTabsDispatchesToHandler() async throws {
-        let (router, _) = try makeRouterAndDB()
-        let params = PanelSyncTabsParams(worktreeID: UUID(), tabs: [], paneHistories: [:])
+        let (router, db) = try makeRouterAndDB()
+        let wtID = try await makeWorktree(db)
+        let params = PanelSyncTabsParams(worktreeID: wtID, tabs: [], paneHistories: [:])
         let request = try RPCRequest(method: RPCMethod.panelSyncTabs, params: params)
         let response = await router.handle(request)
-        #expect(!response.success)
-        #expect(response.error?.contains("Unknown method") == false)
-        #expect(response.error?.contains("panel_tabs_enabled") == true)
+        #expect(response.success)
+        #expect(response.error?.contains("Unknown method") != true)
     }
 }

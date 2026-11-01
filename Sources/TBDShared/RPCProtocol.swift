@@ -385,11 +385,6 @@ public enum RPCMethod {
     /// would take back. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetHolderClaimReconcileEnabled = "config.setHolderClaimReconcileEnabled"
-    /// The side panel with tabs gate (`panel_tabs_enabled`): one switch for
-    /// the daemon's panel store, the tab sync, app rendering and agent
-    /// control. Reading needs no method of its own: `config.get` and
-    /// `daemon.capabilities` carry the resolved value.
-    public static let configSetPanelTabsEnabled = "config.setPanelTabsEnabled"
     /// Turns agent background priority on (with a lease), off, or reports it.
     /// Not an actuation row: it changes no session's input, pty or lifecycle,
     /// and its effect lives in `agent-background.json`. Design:
@@ -3701,14 +3696,6 @@ public struct ConfigSetHolderClaimReconcileParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setPanelTabsEnabled` — the side panel with tabs gate
-/// (default OFF during soak). Design:
-/// `docs/specs/2026-10-30-panel-tabs-design.md`.
-public struct ConfigSetPanelTabsParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// What `agents.background` does.
 public enum AgentBackgroundAction: String, Codable, Sendable {
     case on
@@ -4219,13 +4206,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
     public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
-    /// Whether the side panel with tabs is on (`panel_tabs_enabled`). Default
-    /// OFF while it soaks. Resolved through `Config.panelTabsDefault`. The app
-    /// renders the daemon's panels, and syncs its tabs, only while it is on.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives.
-    public var panelTabsEnabled: Bool = Config.panelTabsDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4367,11 +4347,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
-        // A daemon that does not send it has no tabbed panel store, so fall
-        // through to the shipped default. An older daemon's v1 panel flag is
-        // a different flag and is not read.
-        panelTabsEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .panelTabsEnabled) ?? Config.panelTabsDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)

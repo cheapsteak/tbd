@@ -28,15 +28,12 @@ public enum LegacyTabConverter {
         guard let primary = primaryContent(from: tab.content) else {
             return .skipped("tab \(tab.tabID): its content has no primary form")
         }
+        if let terminalID = terminalOutsidePrimary(content: tab.content, layout: tab.layout) {
+            return .skipped("tab \(tab.tabID): terminal \(terminalID) outside the primary")
+        }
         let layout = tab.layout ?? .pane(tab.content)
         let primaryPaneID = tab.content.paneID
-        let viewerPanes = leaves(of: layout).filter { $0.paneID != primaryPaneID }
-
-        for pane in viewerPanes {
-            if case .terminal(let terminalID) = pane {
-                return .skipped("tab \(tab.tabID): terminal \(terminalID) outside the primary")
-            }
-        }
+        let viewerPanes = Self.viewerPanes(of: layout, primaryPaneID: primaryPaneID)
 
         var panels: [ViewerPanel] = []
         for pane in viewerPanes {
@@ -62,6 +59,40 @@ public enum LegacyTabConverter {
             return .skipped("tab \(tab.tabID): \(violations)")
         }
         return .converted(surface)
+    }
+
+    /// Why `convert` would skip `tab`, or nil when it would convert it: the
+    /// verdict of `convert` itself, so it covers every reason a tab is
+    /// skipped. The app asks it to render a tab legacy before any sync has
+    /// named it skipped, with the payload the sync would send, so the app and
+    /// the daemon cannot disagree about a tab. The app passes no pane
+    /// histories: `convert` reads one only to build a panel's history, which
+    /// it keeps to the pane's kind, dedupes, caps and points at the pane's
+    /// content, so none can change the verdict. Pure: it reads nothing but
+    /// its arguments.
+    public static func skipReason(
+        worktreeID: UUID,
+        tab: LegacyTabPayload,
+        paneHistories: [UUID: MRUHistory<PaneContent>]
+    ) -> String? {
+        guard case .skipped(let reason) = convert(
+            worktreeID: worktreeID, tab: tab, paneHistories: paneHistories)
+        else { return nil }
+        return reason
+    }
+
+    /// The first terminal, in pre-order, that a tab's legacy `layout` holds
+    /// anywhere but its primary pane, the tab's `content`; nil when it holds
+    /// none. A tab without a layout is its primary alone, so it holds none.
+    /// `convert` skips a tab that holds one.
+    static func terminalOutsidePrimary(content: PaneContent, layout: LayoutNode?) -> UUID? {
+        let tree = layout ?? .pane(content)
+        for pane in viewerPanes(of: tree, primaryPaneID: content.paneID) {
+            if case .terminal(let terminalID) = pane {
+                return terminalID
+            }
+        }
+        return nil
     }
 
     // MARK: - Content mapping
@@ -102,6 +133,11 @@ public enum LegacyTabConverter {
     }
 
     // MARK: - Pieces
+
+    /// Every leaf of `layout` but the primary pane, in pre-order.
+    private static func viewerPanes(of layout: LayoutNode, primaryPaneID: UUID) -> [PaneContent] {
+        leaves(of: layout).filter { $0.paneID != primaryPaneID }
+    }
 
     /// Every leaf of `node`, in pre-order: depth first, left to right.
     private static func leaves(of node: LayoutNode) -> [PaneContent] {

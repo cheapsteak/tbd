@@ -141,7 +141,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     case transcriptPromptAnswer
     case transcriptStreaming
     case remoteTranscriptLiveSync
-    case panelTabs
 
     var testDescription: String { rawValue }
 
@@ -154,7 +153,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: state.transcriptPromptAnswerFlagSetter = setter
         case .transcriptStreaming: state.transcriptStreamingFlagSetter = setter
         case .remoteTranscriptLiveSync: state.remoteTranscriptLiveSyncFlagSetter = setter
-        case .panelTabs: state.panelTabsFlagSetter = setter
         }
     }
 
@@ -167,7 +165,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: await state.setTranscriptPromptAnswerEnabled(enabled)
         case .transcriptStreaming: await state.setTranscriptStreamingEnabled(enabled)
         case .remoteTranscriptLiveSync: await state.setRemoteTranscriptLiveSyncEnabled(enabled)
-        case .panelTabs: await state.setPanelTabsEnabled(enabled)
         }
     }
 
@@ -180,7 +177,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: result.transcriptPromptAnswerEnabled = enabled
         case .transcriptStreaming: result.transcriptStreamingEnabled = enabled
         case .remoteTranscriptLiveSync: result.remoteTranscriptLiveSyncEnabled = enabled
-        case .panelTabs: result.panelTabsEnabled = enabled
         }
         return result
     }
@@ -194,7 +190,6 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: return capabilities.transcriptPromptAnswerEnabled
         case .transcriptStreaming: return capabilities.transcriptStreamingEnabled
         case .remoteTranscriptLiveSync: return capabilities.remoteTranscriptLiveSyncEnabled
-        case .panelTabs: return capabilities.panelTabsEnabled
         }
     }
 }

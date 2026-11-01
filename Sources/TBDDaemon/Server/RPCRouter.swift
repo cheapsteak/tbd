@@ -135,10 +135,9 @@ public final class RPCRouter: Sendable {
     /// Login-completion watching for profile login sessions. Injected so
     /// tests can shrink the watcher's poll timings.
     public let loginSessions: LoginSessionCoordinator
-    /// Daemon-owned panel surface actor. Gating on `panel_tabs_enabled` lives
-    /// inside the coordinator — `panel.*` handlers route to it and must not
-    /// re-implement gating. Broadcasts through the same `subscriptions`
-    /// channel every other mutating handler uses.
+    /// Daemon-owned panel surface actor. The `panel.*` handlers route to it;
+    /// idempotency and validation live inside it. Broadcasts through the same
+    /// `subscriptions` channel every other mutating handler uses.
     public let panelCoordinator: PanelCoordinator
     /// Native Claude-to-Codex import seams. Production uses the installed
     /// Codex app-server; tests replace these before invoking the handler.
@@ -1068,8 +1067,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
             case RPCMethod.configSetHolderClaimReconcileEnabled:
                 return try await handleConfigSetHolderClaimReconcileEnabled(request.paramsData)
-            case RPCMethod.configSetPanelTabsEnabled:
-                return try await handleConfigSetPanelTabsEnabled(request.paramsData)
             case RPCMethod.configSetAgentBackgroundEnabled:
                 return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
             case RPCMethod.configSetSessionModUsageEnabled:
@@ -1213,7 +1210,6 @@ public final class RPCRouter: Sendable {
         result.startAdmissionEnabled = config.startAdmissionEnabled
         result.holderClaimReconcileEnabled = config.holderClaimReconcileEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled
-        result.panelTabsEnabled = config.panelTabsEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
