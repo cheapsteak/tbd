@@ -6,7 +6,7 @@ import TBDShared
 @Suite("Servers toolbar menu")
 struct ServersToolbarMenuTests {
     private func info(
-        _ name: String = "web", _ state: DevServerStateKind, url: String? = nil,
+        _ state: DevServerStateKind, name: String = "web", url: String? = nil,
         declared: Bool = true, terminalID: UUID? = nil, lastOutputID: UUID? = nil
     ) -> DevServerInfo {
         DevServerInfo(name: name, label: "Web app", source: declared ? "tbd.toml" : nil, state: state,
@@ -62,6 +62,29 @@ struct ServersToolbarMenuTests {
         #expect(actual == expected)
     }
 
+    @Test func runningServerWithAnEndpointOffersAnOpenRow() {
+        let actual = ServersToolbarMenu.entries(list: list([info(.running, url: "http://a")]), messages: [])
+        let expected: [ServersMenuEntry] = [
+            .item(title: "Open http://a", isEnabled: true, command: .open(url: "http://a")),
+            .separator,
+            .header("Web app — running · tbd.toml"),
+            .item(title: "Open app — http://a", isEnabled: true, command: .open(url: "http://a")),
+            .item(title: "Stop", isEnabled: true, command: .stop(names: ["web"])),
+            .item(title: "Restart", isEnabled: true, command: .restart(names: ["web"])),
+        ] + bulk(startAll: false, stopAll: ["web"])
+        #expect(actual == expected)
+    }
+
+    @Test func unknownDeclaredServerOffersStopAndRestart() {
+        let actual = ServersToolbarMenu.entries(list: list([info(.unknown)]), messages: [])
+        let expected: [ServersMenuEntry] = [
+            .header("Web app — unknown · tbd.toml"),
+            .item(title: "Stop", isEnabled: true, command: .stop(names: ["web"])),
+            .item(title: "Restart", isEnabled: true, command: .restart(names: ["web"])),
+        ] + bulk(startAll: true, stopAll: ["web"])
+        #expect(actual == expected)
+    }
+
     @Test func stoppedDeclaredServerOffersStart() {
         let actual = ServersToolbarMenu.entries(list: list([info(.stopped)]), messages: [])
         let expected: [ServersMenuEntry] = [
@@ -85,9 +108,9 @@ struct ServersToolbarMenuTests {
 
     @Test func bulkItemsAndTheirEnablement() {
         let allRunning = ServersToolbarMenu.entries(
-            list: list([info("a", .running), info("b", .running)]), messages: [])
+            list: list([info(.running, name: "a"), info(.running, name: "b")]), messages: [])
         let mixed = ServersToolbarMenu.entries(
-            list: list([info("a", .running), info("b", .stopped)]), messages: [])
+            list: list([info(.running, name: "a"), info(.stopped, name: "b")]), messages: [])
         let allRunningTail: [ServersMenuEntry] = bulk(startAll: false, stopAll: ["a", "b"])
         let mixedTail: [ServersMenuEntry] = bulk(startAll: true, stopAll: ["a"])
         #expect(Array(allRunning.suffix(4)) == allRunningTail)
