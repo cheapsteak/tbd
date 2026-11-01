@@ -63,15 +63,17 @@ struct PanePlaceholder: View {
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
     @State private var showHistoryPalette = false
-    /// The leaf's own control state, read only while `chrome` is nil.
-    @State private var ownChrome = PaneChromeState()
+    /// Holds the leaf's own control state, read only while `chrome` is nil.
+    /// `@StateObject` builds the holder once per view identity, never on a
+    /// re-init, and the holder builds the state only on first read.
+    @StateObject private var ownChromeHolder = OwnChromeHolder()
     @AppStorage(AppState.enableTranscriptKey)
     private var transcriptFeatureEnabled = AppState.enableTranscriptDefault
 
     /// The control state this leaf reads and writes: the one handed in, or
     /// its own.
     private var chromeState: PaneChromeState {
-        chrome ?? ownChrome
+        chrome ?? ownChromeHolder.state
     }
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
@@ -537,6 +539,17 @@ struct PanePlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+// MARK: - OwnChromeHolder
+
+/// A leaf's own `PaneChromeState`, for a leaf no tab row hands one to.
+/// Created lazily, so a leaf that is handed one — every leaf on the daemon
+/// path — never builds a state or the `WebviewState` inside it. Publishes
+/// nothing: views observe the state it holds, which is `@Observable`.
+@MainActor
+final class OwnChromeHolder: ObservableObject {
+    lazy var state = PaneChromeState()
 }
 
 // MARK: - WebviewAddressLabel
