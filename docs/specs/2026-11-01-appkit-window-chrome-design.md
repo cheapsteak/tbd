@@ -160,8 +160,10 @@ every item but one has an explicit form:
   forward are disabled when history has nowhere to go.
 - **Repo filter** – "Filter", with a submenu of "All Repos" and each repo, the
   current choice checked, kept in step with the popup.
-- **Title cluster** – an inert row showing the title, hidden when nothing is
-  selected.
+- **Title cluster** – an inert row showing the title, or "No Selection" when
+  nothing is selected. It is never hidden: with nothing selected the title
+  item still holds its minimum width, so it can be the only item that
+  overflows, and a hidden row would leave the menu empty.
 - **Remote session buttons** – a row titled with the button's label, carrying
   its action.
 

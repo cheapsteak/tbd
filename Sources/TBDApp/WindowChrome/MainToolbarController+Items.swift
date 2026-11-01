@@ -215,21 +215,30 @@ extension MainToolbarController {
     private func makeTitleItem(withView: Bool) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.title)
         item.isBordered = false
-        item.menuFormRepresentation = Self.makeTitleForm(appliedSnapshot?.title ?? "")
+        item.menuFormRepresentation = Self.makeTitleForm(appliedSnapshot?.title)
         if withView {
             item.view = titleView
         }
         return item
     }
 
-    /// An inert overflow row showing `title`: disabled, with no action, and
-    /// hidden when the title is empty. AppKit's default would be a clickable
-    /// row titled with the item's label, which is empty.
-    private static func makeTitleForm(_ title: String) -> NSMenuItem {
-        let form = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+    /// An inert overflow row showing `title`, or "No Selection" when there is
+    /// none: disabled, with no action, and never hidden. With nothing
+    /// selected the title item still holds its minimum width, so it can be
+    /// the only item that overflows, and a hidden row would leave the
+    /// overflow menu empty. AppKit's default would be a clickable row titled
+    /// with the item's label, which is empty.
+    private static func makeTitleForm(_ title: String?) -> NSMenuItem {
+        let form = NSMenuItem(title: titleRowText(title), action: nil, keyEquivalent: "")
         form.isEnabled = false
-        form.isHidden = title.isEmpty
         return form
+    }
+
+    /// The text the title's overflow row shows: the title, or "No Selection"
+    /// when there is none.
+    private static func titleRowText(_ title: String?) -> String {
+        guard let title, !title.isEmpty else { return "No Selection" }
+        return title
     }
 
     /// Makes `view` a flexible toolbar item view whose width never follows
@@ -355,13 +364,13 @@ extension MainToolbarController {
         }
     }
 
-    /// Gives the title item a fresh overflow row showing `title`, hidden when
-    /// there is none, when its row shows other text. A fresh row rather than
-    /// an edit: AppKit may build the overflow menu from a copy of the row.
+    /// Gives the title item a fresh overflow row showing `title`, or "No
+    /// Selection" when there is none, when its row shows other text. A fresh
+    /// row rather than an edit: AppKit may build the overflow menu from a
+    /// copy of the row.
     private func updateTitleForm(_ item: NSToolbarItem, _ title: String?) {
-        let text = title ?? ""
-        if let shown = item.menuFormRepresentation, shown.title == text { return }
-        item.menuFormRepresentation = Self.makeTitleForm(text)
+        if let shown = item.menuFormRepresentation, shown.title == Self.titleRowText(title) { return }
+        item.menuFormRepresentation = Self.makeTitleForm(title)
     }
 
     /// Sets `item`'s image from `make` when `key`, what the image is derived

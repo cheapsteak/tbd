@@ -77,6 +77,8 @@ struct MainToolbarControllerTests {
         let form = try #require(throwaway?.menuFormRepresentation)
         #expect(form.action == nil)
         #expect(!form.isEnabled)
+        #expect(form.title == "No Selection")
+        #expect(!form.isHidden)
         let constraintsAfter = TitleWidthConstraints(of: fixture.titleView)
         #expect(constraintsAfter == constraintsBefore)
         #expect(constraintsAfter.isTheFlexibleSet)
@@ -722,7 +724,7 @@ struct MainToolbarControllerTests {
     }
 
     /// A filter or title item made before any apply carries an empty row:
-    /// "Filter" with no repos, and a hidden title. One made after an apply
+    /// "Filter" with no repos, and "No Selection". One made after an apply
     /// starts from what that apply showed, so an item the toolbar re-inserts,
     /// as after a collapse, never shows an empty row in between. Made with
     /// `willBeInserted: false`, so the title item leaves the shared title
@@ -742,8 +744,10 @@ struct MainToolbarControllerTests {
         #expect(emptyRows.delegate === unapplied.filterMenuTracker)
         let emptyTitle = try #require(unapplied.makeItem(MainToolbarItemID.title, willBeInserted: false))
         let emptyTitleRow = try #require(emptyTitle.menuFormRepresentation)
-        #expect(emptyTitleRow.title.isEmpty)
-        #expect(emptyTitleRow.isHidden)
+        #expect(emptyTitleRow.title == "No Selection")
+        #expect(emptyTitleRow.isHidden == false)
+        #expect(emptyTitleRow.isEnabled == false)
+        #expect(emptyTitleRow.action == nil)
 
         try await fixture.ready()
         fixture.state.repoFilter = fixture.repos[1].id
@@ -846,17 +850,19 @@ struct MainToolbarControllerTests {
 
     // MARK: - Title
 
-    /// The title's overflow row is inert and shows the cluster's main title:
-    /// hidden with nothing selected, the worktree's name, a remote session's
-    /// name when only it is selected, and hidden again once neither is. Each
-    /// check reads the item's current row, as a change replaces it.
+    /// The title's overflow row is inert, never hidden, and shows the
+    /// cluster's main title: "No Selection" with nothing selected, the
+    /// worktree's name, a remote session's name when only it is selected,
+    /// and "No Selection" again once neither is. Each check reads the item's
+    /// current row, as a change replaces it.
     @Test func titleOverflowRowShowsTheTitle() async throws {
         let fixture = ToolbarFixture(label: "titleOverflowRowShowsTheTitle")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
         let empty = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
-        #expect(empty.isHidden)
+        #expect(empty.title == "No Selection")
+        #expect(empty.isHidden == false)
         #expect(empty.isEnabled == false)
         #expect(empty.action == nil)
 
@@ -875,12 +881,19 @@ struct MainToolbarControllerTests {
         let sessionName = fixture.state.remoteSessionDisplayName(for: selection)
         #expect(sessionRow.title == sessionName)
         #expect(sessionRow.isHidden == false)
+        #expect(sessionRow.isEnabled == false)
 
         fixture.state.selectedRemoteSession = nil
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         let clearedRow = try #require(controller.item(MainToolbarItemID.title)?.menuFormRepresentation)
-        #expect(clearedRow.isHidden)
+        #expect(clearedRow.title == "No Selection")
+        #expect(clearedRow.isHidden == false)
         #expect(clearedRow.isEnabled == false)
+        #expect(clearedRow.action == nil)
+
+        // An unchanged apply keeps the "No Selection" row.
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(controller.item(MainToolbarItemID.title)?.menuFormRepresentation === clearedRow)
     }
 
     /// The shared title view holds a flexible width set once at init: a
