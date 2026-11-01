@@ -172,9 +172,14 @@ struct HolderLifecycleTests {
         }
         #expect(!processIsAlive(fixture.holderPID))
         // Nothing may report the child any more, and nothing may bring a new
-        // holder up in its place on its own. One attempt, not `connect`: a
-        // refusal here is the assertion, not a gap to wait out.
-        #expect(throws: TestHolderError.self) { _ = try fixture.connectOnce(receiveTimeout: 1.0) }
+        // holder up in its place on its own. `connect` throws at once here and
+        // does not wait out its deadline: with the socket gone the attempt
+        // fails with ENOENT, which it never retries, and a socket file left
+        // behind would be refused by a dead holder, which it never retries
+        // either.
+        await #expect(throws: TestHolderError.self) {
+            _ = try await fixture.connect(receiveTimeout: 1.0)
+        }
         #expect(!FileManager.default.fileExists(atPath: fixture.socketPath))
     }
 

@@ -20,14 +20,25 @@ import TBDKernel
 //      orphans a `sleep` that no reconciler covers yet. Bounded at the sleep's
 //      own duration, but it compounds across runs.
 
-enum TestHolderError: LocalizedError {
+/// `CustomStringConvertible` as well as `LocalizedError`, for the same reason
+/// `HolderWaitTimedOut` is: Swift Testing renders a caught error through its
+/// `description`, so that text is what lands on the primary failure line.
+/// Without it a CI summary shows only the bare case, `.connectFailed(path:
+/// …, errno: 61)`, and drops the holder's log.
+enum TestHolderError: LocalizedError, CustomStringConvertible {
     case executableNotFound
     case spawnFailed(Int32)
     case holderNeverReportedItsPID(diagnostics: String)
     case connectFailed(path: String, errno: Int32)
+    /// Every connect was refused (ECONNREFUSED) and then the holder was found
+    /// dead, so it can never start accepting.
+    case holderExitedBeforeAccepting(path: String, refusedAttempts: Int, diagnostics: String)
+    /// Every connect was refused while the holder stayed alive, until the
+    /// shared deadline ran out.
+    case connectRefusedUntilDeadline(path: String, refusedAttempts: Int, elapsed: Duration, diagnostics: String)
     case noResponse
 
-    var errorDescription: String? {
+    var description: String {
         switch self {
         case .executableNotFound:
             return "TBDHolder was not built into the products directory"
@@ -37,10 +48,19 @@ enum TestHolderError: LocalizedError {
             return "the bootstrap shell never wrote a holder pid.\n\(diagnostics)"
         case .connectFailed(let path, let code):
             return "could not connect to \(path): \(String(cString: strerror(code))) (errno \(code))"
+        case .holderExitedBeforeAccepting(let path, let attempts, let diagnostics):
+            return "the holder exited after \(attempts) refused connect attempts to \(path), "
+                + "without ever accepting a connection\n\(diagnostics)"
+        case .connectRefusedUntilDeadline(let path, let attempts, let elapsed, let diagnostics):
+            return "the deadline ran out with every connect to \(path) refused (errno \(ECONNREFUSED)): "
+                + "\(attempts) attempts over \(elapsed), the holder still alive but never accepting"
+                + "\n\(diagnostics)"
         case .noResponse:
             return "the holder closed the connection without answering"
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 /// Poll until `condition` holds or the deadline passes.
@@ -118,25 +138,6 @@ struct HolderWaitTimedOut: Error, CustomStringConvertible {
 
     var description: String {
         "gave up after \(elapsed) (budget \(budget)s) waiting for \(what)"
-    }
-}
-
-/// `HolderFixture.connect` was refused (ECONNREFUSED) on every attempt: the
-/// holder never started accepting before the deadline, or died first. An
-/// `Error` with a `description`, like `HolderWaitTimedOut`, so the counts and
-/// the holder's log land on the primary failure line.
-struct HolderConnectRefused: Error, CustomStringConvertible {
-    let path: String
-    let attempts: Int
-    let elapsed: Duration
-    let budget: TimeInterval
-    let holderAlive: Bool
-    let holderLog: String
-
-    var description: String {
-        let holder = holderAlive ? "is still alive" : "is no longer alive"
-        return "connect to \(path) was refused (errno \(ECONNREFUSED)) on all \(attempts) attempts "
-            + "over \(elapsed) (budget \(budget)s); the holder \(holder)\n\(holderLog)"
     }
 }
 
@@ -463,52 +464,53 @@ final class HolderFixture {
     /// thrown at once, and so is a refusal from a holder that is no longer
     /// alive, since a dead holder can never start listening.
     ///
-    /// Paced like `waitUntil`, through `pollUntilTrue`, so the pause between
-    /// attempts suspends rather than parking one of the fast pass's few
-    /// cooperative threads, and the shared deadline bounds it.
-    func connect(receiveTimeout: TimeInterval = 5.0) async throws -> TestHolderClient {
+    /// The attempts run inside `waitUntil`, so they share its pace, its
+    /// deadline and its cancellation handling. When the deadline runs out,
+    /// `waitUntil` records its own timeout first, as it does for `start`'s pid
+    /// wait, and the error thrown here adds the attempt count and the holder's
+    /// log.
+    func connect(
+        receiveTimeout: TimeInterval = 5.0,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws -> TestHolderClient {
         let started = ContinuousClock.now
         var attempts = 0
         var client: TestHolderClient?
         var failure: (any Error)?
-        let outcome = await pollUntilTrue(
-            timeout: .seconds(TestDeadlines.saturatedPassSeconds), pollInterval: .milliseconds(20)
-        ) {
+        var holderExited = false
+        await waitUntil("the holder at \(socketPath) to accept a connection", sourceLocation: sourceLocation) {
             attempts += 1
             do {
                 client = try connectOnce(receiveTimeout: receiveTimeout)
                 return true
             } catch TestHolderError.connectFailed(_, let code) where code == ECONNREFUSED {
-                return !processIsAlive(holderPID)
+                holderExited = !processIsAlive(holderPID)
+                return holderExited
             } catch {
                 failure = error
                 return true
             }
         }
-        switch outcome {
-        case .satisfied:
-            if let client { return client }
-            if let failure { throw failure }
-            // Otherwise refused by a holder that has died: reported below.
-        case .cancelled:
-            // The harness ended the test; attribution belongs to it, not here.
-            throw CancellationError()
-        case .timedOut:
-            break
+        if let client { return client }
+        if let failure { throw failure }
+        if holderExited {
+            throw TestHolderError.holderExitedBeforeAccepting(
+                path: socketPath, refusedAttempts: attempts, diagnostics: diagnostics())
         }
-        throw HolderConnectRefused(
+        // `waitUntil` returns false both when the harness cancelled the test
+        // and when the deadline ran out; only the second is this call's failure.
+        try Task.checkCancellation()
+        throw TestHolderError.connectRefusedUntilDeadline(
             path: socketPath,
-            attempts: attempts,
+            refusedAttempts: attempts,
             elapsed: ContinuousClock.now - started,
-            budget: TestDeadlines.saturatedPassSeconds,
-            holderAlive: processIsAlive(holderPID),
-            holderLog: diagnostics())
+            diagnostics: diagnostics())
     }
 
-    /// One connect attempt, with no retry. For the callers that must not wait
-    /// out a refusal: `tearDown`, which runs from a `defer` and cannot suspend,
-    /// and a test asserting that nothing answers once the holder has gone.
-    func connectOnce(receiveTimeout: TimeInterval = 5.0) throws -> TestHolderClient {
+    /// One connect attempt, with no retry: what `connect` repeats, and what
+    /// `tearDown` uses directly, since it runs from a `defer` and cannot
+    /// suspend.
+    private func connectOnce(receiveTimeout: TimeInterval = 5.0) throws -> TestHolderClient {
         try TestHolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout)
     }
 
