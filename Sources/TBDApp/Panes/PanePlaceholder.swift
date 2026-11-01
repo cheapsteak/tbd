@@ -568,35 +568,51 @@ extension View {
     /// panes (resolving it needs the terminal model, so the caller passes it in).
     ///
     /// Where the leaf draws its header, the menu hangs on the header's title.
-    /// On the daemon path a side panel's leaf draws none, so the menu hangs on
-    /// the panel's tab in the side region's strip (`SideRegionView`).
+    /// On the daemon path no leaf draws one: a side panel's menu hangs on the
+    /// panel's tab in the side region's strip (`SideRegionView`), and a
+    /// primary's items are on its workspace tab's right-click menu (`TabBar`).
     @ViewBuilder
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
         if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {
             self.contextMenu {
                 Button(target.copyLabel) { copyToPasteboard(target.path) }
-                Button("Reveal in Finder") { revealInFinder(path: target.path) }
+                RevealAndOpenWithMenuItems(path: target.path)
+            }
+        } else {
+            self
+        }
+    }
+}
 
-                let apps = openWithApps(forPath: target.path)
-                if !apps.isEmpty {
-                    Menu("Open With") {
-                        ForEach(apps) { app in
-                            Button {
-                                openFile(path: target.path, withApp: app.url)
-                            } label: {
-                                Label {
-                                    Text(app.displayName)
-                                } icon: {
-                                    Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
-                                        .renderingMode(.original)
-                                }
-                            }
+/// Reveal in Finder and the Open With submenu for the file at `path`: the
+/// file menu's items after its copy item, shared by the pane header's title
+/// (`headerFileContextMenu`) and a workspace tab's right-click menu
+/// (`TabBar`). A view of its own so that the Launch Services query behind
+/// Open With (`openWithApps`) runs in this view's body, which SwiftUI
+/// evaluates for the menu, and never in the body of the view the menu hangs
+/// on. Open With is left out when no application can open the file.
+struct RevealAndOpenWithMenuItems: View {
+    let path: String
+
+    var body: some View {
+        Button("Reveal in Finder") { revealInFinder(path: path) }
+
+        let apps = openWithApps(forPath: path)
+        if !apps.isEmpty {
+            Menu("Open With") {
+                ForEach(apps) { app in
+                    Button {
+                        openFile(path: path, withApp: app.url)
+                    } label: {
+                        Label {
+                            Text(app.displayName)
+                        } icon: {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
+                                .renderingMode(.original)
                         }
                     }
                 }
             }
-        } else {
-            self
         }
     }
 }

@@ -755,6 +755,31 @@ enum TabTerminalTarget {
     }
 }
 
+// MARK: - WorkspaceTabFileMenu
+
+/// The file a workspace tab's right-click menu offers Reveal in Finder and
+/// Open With for: the one a pane header's title menu acts on
+/// (`headerMenuTarget`), for the tab's content. A file tab offers its file,
+/// and a transcript tab its terminal's session `.jsonl` once that terminal's
+/// row carries one; every other tab offers none. On the daemon path no header
+/// names the primary, so the tab's menu is where these items are.
+///
+/// Extracted from the view so each kind is unit-testable without rendering
+/// SwiftUI (same pattern as `TabTerminalTarget`).
+enum WorkspaceTabFileMenu {
+    /// - Parameter transcriptPath: the session `.jsonl` of a terminal, by its
+    ///   ID; asked only for the terminal a transcript tab follows.
+    static func target(
+        for content: PaneContent, transcriptPath: (UUID) -> String?
+    ) -> HeaderMenuTarget? {
+        var path: String?
+        if case .liveTranscript(_, let terminalID) = content {
+            path = transcriptPath(terminalID)
+        }
+        return headerMenuTarget(for: content, transcriptPath: path)
+    }
+}
+
 private struct TabBarItem: View {
     let tab: TBDShared.Tab
     let index: Int
@@ -1107,11 +1132,16 @@ private struct TabBarItem: View {
         case .codeViewer(_, let path):
             return path.isEmpty ? nil : path
         case .liveTranscript(_, let terminalID):
-            let allTerminals = appState.terminals.values.flatMap { $0 }
-            return allTerminals.first { $0.id == terminalID }?.transcriptPath
+            return transcriptPath(of: terminalID)
         default:
             return nil
         }
+    }
+
+    /// The session `.jsonl` the terminal `terminalID` writes, from its row.
+    private func transcriptPath(of terminalID: UUID) -> String? {
+        let allTerminals = appState.terminals.values.flatMap { $0 }
+        return allTerminals.first { $0.id == terminalID }?.transcriptPath
     }
 
     private var copyPathLabel: String {
@@ -1133,6 +1163,11 @@ private struct TabBarItem: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(path, forType: .string)
             }
+        }
+
+        if let fileTarget = WorkspaceTabFileMenu.target(
+            for: tab.content, transcriptPath: { transcriptPath(of: $0) }) {
+            RevealAndOpenWithMenuItems(path: fileTarget.path)
         }
 
         Button("Copy Link") {
