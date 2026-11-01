@@ -25,11 +25,21 @@ struct ContentView: View {
     /// resolves it once per launch, and the window keeps that structure until
     /// the next one (spec, "Switching").
     let chrome: MainWindowChrome
+    /// The `@AppStorage` store for the AppKit chrome's hosted panes, which do
+    /// not inherit this view's. `nil` leaves them on `.standard`, as the app's
+    /// window root is.
+    let hostedAppStorage: UserDefaults?
 
     /// Spelled out because the private `@State` and `@AppStorage` properties
     /// would make the memberwise initializer private.
-    init(chrome: MainWindowChrome) {
+    ///
+    /// - Parameter hostedAppStorage: the test seam that mirrors a test root's
+    ///   `.defaultAppStorage` into the AppKit chrome's hosted panes. The app
+    ///   sets none on its root and passes none here, so the panes read
+    ///   `.standard`, as the root and the menu commands do.
+    init(chrome: MainWindowChrome, hostedAppStorage: UserDefaults? = nil) {
         self.chrome = chrome
+        self.hostedAppStorage = hostedAppStorage
     }
 
     var body: some View {
@@ -82,7 +92,8 @@ struct ContentView: View {
                     // The split and its `NSToolbar`, all AppKit. The split
                     // reaches up under the toolbar, as `NavigationSplitView`
                     // does; each pane's hosted content keeps its own safe area.
-                    MainWindowSplitView(requestRemoteStop: { remoteStopConfirm = $0 })
+                    MainWindowSplitView(
+                        requestRemoteStop: { remoteStopConfirm = $0 }, appStorage: hostedAppStorage)
                         .ignoresSafeArea(.container, edges: .top)
                 case .swiftUI:
                     NavigationSplitView {

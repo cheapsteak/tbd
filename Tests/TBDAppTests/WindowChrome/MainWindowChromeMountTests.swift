@@ -89,13 +89,14 @@ struct MainWindowChromeMountTests {
 
     // MARK: - Hosted panes' storage
 
-    /// The hosted panes read `@AppStorage` from `appState.userDefaults`, as
-    /// the window's own tree does, not from `.standard`: a hosted tree starts
-    /// from a fresh environment. Observed through the sidebar, whose
-    /// `@AppStorage(appKitSidebarKey)` picks the native outline or the
-    /// `List`. The suite is flipped both ways, so the test discriminates
-    /// whatever `.standard` holds for that key on the machine running it.
-    @Test func hostedPanesReadTheStatesStore() async throws {
+    /// The hosted panes read `@AppStorage` from the store `ContentView` was
+    /// given for them, which here mirrors the root's `.defaultAppStorage`,
+    /// not from `.standard`: a hosted tree starts from a fresh environment.
+    /// Observed through the sidebar, whose `@AppStorage(appKitSidebarKey)`
+    /// picks the native outline or the `List`. The suite is flipped both
+    /// ways, so the test discriminates whatever `.standard` holds for that
+    /// key on the machine running it.
+    @Test func hostedPanesReadTheRootsStore() async throws {
         let mount = ChromeMount(chrome: .appKit, label: "hostedStore")
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
@@ -114,6 +115,18 @@ struct MainWindowChromeMountTests {
                 && !OffscreenHost<AnyView>.descendants(NSTableView.self, of: sidebarPane).isEmpty
         }
         #expect(list)
+    }
+
+    /// The app builds `ContentView` without the seam, so its hosted panes get
+    /// no store of their own and keep `.standard`, the store the window's
+    /// root and the menu commands read. The seam carries a test's store.
+    @Test func hostedStoreIsNilWithoutTheSeam() {
+        let suite = TestDefaultsSuite("MainWindowChromeMountTests.seam")
+        defer { suite.tearDown() }
+        let app = ContentView(chrome: .appKit)
+        let seamed = ContentView(chrome: .appKit, hostedAppStorage: suite.defaults)
+        #expect(app.hostedAppStorage == nil)
+        #expect(seamed.hostedAppStorage === suite.defaults)
     }
 
     // MARK: - The toolbar in the hosted window
@@ -377,7 +390,9 @@ private final class ChromeMount {
             defaults: suite.defaults,
             userThemesDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("TBDAppTests.MainWindowChromeMount.\(UUID().uuidString)"))
-        let root = ContentView(chrome: chrome)
+        // The hosted panes get the suite too: they do not inherit the root's
+        // `.defaultAppStorage` below.
+        let root = ContentView(chrome: chrome, hostedAppStorage: suite.defaults)
             .environment(state)
             .environmentObject(appearance)
             .environmentObject(TranscriptOverlayCoordinator())

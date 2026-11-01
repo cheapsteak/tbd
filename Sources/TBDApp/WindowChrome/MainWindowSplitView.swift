@@ -20,10 +20,13 @@ import SwiftUI
 ///   `sceneBridgingOptions = []`, so none of them claims the window's toolbar
 ///   or title, which belong to the toolbar controller. A hosted tree starts
 ///   from a fresh environment, so each gets `AppState`, the appearance
-///   settings and the transcript overlay coordinator again, and
-///   `appState.userDefaults` as its `@AppStorage` store, the one the window's
-///   own tree uses. The controllers' `sizingOptions` are `[]`: the split
-///   items size the panes.
+///   settings and the transcript overlay coordinator again. Its `@AppStorage`
+///   store is `appStorage` when one is given, and otherwise `.standard`. The
+///   app passes `nil`: the window's root sets no `defaultAppStorage`, so it
+///   and the menu commands, ⌘⇧E among them, read `.standard`, and the hosted
+///   panes must read the same store. `appState.userDefaults` is not that
+///   store under `TBD_MOCK`. The controllers' `sizingOptions` are `[]`: the
+///   split items size the panes.
 ///
 /// `updateNSViewController` refreshes only the Stop confirmation's closure.
 /// The panes and the toolbar follow `AppState` themselves, so no AppKit
@@ -34,6 +37,10 @@ import SwiftUI
 struct MainWindowSplitView: NSViewControllerRepresentable {
     /// Raises the toolbar Stop's confirmation, which `ContentView` owns.
     let requestRemoteStop: (RemoteSessionSelection) -> Void
+    /// The hosted trees' `@AppStorage` store: the one the window's root sets
+    /// with `.defaultAppStorage`, or `nil` when it sets none and so reads
+    /// `.standard`. Hosted trees do not inherit it, so it is passed here.
+    let appStorage: UserDefaults?
 
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
@@ -97,14 +104,19 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     }
 
     /// `root` with the environment every hosted tree needs. The `@AppStorage`
-    /// store is `appState.userDefaults`: `.standard` in the app, and a test's
-    /// suite in a test, which a hosted tree would otherwise not inherit.
+    /// store is set only when `appStorage` names one; otherwise the tree
+    /// keeps `.standard`, as the window's root does.
+    @ViewBuilder
     private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
-        root
+        let hosted = root
             .environment(appState)
             .environmentObject(appearance)
             .environmentObject(overlayCoordinator)
-            .defaultAppStorage(appState.userDefaults)
+        if let appStorage {
+            hosted.defaultAppStorage(appStorage)
+        } else {
+            hosted
+        }
     }
 
     private func hostingController<Root: View>(_ root: Root) -> NSViewController {
