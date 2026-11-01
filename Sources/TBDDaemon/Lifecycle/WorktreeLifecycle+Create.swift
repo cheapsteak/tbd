@@ -853,7 +853,7 @@ extension WorktreeLifecycle {
             }
             let changedSurfaces = try await db.panelSurface.openWorktreePanel(
                 worktreeID: worktreeID, content: .note(noteID: note.id), seeding: mainTab, now: now())
-            subscriptions?.broadcastWorktreePanelsChanged(
+            subscriptions?.broadcastPanelSurfacesChanged(
                 worktreeID: worktreeID, surfaces: changedSurfaces)
         } catch {
             logger.warning("failed to create initial note panel for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")

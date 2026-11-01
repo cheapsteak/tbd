@@ -51,7 +51,7 @@ extension RPCRouter {
     func handleNoteDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NoteDeleteParams.self, from: paramsData)
         if let deletion = try await db.notes.delete(id: params.noteID) {
-            subscriptions.broadcastWorktreePanelsChanged(
+            subscriptions.broadcastPanelSurfacesChanged(
                 worktreeID: deletion.worktreeID, surfaces: deletion.changedSurfaces)
         }
         try await db.tabs.delete(tabID: params.noteID)

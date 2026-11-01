@@ -289,27 +289,22 @@ extension StateSubscriptionManager {
             via: { broadcast(delta: $0) })
     }
 
-    /// Tells the app that a scratch promote moved these panel surfaces to
-    /// `worktreeID`, the new repo's main worktree, with their tabs, and
-    /// rewrote the main worktree's own surfaces that the merged worktree
-    /// panels changed (`WorktreeStore.promoteScratchMigration` returns
-    /// both), as one `panelSurfaceChanged` carrying them. The app adopts each
-    /// under `worktreeID`, which drops a moved one from the scratch
-    /// worktree's entry. Sent after the promote commits; nothing is sent when
-    /// nothing moved or changed.
-    func broadcastPanelSurfacesMoved(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
-        broadcastPanelSurfaceChanged(
-            worktreeID: worktreeID, tabs: surfaces, removedTabIDs: [],
-            via: { broadcast(delta: $0) })
-    }
-
-    /// Tells the app that a change to `worktreeID`'s panel list outside a
-    /// panel operation rewrote these surfaces: `note.delete` removing the
-    /// note's panel (`NoteStore.delete`), or worktree creation opening the
-    /// initial note (`PanelSurfaceStore.openWorktreePanel`). One
-    /// `panelSurfaceChanged` carries them all; sent after the change
-    /// commits, and nothing is sent when no surface changed.
-    func broadcastWorktreePanelsChanged(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
+    /// Tells the app that a write outside a panel operation stored these
+    /// surfaces under `worktreeID`, as one `panelSurfaceChanged` carrying
+    /// them; the app adopts each under `worktreeID`. Sent after the write
+    /// commits, and nothing is sent when no surface changed. The writes:
+    ///
+    /// - **A scratch promote** moved these surfaces to `worktreeID`, the new
+    ///   repo's main worktree, with their tabs, and rewrote the main
+    ///   worktree's own surfaces that the merged worktree panels changed
+    ///   (`WorktreeStore.promoteScratchMigration` returns both). Adopting a
+    ///   moved surface under `worktreeID` drops it from the scratch
+    ///   worktree's entry.
+    /// - **A change to `worktreeID`'s panel list** rewrote these surfaces:
+    ///   `note.delete` removing the note's panel (`NoteStore.delete`), or
+    ///   worktree creation opening the initial note
+    ///   (`PanelSurfaceStore.openWorktreePanel`).
+    func broadcastPanelSurfacesChanged(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
         broadcastPanelSurfaceChanged(
             worktreeID: worktreeID, tabs: surfaces, removedTabIDs: [],
             via: { broadcast(delta: $0) })
