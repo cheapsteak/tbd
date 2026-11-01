@@ -28,13 +28,17 @@ struct SideRegionTab: Equatable, Identifiable {
     /// The symbol the workspace tab bar shows for the same kind.
     var systemImage: String { content.kind.tabSystemImage }
 
+    /// A web page's address, which its copy-address control copies until the
+    /// page reports one of its own; nil for the other kinds.
+    var webURL: URL? {
+        guard case .web(let url) = content else { return nil }
+        return url
+    }
+
     /// The tab's hover text: a web page's full address, which its title (the
     /// host) leaves out, and every other tab's title.
     var tooltip: String {
-        if case .web(let url) = content {
-            return url.absoluteString
-        }
-        return title
+        webURL?.absoluteString ?? title
     }
 }
 
@@ -99,9 +103,10 @@ enum SideRegionStrip {
         return SideStripHistoryButtons(search: false, back: false, forward: false)
     }
 
-    /// The active panel's own control, drawn before the collapse button: the
-    /// rendered/source toggle for a file that can render, and copy-address
-    /// for a web page. A file that cannot render, a note and a transcript have
+    /// The active panel's own control, drawn before the collapse button:
+    /// its kind's viewer control (`PaneChromeControl.viewerControl`), the
+    /// rendered/source toggle for a file that can render and copy-address for
+    /// a web page. A file that cannot render, a note and a transcript have
     /// none.
     static func trailingControl(
         for content: PanelContent,
@@ -109,15 +114,8 @@ enum SideRegionStrip {
         showingSource: Bool,
         copied: Bool
     ) -> PaneChromeControl? {
-        switch content {
-        case .file:
-            guard canRender else { return nil }
-            return .renderToggle(showingSource: showingSource)
-        case .web:
-            return .copyAddress(copied: copied)
-        case .note, .transcript:
-            return nil
-        }
+        PaneChromeControl.viewerControl(
+            for: content.kind, canRender: canRender, showingSource: showingSource, copied: copied)
     }
 }
 
@@ -249,11 +247,13 @@ struct SideRegionView: View {
             HStack(spacing: 0) {
                 if let active, let control = activeControl(active) {
                     PaneChromeControlButton(control: control) {
-                        performControl(for: active)
+                        active.chrome.perform(control, contentURL: active.tab.webURL)
                     }
                 }
 
-                collapseButton
+                SidePanelToggleButton(collapsed: false) {
+                    send(.setCollapsed(true))
+                }
             }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
@@ -464,25 +464,32 @@ struct SideRegionView: View {
             copied: active.chrome.didCopyAddress)
     }
 
-    /// The render toggle flips the file between rendered and source; copy
-    /// writes the page's current address, which follows in-page navigation,
-    /// or the panel's own address before the page reports one.
-    private func performControl(for active: ActivePanel) {
-        let chrome = active.chrome
-        switch active.tab.content {
-        case .file:
-            chrome.showSourceCode.toggle()
-        case .web(let url):
-            chrome.copyAddress(chrome.webviewState.currentURL ?? url)
-        case .note, .transcript:
-            break
-        }
+    private func send(_ operation: PanelOperation) {
+        appState.sendPanelOperation(worktreeID: surface.worktreeID, tabID: surface.id, operation)
+    }
+}
+
+// MARK: - SidePanelToggleButton
+
+/// The button that hides or shows the side region: the strip's collapse
+/// button while the region shows (`collapsed` false), and the workspace tab
+/// bar's expand button while it is collapsed (`collapsed` true). Both carry
+/// `⌘\`, and at most one of them draws at a time — the collapse button with
+/// the strip, only while the region shows, and the expand button only while
+/// it is collapsed with panels — so the shortcut is bound once.
+struct SidePanelToggleButton: View {
+    /// Whether the side region is collapsed, so the button shows it.
+    let collapsed: Bool
+    let action: () -> Void
+
+    /// The tooltip for a button that shows the region (`collapsed`) or hides
+    /// it.
+    static func help(collapsed: Bool) -> String {
+        collapsed ? "Show the side panel (⌘\\)" : "Hide the side panel (⌘\\)"
     }
 
-    private var collapseButton: some View {
-        Button {
-            send(.setCollapsed(true))
-        } label: {
+    var body: some View {
+        Button(action: action) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 11))
                 .frame(width: 28)
@@ -491,10 +498,6 @@ struct SideRegionView: View {
         }
         .buttonStyle(.borderless)
         .keyboardShortcut("\\", modifiers: .command)
-        .help("Hide the side panel (⌘\\)")
-    }
-
-    private func send(_ operation: PanelOperation) {
-        appState.sendPanelOperation(worktreeID: surface.worktreeID, tabID: surface.id, operation)
+        .help(Self.help(collapsed: collapsed))
     }
 }

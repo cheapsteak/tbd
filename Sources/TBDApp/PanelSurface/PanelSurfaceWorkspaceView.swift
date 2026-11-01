@@ -247,16 +247,22 @@ struct PanelSurfaceWorkspaceView: View {
         return TabBarTrailingItems(
             selectedTabControl: control,
             onSelectedTabControl: {
-                switch content {
-                case .terminal(let terminalID):
+                // The transcript control opens or closes a panel, which only
+                // this view's action set can send; the viewer controls act on
+                // the tab's chrome state, as the side region's strip does.
+                switch control {
+                case .transcript?:
+                    guard case .terminal(let terminalID) = content else { return }
                     PaneActions.daemon(
                         appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
                     ).toggleTranscript(content, terminalID)
-                case .codeViewer:
-                    chrome.showSourceCode.toggle()
-                case .webview(_, let url):
-                    chrome.copyAddress(chrome.webviewState.currentURL ?? url)
-                case .note, .liveTranscript:
+                case let viewerControl?:
+                    var contentURL: URL?
+                    if case .webview(_, let url) = content {
+                        contentURL = url
+                    }
+                    chrome.perform(viewerControl, contentURL: contentURL)
+                case nil:
                     break
                 }
             },
@@ -359,9 +365,11 @@ struct PanelSurfaceWorkspaceView: View {
 /// asserted without standing up a view.
 enum WorkspaceTabBarChrome {
     /// The transcript button for a Claude terminal while the transcript view
-    /// is on, the rendered/source toggle for a file that can render, and
-    /// copy-address for a web page. A note, a plain terminal and a transcript
-    /// primary have none.
+    /// is on. Any other primary is viewer content, which takes the control
+    /// the side region's strip gives the same kind
+    /// (`PaneChromeControl.viewerControl`): the rendered/source toggle for a
+    /// file that can render, and copy-address for a web page. A note, a plain
+    /// terminal and a transcript primary have none.
     static func trailingControl(
         primary: PaneContent,
         isClaudeTerminal: Bool,
@@ -371,17 +379,12 @@ enum WorkspaceTabBarChrome {
         showingSource: Bool,
         copied: Bool
     ) -> PaneChromeControl? {
-        switch primary {
-        case .terminal:
+        if case .terminal = primary {
             guard isClaudeTerminal, transcriptViewEnabled else { return nil }
             return .transcript(isOn: transcriptOpen)
-        case .codeViewer:
-            guard canRender else { return nil }
-            return .renderToggle(showingSource: showingSource)
-        case .webview:
-            return .copyAddress(copied: copied)
-        case .note, .liveTranscript:
-            return nil
         }
+        guard let viewer = LegacyTabConverter.panelContent(from: primary) else { return nil }
+        return PaneChromeControl.viewerControl(
+            for: viewer.kind, canRender: canRender, showingSource: showingSource, copied: copied)
     }
 }

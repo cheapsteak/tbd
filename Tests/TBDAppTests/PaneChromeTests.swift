@@ -1,7 +1,9 @@
+import Clocks
 import Foundation
 import Testing
 
 @testable import TBDApp
+import TBDShared
 import TestSupport
 
 /// Tier 1. The per-kind control state a tab row owns and hands to the leaf
@@ -15,6 +17,12 @@ import TestSupport
 /// seams"). The restart test chains three such guards on paper, but its two
 /// arming waits are strict and its one non-throwing wait comes last, so at
 /// most one can elapse in a run; every other test chains at most two.
+///
+/// The control-action tests assert what a click writes, not when the
+/// checkmark clears, so they run on an `ImmediateClock`: a copy's reset
+/// returns from its sleep at once rather than wait on a clock nobody
+/// advances. Their bodies never suspend, so the reset cannot run before
+/// their assertions.
 @MainActor
 @Suite("Pane chrome state", .clockDriven)
 struct PaneChromeTests {
@@ -82,6 +90,80 @@ struct PaneChromeTests {
         #expect(state.hasRenderableContent == false)
         #expect(state.didCopyAddress == false)
         #expect(state.webviewState.currentURL == nil)
+    }
+
+    @Test("the render toggle flips the file between its rendered view and its source, and copies nothing")
+    func performingTheRenderToggleFlipsTheView() {
+        let written = FireRecorder<String>()
+        let state = PaneChromeState(pasteboard: { written.record($0) }, clock: ImmediateClock<Duration>())
+
+        state.perform(.renderToggle(showingSource: false), contentURL: nil)
+        #expect(state.showSourceCode, "a click on the rendered view shows the source")
+        state.perform(.renderToggle(showingSource: true), contentURL: nil)
+        #expect(!state.showSourceCode, "a second click shows the rendered view again")
+        #expect(written.values.isEmpty)
+        #expect(!state.didCopyAddress)
+    }
+
+    @Test("copy-address copies the content's address until the page reports its own, then the page's")
+    func performingCopyAddressPrefersThePagesAddress() throws {
+        let opened = try #require(URL(string: "https://example.com/opened"))
+        let navigated = try #require(URL(string: "https://example.com/navigated"))
+        let written = FireRecorder<String>()
+        let state = PaneChromeState(pasteboard: { written.record($0) }, clock: ImmediateClock<Duration>())
+
+        state.perform(.copyAddress(copied: false), contentURL: opened)
+        state.webviewState.currentURL = navigated
+        state.perform(.copyAddress(copied: true), contentURL: opened)
+
+        let expected: [String] = [opened.absoluteString, navigated.absoluteString]
+        #expect(written.values == expected)
+        #expect(state.didCopyAddress)
+        #expect(!state.showSourceCode, "a copy leaves the rendered/source toggle alone")
+    }
+
+    /// The transcript control opens or closes a panel, which the view that
+    /// draws it sends; the chrome state has nothing to do for it.
+    @Test("copy-address with no address to copy, and the transcript control, change nothing")
+    func performingWithoutAnEffectChangesNothing() throws {
+        let opened = try #require(URL(string: "https://example.com/opened"))
+        let written = FireRecorder<String>()
+        let state = PaneChromeState(pasteboard: { written.record($0) }, clock: ImmediateClock<Duration>())
+
+        state.perform(.copyAddress(copied: false), contentURL: nil)
+        state.perform(.transcript(isOn: false), contentURL: opened)
+        state.perform(.transcript(isOn: true), contentURL: opened)
+
+        #expect(written.values.isEmpty)
+        #expect(!state.didCopyAddress)
+        #expect(!state.showSourceCode)
+    }
+
+    @Test("a viewer kind's control: the render toggle for a file that can render, copy-address for a page")
+    func viewerControlPerKind() {
+        let showingSource: PaneChromeControl? = .renderToggle(showingSource: true)
+        let showingRendered: PaneChromeControl? = .renderToggle(showingSource: false)
+        let copied: PaneChromeControl? = .copyAddress(copied: true)
+        let notCopied: PaneChromeControl? = .copyAddress(copied: false)
+
+        #expect(PaneChromeControl.viewerControl(
+            for: .file, canRender: true, showingSource: true, copied: false) == showingSource)
+        #expect(PaneChromeControl.viewerControl(
+            for: .file, canRender: true, showingSource: false, copied: true) == showingRendered)
+        // A file that cannot render has none.
+        #expect(PaneChromeControl.viewerControl(
+            for: .file, canRender: false, showingSource: true, copied: true) == nil)
+        // A web page's control is copy-address whether or not anything renders.
+        #expect(PaneChromeControl.viewerControl(
+            for: .web, canRender: false, showingSource: false, copied: true) == copied)
+        #expect(PaneChromeControl.viewerControl(
+            for: .web, canRender: true, showingSource: true, copied: false) == notCopied)
+        // A note and a transcript have none, whatever the inputs say.
+        let withoutControl: [PanelKind] = [.note, .transcript]
+        for kind in withoutControl {
+            #expect(PaneChromeControl.viewerControl(
+                for: kind, canRender: true, showingSource: true, copied: true) == nil, "\(kind)")
+        }
     }
 
     @Test("the transcript control fills and takes the accent colour only while on")

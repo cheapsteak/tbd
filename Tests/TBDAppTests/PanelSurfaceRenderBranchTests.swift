@@ -637,6 +637,12 @@ struct PanelSurfaceRenderBranchTests {
         #expect(!PanelSurfaceWorkspaceView.showsExpandButton(side: .empty))
     }
 
+    @Test("the side panel button offers to show the region while it is collapsed, and to hide it otherwise")
+    func sidePanelToggleSaysWhatItDoes() {
+        #expect(SidePanelToggleButton.help(collapsed: true) == "Show the side panel (⌘\\)")
+        #expect(SidePanelToggleButton.help(collapsed: false) == "Hide the side panel (⌘\\)")
+    }
+
     /// `⌘\` is bound on the expand button in the workspace tab bar and on the
     /// collapse button in the side region's strip, which draws while the region
     /// is visible. Shown together, the shortcut would fire one of them

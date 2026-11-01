@@ -218,28 +218,15 @@ struct TabBar: View {
                 action: onHistoryTab
             )
 
+            // Brings back the collapsed side region. It shows only while the
+            // region is collapsed, and the strip's collapse button only while
+            // it is visible, so `⌘\` is bound on one of the two at a time.
             if trailing.showsExpandButton {
-                expandButton
+                SidePanelToggleButton(collapsed: true) {
+                    trailing.onExpand()
+                }
             }
         }
-    }
-
-    /// Brings back the collapsed side region. It shows only while the region
-    /// is collapsed, and the strip's collapse button only while it is
-    /// visible, so `⌘\` is bound on one of the two at a time.
-    private var expandButton: some View {
-        Button {
-            trailing.onExpand()
-        } label: {
-            Image(systemName: "sidebar.right")
-                .font(.system(size: 11))
-                .frame(width: 28)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .keyboardShortcut("\\", modifiers: .command)
-        .help("Show the side panel (⌘\\)")
     }
 }
 

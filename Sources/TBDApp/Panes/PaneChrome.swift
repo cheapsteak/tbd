@@ -1,4 +1,5 @@
 import SwiftUI
+import TBDShared
 
 // MARK: - PaneChromeState
 
@@ -71,6 +72,25 @@ final class PaneChromeState {
             self?.didCopyAddress = false
         }
     }
+
+    /// Does what `control`'s button does to this state: the render toggle
+    /// flips the file between its rendered view and its source, and
+    /// copy-address copies the page's current address, which follows in-page
+    /// navigation, or `contentURL`, the address its content opened with,
+    /// until the page reports one. The transcript control changes the
+    /// layout, not this state, so the view that draws it sends that itself
+    /// and this does nothing for it.
+    func perform(_ control: PaneChromeControl, contentURL: URL?) {
+        switch control {
+        case .renderToggle:
+            showSourceCode.toggle()
+        case .copyAddress:
+            guard let url = webviewState.currentURL ?? contentURL else { return }
+            copyAddress(url)
+        case .transcript:
+            break
+        }
+    }
 }
 
 // MARK: - PaneChromeStore
@@ -124,6 +144,25 @@ enum PaneChromeControl: Equatable {
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
     case copyAddress(copied: Bool)
+
+    /// The control viewer content of `kind` puts in its tab row, wherever
+    /// that row is — the workspace tab bar for a primary, the side region's
+    /// strip for a panel: the rendered/source toggle for a file that can
+    /// render, and copy-address for a web page. A file that cannot render, a
+    /// note and a transcript have none.
+    static func viewerControl(
+        for kind: PanelKind, canRender: Bool, showingSource: Bool, copied: Bool
+    ) -> PaneChromeControl? {
+        switch kind {
+        case .file:
+            guard canRender else { return nil }
+            return .renderToggle(showingSource: showingSource)
+        case .web:
+            return .copyAddress(copied: copied)
+        case .note, .transcript:
+            return nil
+        }
+    }
 
     /// The symbol's colour.
     enum Tint {
