@@ -4,6 +4,9 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
+// Tier 1: snapshots made from an in-memory `AppState`, with no window and no
+// waits.
+
 @MainActor
 @Suite("Main toolbar snapshot")
 struct MainToolbarSnapshotTests {

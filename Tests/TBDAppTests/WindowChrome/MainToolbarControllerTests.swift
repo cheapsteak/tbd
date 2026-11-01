@@ -5,6 +5,9 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
+// Tier 2: the toolbar on a real offscreen window. Waits are bounded
+// (`pollUntilTrue`), and the cooldown tests drive an `EventDrivenTestClock`.
+
 /// `MainToolbarController`, the AppKit main window's toolbar, mounted on a
 /// real offscreen window over a `MainSplitViewController`. Spec:
 /// docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar" and
