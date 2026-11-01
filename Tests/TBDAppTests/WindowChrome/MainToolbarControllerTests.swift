@@ -517,6 +517,64 @@ struct MainToolbarControllerTests {
         #expect(fixture.window.toolbar == nil)
     }
 
+    /// Uninstalling lets go of the window and the split. A collapse of the
+    /// old split then reaches nothing: KVO reports it at once, and a report
+    /// still wired would record the state. An install on a fresh window
+    /// counts no replacement from the old one: with the date frozen and the
+    /// cap's worth made before the uninstall, one more on the fresh window is
+    /// put back at once rather than starting the cooldown.
+    @Test func uninstallLetsGoOfTheWindowAndTheSplit() async throws {
+        let fixture = ToolbarFixture(
+            label: "uninstallLetsGoOfTheWindowAndTheSplit",
+            now: TestDateSource().provider, clock: EventDrivenTestClock())
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        try await fixture.replaceAndWaitForReinstall(
+            times: MainToolbarController.maxReplacementsInWindow, label: "beforeUninstall")
+        let quiet = try await waitForMainActorCondition("no apply queued before the uninstall") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
+
+        controller.uninstall()
+        #expect(controller.window == nil)
+        #expect(controller.split == nil)
+        let reportUnhooked = fixture.split.onSidebarCollapsedChange == nil
+        #expect(reportUnhooked)
+
+        let oldSplit = fixture.split
+        oldSplit.sidebarItem.isCollapsed = true
+        let collapsed = try await waitForMainActorCondition("the old split to collapse") {
+            oldSplit.isSidebarCollapsed
+        }
+        try #require(collapsed)
+        #expect(controller.sidebarCollapsed == false)
+        #expect(controller.applyScheduled == false)
+
+        let fresh = ToolbarFixture.makeShownWindow()
+        defer {
+            controller.uninstall()
+            ToolbarFixture.takeDown(fresh.window)
+        }
+        let freshWindow = fresh.window
+        let appliesBefore = controller.applyCount
+        controller.install(on: freshWindow, split: fresh.split)
+        #expect(controller.window === freshWindow)
+        try #require(freshWindow.toolbar === controller.toolbar)
+        let applied = try await waitForMainActorCondition("the fresh install's apply, with none queued after it") {
+            controller.applyCount > appliesBefore && !controller.applyScheduled
+        }
+        try #require(applied)
+
+        freshWindow.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.freshWindow")
+        #expect(controller.isInReinstallCooldown == false)
+        let back = try await waitForMainActorCondition("a replacement on the fresh window to be put back") {
+            freshWindow.toolbar === controller.toolbar
+        }
+        #expect(back)
+    }
+
     // MARK: - The update loop
 
     /// Applies that observation did not trigger each arm a registration of
@@ -729,14 +787,7 @@ private final class ToolbarFixture {
         repos = [first, second]
         self.worktrees = worktrees
 
-        // The sidebar at its widest, so the leading section's fit is not what
-        // these tests measure; the minimum width is the live check's.
-        let size = ToolbarFixture.windowSize
-        let sidebarWidth = MainToolbarMetrics.sidebarMaximumThickness
-        let split = MainSplitViewController(
-            sidebar: ToolbarFixture.makePane(width: sidebarWidth),
-            content: ToolbarFixture.makePane(width: size.width - sidebarWidth),
-            autosaveName: nil)
+        let split = ToolbarFixture.makeSplit()
         let titleView = NSTextField(labelWithString: "feature")
         let controller = MainToolbarController(
             appState: state, titleView: titleView, requestRemoteStop: { _ in }, now: now, clock: clock)
@@ -748,17 +799,42 @@ private final class ToolbarFixture {
         self.titleView = titleView
         self.controller = controller
 
-        let window = NSWindow(
-            contentRect: NSRect(origin: ToolbarFixture.offscreenOrigin, size: size),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
+        let window = ToolbarFixture.makeWindow()
         self.window = window
 
         controller.requestRemoteStop = { [weak self] selection in
             self?.stopRequests.append(selection)
         }
 
+        ToolbarFixture.show(split, in: window, nested: nested)
+    }
+
+    /// A split of plain panes, the sidebar at its widest, so the leading
+    /// section's fit is not what these tests measure; the minimum width is
+    /// the live check's.
+    static func makeSplit() -> MainSplitViewController {
+        let sidebarWidth = MainToolbarMetrics.sidebarMaximumThickness
+        return MainSplitViewController(
+            sidebar: makePane(width: sidebarWidth),
+            content: makePane(width: windowSize.width - sidebarWidth),
+            autosaveName: nil)
+    }
+
+    /// A titled window at the far-off origin, which its owner never closes.
+    static func makeWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(origin: offscreenOrigin, size: windowSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    /// Makes `split` the window's content, itself or inside a plain
+    /// container, and orders the window front, which is when the split's
+    /// `viewDidAppear` runs.
+    static func show(_ split: MainSplitViewController, in window: NSWindow, nested: Bool) {
+        let size = windowSize
         // The window takes its first size from the view; start it at the
         // final one so no transient narrow layout happens on the way.
         split.view.setFrameSize(size)
@@ -774,8 +850,25 @@ private final class ToolbarFixture {
             window.contentViewController = split
         }
         window.setContentSize(size)
-        window.setFrameOrigin(ToolbarFixture.offscreenOrigin)
+        window.setFrameOrigin(offscreenOrigin)
         window.orderFront(nil)
+    }
+
+    /// A second window shown as the fixture's is, over a split of its own
+    /// that installs nothing when it appears. Its owner uninstalls whatever
+    /// controller it gave the window before `takeDown(_:)`.
+    static func makeShownWindow() -> (window: NSWindow, split: MainSplitViewController) {
+        let split = makeSplit()
+        let window = makeWindow()
+        show(split, in: window, nested: false)
+        return (window, split)
+    }
+
+    /// Orders `window` out and empties it.
+    static func takeDown(_ window: NSWindow) {
+        window.orderOut(nil)
+        window.toolbar = nil
+        window.contentViewController = nil
     }
 
     /// Installs the toolbar directly as well, so only `installsOnAppear`
@@ -830,9 +923,7 @@ private final class ToolbarFixture {
     func tearDown() {
         split.onViewDidAppear = nil
         controller.uninstall()
-        window.orderOut(nil)
-        window.toolbar = nil
-        window.contentViewController = nil
+        ToolbarFixture.takeDown(window)
         suite.tearDown()
     }
 

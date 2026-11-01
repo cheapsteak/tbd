@@ -13,7 +13,8 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   split appears in it, wires the split's collapse report, and watches the
 ///   window's appearance and its `toolbar`. It sets nothing on the toolbar
 ///   beyond `window.toolbar`; every item change goes through `scheduleApply()`.
-///   `uninstall(fallbackWindow:)` stops the watching and takes the toolbar off.
+///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off
+///   and lets go of the window and the split.
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
 ///   runs inside `withObservationTracking`, and a change schedules one apply on
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
@@ -65,7 +66,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private(set) weak var split: MainSplitViewController?
 
     /// Between `install(on:split:)` and `uninstall(fallbackWindow:)`: the
-    /// stretch in which a replaced toolbar is put back.
+    /// stretch in which applies are scheduled and a replaced toolbar is put
+    /// back.
     private(set) var isInstalled = false
 
     /// The collapsed state the layout is computed for, as the split last
@@ -187,11 +189,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Stops following the window and takes the toolbar off it, if it still
     /// shows it; a toolbar something else put there stays. The watching stops
     /// first, so the removal is not taken for a replacement, and a running
-    /// cooldown is cancelled. `fallbackWindow` is checked when the toolbar was
-    /// never installed. Safe to call again.
+    /// cooldown is cancelled. Then it lets go of the window and the split,
+    /// whose collapse report it unhooks, so nothing it followed schedules
+    /// work and a later install, on this window or another, starts clean.
+    /// `fallbackWindow` is checked when the toolbar was never installed. Safe
+    /// to call again.
     func uninstall(fallbackWindow: NSWindow? = nil) {
         isInstalled = false
+        appearanceObservation?.invalidate()
         appearanceObservation = nil
+        toolbarObservation?.invalidate()
         toolbarObservation = nil
         cooldown?.cancel()
         cooldown = nil
@@ -199,6 +206,12 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         if let window = window ?? fallbackWindow, window.toolbar === toolbar {
             window.toolbar = nil
         }
+        split?.onSidebarCollapsedChange = nil
+        window = nil
+        split = nil
+        windowShowsOurToolbar = false
+        // A registration still armed is stale from here on.
+        observationGeneration &+= 1
     }
 
     private func attach(to window: NSWindow) {
@@ -277,9 +290,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: The update loop
 
     /// Schedules one apply on the next main-loop turn; further calls before it
-    /// runs are covered by it.
+    /// runs are covered by it. Does nothing while the toolbar is not
+    /// installed, such as after `uninstall`.
     func scheduleApply() {
-        guard !applyScheduled else { return }
+        guard isInstalled, !applyScheduled else { return }
         applyScheduled = true
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated { self?.applyNow() }
