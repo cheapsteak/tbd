@@ -7,7 +7,7 @@ import TestSupport
 @MainActor
 @Suite("Main toolbar layout")
 struct MainToolbarLayoutTests {
-    private typealias ID = MainToolbarItemID
+    private typealias ItemID = MainToolbarItemID
 
     private static func ids(_ state: MainToolbarLayoutState) -> [NSToolbarItem.Identifier] {
         MainToolbarLayout.identifiers(for: state)
