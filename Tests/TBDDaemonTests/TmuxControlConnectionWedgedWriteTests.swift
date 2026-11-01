@@ -1,3 +1,4 @@
+import DaemonTestSupport
 import Darwin
 import Foundation
 import Testing
@@ -18,8 +19,8 @@ import TestSupport
 /// These tests wedge a write for real: a stub "tmux" holds the pty replica
 /// open and never reads its stdin, and a 1 MB `sendCommand` from a background
 /// thread parks in `write()`. Each stub records its own pid, and the
-/// failure-path cleanup kills by that pid, so it can never reach another
-/// run's stub.
+/// failure-path cleanup kills by that pid, and only while it still names the
+/// stub, so it can never reach another process.
 @Suite("TmuxControlConnection wedged-write teardown (R7-H1)")
 struct TmuxControlConnectionWedgedWriteTests {
 
@@ -28,7 +29,7 @@ struct TmuxControlConnectionWedgedWriteTests {
     /// wedges.
     ///
     /// It sleeps `TestDeadlines.outlivingChildSeconds`, past every wait before
-    /// and including the last one that checks the write was unwedged — three
+    /// and including the last one that checks the write was unwedged — four
     /// `saturatedPass` waits and a 300 ms settle — because a stub that ended
     /// on its own would tear the pty down and unwedge the write without
     /// `stop()` having killed it.
@@ -50,16 +51,31 @@ struct TmuxControlConnectionWedgedWriteTests {
         ((stub as NSString).deletingLastPathComponent as NSString).appendingPathComponent("stub.pid")
     }
 
-    /// Kill a leftover stub by the pid it recorded. A no-op on the green path
-    /// (stop() already killed it); on the red/failure path this is what
-    /// unwedges the parked write so leaked threads can exit. By pid, never by
-    /// name pattern: another worktree running this suite has a stub with the
-    /// same command line.
-    private func killStub(_ stub: String) {
-        guard let text = try? String(contentsOfFile: Self.pidFile(forStub: stub), encoding: .utf8),
+    /// The pid the stub at `stub` recorded, once it has.
+    private static func recordedPID(forStub stub: String) -> pid_t? {
+        guard let text = try? String(contentsOfFile: pidFile(forStub: stub), encoding: .utf8),
               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0
-        else { return }
-        kill(pid, SIGKILL)
+        else { return nil }
+        return pid
+    }
+
+    /// Remembers the stub for cleanup. Call it once the write is wedged: the
+    /// stub holds the pty that wedged it, so it is alive.
+    ///
+    /// The cleanup it feeds is a no-op on the green path, where `stop()` has
+    /// already killed and reaped the stub; on the red/failure path it is what
+    /// unwedges the parked write so leaked threads can exit. By pid, never by
+    /// name pattern — another worktree running this suite has a stub with the
+    /// same command line — and only while the pid still names this stub.
+    private func recordStub(_ stub: String) async throws -> RecordedChild? {
+        _ = try await waitFor(
+            "the stub to record its pid",
+            observed: { Self.recordedPID(forStub: stub).map { "pid \($0)" } ?? "no pid file yet" }
+        ) {
+            Self.recordedPID(forStub: stub) != nil
+        }
+        guard let pid = Self.recordedPID(forStub: stub) else { return nil }
+        return RecordedChild.record(pid: pid)
     }
 
     /// Park a background thread inside `sendCommand` and confirm it is wedged
@@ -83,8 +99,9 @@ struct TmuxControlConnectionWedgedWriteTests {
     @Test("stop() returns bounded while a pty write is wedged, and releases the writer")
     func stopReturnsWhileWriteWedged() async throws {
         let stub = try makeStub()
+        var stubChild: RecordedChild?
         defer {
-            killStub(stub)
+            stubChild?.killIfStillTheSame()
             try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent)
         }
 
@@ -93,6 +110,7 @@ struct TmuxControlConnectionWedgedWriteTests {
 
         let sendReturned = EventCounter()
         try await wedgeWrite(on: connection, returned: sendReturned)
+        stubChild = try await recordStub(stub)
 
         // stop() must not deadlock behind the wedged writer's ioLock. Run it
         // on its own thread so a pre-fix deadlock fails the assertion instead
@@ -119,8 +137,9 @@ struct TmuxControlConnectionWedgedWriteTests {
     @Test("a wedged write cannot permanently starve ensureConnection for the server (R7-H1 + R6-M4)")
     func wedgedWriteDoesNotStarveSuccessor() async throws {
         let stub = try makeStub()
+        var stubChild: RecordedChild?
         defer {
-            killStub(stub)
+            stubChild?.killIfStillTheSame()
             try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent)
         }
 
@@ -145,6 +164,7 @@ struct TmuxControlConnectionWedgedWriteTests {
 
         let sendReturned = EventCounter()
         try await wedgeWrite(on: connection, returned: sendReturned)
+        stubChild = try await recordStub(stub)
 
         // Trigger the real fatal path: a client-originated reply block with an
         // empty queue is a correlator protocol violation → onFatalError →

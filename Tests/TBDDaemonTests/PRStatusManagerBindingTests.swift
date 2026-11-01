@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // MARK: - Injected `gh`
@@ -1040,13 +1041,11 @@ struct PRStatusManagerBindingTests {
         // it, so this is the pid of the `sleep` the deadline has to reach.
         let pidFile = dir.appendingPathComponent("child.pid")
         // Nothing reclaims a forge CLI subprocess, this suite included: if the
-        // assertion below fails the child is still out there, so end it here.
-        defer {
-            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
-               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                kill(leaked, SIGKILL)
-            }
-        }
+        // assertion below fails the child is still out there, so end it here —
+        // but only while its pid still names the child recorded alive below,
+        // since the escalation under test normally kills and reaps it first.
+        var child: RecordedChild?
+        defer { child?.killIfStillTheSame() }
 
         let manager = PRStatusManager(
             ghRunner: { _, _ in nil },
@@ -1078,6 +1077,8 @@ struct PRStatusManagerBindingTests {
             String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)))
         #expect(kill(childPID, 0) == 0, "the child was not running for the deadline to end")
+        // Alive, and nothing has advanced the clock that ends it: remember it.
+        child = RecordedChild.record(pid: childPID)
 
         // Virtual time: the deadline fires, then the grace after SIGTERM.
         try await clock.requireAdvanceWhenArmed(by: PRStatusManager.recheckTimeout)
@@ -1115,12 +1116,10 @@ struct PRStatusManagerBindingTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let pidFile = dir.appendingPathComponent("child.pid")
-        defer {
-            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
-               let leaked = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                kill(leaked, SIGKILL)
-            }
-        }
+        // Killed here only while its pid still names the child recorded alive
+        // below: the SIGTERM under test normally ends and reaps it first.
+        var child: RecordedChild?
+        defer { child?.killIfStillTheSame() }
 
         let manager = PRStatusManager(
             ghRunner: { _, _ in nil },
@@ -1147,6 +1146,8 @@ struct PRStatusManagerBindingTests {
         let childPID = try #require(pid_t(
             String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)))
+        // Alive, and nothing has advanced the clock that ends it: remember it.
+        child = RecordedChild.record(pid: childPID)
 
         try await clock.requireAdvanceWhenArmed(by: PRStatusManager.recheckTimeout)
 
