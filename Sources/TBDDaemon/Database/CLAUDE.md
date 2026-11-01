@@ -225,10 +225,13 @@ Any Swift migration body goes through the idempotent helpers in
 - `addIndexIfMissing(_:on:columns:unique:where:)`
 
 The `migration_use_helpers` SwiftLint rule catches `create(table:)`,
-`.add(column:)`, and raw `CREATE TABLE` / `CREATE INDEX`. It names two files —
-`Database.swift` and `SQLMigrationLoader.swift` — at `severity: error`, so raw
-DDL in an escape-hatch body fails `swiftlint --strict` in the `lint` CI job and
-the pre-push hook rather than resting on discipline. `.sql` files need no
+`.add(column:)`, and raw `CREATE TABLE` / `CREATE INDEX`. It names
+`Database.swift`, `SQLMigrationLoader.swift` and each file that holds an
+escape-hatch body, such as `SidePanelNotesMigration.swift`, at
+`severity: error`, so raw DDL in an escape-hatch body fails `swiftlint --strict`
+in the `lint` CI job and the pre-push hook rather than resting on discipline.
+An escape-hatch body kept in a file of its own adds that file to the rule's
+`included` list. `.sql` files need no
 helpers at all — the loader gives them the equivalent ADD COLUMN guard, and the
 `IF NOT EXISTS` forms cover the rest.
 

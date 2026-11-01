@@ -91,6 +91,12 @@ struct SidePanelNotesMigrationTests {
             sql: "UPDATE worktree SET tabOrder = ? WHERE id = ?", arguments: [json, worktreeID.uuidString])
     }
 
+    private static func setActiveTabID(_ db: GRDB.Database, worktreeID: UUID, _ tabID: UUID) throws {
+        try db.execute(
+            sql: "UPDATE worktree SET activeTabID = ? WHERE id = ?",
+            arguments: [tabID.uuidString, worktreeID.uuidString])
+    }
+
     private static func insertNote(
         _ db: GRDB.Database, worktreeID: UUID,
         createdAt: Date = Date(timeIntervalSince1970: 1_800_000_000)
@@ -165,6 +171,13 @@ struct SidePanelNotesMigrationTests {
         try tabOrderText(queue, worktreeID: worktreeID).flatMap { decodeJSON([String].self, from: $0) }
     }
 
+    private static func activeTabID(_ queue: DatabaseQueue, worktreeID: UUID) throws -> String? {
+        try queue.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT activeTabID FROM worktree WHERE id = ?", arguments: [worktreeID.uuidString])
+        }
+    }
+
     private static func tabRowIDs(_ queue: DatabaseQueue) throws -> [String] {
         try queue.read { db in
             try String.fetchAll(db, sql: "SELECT id FROM tab ORDER BY id")
@@ -213,6 +226,52 @@ struct SidePanelNotesMigrationTests {
             try String.fetchAll(
                 db, sql: "SELECT panelID FROM panel_history WHERE tabID = ? ORDER BY panelID",
                 arguments: [tabID.uuidString])
+        }
+    }
+
+    /// `worktree_panel`'s columns, foreign keys and index as SQLite reports
+    /// them, one line each, so two ways of creating the table compare equal
+    /// only when they make the same table.
+    private struct WorktreePanelSchema: Equatable {
+        /// `name TYPE notnull=N pk=N`, in column order.
+        var columns: [String]
+        /// `from -> table.to on delete ACTION`.
+        var foreignKeys: [String]
+        /// `worktree_panel_on_worktreeID`'s columns, in index order.
+        var indexColumns: [String]
+    }
+
+    /// The table `20261101170000_worktree_panel.sql` creates.
+    private static let expectedWorktreePanelSchema = WorktreePanelSchema(
+        columns: [
+            "id TEXT notnull=1 pk=1",
+            "worktreeID TEXT notnull=1 pk=0",
+            "position INTEGER notnull=1 pk=0",
+            "content TEXT notnull=1 pk=0",
+        ],
+        foreignKeys: ["worktreeID -> worktree.id on delete CASCADE"],
+        indexColumns: ["worktreeID", "position"])
+
+    private static func worktreePanelSchema(_ queue: DatabaseQueue) throws -> WorktreePanelSchema {
+        try queue.read { db in
+            let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(worktree_panel)").map { row -> String in
+                let name: String = row["name"]
+                let type: String = row["type"]
+                let notNull: Int = row["notnull"]
+                let primaryKey: Int = row["pk"]
+                return "\(name) \(type.uppercased()) notnull=\(notNull) pk=\(primaryKey)"
+            }
+            let foreignKeys = try Row.fetchAll(db, sql: "PRAGMA foreign_key_list(worktree_panel)").map {
+                row -> String in
+                let from: String = row["from"]
+                let table: String = row["table"]
+                let to: String? = row["to"]
+                let onDelete: String = row["on_delete"]
+                return "\(from) -> \(table).\(to ?? "<primary key>") on delete \(onDelete)"
+            }
+            let indexColumns = try Row.fetchAll(db, sql: "PRAGMA index_info(worktree_panel_on_worktreeID)")
+                .map { row -> String in row["name"] }
+            return WorktreePanelSchema(columns: columns, foreignKeys: foreignKeys, indexColumns: indexColumns)
         }
     }
 
@@ -312,6 +371,89 @@ struct SidePanelNotesMigrationTests {
         #expect(mainPanels.isEmpty)
         let scratchPanels = try Self.panelRows(queue, worktreeID: seeded.scratchID)
         #expect(scratchPanels.isEmpty)
+    }
+
+    /// A worktree whose selected tab was a note selects the first tab its
+    /// remaining tab order lists, or none when it lists none; one whose
+    /// selected tab is a terminal keeps it, though its tab order lost a note.
+    @Test func activeNoteTabMovesToFirstRemainingTab() throws {
+        let firstTerminalTabID = UUID()
+        let secondTerminalTabID = UUID()
+        let selectedTerminalTabID = UUID()
+        let (queue, seeded) = try Self.migrate {
+            db -> (noteSelectedID: UUID, terminalSelectedID: UUID, onlyNoteID: UUID) in
+            let noteSelectedID = try Self.insertWorktree(db)
+            let noteID = try Self.insertNote(db, worktreeID: noteSelectedID)
+            try Self.setTabOrder(db, worktreeID: noteSelectedID, [noteID, firstTerminalTabID, secondTerminalTabID])
+            try Self.setActiveTabID(db, worktreeID: noteSelectedID, noteID)
+
+            let terminalSelectedID = try Self.insertWorktree(db)
+            let otherNoteID = try Self.insertNote(db, worktreeID: terminalSelectedID)
+            try Self.setTabOrder(db, worktreeID: terminalSelectedID, [otherNoteID, selectedTerminalTabID])
+            try Self.setActiveTabID(db, worktreeID: terminalSelectedID, selectedTerminalTabID)
+
+            let onlyNoteID = try Self.insertWorktree(db)
+            let loneNoteID = try Self.insertNote(db, worktreeID: onlyNoteID)
+            try Self.setTabOrder(db, worktreeID: onlyNoteID, [loneNoteID])
+            try Self.setActiveTabID(db, worktreeID: onlyNoteID, loneNoteID)
+            return (noteSelectedID, terminalSelectedID, onlyNoteID)
+        }
+
+        let repaired = try Self.activeTabID(queue, worktreeID: seeded.noteSelectedID)
+        #expect(repaired == firstTerminalTabID.uuidString)
+        let kept = try Self.activeTabID(queue, worktreeID: seeded.terminalSelectedID)
+        #expect(kept == selectedTerminalTabID.uuidString)
+        let cleared = try Self.activeTabID(queue, worktreeID: seeded.onlyNoteID)
+        #expect(cleared == nil)
+    }
+
+    // MARK: - Order independence
+
+    /// The identifier before `20261101170000_worktree_panel`, the migration
+    /// that creates the `worktree_panel` table.
+    private static let lastIdentifierBeforeWorktreePanelTable = "20261030194425_panel_tabs"
+
+    /// Run on a database where `20261101170000_worktree_panel` has not run,
+    /// as a machine that applies the two in another order would, the
+    /// migration creates the table that file creates, then moves the notes
+    /// into it. The rest of the chain still applies afterwards and adds no
+    /// second panel.
+    @Test func createsWorktreePanelTableWhenMissing() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: Self.lastIdentifierBeforeWorktreePanelTable)
+        let tableBefore = try queue.read { db in try db.tableExists("worktree_panel") }
+        #expect(!tableBefore)
+
+        let seeded = try queue.write { db -> (worktreeID: UUID, noteID: UUID) in
+            let worktreeID = try Self.insertWorktree(db)
+            let noteID = try Self.insertNote(db, worktreeID: worktreeID)
+            try Self.setTabOrder(db, worktreeID: worktreeID, [noteID])
+            try SidePanelNotesMigration.run(db)
+            return (worktreeID, noteID)
+        }
+
+        let schema = try Self.worktreePanelSchema(queue)
+        #expect(schema == Self.expectedWorktreePanelSchema)
+        let contents = try Self.panelRows(queue, worktreeID: seeded.worktreeID).map(\.content)
+        let expectedContents: [String] = [Self.noteContent(seeded.noteID)]
+        #expect(contents == expectedContents)
+        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded.worktreeID)
+        let expectedTabOrder: [String] = []
+        #expect(tabOrder == expectedTabOrder)
+
+        try migrator.migrate(queue)
+        let contentsAfterChain = try Self.panelRows(queue, worktreeID: seeded.worktreeID).map(\.content)
+        #expect(contentsAfterChain == expectedContents)
+    }
+
+    /// The table `20261101170000_worktree_panel.sql` creates on the usual
+    /// order has the shape the migration's own creation is held to.
+    @Test func sqlFileCreatesTheSameWorktreePanelTable() throws {
+        let queue = try DatabaseQueue()
+        try TBDDatabase.buildMigratorForTests().migrate(queue)
+        let schema = try Self.worktreePanelSchema(queue)
+        #expect(schema == Self.expectedWorktreePanelSchema)
     }
 
     // MARK: - A tab's own note panels
@@ -622,12 +764,14 @@ struct SidePanelNotesMigrationTests {
     }
 
     /// Running the migration a second time makes no second panel for a note
-    /// and changes no surface, so it takes no revision.
+    /// and changes no surface, so it takes no revision: a tab the first run
+    /// collapsed stays collapsed, and one the user has expanded since stays
+    /// expanded.
     @Test func runningTwiceMakesOnePanelPerNote() throws {
         let filePanelID = UUID()
         let notePanelID = UUID()
         let (queue, seeded) = try Self.migrate {
-            db -> (worktreeID: UUID, panelTabID: UUID, emptyTabID: UUID) in
+            db -> (worktreeID: UUID, panelTabID: UUID, emptyTabID: UUID, collapsedTabID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
             let first = try Self.insertNote(db, worktreeID: worktreeID)
             let second = try Self.insertNote(
@@ -644,11 +788,29 @@ struct SidePanelNotesMigrationTests {
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
                 layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])),
                 position: 1)
-            return (worktreeID, panelTabID, emptyTabID)
+            let collapsedTabID = try Self.insertSurface(
+                db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
+                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])),
+                position: 2)
+            return (worktreeID, panelTabID, emptyTabID, collapsedTabID)
         }
         let panelsAfterFirst = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
         let panelLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.panelTabID)
-        let emptyLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.emptyTabID)
+        let collapsedLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.collapsedTabID)
+        let collapsedAfterFirst = try #require(try Self.layout(queue, tabID: seeded.collapsedTabID))
+        #expect(collapsedAfterFirst.collapsed)
+
+        // The user expands one of the tabs the first run collapsed.
+        var expanded = try #require(try Self.layout(queue, tabID: seeded.emptyTabID))
+        #expect(expanded.collapsed)
+        expanded.collapsed = false
+        let expandedLayoutText = try encodeJSONString(expanded)
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE workspace_tab_surface SET layout = ? WHERE id = ?",
+                arguments: [expandedLayoutText, seeded.emptyTabID.uuidString])
+        }
+        let expandedRevision = try Self.revision(queue, tabID: seeded.emptyTabID)
         let counterAfterFirst = try Self.counter(queue)
 
         try queue.write { db in try SidePanelNotesMigration.run(db) }
@@ -662,7 +824,11 @@ struct SidePanelNotesMigrationTests {
         let contentsAfterFirst = panelsAfterFirst.map(\.content)
         #expect(contents == contentsAfterFirst)
         #expect(try Self.layoutText(queue, tabID: seeded.panelTabID) == panelLayoutAfterFirst)
-        #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == emptyLayoutAfterFirst)
+        #expect(try Self.layoutText(queue, tabID: seeded.collapsedTabID) == collapsedLayoutAfterFirst)
+        #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == expandedLayoutText)
+        let afterRerun = try #require(try Self.layout(queue, tabID: seeded.emptyTabID))
+        #expect(!afterRerun.collapsed)
+        #expect(try Self.revision(queue, tabID: seeded.emptyTabID) == expandedRevision)
         #expect(try Self.counter(queue) == counterAfterFirst)
     }
 }

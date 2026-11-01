@@ -6,8 +6,13 @@ import os
 /// tab bar and the tabs' own side regions, and show in worktree panels (side
 /// panel notes spec, "Daemon → Migration").
 ///
+/// - The `worktree_panel` table and its index are created first when they
+///   are missing, so the migration does not depend on
+///   `20261101170000_worktree_panel` having run before it.
 /// - Every worktree's `tabOrder` loses the ID of every note, and every note
-///   loses its `tab` row.
+///   loses its `tab` row. A worktree whose `activeTabID` names a note
+///   selects the first tab its remaining `tabOrder` lists instead, or none
+///   when it lists none or does not parse.
 /// - Each note of a worktree that is not archived gets a worktree panel,
 ///   unless one already shows it: first the notes the worktree's tab order
 ///   lists, in that order, then the rest by creation, after any panel the
@@ -18,16 +23,19 @@ import os
 ///   histories. One whose front was such a panel brings that note's worktree
 ///   panel forward, else its most recent own panel, else the worktree's first
 ///   panel.
-/// - A surface whose side region had no panels, in a worktree that now has
-///   worktree panels, fronts the first one and comes out collapsed, so the
-///   migration narrows no terminal. One that had panels keeps its collapse.
+/// - A surface whose side region had no panels and nothing in front, in a
+///   worktree that now has worktree panels, fronts the first one and comes
+///   out collapsed, so the migration narrows no terminal. One that had
+///   panels keeps its collapse.
 ///
 /// Each surface it changes takes the revision counter's next value. It works
 /// on raw SQL and private snapshots of the JSON those columns hold, never on
 /// the live model types, so a later change to them cannot change what it
 /// does. It throws only on SQL errors: a throw here stops the daemon at every
 /// start, so a row whose JSON does not parse is logged and left as it is.
-/// Running it again changes nothing.
+/// Running it again changes nothing: a surface it collapsed fronts a
+/// worktree panel, so the collapse rule passes it by, and a tab the user has
+/// expanded since stays expanded.
 enum SidePanelNotesMigration {
     static let identifier = "20261101170100_side_panel_notes"
 
@@ -36,10 +44,28 @@ enum SidePanelNotesMigration {
     /// Runs the migration against an open write transaction. `now` is the
     /// `updatedAt` every surface it rewrites takes.
     static func run(_ db: GRDB.Database, now: Date = Date()) throws {
+        try createWorktreePanelTableIfMissing(db)
         let notes = try noteRows(db)
         try moveNotesIntoWorktreePanels(notes, db: db)
         try db.execute(sql: "DELETE FROM tab WHERE id IN (SELECT id FROM note)")
         try repairSurfaces(db: db, now: now)
+    }
+
+    /// The `worktree_panel` table and its index, exactly as
+    /// `20261101170000_worktree_panel.sql` creates them, when they are
+    /// missing. Migrations can apply in a different order on different
+    /// machines, so this one creates what it writes to rather than assume
+    /// that file ran first.
+    private static func createWorktreePanelTableIfMissing(_ db: GRDB.Database) throws {
+        try db.createTableIfNotExists("worktree_panel") { t in
+            t.primaryKey("id", .text).notNull()
+            t.column("worktreeID", .text).notNull()
+                .references("worktree", column: "id", onDelete: .cascade)
+            t.column("position", .integer).notNull()
+            t.column("content", .text).notNull()
+        }
+        try db.addIndexIfMissing(
+            "worktree_panel_on_worktreeID", on: "worktree_panel", columns: ["worktreeID", "position"])
     }
 
     // MARK: - Notes and tab orders
@@ -63,25 +89,35 @@ enum SidePanelNotesMigration {
             }
     }
 
-    /// Removes every note's ID from every worktree's `tabOrder`, and gives
-    /// the notes of each worktree that is not archived their worktree panels.
-    /// A `tabOrder` that is not a JSON array of strings is left as it is.
+    /// Removes every note's ID from every worktree's `tabOrder`, moves an
+    /// `activeTabID` naming a note to the first tab the remaining `tabOrder`
+    /// lists, and gives the notes of each worktree that is not archived their
+    /// worktree panels. A `tabOrder` that is not a JSON array of strings is
+    /// left as it is, and an `activeTabID` naming a note in such a worktree
+    /// is cleared, since there is no list to take a tab from.
     private static func moveNotesIntoWorktreePanels(_ notes: [NoteRow], db: GRDB.Database) throws {
         let noteKeys = Set(notes.map { $0.key.uppercased() })
         let notesByWorktree = Dictionary(grouping: notes, by: \.worktreeKey)
-        let worktrees = try Row.fetchAll(db, sql: "SELECT id, status, tabOrder FROM worktree ORDER BY id")
+        let worktrees = try Row.fetchAll(
+            db, sql: "SELECT id, status, tabOrder, activeTabID FROM worktree ORDER BY id")
         for row in worktrees {
             guard let worktreeKey: String = row["id"] else { continue }
             let tabOrderText: String? = row["tabOrder"]
             let tabOrder = tabOrderText.flatMap { decodeJSON([String].self, from: $0) }
-            if let tabOrder {
-                let kept = tabOrder.filter { !noteKeys.contains($0.uppercased()) }
+            let kept = tabOrder?.filter { !noteKeys.contains($0.uppercased()) }
+            if let tabOrder, let kept {
                 if kept.count != tabOrder.count {
                     try writeTabOrder(kept, worktreeKey: worktreeKey, db: db)
                 }
             } else {
                 logger.warning(
                     "migration \(Self.identifier, privacy: .public): leaving worktree \(worktreeKey, privacy: .public)'s tabOrder as it is: not a JSON array of strings")
+            }
+            let activeTabKey: String? = row["activeTabID"]
+            if let activeTabKey, noteKeys.contains(activeTabKey.uppercased()) {
+                try db.execute(
+                    sql: "UPDATE worktree SET activeTabID = ? WHERE id = ?",
+                    arguments: [kept?.first, worktreeKey])
             }
             let status: String? = row["status"]
             guard status != "archived", let worktreeNotes = notesByWorktree[worktreeKey] else { continue }
@@ -275,8 +311,11 @@ enum SidePanelNotesMigration {
     /// - Otherwise the front is the worktree panel on `frontNoteID`, the note
     ///   the removed front panel showed, else the most recent remaining own
     ///   panel, else the worktree's first panel, else none.
-    /// - A side region that had no panels comes out collapsed when the
-    ///   worktree has panels; one that had panels keeps its collapse.
+    /// - A side region that had no panels and nothing in front, as every
+    ///   empty region was before the migration, comes out collapsed when the
+    ///   worktree has panels. One that had panels keeps its collapse, and so
+    ///   does an empty one with a front: the migration has already fronted
+    ///   it on a worktree panel, and any collapse it has now is the user's.
     private static func repaired(
         _ side: SideRegionSnapshot, removing removed: Set<UUID>, frontNoteID: UUID?,
         worktreePanels: [WorktreePanelRow]
@@ -294,7 +333,7 @@ enum SidePanelNotesMigration {
         } else {
             next.activePanelID = next.recency.first ?? worktreePanelIDs.first
         }
-        if side.panelIDs.isEmpty, !worktreePanels.isEmpty {
+        if side.panelIDs.isEmpty, side.activePanelID == nil, !worktreePanels.isEmpty {
             next.collapsed = true
         }
         return next

@@ -343,7 +343,7 @@ custom_rules:
   migration_use_helpers:
     name: "Use idempotent migration helpers"
     # included/excluded HERE take REGEX (not glob), matched against file path.
-    # Both entries name ONE file each. Do not relax either to the enclosing
+    # Each entry names ONE file. Do not relax any of them to the enclosing
     # directory: MigrationHelpers.swift is where `create(table:` and
     # `.add(column:` legitimately live — it is the implementation of the
     # helpers this rule points people at.
@@ -354,6 +354,8 @@ custom_rules:
       - "Sources/TBDDaemon/Database/Database\\.swift"
       # The Swift escape hatch, `SQLMigrationLoader.inlineTimestampMigrations`.
       - "Sources/TBDDaemon/Database/SQLMigrationLoader\\.swift"
+      # The body of the escape hatch's `20261101170100_side_panel_notes`.
+      - "Sources/TBDDaemon/Database/SidePanelNotesMigration\\.swift"
     regex: 'create\(table:|\.add\(column:|CREATE\s+(?:TABLE|INDEX)'
     match_kinds:
       - identifier
