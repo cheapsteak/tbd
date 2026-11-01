@@ -295,20 +295,21 @@ struct MainToolbarLayoutTests {
     }
 
     /// The sidebar's minimum thickness is the leading inset, the three
-    /// compact buttons each followed by one spacing, the filter at its widest
-    /// and the margin before the separator: 302 pt with the current
-    /// estimates. Each button and its spacing make one 28 pt pitch.
+    /// compact buttons each followed by one spacing, one more spacing for the
+    /// empty flexible space before the filter, the filter at its widest and
+    /// the margin before the separator: 310 pt with the current estimates.
+    /// Each button and its spacing make one 28 pt pitch.
     @Test func minimumThicknessFitsTheSidebarSection() {
         let inset: CGFloat = MainToolbarMetrics.firstItemLeadingInset
         let button: CGFloat = MainToolbarMetrics.iconButtonWidth
         let spacing: CGFloat = MainToolbarMetrics.interItemSpacing
         let filter: CGFloat = MainToolbarMetrics.filterMaxWidth
         let padding: CGFloat = MainToolbarMetrics.sectionPadding
-        let derived: CGFloat = inset + 3 * button + 3 * spacing + filter + padding
+        let derived: CGFloat = inset + 3 * button + 4 * spacing + filter + padding
         let minimum: CGFloat = MainToolbarMetrics.sidebarMinimumThickness
         let maximum: CGFloat = MainToolbarMetrics.sidebarMaximumThickness
         #expect(minimum == derived)
-        #expect(minimum == 302)
+        #expect(minimum == 310)
         #expect(minimum < maximum)
 
         let pitch: CGFloat = button + spacing

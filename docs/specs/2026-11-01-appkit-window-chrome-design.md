@@ -152,8 +152,9 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
 
 An item that does not fit goes to the toolbar's overflow menu (») as its menu
 form. AppKit's default form for a view item is a row titled with the item's
-label that sends the view's action from an `NSMenuItem`, so every view item has
-an explicit form:
+label that sends the view's action from an `NSMenuItem`, and `NSToolbarItem.h`
+promises a target and action on the default row only for standard items. So
+every item but one has an explicit form:
 
 - **Toggle, back and forward** – a row acting as the button does; back and
   forward are disabled when history has nowhere to go.
@@ -161,14 +162,18 @@ an explicit form:
   current choice checked, kept in step with the popup.
 - **Title cluster** – an inert row showing the title, hidden when nothing is
   selected.
+- **Remote session buttons** – a row titled with the button's label, carrying
+  its action.
+
+The Servers item keeps AppKit's documented default: its menu is its form.
 
 The title's and the filter's rows are replaced, never edited, when what they
-show changes, since AppKit may build the overflow menu from copies of them.
+show changes, since AppKit may build the overflow menu from copies of them. A
+title or filter item the toolbar makes, as when the filter returns after a
+collapse, starts from what the last apply showed.
 
 Every action the toolbar wires takes any sender and checks its class, so a row
 sending it from an `NSMenuItem` never meets a method typed for another sender.
-The Servers item's menu is its form, and the remote session buttons, image
-items whose actions take any sender, keep AppKit's default.
 
 ### Width
 
@@ -180,12 +185,13 @@ section at its narrowest, left to right:
   AppKit places it after the window buttons, estimated from the reference
   toolbar.
 - **Buttons** – 3 × 20 pt.
-- **Spacing** – 3 × 8 pt: one after each button, the third before the filter,
-  as the flexible space between them is empty at this width.
+- **Spacing** – 4 × 8 pt: one after each button, and one more before the
+  filter, as AppKit spaces both sides of the flexible space between forward
+  and the filter even when it is empty.
 - **Filter** – 110 pt, its maximum width.
 - **Margin** – 20 pt before the tracking separator.
 
-That is 88 + 3 × 20 + 3 × 8 + 110 + 20 = 302 pt, below the 400 pt maximum. The
+That is 88 + 3 × 20 + 4 × 8 + 110 + 20 = 310 pt, below the 400 pt maximum. The
 spacing and the inset are estimates: the running app confirms them, and the
 spacing is the one constant to tune if the buttons do not sit 28 pt apart.
 

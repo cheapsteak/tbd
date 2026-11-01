@@ -18,14 +18,6 @@ final class ServersMenuCommandBox: NSObject {
     }
 }
 
-/// The filter's overflow row as last set and the filter it was built for,
-/// so an apply that finds both unchanged sets no new row. The row is held
-/// weakly: one the item no longer holds is never taken for its current row.
-struct FilterFormKey {
-    weak var form: NSMenuItem?
-    var filter: RepoFilterPresentation
-}
-
 /// The key a toolbar item's image was last derived from, such as its symbol
 /// name, and the item it was set on: an item rebuilt since then gets its image
 /// whatever the key says.
@@ -183,8 +175,8 @@ extension MainToolbarController {
         item.view = popup
         item.label = "Filter"
         item.toolTip = "Filter sidebar by repository"
-        // Built from what the last apply showed; the next apply replaces it
-        // with one for the current filter.
+        // Built from what the last apply showed, so an item the toolbar
+        // re-inserts keeps its row until the filter changes.
         item.menuFormRepresentation = makeFilterForm(appliedSnapshot?.filter)
         return item
     }
@@ -193,11 +185,13 @@ extension MainToolbarController {
     /// as the popup, each choosing its repo through `filterChosen(_:)`, and
     /// the row `filter` names checked, or none when it names a repo that is
     /// gone. Empty without a filter. Without it, AppKit's default row would
-    /// send the popup's action from a bare menu item. The submenu reports its
-    /// opening to `filterMenuTracker`, so it is not replaced under the
-    /// pointer.
+    /// send the popup's action from a bare menu item. The row carries
+    /// `filter` as its represented object, so `updateFilterForm` can tell
+    /// whether it is current. The submenu reports its opening to
+    /// `filterMenuTracker`, so it is not replaced under the pointer.
     private func makeFilterForm(_ filter: RepoFilterPresentation?) -> NSMenuItem {
         let form = NSMenuItem(title: "Filter", action: nil, keyEquivalent: "")
+        form.representedObject = filter
         let rows = NSMenu(title: "Filter")
         rows.autoenablesItems = false
         rows.delegate = filterMenuTracker
@@ -216,11 +210,12 @@ extension MainToolbarController {
     /// `prepareTitleView(_:)` set once. Its visibility priority stays
     /// standard, below the right-hand items' `.high`, so a long title gives
     /// way before they overflow. Its overflow row is inert, showing the
-    /// title; `updateContent(_:)` replaces it whenever the title changes.
+    /// title the last apply showed; `updateContent(_:)` replaces it whenever
+    /// the title changes.
     private func makeTitleItem(withView: Bool) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.title)
         item.isBordered = false
-        item.menuFormRepresentation = Self.makeTitleForm("")
+        item.menuFormRepresentation = Self.makeTitleForm(appliedSnapshot?.title ?? "")
         if withView {
             item.view = titleView
         }
@@ -302,6 +297,9 @@ extension MainToolbarController {
         return item
     }
 
+    /// A remote session button. Its overflow row is explicit, titled with
+    /// its label and carrying its target and action: AppKit documents a
+    /// default row with a target and action only for standard items.
     private func makeRemoteItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, label: String, action: Selector
     ) -> NSToolbarItem {
@@ -312,6 +310,9 @@ extension MainToolbarController {
         item.visibilityPriority = .high
         item.target = self
         item.action = action
+        let form = NSMenuItem(title: label, action: action, keyEquivalent: "")
+        form.target = self
+        item.menuFormRepresentation = form
         return item
     }
 
@@ -398,17 +399,13 @@ extension MainToolbarController {
     }
 
     /// Gives the filter item a fresh overflow row for `filter` when its row
-    /// was built for other options or another choice, or the item is not the
-    /// one the last row was set on. A fresh row rather than an edit: AppKit
-    /// may build the overflow menu from a copy of the row.
+    /// was built for other options or another choice, or for none. A fresh
+    /// row rather than an edit: AppKit may build the overflow menu from a
+    /// copy of the row.
     private func updateFilterForm(_ item: NSToolbarItem, _ filter: RepoFilterPresentation) {
-        if let shown = shownFilterForm, let form = shown.form, form === item.menuFormRepresentation,
-           shown.filter == filter {
-            return
-        }
-        let form = makeFilterForm(filter)
-        item.menuFormRepresentation = form
-        shownFilterForm = FilterFormKey(form: form, filter: filter)
+        let shown = item.menuFormRepresentation?.representedObject as? RepoFilterPresentation
+        guard shown != filter else { return }
+        item.menuFormRepresentation = makeFilterForm(filter)
     }
 
     /// Rebuilds the popup's rows. They have no action, as the popup sends its

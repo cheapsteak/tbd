@@ -512,17 +512,19 @@ struct MainToolbarControllerTests {
 
     /// Every item the layout can show, with the Servers item and every remote
     /// item present, sends its overflow row's action from that row, as the
-    /// overflow menu does: the item's own menu form, or AppKit's documented
-    /// default, a row titled with the label carrying the item's target and
-    /// action. A form with a submenu sends each row's. An action that
-    /// assumed another sender would raise, ending the test process, which is
-    /// the regression this guards. The filter's rows run in order, so the
-    /// last repo is the filter after them, and Stop asks for its
-    /// confirmation.
+    /// overflow menu does, and each row of a submenu sends its own. An
+    /// action that assumed another sender would raise, ending the test
+    /// process, which is the regression this guards. The filter's rows run
+    /// in order, so the last repo is the filter after them, and Stop asks for
+    /// its confirmation.
     ///
-    /// The Servers item has no main URL, so it carries no action that would
-    /// open one, and its rows are sent from a bare menu item: run, each
-    /// would start or stop servers through the daemon.
+    /// - **Toggle Sidebar** is checked, not sent: sending it would collapse
+    ///   the sidebar and take the filter away part way through.
+    ///   `toggleAndArrowsSurviveACollapse` covers the collapse.
+    /// - **Servers** has no main URL, so it carries no action that would open
+    ///   one, and its rows are sent from a bare menu item: run, each would
+    ///   start or stop servers through the daemon.
+    /// - **Remote buttons** have explicit rows titled with their labels.
     @Test func everyOverflowRowToleratesAMenuItemSender() async throws {
         let fixture = ToolbarFixture(label: "everyOverflowRowToleratesAMenuItemSender")
         defer { fixture.tearDown() }
@@ -535,30 +537,48 @@ struct MainToolbarControllerTests {
         let missing = MainToolbarItemID.custom.filter { !shownIDs.contains($0) }
         try #require(missing.isEmpty)
 
+        let toggle = try #require(fixture.controller.item(MainToolbarItemID.toggleSidebar))
+        let toggleRow = ToolbarFixture.overflowRow(of: toggle)
+        #expect(toggleRow.target === fixture.split)
+        #expect(toggleRow.action == #selector(NSSplitViewController.toggleSidebar(_:)))
+
+        let remoteIDs: [NSToolbarItem.Identifier] = [
+            MainToolbarItemID.remoteTranscript, MainToolbarItemID.remoteReconnect, MainToolbarItemID.remoteStop,
+        ]
+        for identifier in remoteIDs {
+            let remote = try #require(fixture.controller.item(identifier))
+            let form = try #require(remote.menuFormRepresentation)
+            #expect(form.title == remote.label)
+            #expect(form.target === fixture.controller)
+            #expect(form.action == remote.action)
+        }
+
         var unsent: [String] = []
         var sent = 0
-        for item in items where ToolbarFixture.hasOverflowRow(item) {
-            let form = ToolbarFixture.effectiveMenuForm(of: item)
-            if let action = form.action {
+        for item in items where ToolbarFixture.hasOverflowRow(item)
+            && item.itemIdentifier != MainToolbarItemID.toggleSidebar {
+            let row = ToolbarFixture.overflowRow(of: item)
+            if let action = row.action {
                 sent += 1
-                if !NSApplication.shared.sendAction(action, to: form.target, from: form) {
-                    unsent.append(form.title)
-                }
-            }
-            for row in form.submenu?.items ?? [] where !row.isSeparatorItem {
-                guard let action = row.action else { continue }
-                sent += 1
-                let sender = ToolbarFixture.harmlessSender(for: row)
+                let sender = item.menuFormRepresentation ?? NSMenuItem(title: row.title, action: action, keyEquivalent: "")
                 if !NSApplication.shared.sendAction(action, to: row.target, from: sender) {
                     unsent.append(row.title)
+                }
+            }
+            for subrow in row.subrows where !subrow.isSeparatorItem {
+                guard let action = subrow.action else { continue }
+                sent += 1
+                let sender = ToolbarFixture.harmlessSender(for: subrow)
+                if !NSApplication.shared.sendAction(action, to: subrow.target, from: sender) {
+                    unsent.append(subrow.title)
                 }
             }
         }
 
         #expect(unsent.isEmpty)
-        // Toggle, Back, Forward, three filter rows, Transcript, Reconnect
-        // and Stop at least.
-        #expect(sent >= 9)
+        // Back, Forward, three filter rows, Transcript, Reconnect and Stop at
+        // least.
+        #expect(sent >= 8)
         #expect(fixture.state.repoFilter == fixture.repos[1].id)
         let expectedStops: [RemoteSessionSelection] = [selection]
         #expect(fixture.stopRequests == expectedStops)
@@ -675,37 +695,76 @@ struct MainToolbarControllerTests {
         let expectedAfter: [String] = ["acme"]
         #expect(checkedBefore == expectedBefore)
         #expect(checkedAfter == expectedAfter)
+
+        // A collapse and an expansion re-insert the filter as a new item,
+        // made with a row for the filter the last apply showed, which an
+        // apply with that filter keeps. Not animated: an offscreen window
+        // need not run an animation through.
+        let filterItem = try #require(controller.item(MainToolbarItemID.repoFilter))
+        fixture.split.sidebarItem.isCollapsed = true
+        let filterLeft = try await waitForMainActorCondition("the filter to leave on collapse") {
+            controller.item(MainToolbarItemID.repoFilter) == nil
+        }
+        try #require(filterLeft)
+        fixture.split.sidebarItem.isCollapsed = false
+        let filterBack = try await waitForMainActorCondition("the filter to return on expansion, applied") {
+            controller.item(MainToolbarItemID.repoFilter) != nil && !controller.applyScheduled
+        }
+        try #require(filterBack)
+        let reinserted = try #require(controller.item(MainToolbarItemID.repoFilter))
+        #expect(reinserted !== filterItem)
+        let reinsertedRow = try #require(reinserted.menuFormRepresentation)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === reinsertedRow)
+        let reinsertedRows = try #require(reinsertedRow.submenu)
+        let checkedReinserted = Self.checkedTitles(reinsertedRows)
+        #expect(checkedReinserted == expectedAfter)
     }
 
-    /// A filter item made before any apply carries an empty "Filter" row; one
-    /// made after an apply starts from the filter that apply showed, so a
-    /// filter item the toolbar re-inserts, as after a collapse, never shows
-    /// an empty row in between.
-    @Test func aNewFilterItemStartsFromTheLastAppliedFilter() async throws {
-        let fixture = ToolbarFixture(label: "aNewFilterItemStartsFromTheLastAppliedFilter")
+    /// A filter or title item made before any apply carries an empty row:
+    /// "Filter" with no repos, and a hidden title. One made after an apply
+    /// starts from what that apply showed, so an item the toolbar re-inserts,
+    /// as after a collapse, never shows an empty row in between. Made with
+    /// `willBeInserted: false`, so the title item leaves the shared title
+    /// view where it is.
+    @Test func newItemsStartFromTheLastApply() async throws {
+        let fixture = ToolbarFixture(label: "newItemsStartFromTheLastApply")
         defer { fixture.tearDown() }
         let unapplied = MainToolbarController(
             appState: fixture.state, split: ToolbarFixture.makeSplit(), titleView: NSView(),
             requestRemoteStop: { _ in })
         try #require(unapplied.appliedSnapshot == nil)
-        let emptyItem = try #require(unapplied.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
-        let emptyForm = try #require(emptyItem.menuFormRepresentation)
+        let emptyFilter = try #require(unapplied.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
+        let emptyForm = try #require(emptyFilter.menuFormRepresentation)
         #expect(emptyForm.title == "Filter")
         let emptyRows = try #require(emptyForm.submenu)
         #expect(emptyRows.items.isEmpty)
         #expect(emptyRows.delegate === unapplied.filterMenuTracker)
+        let emptyTitle = try #require(unapplied.makeItem(MainToolbarItemID.title, willBeInserted: false))
+        let emptyTitleRow = try #require(emptyTitle.menuFormRepresentation)
+        #expect(emptyTitleRow.title.isEmpty)
+        #expect(emptyTitleRow.isHidden)
 
         try await fixture.ready()
         fixture.state.repoFilter = fixture.repos[1].id
+        fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let item = try #require(fixture.controller.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
-        let rows = try #require(item.menuFormRepresentation?.submenu)
+        let filterItem = try #require(fixture.controller.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
+        let rows = try #require(filterItem.menuFormRepresentation?.submenu)
         let titles = Self.describeFilterRows(rows)
         let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
         #expect(titles == expectedTitles)
         let checked = Self.checkedTitles(rows)
         let expectedChecked: [String] = ["widgets"]
         #expect(checked == expectedChecked)
+        let titleItem = try #require(fixture.controller.makeItem(MainToolbarItemID.title, willBeInserted: false))
+        let titleRow = try #require(titleItem.menuFormRepresentation)
+        #expect(titleRow.title == "feature")
+        #expect(titleRow.isHidden == false)
+        #expect(titleRow.isEnabled == false)
+        #expect(titleRow.action == nil)
+        #expect(titleItem.view == nil)
+        #expect(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
     }
 
     /// While one of the filter's menus is open its row is not replaced under
@@ -1960,15 +2019,22 @@ private final class ToolbarFixture {
         MainToolbarItemID.custom.contains(item.itemIdentifier) && !(item is NSTrackingSeparatorToolbarItem)
     }
 
-    /// The row AppKit puts in the overflow menu for `item`: its menu form, or,
-    /// when it has none, the default `NSToolbarItem.h` documents, a row
-    /// titled with the item's label carrying its target and action. For a
-    /// view item those are its view's.
-    static func effectiveMenuForm(of item: NSToolbarItem) -> NSMenuItem {
-        if let form = item.menuFormRepresentation { return form }
-        let row = NSMenuItem(title: item.label, action: item.action, keyEquivalent: "")
-        row.target = item.target
-        return row
+    /// What the overflow menu shows for `item`, as `NSToolbarItem.h`
+    /// documents it: the item's menu form, with the item's label, target and
+    /// action standing in for any the form lacks, as AppKit's default row
+    /// carries them; and the rows of the form's submenu, or, for an
+    /// `NSMenuToolbarItem` whose form has none, of its menu, which is its
+    /// form unless one is set. For a view item the target and action are
+    /// its view's.
+    static func overflowRow(of item: NSToolbarItem) -> OverflowRow {
+        let form = item.menuFormRepresentation
+        let ownAction = form?.action
+        let subrows = form?.submenu?.items ?? (item as? NSMenuToolbarItem)?.menu.items ?? []
+        return OverflowRow(
+            title: form?.title ?? item.label,
+            target: ownAction == nil ? item.target : form?.target,
+            action: ownAction ?? item.action,
+            subrows: subrows)
     }
 
     /// The sender to send `row`'s action from: `row` itself, except for a
@@ -2068,6 +2134,15 @@ private struct ToolbarEdges {
     func placedBesideTheWindowButtons(shownDividerX: CGFloat) -> Bool {
         leadingPlaced(before: title.minX) && title.minX < shownDividerX
     }
+}
+
+/// What the overflow menu shows for one toolbar item: its row's title,
+/// target and action, and the rows of its submenu.
+private struct OverflowRow {
+    var title: String
+    var target: AnyObject?
+    var action: Selector?
+    var subrows: [NSMenuItem]
 }
 
 /// The title view's own width constraints, found by their identifiers: each

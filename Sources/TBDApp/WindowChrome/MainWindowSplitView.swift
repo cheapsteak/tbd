@@ -157,8 +157,11 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
 /// A clip at the trailing edge only: the shape stops exactly there and
 /// reaches far past the leading, top and bottom edges, so nothing drawn
-/// beyond those is cut.
+/// beyond those is cut. Its path is drawn for left-to-right layout and
+/// mirrors under right-to-left, so it cuts the trailing edge in both.
 private struct TrailingEdgeClip: Shape {
+    var layoutDirectionBehavior: LayoutDirectionBehavior { .mirrors }
+
     func path(in rect: CGRect) -> Path {
         let reach: CGFloat = 1_000
         return Path(CGRect(

@@ -264,14 +264,14 @@ enum MainToolbarMetrics {
     /// The margin the sidebar's section keeps before the tracking separator.
     static let sectionPadding: CGFloat = 20
     /// The sidebar's section at its narrowest, left to right: the leading
-    /// inset; toggle, back and forward, each followed by one spacing, the
-    /// third being the one before the filter, as the flexible space between
-    /// them is empty at this width; the filter at its widest; and the margin
-    /// before the separator. 302 pt with the estimates above. Three buttons
-    /// and three spacings are three pitches, so the thickness does not
-    /// depend on how the pitch splits between button and spacing.
+    /// inset; toggle, back and forward, each followed by one spacing; the
+    /// flexible space, empty at this width but still spaced on both sides,
+    /// so one more spacing before the filter; the filter at its widest; and
+    /// the margin before the separator. 310 pt with the estimates above.
+    /// Three buttons and four spacings are three pitches and one more
+    /// spacing, so the thickness grows with the spacing estimate.
     static let sidebarMinimumThickness: CGFloat =
-        firstItemLeadingInset + 3 * iconButtonWidth + 3 * interItemSpacing + filterMaxWidth + sectionPadding
+        firstItemLeadingInset + 3 * iconButtonWidth + 4 * interItemSpacing + filterMaxWidth + sectionPadding
     static let sidebarMaximumThickness: CGFloat = 400
 
     /// The title item's narrowest, which the title view holds as a required
