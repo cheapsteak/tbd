@@ -49,12 +49,14 @@ final class MainSplitViewController: NSSplitViewController {
     private var collapseObservation: NSKeyValueObservation?
 
     /// - Parameter autosaveName: the defaults key the divider position is
-    ///   saved under. `nil` saves nothing, which keeps a test's split out of
-    ///   the developer's real defaults.
+    ///   saved under, always in `UserDefaults.standard`. `nil` saves nothing,
+    ///   which keeps a test's split out of the developer's real defaults. No
+    ///   default, so every caller chooses: see
+    ///   `MainWindowSplitView.splitAutosaveName(for:)`.
     init(
         sidebar: NSViewController,
         content: NSViewController,
-        autosaveName: NSSplitView.AutosaveName? = "TBDMainWindowSplit"
+        autosaveName: NSSplitView.AutosaveName?
     ) {
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         contentItem = NSSplitViewItem(viewController: content)
