@@ -12,8 +12,8 @@ import TBDShared
 /// (panel tabs spec, "The render branch" and "The renderer"): which path a
 /// workspace tab takes, what the side region's strip shows — the worktree's
 /// panels, then the tab's own — and what its + menu offers, what the divider
-/// sends on release, which control the workspace tab bar carries for the
-/// selected tab, and when the expand button shows and what it sends.
+/// sends on release, which viewer control the workspace tab bar carries for
+/// the selected tab, and when the expand button shows and what it sends.
 @Suite("Panel surface render branch")
 @MainActor
 struct PanelSurfaceRenderBranchTests {
@@ -721,78 +721,49 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - The workspace tab bar
 
-    /// `WorkspaceTabBarChrome.trailingControl` with every input off unless
+    /// `WorkspaceTabBarChrome.viewerControl` with every input off unless
     /// named.
-    private static func trailingControl(
+    private static func viewerControl(
         _ primary: PaneContent,
-        isClaudeTerminal: Bool = false,
-        transcriptViewEnabled: Bool = false,
-        transcriptOpen: Bool = false,
         canRender: Bool = false,
         showingSource: Bool = false,
         copied: Bool = false
     ) -> PaneChromeControl? {
-        WorkspaceTabBarChrome.trailingControl(
+        WorkspaceTabBarChrome.viewerControl(
             primary: primary,
-            isClaudeTerminal: isClaudeTerminal,
-            transcriptViewEnabled: transcriptViewEnabled,
-            transcriptOpen: transcriptOpen,
             canRender: canRender,
             showingSource: showingSource,
             copied: copied)
     }
 
-    @Test("the workspace tab bar's trailing control for each primary kind")
-    func trailingControlPerPrimaryKind() {
+    @Test("the workspace tab bar's viewer control for each primary kind")
+    func viewerControlPerPrimaryKind() {
         let terminal = PaneContent.terminal(terminalID: UUID())
         let file = PaneContent.codeViewer(id: UUID(), path: "/w/README.md")
         let web = PaneContent.webview(id: UUID(), url: Self.pageURL)
         let note = PaneContent.note(noteID: UUID())
         let transcript = PaneContent.liveTranscript(id: UUID(), terminalID: UUID())
 
-        // A Claude terminal with the transcript view on: the transcript
-        // button, on exactly while its panel exists.
-        let transcriptOn: PaneChromeControl? = .transcript(isOn: true)
-        let transcriptOff: PaneChromeControl? = .transcript(isOn: false)
-        #expect(Self.trailingControl(
-            terminal, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: true)
-            == transcriptOn)
-        #expect(Self.trailingControl(
-            terminal, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: false)
-            == transcriptOff)
-        // The same terminal with the transcript view off has none.
-        #expect(Self.trailingControl(
-            terminal, isClaudeTerminal: true, transcriptViewEnabled: false, transcriptOpen: true)
-            == nil)
-        // A plain terminal has none, whatever the other inputs say.
-        #expect(Self.trailingControl(
-            terminal, isClaudeTerminal: false, transcriptViewEnabled: true, transcriptOpen: true,
-            canRender: true, copied: true)
-            == nil)
-
         // A file that can render: the rendered/source toggle, showing which.
         let showingSource: PaneChromeControl? = .renderToggle(showingSource: true)
         let showingRendered: PaneChromeControl? = .renderToggle(showingSource: false)
-        #expect(Self.trailingControl(file, canRender: true, showingSource: true) == showingSource)
-        #expect(Self.trailingControl(file, canRender: true, showingSource: false) == showingRendered)
+        #expect(Self.viewerControl(file, canRender: true, showingSource: true) == showingSource)
+        #expect(Self.viewerControl(file, canRender: true, showingSource: false) == showingRendered)
         // A file that cannot render has none.
-        #expect(Self.trailingControl(
-            file, isClaudeTerminal: true, transcriptViewEnabled: true, canRender: false,
-            showingSource: true, copied: true)
-            == nil)
+        #expect(Self.viewerControl(file, canRender: false, showingSource: true, copied: true) == nil)
 
         // A web page: copy-address, with its checkmark after a copy.
         let copied: PaneChromeControl? = .copyAddress(copied: true)
         let notCopied: PaneChromeControl? = .copyAddress(copied: false)
-        #expect(Self.trailingControl(web, copied: true) == copied)
-        #expect(Self.trailingControl(web, copied: false) == notCopied)
+        #expect(Self.viewerControl(web, copied: true) == copied)
+        #expect(Self.viewerControl(web, copied: false) == notCopied)
 
-        // A note and a transcript primary have none, whatever the inputs say.
-        let withoutControl: [PaneContent] = [note, transcript]
+        // A terminal, a note and a transcript primary have none, whatever the
+        // inputs say: a terminal's transcript button sits at the window's
+        // right edge, not here.
+        let withoutControl: [PaneContent] = [terminal, note, transcript]
         for primary in withoutControl {
-            #expect(Self.trailingControl(
-                primary, isClaudeTerminal: true, transcriptViewEnabled: true, transcriptOpen: true,
-                canRender: true, showingSource: true, copied: true)
+            #expect(Self.viewerControl(primary, canRender: true, showingSource: true, copied: true)
                 == nil, "\(primary)")
         }
     }

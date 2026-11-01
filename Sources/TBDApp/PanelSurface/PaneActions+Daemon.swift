@@ -4,10 +4,10 @@ import TBDShared
 // MARK: - A panel toggle's decision
 
 /// What a panel toggle sends on the daemon path: the transcript button,
-/// which sits at the trailing end of the workspace tab bar while a Claude
-/// terminal's tab is selected and the transcript view setting is on (panel
-/// tabs spec, "The transcript button"), and ⌘⇧E for the Changes list (side
-/// panel notes and Changes spec, "⌘⇧E").
+/// which sits at the window's right edge while the transcript view setting is
+/// on and acts while a Claude terminal's tab is selected (panel tabs spec,
+/// "The transcript button"), and ⌘⇧E for the Changes list (side panel notes
+/// and Changes spec, "⌘⇧E").
 enum PanelToggleDecision: Equatable {
     /// No panel shows the content: open one.
     case open
@@ -34,10 +34,10 @@ enum PanelToggleDecision: Equatable {
 // MARK: - The Notes button's decision
 
 /// What the Notes button sends, for the worktree's first note: the oldest
-/// by `createdAt` (`PaneActions.notesToggleDecision`). The button sits in the
-/// workspace tab bar's trailing controls, after the transcript button, on
-/// every tab that renders on the daemon path, and follows the transcript
-/// button's three states. Nothing opens a note panel by itself.
+/// by `createdAt` (`PaneActions.notesToggleDecision`). The button sits at the
+/// window's right edge, after the transcript button, on every tab that
+/// renders on the daemon path, and follows the transcript button's three
+/// states. Nothing opens a note panel by itself.
 enum NotesToggleDecision: Equatable {
     /// The worktree's notes are listed and there are none, and the tab shows
     /// no note panel: create one titled `createdNoteTitle`, then open it.

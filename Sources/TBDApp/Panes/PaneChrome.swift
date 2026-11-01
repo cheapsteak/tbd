@@ -165,17 +165,22 @@ final class PaneChromeStore {
 
 // MARK: - PaneChromeControl
 
-/// A control a tab row draws — one a pane's kind puts there, or the
-/// workspace tab bar's Notes button — as a value, so the row can decide which
+/// A control a tab row draws — one a pane's kind puts there, or one of the
+/// two at the window's right edge, the transcript button and the Notes
+/// button (`TabRowEdgeControls`) — as a value, so the row can decide which
 /// one to show and the button can draw it without reading anything else.
 enum PaneChromeControl: Equatable {
-    /// A Claude terminal's transcript toggle, on while its transcript panel
-    /// exists, whether or not that panel is in front.
-    case transcript(isOn: Bool)
-    /// The workspace tab bar's Notes button, on while the worktree's first
-    /// note is in front of a visible side region
-    /// (`NotesToggleDecision.isOn`), and disabled while it cannot act
-    /// (`NotesToggleDecision.isEnabled`).
+    /// The transcript button at the window's right edge
+    /// (`WorkspaceTabBarChrome.transcriptControl`). In front of a Claude
+    /// terminal it toggles that terminal's transcript panel, and is on while
+    /// the panel exists, whether or not that panel is in front. In front of
+    /// any other primary it is drawn disabled rather than removed, so the
+    /// controls before it stay where they are.
+    case transcript(isOn: Bool, isEnabled: Bool)
+    /// The Notes button at the window's right edge, right after the
+    /// transcript button: on while the worktree's first note is in front of a
+    /// visible side region (`NotesToggleDecision.isOn`), and disabled while it
+    /// cannot act (`NotesToggleDecision.isEnabled`).
     case notes(isOn: Bool, isEnabled: Bool)
     /// A renderable file's rendered/source toggle.
     case renderToggle(showingSource: Bool)
@@ -214,7 +219,7 @@ enum PaneChromeControl: Equatable {
 
     var systemImage: String {
         switch self {
-        case .transcript(let isOn):
+        case .transcript(let isOn, _):
             return isOn ? "text.bubble.fill" : "text.bubble"
         case .notes:
             return PanelKind.note.tabSystemImage
@@ -230,9 +235,7 @@ enum PaneChromeControl: Equatable {
     /// Nil leaves the symbol in the button style's own colour.
     var tint: Tint? {
         switch self {
-        case .transcript(let isOn):
-            return isOn ? .accent : .primary
-        case .notes(let isOn, let isEnabled):
+        case .transcript(let isOn, let isEnabled), .notes(let isOn, let isEnabled):
             guard isEnabled else { return .secondary }
             return isOn ? .accent : .primary
         case .renderToggle(let showingSource):
@@ -243,16 +246,22 @@ enum PaneChromeControl: Equatable {
     }
 
     /// Whether the button can be pressed: false only for the Notes button
-    /// while it cannot act.
+    /// while it cannot act, and for the transcript button in front of a
+    /// primary that is not a Claude terminal.
     var isEnabled: Bool {
-        if case .notes(_, let isEnabled) = self { return isEnabled }
-        return true
+        switch self {
+        case .transcript(_, let isEnabled), .notes(_, let isEnabled):
+            return isEnabled
+        case .renderToggle, .copyAddress, .refresh:
+            return true
+        }
     }
 
     /// The tooltip, which also names the button for accessibility.
     var help: String {
         switch self {
-        case .transcript(let isOn):
+        case .transcript(let isOn, let isEnabled):
+            guard isEnabled else { return "Only a Claude terminal has a transcript" }
             return isOn
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"

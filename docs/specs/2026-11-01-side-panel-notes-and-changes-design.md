@@ -31,9 +31,9 @@ else in the side panel.
 - Notes and the Changes list are side-panel tabs.
 - They belong to the worktree: once open, they show in the side panel of every
   workspace tab in that worktree.
-- Nothing opens a note by itself. A Notes button in the workspace tab bar shows
-  and hides the worktree's first note, as the transcript button does for a
-  transcript.
+- Nothing opens a note by itself. A Notes button at the window's right edge
+  shows and hides the worktree's first note, as the transcript button does for
+  a transcript.
 - Agents show and hide them with `tbd panel`, and can find a worktree's notes
   without the app.
 - The Changes column, its toolbar button and the notes in the workspace tab bar
@@ -143,12 +143,16 @@ revision guard needs nothing new.
   lives. `.note` stays
   a `PrimaryContent` case for decoding, and nothing creates one.
 - **The strip.** It reads: history buttons, then the worktree panels, then the
-  tab's own panels, then a **+** menu, the active panel's own control, and
-  collapse. The + menu offers New Note, Changes, and every note of the worktree
-  that has no panel.
-- **The Notes button.** It sits in the workspace tab bar's trailing controls,
-  right after the transcript button, and follows the transcript button's rule
-  for the worktree's first note, the oldest by creation:
+  tab's own panels, then a **+** menu, the active panel's own control, the
+  transcript button, the Notes button, and collapse. The + menu offers New
+  Note, Changes, and every note of the worktree that has no panel.
+- **The Notes button.** It sits at the window's right edge, right after the
+  transcript button while that is drawn, and just before the button that hides
+  or shows the side region: in the strip, before collapse, while the region
+  shows, and at the end of the workspace tab bar, before ◫, while it is hidden.
+  Session History stays at the bar's trailing end either way. The button
+  follows the transcript button's rule for the worktree's first note, the
+  oldest by creation:
   - no panel for it: open one, worktree-wide, in front in this tab;
   - open but not in front, or the region collapsed: select it;
   - in front and visible: `close` it, which keeps the note.

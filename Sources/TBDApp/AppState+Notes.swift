@@ -73,7 +73,7 @@ extension AppState {
             .open(content: .note(noteID: note.id), newPanel: false))
     }
 
-    /// The Notes button in the workspace tab bar of `tabID`: shows, brings
+    /// The Notes button of the workspace tab `tabID`: shows, brings
     /// forward or closes the worktree's first note, as
     /// `PaneActions.notesToggleDecision` decides from the app's copy of the
     /// tab's surface and the worktree's `notes` as they are at the press. A

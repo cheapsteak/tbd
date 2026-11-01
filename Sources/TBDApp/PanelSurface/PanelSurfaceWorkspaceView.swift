@@ -38,9 +38,14 @@ struct PanelSurfaceLoadKey: Equatable {
 /// this view draws the workspace tab bar over the primary's column, so the bar
 /// and the side region's strip meet at the divider, which runs through the
 /// row. With the region hidden, the bar spans the whole width. The bar's
-/// trailing end carries the selected tab's own control
-/// (`WorkspaceTabBarChrome`), the Notes button, Session History, and the
-/// expand button while the region is hidden. No pane draws a header: the
+/// trailing end carries the primary's viewer control
+/// (`WorkspaceTabBarChrome.viewerControl`) and Session History. The
+/// transcript and Notes buttons (`TabRowEdgeControls`) sit at the window's
+/// right edge, just before the button that hides or shows the region: at the
+/// end of the side region's strip, before its collapse button, while the
+/// region shows, and at the end of the bar, before the expand button, while
+/// it is hidden. This view decides them once (`edgeControls`) and hands them
+/// to whichever row reaches the edge. No pane draws a header: the
 /// primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
@@ -70,12 +75,14 @@ struct PanelSurfaceLoadKey: Equatable {
 /// the divider under it and, while it shows, the pre-session banner and its
 /// divider.
 ///
-/// A divider drag, the expand button, the transcript control and the Notes
-/// button each send one panel operation through
+/// A divider drag, the expand button, and the transcript and Notes buttons,
+/// in whichever row draws them, each send one panel operation through
 /// `AppState.applyPanelOperation` and adopt the tab the daemon returns; the
 /// Notes button in a worktree with no note creates one first
-/// (`AppState.toggleNotesPanel`). The rendered/source toggle and copy-address
-/// act on the tab's chrome state and send nothing.
+/// (`AppState.toggleNotesPanel`). The transcript button in front of any
+/// primary but a Claude terminal is disabled and sends nothing. The
+/// rendered/source toggle and copy-address act on the tab's chrome state and
+/// send nothing.
 struct PanelSurfaceWorkspaceView: View {
     let tab: TBDShared.Tab
     /// The copy's surface for this tab, or nil while it holds none yet.
@@ -130,10 +137,14 @@ struct PanelSurfaceWorkspaceView: View {
         let side = self.side
         let tabID = tab.id
         let chrome = primaryChromes.state(for: tabID)
-        // Read here, not in the `GeometryReader` closure, so what the bar's
-        // trailing items read is a dependency of this body.
-        let trailing = trailingItems(chrome: chrome)
-        let showsSide = surface?.isSideVisible ?? false
+        let showsSide = Self.showsSide(surface: surface)
+        // Read here, not in the `GeometryReader` closure, so what the edge
+        // controls and the bar's trailing items read is a dependency of this
+        // body.
+        let edge = Self.edgeControls(
+            appState: appState, worktreeID: worktree.id, tabID: tabID, primary: primaryContent,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
+        let trailing = trailingItems(chrome: chrome, edge: edge, showsSide: showsSide)
         GeometryReader { geometry in
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
@@ -161,7 +172,7 @@ struct PanelSurfaceWorkspaceView: View {
                     .id(tabID)
                     .zIndex(1)
 
-                    SideRegionView(surface: surface, worktree: worktree)
+                    SideRegionView(surface: surface, worktree: worktree, edge: edge)
                         .id(tabID)
                         .frame(width: shares[1] * availableSpace)
                 }
@@ -222,20 +233,71 @@ struct PanelSurfaceWorkspaceView: View {
         }
     }
 
-    /// The bar's trailing items: the primary's control, read from `chrome`,
-    /// the Notes button, on while the worktree's first note is in front of
-    /// the visible region (`NotesToggleDecision.isOn`), and the expand button
-    /// while the tab's loaded side region is hidden.
-    private func trailingItems(chrome: PaneChromeState) -> TabBarTrailingItems {
+    /// The bar's trailing items (`TabBarTrailingItem.items`): the primary's
+    /// viewer control, read from `chrome`, and Session History; then, while
+    /// the side region is hidden (`showsSide` false), the transcript and Notes
+    /// buttons from `edge`, and the expand button once the tab's surface is
+    /// known (`showsExpandButton`).
+    private func trailingItems(
+        chrome: PaneChromeState, edge: TabRowEdgeControls, showsSide: Bool
+    ) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
         let tabID = tab.id
         let content = primaryContent
         let surface = surface
+        let viewerControl = WorkspaceTabBarChrome.viewerControl(
+            primary: content,
+            canRender: chrome.hasRenderableContent,
+            showingSource: chrome.showSourceCode,
+            copied: chrome.didCopyAddress)
 
+        return TabBarTrailingItems(
+            viewerControl: viewerControl,
+            onViewerControl: {
+                // The viewer controls act on the tab's chrome state, as the
+                // side region's strip does.
+                guard let viewerControl else { return }
+                var contentURL: URL?
+                if case .webview(_, let url) = content {
+                    contentURL = url
+                }
+                chrome.perform(viewerControl, contentURL: contentURL)
+            },
+            edge: edge,
+            showsSide: showsSide,
+            showsExpandButton: Self.showsExpandButton(surface: surface),
+            onExpand: {
+                appState.sendPanelOperation(
+                    worktreeID: worktreeID, tabID: tabID, Self.expandOperation(surface: surface))
+            })
+    }
+
+    /// The transcript and Notes buttons of the workspace tab `tabID`, whose
+    /// primary is `primary`, with what a press of each sends. One function
+    /// decides both, so the side region's strip and the workspace tab bar,
+    /// whichever reaches the window's right edge, draw the same two buttons.
+    ///
+    /// - **The transcript button** is the one
+    ///   `WorkspaceTabBarChrome.transcriptControl` decides: on while a Claude
+    ///   terminal's transcript panel exists, whether or not it is in front.
+    ///   Enabled, a press opens, selects or closes that panel through the
+    ///   daemon action set (`PaneActions.toggleTranscript`), the only set that
+    ///   can send it; disabled, a press sends nothing.
+    /// - **The Notes button** (`notesControl`) shows, brings forward or closes
+    ///   the worktree's first note (`AppState.toggleNotesPanel`).
+    @MainActor
+    static func edgeControls(
+        appState: AppState,
+        worktreeID: UUID,
+        tabID: UUID,
+        primary: PaneContent,
+        surface: WorkspaceTabSurface?,
+        transcriptViewEnabled: Bool
+    ) -> TabRowEdgeControls {
         var isClaudeTerminal = false
         var transcriptOpen = false
-        if case .terminal(let terminalID) = content {
+        if case .terminal(let terminalID) = primary {
             isClaudeTerminal = appState.terminal(id: terminalID, in: worktreeID)?.isClaudeResumable == true
             if isClaudeTerminal && transcriptViewEnabled {
                 transcriptOpen = PaneActions.daemon(
@@ -243,47 +305,25 @@ struct PanelSurfaceWorkspaceView: View {
                 ).isTranscriptOpen(terminalID)
             }
         }
-        let control = WorkspaceTabBarChrome.trailingControl(
-            primary: content,
+        let transcript = WorkspaceTabBarChrome.transcriptControl(
+            primary: primary,
             isClaudeTerminal: isClaudeTerminal,
             transcriptViewEnabled: transcriptViewEnabled,
-            transcriptOpen: transcriptOpen,
-            canRender: chrome.hasRenderableContent,
-            showingSource: chrome.showSourceCode,
-            copied: chrome.didCopyAddress)
+            transcriptOpen: transcriptOpen)
 
-        return TabBarTrailingItems(
-            selectedTabControl: control,
-            onSelectedTabControl: {
-                // The transcript control opens or closes a panel, which only
-                // this view's action set can send; the viewer controls act on
-                // the tab's chrome state, as the side region's strip does.
-                switch control {
-                case .transcript?:
-                    guard case .terminal(let terminalID) = content else { return }
-                    PaneActions.daemon(
-                        appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                    ).toggleTranscript(content, terminalID)
-                case let viewerControl?:
-                    var contentURL: URL?
-                    if case .webview(_, let url) = content {
-                        contentURL = url
-                    }
-                    chrome.perform(viewerControl, contentURL: contentURL)
-                case nil:
-                    break
-                }
+        return TabRowEdgeControls(
+            transcript: transcript,
+            onTranscript: {
+                guard transcript?.isEnabled == true, case .terminal(let terminalID) = primary else { return }
+                PaneActions.daemon(
+                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
+                ).toggleTranscript(primary, terminalID)
             },
-            notesControl: Self.notesControl(surface: surface, notes: appState.notes[worktreeID]),
-            onNotesControl: {
+            notes: notesControl(surface: surface, notes: appState.notes[worktreeID]),
+            onNotes: {
                 Task { @MainActor in
                     await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
                 }
-            },
-            showsExpandButton: Self.showsExpandButton(surface: surface),
-            onExpand: {
-                appState.sendPanelOperation(
-                    worktreeID: worktreeID, tabID: tabID, Self.expandOperation(surface: surface))
             })
     }
 
@@ -361,7 +401,8 @@ struct PanelSurfaceWorkspaceView: View {
         CGSize(width: width, height: primaryLeafHeight)
     }
 
-    /// The Notes button as the bar draws it: on while the worktree's first
+    /// The Notes button at the window's right edge, as the side region's
+    /// strip or the workspace tab bar draws it: on while the worktree's first
     /// note is in front of a visible side region, so a press would close it
     /// (`NotesToggleDecision.isOn`), and disabled while the worktree's notes,
     /// `notes`, have not loaded and the tab shows no note panel
@@ -369,6 +410,15 @@ struct PanelSurfaceWorkspaceView: View {
     static func notesControl(surface: WorkspaceTabSurface?, notes: [NoteSummary]?) -> PaneChromeControl {
         let decision = PaneActions.notesToggleDecision(surface: surface, notes: notes)
         return .notes(isOn: decision.isOn, isEnabled: decision.isEnabled)
+    }
+
+    /// Whether the side region draws beside the primary: once the tab's
+    /// surface is known and its region is visible
+    /// (`WorkspaceTabSurface.isSideVisible`). Before the copy holds a surface
+    /// for the tab (`surface` nil) it does not, so the workspace tab bar spans
+    /// the whole width and carries the transcript and Notes buttons.
+    static func showsSide(surface: WorkspaceTabSurface?) -> Bool {
+        surface?.isSideVisible ?? false
     }
 
     /// The expand button shows once the tab's surface is known and its side
@@ -396,31 +446,51 @@ struct PanelSurfaceWorkspaceView: View {
 
 // MARK: - WorkspaceTabBarChrome
 
-/// The selected tab's own control at the workspace tab bar's trailing end
-/// (panel tabs spec, "The renderer"), decided as a value so each kind can be
-/// asserted without standing up a view.
+/// The two controls the workspace tab's primary decides (panel tabs spec,
+/// "The renderer" and "The transcript button"): its viewer control, at the
+/// workspace tab bar's trailing end, and the transcript button, at the
+/// window's right edge. Decided as values so each kind can be asserted
+/// without standing up a view.
 enum WorkspaceTabBarChrome {
-    /// The transcript button for a Claude terminal while the transcript view
-    /// is on. Any other primary is viewer content, which takes the control
-    /// the side region's strip gives the same kind
-    /// (`PaneChromeControl.viewerControl`): the rendered/source toggle for a
-    /// file that can render, and copy-address for a web page. A note, a plain
-    /// terminal and a transcript primary have none.
-    static func trailingControl(
+    /// The primary's own control, drawn at the workspace tab bar's trailing
+    /// end before Session History. Viewer content takes the control the side
+    /// region's strip gives the same kind (`PaneChromeControl.viewerControl`):
+    /// the rendered/source toggle for a file that can render, and copy-address
+    /// for a web page. A terminal, a note and a transcript primary have none.
+    static func viewerControl(
         primary: PaneContent,
-        isClaudeTerminal: Bool,
-        transcriptViewEnabled: Bool,
-        transcriptOpen: Bool,
         canRender: Bool,
         showingSource: Bool,
         copied: Bool
     ) -> PaneChromeControl? {
-        if case .terminal = primary {
-            guard isClaudeTerminal, transcriptViewEnabled else { return nil }
-            return .transcript(isOn: transcriptOpen)
-        }
         guard let viewer = LegacyTabConverter.panelContent(from: primary) else { return nil }
         return PaneChromeControl.viewerControl(
             for: viewer.kind, canRender: canRender, showingSource: showingSource, copied: copied)
+    }
+
+    /// The transcript button at the window's right edge, or nil for none.
+    /// With the transcript view off no tab has one. With it on, every tab
+    /// draws one: live in front of a Claude terminal, and on while that
+    /// terminal's transcript panel exists (`transcriptOpen`); disabled in
+    /// front of any other primary — a plain or Codex terminal, a file, a web
+    /// page, a note or a transcript.
+    ///
+    /// Disabled rather than removed, as the side region's history buttons
+    /// are (`SideStripHistoryButtons`) and as the Notes button is while it
+    /// cannot act: the buttons before it — Session History while the region
+    /// is hidden, the + menu and the active panel's control while it shows —
+    /// would otherwise shift by a button's width whenever the selection moved
+    /// between a Claude terminal's tab and any other.
+    static func transcriptControl(
+        primary: PaneContent,
+        isClaudeTerminal: Bool,
+        transcriptViewEnabled: Bool,
+        transcriptOpen: Bool
+    ) -> PaneChromeControl? {
+        guard transcriptViewEnabled else { return nil }
+        guard case .terminal = primary, isClaudeTerminal else {
+            return .transcript(isOn: false, isEnabled: false)
+        }
+        return .transcript(isOn: transcriptOpen, isEnabled: true)
     }
 }

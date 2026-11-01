@@ -168,10 +168,15 @@ edges, split IDs and ratio lists, `selectTab`, and the daemon's rewrite of
 
 ### The transcript button
 
-The transcript button sits at the trailing end of the workspace tab bar (see
-"The renderer"), shown while the selected tab's primary is a Claude terminal
-and the transcript view is turned on. The app decides what to send from its
-copy of the surface:
+The transcript button sits at the window's right edge, just before the button
+that hides or shows the side region (see "The renderer"): at the end of the
+side region's strip while the region shows, and at the end of the workspace tab
+bar while it is hidden. It is drawn on every tab while the transcript view is
+turned on, and on none while it is off. It acts while the selected tab's
+primary is a Claude terminal. In front of any other primary it is drawn
+disabled rather than removed, as the strip's history buttons are, so the
+buttons before it keep their places as the selection moves between tabs. For a
+Claude terminal the app decides what to send from its copy of the surface:
 
 - **No transcript panel for this terminal:** send `open(.transcript(terminalID))`.
 - **The panel exists but another panel is in front, or the region is
@@ -536,24 +541,36 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
 
 - **The workspace tab bar** is drawn by this view, not by
   `TerminalContainerView` above it, so that it can share the row. Its trailing
-  end holds, in order: the selected tab's own control, Session History, and the
-  expand button while the region is collapsed and has panels. The selected
-  tab's control is the transcript button for a Claude terminal, the
-  rendered/source toggle for a file that can render, and copy-address for a web
-  page; a note or a plain terminal has none. A primary has no history, so the
-  bar carries no history buttons.
+  end holds, in order: the primary's viewer control, then Session History. The
+  viewer control is the rendered/source toggle for a file that can render and
+  copy-address for a web page; a terminal or a note has none. While the region
+  is hidden the bar reaches the window's right edge, so the edge controls
+  follow Session History there: the transcript button, the Notes button, and
+  the expand button once the tab's surface has loaded. A primary has no
+  history, so the bar carries no history buttons.
+- **The edge controls,** the transcript button and the Notes button, act on
+  the workspace tab as a whole rather than on the column under them, so they
+  keep to the window's right edge, just before the button that hides or shows
+  the region: at the end of the side region's strip while the region shows,
+  and at the end of the workspace tab bar while it is hidden. One decision
+  draws them in either place. Session History stays at the bar's trailing end
+  either way. With the transcript view on, the transcript button is drawn on
+  every tab and disabled in front of any primary but a Claude terminal (see
+  "The transcript button"), so nothing before it shifts as the selection moves
+  between a Claude terminal's tab and any other.
 - **The primary** renders through `PanePlaceholder` with the daemon action set.
   Its content comes from the app's own workspace tab, not from the surface: the
   primary is app-owned, so a re-pointed primary shows at once rather than after
   the sync carries it to the daemon.
 - **The side region's strip** reads, left to right: history search (the
   searchable history list), back and forward; the panel tabs (icon, title,
-  close; a click selects; a right-click offers the file menu); then the active
-  panel's own control (the rendered/source toggle for a file, copy-address for
-  a web page) and the collapse button at the trailing edge. The three history
-  buttons act on the active panel and stay in place, dimmed, when it has no
-  history to step through — a transcript or a note — so the tabs never shift
-  under the pointer. Below the strip, the active panel renders through
+  close; a click selects; a right-click offers the file menu); then, at the
+  trailing edge, the + menu, the active panel's own control (the
+  rendered/source toggle for a file, copy-address for a web page), the
+  transcript button, the Notes button, and the collapse button. The three
+  history buttons act on the active panel and stay in place, dimmed, when it
+  has no history to step through — a transcript or a note — so the tabs never
+  shift under the pointer. Below the strip, the active panel renders through
   `PanePlaceholder`.
 - **The terminal's pin** is in its workspace tab's right-click menu (Pin or
   Unpin). The pinned-terminal dock keeps its unpin.
@@ -637,10 +654,15 @@ Each branch is tested both ways, asserting opposite outcomes.
     surface yet renders the daemon path with an empty side region, and its
     primary keeps its view identity when the surface arrives; a gesture on it
     syncs before it applies.
-  - The chrome, as values: the workspace tab bar's trailing control for each
-    primary kind; the strip's history buttons enabled for a file or web panel
-    and dimmed for a transcript or note; the strip's per-kind control; the
-    expand button only while the region is collapsed and has panels.
+  - The chrome, as values: the workspace tab bar's viewer control for each
+    primary kind; the transcript button live for a Claude terminal, disabled
+    for every other primary, and absent while the transcript view is off; the
+    exact trailing items of the bar and of the strip for each primary kind,
+    with the region shown and hidden, and the edge controls keeping their
+    places from the window's right edge across a Claude terminal's tab and a
+    plain one; the strip's history buttons enabled for a file or web panel and
+    dimmed for a transcript or note; the strip's per-kind control; the expand
+    button whenever a loaded region is hidden.
   - Notes: closing a side-region note tab with content asks, then closes and
     deletes; an empty one closes and deletes without asking; a declined
     confirmation changes nothing; the `close` operation alone keeps the note.
