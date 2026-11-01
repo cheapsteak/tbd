@@ -41,6 +41,38 @@ struct MainWindowChromeMountTests {
         let stray = identifiers.filter { !allowed.contains($0) }
         #expect(identifiers.contains(MainToolbarItemID.toggleSidebar))
         #expect(stray.isEmpty)
+
+        // The state's store is a test suite, not `.standard`, so the divider
+        // autosaves nowhere.
+        let split = try #require(mount.mountedSplit)
+        #expect(split.splitView.autosaveName == nil)
+
+        // The detail starts below the toolbar. Asserted on that outcome, the
+        // detail's top edge against the window's content layout rect, rather
+        // than on `safeAreaInsets.top > 0`: it holds however AppKit and
+        // SwiftUI share the inset between them, and an inset SwiftUI ignored
+        // would still pass the other. The first wait makes it non-vacuous: the
+        // layout rect must already leave room for the toolbar, not only the
+        // titlebar.
+        let toolbarTakesRoom = try await waitForChrome("the toolbar to take room above the content layout rect") {
+            mount.heightAboveContentLayout > ChromeMount.titlebarOnlyHeight
+        }
+        try #require(toolbarTakesRoom)
+        let detailBelowToolbar = try await waitForChrome("the hosted detail to start below the toolbar") {
+            mount.detailStartsBelowToolbar(in: split)
+        }
+        #expect(detailBelowToolbar)
+    }
+
+    /// The divider autosaves only into the real store, where `NSSplitView`
+    /// writes it: never into a test's suite or `TBD_MOCK`'s.
+    @Test func dividerAutosavesOnlyForTheStandardStore() {
+        let suite = TestDefaultsSuite("MainWindowChromeMountTests.autosave")
+        defer { suite.tearDown() }
+        let standardName = MainWindowSplitView.splitAutosaveName(for: .standard)
+        let suiteName = MainWindowSplitView.splitAutosaveName(for: suite.defaults)
+        #expect(standardName == "TBDMainWindowSplit")
+        #expect(suiteName == nil)
     }
 
     @Test func swiftUIChromeMountsNoAppKitSplit() async throws {
@@ -59,11 +91,14 @@ struct MainWindowChromeMountTests {
 
     /// Review focus 1: a SwiftUI update of the window's hierarchy must leave
     /// the AppKit toolbar on the window, or the next apply must put it back.
+    /// The root hosting view bridges the scene, as the app window's root does,
+    /// so SwiftUI is free to claim the window's toolbar.
     @Test func toolbarSurvivesAnAppStateChange() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "survives")
+        let mount = ChromeMount(chrome: .appKit, label: "survives", sceneBridgingOptions: .all)
         defer { mount.tearDown() }
         let controller = try await mount.appKitReady()
-        let toolbar = try #require(mount.host.window.toolbar)
+        let toolbar = controller.toolbar
+        try #require(mount.host.window.toolbar === toolbar)
 
         let state = mount.state
         let repoID = mount.repo.id
@@ -260,7 +295,9 @@ private final class ChromeMount {
     let worktrees: [Worktree]
     let host: OffscreenHost<AnyView>
 
-    init(chrome: MainWindowChrome, label: String) {
+    /// - Parameter sceneBridgingOptions: for the root hosting view; `nil`
+    ///   keeps `NSHostingView`'s default.
+    init(chrome: MainWindowChrome, label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil) {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
         self.suite = suite
         let state = AppState(userDefaults: suite.defaults)
@@ -293,7 +330,9 @@ private final class ChromeMount {
             .environmentObject(appearance)
             .environmentObject(TranscriptOverlayCoordinator())
             .defaultAppStorage(suite.defaults)
-        host = OffscreenHost(root: AnyView(root), size: ChromeMount.size, styleMask: ChromeMount.styleMask)
+        host = OffscreenHost(
+            root: AnyView(root), size: ChromeMount.size, styleMask: ChromeMount.styleMask,
+            sceneBridgingOptions: sceneBridgingOptions)
     }
 
     /// Takes the toolbar off the window before the host goes, so the window
@@ -357,6 +396,28 @@ private final class ChromeMount {
 
     var toolbarIdentifiers: [NSToolbarItem.Identifier] {
         (host.window.toolbar?.items ?? []).map(\.itemIdentifier)
+    }
+
+    /// A bare titlebar's height, for a window with no toolbar.
+    static var titlebarOnlyHeight: CGFloat {
+        let content = NSRect(x: 0, y: 0, width: 100, height: 100)
+        return NSWindow.frameRect(forContentRect: content, styleMask: [.titled]).height - content.height
+    }
+
+    /// How far the window's frame reaches above its content layout rect: the
+    /// titlebar, and the toolbar once AppKit lays it out.
+    var heightAboveContentLayout: CGFloat {
+        host.window.frame.height - host.window.contentLayoutRect.maxY
+    }
+
+    /// Whether `DetailSectionHostPager`'s tab view, the outermost one in the
+    /// split's content pane, is laid out with its top edge at or below the
+    /// top of the window's content layout rect.
+    func detailStartsBelowToolbar(in split: MainSplitViewController) -> Bool {
+        let pane = split.contentItem.viewController.view
+        guard let tabView = OffscreenHost<AnyView>.descendants(NSTabView.self, of: pane).first else { return false }
+        let frame = tabView.convert(tabView.bounds, to: nil)
+        return frame.height > 0 && frame.maxY <= host.window.contentLayoutRect.maxY + 0.5
     }
 
     var trackingSeparator: NSTrackingSeparatorToolbarItem? {

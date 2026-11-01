@@ -184,18 +184,26 @@ final class OffscreenHost<Root: View> {
     ///   - styleMask: The window's style. Borderless by default; a caller
     ///     whose view puts a toolbar on its window passes a titled style,
     ///     since a toolbar belongs to a titlebar.
+    ///   - sceneBridgingOptions: Set on the hosting view before the window is
+    ///     shown, for a caller asking how its tree behaves when SwiftUI
+    ///     manages the window's toolbar or title, as it does for a scene's
+    ///     window. `nil` keeps `NSHostingView`'s own default.
     init(
         root: Root,
         size: NSSize,
         appearance: NSAppearance? = NSAppearance(named: .aqua),
         background: NSColor? = .controlBackgroundColor,
-        styleMask: NSWindow.StyleMask = [.borderless]
+        styleMask: NSWindow.StyleMask = [.borderless],
+        sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil
     ) {
         // Enough of an application for AppKit to have an app object at all;
         // `NSHostingView` and `NSWindow` both reach for one.
         _ = NSApplication.shared
 
         let hosting = NSHostingView(rootView: root)
+        if let sceneBridgingOptions {
+            hosting.sceneBridgingOptions = sceneBridgingOptions
+        }
         hosting.translatesAutoresizingMaskIntoConstraints = false
         let ground = NSView(frame: NSRect(origin: .zero, size: size))
         ground.wantsLayer = true

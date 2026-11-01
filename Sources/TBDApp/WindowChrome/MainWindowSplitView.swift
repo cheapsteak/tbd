@@ -9,9 +9,13 @@ import SwiftUI
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
 /// - **The toolbar.** A `MainToolbarController` with the title cluster in a
-///   hosting view, installed on the window by the split's `onViewDidAppear`.
-///   The coordinator holds it, so it lives as long as the split; the toolbar
-///   holds its delegate only weakly.
+///   hosting view, installed on the window the main-actor turn after the
+///   split's `onViewDidAppear`: AppKit can deliver that from inside SwiftUI's
+///   insertion of the representable, and the toolbar never changes inside a
+///   SwiftUI update. The coordinator holds the controller, so it lives as
+///   long as the split; the toolbar holds its delegate only weakly.
+/// - **The divider.** It autosaves only when `AppState` uses
+///   `UserDefaults.standard`, the store `NSSplitView` writes it to.
 /// - **Hosting.** The hosting controllers and the title's hosting view have
 ///   `sceneBridgingOptions = []`, so none of them claims the window's toolbar
 ///   or title, which belong to the toolbar controller. A hosted tree starts
@@ -51,15 +55,29 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
             appState: appState, titleView: titleView, requestRemoteStop: requestRemoteStop)
         let split = MainSplitViewController(
             sidebar: hostingController(SidebarView()),
-            content: hostingController(MainDetailArea()))
+            content: hostingController(MainDetailArea()),
+            autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
         // Weak both ways: the split holds this closure, and the coordinator
-        // holds the toolbar controller.
+        // holds the toolbar controller. Deferred one main-actor turn, so the
+        // install never runs inside the SwiftUI update that inserted the split.
         split.onViewDidAppear = { [weak toolbarController, weak split] window in
             guard let toolbarController, let split else { return }
-            toolbarController.install(on: window, split: split)
+            DispatchQueue.main.async { [weak toolbarController, weak split, weak window] in
+                MainActor.assumeIsolated {
+                    guard let toolbarController, let split, let window else { return }
+                    toolbarController.install(on: window, split: split)
+                }
+            }
         }
         context.coordinator.toolbarController = toolbarController
         return split
+    }
+
+    /// The divider's autosave name, only for `UserDefaults.standard`:
+    /// `NSSplitView` always writes it there, and neither a test's suite nor
+    /// `TBD_MOCK`'s may reach the real store.
+    static func splitAutosaveName(for defaults: UserDefaults) -> NSSplitView.AutosaveName? {
+        defaults === UserDefaults.standard ? "TBDMainWindowSplit" : nil
     }
 
     func updateNSViewController(_ split: MainSplitViewController, context: Context) {
