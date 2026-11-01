@@ -350,14 +350,15 @@ struct SingleWorktreeView: View {
             // The daemon-owned surface, nil until the copy holds the tab's:
             // every tab but one the last tab sync skipped, which falls through
             // to the legacy branch below, unchanged. The view draws the tab
-            // bar itself, over the primary's column.
+            // bar itself, over the primary's column. Not keyed by tab, so one
+            // view, and the tab bar in it, serves every daemon-path tab; it
+            // keys the primary and side region by tab inside.
             PanelSurfaceWorkspaceView(
                 tab: daemonTab.tab,
                 surface: daemonTab.surface,
                 worktree: daemonTab.worktree,
                 makeTabBar: { tabBar($0) }
             )
-            .id(daemonTab.tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },

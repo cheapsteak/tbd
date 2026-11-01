@@ -73,6 +73,37 @@ final class PaneChromeState {
     }
 }
 
+// MARK: - PaneChromeStore
+
+/// One `PaneChromeState` per ID, for a view whose leaves change under one
+/// tab row: the workspace view's primary, keyed by workspace tab, or the side
+/// region's panels, keyed by panel. Each ID keeps its own state for as long
+/// as it is kept, so no leaf shows another's toggle, address or checkmark.
+///
+/// Not observed: views observe the states it hands out, never the store, so
+/// creating a state while a body is evaluated invalidates nothing.
+@MainActor
+final class PaneChromeStore {
+    private var states: [UUID: PaneChromeState] = [:]
+
+    /// The state for `id`, created on first use; the same instance on every
+    /// later call until `id` is pruned.
+    func state(for id: UUID) -> PaneChromeState {
+        if let state = states[id] {
+            return state
+        }
+        let state = PaneChromeState()
+        states[id] = state
+        return state
+    }
+
+    /// Drops the state of every ID not in `ids`. A dropped ID asked for again
+    /// gets a fresh state.
+    func prune(keeping ids: Set<UUID>) {
+        states = states.filter { ids.contains($0.key) }
+    }
+}
+
 // MARK: - PaneChromeControl
 
 /// The control a pane's kind puts in its tab row, as a value, so the row can

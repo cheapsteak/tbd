@@ -273,6 +273,45 @@ struct PanelSurfaceRenderBranchTests {
         #expect(PanelSurfaceWorkspaceView.resizeOperation(ratios: [], currentWidth: 0.4) == nil)
     }
 
+    // MARK: - Per-tab state
+
+    /// One workspace view serves every daemon-path tab of a worktree, so the
+    /// state it keeps for a tab is keyed by the tab.
+    @Test("the chrome store hands out one state per ID, and a fresh one after pruning")
+    func chromeStoreKeepsOneStatePerID() {
+        let store = PaneChromeStore()
+        let first = UUID()
+        let second = UUID()
+
+        let firstState = store.state(for: first)
+        let secondState = store.state(for: second)
+        #expect(store.state(for: first) === firstState, "the same ID gets the same state")
+        #expect(secondState !== firstState, "another ID gets its own state")
+
+        firstState.showSourceCode = true
+        store.prune(keeping: [second])
+
+        #expect(store.state(for: second) === secondState, "a kept ID keeps its state")
+        let refreshed = store.state(for: first)
+        #expect(refreshed !== firstState, "a pruned ID gets a fresh state")
+        #expect(!refreshed.showSourceCode, "nothing of the pruned state carries over")
+    }
+
+    @Test("the divider shows a drag's shares only on the tab the drag was on")
+    func dragSharesBelongToTheirTab() {
+        let draggedTab = UUID()
+        let otherTab = UUID()
+        let dragged: [CGFloat] = [0.6, 0.4]
+        let fromWidth: [CGFloat] = PanelSurfaceWorkspaceView.ratios(forWidth: 0.25)
+        let drag = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: dragged)
+        let malformed = PanelSurfaceWorkspaceView.DividerDrag(tabID: draggedTab, ratios: [0.6])
+
+        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: draggedTab, width: 0.25) == dragged)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: drag, tabID: otherTab, width: 0.25) == fromWidth)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: nil, tabID: draggedTab, width: 0.25) == fromWidth)
+        #expect(PanelSurfaceWorkspaceView.shares(drag: malformed, tabID: draggedTab, width: 0.25) == fromWidth)
+    }
+
     // MARK: - The workspace tab bar
 
     /// `WorkspaceTabBarChrome.trailingControl` with every input off unless

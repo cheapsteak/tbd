@@ -40,8 +40,20 @@ struct PanelSurfaceLoadKey: Equatable {
 /// trailing end carries the selected tab's own control
 /// (`WorkspaceTabBarChrome`), Session History, and the expand button while
 /// the region is collapsed and has panels. No pane draws a header: the
-/// primary's leaf gets `primaryChrome`, the state its control reads, and the
-/// bar draws the control.
+/// primary's leaf gets its tab's state from `primaryChromes`, and the bar
+/// draws the control that state drives.
+///
+/// One view serves every daemon-path tab of the worktree. `layoutContent`
+/// does not key it by tab, so the tab bar inside it — an item's rename field,
+/// its hover, the + button — lives on across a switch between tabs, as it
+/// does where the worktree view draws the bar. Tab identity lives inside
+/// instead:
+/// - **The primary leaf, the divider and the side region** are keyed by the
+///   tab's ID, so each tab gets a fresh terminal view and divider. The surface
+///   arriving changes no ID, so it rebuilds neither.
+/// - **Per-tab state is keyed by tab.** `primaryChromes` holds one control
+///   state per tab, and a divider drag's shares name the tab they belong to
+///   (`DividerDrag`), so no frame shows one tab's state on another.
 ///
 /// The primary comes from the app's tab, not from the surface: it is
 /// app-owned like the tab itself (panel tabs spec, "Tab sync"), and the
@@ -55,9 +67,8 @@ struct PanelSurfaceLoadKey: Equatable {
 ///
 /// A divider drag, the expand button and the transcript control each send one
 /// panel operation through `AppState.applyPanelOperation` and adopt the tab
-/// the daemon returns. The rendered/source toggle and copy-address act on
-/// `primaryChrome` and send nothing. The only other local state is the
-/// divider's overlay while a drag is committing.
+/// the daemon returns. The rendered/source toggle and copy-address act on the
+/// tab's chrome state and send nothing.
 struct PanelSurfaceWorkspaceView: View {
     let tab: TBDShared.Tab
     /// The copy's surface for this tab, or nil while it holds none yet.
@@ -70,14 +81,14 @@ struct PanelSurfaceWorkspaceView: View {
     let makeTabBar: @MainActor (TabBarTrailingItems) -> TabBar
     @Environment(AppState.self) var appState
 
-    /// `[primary, side]` shares for the divider. A drag changes them only
-    /// here, and one `resize` goes out on release; the adopted reply, or a
-    /// width another client set, resets them from the surface.
-    @State private var ratios: [CGFloat]
-    /// The primary's control state: the rendered/source toggle, whether its
-    /// file can render, its web page's address and the copy checkmark. One
-    /// per tab, since the view is keyed by the tab's ID.
-    @State private var primaryChrome = PaneChromeState()
+    /// The divider's shares while a drag on it is being committed: set when
+    /// the drag is released, cleared once its `resize` has been applied or
+    /// refused. Otherwise the shares follow the surface's width.
+    @State private var dividerDrag: DividerDrag?
+    /// The primary's control state per tab: the rendered/source toggle,
+    /// whether its file can render, its web page's address and the copy
+    /// checkmark. Pruned to the worktree's tabs as they change.
+    @State private var primaryChromes = PaneChromeStore()
     @AppStorage(AppState.enableTranscriptKey)
     private var transcriptViewEnabled = AppState.enableTranscriptDefault
 
@@ -91,7 +102,6 @@ struct PanelSurfaceWorkspaceView: View {
         self.surface = surface
         self.worktree = worktree
         self.makeTabBar = makeTabBar
-        _ratios = State(initialValue: Self.ratios(forWidth: Self.sideRegion(of: surface).width))
     }
 
     /// The side region drawn: the surface's, or an empty one without it.
@@ -99,17 +109,19 @@ struct PanelSurfaceWorkspaceView: View {
 
     var body: some View {
         let side = self.side
+        let tabID = tab.id
+        let chrome = primaryChromes.state(for: tabID)
         GeometryReader { geometry in
             let showsSide = side.isVisible
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
-            let shares = ratios.count == 2 ? ratios : Self.ratios(forWidth: side.width)
+            let shares = Self.shares(drag: dividerDrag, tabID: tabID, width: side.width)
 
             // The primary's column stays the first child whatever the side
             // region does, so showing or hiding the region never rebuilds the
             // primary's terminal view.
             HStack(spacing: 0) {
-                primaryColumn(side: side)
+                primaryColumn(side: side, chrome: chrome)
                     .frame(width: showsSide ? shares[0] * availableSpace : geometry.size.width)
 
                 if showsSide, let surface {
@@ -117,20 +129,25 @@ struct PanelSurfaceWorkspaceView: View {
                         direction: .horizontal,
                         thickness: thickness,
                         index: 0,
-                        ratios: $ratios,
+                        ratios: Binding(
+                            get: { Self.shares(drag: dividerDrag, tabID: tabID, width: side.width) },
+                            set: { dividerDrag = DividerDrag(tabID: tabID, ratios: $0) }
+                        ),
                         availableSpace: availableSpace,
                         onDragEnd: { commitWidth() }
                     )
+                    .id(tabID)
                     .zIndex(1)
 
                     SideRegionView(surface: surface, worktree: worktree)
+                        .id(tabID)
                         .frame(width: shares[1] * availableSpace)
                 }
             }
             .preference(key: MainAreaSizeKey.self, value: Self.mainAreaSize(of: geometry.size))
         }
-        .onChange(of: side.width) { _, width in
-            ratios = Self.ratios(forWidth: width)
+        .onChange(of: appState.tabs[worktree.id]?.map(\.id)) { _, tabIDs in
+            primaryChromes.prune(keeping: Set(tabIDs ?? []))
         }
     }
 
@@ -141,10 +158,12 @@ struct PanelSurfaceWorkspaceView: View {
     var primaryContent: PaneContent { tab.content }
 
     /// The workspace tab bar, a divider, and the primary's leaf, which draws
-    /// no header.
-    private func primaryColumn(side: SideRegion) -> some View {
+    /// no header. The bar keeps its identity across tabs; the leaf is keyed by
+    /// the tab, so each tab gets a fresh terminal view and web view, the
+    /// latter reporting to that tab's `chrome`.
+    private func primaryColumn(side: SideRegion, chrome: PaneChromeState) -> some View {
         VStack(spacing: 0) {
-            makeTabBar(trailingItems(side: side))
+            makeTabBar(trailingItems(side: side, chrome: chrome))
 
             Divider()
 
@@ -154,19 +173,19 @@ struct PanelSurfaceWorkspaceView: View {
                 tabID: tab.id,
                 actions: .daemon(
                     appState: appState, worktreeID: worktree.id, tabID: tab.id, panelID: nil),
-                chrome: primaryChrome
+                chrome: chrome
             )
+            .id(tab.id)
         }
     }
 
-    /// The bar's trailing items: the primary's control, and the expand button
-    /// while `side` is collapsed with panels.
-    private func trailingItems(side: SideRegion) -> TabBarTrailingItems {
+    /// The bar's trailing items: the primary's control, read from `chrome`,
+    /// and the expand button while `side` is collapsed with panels.
+    private func trailingItems(side: SideRegion, chrome: PaneChromeState) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
         let tabID = tab.id
         let content = primaryContent
-        let chrome = primaryChrome
 
         var isClaudeTerminal = false
         var transcriptOpen = false
@@ -209,27 +228,46 @@ struct PanelSurfaceWorkspaceView: View {
             })
     }
 
-    /// Sends the drag's width, clamped to the model's range. With nothing to
-    /// send, or once the apply has finished, the overlay snaps to the copy: an
-    /// adopted reply has already moved it there, and a failed apply leaves the
-    /// copy where it was.
+    /// Sends the released drag's width, clamped to the model's range, for the
+    /// tab the drag was on. With nothing to send, or once the apply has
+    /// finished, the drag's shares are dropped and the divider follows the
+    /// copy: an adopted reply has already moved it there, and a failed apply
+    /// leaves the copy where it was. A later drag keeps its own shares.
     private func commitWidth() {
         let appState = appState
         let worktreeID = worktree.id
-        let tabID = tab.id
-        let heldWidth = side.width
-        guard let operation = Self.resizeOperation(ratios: ratios, currentWidth: heldWidth) else {
-            ratios = Self.ratios(forWidth: heldWidth)
+        guard let drag = dividerDrag, drag.tabID == tab.id,
+              let operation = Self.resizeOperation(ratios: drag.ratios, currentWidth: side.width)
+        else {
+            dividerDrag = nil
             return
         }
         Task { @MainActor in
-            _ = await appState.applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
-            let width = appState.panelSurface(worktreeID: worktreeID, tabID: tabID)?.side.width ?? heldWidth
-            ratios = Self.ratios(forWidth: width)
+            _ = await appState.applyPanelOperation(worktreeID: worktreeID, tabID: drag.tabID, operation)
+            if dividerDrag == drag {
+                dividerDrag = nil
+            }
         }
     }
 
     // MARK: - Pure helpers
+
+    /// A divider drag's shares, held for the tab the drag was on.
+    struct DividerDrag: Equatable {
+        let tabID: UUID
+        let ratios: [CGFloat]
+    }
+
+    /// The divider's `[primary, side]` shares for the tab `tabID`: a drag's
+    /// while one on this tab is being committed, otherwise the side region's
+    /// `width`. A drag on another tab, or one with malformed shares, is not
+    /// this tab's.
+    static func shares(drag: DividerDrag?, tabID: UUID, width: Double) -> [CGFloat] {
+        if let drag, drag.tabID == tabID, drag.ratios.count == 2 {
+            return drag.ratios
+        }
+        return Self.ratios(forWidth: width)
+    }
 
     /// A surface's side region, or `SideRegion.empty` for none.
     static func sideRegion(of surface: WorkspaceTabSurface?) -> SideRegion {
