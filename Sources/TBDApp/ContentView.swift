@@ -21,31 +21,6 @@ struct ContentView: View {
     /// was raised for even if the selection has moved on.
     @State private var remoteStopConfirm: RemoteSessionSelection?
 
-    private var selectedWorktree: Worktree? {
-        guard let id = appState.selectedWorktreeIDs.first else { return nil }
-        // findWorktree also resolves scratch spaces (repo-less worktrees).
-        return appState.findWorktree(id: id)
-    }
-
-    @ViewBuilder
-    private var worktreeTitleItem: some View {
-        if let worktree = selectedWorktree {
-            WorktreeTitleView(
-                appState: appState,
-                worktree: worktree,
-                repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
-            )
-        } else if let selection = appState.selectedRemoteSession {
-            // A Remote-section row selects no worktree; name the session the
-            // way `WorktreeTitleView` names a local one. (An adopted lane's
-            // row IS a worktree selection and takes the branch above.)
-            Text(appState.remoteSessionDisplayName(for: selection))
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
     var body: some View {
         @Bindable var appState = appState
         VStack(spacing: 0) {
@@ -127,12 +102,12 @@ struct ContentView: View {
 
                 if #available(macOS 26.0, *) {
                     ToolbarItem(placement: .principal) {
-                        worktreeTitleItem
+                        ToolbarTitleCluster()
                     }
                     .sharedBackgroundVisibility(.hidden)
                 } else {
                     ToolbarItem(placement: .principal) {
-                        worktreeTitleItem
+                        ToolbarTitleCluster()
                     }
                 }
 
