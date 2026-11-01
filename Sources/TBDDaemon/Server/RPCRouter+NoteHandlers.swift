@@ -41,13 +41,19 @@ extension RPCRouter {
         return try RPCResponse(result: note)
     }
 
-    /// Removes the note row + tab row only. The note's content file under
-    /// `~/tbd/notes/` is intentionally retained (orphan-file GC out of scope)
-    /// — closing a notes tab must never destroy content on disk.
+    /// Removes the note row with its worktree panel, then its tab row, and
+    /// broadcasts the workspace tab surfaces that lost the panel. The note's
+    /// content file under `~/tbd/notes/` is intentionally retained
+    /// (orphan-file GC out of scope) — deleting a note must never destroy
+    /// content on disk.
     func handleNoteDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NoteDeleteParams.self, from: paramsData)
-        try await db.notes.delete(id: params.noteID)
+        let deletion = try await db.notes.delete(id: params.noteID)
         try await db.tabs.delete(tabID: params.noteID)
+        if let deletion {
+            subscriptions.broadcastWorktreePanelsChanged(
+                worktreeID: deletion.worktreeID, surfaces: deletion.changedSurfaces)
+        }
         return .ok()
     }
 

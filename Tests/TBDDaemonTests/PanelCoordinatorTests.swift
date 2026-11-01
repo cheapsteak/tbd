@@ -65,11 +65,12 @@ struct PanelCoordinatorTests {
     /// Seeds a tab whose side region has no panels.
     @discardableResult
     private func seedEmptyTab(
-        _ db: TBDDatabase, worktreeID: UUID, tabID: UUID = UUID(), position: Int = 0
+        _ db: TBDDatabase, worktreeID: UUID, tabID: UUID = UUID(), position: Int = 0,
+        collapsed: Bool = false
     ) async throws -> WorkspaceTabSurface {
         let surface = WorkspaceTabSurface(
             id: tabID, worktreeID: worktreeID, label: "empty",
-            primary: .terminal(terminalID: UUID()), side: .empty, revision: 0)
+            primary: .terminal(terminalID: UUID()), side: SideRegion(collapsed: collapsed), revision: 0)
         try await db.panelSurface.commit(surface: surface, position: position, receipt: nil, now: Date())
         return surface
     }
@@ -233,6 +234,204 @@ struct PanelCoordinatorTests {
             worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: note.id), newPanel: false)))
 
         #expect(result.tab.worktreePanel(showing: .note(noteID: note.id)) != nil)
+    }
+
+    @Test func openOfChangesNeedsNoResource() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
+
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: .changes, newPanel: false)))
+
+        let changes = try #require(result.tab.worktreePanel(showing: .changes))
+        #expect(result.tab.side.activePanelID == changes.id)
+    }
+
+    // MARK: - Worktree panels
+
+    /// The raw row of a tab's surface, every column quoted, so a test can
+    /// say a row was left exactly as it was.
+    private func rawSurfaceRow(_ db: TBDDatabase, tabID: UUID) async throws -> String? {
+        try await db.writerForTests.read { dbc in
+            try String.fetchOne(
+                dbc,
+                sql: """
+                    SELECT quote(id) || quote(worktreeID) || quote(primaryContent) || quote(label)
+                         || quote(position) || quote(layout) || quote(revision) || quote(updatedAt)
+                         || quote(awaitingListing)
+                    FROM workspace_tab_surface WHERE id = ?
+                    """,
+                arguments: [tabID.uuidString])
+        }
+    }
+
+    /// A note opened in one tab becomes a worktree panel that every tab of
+    /// the worktree carries: one delta holds the operated tab and its
+    /// sibling, the sibling at a fresh revision with the same list. A
+    /// sibling with nothing in front shows the panel, and keeps its
+    /// collapse state.
+    @Test func worktreePanelOpenRewritesEveryTabSurface() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let tabA = try await seedTab(db, worktreeID: wtID, position: 0)
+        let tabB = try await seedEmptyTab(db, worktreeID: wtID, position: 1, collapsed: true)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let opID = UUID()
+
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabA.id, operationID: opID,
+            .open(content: .note(noteID: note.id), newPanel: false)))
+
+        let notePanel = try #require(result.tab.worktreePanel(showing: .note(noteID: note.id)))
+        #expect(result.tab.side.activePanelID == notePanel.id)
+        let deltas = surfaceDeltas(recorder)
+        try #require(deltas.count == 1)
+        let delta = deltas[0]
+        #expect(delta.originOperationID == opID)
+        try #require(delta.tabs.map(\.id) == [tabA.id, tabB.id])
+        #expect(delta.tabs[0] == result.tab)
+        let siblingB = delta.tabs[1]
+        #expect(siblingB.revision > tabB.revision)
+        #expect(siblingB.worktreePanels == result.tab.worktreePanels)
+        #expect(siblingB.side.activePanelID == notePanel.id)
+        #expect(siblingB.side.collapsed == true, "the open selects nothing in a sibling, so its collapse stays")
+        #expect(try await db.panelSurface.surface(tabID: tabB.id) == siblingB)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wtID) == [notePanel])
+    }
+
+    /// Review focus 2: an agent opens a note in tab A, then the user opens
+    /// the same note in tab B. There is still one worktree panel, B shows
+    /// it, and A's front is untouched.
+    @Test func openSameNoteFromSecondTabSelectsExisting() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let aPanelID = UUID()
+        let tabA = try await seedTab(db, worktreeID: wtID, panelID: aPanelID, position: 0)
+        let tabB = try await seedTab(db, worktreeID: wtID, position: 1)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let openNote = PanelOperation.open(content: .note(noteID: note.id), newPanel: false)
+
+        let fromA = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabA.id, origin: .agentCLI, openNote))
+        let notePanel = try #require(fromA.tab.worktreePanel(showing: .note(noteID: note.id)))
+        _ = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabA.id, origin: .agentCLI, .select(panelID: aPanelID)))
+        let deltasBefore = surfaceDeltas(recorder).count
+
+        let fromB = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabB.id, origin: .appUser, openNote))
+
+        #expect(fromB.tab.worktreePanels == [notePanel])
+        #expect(fromB.tab.side.activePanelID == notePanel.id)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wtID) == [notePanel])
+        let storedA = try #require(try await db.panelSurface.surface(tabID: tabA.id))
+        #expect(storedA.side.activePanelID == aPanelID)
+        #expect(storedA.worktreePanels == [notePanel])
+        let deltas = surfaceDeltas(recorder)
+        try #require(deltas.count == deltasBefore + 1)
+        #expect(deltas[deltasBefore].tabs.map(\.id) == [tabB.id],
+                "selecting the existing panel changes no list, so no sibling is rewritten")
+    }
+
+    /// Closing a worktree panel from one tab removes it from every tab, and
+    /// each tab that had it in front brings its most recent own panel
+    /// forward, or nothing when it has none. The note itself stays.
+    @Test func closeWorktreePanelMovesEachTabsFront() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let aPanelID = UUID()
+        let tabA = try await seedTab(db, worktreeID: wtID, panelID: aPanelID, position: 0)
+        let tabB = try await seedEmptyTab(db, worktreeID: wtID, position: 1)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let opened = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabA.id, .open(content: .note(noteID: note.id), newPanel: false)))
+        let notePanel = try #require(opened.tab.worktreePanel(showing: .note(noteID: note.id)))
+        let storedB = try #require(try await db.panelSurface.surface(tabID: tabB.id))
+        try #require(storedB.side.activePanelID == notePanel.id, "precondition: B shows the note")
+
+        let closed = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabB.id, .close(panelID: notePanel.id)))
+
+        #expect(closed.tab.worktreePanels.isEmpty)
+        #expect(closed.tab.side.activePanelID == nil)
+        let storedA = try #require(try await db.panelSurface.surface(tabID: tabA.id))
+        #expect(storedA.worktreePanels.isEmpty)
+        #expect(storedA.side.activePanelID == aPanelID)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wtID).isEmpty)
+        let delta = try #require(surfaceDeltas(recorder).last)
+        #expect(delta.tabs.map(\.id) == [tabB.id, tabA.id], "the operated tab, then its sibling")
+        #expect(try await db.notes.get(id: note.id) != nil, "closing a panel never deletes a note")
+    }
+
+    /// A worktree panel shows one note for its whole life: `history` and
+    /// `navigate` on one are refused, and nothing is written or broadcast.
+    @Test func historyOnWorktreePanelIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let opened = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: note.id), newPanel: false)))
+        let notePanel = try #require(opened.tab.worktreePanel(showing: .note(noteID: note.id)))
+        let receiptsBefore = try await receiptCount(db, worktreeID: wtID)
+        let broadcastsBefore = recorder.count
+
+        let refused = PanelCoordinatorError.operation(.worktreePanelHasNoHistory(notePanel.id))
+        let back = envelope(
+            worktreeID: wtID, tabID: tab.id, .history(panelID: notePanel.id, action: .back))
+        await #expect(throws: refused) {
+            _ = try await coordinator.apply(back)
+        }
+        let other = try await db.notes.create(worktreeID: wtID)
+        let toOtherNote = envelope(
+            worktreeID: wtID, tabID: tab.id,
+            .navigate(panelID: notePanel.id, destination: .note(noteID: other.id)))
+        await #expect(throws: refused) {
+            _ = try await coordinator.apply(toOtherNote)
+        }
+
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == opened.tab)
+        #expect(try await receiptCount(db, worktreeID: wtID) == receiptsBefore)
+        #expect(recorder.count == broadcastsBefore)
+    }
+
+    /// Review focus 3: a sibling whose row cannot be read does not stop the
+    /// change. The open commits, the bad row stays exactly as it was, and
+    /// the delta carries only the operated tab.
+    @Test func unreadableSiblingRowIsSkipped() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
+        let tabA = try await seedTab(db, worktreeID: wtID, position: 0)
+        let tabB = try await seedTab(db, worktreeID: wtID, position: 1)
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE workspace_tab_surface SET layout = 'not a layout' WHERE id = ?",
+                arguments: [tabB.id.uuidString])
+        }
+        let rowBefore = try #require(try await rawSurfaceRow(db, tabID: tabB.id))
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tabA.id, .open(content: .note(noteID: note.id), newPanel: false)))
+
+        #expect(result.tab.worktreePanel(showing: .note(noteID: note.id)) != nil)
+        #expect(try await db.panelSurface.surface(tabID: tabA.id) == result.tab)
+        #expect(try await rawSurfaceRow(db, tabID: tabB.id) == rowBefore)
+        let deltas = surfaceDeltas(recorder)
+        try #require(deltas.count == 1)
+        #expect(deltas[0].tabs.map(\.id) == [tabA.id])
     }
 
     @Test func transcriptOfForeignTerminalIsInvalidResource() async throws {

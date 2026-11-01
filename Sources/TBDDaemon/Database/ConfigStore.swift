@@ -65,7 +65,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.queuedPromptDefault`, never through `?? false`.
     var queued_prompt_enabled: Bool?
-    /// Whether ordinary new worktrees start with an empty Notes tab.
+    /// Whether ordinary new worktrees open an empty "Notes" note as a
+    /// worktree panel in the side panel.
     /// **Genuinely tri-state**: the backing migration carries no SQL default,
     /// so `nil` means "never chose" and resolves through
     /// `Config.autoCreateNotesDefault`.
@@ -701,8 +702,8 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist whether ordinary new worktrees start with an empty Notes tab.
-    /// Writing either value records an explicit choice, distinct from NULL.
+    /// Persist whether ordinary new worktrees open an empty "Notes" note as a
+    /// worktree panel. Writing either value records an explicit choice, distinct from NULL.
     public func setAutoCreateNotes(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(

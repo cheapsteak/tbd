@@ -217,7 +217,7 @@ struct PanelSurfaceStoreTests {
         }
 
         let applied = try #require(outcome)
-        guard case .applied(let result) = applied else {
+        guard case .applied(let result, _) = applied else {
             Issue.record("expected .applied, got \(applied)")
             return
         }
@@ -242,7 +242,7 @@ struct PanelSurfaceStoreTests {
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
         let first = try #require(firstOutcome)
-        guard case .applied(let applied) = first else {
+        guard case .applied(let applied, _) = first else {
             Issue.record("expected .applied, got \(first)")
             return
         }
@@ -275,7 +275,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = firstOutcome else {
+        guard case .applied(let applied, _)? = firstOutcome else {
             Issue.record("expected .applied, got \(String(describing: firstOutcome))")
             return
         }
@@ -789,7 +789,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = outcome else {
+        guard case .applied(let applied, _)? = outcome else {
             Issue.record("expected .applied, got \(String(describing: outcome))")
             return
         }
@@ -1027,7 +1027,7 @@ struct PanelSurfaceStoreTests {
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
         let first = try #require(firstOutcome)
-        guard case .applied(let applied) = first else {
+        guard case .applied(let applied, _) = first else {
             Issue.record("expected .applied, got \(first)")
             return
         }
@@ -1202,7 +1202,7 @@ struct PanelSurfaceStoreTests {
         ) { current in
             try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
         }
-        guard case .applied(let applied)? = outcome else {
+        guard case .applied(let applied, _)? = outcome else {
             Issue.record("expected .applied, got \(String(describing: outcome))")
             return
         }

@@ -21,12 +21,7 @@ struct WorktreePanelRecord: Codable, FetchableRecord, PersistableRecord, Sendabl
         self.id = panel.id.uuidString
         self.worktreeID = worktreeID.uuidString
         self.position = position
-        let data = try JSONEncoder().encode(panel.content)
-        guard let json = String(bytes: data, encoding: .utf8) else {
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: [], debugDescription: "JSON-encoded data is not valid UTF-8"))
-        }
-        self.content = json
+        self.content = try encodeJSONString(panel.content)
     }
 
     /// Failable decode: returns nil after a logged warning, never traps, when
@@ -36,8 +31,7 @@ struct WorktreePanelRecord: Codable, FetchableRecord, PersistableRecord, Sendabl
             decodeLogger.warning("Skipping worktree_panel row \(id, privacy: .public): malformed id")
             return nil
         }
-        guard let data = content.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(WorktreePanelContent.self, from: data) else {
+        guard let decoded = decodeJSON(WorktreePanelContent.self, from: content) else {
             decodeLogger.warning("Skipping worktree_panel row \(id, privacy: .public): malformed content")
             return nil
         }

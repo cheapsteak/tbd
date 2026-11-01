@@ -1595,7 +1595,8 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
-    /// Whether ordinary new worktrees start with an empty Notes tab.
+    /// Whether ordinary new worktrees open an empty "Notes" note as a
+    /// worktree panel in the side panel.
     ///
     /// **Resolved, not stored.** The backing column carries no SQL default and
     /// stays NULL until somebody touches the toggle, so this property is
@@ -1852,7 +1853,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
     /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
-    /// preserved until a user explicitly turns automatic Notes tabs off.
+    /// preserved until a user explicitly turns the automatic Notes note off.
     public static let autoCreateNotesDefault = true
     /// The shipped default for `gcProfileDirsEnabled`, and the single place it
     /// lives. The profile-dir collector ships off; graduating it is a change to

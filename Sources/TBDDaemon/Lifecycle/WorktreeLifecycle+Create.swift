@@ -26,7 +26,8 @@ public enum WorktreeCreateCompletion: Sendable {
 /// composer, exactly like an ordinary resume. An earlier revision passed a
 /// "you have been moved" context prompt as the spawn's trailing argument,
 /// which Claude answered immediately — an unwanted turn on every revive.
-/// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
+/// Provenance lives solely in `notesSeed`, which seeds the initial "Notes"
+/// note, opened as a worktree panel.
 ///
 /// `claudeSpawnExtras` are the plugin folders and settings overlay the source
 /// session's terminal carried when its worktree was archived: the carried-over
@@ -591,7 +592,7 @@ extension WorktreeLifecycle {
                         preparedCodexLaunch: preparedCodexLaunch
                     )
                     if shouldCreateInitialNote {
-                        await createInitialNoteTab(
+                        await createInitialNotePanel(
                             worktreeID: worktree.id,
                             seed: carryover?.notesSeed
                         )
@@ -625,9 +626,10 @@ extension WorktreeLifecycle {
 
             // 3c. Conversation carryover always gets a seeded provenance note;
             // ordinary creates get an empty note only when configured. Either
-            // is appended last while the primary terminal keeps focus.
+            // opens as a worktree panel in the side panel, outside the tab
+            // order, so the primary terminal keeps focus.
             if shouldCreateInitialNote {
-                await createInitialNoteTab(
+                await createInitialNotePanel(
                     worktreeID: worktreeID,
                     seed: carryover?.notesSeed
                 )
@@ -812,15 +814,17 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Creates an initial Notes tab and appends it to the tab order (last; the
-    /// primary terminal keeps focus). Ordinary creates leave it empty; a
-    /// conversation carryover supplies the populated provenance seed. The app
-    /// materializes the tab from the note row via its
-    /// `reconcileNoteTabs` poll — note tabs use the note row's UUID as the tab
-    /// ID. Best-effort: a failure (e.g. the worktree row vanished mid-create,
+    /// Creates the initial "Notes" note and opens it as a worktree panel
+    /// (side panel notes spec, "New worktrees"), which every workspace tab of
+    /// the worktree shows in its side panel. The note stays out of the tab
+    /// order, so the primary terminal keeps focus. Ordinary creates leave it
+    /// empty; a conversation carryover supplies the populated provenance
+    /// seed. Opening the panel selects nothing; any surface it rewrote is
+    /// broadcast, and a surface a later tab sync imports joins the panel in.
+    /// Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
     /// terminals are already valid.
-    func createInitialNoteTab(worktreeID: UUID, seed: String? = nil) async {
+    func createInitialNotePanel(worktreeID: UUID, seed: String? = nil) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
             if let seed {
@@ -830,11 +834,12 @@ extension WorktreeLifecycle {
                     content: seed
                 )
             }
-            var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
-            order.append(note.id)
-            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
+            let changedSurfaces = try await db.panelSurface.openWorktreePanel(
+                worktreeID: worktreeID, content: .note(noteID: note.id), now: now())
+            subscriptions?.broadcastWorktreePanelsChanged(
+                worktreeID: worktreeID, surfaces: changedSurfaces)
         } catch {
-            logger.warning("failed to create initial note tab for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to create initial note panel for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

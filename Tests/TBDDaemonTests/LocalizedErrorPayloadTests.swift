@@ -169,6 +169,14 @@ struct LocalizedErrorPayloadTests {
                 )
             ),
             (
+                "PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree",
+                PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree(
+                    panelID: Self.panelID,
+                    existingWorktreeID: Self.worktreeID,
+                    incomingWorktreeID: Self.repoID
+                )
+            ),
+            (
                 "PanelSurfaceStoreError.invalidSurface",
                 PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel])
             ),
@@ -264,6 +272,15 @@ struct LocalizedErrorPayloadTests {
             ),
             [Self.panelID.uuidString, Self.owningTabID.uuidString, Self.incomingTabID.uuidString],
             "PanelSurfaceStoreError.panelHistoryOwnedByOtherTab"
+        )
+        assertRenders(
+            PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree(
+                panelID: Self.panelID,
+                existingWorktreeID: Self.worktreeID,
+                incomingWorktreeID: Self.repoID
+            ),
+            [Self.panelID.uuidString, Self.worktreeID.uuidString, Self.repoID.uuidString],
+            "PanelSurfaceStoreError.worktreePanelOwnedByOtherWorktree"
         )
         assertRenders(
             PanelSurfaceStoreError.invalidSurface(tabID: Self.incomingTabID, violations: [.noActivePanel]),

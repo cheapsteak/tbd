@@ -10,10 +10,13 @@ import Testing
 // TBD_HOME mutation) so hook resolution and runtime dirs never touch the
 // developer's real ~/tbd. See TBDHomeSerializedSuites.swift.
 extension TBDHomeSerialized {
-@Suite("Automatic note tab on worktree create")
+@Suite("Automatic note panel on worktree create")
 struct NoteTabOnCreateTests {
 
-    @Test func ordinaryCreateDefaultsToNotesTabAppendedLast() async throws {
+    /// With `auto_create_notes_enabled` on, a create makes one "Notes" note
+    /// and opens it as the worktree's one panel. The note stays out of the
+    /// tab order, which holds only the terminals, and a terminal keeps focus.
+    @Test func creationOpensInitialNotePanelWhenEnabled() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -30,17 +33,23 @@ struct NoteTabOnCreateTests {
         let note = try #require(notes.first)
         #expect(note.title == "Notes")
         #expect(!note.hasLegacyContent)
+        let panelContent = try await db.panelSurface.worktreePanels(worktreeID: wt.id).map(\.content)
+        let expectedContent: [WorktreePanelContent] = [.note(noteID: note.id)]
+        #expect(panelContent == expectedContent)
 
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
-        #expect(order.last == note.id)
-        #expect(order.count == terminals.count + 1)
+        #expect(!order.contains(note.id))
+        #expect(Set(order) == Set(terminals.map(\.id)))
         let active = try await db.worktrees.getActiveTabID(worktreeID: wt.id)
-        #expect(active != note.id)
         #expect(terminals.map(\.id).contains(try #require(active)))
     }
 
-    @Test func ordinaryCreateDoesNotCreateNotesTabWhenDisabled() async throws {
+    /// With the setting off, an ordinary create makes no note and opens no
+    /// panel. A conversation carryover still does, whatever the setting:
+    /// `WorktreeConversationCarryoverTests` runs with it off and asserts
+    /// the seeded note and its panel.
+    @Test func creationOpensNoNotePanelWhenDisabled() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -54,6 +63,7 @@ struct NoteTabOnCreateTests {
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
         #expect(try await db.notes.list(worktreeID: wt.id).isEmpty)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: wt.id).isEmpty)
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
         #expect(Set(order) == Set(terminals.map(\.id)))
@@ -61,7 +71,7 @@ struct NoteTabOnCreateTests {
         #expect(terminals.map(\.id).contains(try #require(active)))
     }
 
-    @Test func preSessionGatedCreateCreatesNotesTabWhenEnabled() async throws {
+    @Test func preSessionGatedCreateOpensNotePanelWhenEnabled() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -87,16 +97,18 @@ struct NoteTabOnCreateTests {
         let notes = try await db.notes.list(worktreeID: pending.id)
         #expect(notes.count == 1)
         let note = try #require(notes.first)
+        let panelContent = try await db.panelSurface.worktreePanels(worktreeID: pending.id).map(\.content)
+        let expectedContent: [WorktreePanelContent] = [.note(noteID: note.id)]
+        #expect(panelContent == expectedContent)
         let terminals = try await db.terminals.list(worktreeID: pending.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: pending.id)
-        #expect(order.last == note.id)
-        #expect(order.count == terminals.count + 1)
+        #expect(!order.contains(note.id))
+        #expect(Set(order) == Set(terminals.map(\.id)))
         let active = try await db.worktrees.getActiveTabID(worktreeID: pending.id)
-        #expect(active != note.id)
         #expect(terminals.map(\.id).contains(try #require(active)))
     }
 
-    @Test func preSessionGatedCreateDoesNotCreateNotesTabWhenDisabled() async throws {
+    @Test func preSessionGatedCreateOpensNoNotePanelWhenDisabled() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -120,6 +132,7 @@ struct NoteTabOnCreateTests {
         await phase3.value
 
         #expect(try await db.notes.list(worktreeID: pending.id).isEmpty)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: pending.id).isEmpty)
         let terminals = try await db.terminals.list(worktreeID: pending.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: pending.id)
         #expect(Set(order) == Set(terminals.map(\.id)))
@@ -159,6 +172,7 @@ struct NoteTabOnCreateTests {
 
         #expect(try await db.notes.list(worktreeID: pending.id).isEmpty,
                 "no note row may be created for a deleted worktree")
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: pending.id).isEmpty)
     }
 }
 }

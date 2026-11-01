@@ -207,4 +207,66 @@ import TestSupport
         let tabs = try await db.tabs.listForWorktree(worktreeID: wt.id)
         #expect(tabs.isEmpty)
     }
+
+    /// `note.delete` takes the note's worktree panel with it: no surface and
+    /// no `worktree_panel` row shows the note afterwards, one delta carries
+    /// every rewritten surface, and the note's tab row still goes.
+    @Test func noteDeleteRemovesItsPanel() async throws {
+        let (db, worktreeID) = try await makeFixture()
+        let recorder = BroadcastRecorder()
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                recorder.record(delta)
+            }
+            return true
+        }
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            ),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            subscriptions: subscriptions,
+            actuationLog: makeTestActuationLog()
+        )
+        let note = try await db.notes.create(worktreeID: worktreeID)
+        try await db.tabs.setLabel(tabID: note.id, worktreeID: worktreeID, label: "MyNote")
+        let tabIDs = [UUID(), UUID()]
+        for (position, tabID) in tabIDs.enumerated() {
+            let surface = WorkspaceTabSurface(
+                id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: UUID()))
+            try await db.panelSurface.commit(surface: surface, position: position, receipt: nil, now: Date())
+        }
+        _ = try await db.panelSurface.openWorktreePanel(
+            worktreeID: worktreeID, content: .note(noteID: note.id), now: Date())
+        let deltasBefore = recorder.count
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.noteDelete, params: NoteDeleteParams(noteID: note.id)))
+
+        #expect(response.success)
+        #expect(try await db.notes.get(id: note.id) == nil)
+        #expect(try await db.tabs.listForWorktree(worktreeID: worktreeID).isEmpty)
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: worktreeID).isEmpty)
+        let rowCount = try await db.writerForTests.read { dbc in
+            try Int.fetchOne(dbc, sql: "SELECT COUNT(*) FROM worktree_panel") ?? -1
+        }
+        #expect(rowCount == 0)
+        let surfaces = try await db.panelSurface.surfaces(worktreeID: worktreeID)
+        #expect(surfaces.map(\.id) == tabIDs)
+        let noteShown = surfaces.contains { $0.worktreePanel(showing: .note(noteID: note.id)) != nil }
+        #expect(!noteShown)
+        let panelDeltas: [PanelSurfaceDelta] = recorder.deltas.dropFirst(deltasBefore).compactMap {
+            if case .panelSurfaceChanged(let delta) = $0 { return delta }
+            return nil
+        }
+        try #require(panelDeltas.count == 1)
+        #expect(panelDeltas[0].worktreeID == worktreeID)
+        #expect(panelDeltas[0].tabs == surfaces)
+    }
 }
