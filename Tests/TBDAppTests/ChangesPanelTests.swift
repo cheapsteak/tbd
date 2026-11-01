@@ -161,7 +161,7 @@ struct ChangesPanelTests {
         }
     }
 
-    @Test("⌘⇧E on a daemon-path tab with no surface yet opens Changes, as ◫ does")
+    @Test("⌘⇧E on a daemon-path tab with no surface yet opens Changes")
     func toggleChangesPanelWithoutSurfaceOpensChanges() async throws {
         try await Fixture.withState { state in
             let tab = Fixture.terminalTab()

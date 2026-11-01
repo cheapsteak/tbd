@@ -221,7 +221,7 @@ struct PanelSurfaceWorkspaceView: View {
     }
 
     /// The bar's trailing items: the primary's control, read from `chrome`,
-    /// and the expand button while the side region is hidden.
+    /// and the expand button while the tab's loaded side region is hidden.
     private func trailingItems(chrome: PaneChromeState) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
@@ -351,12 +351,16 @@ struct PanelSurfaceWorkspaceView: View {
         CGSize(width: width, height: primaryLeafHeight)
     }
 
-    /// The expand button shows whenever the side region is hidden: collapsed,
-    /// without a panel of its own or the worktree's, or not loaded yet
-    /// (`surface` nil). It never shows while the region is visible, when the
-    /// strip's collapse button carries `⌘\`.
+    /// The expand button shows once the tab's surface is known and its side
+    /// region is hidden: collapsed, or without a panel of its own or the
+    /// worktree's. It never shows while the region is visible, when the
+    /// strip's collapse button carries `⌘\`, nor before the copy holds a
+    /// surface for the tab (`surface` nil): the region's real state is
+    /// unknown then, and it may be collapsed over panels, which an expand
+    /// should uncollapse rather than open Changes in front of.
     static func showsExpandButton(surface: WorkspaceTabSurface?) -> Bool {
-        !(surface?.isSideVisible ?? false)
+        guard let surface else { return false }
+        return !surface.isSideVisible
     }
 
     /// What the expand button sends: a region with panels is uncollapsed; one

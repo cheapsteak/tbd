@@ -850,7 +850,11 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - Collapse and expand
 
-    @Test("the expand button shows while the region is hidden, and never while it shows")
+    /// Before the copy holds a surface for the tab, the region's real state
+    /// is unknown: it may be collapsed over panels, where an expand that
+    /// opened Changes would be the wrong operation. So the button waits for
+    /// the surface.
+    @Test("the expand button shows while a loaded region is hidden, never while it shows, and not before it loads")
     func expandButtonShowsWhileHidden() {
         let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
         let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
@@ -867,7 +871,7 @@ struct PanelSurfaceRenderBranchTests {
         let worktreeVisible = Self.surface(
             side: SideRegion(activePanelID: note.id), worktreePanels: [note])
 
-        #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: nil), "no surface yet")
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: nil), "no surface yet")
         #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: empty))
         #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: emptyCollapsed))
         #expect(PanelSurfaceWorkspaceView.showsExpandButton(surface: ownCollapsed))
@@ -908,9 +912,10 @@ struct PanelSurfaceRenderBranchTests {
     /// `⌘\` is bound on the expand button in the workspace tab bar and on the
     /// collapse button in the side region's strip, which draws while the region
     /// is visible. Shown together, the shortcut would fire one of them
-    /// arbitrarily; with the expand button showing whenever the region is
-    /// hidden, one of the two is always there to take it.
-    @Test("exactly one of the expand and collapse buttons shows")
+    /// arbitrarily; with the expand button showing whenever a loaded region is
+    /// hidden, one of the two is there to take it once the surface loads.
+    /// Before that, the region draws empty and neither button shows.
+    @Test("exactly one of the expand and collapse buttons shows once the surface loads, and neither before")
     func expandAndCollapseNeverShowTogether() {
         let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
         let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
@@ -922,16 +927,20 @@ struct PanelSurfaceRenderBranchTests {
         let worktreePanels = Self.surface(side: SideRegion(activePanelID: note.id), worktreePanels: [note])
         let worktreePanelsCollapsed = Self.surface(
             side: SideRegion(activePanelID: note.id, collapsed: true), worktreePanels: [note])
-        let surfaces: [WorkspaceTabSurface?] = [
-            nil, empty, emptyCollapsed, panels, panelsCollapsed, worktreePanels, worktreePanelsCollapsed,
+        let surfaces: [WorkspaceTabSurface] = [
+            empty, emptyCollapsed, panels, panelsCollapsed, worktreePanels, worktreePanelsCollapsed,
         ]
 
         for surface in surfaces {
             let showsExpand = PanelSurfaceWorkspaceView.showsExpandButton(surface: surface)
             // The strip, and with it the collapse button, draws exactly while
             // the region shows.
-            let showsCollapse = surface?.isSideVisible ?? false
-            #expect(showsExpand != showsCollapse, "exactly one of the two shows: \(String(describing: surface))")
+            let showsCollapse = surface.isSideVisible
+            #expect(showsExpand != showsCollapse, "exactly one of the two shows: \(surface)")
         }
+
+        // With no surface yet the view draws no side region, so the strip and
+        // its collapse button do not draw, and the expand button waits too.
+        #expect(!PanelSurfaceWorkspaceView.showsExpandButton(surface: nil), "neither shows before the surface loads")
     }
 }

@@ -70,6 +70,15 @@ struct PanelSurfaceContentMappingTests {
         #expect(history.paneHistory(panelID: UUID()) == nil)
     }
 
+    @Test("one entry with no leaf form is enough to leave a history without a leaf history")
+    func paneHistoryIsNilWithAnyChangesEntry() {
+        let file = PanelContent.file(FileReference(path: "/w/a.md"))
+        var history = PanelHistory.seeded(with: file)
+        history.recordReplacement(outgoing: file, incoming: .changes)
+        #expect(history.entries.count == 2, "precondition: a leaf entry beside the Changes one")
+        #expect(history.paneHistory(panelID: UUID()) == nil)
+    }
+
     @Test("a history maps entry by entry, keeping order and cursor")
     func paneHistoryKeepsOrderAndCursor() throws {
         let panelID = UUID()

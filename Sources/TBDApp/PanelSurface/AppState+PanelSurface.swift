@@ -435,9 +435,9 @@ extension AppState {
     /// opens Changes, brings it forward, or closes it.
     ///
     /// A tab on the daemon path with no surface in the copy yet opens
-    /// Changes, as the workspace tab bar's ◫ does there;
-    /// `applyPanelOperation` sends any pending tab sync first, so the daemon
-    /// knows the tab. A tab that renders legacy (`workspaceRenderPath`) has
+    /// Changes, though the workspace tab bar draws no ◫ there until the
+    /// surface loads; `applyPanelOperation` sends any pending tab sync first,
+    /// so the daemon knows the tab. A tab that renders legacy (`workspaceRenderPath`) has
     /// no side region, so ⌘⇧E sends nothing there and beeps
     /// (`refusalBeep`).
     ///

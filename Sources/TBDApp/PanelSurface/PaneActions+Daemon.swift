@@ -58,9 +58,9 @@ extension PaneActions {
     /// ⌘⇧E's operation for one workspace tab on the daemon path, decided from
     /// the app's copy of its surface as `transcriptToggleDecision` is: open
     /// when the worktree has no Changes panel, or when `surface` is nil — a
-    /// tab the copy holds no surface for yet, where ◫ opens Changes too;
-    /// close when the Changes panel is in front of a visible region;
-    /// otherwise select it, which also expands a collapsed region. Visibility
+    /// tab the copy holds no surface for yet; close when the Changes panel is
+    /// in front of a visible region; otherwise select it, which also expands
+    /// a collapsed region. Visibility
     /// counts the worktree's panels (`isSideVisible`), because the Changes
     /// panel is one of them. A tab that renders legacy never reaches this
     /// (`AppState.toggleChangesPanel`).

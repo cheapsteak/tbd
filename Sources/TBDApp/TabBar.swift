@@ -97,8 +97,8 @@ struct TabBarTrailingItems {
     /// or nil when its kind has none.
     var selectedTabControl: PaneChromeControl?
     var onSelectedTabControl: @MainActor () -> Void
-    /// True while the side region is hidden: collapsed, without a panel, or
-    /// not loaded yet (`PanelSurfaceWorkspaceView.showsExpandButton`).
+    /// True while the tab's loaded side region is hidden: collapsed, or
+    /// without a panel (`PanelSurfaceWorkspaceView.showsExpandButton`).
     var showsExpandButton: Bool
     var onExpand: @MainActor () -> Void
 
@@ -252,7 +252,7 @@ struct TabBar: View {
 
             // Shows the hidden side region. It shows only while the region is
             // hidden, and the strip's collapse button only while it is
-            // visible, so `⌘\` is bound on one of the two at a time.
+            // visible, so `⌘\` is bound on at most one of the two at a time.
             if trailing.showsExpandButton {
                 SidePanelToggleButton(collapsed: true) {
                     trailing.onExpand()
