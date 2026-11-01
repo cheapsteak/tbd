@@ -253,7 +253,7 @@ struct SidePanelNotesMigrationTests {
         indexColumns: ["worktreeID", "position"])
 
     private static func worktreePanelSchema(_ queue: DatabaseQueue) throws -> WorktreePanelSchema {
-        try queue.read { db in
+        try queue.read { db -> WorktreePanelSchema in
             let columns = try Row.fetchAll(db, sql: "PRAGMA table_info(worktree_panel)").map { row -> String in
                 let name: String = row["name"]
                 let type: String = row["type"]
