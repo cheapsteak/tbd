@@ -177,7 +177,8 @@ revision guard needs nothing new.
   It becomes a menu command, so it works without a toolbar button. A tab the
   daemon could not import, such as one with a terminal split off, still draws
   through the legacy split layout, which has no side region: there ⌘⇧E beeps,
-  and the worktree's notes and Changes are reached from any other tab.
+  and the worktree's notes and Changes are reached from any other tab. It
+  also beeps while Session History fills the worktree, whose tab is hidden.
 
 ## CLI and agent guidance
 
