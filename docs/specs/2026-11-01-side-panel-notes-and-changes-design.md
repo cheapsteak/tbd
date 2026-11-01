@@ -31,10 +31,13 @@ else in the side panel.
 - Notes and the Changes list are side-panel tabs.
 - They belong to the worktree: once open, they show in the side panel of every
   workspace tab in that worktree.
+- Nothing opens a note by itself. A Notes button in the workspace tab bar shows
+  and hides the worktree's first note, as the transcript button does for a
+  transcript.
 - Agents show and hide them with `tbd panel`, and can find a worktree's notes
   without the app.
 - The Changes column, its toolbar button and the notes in the workspace tab bar
-  go away, and nothing a user had is lost on the way.
+  go away, and no note is lost on the way.
 
 ## Non-goals
 
@@ -82,12 +85,8 @@ worktree panels first, then the tab's own panels.
 - **`close` on a worktree panel** removes it from the worktree, so from every
   workspace tab. Each tab that had it in front brings its most recent remaining
   panel forward. Closing alone never deletes a note (see "Notes").
-- **`close` on a tab's own panel** works as before, with one addition. When it
-  closes the panel in front and leaves the tab with no panels of its own while
-  worktree panels remain, the first worktree panel comes forward and the
-  region collapses. Nearly every worktree has a note, so without this the
-  transcript button and a file's × would leave the region open on the note
-  rather than hide it.
+- **`close` on a tab's own panel** works as before; when the tab has no panels
+  of its own left, its first worktree panel comes forward.
 - **`select`** is per tab, as before.
 
 A change to the worktree's panel list rewrites every workspace tab surface of
@@ -107,64 +106,55 @@ revision guard needs nothing new.
   unless the main worktree has one, and deletes its note panels, because a
   promote leaves the notes themselves with the archived scratch worktree, and
   a note's content file is keyed by that worktree; the cascade covers a
-  deleted row. Archiving keeps the notes. A revive reopens a worktree panel
-  for each of the worktree's notes, in creation order, in the transaction
-  that takes the row out of archived.
+  deleted row. Archiving keeps the notes, and a revive opens no panel: the
+  notes are reached from the Notes button and the strip's + menu.
 - **Notes follow their panels.** `note.delete` deletes the note's worktree panel
   in the same transaction and broadcasts the change.
-- **New worktrees.** Worktree creation makes the initial "Notes" note as
-  before, carryover seed included, and opens it as a worktree panel instead of
-  appending it to the tab order. It also writes the surface of the
-  worktree's main tab, with the note in front and the region open, so a new
-  worktree opens its starter note visibly; the app's first tab sync keeps that
-  surface, as it keeps any it can read. The config column
-  `auto_create_notes_enabled` keeps its meaning. Its Settings label becomes
-  "Open a Notes panel for new worktrees".
-- **Imported tabs.** A tab the daemon imports in a tab sync with no panels of
-  its own comes out collapsed when its worktree has worktree panels, with the
-  first one in front. Most tabs have no surface when the app updates, and
-  every new terminal tab is imported, so without this an update, or a new
-  tab, would open the side region and narrow the terminal. A tab that brings
-  panels of its own keeps its collapse state.
-- **Migration.** Existing notes move into the side panel. For every note row,
-  the migration:
-  - inserts a worktree panel in the worktree's tab order;
-  - removes the note's ID from `worktree.tabOrder`;
+- **New worktrees.** Worktree creation makes the starter "Notes" note as
+  before, carryover seed included, and opens no panel for it and no longer
+  appends it to the tab order. The note opens from the Notes button. The
+  config column `auto_create_notes_enabled` keeps its meaning; its Settings
+  label becomes "Create a starter note for new worktrees", and its help text
+  says the note opens from the Notes button.
+- **`note.create`** takes an optional title, so the Notes button can name the
+  note it creates "Notes". Without one, the default "Note N" title stays.
+- **Migration.** Existing notes leave the workspace tab bar and keep their
+  content. For every note row, the migration:
+  - removes the note's ID from `worktree.tabOrder`, and repairs a worktree's
+    `activeTabID` that names it;
   - removes its tab row;
   - deletes any surface whose primary is that note, with its side region;
-  - removes every panel in a tab's own side region that shows that note, and a
-    tab that had one in front brings the note's worktree panel forward.
+  - removes every panel in a tab's own side region that shows that note; a tab
+    that had one in front brings its most recent remaining panel forward.
 
-  Afterwards a note shows only in its worktree panel, which `note.delete`
-  removes, so no panel is left showing a deleted note.
-
-  The migration narrows no terminal. Nearly every worktree has its starter
-  Notes note, so a worktree panel would otherwise open the side region of
-  every tab the moment the app updates, with nothing the user did behind it.
-  So a tab whose side region had no panels comes out collapsed, with the
-  worktree's first panel in front, one ◫ away. A tab that had panels keeps
-  its collapse state and the panel in front, and the worktree panels join its
-  strip; the one exception is a tab whose own note panel was in front, which
-  brings the note's worktree panel forward, as above. A tab with no surface
-  yet comes out collapsed when the app's next tab sync imports it (see
-  "Imported tabs"). New worktrees differ on purpose: creation opens the
-  starter note visibly in the main tab, which is what the "Open a Notes panel
-  for new worktrees" setting asks for.
+  It opens no worktree panel, so it narrows no terminal: the notes are reached
+  from the Notes button and the strip's + menu. It creates the `worktree_panel`
+  table itself when the table is missing, skips and logs a row it cannot
+  read, and changes nothing when run again.
 
   The JSON edit of `tabOrder` takes the Swift escape hatch in
-  `SQLMigrationLoader.inlineTimestampMigrations`, unless the `.sql` allowlist
-  can express it.
+  `SQLMigrationLoader.inlineTimestampMigrations`.
 
 ## App
 
 - **Notes leave the tab bar.** `reconcileNoteTabs` goes, and with it the note
   branch of `closeTab`. The workspace bar's + menu loses "Note": a note is made
-  only from the side strip's + menu, so it is born where it lives. `.note` stays
+  from the side strip's + menu or the Notes button, so it is born where it
+  lives. `.note` stays
   a `PrimaryContent` case for decoding, and nothing creates one.
 - **The strip.** It reads: history buttons, then the worktree panels, then the
   tab's own panels, then a **+** menu, the active panel's own control, and
   collapse. The + menu offers New Note, Changes, and every note of the worktree
   that has no panel.
+- **The Notes button.** It sits in the workspace tab bar's trailing controls,
+  right after the transcript button, and follows the transcript button's rule
+  for the worktree's first note, the oldest by creation:
+  - no panel for it: open one, worktree-wide, in front in this tab;
+  - open but not in front, or the region collapsed: select it;
+  - in front and visible: `close` it, which keeps the note.
+
+  With no note in the worktree, it creates one titled "Notes" and opens it.
+  The worktree's other notes stay in the strip's + menu.
 - **Closing a note's tab** works as the panel tabs spec says: the app asks
   first when the note has content, then deletes it. The `close` operation alone
   keeps it, so a note an agent closed stays in the + menu.
@@ -206,14 +196,13 @@ revision guard needs nothing new.
 No flag. Panel tabs ship to everyone without one, and this moves existing items
 by the same decision of the owner's. The way back is a revert and a release.
 Neither a revert nor a downgrade makes the moved notes reappear as workspace
-tabs, so they are reached through the side panel's + menu until one does.
+tabs, so they are reached through the Notes button and the side panel's +
+menu until one does.
 
 ## Testing
 
 - **Shared:**
   - The reducer opens, selects and closes worktree panels, and selects per tab.
-  - Closing the own panel in front collapses the region when it leaves only
-    worktree panels, and changes no collapse otherwise.
   - A close moves each affected tab's front to its most recent remaining panel.
   - `history` and `navigate` on a worktree panel are refused.
   - The validator enforces the kinds rule and both at-most-one rules.
@@ -223,19 +212,13 @@ tabs, so they are reached through the side panel's + menu until one does.
     a fresh revision, in one delta.
   - `note.delete` removes the note's panel.
   - Archive deletes the worktree's panels, and promote moves the Changes
-    panel and deletes the note panels. A revive reopens a panel for each
-    note, in creation order, and duplicates none.
-  - Creation opens the initial note as a panel, in front of an open region in
-    the main tab, when `auto_create_notes_enabled` is on, and opens none when
-    it is off.
-  - A tab sync imports a tab with no panels of its own collapsed when the
-    worktree has worktree panels, and leaves a tab with its own panels, or in a
-    worktree without worktree panels, as it came.
-  - The migration moves a note out of `tabOrder` into the worktree's panels,
-    replaces a tab's own note panel with the worktree panel (in front when the
-    old one was), collapses a tab whose side region had no panels, leaves a
-    tab that had panels with its collapse state and front, and leaves a
-    worktree with no notes untouched.
+    panel and deletes the note panels.
+  - Creation makes the starter note and opens no panel when
+    `auto_create_notes_enabled` is on, and makes neither when it is off.
+  - `note.create` names the note by its title when one is given.
+  - The migration moves a note out of `tabOrder`, repairs an `activeTabID`
+    that names it, removes a tab's own note panel with its front falling back,
+    creates no worktree panel, and leaves a worktree with no notes untouched.
 - **CLI:** parsing for `--changes` and `tbd note list`.
 - **App:**
   - No note becomes a workspace tab.
@@ -243,6 +226,8 @@ tabs, so they are reached through the side panel's + menu until one does.
   - The side strip's + menu lists exactly the notes without a panel.
   - ◫ opens Changes on an empty region and expands a collapsed one.
   - ⌘⇧E's three states each send the right operation.
+  - The Notes button's three states each send the right operation for the
+    worktree's first note, and with no note it creates "Notes" and opens it.
   - A file click in Changes sends `open(.file)`, and Shift-click sends it with
     `newPanel`.
   - The right column and its keys are gone.
@@ -261,9 +246,8 @@ tabs, so they are reached through the side panel's + menu until one does.
 - **App and daemon skew.** An app older than this migration finds the notes gone
   from the tab bar and no way to show them until it updates.
 - **Rolling back to an older build.** An older daemon cannot read a tab whose
-  front panel is a worktree panel, which after the migration is most tabs, so
-  its next tab sync imports each such tab again from its legacy layout, and
-  the tab loses the panels of its own.
+  front panel is a worktree panel, so its next tab sync imports each such tab
+  again from its legacy layout, and the tab loses the panels of its own.
 
 ## Rejected alternatives
 
@@ -275,6 +259,8 @@ tabs, so they are reached through the side panel's + menu until one does.
   homes.
 - **Reusing a note panel with history, as files do.** A note is a document the
   user keeps open; stepping it through other notes hides one to show another.
+- **Opening the starter note in every worktree.** It narrows every terminal for
+  a note most worktrees leave empty.
 - **Moving only the Changes button.** It keeps two right-hand areas side by side.
 - **Keeping "Note" in the workspace bar's + menu.** That menu makes workspace
   tabs; a note made there would appear somewhere other than where it was asked
