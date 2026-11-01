@@ -227,16 +227,27 @@ extension MainToolbarController {
     /// AppKit creates the item for `.sidebarTrackingSeparator` and finds a
     /// sidebar on its own, but only documents that for a split it can
     /// discover; in the app the split sits inside SwiftUI's hosting view, so
-    /// the binding is made explicit on every apply.
+    /// every apply checks the binding, and sets it only when it differs.
     private func bindTrackingSeparator() {
         guard let split,
               let separator = item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem else { return }
-        // Read as optional: an item AppKit has not bound yet holds no split view.
-        let bound: NSSplitView? = separator.splitView
-        guard bound !== split.splitView || separator.dividerIndex != 0 else { return }
+        guard Self.boundSplitView(of: separator) !== split.splitView || separator.dividerIndex != 0 else { return }
         separator.splitView = split.splitView
         separator.dividerIndex = 0
         itemsLogger.debug("Main toolbar bound the tracking separator to the main split")
+    }
+
+    /// The split view `separator` is bound to, or `nil` when it is bound to
+    /// none.
+    ///
+    /// `splitView` is declared nonnull, so Swift reads it as `NSSplitView`,
+    /// but the item AppKit makes for `.sidebarTrackingSeparator`, through the
+    /// plain `init(itemIdentifier:)`, holds none until it is bound. Reading
+    /// that through the property would carry a nil reference in a non-optional
+    /// value, so it is read through KVC, which returns `nil` for an unset
+    /// property.
+    static func boundSplitView(of separator: NSTrackingSeparatorToolbarItem) -> NSSplitView? {
+        separator.value(forKey: "splitView") as? NSSplitView
     }
 
     private func updateFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {

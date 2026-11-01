@@ -85,9 +85,25 @@ struct MainToolbarControllerTests {
 
         let separator = try #require(
             fixture.controller.item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem)
-        let bound: NSSplitView? = separator.splitView
+        let bound = MainToolbarController.boundSplitView(of: separator)
         #expect(bound === fixture.split.splitView)
         #expect(separator.dividerIndex == 0)
+    }
+
+    /// The separator's split view is declared nonnull, but an item made the
+    /// way AppKit makes the standard one, through `init(itemIdentifier:)`,
+    /// holds none. The controller's read reports none for it rather than
+    /// trusting the annotation, and reports the split view a bound item holds.
+    @Test func separatorReadReportsAnUnboundItem() {
+        let unbound = NSTrackingSeparatorToolbarItem(itemIdentifier: .sidebarTrackingSeparator)
+        let unboundView = MainToolbarController.boundSplitView(of: unbound)
+        #expect(unboundView == nil)
+
+        let splitView = NSSplitView()
+        let bound = NSTrackingSeparatorToolbarItem(
+            identifier: .sidebarTrackingSeparator, splitView: splitView, dividerIndex: 0)
+        let boundView = MainToolbarController.boundSplitView(of: bound)
+        #expect(boundView === splitView)
     }
 
     @Test func noSwiftUIItems() async throws {
