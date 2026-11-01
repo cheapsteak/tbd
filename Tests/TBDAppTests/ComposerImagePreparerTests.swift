@@ -18,7 +18,14 @@ import UniformTypeIdentifiers
 /// `aSmallImageKeepsItsSize` fails there while passing on a CI runner with no
 /// screen. The pixel dimensions are the subject of these tests, so they are
 /// stated rather than inherited from the hardware.
-@MainActor
+///
+/// **Not `@MainActor`, on purpose.** Nothing here needs the main thread: the
+/// preparer's decode and encode paths are nonisolated ImageIO work, and the
+/// fixtures are built with `NSBitmapImageRep`, which AppKit does not isolate to
+/// the main actor. The suite is also among the heaviest CPU in the app test
+/// pass, so off the main actor it runs on the cooperative pool beside the
+/// main-thread suites instead of queueing ahead of them. `imageData(from:)` reads a
+/// pasteboard and *is* `@MainActor`; a test of it belongs in a suite that is.
 @Suite("ComposerImagePreparer")
 struct ComposerImagePreparerTests {
 
@@ -45,12 +52,21 @@ struct ComposerImagePreparerTests {
         if noisy {
             // A tiny xorshift, so the fixture is incompressible and identical
             // on every run.
+            //
+            // A `while` over the raw pointer, not `for index in 0..<count`:
+            // tests build unoptimized, where every step of a `Range` iterator is
+            // an unspecialized generic call. At 4000×3000×3 bytes that iterator
+            // alone was over half of this suite's CPU — about 4 s on a CI
+            // runner, four times the preparer it feeds. The bytes are the same
+            // either way.
             var state: UInt32 = 0x1234_5678
-            for index in 0..<count {
+            var index = 0
+            while index < count {
                 state ^= state << 13
                 state ^= state >> 17
                 state ^= state << 5
                 bytes[index] = UInt8(truncatingIfNeeded: state)
+                index += 1
             }
         } else {
             memset(bytes, 0x40, count)
