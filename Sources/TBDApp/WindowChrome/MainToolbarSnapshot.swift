@@ -16,7 +16,6 @@ struct RepoFilterPresentation: Equatable {
 
 /// The Servers button for the one selected worktree.
 struct ServersPresentation: Equatable {
-    var worktreeID: UUID
     var title: String
     var isRunning: Bool
     var primaryURL: String?
@@ -25,8 +24,9 @@ struct ServersPresentation: Equatable {
 }
 
 /// The selected remote session's toolbar buttons.
+/// Its actions read the selected session when they are clicked, so it carries
+/// no selection of its own.
 struct RemotePresentation: Equatable {
-    var selection: RemoteSessionSelection
     /// The Transcript toggle is offered: only while the session is attached.
     var showsTranscript: Bool
     var showsReconnect: Bool
@@ -38,8 +38,10 @@ struct RemotePresentation: Equatable {
     var transcriptHelp: String { transcriptShown ? "Hide transcript" : "Show transcript" }
 }
 
-/// Everything the AppKit main toolbar reads from `AppState`, as plain values,
-/// so the toolbar can compare two snapshots and rebuild only on a change.
+/// Everything the AppKit main toolbar reads from `AppState`, as plain values.
+/// Each apply makes one, and the controller never compares two of them: it
+/// diffs the items against the layout, then sets each item property only when
+/// it differs from what the item shows (`MainToolbarController.updateContent`).
 /// The rules mirror the SwiftUI toolbar in `ContentView`.
 struct MainToolbarSnapshot: Equatable {
     var canGoBack: Bool
@@ -75,7 +77,6 @@ struct MainToolbarSnapshot: Equatable {
             let runningCount = ServersButtonLabel.runningCount(list)
             let primaryURL = AppState.primaryDevServerURL(list)
             servers = ServersPresentation(
-                worktreeID: worktreeID,
                 title: ServersButtonLabel.title(runningCount: runningCount),
                 isRunning: runningCount > 0,
                 primaryURL: primaryURL,
@@ -93,7 +94,6 @@ struct MainToolbarSnapshot: Equatable {
             let showsTranscript = transcript.showsToggle
             if showsReconnect || showsStop || showsTranscript {
                 remote = RemotePresentation(
-                    selection: selection,
                     showsTranscript: showsTranscript,
                     showsReconnect: showsReconnect,
                     showsStop: showsStop,

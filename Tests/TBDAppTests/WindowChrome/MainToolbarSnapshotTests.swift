@@ -87,7 +87,6 @@ struct MainToolbarSnapshotTests {
 
             state.selectedWorktreeIDs = [a]
             let idle = MainToolbarSnapshot.make(from: state).servers
-            #expect(idle?.worktreeID == a)
             #expect(idle?.title == "Servers")
             #expect(idle?.isRunning == false)
             #expect(idle?.primaryURL == nil)
@@ -129,7 +128,6 @@ struct MainToolbarSnapshotTests {
         sourceLocation: SourceLocation = #_sourceLocation
     ) {
         let presentation = state.remoteTranscriptPresentation(for: selection)
-        #expect(remote.selection == selection, sourceLocation: sourceLocation)
         #expect(remote.showsTranscript == presentation.showsToggle, sourceLocation: sourceLocation)
         #expect(remote.showsReconnect == presentation.attached, sourceLocation: sourceLocation)
         #expect(remote.transcriptShown == presentation.showsPane, sourceLocation: sourceLocation)
@@ -189,10 +187,8 @@ struct MainToolbarSnapshotTests {
     }
 
     @Test func remotePresentationSymbolAndHelp() {
-        let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
         let shown = RemotePresentation(
-            selection: selection, showsTranscript: true, showsReconnect: true,
-            showsStop: false, transcriptShown: true)
+            showsTranscript: true, showsReconnect: true, showsStop: false, transcriptShown: true)
         var hidden = shown
         hidden.transcriptShown = false
         #expect(shown.transcriptSymbolName == "text.bubble.fill")
@@ -202,15 +198,13 @@ struct MainToolbarSnapshotTests {
     }
 
     @Test func layoutStateMapsPresence() {
-        let selection = RemoteSessionSelection(provider: "acme", sessionID: "s1")
         let filter = RepoFilterPresentation(
             options: [.init(id: nil, title: "All Repos")], selected: nil, selectedIsKnown: true)
         let servers = ServersPresentation(
-            worktreeID: UUID(), title: "Servers", isRunning: false, primaryURL: nil,
+            title: "Servers", isRunning: false, primaryURL: nil,
             help: "Dev servers", accessibilityLabel: "Dev servers")
         let remote = RemotePresentation(
-            selection: selection, showsTranscript: true, showsReconnect: false,
-            showsStop: true, transcriptShown: false)
+            showsTranscript: true, showsReconnect: false, showsStop: true, transcriptShown: false)
 
         let bare = MainToolbarSnapshot(
             canGoBack: false, canGoForward: false, filter: filter, servers: nil, remote: nil)
