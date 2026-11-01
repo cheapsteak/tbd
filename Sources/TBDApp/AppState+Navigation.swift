@@ -391,8 +391,9 @@ extension AppState {
     /// half directly (`syncRemoteSurfaceToWorktreeSelection`).
     ///
     /// Both row kinds share the unread clear. A plain selection only browses
-    /// the surface; an explicit Attach action also records connection intent
-    /// and clears a clean-detach flag.
+    /// the surface; an explicit Attach action also records connection intent,
+    /// clears a clean-detach flag, and ends a transcript hide on `selection`
+    /// (`remoteTranscriptHiddenSelection`).
     func showRemoteSessionSurface(
         _ selection: RemoteSessionSelection, reattach: Bool
     ) {
@@ -401,6 +402,7 @@ extension AppState {
         if reattach {
             touchAttachedRemoteSession(selection)
             clearRemoteSessionDetachedFlag(selection)
+            endRemoteTranscriptHide(for: selection)
         }
         focusRemoteTerminalAfterSelectionChange(selection)
     }

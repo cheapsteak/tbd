@@ -1,62 +1,171 @@
 import AppKit
 import SwiftUI
 
-/// The remote detail pane's two halves: `leading` always, `trailing` beside it
-/// when `showsTrailing`, with a draggable divider between them.
+/// The remote detail pane: the terminal side and the transcript, placed by
+/// role with a draggable divider between them, over a live-terminal slot that
+/// hosts the attached terminal.
 ///
-/// A plain `HStack` rather than `HSplitView`, because the one property this
-/// container exists for is that **adding or removing the trailing half never
-/// remounts the leading one**. The leading half hosts `RemoteAttachPager`,
-/// whose `NSTabViewController` owns every live attach connection; dismantling
-/// it would drop them all. In an `HStack` the leading child sits at a fixed
-/// position in a `TupleView`, so SwiftUI's structural identity keeps it — and
-/// the AppKit views under it — across the toggle. `HSplitView` bridges its
-/// children into `NSSplitView` subviews, and nothing documents that it keeps a
-/// sibling's hosted views when the child list changes shape.
-/// `RemoteDetailSplitTests` pins the property.
-struct RemoteDetailSplit<Leading: View, Trailing: View>: View {
-    let showsTrailing: Bool
-    @ViewBuilder let leading: () -> Leading
-    @ViewBuilder let trailing: () -> Trailing
+/// `terminal` always shows. `transcript` and the divider show beside it when
+/// `showsTranscript`, and `transcriptLeads` says which half is on the left:
+/// the transcript while the session is not attached, the terminal once it is.
+/// `transcriptLeads` is ignored while the transcript is hidden, and the
+/// terminal side then spans the pane.
+///
+/// `liveTerminal` is always laid out where the attached terminal is drawn —
+/// the left half, or the whole pane without the transcript — whatever
+/// `transcriptLeads` says, and it is drawn behind everything else. It hosts
+/// `RemoteAttachPager`, which keeps other sessions' terminals alive. While
+/// the session on screen is not attached, the pager keeps the tab it last
+/// showed selected, and that one terminal stays laid out. Were the pager
+/// inside the terminal side, viewing a session that is not attached would
+/// move it into the right half with the terminal side and resize that
+/// terminal's remote program. The terminal side draws over it, and renders
+/// nothing while attached so the live terminal shows through.
+///
+/// The one property this container exists for is that **the split never
+/// remounts any of its parts** — not when the transcript shows or hides, and
+/// not when the halves swap. `RemoteAttachPager`'s `NSTabViewController` owns
+/// every live attach connection, and the transcript is
+/// `RemoteTranscriptLivePane`, which owns a sync driver; dismantling either
+/// would drop them. So each part keeps a fixed structural position in the view
+/// tree — the live terminal first, then the terminal side, both
+/// unconditionally, then the divider and the transcript while shown — and a
+/// private `Layout` reads each subview's role (a `LayoutValueKey`) and places
+/// it from `columns(...)`. A swap changes only where each half is drawn, so
+/// SwiftUI's structural identity keeps every part and the AppKit views under
+/// them. A container that places children by order cannot do this: reordering
+/// an `HStack`'s children changes their structural identity, and `HSplitView`
+/// bridges its children into `NSSplitView` subviews with nothing documenting
+/// that it keeps a sibling's hosted views when the child list changes.
+///
+/// The divider sets the width of whichever half is on the right, so the half
+/// that moves there takes the stored width. `RemoteDetailSplitTests` pins the
+/// placement, the width math, that the live terminal holds still across a
+/// swap, and that no part is remade.
+struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal: View>: View {
+    let showsTranscript: Bool
+    let transcriptLeads: Bool
+    @ViewBuilder let terminal: () -> TerminalSide
+    @ViewBuilder let transcript: () -> TranscriptSide
+    @ViewBuilder let liveTerminal: () -> LiveTerminal
 
-    static var leadingMinWidth: CGFloat { 240 }
-    static var trailingMinWidth: CGFloat { 280 }
+    /// The minimums are by position, not by role; `clamp` applies both to the
+    /// right half's width.
+    static var leftMinWidth: CGFloat { 240 }
+    static var rightMinWidth: CGFloat { 280 }
     private static var dividerHitWidth: CGFloat { 6 }
 
-    /// The trailing half's width (420 pt by default), kept across hide/show
-    /// within one mount.
-    @State private var trailingWidth: CGFloat = 420
+    /// The right half's width (420 pt by default), whichever role sits there,
+    /// kept across hide, show and swap within one mount, and across a pane too
+    /// narrow for both minimums (`fitsBothMinimums`).
+    @State private var rightWidth: CGFloat = 420
     /// The width a drag started from, so the drag is relative to it.
     @State private var dragOrigin: CGFloat?
 
     var body: some View {
         GeometryReader { proxy in
-            HStack(spacing: 0) {
-                leading()
-                    .frame(minWidth: Self.leadingMinWidth, maxWidth: .infinity, maxHeight: .infinity)
-                if showsTrailing {
-                    divider(totalWidth: proxy.size.width)
-                    trailing()
-                        .frame(width: clampedTrailingWidth(totalWidth: proxy.size.width))
-                        .frame(maxHeight: .infinity)
+            let totalWidth = proxy.size.width
+            let columns = Self.columns(
+                totalWidth: totalWidth,
+                rightWidth: clampedRightWidth(totalWidth: totalWidth),
+                dividerWidth: Self.dividerHitWidth,
+                showsTranscript: showsTranscript,
+                transcriptLeads: transcriptLeads)
+            let layout = RemoteDetailSplitLayout(columns: columns)
+            // Each part takes exactly the column it is proposed: with both a
+            // minimum and a maximum, a frame adopts its proposal whatever its
+            // content asks for. Subviews draw in this order, so the live
+            // terminal sits behind the rest.
+            layout {
+                liveTerminal()
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .layoutValue(key: RemoteDetailSplitRoleKey.self, value: .liveTerminal)
+                terminal()
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .layoutValue(key: RemoteDetailSplitRoleKey.self, value: .terminal)
+                if showsTranscript {
+                    divider(totalWidth: totalWidth)
+                        .layoutValue(key: RemoteDetailSplitRoleKey.self, value: .divider)
+                    transcript()
+                        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                        .layoutValue(key: RemoteDetailSplitRoleKey.self, value: .transcript)
                 }
             }
         }
     }
 
-    /// Never narrower than its minimum, and never so wide the leading half
-    /// drops below its own.
-    private func clampedTrailingWidth(totalWidth: CGFloat) -> CGFloat {
-        Self.clamp(
-            trailingWidth, totalWidth: totalWidth,
-            leadingMin: Self.leadingMinWidth, trailingMin: Self.trailingMinWidth)
+    /// Where each part is drawn, as offsets from the split's left edge. Pure,
+    /// so the placement can be tested without a window.
+    ///
+    /// Without the transcript the terminal side and the live terminal span the
+    /// whole width and `transcriptLeads` changes nothing. With it, the right
+    /// half is `rightWidth` wide, the divider sits just left of it, and the
+    /// left half takes what remains. `rightWidth` arrives clamped (`clamp`),
+    /// so in a pane too narrow for both minimums both halves have already
+    /// shrunk in proportion and neither collapses.
+    /// The terminal side takes the right half when `transcriptLeads`, the left
+    /// half otherwise. The live terminal takes the left half either way, which
+    /// is where the terminal side is drawn while attached.
+    nonisolated static func columns(
+        totalWidth: CGFloat, rightWidth: CGFloat, dividerWidth: CGFloat,
+        showsTranscript: Bool, transcriptLeads: Bool
+    ) -> RemoteDetailSplitColumns {
+        guard showsTranscript else {
+            let whole = RemoteDetailSplitColumn(x: 0, width: totalWidth)
+            return RemoteDetailSplitColumns(
+                terminal: whole, divider: nil, transcript: nil, liveTerminal: whole)
+        }
+        let leftWidth = max(0, totalWidth - rightWidth - dividerWidth)
+        let left = RemoteDetailSplitColumn(x: 0, width: leftWidth)
+        let middle = RemoteDetailSplitColumn(x: leftWidth, width: dividerWidth)
+        let right = RemoteDetailSplitColumn(x: leftWidth + dividerWidth, width: rightWidth)
+        return RemoteDetailSplitColumns(
+            terminal: transcriptLeads ? right : left,
+            divider: middle,
+            transcript: transcriptLeads ? left : right,
+            liveTerminal: left)
     }
 
-    static func clamp(
-        _ width: CGFloat, totalWidth: CGFloat, leadingMin: CGFloat, trailingMin: CGFloat
+    /// The stored right-half width, clamped for a pane `totalWidth` wide (see
+    /// `clamp`). The left half is the main side. In a pane too narrow for
+    /// both minimums, both halves shrink in proportion and neither collapses.
+    private func clampedRightWidth(totalWidth: CGFloat) -> CGFloat {
+        Self.clamp(
+            rightWidth, totalWidth: totalWidth,
+            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth, dividerWidth: Self.dividerHitWidth)
+    }
+
+    /// Whether a pane `totalWidth` wide holds both halves at their minimums
+    /// beside the divider. While it does, `clamp` applies the stored width
+    /// and the divider sets it. While it does not, `clamp` ignores the stored
+    /// width and the divider writes none, so the width the user set returns
+    /// once the pane widens again.
+    nonisolated static func fitsBothMinimums(
+        totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
+    ) -> Bool {
+        totalWidth - dividerWidth >= leftMin + rightMin
+    }
+
+    /// The right half's width in a pane `totalWidth` wide, from the stored
+    /// `width`. The left half is the main side (the live terminal while
+    /// attached, the transcript while not).
+    ///
+    /// While the pane holds both minimums beside the divider
+    /// (`fitsBothMinimums`), `width` is kept to at least `rightMin` and to at
+    /// most what leaves `leftMin` for the left half. In a pane too narrow for
+    /// both minimums, both halves shrink in proportion to their minimums and
+    /// neither collapses: the right half takes `rightMin / (leftMin +
+    /// rightMin)` of what the divider leaves, whatever `width` is.
+    nonisolated static func clamp(
+        _ width: CGFloat, totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
     ) -> CGFloat {
-        let upper = max(trailingMin, totalWidth - leadingMin)
-        return min(max(width, trailingMin), upper)
+        guard fitsBothMinimums(
+            totalWidth: totalWidth, leftMin: leftMin, rightMin: rightMin, dividerWidth: dividerWidth)
+        else {
+            let available = max(0, totalWidth - dividerWidth)
+            return available * rightMin / (leftMin + rightMin)
+        }
+        return min(max(width, rightMin), totalWidth - leftMin - dividerWidth)
     }
 
     private func divider(totalWidth: CGFloat) -> some View {
@@ -70,13 +179,91 @@ struct RemoteDetailSplit<Leading: View, Trailing: View>: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        let origin = dragOrigin ?? clampedTrailingWidth(totalWidth: totalWidth)
+                        // Too narrow for both minimums, `clamp` ignores the
+                        // stored width, so a write here would only lose it.
+                        guard Self.fitsBothMinimums(
+                            totalWidth: totalWidth, leftMin: Self.leftMinWidth,
+                            rightMin: Self.rightMinWidth, dividerWidth: Self.dividerHitWidth)
+                        else { return }
+                        let origin = dragOrigin ?? clampedRightWidth(totalWidth: totalWidth)
                         if dragOrigin == nil { dragOrigin = origin }
-                        trailingWidth = Self.clamp(
+                        rightWidth = Self.clamp(
                             origin - value.translation.width, totalWidth: totalWidth,
-                            leadingMin: Self.leadingMinWidth, trailingMin: Self.trailingMinWidth)
+                            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth,
+                            dividerWidth: Self.dividerHitWidth)
                     }
                     .onEnded { _ in dragOrigin = nil })
             .accessibilityHidden(true)
+    }
+}
+
+/// One horizontal span of the split: its offset from the split's left edge
+/// and its width.
+struct RemoteDetailSplitColumn: Equatable, Sendable {
+    var x: CGFloat
+    var width: CGFloat
+}
+
+/// Where `RemoteDetailSplit` draws each of its parts. `divider` and
+/// `transcript` are nil while the transcript is hidden; `liveTerminal` is where
+/// the attached terminal is drawn, whichever half leads.
+struct RemoteDetailSplitColumns: Equatable, Sendable {
+    var terminal: RemoteDetailSplitColumn
+    var divider: RemoteDetailSplitColumn?
+    var transcript: RemoteDetailSplitColumn?
+    var liveTerminal: RemoteDetailSplitColumn
+}
+
+/// What a subview of the split is, read by `RemoteDetailSplitLayout` to find
+/// its column.
+private enum RemoteDetailSplitRole: Sendable {
+    case liveTerminal
+    case terminal
+    case divider
+    case transcript
+}
+
+/// Tags each subview of the split with its role. Nil, the default, marks a
+/// subview the split did not tag; it gets no column.
+private struct RemoteDetailSplitRoleKey: LayoutValueKey {
+    static var defaultValue: RemoteDetailSplitRole? { nil }
+}
+
+private extension RemoteDetailSplitColumns {
+    func column(for role: RemoteDetailSplitRole) -> RemoteDetailSplitColumn? {
+        switch role {
+        case .liveTerminal: liveTerminal
+        case .terminal: terminal
+        case .divider: divider
+        case .transcript: transcript
+        }
+    }
+}
+
+/// Places each subview of the split by its role, never by its index, at the
+/// full height of the split. A plain value with no actor state, because
+/// `Layout`'s requirements are nonisolated.
+private struct RemoteDetailSplitLayout: Layout {
+    let columns: RemoteDetailSplitColumns
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        for subview in subviews {
+            guard let role = subview[RemoteDetailSplitRoleKey.self],
+                  let column = columns.column(for: role)
+            else {
+                subview.place(at: bounds.origin, anchor: .topLeading, proposal: .zero)
+                continue
+            }
+            subview.place(
+                at: CGPoint(x: bounds.minX + column.x, y: bounds.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: column.width, height: bounds.height))
+        }
     }
 }

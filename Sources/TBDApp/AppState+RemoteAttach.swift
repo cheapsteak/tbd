@@ -181,6 +181,16 @@ extension AppState {
         attachedRemoteSelections(now: Date())
     }
 
+    /// Whether `selection` is attached: it is in `attachedRemoteSelections`,
+    /// the set `RemoteAttachPager` mounts. This is the one meaning of
+    /// "attached" for remote sessions — the toolbar's Reconnect button, the
+    /// detail pane's attach slot and the transcript gates all read it. A
+    /// session that exits, goes gone, is dismissed, or whose provider needs
+    /// sign-in leaves eligibility and so stops being attached.
+    func remoteSessionIsAttached(_ selection: RemoteSessionSelection) -> Bool {
+        attachedRemoteSelections.contains(selection)
+    }
+
     /// `attachedRemoteSelections` paired with each selection's restart
     /// generation — the identities `RemoteAttachPager` mounts its tab items
     /// under. A `reconnectRemoteSession` bump changes a selection's key, which
