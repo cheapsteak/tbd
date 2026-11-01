@@ -43,25 +43,25 @@ import Testing
 /// binding constraint rather than an incidental one.
 ///
 /// The pass that binds this value is fast pass 2 (everything but the two
-/// daemon targets, ~7200 tests). Measured on five green CI runs with pass 2
-/// as one step, its slowest test reported 67.2–94.5 s (p90 55–79 s, p99
-/// 66–93 s), and runner noise alone moves that tail by about twenty seconds.
-/// Fast passes 1a and 1b report shorter tails (slowest 51.7–74.2 s and
-/// 22.5–34.2 s). A reported duration there also includes the time a test
-/// waits for its body to start, which a wait inside the body never pays, so
-/// those figures bound a wait only loosely.
+/// daemon targets, ~7200 tests). Its worst green maximum on record is 101.7 s,
+/// with pass 2 as one step. Five other green runs as one step measured its
+/// slowest test at 67.2–94.5 s (p90 55–79 s, p99 66–93 s), and runner noise
+/// alone moves that tail by about twenty seconds. A tail that near the 100 s
+/// trigger is why pass 2 runs as two steps, 2a and 2b, cut by main-thread
+/// time: on one green run their slowest tests reported 41.0 s and 37.5 s (p99
+/// 40.9 s and 36.0 s). Fast passes 1a and 1b report slowest tests of
+/// 51.7–74.2 s and 22.5–34.2 s, and a reported duration there also includes
+/// the time a test waits for its body to start, which a wait inside the body
+/// never pays, so those figures bound a wait only loosely.
 ///
 /// The sizing rule clears the worst green tail by about 18 s, because runner
-/// noise alone moves it by about twenty. 120 s clears pass 2's 94.5 s by
-/// about 25 s, and the deadline still elapses only on a genuine hang. Nothing
-/// below about 113 s satisfies the rule, and a step that small does not repay
-/// re-deriving the values coupled to this one: `TestGate.deadline`,
-/// `.fastPassBounded`, and the tier-3 suite limits summed from chains of
-/// these waits. A tail within about 6 s of the 100 s trigger is why pass 2
-/// runs as two steps, 2a and 2b, cut by main-thread time; the split should
-/// roughly halve its tail, and the figures here are re-measured on the
-/// halves' first green runs (`Tests/CLAUDE.md`, "Population is the
-/// scheduler").
+/// noise alone moves it by about twenty. 120 s clears the 101.7 s on record by
+/// about 18 s, and the 94.5 s by about 25 s, and the deadline still elapses
+/// only on a genuine hang. It is sized against the record and is not
+/// re-derived from the split halves' tails. Re-deriving it would also move
+/// the values coupled to it: `TestGate.deadline`, `.fastPassBounded`, and the
+/// tier-3 suite limits summed from chains of these waits (`Tests/CLAUDE.md`,
+/// "Population is the scheduler").
 ///
 /// ## The interaction with `.clockDriven` — read before changing either value
 ///

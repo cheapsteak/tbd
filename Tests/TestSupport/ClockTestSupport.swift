@@ -29,14 +29,15 @@ public extension Trait where Self == TimeLimitTrait {
     /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a slowest test of
     /// 51.7–74.2 s; fast pass 1b (the rest of the daemon target, ~3900 tests)
     /// 22.5–34.2 s; fast pass 2 (everything else, ~7200 tests), measured as
-    /// one step, 67.2–94.5 s (p90 55–79 s, p99 66–93 s). Pass 2 runs as two
-    /// steps, 2a and 2b, which should roughly halve that tail; re-measure it on
-    /// their first green runs. A limit of one minute sits **below the p99** of
-    /// every healthy pass 2 measured, and inside the range of its p90 — it is a
-    /// coin flip on green runs, and it fired that way on three
-    /// `TerminalLockedAccessTests` tests at the same instant, twice in five
-    /// days, with no hang anywhere. Five minutes clears the largest measured
-    /// maximum by about 3x while staying a small fraction of the step budget.
+    /// one step, 67.2–94.5 s (p90 55–79 s, p99 66–93 s), with 101.7 s the
+    /// worst on record. Split into 2a and 2b, pass 2's slowest tests reported
+    /// 41.0 s and 37.5 s on one green run (p90 34.1 s and 29.4 s). A limit of
+    /// one minute sits inside pass 1a's range of slowest tests and **below the
+    /// p99** of every healthy one-step pass 2 measured — it is a coin flip on
+    /// green runs, and it fired that way on three `TerminalLockedAccessTests`
+    /// tests at the same instant, twice in five days, with no hang anywhere.
+    /// Five minutes clears the largest maximum on record by about 3x while
+    /// staying a small fraction of the step budget.
     /// The full derivation — how 300 s composes with `ciSafeDeadline` (120 s)
     /// and the arming waits (45 s), and the invariant the three satisfy
     /// together — is on ``clockDriven`` below; re-derive all of them together

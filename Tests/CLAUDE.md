@@ -339,7 +339,10 @@ because adding a target reduces no existing step's count. Written as
 complements, 1b absorbs any daemon suite that falls outside `[A-O]` (including
 one renamed to start with a digit), and 2b, one `--skip` regex, absorbs any new
 target and any app suite outside `[A-P]`, so the five passes partition the
-package by construction. The per-step floors have a
+package by construction. A suite-less app test runs in 2b unless its function
+name starts with an uppercase A–P: its ID is `TBDAppTests.Name()`, which 2a's
+filter also matches. Swift function names are normally lowercase, so in
+practice those tests run in 2b. The per-step floors have a
 narrower job: catching a target that *is* named in one of these regexes
 collapsing or being renamed, where the regex would zero-match or over-skip its
 way to a green run of nothing. Keep them updated.
@@ -352,15 +355,20 @@ on five green runs with pass 2 as one step, its slowest test reported
 and still put 94.5 s on pass 2's slowest test. The trigger to split is a green
 maximum near 100 s, which is `saturatedPass` less the 18 s margin below.
 94.5 s is within about 6 s of it, and pass 2's timing tests flake in that tail;
-one failed after 94.2 s. A split runs its halves one after the other, so it
-saves no main-thread time, and the job pays about 26 s more startup. What it
-buys is a tail roughly half as long, because a test queues behind only its own
-half's main-actor work. So the cut halves main-thread time, not test count.
-Through `P`, TBDAppTests holds 51.6% and 53.6% of pass 2's main-thread samples
-in two whole-pass profiles, and 52% of its own tests. 2a executes about 2,700
-tests and 2b about 4,540, because 2b also holds the targets that do little on
-the main thread. When the halves' tails drift apart, re-cut from a whole-pass
-profile, not from test counts.
+one failed after 94.2 s. A split does not reduce the main-thread work, and it
+adds an invocation's startup, about 26 s. What it buys is a shorter tail,
+because a test queues behind only its own half's main-actor work. So the cut
+halves main-thread time, not test count. Through `P`, TBDAppTests holds 51.6%
+and 53.6% of pass 2's main-thread samples in two whole-pass profiles, and 52%
+of its own tests. Measured on one green run with the split, 2a executed 2,501
+tests and 2b 4,739, because 2b also holds the targets that do little on the
+main thread. The slowest test reported 41.0 s in 2a (p99 40.9 s) and 37.5 s in
+2b (p99 36.0 s), against 67.2–94.5 s with one step. The two steps took 61 s
+and 57 s, 118 s together, against 87–123 s for the single step on recent runs
+of `main`, so on that run the split cost no measurable job time: halving the
+main-thread queue saved about what the extra startup costs. That is one run.
+When the halves' tails drift apart, re-cut from a whole-pass profile, not from
+test counts.
 
 **Wall-clock handshake deadlines are hang-catchers sized against the population
 of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`),
@@ -484,18 +492,22 @@ targets, ~7200 tests) reported a slowest test of 67.2–94.5 s, with p90
 55–79 s and p99 66–93 s, and runner noise alone moves its tail by about twenty
 seconds. Fast pass 1a (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a
 slowest test of 51.7–74.2 s, and fast pass 1b (~3900 tests) 22.5–34.2 s.
-Reported duration is almost entirely time suspended behind other runnable
-tests. In pass 1 it also includes the time a test waits for its body to start
-at all, which no bound inside the body pays, so pass 1's figures bound a wait
-only loosely. Pass 2 sets the tail `saturatedPass` is sized against (the
-derivation is at `ciSafeDeadline`). A 2–30 s hand-rolled wait therefore sits
-well below the healthy latency of the very hop it is guarding, and a one-minute
-suite limit sits below pass 2's p99 on every run measured. Both fire on healthy
-runs, and both did. Three exceptions, and only these: a
-**negative-assertion window** ("nothing fires within X") is the assertion and
-is never lengthened; a **discriminating threshold** that decides
-between two diagnoses (`FileWatcherTests`' `attemptWindow`) is likewise the
-assertion; and a **gate's own self-release cap** takes `TestGate.deadline`,
+Measured on one green run with pass 2 split, 2a (`^TBDAppTests\.[A-P]`, 2,501
+tests) reported p90 34.1 s, p99 40.9 s and a slowest test of 41.0 s, and 2b
+(4,739 tests) p90 29.4 s, p99 36.0 s and 37.5 s. Reported duration is almost
+entirely time suspended behind other runnable tests. In pass 1 it also
+includes the time a test waits for its body to start at all, which no bound
+inside the body pays, so pass 1's figures bound a wait only loosely. Pass 2 as
+one step set the tail `saturatedPass` is sized against (the derivation is at
+`ciSafeDeadline`). A 2–30 s hand-rolled wait therefore sits well below the
+healthy latency of the very hop it is guarding, and a one-minute suite limit
+sits inside pass 1a's range of slowest tests and below the p99 of pass 2 as
+one step on every run measured. Both fire on healthy runs, and both did. Three
+exceptions, and only these: a **negative-assertion window** ("nothing fires
+within X") is the assertion and is never lengthened; a **discriminating
+threshold** that decides between two diagnoses (`FileWatcherTests`'
+`attemptWindow`) is likewise the assertion; and a **gate's own self-release
+cap** takes `TestGate.deadline`,
 which is sized to dominate `saturatedPass` so the hold cannot expire mid-
 observation. Everything else — including a wait reached only through production
 code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
@@ -504,25 +516,30 @@ the shared constant.
 
 **`saturatedPass` stays at 120 s.** The sizing rule clears the worst green
 tail by about 18 s, because runner noise alone moves that tail by about twenty
-seconds. Pass 2's worst green maximum as one step is 94.5 s, so 120 s clears it
-by about 25 s. Nothing below about 113 s satisfies the rule, and a step that
-small does not repay re-deriving the values coupled to this one:
-`TestGate.deadline`, the `.fastPassBounded` limit, and the tier-3 suite limits
-summed from chains of `saturatedPass` waits. The split into 2a and 2b should
-roughly halve pass 2's tail. Whether that earns a smaller value is for the
-halves' measured tails to say, not a prediction, so re-measure them on their
-first green runs and update the figures above. Pass 1's tails, at 74.2 s or
-less, are not near 120 s.
+seconds. 120 s clears the worst green pass-2 maximum on record, 101.7 s with
+pass 2 as one step (cited under "Clock and date seams" below), by about 18 s.
+It clears the worst measured with the stall remedies below in place, 94.5 s,
+by about 25 s. Split into 2a and 2b, pass 2's slowest tests reported 41.0 s
+and 37.5 s on one green run. The deadline is sized against the record and is
+not re-derived from those halves. Re-deriving it would also move the values
+coupled to it: `TestGate.deadline`, the `.fastPassBounded` limit, and the
+tier-3 suite limits summed from chains of `saturatedPass` waits. Pass 1's
+tails, at 74.2 s or less, are not near 120 s.
 
 One more thing a reader should not have to mine a log for: the **"72 known
 issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
-self-tests wrapped in `withKnownIssue`, not hidden failures** — almost all of
-them `EventDrivenTestClockSelfTests` driving its own hang guards to their
-diagnostics, plus `BoundedGateWaitTests`' unsignalled gate,
-`FlakyQuarantineSelfTests.retriesUntilPass`, and pass 2's
-`AppStatePublishFrequencyTests` excess-publish records and
-`UserDefaultsTestSupportTests`' "teardown records a refused name as a failure
-and leaves the suite alone".
+self-tests wrapped in `withKnownIssue`, not hidden failures.** Pass 1's are
+almost all `EventDrivenTestClockSelfTests` driving its own hang guards to their
+diagnostics, plus `BoundedGateWaitTests`' unsignalled gate and
+`FlakyQuarantineSelfTests.retriesUntilPass`. Pass 2's are the excess-publish
+records of the suites in `AppStatePublishFrequencyTests.swift`, plus one
+teardown self-test, and each lands in the half its suite's name selects:
+
+- **2a reports 7** – `DeltaIngestionTests` 4, `ControlModeAttachTests` 2 and
+  `NotificationDeltaTests` 1.
+- **2b reports 5** – `TerminalPollTickTests` 2, `RemoteRefreshTests` 1,
+  `SelectionCascadeTests` 1, and `UserDefaultsTestSupportTests`' "teardown
+  records a refused name as a failure and leaves the suite alone" 1.
 
 Three remedies are already refuted; don't re-litigate them.
 
@@ -670,13 +687,14 @@ runner and pinned by `TaskPriorityParityTests`
 (`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
 is queued *behind higher-priority work* — the pool's queue is FIFO among the
 thousands of tasks the pass keeps runnable, and one suspension hop on a green
-run can cost up to about the pass's own per-test tail, around 95 s in fast
-pass 2 as one step (p99 66–93 s on the green runs measured; see "Population is
-the scheduler" for why pass 2 is the measure). A handshake that needs *k* hops
-therefore costs up to *k* × that, and the uninjected latch needs three or
-four — each caller starting, reaching the
+run can cost up to about the pass's own per-test tail: up to 94.5 s with fast
+pass 2 as one step, and 41.0 s in 2a on one green run with the split (see
+"Population is the scheduler" for why pass 2 is the measure). A handshake that
+needs *k* hops therefore costs up to *k* × that, and the uninjected latch needs
+three or four — each caller starting, reaching the
 latch and awaiting the run; the run's own unstructured task starting; then
-every caller resuming. Measured against a 90 s bound, CI saw 0 of 8 callers
+every caller resuming. Measured against a 90 s bound with pass 2 as one step,
+CI saw 0 of 8 callers
 back after 90 s while the test's own polling task, already runnable, kept
 reporting on time: 90 s was one hop's worth of budget for a four-hop
 handshake. **A bound cannot buy a hop its turn** — sizing one to fit four hops
