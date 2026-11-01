@@ -12,7 +12,10 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
-        let note = try await db.notes.create(worktreeID: params.worktreeID)
+        // A blank title takes the "Note N" default, as no title does.
+        let title = params.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = try await db.notes.create(
+            worktreeID: params.worktreeID, title: title?.isEmpty == false ? title : nil)
         return try RPCResponse(result: note)
     }
 

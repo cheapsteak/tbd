@@ -227,6 +227,48 @@ extension RPCRouterTests {
         #expect(notes.count == 1)
     }
 
+    /// `note.create` names the note with the title it is given, and a
+    /// missing or blank title takes the next free "Note N".
+    @Test("note.create takes an optional title")
+    func noteCreateTakesAnOptionalTitle() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "test-wt",
+            branch: "tbd/test-wt",
+            path: "/tmp/test-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-test"
+        )
+
+        let titled = await router.handle(try RPCRequest(
+            method: RPCMethod.noteCreate,
+            params: NoteCreateParams(worktreeID: wt.id, title: "Notes")
+        ))
+        #expect(titled.success)
+        #expect(try titled.decodeResult(Note.self).title == "Notes")
+
+        let untitled = await router.handle(try RPCRequest(
+            method: RPCMethod.noteCreate,
+            params: NoteCreateParams(worktreeID: wt.id)
+        ))
+        #expect(untitled.success)
+        #expect(try untitled.decodeResult(Note.self).title == "Note 1")
+
+        let blank = await router.handle(try RPCRequest(
+            method: RPCMethod.noteCreate,
+            params: NoteCreateParams(worktreeID: wt.id, title: "  ")
+        ))
+        #expect(blank.success)
+        #expect(try blank.decodeResult(Note.self).title == "Note 2")
+
+        let titles = try await db.notes.list(worktreeID: wt.id).map(\.title)
+        #expect(titles.sorted() == ["Note 1", "Note 2", "Notes"])
+    }
+
     @Test("note.update returns error for missing note")
     func noteUpdateMissing() async throws {
         let updateReq = try RPCRequest(

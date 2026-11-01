@@ -4390,9 +4390,17 @@ public struct TerminalRecreateWindowParams: Codable, Sendable {
     }
 }
 
+/// `note.create`'s parameters. `title` names the new note; nil, or a title
+/// of only whitespace, gives it the next free "Note N". A client that sends
+/// no `title` key decodes as nil.
 public struct NoteCreateParams: Codable, Sendable {
     public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    public let title: String?
+
+    public init(worktreeID: UUID, title: String? = nil) {
+        self.worktreeID = worktreeID
+        self.title = title
+    }
 }
 
 public struct NoteGetParams: Codable, Sendable {
