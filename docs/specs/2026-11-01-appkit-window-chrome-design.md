@@ -155,17 +155,21 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   those, so the item keeps its own `isBordered = false`, set explicitly, and
   shows no glass, as the title item does. The bordered button one level down
   keeps its own hover highlight.
-- **Wiring** – the button carries the target and action, and the item
-  neither. The host forwards nothing, so the item is a `ToolbarIconButtonItem`,
-  an `NSToolbarItem` subclass whose `isEnabled` reads its button, so the item
-  and the button cannot drift apart. Setting the flag brings the overflow row
-  along: the setter compares the item's own flag, the button and the row, and
-  sets each only when it differs. Back and forward set the item alone, on
-  every apply, so an apply that changes nothing sets nothing and a row that
-  drifted comes back on the next one. No compact item autovalidates:
-  `NSToolbarItem`'s `validate` does nothing for an item with a custom view,
-  and none of the three wants validating. The host is not an accessibility
-  element, so VoiceOver lands on the button.
+- **Wiring** – the target and action are set on the item and the button; the
+  host forwards neither, so each keeps its own. The item's pair keeps AppKit
+  paths that send the item's own action, such as a text-only display mode,
+  working; glass follows `isBordered`, not these. For the same reason the
+  item is a `ToolbarIconButtonItem`, an `NSToolbarItem` subclass that
+  reports its button's state: setting the item's flag sets the button and the
+  overflow row, and the setter compares the item's own flag, the button and
+  the row, and sets each only when it differs. Back and forward set the item
+  alone, and only when the item or its row differs from the snapshot, because
+  calling the `isEnabled` setter posts KVO change notifications for `enabled`
+  even when nothing changes. So an apply that changes nothing sets nothing,
+  and a row that drifted comes back on the next one. No compact item
+  autovalidates: `NSToolbarItem`'s `validate` does nothing for an item with a
+  custom view, and none of the three wants validating. The host is not an
+  accessibility element, so VoiceOver lands on the button.
 - **Copies** – the toolbar never shows a copy, because user customization is
   off (`allowsUserCustomization = false` in `MainToolbarController`). AppKit
   copies a view item by archiving its view and unarchiving the copy's, and
@@ -263,11 +267,11 @@ No durable resource is added.
 - **Compact buttons:** each is an unbordered `ToolbarIconButtonItem` that does
   not autovalidate, whose host answers none of the selectors an item forwards
   and holds 20 × 28 pt, and whose button fills the host, with its tool tip,
-  target and action; back and forward start disabled, button included, and an
-  apply brings back a row that drifted; setting the toggle item's `isEnabled`
-  moves its button and row, and the item reads a button set directly; a copy
-  keeps the subclass, the host, its layout and the button's glyph and action,
-  and its flag is its button's; the sidebar's minimum thickness is the "Width"
+  target and action, which the item carries too; back and forward start
+  disabled, button included, and an apply brings back a row that drifted;
+  setting the toggle item's `isEnabled` moves its button and row; a copy keeps
+  the subclass, the host, its layout and the button's glyph and action, and
+  its flag is its button's; the sidebar's minimum thickness is the "Width"
   formula.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
   none, sends its action from a menu item without raising; the filter's form

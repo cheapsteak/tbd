@@ -52,9 +52,9 @@ struct ToolbarImageKey {
 /// are marked `shouldBeArchived`: AppKit archives no constraint made in code
 /// otherwise. Accessibility is not archived, so the decoder sets it again.
 final class ToolbarIconButtonHost: NSView {
-    /// The button the host holds, its one subview.
+    /// The button the host holds.
     var button: NSButton? {
-        subviews.first as? NSButton
+        subviews.lazy.compactMap { $0 as? NSButton }.first
     }
 
     init(button: NSButton) {
@@ -84,13 +84,12 @@ final class ToolbarIconButtonHost: NSView {
 /// A compact leading toolbar item, whose view is a `ToolbarIconButtonHost`.
 ///
 /// The host forwards nothing, so the item's `isEnabled` would otherwise never
-/// reach the button. Here the item's flag is its button's: the getter reads
-/// the button, so nothing can leave the two apart, and setting the flag
-/// brings the overflow row along. The setter compares each part, the item's
-/// own flag, the button and the row, and sets only what differs. That holds
-/// whoever sets it: `updateContent(_:)` for Back and Forward, or AppKit when
-/// it copies an item, which enables the copy. Until the item has its host,
-/// the getter reads the item's own flag.
+/// reach the button. Here the item reports its button's state, and setting
+/// the item's flag sets the button and the overflow row. The setter compares
+/// each part, the item's own flag, the button and the row, and sets only what
+/// differs. That holds whoever sets it: `updateContent(_:)` for Back and
+/// Forward, or AppKit when it copies an item, which enables the copy. Until
+/// the item has its host, the getter reads the item's own flag.
 ///
 /// No compact item autovalidates (`makeIconButtonItem`): `validate` does
 /// nothing for an item with a custom view, and none of the three wants
@@ -173,14 +172,17 @@ extension MainToolbarController {
     /// while the pointer is inside it, so it highlights on hover and shows no
     /// bezel at rest. The item is not bordered, and the host answers none of
     /// the properties an item forwards to its view, so the item has no Liquid
-    /// Glass background (see `ToolbarIconButtonHost`). The button carries the
-    /// target and action, the item neither, and the item's overflow row is an
-    /// explicit menu form carrying the same target and action. The item is a
-    /// `ToolbarIconButtonItem`, so its `isEnabled` is its button's and moves
-    /// the row with it. It does not autovalidate: `NSToolbarItem.h` documents
-    /// that `validate` does nothing for an item with a custom view, and none
-    /// of the three wants validating, as the toggle stays enabled and Back
-    /// and Forward follow the snapshot.
+    /// Glass background (see `ToolbarIconButtonHost`). The target and action
+    /// are set on the button and on the item: the host answers neither, so
+    /// the item stores its own, which keeps AppKit paths that send the item's
+    /// action, such as a text-only display mode, working. Glass follows
+    /// `isBordered`, not these. The item's overflow row is an explicit menu
+    /// form carrying the same target and action. The item is a
+    /// `ToolbarIconButtonItem`, so it reports its button's state, and setting
+    /// its flag sets the button and the row. It does not autovalidate:
+    /// `NSToolbarItem.h` documents that `validate` does nothing for an item
+    /// with a custom view, and none of the three wants validating, as the
+    /// toggle stays enabled and Back and Forward follow the snapshot.
     private func makeIconButtonItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
     ) -> ToolbarIconButtonItem {
@@ -212,6 +214,8 @@ extension MainToolbarController {
         item.view = host
         item.isBordered = false
         item.autovalidates = false
+        item.target = target
+        item.action = action
         item.label = tip
         item.toolTip = tip
         let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")
@@ -445,10 +449,10 @@ extension MainToolbarController {
     /// value is set only when it differs from what the item holds, so an
     /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let back = item(MainToolbarItemID.back) as? ToolbarIconButtonItem {
+        if let back = compactItem(MainToolbarItemID.back) {
             updateEnabled(back, snapshot.canGoBack)
         }
-        if let forward = item(MainToolbarItemID.forward) as? ToolbarIconButtonItem {
+        if let forward = compactItem(MainToolbarItemID.forward) {
             updateEnabled(forward, snapshot.canGoForward)
         }
         if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
@@ -466,14 +470,33 @@ extension MainToolbarController {
         }
     }
 
-    /// Enables or disables Back or Forward. The item's setter compares its
-    /// own flag, its button and its overflow row each with `enabled` and sets
-    /// only what differs (`ToolbarIconButtonItem`), so an apply that changes
-    /// nothing sets nothing, and a row that drifted comes back on the next
-    /// apply. The row's own flag matters because the overflow menu may or may
-    /// not validate its rows.
+    /// The present compact item for `identifier`, or nil when there is none.
+    /// An item there of another class is logged and skipped.
+    private func compactItem(_ identifier: NSToolbarItem.Identifier) -> ToolbarIconButtonItem? {
+        guard let found = item(identifier) else { return nil }
+        guard let compact = found as? ToolbarIconButtonItem else {
+            let name = identifier.rawValue
+            let kind = String(describing: type(of: found))
+            itemsLogger.error(
+                "Main toolbar item \(name, privacy: .public) is a \(kind, privacy: .public), not a compact item; skipped")
+            return nil
+        }
+        return compact
+    }
+
+    /// Enables or disables Back or Forward. It calls the item's setter only
+    /// when the item, which reports its button's state, or its overflow row
+    /// differs from `enabled`: calling the `isEnabled` setter posts KVO change
+    /// notifications for `enabled` even when nothing changes, so an apply
+    /// that changes nothing must not call it. The row clause brings a row
+    /// that drifted back on the next apply; the row's own flag matters
+    /// because the overflow menu may or may not validate its rows. The setter
+    /// then sets only the parts that differ (`ToolbarIconButtonItem`).
     private func updateEnabled(_ item: ToolbarIconButtonItem, _ enabled: Bool) {
-        item.isEnabled = enabled
+        let rowDiffers = item.menuFormRepresentation.map { $0.isEnabled != enabled } ?? false
+        if item.isEnabled != enabled || rowDiffers {
+            item.isEnabled = enabled
+        }
     }
 
     /// Gives the title item a fresh overflow row showing `title`, or "No

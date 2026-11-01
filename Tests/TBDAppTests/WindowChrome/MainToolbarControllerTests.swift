@@ -265,14 +265,14 @@ struct MainToolbarControllerTests {
     /// them. A bordered button as an item's view makes the item bordered,
     /// which gives it glass, so the item is not bordered and its view answers
     /// none of the selectors an item forwards to its view (`isBordered`,
-    /// `isEnabled`, `target`, `action` and `image`, getters and setters), and
-    /// the item holds no target or action of its own, which it would if the
-    /// view forwarded them. No item autovalidates: `validate` does nothing for
-    /// an item with a custom view, and none of the three wants validating.
+    /// `isEnabled`, `target`, `action` and `image`, getters and setters). No
+    /// item autovalidates: `validate` does nothing for an item with a custom
+    /// view, and none of the three wants validating.
     ///
     /// The host's button is an accessory-bar button, bordered but showing its
     /// border only under the pointer, image-only, with its tool tip and
-    /// accessibility description, its target and action, and pinned to the
+    /// accessibility description, its target and action, which the item
+    /// carries too, since the host forwards neither, and pinned to the
     /// host's four edges by required constraints, so once laid out its frame
     /// is the host's bounds. The host holds the compact size by required
     /// constraints, found by their identifiers among its edge constraints,
@@ -302,9 +302,6 @@ struct MainToolbarControllerTests {
             #expect(item.isBordered == false)
             let answered = ToolbarFixture.answeredForwardedSelectors(of: host)
             #expect(answered.isEmpty, "the host answers \(answered)")
-            let itemHasTarget = item.target != nil
-            #expect(!itemHasTarget)
-            #expect(item.action == nil)
             #expect(item.autovalidates == false)
 
             #expect(item.label == tip)
@@ -318,6 +315,9 @@ struct MainToolbarControllerTests {
             #expect(button.showsBorderOnlyWhileMouseInside)
             #expect(button.target === target)
             #expect(button.action == action)
+            let itemSharesTarget = item.target === button.target
+            #expect(itemSharesTarget)
+            #expect(item.action == button.action)
             #expect(host.translatesAutoresizingMaskIntoConstraints == false)
             #expect(button.translatesAutoresizingMaskIntoConstraints == false)
             let pinnedEdges = ToolbarFixture.pinnedEdges(of: button, in: host)
@@ -359,9 +359,7 @@ struct MainToolbarControllerTests {
     /// overflow row with it, through the base class's property as AppKit
     /// would set it. No apply sets the toggle's flag, so this is the one path
     /// the Back and Forward tests do not cover: the host forwards nothing, and
-    /// only the item (`ToolbarIconButtonItem`) carries the flag down. The
-    /// item's flag reads its button, so a button set directly, against the
-    /// item, is what the item then reports: the two cannot drift apart.
+    /// only the item (`ToolbarIconButtonItem`) carries the flag down.
     @Test func toggleEnablementMovesItsButtonAndRow() async throws {
         let fixture = ToolbarFixture(label: "toggleEnablementMovesItsButtonAndRow")
         defer { fixture.tearDown() }
@@ -379,10 +377,6 @@ struct MainToolbarControllerTests {
         #expect(toggle.isEnabled == true)
         #expect(button.isEnabled == true)
         #expect(row.isEnabled == true)
-
-        let drifted = !toggle.isEnabled
-        button.isEnabled = drifted
-        #expect(toggle.isEnabled == drifted)
     }
 
     /// A compact item survives AppKit's copy, which archives the item's view
@@ -489,8 +483,8 @@ struct MainToolbarControllerTests {
     /// then sets the item from the snapshot, and the item keeps the button and
     /// the row in step (`ToolbarIconButtonItem`). A row disabled directly
     /// while its item is enabled comes back on the next apply that enables
-    /// Back, though the item already shows that value: the item's setter
-    /// compares the row as well as the item.
+    /// Back, though the item already shows that value: the apply compares the
+    /// row as well as the item.
     @Test func backForwardEnablementFollowsTheSnapshot() async throws {
         let fixture = ToolbarFixture(label: "backForwardEnablementFollowsTheSnapshot")
         defer { fixture.tearDown() }
