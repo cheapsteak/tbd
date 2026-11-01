@@ -846,8 +846,16 @@ final class AppState {
     /// spawns silently on the global default profile instead of opening the
     /// spawn-time account picker. Toggleable from the picker itself and
     /// Settings → Model Profiles. Persisted per-user.
+    ///
+    /// Written only when it changes. `init` restores it from the same key, and
+    /// writing that value straight back cost a synchronous `cfprefsd` round trip
+    /// on every construction while saving nothing: an absent key already reads
+    /// as `false`.
     var skipAccountPicker: Bool = false {
-        didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
+        didSet {
+            guard skipAccountPicker != oldValue else { return }
+            userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey)
+        }
     }
     /// The remote session whose transcript the toolbar toggle has hidden, or
     /// nil when no transcript is hidden. In memory only and never persisted:

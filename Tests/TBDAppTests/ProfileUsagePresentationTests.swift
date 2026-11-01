@@ -822,6 +822,37 @@ struct SkipAccountPickerPersistenceTests {
         }
     }
 
+    /// `init` restores the value from its key and must not write it straight
+    /// back: on an untouched suite the key stays absent, and assigning the
+    /// value the property already holds writes nothing either.
+    @Test func constructingAppStateWritesNoSkipAccountPickerValue() {
+        withIsolatedDefaults { defaults in
+            let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+            let state = AppState(userDefaults: defaults)
+            #expect(defaults.object(forKey: key) == nil)
+
+            state.skipAccountPicker = false
+            #expect(defaults.object(forKey: key) == nil)
+            #expect(AppState(userDefaults: defaults).skipAccountPicker == false)
+        }
+    }
+
+    /// The other side of the only-on-change gate: a change in either direction
+    /// is written, and `false` is stored as an explicit value rather than left
+    /// to the absent key's default.
+    @Test func changingSkipAccountPickerPersistsEachNewValue() {
+        withIsolatedDefaults { defaults in
+            let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
+            let state = AppState(userDefaults: defaults)
+
+            state.skipAccountPicker = true
+            #expect(defaults.object(forKey: key) as? Bool == true)
+
+            state.skipAccountPicker = false
+            #expect(defaults.object(forKey: key) as? Bool == false)
+        }
+    }
+
     @Test func writesDoNotTouchStandardDefaults() {
         withIsolatedDefaults { defaults in
             let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
