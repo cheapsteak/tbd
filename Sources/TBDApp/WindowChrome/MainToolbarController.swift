@@ -14,8 +14,10 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   separator is made bound to it and never re-bound.
 /// - **Install.** `install(on:)` puts the toolbar on the window once the
 ///   split appears in it, wires the split's collapse report, and watches the
-///   window's appearance and its `toolbar`. It sets nothing on the toolbar
-///   beyond `window.toolbar`; every item change goes through `scheduleApply()`.
+///   window's appearance and its `toolbar`. Installed on one window, an
+///   install on another uninstalls from the first. It sets nothing on the
+///   toolbar beyond `window.toolbar`; every item change goes through
+///   `scheduleApply()`.
 ///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off,
 ///   unhooks the split's collapse report and lets go of the window.
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
@@ -196,10 +198,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Puts the toolbar on `window`, follows the split's collapse, the
     /// window's appearance and its `toolbar`, and schedules the first apply.
     /// Safe to call again for the same window, as each `viewDidAppear` does.
+    /// For another window while installed, it uninstalls first, which takes
+    /// the toolbar off the old window if that still shows it, so one toolbar
+    /// is never on two windows, and the new window starts clean.
     /// During a cooldown it records the window but leaves the window's
     /// toolbar alone: a window ordered back in or unminimized must not restart
     /// the trade the cooldown stops, and the cooldown's end puts ours back.
     func install(on window: NSWindow) {
+        if isInstalled, self.window !== window {
+            uninstall()
+        }
         // Before the toolbar is set: setting it asks the delegate for its
         // default items, which follow the collapse.
         self.window = window

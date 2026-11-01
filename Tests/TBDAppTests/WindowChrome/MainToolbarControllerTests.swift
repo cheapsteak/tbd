@@ -882,6 +882,43 @@ struct MainToolbarControllerTests {
         #expect(back)
     }
 
+    /// An install on another window while the toolbar is installed on one,
+    /// as a split moved into another window makes when it appears there,
+    /// uninstalls from the first: ours leaves that window, so one toolbar is
+    /// never on two, and goes on the new one. The move clears the split's
+    /// appear hook, so only the explicit install acts. The apply the install
+    /// schedules leaves the first window without a toolbar.
+    @Test func installOnAnotherWindowTakesTheToolbarOffTheFirst() async throws {
+        let fixture = ToolbarFixture(label: "installOnAnotherWindowTakesTheToolbarOffTheFirst")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let first = fixture.window
+
+        let second = fixture.moveSplitToAFreshWindow()
+        defer {
+            controller.uninstall()
+            ToolbarFixture.takeDown(second)
+        }
+        try #require(controller.isInstalled)
+        try #require(controller.window === first)
+        try #require(first.toolbar === controller.toolbar)
+
+        let appliesBefore = controller.applyCount
+        controller.install(on: second)
+        #expect(first.toolbar == nil)
+        #expect(second.toolbar === controller.toolbar)
+        #expect(controller.window === second)
+        #expect(controller.isInstalled)
+
+        let applied = try await waitForMainActorCondition("the second install's apply, with none queued after it") {
+            controller.applyCount > appliesBefore && !controller.applyScheduled
+        }
+        try #require(applied)
+        #expect(first.toolbar == nil)
+        #expect(second.toolbar === controller.toolbar)
+    }
+
     // MARK: - The update loop
 
     /// Applies that observation did not trigger each arm a registration of
