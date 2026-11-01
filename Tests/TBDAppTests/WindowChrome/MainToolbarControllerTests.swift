@@ -14,8 +14,8 @@ import TestSupport
 /// interleave at each wait never mirror each other's item changes.
 ///
 /// `apply` defers through `DispatchQueue.main.async` and toolbar layout runs
-/// on the run loop, so tests wait by suspending (`waitUntil`, over
-/// `pollUntilTrue`), never by pumping (Tests/CLAUDE.md, "`@MainActor` tests:
+/// on the run loop, so tests wait by suspending (`waitForMainActorCondition`,
+/// over `pollUntilTrue`), never by pumping (Tests/CLAUDE.md, "`@MainActor` tests:
 /// suspend to drain, never pump"). Assertions after a direct `apply` run
 /// before any suspension, so a scheduled apply cannot land between the two.
 @MainActor
@@ -29,11 +29,13 @@ struct MainToolbarControllerTests {
         let fixture = ToolbarFixture(label: "installsOnAppear")
         defer { fixture.tearDown() }
 
-        let installed = try await waitUntil("the split's viewDidAppear to install the toolbar") {
+        let installed = try await waitForMainActorCondition("the split's viewDidAppear to install the toolbar") {
             fixture.window.toolbar === fixture.controller.toolbar
         }
         try #require(installed)
-        let applied = try await waitUntil("the first apply") { fixture.controller.appliedSnapshot != nil }
+        let applied = try await waitForMainActorCondition("the first apply") {
+            fixture.controller.appliedSnapshot != nil
+        }
         try #require(applied)
 
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
@@ -124,14 +126,14 @@ struct MainToolbarControllerTests {
 
         // Not animated: an offscreen window need not run an animation through.
         fixture.split.sidebarItem.isCollapsed = true
-        let filterLeft = try await waitUntil("the filter to leave on collapse") {
+        let filterLeft = try await waitForMainActorCondition("the filter to leave on collapse") {
             !fixture.identifiers.contains(MainToolbarItemID.repoFilter)
         }
         try #require(filterLeft)
         let collapsedLeading = Array(fixture.identifiers.prefix(3))
         #expect(collapsedLeading == leading)
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
-        let leadingVisible = try await waitUntil("the toggle and arrows to be visible") {
+        let leadingVisible = try await waitForMainActorCondition("the toggle and arrows to be visible") {
             fixture.window.layoutIfNeeded()
             let visible = Set((fixture.controller.toolbar.visibleItems ?? []).map { $0.itemIdentifier })
             return leading.allSatisfy { visible.contains($0) }
@@ -139,7 +141,7 @@ struct MainToolbarControllerTests {
         #expect(leadingVisible)
 
         fixture.split.sidebarItem.isCollapsed = false
-        let filterBack = try await waitUntil("the filter to return on expansion") {
+        let filterBack = try await waitForMainActorCondition("the filter to return on expansion") {
             fixture.identifiers.contains(MainToolbarItemID.repoFilter)
         }
         try #require(filterBack)
@@ -232,7 +234,7 @@ struct MainToolbarControllerTests {
         // Uncapped, the name would be wider, so the cap is what holds it.
         #expect(popup.intrinsicContentSize.width > MainToolbarMetrics.filterMaxWidth)
 
-        let laidOut = try await waitUntil("the filter to be laid out in the toolbar") {
+        let laidOut = try await waitForMainActorCondition("the filter to be laid out in the toolbar") {
             fixture.window.layoutIfNeeded()
             return popup.window === fixture.window && popup.frame.width > 0
         }
@@ -319,7 +321,7 @@ struct MainToolbarControllerTests {
         // The appearance change alone schedules the re-bake, through KVO.
         fixture.window.appearance = dark
         let lightID = ObjectIdentifier(light)
-        let followed = try await waitUntil("the Servers icon to follow the appearance") {
+        let followed = try await waitForMainActorCondition("the Servers icon to follow the appearance") {
             servers.image.map { ObjectIdentifier($0) } != lightID
         }
         #expect(followed)
@@ -344,7 +346,7 @@ struct MainToolbarControllerTests {
         fixture.window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.replacement")
         try #require(fixture.window.toolbar !== fixture.controller.toolbar)
 
-        let back = try await waitUntil("our toolbar to come back") {
+        let back = try await waitForMainActorCondition("our toolbar to come back") {
             fixture.window.toolbar === fixture.controller.toolbar
         }
         #expect(back)
@@ -376,7 +378,7 @@ struct MainToolbarControllerTests {
 
         try await clock.requireAdvanceWhenArmed(
             by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
-        let back = try await waitUntil("the toolbar to come back when the cooldown ends") {
+        let back = try await waitForMainActorCondition("the toolbar to come back when the cooldown ends") {
             window.toolbar === controller.toolbar
         }
         try #require(back)
@@ -384,7 +386,7 @@ struct MainToolbarControllerTests {
 
         window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.refused.afterCooldown")
         #expect(controller.isInReinstallCooldown == false)
-        let backAgain = try await waitUntil("the first replacement after the cooldown to be put back") {
+        let backAgain = try await waitForMainActorCondition("the first replacement after the cooldown to be put back") {
             window.toolbar === controller.toolbar
         }
         #expect(backAgain)
@@ -416,7 +418,7 @@ struct MainToolbarControllerTests {
         for round in 1...3 {
             let before = controller.applyCount
             controller.scheduleApply()
-            let applied = try await waitUntil("apply \(round) during the cooldown") {
+            let applied = try await waitForMainActorCondition("apply \(round) during the cooldown") {
                 controller.applyCount > before
             }
             try #require(applied)
@@ -425,7 +427,7 @@ struct MainToolbarControllerTests {
         }
 
         try await clock.requireAdvanceWhenArmed(by: cooldown - partway, timeout: TestDeadlines.saturatedPass)
-        let back = try await waitUntil("the toolbar to come back at the original cooldown's end") {
+        let back = try await waitForMainActorCondition("the toolbar to come back at the original cooldown's end") {
             window.toolbar === controller.toolbar
         }
         #expect(back)
@@ -451,7 +453,7 @@ struct MainToolbarControllerTests {
         dates.advance(by: MainToolbarController.replacementWindow + 1)
         window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterQuiet")
         #expect(controller.isInReinstallCooldown == false)
-        let back = try await waitUntil("a replacement after a quiet spell to be put back") {
+        let back = try await waitForMainActorCondition("a replacement after a quiet spell to be put back") {
             window.toolbar === controller.toolbar
         }
         #expect(back)
@@ -502,12 +504,12 @@ struct MainToolbarControllerTests {
         for collapsed in collapses {
             let before = fixture.controller.applyCount
             fixture.split.sidebarItem.isCollapsed = collapsed
-            let applied = try await waitUntil("the apply after collapsed = \(collapsed)") {
+            let applied = try await waitForMainActorCondition("the apply after collapsed = \(collapsed)") {
                 fixture.controller.applyCount > before
             }
             try #require(applied)
         }
-        let settled = try await waitUntil("no apply queued after the collapses") {
+        let settled = try await waitForMainActorCondition("no apply queued after the collapses") {
             !fixture.controller.applyScheduled
         }
         try #require(settled)
@@ -516,7 +518,7 @@ struct MainToolbarControllerTests {
         let appliesBefore = fixture.controller.applyCount
         let repoID = fixture.repos[1].id
         fixture.state.repoFilter = repoID
-        let applied = try await waitUntil("the apply the filter change scheduled") {
+        let applied = try await waitForMainActorCondition("the apply the filter change scheduled") {
             fixture.controller.applyCount > appliesBefore
         }
         try #require(applied)
@@ -640,44 +642,6 @@ struct MainToolbarControllerTests {
     }
 }
 
-// MARK: - Waiting
-
-/// Waits until `condition` holds on the main actor, through `pollUntilTrue`
-/// (Tests/CLAUDE.md, "Assertion hygiene" 5), suspending between reads so
-/// main-queue work and run-loop layout get to run.
-///
-/// Returns true once it holds. A timeout is recorded as an error naming what
-/// was awaited and how long the wait took, so the text reaches the CI summary,
-/// and returns false. Cancellation throws: the harness ended the test, and no
-/// timeout is invented for it.
-@MainActor
-private func waitUntil(
-    _ what: String, _ condition: @escaping @MainActor @Sendable () -> Bool
-) async throws -> Bool {
-    let start = ContinuousClock.now
-    let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
-        await MainActor.run { condition() }
-    }
-    switch outcome {
-    case .satisfied:
-        return true
-    case .cancelled:
-        throw CancellationError()
-    case .timedOut:
-        Issue.record(WaitTimedOut(what: what, elapsed: ContinuousClock.now - start))
-        return false
-    }
-}
-
-private struct WaitTimedOut: Error, CustomStringConvertible {
-    let what: String
-    let elapsed: Duration
-
-    var description: String {
-        "Timed out waiting for \(what) after \(elapsed)"
-    }
-}
-
 // MARK: - Fixture
 
 /// An `AppState`, a split of plain panes, and a toolbar controller, mounted on
@@ -787,7 +751,7 @@ private final class ToolbarFixture {
         controller.install(on: window, split: split)
         let controller = self.controller
         let window = self.window
-        let applied = try await waitUntil("the first apply, with none queued after it") {
+        let applied = try await waitForMainActorCondition("the first apply, with none queued after it") {
             controller.appliedSnapshot != nil && window.toolbar === controller.toolbar
                 && !controller.applyScheduled
         }
@@ -802,7 +766,7 @@ private final class ToolbarFixture {
         let window = self.window
         for attempt in 1...count {
             window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.\(label).\(attempt)")
-            let back = try await waitUntil("re-install \(attempt) of \(count) (\(label))") {
+            let back = try await waitForMainActorCondition("re-install \(attempt) of \(count) (\(label))") {
                 window.toolbar === controller.toolbar
             }
             try #require(back)
@@ -816,7 +780,7 @@ private final class ToolbarFixture {
     func replaceUntilTheCooldownStarts(label: String) async throws -> NSToolbar {
         try await replaceAndWaitForReinstall(times: MainToolbarController.maxReplacementsInWindow, label: label)
         let controller = self.controller
-        let quiet = try await waitUntil("no apply queued before the replacement past the cap") {
+        let quiet = try await waitForMainActorCondition("no apply queued before the replacement past the cap") {
             !controller.applyScheduled
         }
         try #require(quiet)

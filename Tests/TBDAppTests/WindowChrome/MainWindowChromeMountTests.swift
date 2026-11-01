@@ -18,7 +18,7 @@ import TestSupport
 /// "Switching" and "Testing".
 ///
 /// The toolbar is applied through `DispatchQueue.main.async`, so waits on it
-/// suspend (`waitForChrome`, over `pollUntilTrue`) rather than pump
+/// suspend (`waitForMainActorCondition`, over `pollUntilTrue`) rather than pump
 /// (Tests/CLAUDE.md, "`@MainActor` tests: suspend to drain, never pump").
 @MainActor
 @Suite("Main window chrome mount")
@@ -54,11 +54,13 @@ struct MainWindowChromeMountTests {
         // would still pass the other. The first wait makes it non-vacuous: the
         // layout rect must already leave room for the toolbar, not only the
         // titlebar.
-        let toolbarTakesRoom = try await waitForChrome("the toolbar to take room above the content layout rect") {
+        let toolbarTakesRoom = try await waitForMainActorCondition(
+            "the toolbar to take room above the content layout rect"
+        ) {
             mount.heightAboveContentLayout > ChromeMount.titlebarOnlyHeight
         }
         try #require(toolbarTakesRoom)
-        let detailBelowToolbar = try await waitForChrome("the hosted detail to start below the toolbar") {
+        let detailBelowToolbar = try await waitForMainActorCondition("the hosted detail to start below the toolbar") {
             mount.detailStartsBelowToolbar(in: split)
         }
         #expect(detailBelowToolbar)
@@ -104,13 +106,15 @@ struct MainWindowChromeMountTests {
         let sidebarPane = split.sidebarItem.viewController.view
 
         mount.suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
-        let native = try await waitForChrome("the hosted sidebar to mount the native outline from the suite") {
+        let native = try await waitForMainActorCondition(
+            "the hosted sidebar to mount the native outline from the suite"
+        ) {
             !ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
         }
         #expect(native)
 
         mount.suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
-        let list = try await waitForChrome("the hosted sidebar to mount the List from the suite") {
+        let list = try await waitForMainActorCondition("the hosted sidebar to mount the List from the suite") {
             ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
                 && !OffscreenHost<AnyView>.descendants(NSTableView.self, of: sidebarPane).isEmpty
         }
@@ -141,7 +145,7 @@ struct MainWindowChromeMountTests {
         let mount = ChromeMount(chrome: .swiftUI, label: "bridges", sceneBridgingOptions: .all)
         defer { mount.tearDown() }
 
-        let bridged = try await waitForChrome("SwiftUI to put the scene's toolbar on the window") {
+        let bridged = try await waitForMainActorCondition("SwiftUI to put the scene's toolbar on the window") {
             mount.host.window.toolbar != nil
         }
         try #require(bridged)
@@ -170,7 +174,7 @@ struct MainWindowChromeMountTests {
 
         // Both sides took the change: the toolbar applied it, and
         // `ContentView`'s own `onChange` ran in a SwiftUI update.
-        let landed = try await waitForChrome("the toolbar and ContentView to take the change") {
+        let landed = try await waitForMainActorCondition("the toolbar and ContentView to take the change") {
             controller.appliedSnapshot?.filter.selected == repoID
                 && state.recentlyVisitedWorktreeIDs.first == worktreeID
         }
@@ -194,7 +198,7 @@ struct MainWindowChromeMountTests {
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
 
-        let hasSeparator = try await waitForChrome("a tracking separator in the window's toolbar") {
+        let hasSeparator = try await waitForMainActorCondition("a tracking separator in the window's toolbar") {
             mount.trackingSeparator != nil
         }
         try #require(hasSeparator)
@@ -222,11 +226,11 @@ struct MainWindowChromeMountTests {
         let worktreeID = mount.worktrees[1].id
         mount.state.selectedWorktreeIDs = [worktreeID]
 
-        let fetched = try await waitForChrome("the selection's server fetch") {
+        let fetched = try await waitForMainActorCondition("the selection's server fetch") {
             fetches.worktreeIDs.contains(worktreeID)
         }
         #expect(fetched)
-        let shown = try await waitForChrome("the Servers item") {
+        let shown = try await waitForMainActorCondition("the Servers item") {
             mount.toolbarIdentifiers.contains(MainToolbarItemID.servers)
         }
         #expect(shown)
@@ -242,7 +246,7 @@ struct MainWindowChromeMountTests {
         let worktreeID = mount.worktrees[1].id
         mount.state.selectedWorktreeIDs = [worktreeID]
 
-        let fetched = try await waitForChrome("the selection's server fetch") {
+        let fetched = try await waitForMainActorCondition("the selection's server fetch") {
             fetches.worktreeIDs.contains(worktreeID)
         }
         #expect(fetched)
@@ -306,38 +310,6 @@ struct MainWindowChromeMountTests {
         let pane = NSViewController()
         pane.view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: ChromeMount.size.height))
         return pane
-    }
-}
-
-// MARK: - Waiting
-
-/// Polls `condition` on the main actor until it holds, bounded by the
-/// saturated pass's deadline. A timeout is recorded as an issue naming `what`
-/// and the time spent, and returns `false`.
-private func waitForChrome(
-    _ what: String, _ condition: @escaping @MainActor @Sendable () -> Bool
-) async throws -> Bool {
-    let start = ContinuousClock.now
-    let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
-        await MainActor.run { condition() }
-    }
-    switch outcome {
-    case .satisfied:
-        return true
-    case .cancelled:
-        throw CancellationError()
-    case .timedOut:
-        Issue.record(ChromeWaitTimedOut(what: what, elapsed: ContinuousClock.now - start))
-        return false
-    }
-}
-
-private struct ChromeWaitTimedOut: Error, CustomStringConvertible {
-    let what: String
-    let elapsed: Duration
-
-    var description: String {
-        "Timed out waiting for \(what) after \(elapsed)"
     }
 }
 
@@ -418,7 +390,7 @@ private final class ChromeMount {
     func appKitReady() async throws -> MainToolbarController {
         let splitMounted = await host.settle { !self.splitRoots.isEmpty }
         try #require(splitMounted, "The AppKit split never mounted with the AppKit chrome")
-        let installed = try await waitForChrome("the AppKit toolbar to be installed and applied") {
+        let installed = try await waitForMainActorCondition("the AppKit toolbar to be installed and applied") {
             self.toolbarController?.appliedSnapshot != nil
         }
         try #require(installed)
