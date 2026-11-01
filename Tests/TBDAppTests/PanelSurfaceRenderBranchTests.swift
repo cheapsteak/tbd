@@ -394,8 +394,11 @@ struct PanelSurfaceRenderBranchTests {
             for: side,
             noteTitle: { _ in nil },
             transcriptPath: { $0 == terminalID ? "/w/session.jsonl" : nil })
-        // What the tab hands `headerFileContextMenu`, resolved the same way.
-        let targets = tabs.map { headerMenuTarget(for: $0.paneContent, transcriptPath: $0.transcriptPath) }
+        // What the tab hands `headerFileContextMenu`, resolved the same way;
+        // a tab with no leaf content gets no menu, as `SideRegionView` does.
+        let targets: [HeaderMenuTarget?] = tabs.map { tab in
+            tab.paneContent.flatMap { headerMenuTarget(for: $0, transcriptPath: tab.transcriptPath) }
+        }
 
         try #require(targets.count == 4)
         #expect(targets[0] == HeaderMenuTarget(path: "/w/a.md", copyLabel: "Copy Path"))
@@ -412,8 +415,9 @@ struct PanelSurfaceRenderBranchTests {
         let tabs = SideRegionStrip.tabs(for: side, noteTitle: { _ in nil }, transcriptPath: { _ in "" })
 
         let tab = try #require(tabs.first)
+        let paneContent = try #require(tab.paneContent)
         #expect(tab.transcriptPath == nil)
-        #expect(headerMenuTarget(for: tab.paneContent, transcriptPath: tab.transcriptPath) == nil)
+        #expect(headerMenuTarget(for: paneContent, transcriptPath: tab.transcriptPath) == nil)
     }
 
     @Test("the strip's history buttons are enabled for a file or web panel and dimmed for a transcript or note")
