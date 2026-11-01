@@ -244,7 +244,7 @@ CI_PASSES=(
   "fast-pass-daemon-a|1200|--parallel --filter ^TBDDaemonTests\\.[A-O]"
   "fast-pass-daemon-b|1500|--parallel --filter ^TBDDaemonTests\\. --skip ^TBDDaemonTests\\.[A-O]"
   "fast-pass-app-a|1400|--parallel --filter ^TBDAppTests\\.[A-P]"
-  "fast-pass-app-b|2500|--parallel --skip ^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.[A-P])"
+  "fast-pass-app-b|3200|--parallel --skip ^(TBDDaemonTests\\.|TBDDaemonLiveTests\\.|TBDAppTests\\.[A-P])"
   "quiet-pass|35|--filter ^TBDDaemonLiveTests\\. --no-parallel"
 )
 

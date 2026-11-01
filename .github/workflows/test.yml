@@ -1368,13 +1368,22 @@ jobs:
       # counts this cut's first run prints, which is the only source that
       # measures what actually executes.
       #
-      # The two app halves are floored at 1400 and 2500, against the 2,501 and
+      # The two app halves are floored at 1400 and 3200, against the 2,501 and
       # 4,739 tests they executed on the split's first green run
-      # (41352611270). They sit far below either half for the same reasons as
+      # (41352611270). They sit well below either half for the same reasons as
       # the daemon floors: the executed count drifts from run to run, and a
-      # floor is there to catch a collapse, not to track the population. 2a's
-      # floor is one no other step uses, so `scripts/nightly-flake-stress.test.sh`
-      # catches a change to it on its own.
+      # floor is there to catch a collapse, not to track the population.
+      #
+      # 2b's floor is sized against its worst over-skip, not only against
+      # zero. TBDAppTests holds about 4,810 tests, about 2,300 of them in 2b,
+      # so a 2b `--skip` that over-matched ALL of TBDAppTests would still run
+      # about 2,440 tests from the other targets. A floor of 2500 would sit
+      # only about 60 above that and could miss it on a run with a few more
+      # tests; 3200 catches that over-skip and still sits about 1,500 below
+      # the 4,739 2b executed.
+      #
+      # No two steps share a floor, so `scripts/nightly-flake-stress.test.sh`
+      # catches a change to any one step's floor on its own.
       #
       # And the executed count is NOT stable run to run: two CI runs on one PR,
       # on commits differing only in doc comments (zero tests added,
@@ -1537,7 +1546,7 @@ jobs:
           read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-app-b --budget-seconds 600 \
-            --floor 2500 \
+            --floor 3200 \
             --floor-message 'the --skip regex over-matched or a target was renamed.' \
             -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --skip '^(TBDDaemonTests\.|TBDDaemonLiveTests\.|TBDAppTests\.[A-P])' \
                --xunit-output /tmp/xunit-app-b.xml --experimental-xunit-message-failure

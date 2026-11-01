@@ -72,14 +72,30 @@ MAX_EXCLUDED=2
 # N is never below the baseline's own count.
 MIN_N=20
 # The per-try allotment R and the timing behind each scope's cap,
-# cap = floor((R - B - W) / t), all in seconds (spec §9). Measured on a
-# macos-26 CI runner (3 cores, 2 compile jobs) in run 37686691741: a
-# test-alone iteration took 17 to 25 seconds, and a warm fast pass 2 iteration
-# 171 seconds, its first iteration 169 seconds more, a warm-up that persists
-# after an incremental rebuild. B is a ceiling on the incremental rebuild,
-# which measured 26 seconds. At these values the test-scope cap is 45 and the
-# pass-scope cap 5. Fast passes 1a and 1b and the quiet pass were not
-# measured; they use pass 2's figures until they are.
+# cap = floor((R - B - W) / t), all in seconds (spec §9). t is one warm
+# iteration of the scope in this verifier's own regime — under induced load,
+# and without `--skip-build`, so every iteration re-pays SwiftPM's build check
+# — and W is the extra time the first iteration takes. Measured on a macos-26
+# CI runner (3 cores, 2 compile jobs) in run 37686691741: a test-alone
+# iteration took 17 to 25 seconds, and a warm fast pass 2 iteration 171
+# seconds, its first iteration 169 seconds more, a warm-up that persists after
+# an incremental rebuild. B is a ceiling on the incremental rebuild, which
+# measured 26 seconds. At these values the test-scope cap is 45 and the
+# pass-scope cap 5.
+#
+# One pass-scope figure serves every pass. Fast pass 2 was measured as one
+# step, and CI runs it as two, 2a and 2b, each a subset of it. A warm
+# iteration of either half takes no longer than the whole, so 171 and 169 are
+# an upper bound for both: their cap is conservative, and a half's run fits
+# the allotment at least as well as the whole did. test.yml's step times do not
+# replace them. On run 41352611270,
+# 2a's step took 61 s (42.4 s of tests, 14.6 s before them, 4.2 s after) and
+# 2b's 57 s (39.8 s, 10.6 s, 5.8 s), against 87-123 s for the single pass-2
+# step, so a half takes about half to two thirds of the whole there. But those
+# steps ran without induced load, with `--skip-build` and with no warm-up
+# iteration, so they measure neither t nor W. Lower these only from a
+# verifier run at pass scope on a half. Fast passes 1a and 1b and the quiet pass were not
+# measured either; they use these figures until they are.
 ALLOTMENT_S=1440
 REBUILD_S=300
 TEST_T_S=25
