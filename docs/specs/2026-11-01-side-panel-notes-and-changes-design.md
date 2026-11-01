@@ -111,7 +111,12 @@ revision guard needs nothing new.
   - inserts a worktree panel in the worktree's tab order;
   - removes the note's ID from `worktree.tabOrder`;
   - removes its tab row;
-  - deletes any surface whose primary is that note, with its side region.
+  - deletes any surface whose primary is that note, with its side region;
+  - removes every panel in a tab's own side region that shows that note, and a
+    tab that had one in front brings the note's worktree panel forward.
+
+  Afterwards a note shows only in its worktree panel, which `note.delete`
+  removes, so no panel is left showing a deleted note.
 
   The JSON edit of `tabOrder` takes the Swift escape hatch in
   `SQLMigrationLoader.inlineTimestampMigrations`, unless the `.sql` allowlist
@@ -182,8 +187,9 @@ tabs, so they are reached through the side panel's + menu until one does.
   - Archive deletes the worktree's panels, and promote moves them.
   - Creation opens the initial note as a panel when `auto_create_notes_enabled`
     is on, and opens none when it is off.
-  - The migration moves a note out of `tabOrder` into the worktree's panels, and
-    leaves a worktree with no notes untouched.
+  - The migration moves a note out of `tabOrder` into the worktree's panels,
+    replaces a tab's own note panel with the worktree panel (in front when the
+    old one was), and leaves a worktree with no notes untouched.
 - **CLI:** parsing for `--changes` and `tbd note list`.
 - **App:**
   - No note becomes a workspace tab.
