@@ -352,10 +352,10 @@ population moves materially — that is what turned the `ControlModeInputHealth`
 `ControlModeInputRouter` and "Archived search debounce" reds into a ~42% red
 rate on `main` with **zero** logic assertions failing.
 
-**Derive the three together, and know the invariant.** They are currently
-`ciSafeDeadline` 90 s, the arming waits 45 s, `.clockDriven`
-`.timeLimit(.minutes(4))` = 240 s. The suite limit and the two wait deadlines
-race each other for real: `AttachRPCOrchestrationTests` and
+**Derive the three together, and know the invariant.** They are
+`ciSafeDeadline` 120 s (`TestDeadlines.saturatedPass`), the arming waits 45 s,
+`.clockDriven` `.timeLimit(.minutes(5))` = 300 s. The suite limit and the two
+wait deadlines race each other for real: `AttachRPCOrchestrationTests` and
 `PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
 `ciSafeDeadline`, across 44 `waitFor` call sites. Every one of those sites is
 unguarded — `waitFor` is `@discardableResult` and non-throwing on timeout, so
@@ -373,12 +373,13 @@ limit. The rule is:
 > truncates the test. Chains beyond the first belong to a test that is already
 > failing; truncating those is acceptable and deliberate.
 
-Checked against 240 s: one `waitFor` + one arming wait = 135 s ✓; two
-`waitFor` = 180 s ✓; two arming waits = 90 s ✓ (this is the "a test that
+Checked against 300 s: one `waitFor` + one arming wait = 165 s ✓; two
+`waitFor` = 240 s ✓; two arming waits = 90 s ✓ (this is the "a test that
 waits twice must afford both waits" property the old pairing was reasoned
-from).
+from); one gate held to `TestGate.deadline` (150 s) leaves 150 s for the rest
+of the test ✓.
 
-**Past that pair the margin is thin — 240 s is not roomy, and the real numbers
+**Past that pair the margin is thin — 300 s is not roomy, and the real numbers
 are worth knowing before someone reaches for a raise.**
 **Count each arming wait as one 45 s guard, and count `advanceUntil` as one
 too.** `advanceUntil` applies its `timeout` to every arming wait it makes, but
@@ -391,7 +392,7 @@ state the test just created on the probe that follows. Where the code under test
 probes external state and re-arms if it is not there yet, one advance stakes the
 run on one probe, and a probe that reads "keep waiting" re-arms a sleep nothing
 will ever advance again. `PaneRepairCoordinatorTests`' broken-pipe test wedged
-in CI that way for its full 240 s limit — one write, `repairing` still set —
+in CI that way for a full 240 s limit — one write, `repairing` still set —
 and had already done so once before, on a diff that touched only
 `Sources/TBDCLI`. Drive those with `EventDrivenTestClock.advanceUntil`, which
 steps the loop one armed sleeper at a time until its condition holds (see "The
@@ -400,11 +401,12 @@ of `requireAdvanceWhenArmed` closed by a `requireSleeperArmed`, where the
 *number* of advances is the property under test.
 
 On that basis, the deepest chains in the tree are the poller tests, and their
-paper tallies do not all fit under the ceiling:
+paper tallies leave little room under the ceiling:
 
 - `GatedIntervalSleepTests.returnsAfterExpectedPollCount` — 3
   `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1 `FireRecorder.next()`
-  = **6** guards, 270 s, i.e. **over** the 240 s limit.
+  = **6** guards, 270 s, 30 s under the 300 s limit — one more guard, or any
+  `ciSafeDeadline` wait, would carry it past.
 - `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) — **5** guards,
   225 s.
 
@@ -414,21 +416,26 @@ are on `EventDrivenTestClock`'s **strict** waits, where a missed arming throws
 before anything advances, so the chain stops at the first bad step and nothing
 after it runs. The one non-throwing guard in each chain — `FireRecorder.next()`,
 which records and continues — sits *last*, with no wait behind it to inherit the
-run. So the real worst case is one 45 s guard, and 270 s describes a run that
-cannot happen. That is a property of these chains' *shape*, not of strictness
-alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
-follows. And counting `waitFor` at 90 s plus
-each clock wait at 45 s, **6 of the 13** `PaneRepairCoordinatorTests` have a
-worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
-the invariant, because only an already-failing test walks a full chain of
-timeouts and the first diagnostic is already recorded by then.
+run. So the real worst case is one 45 s guard, and the 270 s tally describes a
+run that cannot happen — the 30 s of room under the limit is not what keeps it
+safe. That is a property of these chains' *shape*, not of strictness alone:
+put a `next()` mid-chain and its 45 s becomes payable on top of whatever
+follows. And counting each `ciSafeDeadline` wait (`waitFor` and the
+suite's `readUntil`) at 120 s plus each clock wait at 45 s, **10 of the 13**
+`PaneRepairCoordinatorTests` have a worst case above 300 s — not just the
+6-`waitFor` chain usually cited, which with its two `readUntil` reads is 960 s.
+Every one of those is still consistent with the invariant, because only an
+already-failing test walks a full chain of timeouts and the first diagnostic is
+already recorded by then.
 
 **The remedy if they start tripping is to shorten the chain, not to raise the
-limit again.** "Keep advance chains short — single digits" below is already the
-rule, and a 5-deep chain sits at its edge; inject pacing values and cross the
-threshold in 2–3 advances. Raising 240 s buys room only for tests that are
-already failing, and taxes every genuinely wedged test with a longer wait
-before it gets attributed.
+limit.** The limit is derived from `TestDeadlines.saturatedPass` through the
+invariant above and moves only when that constant does; a chain that trips it
+is shortened, never answered by raising the limit. "Keep advance chains short —
+single digits" below is already the rule, and a 5-deep chain sits at its edge;
+inject pacing values and cross the threshold in 2–3 advances. Raising 300 s
+buys room only for tests that are already failing, and taxes every genuinely
+wedged test with a longer wait before it gets attributed.
 
 **All three are sized for the fast parallel pass, so tier 3 opts out.** The
 quiet pass (`--no-parallel`, idle machine) never sees the saturation that forced
@@ -451,16 +458,26 @@ fast-pass suite carries a hand-written `.timeLimit`.** A wait takes its deadline
 from `TestDeadlines` (`saturatedPass` as a `Duration`, `saturatedPassSeconds` as
 a `TimeInterval`), and a suite or test hang guard takes `.fastPassBounded` —
 which `.clockDriven` is an alias of, so there is one dial. The evidence is what
-the pass's own numbers say about a small number: on a **green** run, fast pass 1
-(`^TBDDaemonTests\.`, ~5200 tests) reported p50 65.6 s, p99 92.1 s and max
-95.5 s per test, and fast pass 2 (everything else, ~4800 tests) reported p90
-51.4 s and max 55.3 s — reported duration being almost entirely time suspended
-behind other runnable tests. So a 2–30 s hand-rolled wait sits an order of
-magnitude below the healthy latency of the very hop it is guarding, and a
-one-minute suite limit sits below pass 1's median and five seconds above pass
-2's maximum. Both fire on healthy runs, and both did. Three exceptions, and only
-these: a **negative-assertion window** ("nothing fires within X") is the
-assertion and is never lengthened; a **discriminating threshold** that decides
+the passes' own numbers say about a small number. Measured on two **green** runs
+of one commit: fast pass 2 (everything outside the two daemon targets, ~7200
+tests) reported p50 9.9 s, p90 88.2 s, p99 100.5 s and max 101.7 s per test on
+one, and p50 6.7 s, p90 72.3 s and max 82.4 s on the other — runner noise alone
+moves its tail by about twenty seconds. On the second run fast pass 1a
+(`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported p50 84.0 s, p99 107.6 s and
+max 111.7 s, and fast pass 1b (~3900 tests) p50 63.6 s, p99 101.2 s and max
+107.4 s. Reported duration is almost entirely time suspended behind other
+runnable tests. In pass 1 it also includes the time a test waits for its body
+to start at all, which no bound inside the body pays, and the record fits:
+across five CI attempts of that commit no bounded wait timed out in pass 1a or
+1b. Pass 2's green tail, by contrast, crosses a 90 s bound outright — 101.7 s
+above, and 97.2 s among the passing tests of a run of `main` — so pass 2 is the
+pass `saturatedPass` is sized against (the derivation is at `ciSafeDeadline`). A
+2–30 s hand-rolled wait therefore sits well below the healthy latency of the
+very hop it is guarding, and a one-minute suite limit sits below the median of
+both halves of pass 1 and below pass 2's p90. Both fire on healthy runs, and
+both did. Three exceptions, and only these: a **negative-assertion window**
+("nothing fires within X") is the assertion and is never lengthened; a
+**discriminating threshold** that decides
 between two diagnoses (`FileWatcherTests`' `attemptWindow`) is likewise the
 assertion; and a **gate's own self-release cap** takes `TestGate.deadline`,
 which is sized to dominate `saturatedPass` so the hold cannot expire mid-
@@ -518,8 +535,8 @@ silent and dies on the step's `timeout-minutes` with zero failing tests, and no
 per-test `.timeLimit` fires, because a blocked thread is where cooperative
 cancellation cannot reach. Bounding the wait converts the wedge into
 starvation, not into health — a bounded holder still owns its thread for the
-whole deadline, and innocent suites blow their own 90 s and 120 s
-hang-catchers first.
+whole deadline, and innocent suites blow their own `TestDeadlines.saturatedPass`
+and `TestGate.deadline` hang-catchers first.
 
 So start the side that will be held with `gateHoldingTask`
 (`Tests/TestSupport/BoundedGateSupport.swift`), which pins it and every
@@ -569,22 +586,24 @@ and a `gateHoldingTask { }` all read medium (21), measured on the 3-core CI
 runner and pinned by `TaskPriorityParityTests`
 (`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
 is queued *behind higher-priority work* — the pool's queue is FIFO among the
-~5,000 tasks the pass keeps runnable, and one suspension hop costs the pass's
-own per-test latency: p50 65.6 s and p99 92.1 s on a green fast pass 1. A
-handshake that needs *k* hops therefore costs *k* × that, and the uninjected
-latch needs three or four — each caller starting, reaching the latch and
-awaiting the run; the run's own unstructured task starting; then every caller
-resuming. That is why CI measured 0 of 8 callers back after 90 s while the
-test's own polling task, already runnable, kept reporting on time: 90 s is one
-hop's worth of budget for a four-hop handshake. **A bound cannot buy a hop its
-turn** — sizing one to fit four hops taxes every healthy run, while injecting
-the executor removes the hops from the shared queue and costs nothing. (The one
+thousands of tasks the pass keeps runnable, and one suspension hop on a green
+run can cost up to about the pass's own per-test tail, around 100 s in fast
+pass 2 (p99 100.5 s; see "Population is the scheduler" for why pass 2 is the
+measure). A handshake that needs *k* hops therefore costs up to *k* × that, and
+the uninjected latch needs three or four — each caller starting, reaching the
+latch and awaiting the run; the run's own unstructured task starting; then
+every caller resuming. Measured against a 90 s bound, CI saw 0 of 8 callers
+back after 90 s while the test's own polling task, already runnable, kept
+reporting on time: 90 s was one hop's worth of budget for a four-hop
+handshake. **A bound cannot buy a hop its turn** — sizing one to fit four hops
+taxes every healthy run, while injecting the executor removes the hops from the
+shared queue and costs nothing. (The one
 deliberate exception to the single priority is swift-clocks' `megaYield`, which
 creates background-QoS tasks on purpose; see "Clock and date seams".)
 
 Where the test reaches the hop through production code it does not construct —
 a server's `stop()` — the bound is all that is left: release a gate from beyond
-it at `TestDeadlines.saturatedPass` (90 s) and give the outer observation a
+it at `TestDeadlines.saturatedPass` (120 s) and give the outer observation a
 strictly larger budget, so a genuinely lost handshake still reports before the
 wedge does. A snappier inner bound reports
 starvation the outer bound was sized to tolerate — which is exactly how
@@ -1024,7 +1043,7 @@ Don't roll your own test clock wrapper, advance helper, `.timeLimit` default,
 or date box. This file is the whole shared surface:
 
 - `@Suite(.fastPassBounded)` — the one suite/test hang guard for the fast
-  parallel pass: a four-minute time limit (Swift Testing expresses limits in
+  parallel pass: a five-minute time limit (Swift Testing expresses limits in
   whole minutes, so that is the dial). A hang-catcher, not a perf budget; its
   value is derived from the pass's measured per-test latency, and every
   fast-pass suite that needs a limit takes it unless the limit is itself the
@@ -1072,10 +1091,10 @@ carry on, and the visible failure was `[42] == [42, 42]` — which reads as a
 generation-numbering bug and sends the reader to the wrong line entirely. A
 crash announces itself; this does not. **The tell was the duration**: 62 s for
 what should have been a fast assertion failure, i.e. two bounded waits timing
-out back to back against the 30 s `ciSafeDeadline` of the day (90 s now, so the
-same signature is ~180 s). When an assertion failure took far longer than an
-assertion failure should, suspect a swallowed waiter before you believe the
-message.
+out back to back against a 30 s `ciSafeDeadline` (with `ciSafeDeadline` at
+120 s the same signature is ~240 s). When an assertion failure took far longer
+than an assertion failure should, suspect a swallowed waiter before you believe
+the message.
 
 ### The event-driven clock — `Tests/TestSupport/EventDrivenTestClock.swift`
 
@@ -1132,7 +1151,7 @@ joining the task — rather than a weaker negative.
 **Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like an
 arming wait, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
-180 s worst case against the 240 s limit, a figure that assumes every wait takes
+180 s worst case against the 300 s limit, a figure that assumes every wait takes
 its default and scales with any explicit `next(timeout:)` or
 `requireAdvanceWhenArmed(by:timeout:)` budget. And `next()` is **non-throwing** — it
 records and returns `nil` — so it does not stop a chain the way a strict arming
@@ -1140,20 +1159,21 @@ wait does: a `next()` that times out mid-chain leaves every guard after it
 payable in the same run. Put it last, which is what makes the poller chains
 above cost one guard in practice rather than their paper tally.
 
-**Both guards take `TestDeadlines.saturatedPass` (90 s) where the code under
+**Both guards take `TestDeadlines.saturatedPass` (120 s) where the code under
 test is `@MainActor`.** A `@MainActor` debouncer fires through
 `Task { @MainActor }`, so its timer arms only once that task has had a turn on
 the main actor — a process-wide queue every `@MainActor` test body in the pass
 is waiting on, deepest at pass start — and the fire needs the main actor again
-after `advance`. Measured on a green fast pass 2: the same shape took 84 s to
-arm (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`), 55% of
-the pass's tests reported over 45 s and none over 90 s; at 45 s the first test
-of both debounce suites went red on ordinary CI with every logic assertion a
-consequence and every sibling test passing in milliseconds. Pass the budget
-through the strict `requireAdvanceWhenArmed(by:timeout:)` and
-`next(timeout:)`, so a missed arming ends the test instead of paying the
+after `advance`. Measured on green fast pass 2 runs: the same shape took 84 s
+to arm (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`), about
+30% of the pass's tests report over 45 s on every run, and the slowest test of a
+green run reported 101.7 s; at 45 s the first test of both debounce suites went
+red on ordinary CI with every logic assertion a consequence and every sibling
+test passing in milliseconds. Pass the budget through the strict
+`requireAdvanceWhenArmed(by:timeout:)` and `next(timeout:)`, so a missed
+arming ends the test instead of paying the
 recorder's guard as well — a two-step chain then costs at most two guards,
-180 s, inside the 240 s limit.
+240 s, inside the 300 s limit.
 
 Worked examples, by shape:
 
@@ -1161,8 +1181,8 @@ Worked examples, by shape:
   `SearchQueryDebouncerTests`, which reproduced the polling starvation in a
   full-suite soak.
 - **Poller chains** – `GatedIntervalSleepTests`, whose chains on the polling
-  helpers each paid five wall-clock guards (225 s of the 240 s ceiling) and on
-  the strict waits cost at most one.
+  helpers each paid five wall-clock guards (225 s) and on the strict waits
+  cost at most one.
 - **Arming behind an unstructured task, tier 3** – `GitManagerTimeoutTests`,
   whose sleeper arms inside `runBoundedProcess`. Its polled handshake starved
   past the test's own real `/bin/sleep 30` child under induced load, so the
@@ -1171,7 +1191,7 @@ Worked examples, by shape:
 
 The polling probe can also fail without any diagnostic:
 `ProvisionalRowPublishTests` and the `--keys` tests in
-`TerminalSendDispatchTests` hit `.clockDriven`'s 240 s limit with nothing
+`TerminalSendDispatchTests` hit a 240 s `.clockDriven` limit with nothing
 recorded on the nightly stress loop, because a single `megaYield` probe never
 returned and the 45 s guard, checked only between probes, never ran (#503).
 Design: `docs/specs/2026-08-11-event-driven-test-clock-design.md` (the clock)

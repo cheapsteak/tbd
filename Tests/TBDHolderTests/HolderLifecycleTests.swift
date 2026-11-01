@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDHolder
 import TBDKernel
@@ -13,12 +14,15 @@ import TBDKernel
 struct HolderLifecycleTests {
     private static let rcFreeEnvironment = ["PATH": "/usr/bin:/bin", "TERM": "dumb"]
 
-    /// A job that does nothing but stay alive. Bounded so a fixture that
-    /// somehow escapes teardown still reaps itself.
+    /// A job that does nothing but stay alive. It ends on its own after
+    /// `TestDeadlines.outlivingChildSeconds`, long enough to outlive the
+    /// fixture's bootstrap waits, `waitForSocket` and the test's own wait;
+    /// teardown kills it sooner.
     private static func idleJob(marker: String = "") -> HolderLaunchRequest {
-        HolderLaunchRequest(
+        let stayAlive = "sleep \(TestDeadlines.outlivingChildSeconds)"
+        return HolderLaunchRequest(
             executable: "/bin/sh",
-            arguments: ["-c", marker.isEmpty ? "sleep 60" : "printf '\(marker)\\n'; sleep 60"],
+            arguments: ["-c", marker.isEmpty ? stayAlive : "printf '\(marker)\\n'; \(stayAlive)"],
             workingDirectory: "/tmp",
             environment: rcFreeEnvironment,
             columns: 100,
@@ -254,10 +258,13 @@ struct HolderLifecycleTests {
     @Test func theJobDoesNotInheritStrayDescriptors() async throws {
         let home = HolderFixture.scratchHome()
         let probe = HolderFixture.strayDescriptorNumber
+        // The job has to be alive until it is described, after the fixture's
+        // waits and `waitForSocket`: a holder whose job exited unlinks its
+        // socket ten seconds later.
         let script = [
             "echo LEAKED >&\(probe) 2>/dev/null",
             "echo RAN > '\(home)/ran.marker'",
-            "sleep 120",
+            "sleep \(TestDeadlines.outlivingChildSeconds)",
         ].joined(separator: "; ")
         let launch = HolderLaunchRequest(
             executable: "/bin/sh",

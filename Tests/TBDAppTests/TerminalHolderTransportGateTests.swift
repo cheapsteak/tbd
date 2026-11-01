@@ -56,7 +56,7 @@ import TestSupport
 /// `scripts/test.sh` fences onto a scratch path with no listener — the connect
 /// fails with ENOENT and returns at once.
 // A hang guard, and it has to clear the bounded waits below, which run to
-// `TestDeadlines.saturatedPass` (90 s): a suite limit under that truncates
+// `TestDeadlines.saturatedPass` (120 s): a suite limit under that truncates
 // their named diagnostic into a bare "Time limit was exceeded" — measured, by
 // mutating away `reader.start()`. The shared dial is derived to clear exactly
 // that, so it is what this takes rather than a locally chosen two minutes. See

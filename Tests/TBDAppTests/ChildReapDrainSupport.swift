@@ -15,9 +15,9 @@ import Foundation
 /// suite limit with room for the disposal and assertions that follow it, so
 /// that a stuck reap is reported by *this* guard, with its observed state,
 /// rather than truncated into a bare "Time limit was exceeded". That limit is
-/// `.fastPassBounded` (`Tests/TestSupport/ClockTestSupport.swift`) — 240 s, one
+/// `.fastPassBounded` (`Tests/TestSupport/ClockTestSupport.swift`) — 300 s, one
 /// dial derived from the fast pass's measured latency — which leaves this
-/// guard 8x of room instead of the 2x the hand-written one minute left it. It
+/// guard 10x of room instead of the 2x a hand-written one minute would. It
 /// is a hang guard, not a timing assertion: a passing run never spends any
 /// of it.
 let reapDrainHangGuard: Duration = .seconds(30)

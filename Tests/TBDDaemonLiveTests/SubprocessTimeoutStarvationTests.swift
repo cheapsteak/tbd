@@ -70,17 +70,17 @@ import Testing
 /// 1. **60 s is this suite's detector, not a hang guard.** The mutation proof
 ///    above works only because 60 s sits between the working watchdog's ~100 ms
 ///    SIGKILL and the 90 s child that a broken watchdog leaves running. Inherit
-///    `.clockDriven`'s 240 s and the `sleep 90` child finishes comfortably
+///    `.clockDriven`'s 300 s and the `sleep 90` child finishes comfortably
 ///    inside the limit, the authority check reports `.timedOut` on its own, and
 ///    both tests go green with the watchdog armer deleted. The proof silently
 ///    disarms; nothing goes red to tell you.
-/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
-///    4 minutes to absorb the arming latency of the fast parallel pass, whose
-///    ~4536-test population is what makes a `TestClock` handshake take tens of
-///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+/// 2. **It does not need the larger budget.** `.clockDriven` is 5 minutes to
+///    absorb the arming latency of the fast parallel pass, whose population of
+///    thousands of in-process tests is what makes a clock handshake take tens
+///    of seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds and the saturation
-///    that motivated the raise never occurs. This suite never advances its
+///    that sizes the larger budget never occurs. This suite never advances its
 ///    clock at all, so it does not even pay the handshake.
 @Suite("Subprocess timeout under dispatch-pool starvation", .serialized, .timeLimit(.minutes(1)))
 struct SubprocessTimeoutStarvationTests {

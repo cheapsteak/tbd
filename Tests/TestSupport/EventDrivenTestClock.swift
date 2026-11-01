@@ -305,7 +305,7 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     ///     as a race against a single real `Task.sleep` that never fires on a
     ///     healthy path, so a passing run pays nothing for it. 45 s carries over
     ///     from `waitForSuspension`, whose derivation against `.clockDriven`'s
-    ///     240 s limit is documented in `ClockTestSupport.swift` and
+    ///     300 s limit is documented in `ClockTestSupport.swift` and
     ///     `Tests/CLAUDE.md` ("Population is the scheduler"); the value is kept
     ///     so that a chain of these still tallies the same way. **Raise it to
     ///     ``TestDeadlines/saturatedPass`` where the arming is not one hop from

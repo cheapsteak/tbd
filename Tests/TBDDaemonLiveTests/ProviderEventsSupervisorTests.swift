@@ -23,10 +23,10 @@ import TestSupport
 // a regression detector here — unlike `SubprocessTimeoutTests`, nothing in
 // this suite proves anything by outliving it. Its job is to stop a regressed
 // `stop()` that never returns from wedging a whole local run, since nothing
-// else bounds that. Sized so the first named diagnostic (a 90s bounded wait's
+// else bounds that. Sized so the first named diagnostic (a 120s bounded wait's
 // thrown failure) always lands well inside it, and above the worst-case
-// failing chain (~90x3 + 30 + stop ~= 310s).
-@Suite("ProviderEventsSupervisor (live)", .timeLimit(.minutes(6)))
+// failing chain (~120x3 + 30 + stop ~= 400s).
+@Suite("ProviderEventsSupervisor (live)", .timeLimit(.minutes(8)))
 struct ProviderEventsSupervisorTests {
     /// Hang guard for the bounded waits on supervisor progress (spawn, snapshot
     /// application, respawn, resync).
@@ -36,8 +36,8 @@ struct ProviderEventsSupervisorTests {
     /// failing one pays it. 15s was the previous value and produced reds on a
     /// loaded multi-agent dev box that went green on a targeted rerun — the
     /// signature of scheduling latency, not of a supervisor defect (mined p50
-    /// per-test duration is ~1/3 of total wall time). 90s matches the
-    /// `ciSafeDeadline` re-derivation for this same contention class; that
+    /// per-test duration is ~1/3 of total wall time). It matches the
+    /// `ciSafeDeadline` derivation for this same contention class; that
     /// constant lives in `Tests/TBDDaemonTests` and is not importable from this
     /// target, so both take the same value from `TestSupport` rather than
     /// repeating the literal.

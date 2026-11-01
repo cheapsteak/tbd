@@ -25,13 +25,13 @@ import TestSupport
 ///    *structurally*: their grandchildren hold the pipe write ends open for 120 s
 ///    and 30 s of REAL time, and the only thing that distinguishes "returned
 ///    without waiting for EOF" from "regressed into an EOF-waiting drain" is that
-///    the latter blocks past the limit. At 240 s a regressed 120 s drain finishes
+///    the latter blocks past the limit. At 300 s a regressed 120 s drain finishes
 ///    inside the budget and the test goes green — mutation-verified proof,
 ///    silently disarmed, with nothing going red to tell you.
-/// 2. **It does not need the raised budget.** `.clockDriven` was raised to
-///    4 minutes to absorb the arming latency of the fast parallel pass, whose
-///    ~4536-test population is what makes a `TestClock` handshake take tens of
-///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
+/// 2. **It does not need the larger budget.** `.clockDriven` is 5 minutes to
+///    absorb the arming latency of the fast parallel pass, whose population of
+///    thousands of in-process tests is what makes a clock handshake take tens
+///    of seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds.
 ///
