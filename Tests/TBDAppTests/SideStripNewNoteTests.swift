@@ -52,7 +52,7 @@ struct SideStripNewNoteTests {
         }
     }
 
-    @Test("a failed create opens nothing and lists nothing")
+    @Test("a failed create opens nothing, lists nothing, and shows an error toast")
     func failedCreateOpensNothing() async {
         await Fixture.withState { state in
             let worktreeID = UUID()
@@ -61,11 +61,38 @@ struct SideStripNewNoteTests {
                 throw PanelTabsFixture.Rejected(message: "note.create refused")
             }
             // The fixture's `panel.apply` records an issue if it is reached.
+            #expect(state.activeToast == nil, "precondition: no toast showing")
 
             await state.createNote(worktreeID: worktreeID, tabID: tabID)
 
             #expect(state.notes[worktreeID] == nil)
             #expect(state.tabs[worktreeID] == nil)
+            #expect(state.activeToast?.style == .error)
+            let message = state.activeToast?.message ?? ""
+            #expect(message.contains("note.create refused"), "the toast carries the error: \(message)")
+        }
+    }
+
+    @Test("a notes refresh that lands while the create is in flight leaves the note listed once")
+    func createdNoteIsListedOnce() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let surface = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 1)
+            state.panelSurfaces = [worktreeID: [tabID: surface]]
+            let created = Note(worktreeID: worktreeID, title: "Note")
+            state.noteCreator = { @MainActor [weak state] worktreeID in
+                // The refresh lists the new note before the create's reply lands.
+                state?.adoptNotes([NoteSummary(from: created)], worktreeIDs: [worktreeID])
+                return created
+            }
+            _ = Fixture.collectEnvelopes(state, replying: surface)
+
+            await state.createNote(worktreeID: worktreeID, tabID: tabID)
+
+            let listed: [UUID] = state.notes[worktreeID]?.map { $0.id } ?? []
+            let expectedListed: [UUID] = [created.id]
+            #expect(listed == expectedListed)
         }
     }
 }

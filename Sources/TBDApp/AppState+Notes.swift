@@ -45,7 +45,11 @@ extension AppState {
     ///
     /// The note's summary lands in `notes` before the open goes out, so its
     /// tab reads the note's title, and the + menu does not list it, from the
-    /// moment the panel arrives. A failed create opens nothing; a failed open
+    /// moment the panel arrives. It is appended only when `notes` does not
+    /// list the note already: a notes refresh can land while the create is
+    /// in flight and bring the new note with it.
+    ///
+    /// A failed create opens nothing and shows an error toast; a failed open
     /// leaves the note, which the + menu then lists.
     func createNote(worktreeID: UUID, tabID: UUID) async {
         let note: Note
@@ -53,12 +57,15 @@ extension AppState {
             note = try await noteCreator(worktreeID)
         } catch {
             logger.error("Failed to create note: \(error, privacy: .public)")
+            showErrorToast("Couldn't create a note: \(error.localizedDescription)")
             handleConnectionError(error)
             return
         }
         // `notes` holds metadata only — the daemon hands back a full `Note`
         // here, so summarize it rather than caching content.
-        notes[worktreeID, default: []].append(NoteSummary(from: note))
+        if notes[worktreeID]?.contains(where: { $0.id == note.id }) != true {
+            notes[worktreeID, default: []].append(NoteSummary(from: note))
+        }
         await applyPanelOperation(
             worktreeID: worktreeID, tabID: tabID,
             .open(content: .note(noteID: note.id), newPanel: false))
