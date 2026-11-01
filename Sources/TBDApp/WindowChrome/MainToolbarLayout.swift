@@ -34,18 +34,6 @@ struct MainToolbarLayoutState: Equatable {
     var showsTranscript: Bool
     var showsReconnect: Bool
     var showsStop: Bool
-
-    /// All 32 combinations of the five flags.
-    static var allCombinations: [MainToolbarLayoutState] {
-        (0..<32).map { bits in
-            MainToolbarLayoutState(
-                sidebarCollapsed: bits & 1 != 0,
-                showsServers: bits & 2 != 0,
-                showsTranscript: bits & 4 != 0,
-                showsReconnect: bits & 8 != 0,
-                showsStop: bits & 16 != 0)
-        }
-    }
 }
 
 /// One step turning the toolbar's current item list into the next.
@@ -134,8 +122,9 @@ enum MainToolbarLayout {
     }
 
     /// Carries out `edits` in order through `remove` and `insert`: the one
-    /// loop both the toolbar and `applying(_:to:)` run. `count` reads the
-    /// list's length as it stands, and is how an edit reports that it took.
+    /// loop the toolbar runs, through `ToolbarLayoutSync`, and the tests run
+    /// over a plain list. `count` reads the list's length as it stands, and
+    /// is how an edit reports that it took.
     ///
     /// Each index assumes every edit before it took, so the loop stops at the
     /// first edit whose index lies outside the list, without carrying it out,
@@ -165,19 +154,6 @@ enum MainToolbarLayout {
             }
         }
         return nil
-    }
-
-    /// `items` after `edits`, through `perform`.
-    static func applying(
-        _ edits: [ToolbarEdit], to items: [NSToolbarItem.Identifier]
-    ) -> [NSToolbarItem.Identifier] {
-        var working = items
-        perform(
-            edits,
-            count: { working.count },
-            remove: { index in _ = working.remove(at: index) },
-            insert: { identifier, index in working.insert(identifier, at: index) })
-        return working
     }
 }
 

@@ -288,6 +288,35 @@ struct MainToolbarLayoutTests {
     }
 }
 
+private extension MainToolbarLayoutState {
+    /// All 32 combinations of the five flags.
+    static var allCombinations: [MainToolbarLayoutState] {
+        (0..<32).map { bits in
+            MainToolbarLayoutState(
+                sidebarCollapsed: bits & 1 != 0,
+                showsServers: bits & 2 != 0,
+                showsTranscript: bits & 4 != 0,
+                showsReconnect: bits & 8 != 0,
+                showsStop: bits & 16 != 0)
+        }
+    }
+}
+
+private extension MainToolbarLayout {
+    /// `items` after `edits`, through `perform`, the loop the toolbar runs.
+    static func applying(
+        _ edits: [ToolbarEdit], to items: [NSToolbarItem.Identifier]
+    ) -> [NSToolbarItem.Identifier] {
+        var working = items
+        perform(
+            edits,
+            count: { working.count },
+            remove: { index in _ = working.remove(at: index) },
+            insert: { identifier, index in working.insert(identifier, at: index) })
+        return working
+    }
+}
+
 /// A toolbar's item list as a plain array. An insert of an identifier in
 /// `refusing` adds nothing, as one the toolbar's delegate cannot serve. An
 /// edit outside the list adds or removes nothing either, where the array
