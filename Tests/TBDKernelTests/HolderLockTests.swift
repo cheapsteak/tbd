@@ -42,13 +42,13 @@ struct HolderLockTests {
     /// `.alreadyHeld` against a claim nobody in this test made.
     ///
     /// Any other error fails at once, and the verdict after the budget comes
-    /// from a fresh attempt. The budget matches `TestDeadlines.saturatedPass`
-    /// (this target does not link `TestSupport`): a forked child waiting to
-    /// `exec` sits in the same starved scheduler as every other waiter in the
-    /// fast parallel pass. Success costs one attempt, so the size only matters
-    /// when the lock genuinely never comes back.
+    /// from a fresh attempt. The budget matches `TestDeadlines.saturatedPass`,
+    /// 120 s (this target does not link `TestSupport`): a forked child waiting
+    /// to `exec` sits in the same starved scheduler as every other waiter in
+    /// the fast parallel pass. Success costs one attempt, so the size only
+    /// matters when the lock genuinely never comes back.
     private func reacquire(path: String) async throws -> HolderLock {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(120))
         while true {
             do {
                 return try HolderLock.acquire(path: path)

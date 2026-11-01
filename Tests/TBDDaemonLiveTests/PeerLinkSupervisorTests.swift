@@ -38,10 +38,10 @@ import TBDKernel
 ///   every step, which is the event that says the previous step's ticks ran.
 ///
 /// The time limit is a hang catcher pinned here rather than inherited from
-/// `.clockDriven`, whose 240 s is sized for the fast parallel pass (the tier-3
+/// `.clockDriven`, whose value is sized for the fast parallel pass (the tier-3
 /// convention in `Tests/CLAUDE.md`). It must clear the worst-case failing chain
-/// in one test — a 45 s `advanceVirtualTime` budget, a 90 s `waitFor`, and
-/// `stopDriven`'s own 45 s, so ~180 s — with room for the run to report.
+/// in one test — a 45 s `advanceVirtualTime` budget, a 120 s `waitFor`, and
+/// `stopDriven`'s own 45 s, so ~210 s — with room for the run to report.
 ///
 /// `.serialized` because each test spawns children and drives a clock, and the
 /// real-time waits here are sized for a quiet pass.

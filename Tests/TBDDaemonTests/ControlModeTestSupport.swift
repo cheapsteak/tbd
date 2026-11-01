@@ -32,22 +32,31 @@ import Testing
 /// value explicitly. That default is still live at
 /// `Tests/TBDDaemonTests/AttachRPCTests.swift:137`.
 ///
-/// ## Sizing (30 s -> 90 s)
+/// ## Sizing
 ///
-/// 30 s was sized against a ~3000-test population. The population is now 4536
-/// and Swift Testing runs all of it in one process with no concurrency cap, so
-/// per-test scheduling latency scales with the total, not with this suite. In
-/// CI the whole `ControlModeInputHealth` suite has been observed finishing
-/// green at 45.8 s / 47.4 s and red at 47.9 s — a ~2 s band on either side of
-/// a fixed 30 s wall-clock deadline, which is a coin flip, not a signal. The
-/// observed failures burned the *full* 30 s deadline, so the old value was the
+/// Swift Testing runs the whole fast pass in one process with no concurrency
+/// cap, so per-test scheduling latency scales with the pass's population, not
+/// with this suite. A deadline inside that latency is a coin flip, not a
+/// signal: in CI the whole `ControlModeInputHealth` suite was observed
+/// finishing green at 45.8 s / 47.4 s and red at 47.9 s against a 30 s
+/// deadline, and the failures burned the *full* 30 s, so the deadline was the
 /// binding constraint rather than an incidental one.
 ///
-/// 90 s is 3x that deadline, and it is spent against a tail that sharding the
-/// fast pass independently roughly halves (p90 26.4 s -> 14.6 s, means over 5
-/// iterations, measured interleaved under induced load with population held
-/// constant). Two compounding
-/// changes, so the effective headroom is well past 3x — and the deadline still
+/// The pass that binds this value is fast pass 2 (everything but the two
+/// daemon targets, ~7200 tests). Measured on two green runs of one commit,
+/// its slowest test reported 101.7 s on one (p50 9.9 s, p90 88.2 s, p99
+/// 100.5 s) and 82.4 s on the other (p90 72.3 s) — runner noise alone moves
+/// the tail by about twenty seconds — and about 30% of its tests report over
+/// 45 s on every run measured. Fast passes 1a and 1b report longer tails (on
+/// the second run, max 111.7 s and 107.4 s, p50 84.0 s and 63.6 s), but a
+/// reported duration there includes the time a test waits for its body to
+/// start, which a wait inside the body never pays, so those figures bound a
+/// wait only loosely. The record agrees: across five CI attempts of that
+/// commit no bounded wait timed out in pass 1a or 1b, while pass 2's green
+/// tail crosses a 90 s bound outright — 101.7 s above, and 97.2 s among the
+/// passing tests of a run of `main`.
+///
+/// 120 s clears pass 2's green maximum by ~18 s, and the deadline still
 /// elapses only on a genuine hang.
 ///
 /// ## The interaction with `.clockDriven` — read before changing either value
@@ -78,21 +87,23 @@ import Testing
 /// the first belong to a test that is already failing; truncating those is
 /// acceptable and deliberate.
 ///
-/// Checked against `.clockDriven`'s 4-minute (240 s) limit:
-/// - one `waitFor` (90 s) + one `waitForSuspension` (45 s) = 135 s ✓
-/// - two `waitFor` = 180 s ✓
-/// - two `waitForSuspension` = 90 s ✓ (preserves the "a test that waits twice
-///   must afford both waits" property the old pairing reasoned about)
+/// Checked against `.clockDriven`'s 5-minute (300 s) limit:
+/// - one `waitFor` (120 s) + one arming wait (45 s) = 165 s ✓
+/// - two `waitFor` = 240 s ✓
+/// - two arming waits = 90 s ✓ (preserves the "a test that waits twice must
+///   afford both waits" property the old pairing reasoned about)
 ///
 /// The margin past that is thin, and the 6-deep chain is not the only case that
-/// overruns: counting `waitFor` at 90 s and each clock wait at 45 s, **6 of the
-/// 13** `PaneRepairCoordinatorTests` have a worst case above 240 s (the 6-deep
-/// one needs 540 s). All of them are consistent with the invariant above — only
-/// an already-failing test walks a full chain of timeouts, and the first
-/// timeout's diagnostic has already been recorded by then — but none of them
-/// has spare room. **If they start tripping, shorten the chains; do not raise
-/// 240 s again.** A longer limit only buys time for tests that are already
-/// failing, while making every genuine wedge that much slower to attribute.
+/// overruns: counting each wait on this value — `waitFor` and the suite's own
+/// `readUntil` — at 120 s and each clock wait at 45 s, **10 of the 13**
+/// `PaneRepairCoordinatorTests` have a worst case above 300 s (the 6-deep one,
+/// with its two `readUntil` reads, needs 960 s). All of them are consistent
+/// with the invariant above — only an already-failing test walks a full chain
+/// of timeouts, and the first timeout's diagnostic has already been recorded by
+/// then — but none of them has spare room. **If they start tripping, shorten
+/// the chains; do not raise 300 s.** A longer limit only buys time for tests
+/// that are already failing, while making every genuine wedge that much slower
+/// to attribute.
 ///
 /// ## Why not `@Suite(.serialized)`
 ///
@@ -114,7 +125,7 @@ import Testing
 /// need the same budget. Keeping one literal is what stops the three from
 /// drifting apart unnoticed; the reasoning above is what re-derives it, and it
 /// stays here. Re-derive it together with `TestGate.deadline`, which must
-/// dominate it, and with `waitForSuspension` / `.clockDriven`.
+/// dominate it, and with the clock's arming waits and `.clockDriven`.
 let ciSafeDeadline: Duration = TestDeadlines.saturatedPass
 
 /// Thread-safe, synchronous recorder of fake-client stream writes in call

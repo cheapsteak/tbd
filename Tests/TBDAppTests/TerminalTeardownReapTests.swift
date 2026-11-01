@@ -74,10 +74,10 @@ import TestSupport
 /// cannot do (above). What the limit has to afford is a test that fails through
 /// the 30 s barrier guard and still gets to report: the guard plus the disposal
 /// and assertions that follow it, which is ~35 s of budget. The reason that
-/// budget is not simply a written-out minute is that a minute is not a spare
-/// four minutes in this pass — it is *below* the median reported duration of a
-/// healthy test in it, because reported duration here is mostly time suspended
-/// behind ~5000 other runnable tests. So the number is the shared dial and the
+/// budget is not simply a written-out minute is that a minute is not spare in
+/// this pass — it is *below* the p90 reported duration of a healthy test in it,
+/// because reported duration here is mostly time suspended behind thousands of
+/// other runnable tests. So the number is the shared dial and the
 /// 30 s guard is checked against it, not against a locally-invented literal.
 /// See `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 ///

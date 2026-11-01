@@ -76,21 +76,60 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         try "\(exitCode)\n".write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    /// Polls `condition` until it returns true or the deadline passes.
-    /// The deadline is the shared saturated-pass budget rather than a literal:
-    /// what these wait for is produced by a detached task no test owns, which
-    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
-    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
-    private func waitUntil(
-        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
-        _ condition: @Sendable () async throws -> Bool
+    // Every wait here is the shared `waitFor`, on the saturated-pass budget
+    // rather than a literal: what these wait for is produced by a detached
+    // task no test owns, which SE-0417 leaves on the cooperative pool behind
+    // the whole fast pass — see `gateHoldingTask` in
+    // `Tests/TestSupport/BoundedGateSupport.swift`.
+
+    /// Waits until the repo's serializer lane has run past everything
+    /// submitted to it so far, and returns whether it did in time.
+    ///
+    /// The lane runs a repo's jobs one at a time in submission order, and the
+    /// handler submits its whole phase 2 — the lifecycle's completion and the
+    /// handler's own `.worktreeCreated` broadcast for a `.ready` one — as a
+    /// single job before `handle` returns. A barrier submitted after that runs
+    /// only once phase 2 is over, and the broadcast reaches `deltas`
+    /// synchronously, so a count taken after the barrier is final: no
+    /// duplicate from phase 2 can land a hop later.
+    private func waitForPhase2(
+        of router: RPCRouter, repoID: UUID,
+        observed: @escaping @Sendable () async -> String,
+        sourceLocation: SourceLocation = #_sourceLocation
     ) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if try await condition() { return true }
-            try await Task.sleep(nanoseconds: 50_000_000)
+        let barrier = LaneBarrier()
+        await router.repoSerializer.submit(repoID: repoID) { barrier.pass() }
+        return try await waitFor(
+            "the repo's serializer lane to run past phase 2", observed: observed,
+            sourceLocation: sourceLocation
+        ) {
+            barrier.hasPassed
         }
-        return try await condition()
+    }
+
+    /// The `.worktreeCreated` deltas broadcast for `worktreeID`.
+    private static func createdDeltas(_ deltas: [StateDelta], for worktreeID: UUID) -> [StateDelta] {
+        deltas.filter {
+            if case .worktreeCreated(let d) = $0 { return d.worktreeID == worktreeID }
+            return false
+        }
+    }
+
+    /// The broadcast deltas as a diagnostic reads them: each case's name, in
+    /// order.
+    private static func describe(_ deltas: [StateDelta]) -> String {
+        let names = deltas.map { delta in String(String(describing: delta).prefix { $0 != "(" }) }
+        return "\(deltas.count) delta(s) \(names)"
+    }
+
+    /// The worktree row's status as a diagnostic reads it.
+    private static func describeRow(db: TBDDatabase, id: UUID) async -> String {
+        do {
+            guard let row = try await db.worktrees.get(id: id) else { return "no row" }
+            return "row status \(row.status)"
+        } catch {
+            return "row read failed: \(error)"
+        }
     }
 
     @Test func readyCompletionBroadcastsExactlyOneWorktreeCreated() async throws {
@@ -114,16 +153,22 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         let pending = try response.decodeResult(Worktree.self)
         #expect(pending.status == .creating)
 
-        // Background phase 2 runs on the repo serializer; wait for the flip.
-        let activated = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status == .active
+        // Background phase 2 runs on the repo serializer: the lifecycle sets
+        // the row `.active` and returns `.ready`, and only then does the handler
+        // re-read the row and broadcast. Neither the row nor the first delta
+        // says the job is over — a duplicate could still follow — so wait for
+        // a barrier behind it instead, and count once it has run.
+        let phase2Done = try await waitForPhase2(of: router, repoID: repo.id) {
+            let row = await Self.describeRow(db: db, id: pending.id)
+            return "\(row); \(Self.describe(deltas.snapshot()))"
         }
-        #expect(activated, "background create must complete")
+        // `waitFor` has recorded the timeout; nothing after it can add to it.
+        guard phase2Done else { return }
 
-        let created = deltas.snapshot().filter {
-            if case .worktreeCreated(let d) = $0 { return d.worktreeID == pending.id }
-            return false
-        }
+        let row = try await db.worktrees.get(id: pending.id)
+        #expect(row?.status == .active, "phase 2 must leave the row active")
+
+        let created = Self.createdDeltas(deltas.snapshot(), for: pending.id)
         #expect(created.count == 1,
                 ".ready completion must produce exactly one .worktreeCreated broadcast")
     }
@@ -151,23 +196,40 @@ struct RPCRouterWorktreeCreateBroadcastTests {
 
         // Wait for phase 2 to spawn the pre-session terminal (the marker file
         // is wiped at spawn, so writing it after this point is race-free).
-        let hookSpawned = try await waitUntil {
-            try await db.terminals.list(worktreeID: pending.id)
-                .contains { $0.label == "pre-session" }
+        let hookSpawned = try await waitFor(
+            "phase 2 to spawn the pre-session terminal",
+            observed: {
+                guard let terminals = try? await db.terminals.list(worktreeID: pending.id) else {
+                    return "terminal list read failed"
+                }
+                return "terminal labels \(terminals.map { $0.label })"
+            }
+        ) {
+            let terminals = try? await db.terminals.list(worktreeID: pending.id)
+            return terminals?.contains { $0.label == "pre-session" } == true
         }
-        #expect(hookSpawned, "phase 2 must spawn the pre-session terminal")
+        guard hookSpawned else { return }
 
         // Finish the hook and wait for the detached phase 3 to activate the row.
         try writeMarker(worktreeID: pending.id, exitCode: 0)
-        let activated = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status == .active
+        let activated = try await waitFor(
+            "phase 3 to flip the row to .active",
+            observed: { await Self.describeRow(db: db, id: pending.id) }
+        ) {
+            (try? await db.worktrees.get(id: pending.id))?.status == .active
         }
-        #expect(activated, "phase 3 must flip the row to .active")
+        guard activated else { return }
 
-        let created = deltas.snapshot().filter {
-            if case .worktreeCreated(let d) = $0 { return d.worktreeID == pending.id }
-            return false
+        // The handler's `.preSessionPending` branch runs inside its phase-2
+        // serializer job, so a duplicate it broadcast would land before a
+        // barrier behind that job runs; counting after the barrier leaves it
+        // no later hop to slip into.
+        let phase2Done = try await waitForPhase2(of: router, repoID: repo.id) {
+            Self.describe(deltas.snapshot())
         }
+        guard phase2Done else { return }
+
+        let created = Self.createdDeltas(deltas.snapshot(), for: pending.id)
         #expect(created.count == 1,
                 ".preSessionPending must produce exactly one .worktreeCreated total (no handler duplicate)")
     }
@@ -258,13 +320,16 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         gate.continuation.yield(())
         gate.continuation.finish()
 
-        let failed = try await waitUntil {
+        let failed = try await waitFor(
+            "the background create's failure broadcast",
+            observed: { Self.describe(deltas.snapshot()) }
+        ) {
             deltas.snapshot().contains {
                 if case .worktreeArchived(let d) = $0 { return d.worktreeID == pending.id }
                 return false
             }
         }
-        #expect(failed, "the background create must fail and broadcast")
+        guard failed else { return }
 
         let delta = try #require(deltas.snapshot().compactMap { delta -> WorktreeIDDelta? in
             if case .worktreeArchived(let d) = delta, d.worktreeID == pending.id { return d }
@@ -277,6 +342,22 @@ struct RPCRouterWorktreeCreateBroadcastTests {
         #expect(try await db.worktrees.get(id: pending.id) == nil)
     }
 }
+}
+
+/// A one-way flag a serializer job sets, read by the test's wait.
+private final class LaneBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var passed = false
+
+    func pass() {
+        lock.lock(); defer { lock.unlock() }
+        passed = true
+    }
+
+    var hasPassed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return passed
+    }
 }
 
 /// Thread-safe collector for broadcast StateDeltas.

@@ -109,11 +109,12 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// **That assumes the pool can be reached.** When a suite shares the test
 /// process with one that deliberately saturates the pool —
 /// `BoundedGateWaitTests`'s whole subject, which parks every cooperative
-/// thread for 120 s — a releasing side left on the pool may not run at all,
-/// and the hand-off that releases the gate needs `gateHoldingTask` too, not
-/// just the held side. The sanctioned pattern for that case runs both the
-/// held side and the `signal()`-equivalent hand-off through
-/// `gateHoldingTask`, so the hand-off completes whatever the pool is doing.
+/// thread for up to ``TestGate/deadline`` — a releasing side left on the pool
+/// may not run at all, and the hand-off that releases the gate needs
+/// `gateHoldingTask` too, not just the held side. The sanctioned pattern for
+/// that case runs both the held side and the `signal()`-equivalent hand-off
+/// through `gateHoldingTask`, so the hand-off completes whatever the pool is
+/// doing.
 ///
 /// **The preference stops at an unstructured task.** SE-0417 carries a task
 /// executor preference into child tasks (`async let`, task groups) and into
@@ -152,15 +153,23 @@ public func gateHoldingTask<Success: Sendable>(
 /// and `ProviderEventsSupervisorTests.saturatedWaitDeadline` one constant
 /// rather than three that can drift apart unnoticed.
 ///
-/// The derivation itself — why 90 s, and what re-derives it — stays with
+/// The derivation itself — why 120 s, and what re-derives it — stays with
 /// `ciSafeDeadline` in `Tests/TBDDaemonTests/ControlModeTestSupport.swift`,
 /// which is where the reasoning about population and contention lives.
 public enum TestDeadlines {
-    /// 90 s, as a `TimeInterval` for `Date`-based waits.
-    public static let saturatedPassSeconds: TimeInterval = 90
+    /// 120 s, as a `TimeInterval` for `Date`-based waits.
+    public static let saturatedPassSeconds: TimeInterval = 120
 
-    /// The same 90 s, as a `Duration` for poll-loop waits.
+    /// The same 120 s, as a `Duration` for poll-loop waits.
     public static let saturatedPass: Duration = .seconds(saturatedPassSeconds)
+
+    /// How long, in whole seconds, a test's child process sleeps when it must
+    /// outlive every wait that checks it: five `saturatedPass` budgets, so a
+    /// child that is gone inside such a wait was ended rather than having
+    /// finished its sleep, and one that has to be alive afterwards still is.
+    /// Derived from `saturatedPassSeconds`, so it moves with it. The lifetime is
+    /// a backstop: ending the child is still the spawning test's job.
+    public static let outlivingChildSeconds: Int = Int(saturatedPassSeconds) * 5
 }
 
 /// Carries a bounded wait's OBSERVED state on the primary failure line
@@ -243,21 +252,22 @@ public func waitFor(
 /// is held for as long as the test's own observation takes, and the outer
 /// observations are themselves hang-catchers sized against a loaded runner:
 /// the `TmuxControlSupervisor` teardown gates are held across a `waitUntil`
-/// bounded by that suite's own `teardownWaitDeadline` (90 s, the value
-/// `ciSafeDeadline` carries). A gate deadline below that would go red
-/// on a merely slow machine, and a spuriously red CI is worse than the bug
-/// this bound exists to report. 120 s clears 90 s with margin while staying a
-/// small fraction of the 30-minute step budget, so a wedge reports in minutes
-/// instead of consuming the job.
+/// bounded by that suite's own `teardownWaitDeadline`
+/// (``TestDeadlines/saturatedPass``, the value `ciSafeDeadline` carries). A
+/// gate deadline below that would go red on a merely slow machine, and a
+/// spuriously red CI is worse than the bug this bound exists to report. 150 s
+/// clears `saturatedPass`'s 120 s by 30 s while staying a small fraction of
+/// the 30-minute step budget, so a wedge reports in minutes instead of
+/// consuming the job.
 ///
 /// It also stays inside the shared fast-pass suite limit,
-/// `.fastPassBounded` / `.clockDriven` (`.timeLimit(.minutes(4))`), leaving
-/// room for the rest of an ordinary test after one full gate timeout — the
-/// same invariant `Tests/CLAUDE.md` derives for `ciSafeDeadline` and
-/// `waitForSuspension`. Re-derive it together with those two when the test
+/// `.fastPassBounded` / `.clockDriven` (`.timeLimit(.minutes(5))`, 300 s),
+/// leaving 150 s for the rest of an ordinary test after one full gate timeout
+/// — the same invariant `Tests/CLAUDE.md` derives for `ciSafeDeadline` and the
+/// clock's arming waits. Re-derive it together with those two when the test
 /// population moves materially.
 public enum TestGate {
-    public static let deadline: Duration = .seconds(120)
+    public static let deadline: Duration = .seconds(150)
 }
 
 /// Thrown-shaped diagnostic for an expired gate.
