@@ -246,7 +246,10 @@ struct SocketServerSocketOwnershipTests {
         // `GateExecutor.shared` through `shutdownExecutor:`, and the shutdown
         // body, with the claim window that signals the staging gate, runs on
         // threads the test owns rather than queueing behind the parallel pass.
-        // The claim window records the thread it ran on, so dropping that
+        // The event-loop group's shutdown completion is delivered on the
+        // server's own serial queue rather than `DispatchQueue.global()`, so
+        // the last hop before the reclaim step does not wait on the CPU-wide
+        // global pool either. The claim window records the thread it ran on, so dropping that
         // argument goes red below instead of quietly returning to the pool.
         let claims = ClaimCounter()
         let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
