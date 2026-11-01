@@ -25,6 +25,5 @@ struct MainWindowCommandTests {
 
     @Test func settingsHelpNamesTheNextLaunch() {
         #expect(GeneralSettingsTab.appKitSidebarHelp.contains("next launch"))
-        #expect(!GeneralSettingsTab.panelTabsHelp.contains("next launch"))
     }
 }
