@@ -18,8 +18,21 @@ import UniformTypeIdentifiers
 /// `aSmallImageKeepsItsSize` fails there while passing on a CI runner with no
 /// screen. The pixel dimensions are the subject of these tests, so they are
 /// stated rather than inherited from the hardware.
-@MainActor
-@Suite("ComposerImagePreparer")
+///
+/// **Not `@MainActor`, and the heavy work not on the cooperative pool
+/// either.** Nothing here needs the main thread: the preparer's decode and
+/// encode paths are nonisolated ImageIO work, and the fixtures are built with
+/// `NSBitmapImageRep`, which AppKit does not isolate to the main actor. The
+/// suite is also among the heaviest CPU in the app test pass, and a long
+/// synchronous stretch on CI's three-thread cooperative pool starves every
+/// other suite waiting on it (`Tests/CLAUDE.md`, "Thread-blocking gates run off
+/// the cooperative pool"). So the tests that decode and encode images thousands
+/// of pixels on a side run their bodies through `onTestOwnedThread`, on
+/// `GateExecutor`'s threads — off both the main thread and the shared pool —
+/// and `.serialized` keeps it to one such test at a time. `imageData(from:)`
+/// reads a pasteboard and *is* `@MainActor`; a test of it belongs in a suite
+/// that is.
+@Suite("ComposerImagePreparer", .serialized)
 struct ComposerImagePreparerTests {
 
     /// A bitmap at an exact pixel size. `noisy` fills it with deterministic
@@ -45,12 +58,24 @@ struct ComposerImagePreparerTests {
         if noisy {
             // A tiny xorshift, so the fixture is incompressible and identical
             // on every run.
+            //
+            // A `while` over the raw pointer, not `for index in 0..<count`:
+            // tests build unoptimized, where every step of a `Range` iterator is
+            // an unspecialized generic call. At 4000×3000×3 bytes that iterator
+            // alone was over half of this suite's CPU — about 4 s on a CI
+            // runner, four times the preparer it feeds. The shifts are the
+            // masking `&<<` and `&>>` for the same reason: unoptimized, the
+            // smart `<<` and `>>` may go through `BinaryInteger`'s generic
+            // overload, and for these constant amounts on a `UInt32` the two
+            // give identical bits. The bytes are the same either way.
             var state: UInt32 = 0x1234_5678
-            for index in 0..<count {
-                state ^= state << 13
-                state ^= state >> 17
-                state ^= state << 5
+            var index = 0
+            while index < count {
+                state ^= state &<< 13
+                state ^= state &>> 17
+                state ^= state &<< 5
                 bytes[index] = UInt8(truncatingIfNeeded: state)
+                index += 1
             }
         } else {
             memset(bytes, 0x40, count)
@@ -104,6 +129,33 @@ struct ComposerImagePreparerTests {
         data.starts(with: [0x89, 0x50, 0x4E, 0x47])
     }
 
+    /// Runs `body` on a thread the tests own rather than on the cooperative
+    /// pool or the main thread, for the tests whose fixtures are thousands of
+    /// pixels on a side. A preference for `GateExecutor` moves this nonisolated
+    /// operation onto one of its threads, and `body` never suspends, so it runs
+    /// start to finish there. Assertions inside still attribute to the test:
+    /// it is the same task.
+    ///
+    /// The thread is checked by name before `body` runs, so a preference that
+    /// stopped reaching this closure goes red here instead of quietly putting
+    /// the work back on the pool.
+    private func onTestOwnedThread(_ body: () throws -> Void) async throws {
+        try await withTaskExecutorPreference(GateExecutor.shared) {
+            #expect(Self.runningThreadName() == GateExecutor.threadName)
+            try body()
+        }
+    }
+
+    /// Which thread is running this code.
+    ///
+    /// Synchronous on purpose: `Thread.current` is unavailable from an async
+    /// context, because the answer can change across a suspension point. Called
+    /// from the async closure above with no suspension between it and `body`,
+    /// so it names the thread `body` runs on.
+    private static func runningThreadName() -> String? {
+        Thread.current.name
+    }
+
     @Test func tiffInPngOut() throws {
         let out = try ComposerImagePreparer.preparePNG(
             from: try makeImage(width: 64, height: 48, type: .tiff))
@@ -127,33 +179,39 @@ struct ComposerImagePreparerTests {
         #expect(size.width == 64 && size.height == 48)
     }
 
-    @Test func aLargeImageIsCappedOnItsLongEdge() throws {
-        let out = try ComposerImagePreparer.preparePNG(
-            from: try makeImage(width: 4000, height: 1000, type: .png))
-        let size = try dimensions(of: out)
-        #expect(size.width == ComposerImagePreparer.maxLongEdge)
-        #expect(size.height == 500, "the aspect ratio must survive: got \(size)")
+    @Test func aLargeImageIsCappedOnItsLongEdge() async throws {
+        try await onTestOwnedThread {
+            let out = try ComposerImagePreparer.preparePNG(
+                from: try makeImage(width: 4000, height: 1000, type: .png))
+            let size = try dimensions(of: out)
+            #expect(size.width == ComposerImagePreparer.maxLongEdge)
+            #expect(size.height == 500, "the aspect ratio must survive: got \(size)")
+        }
     }
 
-    @Test func aTallImageIsCappedOnItsLongEdgeToo() throws {
-        let out = try ComposerImagePreparer.preparePNG(
-            from: try makeImage(width: 1000, height: 4000, type: .png))
-        let size = try dimensions(of: out)
-        #expect(size.height == ComposerImagePreparer.maxLongEdge)
+    @Test func aTallImageIsCappedOnItsLongEdgeToo() async throws {
+        try await onTestOwnedThread {
+            let out = try ComposerImagePreparer.preparePNG(
+                from: try makeImage(width: 1000, height: 4000, type: .png))
+            let size = try dimensions(of: out)
+            #expect(size.height == ComposerImagePreparer.maxLongEdge)
+        }
     }
 
     /// **The result must fit Claude Code's cap after base64 expansion**, which is
     /// four bytes out for every three in. The fixture is noise, so the long-edge
     /// cap alone is not enough to get under it and the re-encode loop has to run.
-    @Test func theResultFitsTheBase64Cap() throws {
-        let out = try ComposerImagePreparer.preparePNG(
-            from: try makeImage(width: 4000, height: 3000, type: .png, noisy: true))
-        let base64Bytes = (out.count + 2) / 3 * 4
-        #expect(base64Bytes <= ComposerImagePreparer.maxBase64Bytes,
-                "\(out.count) raw bytes expand to \(base64Bytes) base64 bytes")
-        // …and it really did have to shrink further than the long-edge cap,
-        // which is what makes the assertion above discriminating.
-        #expect(try dimensions(of: out).width < ComposerImagePreparer.maxLongEdge)
+    @Test func theResultFitsTheBase64Cap() async throws {
+        try await onTestOwnedThread {
+            let out = try ComposerImagePreparer.preparePNG(
+                from: try makeImage(width: 4000, height: 3000, type: .png, noisy: true))
+            let base64Bytes = (out.count + 2) / 3 * 4
+            #expect(base64Bytes <= ComposerImagePreparer.maxBase64Bytes,
+                    "\(out.count) raw bytes expand to \(base64Bytes) base64 bytes")
+            // …and it really did have to shrink further than the long-edge cap,
+            // which is what makes the assertion above discriminating.
+            #expect(try dimensions(of: out).width < ComposerImagePreparer.maxLongEdge)
+        }
     }
 
     /// Undecodable input is refused with a message, never written and never sent.
