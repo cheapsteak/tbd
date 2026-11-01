@@ -260,6 +260,10 @@ tabs, so they are reached through the side panel's + menu until one does.
   few tabs, and the write is one transaction.
 - **App and daemon skew.** An app older than this migration finds the notes gone
   from the tab bar and no way to show them until it updates.
+- **Rolling back to an older build.** An older daemon cannot read a tab whose
+  front panel is a worktree panel, which after the migration is most tabs, so
+  its next tab sync imports each such tab again from its legacy layout, and
+  the tab loses the panels of its own.
 
 ## Rejected alternatives
 
