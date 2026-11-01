@@ -33,17 +33,17 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   both layouts share are never rebuilt and an edit that does not take stops
 ///   the rest, then updates the present items' content in place, setting only
 ///   what changed.
-/// - **Replacement.** A change of the window's `toolbar` from ours to another,
-///   or to none while the window is visible, schedules an apply at once,
-///   through KVO on `window.toolbar`, so it does not wait for an unrelated
-///   change. A change to none on a window that is not visible, closing or
-///   ordered out, is a removal, such as teardown makes before the split is
-///   dismantled: it neither counts nor brings ours back. More than
-///   `maxReplacementsInWindow` replacements within `replacementWindow` start a
-///   `reinstallCooldown`, in which applies and installs leave the window's
-///   toolbar alone, so the two never ping-pong. When it ends, the controller
-///   schedules the apply that puts the toolbar back if the window still
-///   shows another, or none while it is visible.
+/// - **Replacement.** A change of a visible window's `toolbar` from ours to
+///   another or to none schedules an apply at once, through KVO on
+///   `window.toolbar`, so it does not wait for an unrelated change. On a
+///   window that is not visible, closing or ordered out, a change away from
+///   ours, to none as teardown makes before the split is dismantled or to
+///   another toolbar, neither counts nor brings ours back: ours never returns
+///   to a closing window. More than `maxReplacementsInWindow` replacements
+///   within `replacementWindow` start a `reinstallCooldown`, in which applies
+///   and installs leave the window's toolbar alone, so the two never
+///   ping-pong. When it ends, the controller schedules the apply that puts
+///   the toolbar back if the window is visible and shows another or none.
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width".
@@ -140,8 +140,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// tests.
     private(set) var recentReplacements: [Date] = []
     /// Whether ours was the last toolbar the watch saw on the window, so only
-    /// a change away from ours counts as a replacement. A removal, a change
-    /// to none on a window that is not visible, leaves it as it was.
+    /// a change away from ours counts as a replacement. A change away from
+    /// ours on a window that is not visible leaves it as it was.
     private var windowShowsOurToolbar = false
     /// The running cooldown. While it is set, applies and installs leave the
     /// window's toolbar alone and the watch ignores the window's changes.
@@ -270,23 +270,25 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         scheduleApply()
     }
 
-    /// The window's `toolbar` changed. A change from ours to another toolbar,
-    /// or to none while the window is visible, is a replacement, and counts
-    /// toward the cooldown; a change from one other toolbar to another does
-    /// not. Anything but ours schedules the apply that puts ours back, unless
-    /// a cooldown is running or this replacement started one. Applies never
+    /// The window's `toolbar` changed. On a visible window, a change from ours
+    /// to another toolbar or to none is a replacement, and counts toward the
+    /// cooldown; a change from one other toolbar to another does not.
+    /// Anything but ours schedules the apply that puts ours back, unless a
+    /// cooldown is running or this replacement started one. Applies never
     /// count: only the window's changes do.
     ///
-    /// A change to none on a window that is not visible, closing or ordered
-    /// out, is a removal, such as teardown makes before the split is
-    /// dismantled: it counts nothing and puts nothing back, so a closing
-    /// window gets no toolbar and no cooldown starts. It leaves what the watch
-    /// last saw as it was, so ours, then a removal, then another counts once.
+    /// A change away from ours on a window that is not visible, closing or
+    /// ordered out, is left alone, whether to none, as teardown makes before
+    /// the split is dismantled, or to another toolbar: it counts nothing and
+    /// puts nothing back, so a closing window never gets ours back and no
+    /// cooldown starts. It leaves what the watch last saw as it was, so ours,
+    /// then a change on the hidden window, then another once it is visible
+    /// counts once.
     private func windowToolbarChanged() {
         guard isInstalled, let window else { return }
         let shown = window.toolbar
-        if shown == nil, !window.isVisible { return }
         let showsOurs = shown === toolbar
+        if !showsOurs, !window.isVisible { return }
         let replaced = windowShowsOurToolbar && !showsOurs
         windowShowsOurToolbar = showsOurs
         guard !showsOurs, cooldown == nil else { return }
@@ -333,7 +335,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     }
 
     /// The cooldown ran out: the scheduled apply puts the toolbar back if the
-    /// window still shows another, or none while it is visible.
+    /// window is visible and still shows another or none.
     private func cooldownEnded() {
         cooldown = nil
         guard isInstalled else { return }
@@ -432,8 +434,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         toolbarLogger.debug("Main toolbar apply \(self.applyCount, privacy: .public)")
         appliedSnapshot = snapshot
         // Something else, such as a SwiftUI scene update, can set the window's
-        // toolbar; ours comes back here, except during a cooldown or after a
-        // removal.
+        // toolbar; ours comes back here, except during a cooldown or on a
+        // window that is not visible.
         if reattachIsDue, let window {
             toolbarLogger.info("Main toolbar was replaced on its window; re-installing it")
             attach(to: window)
@@ -448,14 +450,13 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Whether an apply puts the toolbar back on its window: it is installed,
     /// no cooldown is leaving another toolbar or none in place, and the window
-    /// shows another toolbar, or none while it is visible. A window that is
-    /// not visible and has no toolbar had ours removed, as teardown does
-    /// before the split is dismantled, and ours must not return to a closing
-    /// window.
+    /// is visible and shows another toolbar or none. On a window that is not
+    /// visible, closing or ordered out, whatever replaced ours stays, whether
+    /// none, as teardown leaves before the split is dismantled, or another
+    /// toolbar: ours must not return to a closing window.
     private var reattachIsDue: Bool {
-        guard isInstalled, cooldown == nil, let window else { return false }
-        guard let shown = window.toolbar else { return window.isVisible }
-        return shown !== toolbar
+        guard isInstalled, cooldown == nil, let window, window.isVisible else { return false }
+        return window.toolbar !== toolbar
     }
 
     /// Brings the items to `target` through `layoutSync`, and returns whether

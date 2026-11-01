@@ -518,8 +518,10 @@ struct MainToolbarControllerTests {
     /// is a removal, as teardown makes before the split is dismantled, not a
     /// competing toolbar: it counts no replacement and queues nothing, and a
     /// later apply leaves the window without a toolbar rather than putting
-    /// ours back on a closing window. Another toolbar after the removal is
-    /// still a replacement of ours: it counts once and is put back.
+    /// ours back on a closing window. Another toolbar once the window is back
+    /// in, with nothing installing on its appearance, is still a replacement
+    /// of ours: the removal left ours as the last toolbar the watch saw, so
+    /// it counts once, and it is put back.
     @Test func aToolbarClearedOnAHiddenWindowIsNotAReplacement() async throws {
         let fixture = ToolbarFixture(label: "aToolbarClearedOnAHiddenWindowIsNotAReplacement")
         defer { fixture.tearDown() }
@@ -547,12 +549,54 @@ struct MainToolbarControllerTests {
         #expect(controller.applyCount == appliesBefore + 1)
         #expect(window.toolbar == nil)
 
+        // Nothing suspends from ordering the window in to the toolbar set, so
+        // no queued apply can put ours back in between.
+        fixture.split.onViewDidAppear = nil
+        window.orderFront(nil)
+        try #require(window.isVisible)
+        try #require(window.toolbar == nil)
         window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterRemoval")
         #expect(controller.recentReplacements.count == 1)
         let back = try await waitForMainActorCondition("a toolbar set after the removal to be replaced by ours") {
             window.toolbar === controller.toolbar
         }
         #expect(back)
+    }
+
+    /// Another toolbar set on a window that is not visible is left alone, as
+    /// a clear there is: it counts no replacement and queues nothing, and a
+    /// later apply leaves it on the window rather than putting ours back on a
+    /// closing window.
+    @Test func aToolbarSetOnAHiddenWindowIsNotAReplacement() async throws {
+        let fixture = ToolbarFixture(label: "aToolbarSetOnAHiddenWindowIsNotAReplacement")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        window.orderOut(nil)
+        try #require(window.isVisible == false)
+        let quiet = try await waitForMainActorCondition("no apply queued after ordering the window out") {
+            !controller.applyScheduled
+        }
+        try #require(quiet)
+        try #require(controller.recentReplacements.isEmpty)
+        try #require(window.toolbar === controller.toolbar)
+
+        let other = NSToolbar(identifier: "MainToolbarControllerTests.onHiddenWindow")
+        window.toolbar = other
+        // KVO reports synchronously, so a watch that took the change for a
+        // replacement would have counted it and queued an apply by now.
+        #expect(controller.recentReplacements.isEmpty)
+        #expect(controller.applyScheduled == false)
+        #expect(controller.isInstalled)
+
+        // The apply runs, which is what makes its leaving the other toolbar
+        // on the window mean something.
+        let appliesBefore = controller.applyCount
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(controller.applyCount == appliesBefore + 1)
+        #expect(window.toolbar === other)
     }
 
     /// One replacement past `maxReplacementsInWindow` inside one
