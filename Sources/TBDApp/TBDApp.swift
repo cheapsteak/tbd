@@ -326,8 +326,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     static func lockSidebarOpen(in window: NSWindow) {
         guard let contentView = window.contentView,
-              let splitVC = findSplitViewController(in: contentView),
-              let sidebarItem = splitVC.splitViewItems.first,
+              let splitVC = findSplitViewController(in: contentView) else {
+            return
+        }
+        // The AppKit split sets its own collapse flags once (spec, "Window structure").
+        if splitVC is MainSplitViewController { return }
+        guard let sidebarItem = splitVC.splitViewItems.first,
               sidebarItem.behavior == .sidebar else {
             // .sidebar guard: if the detail pane ever hosts its own
             // NSSplitViewController (nested NavigationSplitView, NavigationView),
@@ -498,6 +502,16 @@ struct TBDAppMain: App {
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
 
+    /// The main window's split and toolbar, read from the native sidebar flag
+    /// once per launch, in the store `appState` reads. The structure is
+    /// chosen when the window is created: flipping the Settings toggle swaps
+    /// the sidebar's contents at once and the chrome at the next launch
+    /// (docs/specs/2026-11-01-appkit-window-chrome-design.md, "Switching").
+    /// Read live, a flip would tear down the window's split and toolbar
+    /// mid-session. It rests on the same "`App.main()` instantiates this
+    /// once" as `appState` above.
+    private let windowChrome: MainWindowChrome = MainWindowChrome.resolve(TBDAppMain.resolveUserDefaults())
+
     /// Choose the UserDefaults domain for this app instance. The mock harness
     /// (`TBD_MOCK`) routes `AppState` — which persists window frame and layout
     /// state — to an isolated suite so a mock run never writes those back into
@@ -524,7 +538,7 @@ struct TBDAppMain: App {
 
     var body: some Scene {
         Window("TBD", id: "main") {
-            ContentView()
+            ContentView(chrome: windowChrome)
                 .environment(appState)
                 .environmentObject(appearance)
                 .environmentObject(overlayCoordinator)

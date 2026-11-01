@@ -52,6 +52,38 @@ enum TextFinderCommand {
     }
 }
 
+/// The main window's navigation and panel commands. They live in the menu bar,
+/// not on toolbar buttons, so the shortcuts work the same on the SwiftUI and
+/// AppKit toolbars.
+enum MainWindowCommand: CaseIterable {
+    case back
+    case forward
+    case toggleChanges
+
+    var title: String {
+        switch self {
+        case .back: "Back"
+        case .forward: "Forward"
+        case .toggleChanges: "Toggle Changes"
+        }
+    }
+
+    var key: KeyEquivalent {
+        switch self {
+        case .back: "["
+        case .forward: "]"
+        case .toggleChanges: "e"
+        }
+    }
+
+    var modifiers: EventModifiers {
+        switch self {
+        case .back, .forward: .command
+        case .toggleChanges: [.command, .shift]
+        }
+    }
+}
+
 /// Menu commands providing keyboard shortcuts for the app.
 struct TBDCommands: Commands {
     var appState: AppState
@@ -98,10 +130,13 @@ struct TBDCommands: Commands {
         // selected local worktree with an active tab, and beeps on a tab that
         // renders legacy (`AppState.toggleChangesPanel`).
         CommandGroup(after: .sidebar) {
-            Button("Toggle Changes") {
+            Button(MainWindowCommand.toggleChanges.title) {
                 Task { @MainActor in appState.toggleChangesPanel() }
             }
-            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .keyboardShortcut(
+                MainWindowCommand.toggleChanges.key,
+                modifiers: MainWindowCommand.toggleChanges.modifiers
+            )
         }
 
         // Worktree commands
@@ -116,6 +151,10 @@ struct TBDCommands: Commands {
 
         // Worktree selection by index (Cmd-1 through Cmd-9)
         CommandMenu("Go") {
+            NavigationCommandsContent().environment(appState)
+
+            Divider()
+
             Button("Jump to Worktree…") {
                 Task { @MainActor in
                     JumpMenuController.shared.toggle()
@@ -228,5 +267,25 @@ private struct TerminalCommandsContent: View {
         }
         .keyboardShortcut("/", modifiers: [.command, .option])
         .disabled(appState.composerCommandTerminalID == nil)
+    }
+}
+
+/// Back and Forward are gated on `AppState`, so they live in a nested `View`
+/// for the reason `WorktreeCommandsContent` gives.
+private struct NavigationCommandsContent: View {
+    @Environment(AppState.self) var appState
+
+    var body: some View {
+        Button(MainWindowCommand.back.title) {
+            appState.navigateBack()
+        }
+        .keyboardShortcut(MainWindowCommand.back.key, modifiers: MainWindowCommand.back.modifiers)
+        .disabled(!appState.canGoBack)
+
+        Button(MainWindowCommand.forward.title) {
+            appState.navigateForward()
+        }
+        .keyboardShortcut(MainWindowCommand.forward.key, modifiers: MainWindowCommand.forward.modifiers)
+        .disabled(!appState.canGoForward)
     }
 }

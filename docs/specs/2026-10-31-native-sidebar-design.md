@@ -672,6 +672,10 @@ a slow frame to the list that spent it.
   (experimental)". `SidebarView` chooses its path from the key, so the toggle
   swaps the sidebar without a restart.
 - **Off** – the SwiftUI `List` path runs unchanged.
+- **Window chrome** – the AppKit split and toolbar of
+  [`2026-11-01-appkit-window-chrome-design.md`](2026-11-01-appkit-window-chrome-design.md)
+  ride this key and graduate with it. They follow the key at the next launch
+  rather than at once.
 - **During the soak** – a change to sidebar behavior lands in both paths, and
   its PR says so.
 - **Soak** – two weeks with the flag on in daily use, starting when the PR that
@@ -719,6 +723,12 @@ The behaviors a rewrite most easily loses:
    section header without stopping at it, and a real click on a header runs
    its action through the outline's `action`, which the offscreen tests drive
    only through the click handler.
+10. The window chrome: the toggle, back and forward stay beside the window
+    buttons with the sidebar shown and collapsed; the repo filter hides while
+    collapsed; every right-hand toolbar item the AppKit toolbar keeps matches
+    the SwiftUI toolbar's behavior, and it has no PR button and no
+    file-panel toggle; no separator line under the sidebar's toolbar area; waking from
+    sleep never collapses the sidebar.
 
 ## Testing
 
