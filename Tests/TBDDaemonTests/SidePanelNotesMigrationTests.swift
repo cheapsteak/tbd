@@ -8,7 +8,7 @@ import TBDShared
 /// The `20261101170100_side_panel_notes` migration
 /// (docs/specs/2026-11-01-side-panel-notes-and-changes-design.md, "Daemon →
 /// Migration"): notes leave the workspace tab bar and the tabs' own side
-/// regions, and show in worktree panels.
+/// regions, and no worktree panel opens for them.
 ///
 /// Each test migrates a database to just before the migration, seeds rows as
 /// the daemon wrote them before it, and runs the rest of the chain. JSON that
@@ -53,13 +53,6 @@ struct SidePanelNotesMigrationTests {
         var recency: [UUID]
         var collapsed: Bool = false
         var width: Double = 0.5
-    }
-
-    /// One `worktree_panel` row.
-    private struct PanelRow {
-        let id: UUID?
-        let position: Int
-        let content: String
     }
 
     // MARK: - Seeding
@@ -152,12 +145,6 @@ struct SidePanelNotesMigrationTests {
         #"{"entries":[{"note":{"noteID":"\#(noteID.uuidString)"}}],"cursor":0}"#
     }
 
-    /// A note's worktree panel content, as `JSONEncoder` spells
-    /// `WorktreePanelContent.note`.
-    private static func noteContent(_ noteID: UUID) -> String {
-        #"{"note":{"noteID":"\#(noteID.uuidString)"}}"#
-    }
-
     // MARK: - Reading back
 
     private static func tabOrderText(_ queue: DatabaseQueue, worktreeID: UUID) throws -> String? {
@@ -184,15 +171,10 @@ struct SidePanelNotesMigrationTests {
         }
     }
 
-    /// The worktree's `worktree_panel` rows in position order.
-    private static func panelRows(_ queue: DatabaseQueue, worktreeID: UUID) throws -> [PanelRow] {
+    /// Every `worktree_panel` row, in any worktree.
+    private static func worktreePanelRowCount(_ queue: DatabaseQueue) throws -> Int {
         try queue.read { db in
-            try Row.fetchAll(
-                db, sql: "SELECT id, position, content FROM worktree_panel WHERE worktreeID = ? ORDER BY position",
-                arguments: [worktreeID.uuidString]
-            ).map { row in
-                PanelRow(id: UUID(uuidString: row["id"]), position: row["position"], content: row["content"])
-            }
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM worktree_panel") ?? -1
         }
     }
 
@@ -285,9 +267,9 @@ struct SidePanelNotesMigrationTests {
 
     // MARK: - Notes leave the tab bar
 
-    /// A note's ID leaves its worktree's tab order, it gets one worktree
-    /// panel, and its tab row goes while the terminal tab's stays.
-    @Test func movesNoteOutOfTabOrderIntoWorktreePanel() throws {
+    /// A note's ID leaves its worktree's tab order and its tab row goes,
+    /// while the terminal tab's stays. No worktree panel opens for it.
+    @Test func removesNoteFromTabOrderAndTabRows() throws {
         let terminalTabID = UUID()
         let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, noteID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
@@ -300,56 +282,28 @@ struct SidePanelNotesMigrationTests {
 
         let tabOrder = try Self.tabOrder(queue, worktreeID: seeded.worktreeID)
         #expect(tabOrder == [terminalTabID.uuidString])
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        let contents = panels.map(\.content)
-        #expect(contents == [Self.noteContent(seeded.noteID)])
-        #expect(panels.first?.id != nil)
         let tabRows = try Self.tabRowIDs(queue)
         #expect(tabRows == [terminalTabID.uuidString])
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
-    /// The panels follow the tab order's notes, in its order, then the notes
-    /// it does not list, by creation rather than by insertion.
-    @Test func ordersPanelsByTabOrderThenCreation() throws {
+    /// An archived worktree's tab order loses its notes' IDs and its notes
+    /// lose their tab rows, as any other worktree's do.
+    @Test func cleansArchivedWorktreeTabOrder() throws {
         let terminalTabID = UUID()
-        let base = Date(timeIntervalSince1970: 1_800_000_000)
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, notes: [UUID]) in
-            let worktreeID = try Self.insertWorktree(db)
-            let first = try Self.insertNote(db, worktreeID: worktreeID, createdAt: base)
-            let fourth = try Self.insertNote(db, worktreeID: worktreeID, createdAt: base.addingTimeInterval(180))
-            let second = try Self.insertNote(db, worktreeID: worktreeID, createdAt: base.addingTimeInterval(60))
-            let third = try Self.insertNote(db, worktreeID: worktreeID, createdAt: base.addingTimeInterval(120))
-            try Self.setTabOrder(db, worktreeID: worktreeID, [terminalTabID, third, first])
-            return (worktreeID, [first, second, third, fourth])
-        }
-
-        let notes = seeded.notes
-        let expected: [String] = [notes[2], notes[0], notes[1], notes[3]].map { Self.noteContent($0) }
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        let contents = panels.map(\.content)
-        let positions = panels.map(\.position)
-        #expect(contents == expected)
-        #expect(positions == [0, 1, 2, 3])
-    }
-
-    /// An archived worktree's tab order loses its notes' IDs, and its notes
-    /// get no worktree panels.
-    @Test func archivedWorktreeGetsNoPanels() throws {
-        let terminalTabID = UUID()
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, noteID: UUID) in
+        let (queue, seeded) = try Self.migrate { db -> UUID in
             let worktreeID = try Self.insertWorktree(db, status: "archived")
             let noteID = try Self.insertNote(db, worktreeID: worktreeID)
             try Self.setTabOrder(db, worktreeID: worktreeID, [terminalTabID, noteID])
             try Self.insertTabRow(db, id: noteID, worktreeID: worktreeID)
-            return (worktreeID, noteID)
+            return worktreeID
         }
 
-        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded.worktreeID)
+        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded)
         #expect(tabOrder == [terminalTabID.uuidString])
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        #expect(panels.isEmpty)
         let tabRows = try Self.tabRowIDs(queue)
         #expect(tabRows.isEmpty)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
     /// A note's ID leaves every tab order that lists it, not only its own
@@ -357,20 +311,17 @@ struct SidePanelNotesMigrationTests {
     /// to the main worktree, while the notes stay behind with the scratch.
     @Test func removesNoteIDsFromEveryWorktreesTabOrder() throws {
         let terminalTabID = UUID()
-        let (queue, seeded) = try Self.migrate { db -> (scratchID: UUID, mainID: UUID) in
+        let (queue, seeded) = try Self.migrate { db -> UUID in
             let scratchID = try Self.insertWorktree(db, status: "archived")
             let noteID = try Self.insertNote(db, worktreeID: scratchID)
             let mainID = try Self.insertWorktree(db, status: "main")
             try Self.setTabOrder(db, worktreeID: mainID, [terminalTabID, noteID])
-            return (scratchID, mainID)
+            return mainID
         }
 
-        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded.mainID)
+        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded)
         #expect(tabOrder == [terminalTabID.uuidString])
-        let mainPanels = try Self.panelRows(queue, worktreeID: seeded.mainID)
-        #expect(mainPanels.isEmpty)
-        let scratchPanels = try Self.panelRows(queue, worktreeID: seeded.scratchID)
-        #expect(scratchPanels.isEmpty)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
     /// A worktree whose selected tab was a note selects the first tab its
@@ -415,9 +366,9 @@ struct SidePanelNotesMigrationTests {
 
     /// Run on a database where `20261101170000_worktree_panel` has not run,
     /// as a machine that applies the two in another order would, the
-    /// migration creates the table that file creates, then moves the notes
-    /// into it. The rest of the chain still applies afterwards and adds no
-    /// second panel.
+    /// migration creates the table that file creates, puts no row in it, and
+    /// takes the notes out of the tab order. The rest of the chain still
+    /// applies afterwards.
     @Test func createsWorktreePanelTableWhenMissing() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
@@ -425,26 +376,23 @@ struct SidePanelNotesMigrationTests {
         let tableBefore = try queue.read { db in try db.tableExists("worktree_panel") }
         #expect(!tableBefore)
 
-        let seeded = try queue.write { db -> (worktreeID: UUID, noteID: UUID) in
+        let worktreeID = try queue.write { db -> UUID in
             let worktreeID = try Self.insertWorktree(db)
             let noteID = try Self.insertNote(db, worktreeID: worktreeID)
             try Self.setTabOrder(db, worktreeID: worktreeID, [noteID])
             try SidePanelNotesMigration.run(db)
-            return (worktreeID, noteID)
+            return worktreeID
         }
 
         let schema = try Self.worktreePanelSchema(queue)
         #expect(schema == Self.expectedWorktreePanelSchema)
-        let contents = try Self.panelRows(queue, worktreeID: seeded.worktreeID).map(\.content)
-        let expectedContents: [String] = [Self.noteContent(seeded.noteID)]
-        #expect(contents == expectedContents)
-        let tabOrder = try Self.tabOrder(queue, worktreeID: seeded.worktreeID)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
+        let tabOrder = try Self.tabOrder(queue, worktreeID: worktreeID)
         let expectedTabOrder: [String] = []
         #expect(tabOrder == expectedTabOrder)
 
         try migrator.migrate(queue)
-        let contentsAfterChain = try Self.panelRows(queue, worktreeID: seeded.worktreeID).map(\.content)
-        #expect(contentsAfterChain == expectedContents)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
     /// The table `20261101170000_worktree_panel.sql` creates on the usual
@@ -458,13 +406,14 @@ struct SidePanelNotesMigrationTests {
 
     // MARK: - A tab's own note panels
 
-    /// A tab's own panel on a note, in front, gives way to the note's
-    /// worktree panel, in front: its history row goes, the file panel stays,
-    /// and the row takes a revision above every earlier one.
-    @Test func replacesTabsOwnNotePanelInFront() async throws {
+    /// A tab's own panel on a note, in front, is removed with its history
+    /// row; the tab fronts its most recent remaining own panel, the file
+    /// panel, and its row takes a revision above every earlier one. The
+    /// store reads it back with no worktree panel.
+    @Test func removesTabsOwnNotePanelInFront() async throws {
         let filePanelID = UUID()
         let notePanelID = UUID()
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, noteID: UUID, tabID: UUID) in
+        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, tabID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
             let noteID = try Self.insertNote(db, worktreeID: worktreeID)
             let tabID = try Self.insertSurface(
@@ -475,25 +424,23 @@ struct SidePanelNotesMigrationTests {
                 revision: Self.counterBefore)
             try Self.insertHistory(db, panelID: filePanelID, tabID: tabID, history: Self.fileHistory())
             try Self.insertHistory(db, panelID: notePanelID, tabID: tabID, history: Self.noteHistory(noteID))
-            return (worktreeID, noteID, tabID)
+            return (worktreeID, tabID)
         }
 
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        let notePanelRowID = try #require(panels.first?.id)
         let layout = try #require(try Self.layout(queue, tabID: seeded.tabID))
-        #expect(layout == Layout(panelIDs: [filePanelID], activePanelID: notePanelRowID, recency: [filePanelID]))
+        #expect(layout == Layout(panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID]))
         let historyIDs = try Self.historyPanelIDs(queue, tabID: seeded.tabID)
         #expect(historyIDs == [filePanelID.uuidString])
         let revision = try #require(try Self.revision(queue, tabID: seeded.tabID))
         #expect(revision > Self.counterBefore)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
 
         let surfaces = try await PanelSurfaceStore(writer: queue).surfaces(worktreeID: seeded.worktreeID)
         let surface = try #require(surfaces.first)
         let ownPanelIDs = surface.side.panels.map(\.id)
         #expect(ownPanelIDs == [filePanelID])
-        #expect(surface.side.activePanelID == notePanelRowID)
-        let expectedPanels = [WorktreePanel(id: notePanelRowID, content: .note(noteID: seeded.noteID))]
-        #expect(surface.worktreePanels == expectedPanels)
+        #expect(surface.side.activePanelID == filePanelID)
+        #expect(surface.worktreePanels.isEmpty)
         #expect(surface.revision == UInt64(revision))
     }
 
@@ -502,7 +449,7 @@ struct SidePanelNotesMigrationTests {
     @Test func keepsFrontWhenNotePanelWasBehind() throws {
         let filePanelID = UUID()
         let notePanelID = UUID()
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, tabID: UUID) in
+        let (queue, seeded) = try Self.migrate { db -> UUID in
             let worktreeID = try Self.insertWorktree(db)
             let noteID = try Self.insertNote(db, worktreeID: worktreeID)
             let tabID = try Self.insertSurface(
@@ -512,56 +459,65 @@ struct SidePanelNotesMigrationTests {
                     recency: [filePanelID, notePanelID])))
             try Self.insertHistory(db, panelID: filePanelID, tabID: tabID, history: Self.fileHistory())
             try Self.insertHistory(db, panelID: notePanelID, tabID: tabID, history: Self.noteHistory(noteID))
-            return (worktreeID, tabID)
+            return tabID
         }
 
-        let layout = try #require(try Self.layout(queue, tabID: seeded.tabID))
+        let layout = try #require(try Self.layout(queue, tabID: seeded))
         #expect(layout == Layout(panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID]))
-        let historyIDs = try Self.historyPanelIDs(queue, tabID: seeded.tabID)
+        let historyIDs = try Self.historyPanelIDs(queue, tabID: seeded)
         #expect(historyIDs == [filePanelID.uuidString])
     }
 
-    /// A tab's own panel on a note that has no row goes too. With another
-    /// own panel left, the front falls back to the most recent one rather
-    /// than to the worktree's panel; with none left, to the worktree's first
-    /// panel, keeping the region's collapse state.
-    @Test func removesOwnPanelOfDeletedNote() throws {
+    /// A tab's own panel on a note goes whether or not the note still has a
+    /// row. With another own panel left, the front falls back to the most
+    /// recent one; with none left, to nothing. Neither tab's collapse state
+    /// changes.
+    @Test(arguments: [false, true])
+    func removedNotePanelFrontFallsBackToRecencyThenNothing(collapsed: Bool) async throws {
         let filePanelID = UUID()
         let deletedNotePanelID = UUID()
-        let loneDeletedNotePanelID = UUID()
+        let loneNotePanelID = UUID()
         let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, withFileID: UUID, aloneID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
-            _ = try Self.insertNote(db, worktreeID: worktreeID)
+            let noteID = try Self.insertNote(db, worktreeID: worktreeID)
             let deletedNoteID = UUID()
             let withFileID = try Self.insertSurface(
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
                 layout: encodeJSONString(Layout(
                     panelIDs: [filePanelID, deletedNotePanelID], activePanelID: deletedNotePanelID,
-                    recency: [deletedNotePanelID, filePanelID])))
+                    recency: [deletedNotePanelID, filePanelID], collapsed: collapsed)))
             try Self.insertHistory(db, panelID: filePanelID, tabID: withFileID, history: Self.fileHistory())
             try Self.insertHistory(
                 db, panelID: deletedNotePanelID, tabID: withFileID, history: Self.noteHistory(deletedNoteID))
             let aloneID = try Self.insertSurface(
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
                 layout: encodeJSONString(Layout(
-                    panelIDs: [loneDeletedNotePanelID], activePanelID: loneDeletedNotePanelID,
-                    recency: [loneDeletedNotePanelID])),
+                    panelIDs: [loneNotePanelID], activePanelID: loneNotePanelID,
+                    recency: [loneNotePanelID], collapsed: collapsed, width: 0.4)),
                 position: 1)
             try Self.insertHistory(
-                db, panelID: loneDeletedNotePanelID, tabID: aloneID, history: Self.noteHistory(deletedNoteID))
+                db, panelID: loneNotePanelID, tabID: aloneID, history: Self.noteHistory(noteID))
             return (worktreeID, withFileID, aloneID)
         }
 
         let withFile = try #require(try Self.layout(queue, tabID: seeded.withFileID))
-        #expect(withFile == Layout(panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID]))
+        #expect(withFile == Layout(
+            panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID], collapsed: collapsed))
         let withFileHistories = try Self.historyPanelIDs(queue, tabID: seeded.withFileID)
         #expect(withFileHistories == [filePanelID.uuidString])
 
-        let worktreePanelID = try #require(try Self.panelRows(queue, worktreeID: seeded.worktreeID).first?.id)
         let alone = try #require(try Self.layout(queue, tabID: seeded.aloneID))
-        #expect(alone == Layout(panelIDs: [], activePanelID: worktreePanelID, recency: [], collapsed: false))
+        #expect(alone == Layout(panelIDs: [], activePanelID: nil, recency: [], collapsed: collapsed, width: 0.4))
         let aloneHistories = try Self.historyPanelIDs(queue, tabID: seeded.aloneID)
         #expect(aloneHistories.isEmpty)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
+
+        let surfaces = try await PanelSurfaceStore(writer: queue).surfaces(worktreeID: seeded.worktreeID)
+        #expect(surfaces.map(\.id) == [seeded.withFileID, seeded.aloneID], "both read back")
+        for surface in surfaces {
+            #expect(PanelSurfaceValidator.violations(in: surface).isEmpty)
+            #expect(surface.side.collapsed == collapsed)
+        }
     }
 
     /// Every surface whose primary is a note is deleted with its panels'
@@ -593,76 +549,55 @@ struct SidePanelNotesMigrationTests {
         #expect(try Self.surfaceExists(queue, tabID: seeded.terminalTabID))
         let noteTabHistories = try Self.historyPanelIDs(queue, tabID: seeded.noteTabID)
         #expect(noteTabHistories.isEmpty)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
-    // MARK: - Front and collapse
+    // MARK: - Surfaces without note panels
 
-    /// A tab whose side region had no panels fronts the worktree's first
-    /// panel and comes out collapsed, so the update narrows no terminal; the
-    /// store reads it back, and it passes the validator.
-    @Test func emptyRegionComesOutCollapsed() async throws {
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, noteID: UUID, tabID: UUID) in
-            let worktreeID = try Self.insertWorktree(db)
-            let noteID = try Self.insertNote(db, worktreeID: worktreeID)
-            let tabID = try Self.insertSurface(
-                db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
-                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])))
-            return (worktreeID, noteID, tabID)
-        }
-
-        let worktreePanelID = try #require(try Self.panelRows(queue, worktreeID: seeded.worktreeID).first?.id)
-        let layout = try #require(try Self.layout(queue, tabID: seeded.tabID))
-        #expect(layout == Layout(panelIDs: [], activePanelID: worktreePanelID, recency: [], collapsed: true))
-        let revision = try #require(try Self.revision(queue, tabID: seeded.tabID))
-        #expect(revision > Self.counterBefore)
-
-        let surfaces = try await PanelSurfaceStore(writer: queue).surfaces(worktreeID: seeded.worktreeID)
-        let surface = try #require(surfaces.first)
-        #expect(surface.side.collapsed)
-        #expect(surface.side.activePanelID == worktreePanelID)
-        let worktreePanelContents = surface.worktreePanels.map(\.content)
-        let expectedContents: [WorktreePanelContent] = [.note(noteID: seeded.noteID)]
-        #expect(worktreePanelContents == expectedContents)
-        let violations = PanelSurfaceValidator.violations(in: surface)
-        #expect(violations.isEmpty)
-        #expect(!surface.isSideVisible)
-    }
-
-    /// A tab whose side region had panels keeps its front and its collapse
-    /// state, and its row is not rewritten; its strip gains the worktree
-    /// panel when the store joins it in.
+    /// In a worktree with notes, a tab with no note panel, whether its side
+    /// region holds a file panel or nothing, keeps its layout and revision
+    /// byte for byte, collapsed or not, and reads back with no worktree
+    /// panel.
     @Test(arguments: [false, true])
-    func tabWithPanelsKeepsCollapseAndFront(collapsed: Bool) async throws {
+    func leavesSurfacesWithoutNotePanelsUntouched(collapsed: Bool) async throws {
         let filePanelID = UUID()
-        let seededLayout = Layout(
-            panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID], collapsed: collapsed)
-        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, noteID: UUID, tabID: UUID) in
+        let panelLayoutText = try encodeJSONString(Layout(
+            panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID], collapsed: collapsed))
+        let emptyLayoutText = try encodeJSONString(Layout(
+            panelIDs: [], activePanelID: nil, recency: [], collapsed: collapsed))
+        let (queue, seeded) = try Self.migrate { db -> (worktreeID: UUID, panelTabID: UUID, emptyTabID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
             let noteID = try Self.insertNote(db, worktreeID: worktreeID)
-            let tabID = try Self.insertSurface(
-                db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
-                layout: encodeJSONString(seededLayout), revision: 7)
-            try Self.insertHistory(db, panelID: filePanelID, tabID: tabID, history: Self.fileHistory())
-            return (worktreeID, noteID, tabID)
+            try Self.setTabOrder(db, worktreeID: worktreeID, [noteID])
+            let panelTabID = try Self.insertSurface(
+                db, worktreeID: worktreeID, primary: Self.terminalPrimary(), layout: panelLayoutText, revision: 7)
+            try Self.insertHistory(db, panelID: filePanelID, tabID: panelTabID, history: Self.fileHistory())
+            let emptyTabID = try Self.insertSurface(
+                db, worktreeID: worktreeID, primary: Self.terminalPrimary(), layout: emptyLayoutText,
+                position: 1, revision: 8)
+            return (worktreeID, panelTabID, emptyTabID)
         }
 
-        let layout = try #require(try Self.layout(queue, tabID: seeded.tabID))
-        #expect(layout == seededLayout)
-        let revision = try Self.revision(queue, tabID: seeded.tabID)
-        #expect(revision == 7)
+        #expect(try Self.layoutText(queue, tabID: seeded.panelTabID) == panelLayoutText)
+        #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == emptyLayoutText)
+        #expect(try Self.revision(queue, tabID: seeded.panelTabID) == 7)
+        #expect(try Self.revision(queue, tabID: seeded.emptyTabID) == 8)
+        #expect(try Self.counter(queue) == Self.counterBefore, "no revision was taken")
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
 
         let surfaces = try await PanelSurfaceStore(writer: queue).surfaces(worktreeID: seeded.worktreeID)
-        let surface = try #require(surfaces.first)
-        #expect(surface.side.activePanelID == filePanelID)
-        #expect(surface.side.collapsed == collapsed)
-        let worktreePanelContents = surface.worktreePanels.map(\.content)
-        let expectedContents: [WorktreePanelContent] = [.note(noteID: seeded.noteID)]
-        #expect(worktreePanelContents == expectedContents)
+        try #require(surfaces.map(\.id) == [seeded.panelTabID, seeded.emptyTabID])
+        #expect(surfaces[0].side.activePanelID == filePanelID)
+        #expect(surfaces[1].side.activePanelID == nil)
+        for surface in surfaces {
+            #expect(surface.side.collapsed == collapsed)
+            #expect(surface.worktreePanels.isEmpty)
+        }
     }
 
     /// A worktree with no notes keeps its tab order, its surfaces' layouts
-    /// and their revisions byte for byte, an empty side region included, and
-    /// gets no worktree panels, while another worktree's notes move.
+    /// and their revisions byte for byte, an empty side region included,
+    /// while another worktree's notes leave its tab order.
     @Test func leavesWorktreeWithoutNotesUntouched() throws {
         let filePanelID = UUID()
         let terminalTabIDs = [UUID(), UUID()]
@@ -675,10 +610,8 @@ struct SidePanelNotesMigrationTests {
         let emptyLayoutText = #"{ "panelIDs": [], "recency": [], "collapsed": false, "width": 0.5 }"#
         let (queue, seeded) = try Self.migrate { db -> (otherID: UUID, quietID: UUID, panelTabID: UUID, emptyTabID: UUID) in
             let otherID = try Self.insertWorktree(db)
-            _ = try Self.insertNote(db, worktreeID: otherID)
-            _ = try Self.insertSurface(
-                db, worktreeID: otherID, primary: Self.terminalPrimary(),
-                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])))
+            let otherNoteID = try Self.insertNote(db, worktreeID: otherID)
+            try Self.setTabOrder(db, worktreeID: otherID, [otherNoteID])
             let quietID = try Self.insertWorktree(db, tabOrder: quietTabOrder)
             let panelTabID = try Self.insertSurface(
                 db, worktreeID: quietID, primary: Self.terminalPrimary(), layout: panelLayoutText, revision: 3)
@@ -689,16 +622,16 @@ struct SidePanelNotesMigrationTests {
             return (otherID, quietID, panelTabID, emptyTabID)
         }
 
-        let otherPanels = try Self.panelRows(queue, worktreeID: seeded.otherID)
-        #expect(otherPanels.count == 1)
+        let otherTabOrder = try Self.tabOrder(queue, worktreeID: seeded.otherID)
+        let emptyTabOrder: [String] = []
+        #expect(otherTabOrder == emptyTabOrder)
 
         #expect(try Self.tabOrderText(queue, worktreeID: seeded.quietID) == quietTabOrder)
         #expect(try Self.layoutText(queue, tabID: seeded.panelTabID) == panelLayoutText)
         #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == emptyLayoutText)
         #expect(try Self.revision(queue, tabID: seeded.panelTabID) == 3)
         #expect(try Self.revision(queue, tabID: seeded.emptyTabID) == 4)
-        let quietPanels = try Self.panelRows(queue, worktreeID: seeded.quietID)
-        #expect(quietPanels.isEmpty)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
     // MARK: - Robustness
@@ -706,19 +639,22 @@ struct SidePanelNotesMigrationTests {
     /// A layout that does not parse, a panel with no history row, a tab order
     /// that is not JSON and a primary that is not JSON are each logged and
     /// left as they are, the migration finishes without throwing, and the
-    /// rows around them move. The surfaces left alone are ones the migration
-    /// would otherwise rewrite: the orphan's tab shows a note panel in front,
-    /// and the bad primary's side region is empty.
+    /// rows around them are repaired. The surfaces left alone are ones the
+    /// migration would otherwise rewrite: the orphan's tab shows a note
+    /// panel in front, and the bad primary's tab has one.
     @Test func skipsMalformedRowsWithoutThrowing() throws {
         let orphanPanelID = UUID()
         let orphanNotePanelID = UUID()
+        let badPrimaryNotePanelID = UUID()
         let filePanelID = UUID()
         let notePanelID = UUID()
         let badLayoutText = "{not json"
         let orphanLayoutText = try encodeJSONString(Layout(
             panelIDs: [orphanNotePanelID, orphanPanelID], activePanelID: orphanNotePanelID,
             recency: [orphanNotePanelID, orphanPanelID]))
-        let emptyLayoutText = try encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: []))
+        let badPrimaryLayoutText = try encodeJSONString(Layout(
+            panelIDs: [badPrimaryNotePanelID], activePanelID: badPrimaryNotePanelID,
+            recency: [badPrimaryNotePanelID]))
         // `migrate` runs the whole chain, so returning from it is the
         // migration returning.
         let (queue, seeded) = try Self.migrate {
@@ -733,8 +669,10 @@ struct SidePanelNotesMigrationTests {
             try Self.insertHistory(
                 db, panelID: orphanNotePanelID, tabID: orphanTabID, history: Self.noteHistory(noteID))
             let badPrimaryTabID = try Self.insertSurface(
-                db, worktreeID: worktreeID, primary: "{not json", layout: emptyLayoutText,
+                db, worktreeID: worktreeID, primary: "{not json", layout: badPrimaryLayoutText,
                 position: 2, revision: 7)
+            try Self.insertHistory(
+                db, panelID: badPrimaryNotePanelID, tabID: badPrimaryTabID, history: Self.noteHistory(noteID))
             let goodTabID = try Self.insertSurface(
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
                 layout: encodeJSONString(Layout(
@@ -753,30 +691,30 @@ struct SidePanelNotesMigrationTests {
         #expect(try Self.revision(queue, tabID: seeded.orphanTabID) == 6)
         let orphanHistories = try Self.historyPanelIDs(queue, tabID: seeded.orphanTabID)
         #expect(orphanHistories == [orphanNotePanelID.uuidString])
-        #expect(try Self.layoutText(queue, tabID: seeded.badPrimaryTabID) == emptyLayoutText)
+        #expect(try Self.layoutText(queue, tabID: seeded.badPrimaryTabID) == badPrimaryLayoutText)
         #expect(try Self.revision(queue, tabID: seeded.badPrimaryTabID) == 7)
+        let badPrimaryHistories = try Self.historyPanelIDs(queue, tabID: seeded.badPrimaryTabID)
+        #expect(badPrimaryHistories == [badPrimaryNotePanelID.uuidString])
 
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        let worktreePanelID = try #require(panels.first?.id)
-        #expect(panels.count == 1)
         let good = try #require(try Self.layout(queue, tabID: seeded.goodTabID))
-        #expect(good == Layout(panelIDs: [filePanelID], activePanelID: worktreePanelID, recency: [filePanelID]))
+        #expect(good == Layout(panelIDs: [filePanelID], activePanelID: filePanelID, recency: [filePanelID]))
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 
-    /// Running the migration a second time makes no second panel for a note
-    /// and changes no surface, so it takes no revision: a tab the first run
-    /// collapsed stays collapsed, and one the user has expanded since stays
-    /// expanded.
-    @Test func runningTwiceMakesOnePanelPerNote() throws {
+    /// Running the migration a second time changes nothing: no tab order,
+    /// layout or history row, and it takes no revision.
+    @Test func runningTwiceChangesNothing() throws {
         let filePanelID = UUID()
         let notePanelID = UUID()
+        let terminalTabID = UUID()
         let (queue, seeded) = try Self.migrate {
-            db -> (worktreeID: UUID, panelTabID: UUID, emptyTabID: UUID, collapsedTabID: UUID) in
+            db -> (worktreeID: UUID, panelTabID: UUID, emptyTabID: UUID) in
             let worktreeID = try Self.insertWorktree(db)
             let first = try Self.insertNote(db, worktreeID: worktreeID)
             let second = try Self.insertNote(
                 db, worktreeID: worktreeID, createdAt: Date(timeIntervalSince1970: 1_800_000_060))
-            try Self.setTabOrder(db, worktreeID: worktreeID, [first, second])
+            try Self.setTabOrder(db, worktreeID: worktreeID, [first, terminalTabID, second])
+            try Self.setActiveTabID(db, worktreeID: worktreeID, second)
             let panelTabID = try Self.insertSurface(
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
                 layout: encodeJSONString(Layout(
@@ -786,49 +724,29 @@ struct SidePanelNotesMigrationTests {
             try Self.insertHistory(db, panelID: notePanelID, tabID: panelTabID, history: Self.noteHistory(second))
             let emptyTabID = try Self.insertSurface(
                 db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
-                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])),
+                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [], collapsed: true)),
                 position: 1)
-            let collapsedTabID = try Self.insertSurface(
-                db, worktreeID: worktreeID, primary: Self.terminalPrimary(),
-                layout: encodeJSONString(Layout(panelIDs: [], activePanelID: nil, recency: [])),
-                position: 2)
-            return (worktreeID, panelTabID, emptyTabID, collapsedTabID)
+            return (worktreeID, panelTabID, emptyTabID)
         }
-        let panelsAfterFirst = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
+        let tabOrderAfterFirst = try Self.tabOrderText(queue, worktreeID: seeded.worktreeID)
+        #expect(try Self.tabOrder(queue, worktreeID: seeded.worktreeID) == [terminalTabID.uuidString])
+        #expect(try Self.activeTabID(queue, worktreeID: seeded.worktreeID) == terminalTabID.uuidString)
         let panelLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.panelTabID)
-        let collapsedLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.collapsedTabID)
-        let collapsedAfterFirst = try #require(try Self.layout(queue, tabID: seeded.collapsedTabID))
-        #expect(collapsedAfterFirst.collapsed)
-
-        // The user expands one of the tabs the first run collapsed.
-        var expanded = try #require(try Self.layout(queue, tabID: seeded.emptyTabID))
-        #expect(expanded.collapsed)
-        expanded.collapsed = false
-        let expandedLayoutText = try encodeJSONString(expanded)
-        try queue.write { db in
-            try db.execute(
-                sql: "UPDATE workspace_tab_surface SET layout = ? WHERE id = ?",
-                arguments: [expandedLayoutText, seeded.emptyTabID.uuidString])
-        }
-        let expandedRevision = try Self.revision(queue, tabID: seeded.emptyTabID)
+        let emptyLayoutAfterFirst = try Self.layoutText(queue, tabID: seeded.emptyTabID)
+        let panelRevisionAfterFirst = try Self.revision(queue, tabID: seeded.panelTabID)
+        let historiesAfterFirst = try Self.historyPanelIDs(queue, tabID: seeded.panelTabID)
+        #expect(historiesAfterFirst == [filePanelID.uuidString])
         let counterAfterFirst = try Self.counter(queue)
 
         try queue.write { db in try SidePanelNotesMigration.run(db) }
 
-        let panels = try Self.panelRows(queue, worktreeID: seeded.worktreeID)
-        #expect(panels.count == 2)
-        let ids = panels.map(\.id)
-        let idsAfterFirst = panelsAfterFirst.map(\.id)
-        #expect(ids == idsAfterFirst)
-        let contents = panels.map(\.content)
-        let contentsAfterFirst = panelsAfterFirst.map(\.content)
-        #expect(contents == contentsAfterFirst)
+        #expect(try Self.tabOrderText(queue, worktreeID: seeded.worktreeID) == tabOrderAfterFirst)
+        #expect(try Self.activeTabID(queue, worktreeID: seeded.worktreeID) == terminalTabID.uuidString)
         #expect(try Self.layoutText(queue, tabID: seeded.panelTabID) == panelLayoutAfterFirst)
-        #expect(try Self.layoutText(queue, tabID: seeded.collapsedTabID) == collapsedLayoutAfterFirst)
-        #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == expandedLayoutText)
-        let afterRerun = try #require(try Self.layout(queue, tabID: seeded.emptyTabID))
-        #expect(!afterRerun.collapsed)
-        #expect(try Self.revision(queue, tabID: seeded.emptyTabID) == expandedRevision)
+        #expect(try Self.layoutText(queue, tabID: seeded.emptyTabID) == emptyLayoutAfterFirst)
+        #expect(try Self.revision(queue, tabID: seeded.panelTabID) == panelRevisionAfterFirst)
+        #expect(try Self.historyPanelIDs(queue, tabID: seeded.panelTabID) == historiesAfterFirst)
         #expect(try Self.counter(queue) == counterAfterFirst)
+        #expect(try Self.worktreePanelRowCount(queue) == 0)
     }
 }
