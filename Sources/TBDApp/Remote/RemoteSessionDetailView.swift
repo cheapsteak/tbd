@@ -164,13 +164,19 @@ struct RemoteSessionDetailView: View {
     }
 
     var body: some View {
+        // Read once per evaluation and handed to everything below that needs
+        // it: whether this session is attached is rebuilt from
+        // `attachedRemoteSelections` on every read (root CLAUDE.md, "Keep
+        // work out of `body`").
+        let transcriptPresentation = appState.remoteTranscriptPresentation(for: selection)
+        let slotShown = showsAttachSlot(attached: transcriptPresentation.attached)
         VStack(alignment: .leading, spacing: 0) {
             if hasWarnings {
                 warningStrip
                 Divider()
             }
-            contentArea
-            if showsSendFooter {
+            contentArea(transcriptPresentation, slotShown: slotShown)
+            if showsSendFooter(transcriptShown: transcriptPresentation.showsPane, slotShown: slotShown) {
                 Divider()
                 sendFooter
             }
@@ -188,7 +194,7 @@ struct RemoteSessionDetailView: View {
         // Tells AppState which session's attach slot is actually visible, so
         // a focus claim never lands in a pane this view is keeping
         // transparent (the log fallback, a detached or auth prompt).
-        .onChange(of: showsAttachSlot ? selection : nil, initial: true) { _, shown in
+        .onChange(of: slotShown ? selection : nil, initial: true) { _, shown in
             appState.setRemoteAttachSlotShown(shown)
         }
         // Replaces what `.id(selection)` would give for free (see this
@@ -204,14 +210,6 @@ struct RemoteSessionDetailView: View {
             isSending = false
             selectionEpoch += 1
         }
-    }
-
-    /// Whether this selection has an admitted connection in the pager. A
-    /// browsed session can be eligible and selected without having requested
-    /// one, so "not in this set" means either never attached or detached —
-    /// `detachInfo` tells the two apart.
-    private var isAttached: Bool {
-        appState.remoteSessionIsAttached(selection)
     }
 
     /// Covers both detach mechanisms — a clean, explicit detach
@@ -284,25 +282,25 @@ struct RemoteSessionDetailView: View {
 
     /// A horizontal split of the terminal side and the transcript, placed by
     /// role (`RemoteDetailSplit`), over the live-terminal slot that holds
-    /// `attachPager`. `remoteSessionShowsTranscriptPane` says whether the
-    /// transcript shows, and `remoteSessionTranscriptLeads` whether it is on the
-    /// left: the transcript leads until the session attaches, and the terminal
-    /// leads once it has. The split is always the container, even with one
-    /// half, and keeps every part at a fixed position in the view tree: showing
-    /// or hiding the transcript only adds or removes it, and a swap changes only
+    /// `attachPager`. `presentation.showsPane` says whether the transcript
+    /// shows, and `presentation.transcriptLeads` whether it is on the left: the
+    /// transcript leads until the session attaches, and the terminal leads
+    /// once it has. The split is always the container, even with one half,
+    /// and keeps every part at a fixed position in the view tree: showing or
+    /// hiding the transcript only adds or removes it, and a swap changes only
     /// where each half is drawn. So `RemoteAttachPager` stays mounted
     /// throughout, laid out where the attached terminal is drawn whichever half
     /// leads, and a swap keeps the transcript's sync driver as well.
-    private var contentArea: some View {
+    private func contentArea(_ presentation: RemoteTranscriptPresentation, slotShown: Bool) -> some View {
         RemoteDetailSplit(
-            showsTranscript: appState.remoteSessionShowsTranscriptPane(selection),
-            transcriptLeads: appState.remoteSessionTranscriptLeads(selection)
+            showsTranscript: presentation.showsPane,
+            transcriptLeads: presentation.transcriptLeads
         ) {
-            terminalArea
+            terminalArea(attached: presentation.attached)
         } transcript: {
             RemoteTranscriptLivePane(selection: selection)
         } liveTerminal: {
-            attachPager
+            attachPager(slotShown: slotShown)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -318,9 +316,9 @@ struct RemoteSessionDetailView: View {
     /// LOOKS AT a session that can't attach — e.g. a gone session — exactly the
     /// kind of accidental mass-teardown this pager exists to prevent.
     /// Visibility (not existence) is controlled by opacity and hit-testing;
-    /// `showsAttachSlot` is already `false` whenever `content != .attach`, so
-    /// the pager simply stays transparent and non-hit-testable behind whatever
-    /// renders instead.
+    /// `slotShown` (`showsAttachSlot(attached:)`) is already `false` whenever
+    /// `content != .attach`, so the pager simply stays transparent and
+    /// non-hit-testable behind whatever renders instead.
     ///
     /// It sits in its own slot rather than inside `terminalArea` so that a
     /// kept-alive terminal of another session is never resized when the pane
@@ -330,24 +328,30 @@ struct RemoteSessionDetailView: View {
     /// where the attached terminal is drawn, so viewing a session that is not
     /// attached — which moves `terminalArea` into the right half — leaves the
     /// pager where it is.
-    private var attachPager: some View {
+    private func attachPager(slotShown: Bool) -> some View {
         RemoteAttachPager(
             mounts: appState.attachedRemoteMountKeys,
             activeSelection: selection
         )
-        .opacity(showsAttachSlot ? 1 : 0)
-        .allowsHitTesting(showsAttachSlot)
+        .opacity(slotShown ? 1 : 0)
+        .allowsHitTesting(slotShown)
     }
 
     /// What the terminal side shows over the live-terminal slot: the detached
     /// or sign-in prompt, the log, or the unsupported note. While attached it
     /// renders nothing, so the live terminal in `attachPager` shows through.
+    ///
+    /// `attached` is whether this selection has an admitted connection in the
+    /// pager (`RemoteTranscriptPresentation.attached`). A browsed session can
+    /// be eligible and selected without having requested one, so not attached
+    /// means either never attached or detached — `detachInfo` tells the two
+    /// apart.
     @ViewBuilder
-    private var terminalArea: some View {
+    private func terminalArea(attached: Bool) -> some View {
         ZStack {
             switch content {
             case .attach:
-                if !isAttached {
+                if !attached {
                     // The auth CTA REPLACES the detached prompt rather than
                     // stacking with it: while the provider can't
                     // authenticate, "Reattach" is an action that cannot
@@ -378,9 +382,10 @@ struct RemoteSessionDetailView: View {
     /// (not explicitly detached). Any other remote session the pager happens
     /// to also be keeping warm in the background stays fully transparent and
     /// non-hit-testable — this session is the only thing the user can see or
-    /// interact with.
-    private var showsAttachSlot: Bool {
-        content == .attach && isAttached
+    /// interact with. `attached` is `RemoteTranscriptPresentation.attached`,
+    /// which `body` reads once and hands here.
+    private func showsAttachSlot(attached: Bool) -> Bool {
+        content == .attach && attached
     }
 
     /// The provider-authentication CTA for this session's provider.
@@ -465,13 +470,16 @@ struct RemoteSessionDetailView: View {
     /// the pane has moved on — see `performSend`.
     @State private var selectionEpoch = 0
 
-    private var showsSendFooter: Bool {
+    /// `transcriptShown` and `slotShown` are the answers `body` already read
+    /// for this evaluation: `RemoteTranscriptPresentation.showsPane` and
+    /// `showsAttachSlot(attached:)`.
+    private func showsSendFooter(transcriptShown: Bool, slotShown: Bool) -> Bool {
         RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: isGone,
             snapshotFresh: providerStatus?.hasStaleSnapshot != true,
-            hasLiveAttachedPane: showsAttachSlot,
+            hasLiveAttachedPane: slotShown,
             transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
-                transcriptShown: appState.remoteSessionShowsTranscriptPane(selection),
+                transcriptShown: transcriptShown,
                 composerState: appState.remoteComposerState(for: selection)))
     }
 

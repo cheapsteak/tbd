@@ -79,6 +79,18 @@ struct RemoteTranscriptVisibilityTests {
         state.reattachRemoteSession(selection)
     }
 
+    /// The presentation as the separate wrappers report it, field by field —
+    /// the answers the AppKit toolbar reads one at a time.
+    private func presentationFromWrappers(
+        _ state: AppState, _ selection: RemoteSessionSelection
+    ) -> RemoteTranscriptPresentation {
+        RemoteTranscriptPresentation(
+            attached: state.remoteSessionIsAttached(selection),
+            showsToggle: state.remoteSessionShowsTranscriptToggle(selection),
+            showsPane: state.remoteSessionShowsTranscriptPane(selection),
+            transcriptLeads: state.remoteSessionTranscriptLeads(selection))
+    }
+
     // MARK: - Which half leads, and when the toggle is offered
 
     @Test func notAttachedLeadsWithTheTranscriptAndHidesTheToggle() {
@@ -433,6 +445,55 @@ struct RemoteTranscriptVisibilityTests {
             #expect(state.remoteSessionShowsTranscriptPane(s1))
             #expect(state.remoteSessionTranscriptLeads(s1))
             #expect(!state.remoteSessionShowsTranscriptToggle(s1))
+        }
+    }
+
+    // MARK: - One presentation per evaluation
+
+    /// The views read `remoteTranscriptPresentation(for:)` once; the AppKit
+    /// toolbar reads the wrappers. Each state is pinned to its expected
+    /// value as well, so the comparison cannot pass by both sides being
+    /// wrong the same way.
+    @Test func presentationMatchesTheWrappers() {
+        withState { state in
+            seedProvider(state)
+            seedSession(state, id: "s1")
+            let s1 = sel("s1")
+            state.selectedRemoteSession = s1
+
+            let notAttached: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
+            let notAttachedWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let notAttachedExpected = RemoteTranscriptPresentation(
+                attached: false, showsToggle: false, showsPane: true, transcriptLeads: true)
+            #expect(notAttached == notAttachedWrappers)
+            #expect(notAttached == notAttachedExpected)
+
+            state.reattachRemoteSession(s1)
+            state.setRemoteAttachSlotShown(s1)
+            let attached: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
+            let attachedWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let attachedExpected = RemoteTranscriptPresentation(
+                attached: true, showsToggle: true, showsPane: true, transcriptLeads: false)
+            #expect(attached == attachedWrappers)
+            #expect(attached == attachedExpected)
+
+            state.toggleRemoteTranscript(s1)
+            let hidden: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
+            let hiddenWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let hiddenExpected = RemoteTranscriptPresentation(
+                attached: true, showsToggle: true, showsPane: false, transcriptLeads: false)
+            #expect(hidden == hiddenWrappers)
+            #expect(hidden == hiddenExpected)
+
+            // The provider stops declaring `transcript.read`; it can still
+            // attach, so only the transcript answers change.
+            seedProvider(state, capabilities: ["attach", "log"])
+            let noCapability: RemoteTranscriptPresentation = state.remoteTranscriptPresentation(for: s1)
+            let noCapabilityWrappers: RemoteTranscriptPresentation = presentationFromWrappers(state, s1)
+            let noCapabilityExpected = RemoteTranscriptPresentation(
+                attached: true, showsToggle: false, showsPane: false, transcriptLeads: false)
+            #expect(noCapability == noCapabilityWrappers)
+            #expect(noCapability == noCapabilityExpected)
         }
     }
 

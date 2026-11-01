@@ -13,6 +13,19 @@ final class WeakRemoteTranscriptSyncDriver {
     init(_ driver: RemoteTranscriptSyncDriver) { self.driver = driver }
 }
 
+/// What the window toolbar and the detail pane show for one remote session's
+/// transcript, decided together (`AppState.remoteTranscriptPresentation(for:)`).
+struct RemoteTranscriptPresentation: Equatable {
+    /// Whether the session is attached (`AppState.remoteSessionIsAttached`).
+    let attached: Bool
+    /// Whether the toolbar offers the Transcript toggle.
+    let showsToggle: Bool
+    /// Whether the detail pane shows the transcript half of its split.
+    let showsPane: Bool
+    /// Whether the transcript is the split's main side, on the left.
+    let transcriptLeads: Bool
+}
+
 /// App-side wiring for a remote session's transcript pane
 /// (docs/specs/2026-09-25-remote-session-transcript-design.md, "App"). The
 /// decisions themselves are the pure gates in `RemoteSessionDetailGates`;
@@ -24,34 +37,50 @@ extension AppState {
         remoteProviders.first { $0.config.name == selection.provider }?.describe?.capabilities ?? []
     }
 
+    /// Every transcript decision for `selection`, from one read of its
+    /// provider's capabilities and one of whether it is attached. Whether a
+    /// session is attached is `attachedRemoteSelections`, which is rebuilt on
+    /// every read, so a view that needs several of these answers asks here
+    /// once per evaluation rather than once per answer. The fields come from
+    /// the pure gates in `RemoteSessionDetailGates`.
+    func remoteTranscriptPresentation(for selection: RemoteSessionSelection) -> RemoteTranscriptPresentation {
+        let capabilities = remoteProviderCapabilities(for: selection)
+        let attached = remoteSessionIsAttached(selection)
+        return RemoteTranscriptPresentation(
+            attached: attached,
+            showsToggle: RemoteSessionDetailGates.showsTranscriptToggle(
+                capabilities: capabilities, attached: attached),
+            showsPane: RemoteSessionDetailGates.showsTranscriptPane(
+                capabilities: capabilities, attached: attached,
+                hiddenByToggle: remoteTranscriptHiddenAttach == remoteAttachMountKey(for: selection)),
+            transcriptLeads: RemoteSessionDetailGates.transcriptLeads(
+                capabilities: capabilities, attached: attached))
+    }
+
     /// Whether the window toolbar offers the Transcript toggle for
     /// `selection`: its provider declares `transcript.read` and it is
-    /// attached (`remoteSessionIsAttached`).
+    /// attached (`remoteSessionIsAttached`). One field of
+    /// `remoteTranscriptPresentation(for:)`, for a caller that needs only it.
     func remoteSessionShowsTranscriptToggle(_ selection: RemoteSessionSelection) -> Bool {
-        RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: remoteProviderCapabilities(for: selection),
-            attached: remoteSessionIsAttached(selection))
+        remoteTranscriptPresentation(for: selection).showsToggle
     }
 
     /// Whether `selection`'s detail pane shows the transcript half of its
     /// split: always while it is not attached, and while it is attached
     /// unless the toolbar toggle has hidden it for this session's current
-    /// connection (`remoteTranscriptHiddenAttach`).
+    /// connection (`remoteTranscriptHiddenAttach`). One field of
+    /// `remoteTranscriptPresentation(for:)`, for a caller that needs only it.
     func remoteSessionShowsTranscriptPane(_ selection: RemoteSessionSelection) -> Bool {
-        RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: remoteProviderCapabilities(for: selection),
-            attached: remoteSessionIsAttached(selection),
-            hiddenByToggle: remoteTranscriptHiddenAttach == remoteAttachMountKey(for: selection))
+        remoteTranscriptPresentation(for: selection).showsPane
     }
 
     /// Whether the transcript is the main side of `selection`'s split, with
     /// the terminal side on the right: its provider declares
     /// `transcript.read` and it is not attached. Attaching and detaching swap
-    /// the halves.
+    /// the halves. One field of `remoteTranscriptPresentation(for:)`, for a
+    /// caller that needs only it.
     func remoteSessionTranscriptLeads(_ selection: RemoteSessionSelection) -> Bool {
-        RemoteSessionDetailGates.transcriptLeads(
-            capabilities: remoteProviderCapabilities(for: selection),
-            attached: remoteSessionIsAttached(selection))
+        remoteTranscriptPresentation(for: selection).transcriptLeads
     }
 
     /// The toolbar toggle's action: hides the transcript of `selection`'s

@@ -344,10 +344,12 @@ struct ContentView: View {
                 // session's live: plain buttons (no badges to flatten) on
                 // one fused capsule, like back/forward.
                 if let selection = appState.selectedRemoteSession {
-                    let showsReconnect = appState.remoteSessionIsAttached(selection)
+                    // One read of the attach state for every button below.
+                    let transcriptPresentation = appState.remoteTranscriptPresentation(for: selection)
+                    let showsReconnect = transcriptPresentation.attached
                     let showsStop = appState.remoteSessionShowsStop(selection)
-                    let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
-                    let transcriptShown = appState.remoteSessionShowsTranscriptPane(selection)
+                    let showsTranscriptToggle = transcriptPresentation.showsToggle
+                    let transcriptShown = transcriptPresentation.showsPane
                     if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
