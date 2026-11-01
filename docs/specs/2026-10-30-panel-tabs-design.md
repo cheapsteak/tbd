@@ -570,8 +570,9 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
   transcript button, the Notes button, and the collapse button. The three
   history buttons act on the active panel and stay in place, dimmed, when it
   has no history to step through — a transcript or a note — so the tabs never
-  shift under the pointer. Below the strip, the active panel renders through
-  `PanePlaceholder`.
+  shift under the pointer. A strip too narrow for both ends loses its leading
+  end first, so the buttons at the window's edge stay in reach. Below the
+  strip, the active panel renders through `PanePlaceholder`.
 - **The terminal's pin** is in its workspace tab's right-click menu (Pin or
   Unpin). The pinned-terminal dock keeps its unpin.
 - **A note's title** is edited by renaming its tab, in the workspace tab bar or

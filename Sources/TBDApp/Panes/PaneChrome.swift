@@ -261,7 +261,9 @@ enum PaneChromeControl: Equatable {
     var help: String {
         switch self {
         case .transcript(let isOn, let isEnabled):
-            guard isEnabled else { return "Only a Claude terminal has a transcript" }
+            // Neutral: a Claude terminal whose row has not loaded, or whose
+            // session cannot be resumed yet, draws this too.
+            guard isEnabled else { return "No transcript for this tab" }
             return isOn
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"

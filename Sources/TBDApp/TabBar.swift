@@ -100,17 +100,16 @@ struct TabBarTrailingItems {
     let items: [TabBarTrailingItem]
     /// What the primary's viewer control does.
     let onViewerControl: @MainActor () -> Void
-    /// What the transcript button does (`TabRowEdgeControls.onTranscript`).
-    let onTranscript: @MainActor () -> Void
-    /// What the Notes button does (`TabRowEdgeControls.onNotes`).
-    let onNotes: @MainActor () -> Void
+    /// The transcript and Notes buttons the `.edge` items draw, with their
+    /// actions; nil for a bar that has none (`none`).
+    let edge: TabRowEdgeControls?
     /// What the expand button does.
     let onExpand: @MainActor () -> Void
 
     /// The daemon path's items: `viewerControl`, the primary's own control
     /// (`WorkspaceTabBarChrome.viewerControl`), or nil when its kind has
     /// none; Session History; and, while the side region is hidden
-    /// (`showsSide` false), `edge` and the expand button when
+    /// (`showsSide` false), `edge`'s buttons and the expand button when
     /// `showsExpandButton` (`PanelSurfaceWorkspaceView.showsExpandButton`).
     init(
         viewerControl: PaneChromeControl?,
@@ -123,27 +122,25 @@ struct TabBarTrailingItems {
         self.init(
             items: TabBarTrailingItem.items(
                 viewerControl: viewerControl,
-                transcript: edge.transcript,
-                notes: edge.notes,
+                edgeItems: edge.items,
                 showsSide: showsSide,
                 showsExpandButton: showsExpandButton),
             onViewerControl: onViewerControl,
-            onTranscript: edge.onTranscript,
-            onNotes: edge.onNotes,
+            edge: edge,
             onExpand: onExpand)
     }
 
+    /// Stores what it is given: the daemon path's init above, and `none`,
+    /// whose items no input decides.
     private init(
         items: [TabBarTrailingItem],
         onViewerControl: @escaping @MainActor () -> Void,
-        onTranscript: @escaping @MainActor () -> Void,
-        onNotes: @escaping @MainActor () -> Void,
+        edge: TabRowEdgeControls?,
         onExpand: @escaping @MainActor () -> Void
     ) {
         self.items = items
         self.onViewerControl = onViewerControl
-        self.onTranscript = onTranscript
-        self.onNotes = onNotes
+        self.edge = edge
         self.onExpand = onExpand
     }
 
@@ -154,8 +151,7 @@ struct TabBarTrailingItems {
     /// `Sendable` type, which a struct of closures is not, and building an
     /// empty value costs nothing.
     static var none: TabBarTrailingItems {
-        TabBarTrailingItems(
-            items: [.sessionHistory], onViewerControl: {}, onTranscript: {}, onNotes: {}, onExpand: {})
+        TabBarTrailingItems(items: [.sessionHistory], onViewerControl: {}, edge: nil, onExpand: {})
     }
 }
 
@@ -303,13 +299,10 @@ struct TabBar: View {
                 isSelected: isHistorySelected,
                 action: onHistoryTab
             )
-        case .transcript(let control):
-            PaneChromeControlButton(control: control) {
-                trailing.onTranscript()
-            }
-        case .notes(let control):
-            PaneChromeControlButton(control: control) {
-                trailing.onNotes()
+        case .edge(let edgeItem):
+            // `.edge` items come only with the edge controls that act for them.
+            if let edge = trailing.edge {
+                TabRowEdgeButton(item: edgeItem, edge: edge)
             }
         case .expand:
             // Shows the hidden side region. It shows only while the region is

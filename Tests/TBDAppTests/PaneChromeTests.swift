@@ -185,16 +185,16 @@ struct PaneChromeTests {
         #expect(off.isEnabled)
     }
 
-    /// In front of a primary that is not a Claude terminal the transcript
-    /// button stays in its place, drawn disabled, and says why it cannot act.
-    @Test("the disabled transcript control is secondary, cannot be pressed, and says only a Claude terminal has a transcript")
+    /// In front of a primary with no transcript to show the transcript
+    /// button stays in its place, drawn disabled, and says so.
+    @Test("the disabled transcript control is secondary, cannot be pressed, and says the tab has no transcript")
     func disabledTranscriptControl() {
         let disabled = PaneChromeControl.transcript(isOn: false, isEnabled: false)
 
         #expect(disabled.systemImage == "text.bubble")
         #expect(disabled.tint == .secondary)
         #expect(!disabled.isEnabled)
-        #expect(disabled.help == "Only a Claude terminal has a transcript")
+        #expect(disabled.help == "No transcript for this tab")
     }
 
     @Test("the render toggle is primary while showing source and secondary otherwise")

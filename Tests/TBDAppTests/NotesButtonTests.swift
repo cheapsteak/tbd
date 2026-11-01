@@ -257,9 +257,12 @@ struct NotesButtonTests {
 
     @Test("a bar drawn off the daemon path has Session History alone, and no Notes button")
     func noneHasNoNotesButton() {
-        let items: [TabBarTrailingItem] = TabBarTrailingItems.none.items
+        let offPath = TabBarTrailingItems.none
+        let items: [TabBarTrailingItem] = offPath.items
         let expected: [TabBarTrailingItem] = [.sessionHistory]
         #expect(items == expected)
+        let carriesEdgeControls = offPath.edge != nil
+        #expect(!carriesEdgeControls)
     }
 
     // MARK: - A press

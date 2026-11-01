@@ -226,9 +226,12 @@ enum SideRegionStrip {
 /// the + menu, the active panel's own control, the transcript and Notes
 /// buttons, and the collapse button, which carries `⌘\` while the region
 /// shows (`SideStripTrailingItem.items`). The transcript and Notes buttons
-/// belong to the window's right edge, which the strip reaches while it shows;
-/// the workspace view decides them once for whichever row reaches that edge
-/// and hands them in as `edge`. The history buttons are always drawn
+/// belong to the window's right edge, which the strip reaches while it shows.
+/// The strip builds them with the function that builds the workspace tab
+/// bar's (`PanelSurfaceWorkspaceView.edgeControls`), from the tab's `primary`
+/// and `transcriptViewEnabled`, which the workspace view passes in as plain
+/// values, so both rows draw the same two buttons and SwiftUI can still tell
+/// when this view's inputs are unchanged. The history buttons are always drawn
 /// and only disabled, so the tabs never shift under the pointer; they are
 /// dimmed in front of a note or the Changes list, which have no history.
 ///
@@ -261,13 +264,17 @@ enum SideRegionStrip {
 /// History steps go out as panel operations through the active panel's
 /// daemon action set. The render toggle, copy-address and refresh act on the
 /// chrome state and send nothing. The transcript and Notes buttons do what
-/// `edge` says, as they do at the end of the workspace tab bar.
+/// they do at the end of the workspace tab bar.
 struct SideRegionView: View {
     let surface: WorkspaceTabSurface
     let worktree: LocalWorktree
-    /// The transcript and Notes buttons, with their actions
-    /// (`PanelSurfaceWorkspaceView.edgeControls`).
-    let edge: TabRowEdgeControls
+    /// The workspace tab's primary as the app holds it
+    /// (`PanelSurfaceWorkspaceView.primaryContent`), which decides the
+    /// transcript button.
+    let primary: PaneContent
+    /// Whether the transcript view setting is on, as the workspace view
+    /// reads it.
+    let transcriptViewEnabled: Bool
     @Environment(AppState.self) var appState
 
     /// Each panel's control state: its rendered/source toggle, whether its
@@ -299,9 +306,15 @@ struct SideRegionView: View {
                 appState.terminal(id: terminalID, in: worktree.id)?.transcriptPath
             })
         let active = tabs.first(where: \.isActive).map { activePanel(for: $0) }
+        // The same builder the workspace tab bar's buttons come from, so the
+        // two rows agree; read here, so what it reads is a dependency of this
+        // body.
+        let edge = PanelSurfaceWorkspaceView.edgeControls(
+            appState: appState, worktreeID: surface.worktreeID, tabID: surface.id, primary: primary,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
 
         VStack(spacing: 0) {
-            strip(tabs: tabs, active: active)
+            strip(tabs: tabs, active: active, edge: edge)
 
             Divider()
 
@@ -367,9 +380,9 @@ struct SideRegionView: View {
     /// full width however many tabs there are, and scrolls the active panel's
     /// tab into view when the strip appears, when another panel comes to the
     /// front and when the tabs change.
-    private func strip(tabs: [SideRegionTab], active: ActivePanel?) -> some View {
+    private func strip(tabs: [SideRegionTab], active: ActivePanel?, edge: TabRowEdgeControls) -> some View {
         ScrollViewReader { proxy in
-            stripRow(tabs: tabs, active: active)
+            stripRow(tabs: tabs, active: active, edge: edge)
                 .onAppear { scrollActiveTabIntoView(proxy) }
                 .onChange(of: surface.side.activePanelID) { _, _ in scrollActiveTabIntoView(proxy) }
                 .onChange(of: tabs.map(\.id)) { _, _ in scrollActiveTabIntoView(proxy) }
@@ -377,12 +390,12 @@ struct SideRegionView: View {
     }
 
     /// The strip's row, without its scrolling. Its trailing end draws
-    /// `SideStripTrailingItem.items` in the order they come.
-    private func stripRow(tabs: [SideRegionTab], active: ActivePanel?) -> some View {
+    /// `SideStripTrailingItem.items` in the order they come, `edge`'s
+    /// buttons among them.
+    private func stripRow(tabs: [SideRegionTab], active: ActivePanel?, edge: TabRowEdgeControls) -> some View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
-            transcript: edge.transcript,
-            notes: edge.notes)
+            edgeItems: edge.items)
         return HStack(spacing: 0) {
             historyGroup(active: active)
                 .fixedSize(horizontal: true, vertical: false)
@@ -399,15 +412,22 @@ struct SideRegionView: View {
 
             HStack(spacing: 0) {
                 ForEach(trailingItems) { item in
-                    trailingItem(item, active: active)
+                    trailingItem(item, active: active, edge: edge)
                 }
             }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
         }
         .frame(height: TabRowMetrics.height)
-        // At the region's minimum width the two ends can outgrow the strip;
-        // clipping keeps them off the divider.
+        // Near the region's minimum width the two fixed-width ends can need
+        // more than the strip has, and the row would then report that larger
+        // width and overflow on both sides. This frame takes exactly the
+        // strip's width and pins the row to its trailing edge, so what does
+        // not fit falls off the leading end, the history buttons first, and
+        // the clip below cuts it there, off the divider. The + menu, the
+        // active panel's control, the transcript and Notes buttons and the
+        // collapse button stay in reach, since they act at the window's edge.
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
         .clipped()
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -609,9 +629,12 @@ struct SideRegionView: View {
     /// One item at the strip's trailing end. The active panel's control acts
     /// on that panel's chrome state, the Changes list's refresh drawing as
     /// `PaneRefreshControl`; the transcript and Notes buttons do what `edge`
-    /// says; the collapse button hides the region.
+    /// says, drawn as the workspace tab bar draws them (`TabRowEdgeButton`);
+    /// the collapse button hides the region.
     @ViewBuilder
-    private func trailingItem(_ item: SideStripTrailingItem, active: ActivePanel?) -> some View {
+    private func trailingItem(
+        _ item: SideStripTrailingItem, active: ActivePanel?, edge: TabRowEdgeControls
+    ) -> some View {
         switch item {
         case .addMenu:
             addMenu
@@ -625,14 +648,8 @@ struct SideRegionView: View {
                     }
                 }
             }
-        case .transcript(let control):
-            PaneChromeControlButton(control: control) {
-                edge.onTranscript()
-            }
-        case .notes(let control):
-            PaneChromeControlButton(control: control) {
-                edge.onNotes()
-            }
+        case .edge(let edgeItem):
+            TabRowEdgeButton(item: edgeItem, edge: edge)
         case .collapse:
             SidePanelToggleButton(collapsed: false) {
                 send(.setCollapsed(true))

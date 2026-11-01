@@ -44,8 +44,10 @@ struct PanelSurfaceLoadKey: Equatable {
 /// right edge, just before the button that hides or shows the region: at the
 /// end of the side region's strip, before its collapse button, while the
 /// region shows, and at the end of the bar, before the expand button, while
-/// it is hidden. This view decides them once (`edgeControls`) and hands them
-/// to whichever row reaches the edge. No pane draws a header: the
+/// it is hidden. One function decides them for both rows (`edgeControls`):
+/// this view calls it for the bar, and `SideRegionView` calls it for the
+/// strip with the same primary and transcript setting, which this view passes
+/// to it as plain values rather than closures. No pane draws a header: the
 /// primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
@@ -138,11 +140,13 @@ struct PanelSurfaceWorkspaceView: View {
         let tabID = tab.id
         let chrome = primaryChromes.state(for: tabID)
         let showsSide = Self.showsSide(surface: surface)
+        let primary = primaryContent
+        let transcriptViewEnabled = self.transcriptViewEnabled
         // Read here, not in the `GeometryReader` closure, so what the edge
         // controls and the bar's trailing items read is a dependency of this
         // body.
         let edge = Self.edgeControls(
-            appState: appState, worktreeID: worktree.id, tabID: tabID, primary: primaryContent,
+            appState: appState, worktreeID: worktree.id, tabID: tabID, primary: primary,
             surface: surface, transcriptViewEnabled: transcriptViewEnabled)
         let trailing = trailingItems(chrome: chrome, edge: edge, showsSide: showsSide)
         GeometryReader { geometry in
@@ -172,7 +176,13 @@ struct PanelSurfaceWorkspaceView: View {
                     .id(tabID)
                     .zIndex(1)
 
-                    SideRegionView(surface: surface, worktree: worktree, edge: edge)
+                    // Plain values, not the edge controls' closures, so
+                    // SwiftUI can tell when the region's inputs are unchanged
+                    // and skip its body; it builds the same edge controls
+                    // from them.
+                    SideRegionView(
+                        surface: surface, worktree: worktree,
+                        primary: primary, transcriptViewEnabled: transcriptViewEnabled)
                         .id(tabID)
                         .frame(width: shares[1] * availableSpace)
                 }
@@ -276,7 +286,8 @@ struct PanelSurfaceWorkspaceView: View {
     /// The transcript and Notes buttons of the workspace tab `tabID`, whose
     /// primary is `primary`, with what a press of each sends. One function
     /// decides both, so the side region's strip and the workspace tab bar,
-    /// whichever reaches the window's right edge, draw the same two buttons.
+    /// whichever reaches the window's right edge, draw the same two buttons:
+    /// this view calls it for the bar, and `SideRegionView` for the strip.
     ///
     /// - **The transcript button** is the one
     ///   `WorkspaceTabBarChrome.transcriptControl` decides: on while a Claude
