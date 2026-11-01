@@ -26,7 +26,10 @@ import UniformTypeIdentifiers
 /// pass, so off the main actor it runs on the cooperative pool beside the
 /// main-thread suites instead of queueing ahead of them. `imageData(from:)` reads a
 /// pasteboard and *is* `@MainActor`; a test of it belongs in a suite that is.
-@Suite("ComposerImagePreparer")
+/// `.serialized` keeps it to one pool thread at a time: run in parallel, its
+/// heavy tests could hold every thread of CI's three-thread cooperative pool
+/// with CPU work and stall everything else waiting on the pool.
+@Suite("ComposerImagePreparer", .serialized)
 struct ComposerImagePreparerTests {
 
     /// A bitmap at an exact pixel size. `noisy` fills it with deterministic

@@ -275,9 +275,10 @@ struct TranscriptEstimatorAccuracyTests {
         var signedLineError = 0
         var worst: (text: String, width: CGFloat, delta: CGFloat)?
 
-        // The render takes neither a width nor a role, so each paragraph is
-        // rendered once here and measured at all four geometries below — by one
-        // measurer, the way the Coordinator keeps one for every row it sizes.
+        // The render takes no width, and this loop renders every paragraph the
+        // same way whichever geometry measures it, so each paragraph is rendered
+        // once here and measured at all four geometries below — by one measurer,
+        // the way the Coordinator keeps one for every row it sizes.
         var renderedCorpus: [[MessageBlock]] = []
         for text in Self.paragraphCorpus {
             renderedCorpus.append(MarkdownAttributedRenderer.renderBlocks(
@@ -442,36 +443,32 @@ struct TranscriptEstimatorAccuracyTests {
             let (shape, text) = Self.randomMessage(&generator)
             // A message's blocks depend on its text, role and badge, never on the
             // column width, so each arm is rendered once here and measured at both
-            // widths below. The measuring still runs width first, then arm, so
-            // every sum and list below accumulates in the same order as before.
-            var rendered: [RenderedArm] = []
+            // widths below. The measuring runs width first, then arm: the order
+            // the thresholds below were swept in.
+            var renderedArms: [RenderedArm] = []
             for arm in Self.corpusArms {
-                let usage: TokenUsage? = arm.badged
-                    ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
-                    : nil
+                let usage = Self.corpusUsage(badged: arm.badged)
                 let item: TranscriptItem = arm.role == .user
                     ? .userPrompt(id: "corpus", text: text, timestamp: nil)
                     : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
-                rendered.append(RenderedArm(
-                    role: arm.role, weight: arm.weight, item: item, usage: usage,
+                renderedArms.append(RenderedArm(
+                    arm: arm, item: item,
                     blocks: TranscriptBubbleGeometry.composedBlocks(
                         for: item, badgeUsage: usage, linkResolver: nil)))
             }
-            var tableHeights: TableHeights = []
             for width in Self.widths {
-                for arm in rendered {
+                for rendered in renderedArms {
+                    let arm = rendered.arm
                     let role = arm.role
-                    let usage = arm.usage
-                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(arm.item),
+                    let usage = Self.corpusUsage(badged: arm.badged)
+                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(rendered.item),
                                                     badgeUsage: usage)
                     let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
                     let measured = TranscriptBubbleGeometry.rowHeight(
-                        blocksHeight: Self.blocksHeight(
-                            arm.blocks,
+                        blocksHeight: measurer.blocksHeight(
+                            rendered.blocks,
                             bodyWidth: TranscriptBubbleGeometry.bodyWidth(
-                                columnWidth: width, role: role),
-                            measurer: measurer,
-                            tableHeights: &tableHeights),
+                                columnWidth: width, role: role)),
                         role: role)
                     total += arm.weight
                     signedTotal += CGFloat(arm.weight) * (estimate - measured)
@@ -532,58 +529,25 @@ struct TranscriptEstimatorAccuracyTests {
     /// unbadged row exactly and measure the same height again: it is measured
     /// once and counted twice instead. The weight keeps the rate and mean
     /// thresholds reading over the 3200 combinations they were swept against.
-    private static let corpusArms: [(role: TranscriptBubbleGeometry.Role, badged: Bool, weight: Int)] = [
+    private static let corpusArms: [CorpusArm] = [
         (.assistant, false, 1),
         (.assistant, true, 1),
         (.user, false, 2),
     ]
 
-    /// One corpus arm, rendered once and measured at both column widths.
+    private typealias CorpusArm = (role: TranscriptBubbleGeometry.Role, badged: Bool, weight: Int)
+
+    /// One corpus arm of one message, rendered once and measured at both column
+    /// widths.
     private struct RenderedArm {
-        let role: TranscriptBubbleGeometry.Role
-        let weight: Int
+        let arm: CorpusArm
         let item: TranscriptItem
-        let usage: TokenUsage?
         let blocks: [MessageBlock]
     }
 
-    /// The tables one corpus message has had measured so far, with the body
-    /// width each was measured at.
-    private typealias TableHeights = [(data: TranscriptTableData, bodyWidth: CGFloat, height: CGFloat)]
-
-    /// `MessageBlockMeasurer.blocksHeight(_:bodyWidth:)`, built from the same two
-    /// calls the Coordinator's cache-fed path makes — `height(of:bodyWidth:)` per
-    /// block, summed by `blocksHeight(fromBlockHeights:)` — except that a TABLE
-    /// already measured at this body width is read back from `tableHeights`.
-    ///
-    /// A table's height is a function of its data and the body width alone
-    /// (`tableHeight` lays out a fresh hosting controller on every call), and it
-    /// is the most expensive measurement in this file: one SwiftUI layout pass
-    /// each, over half of the corpus test's main-thread time on CI. The badged and
-    /// unbadged assistant arms of a message carry identical tables at identical
-    /// widths, so without this every assistant table was laid out twice. Prose is
-    /// always measured, and an unequal table is measured afresh.
-    private static func blocksHeight(
-        _ blocks: [MessageBlock],
-        bodyWidth: CGFloat,
-        measurer: MessageBlockMeasurer,
-        tableHeights: inout TableHeights
-    ) -> CGFloat {
-        var heights: [CGFloat] = []
-        for block in blocks {
-            guard case .table(let data) = block else {
-                heights.append(measurer.height(of: block, bodyWidth: bodyWidth))
-                continue
-            }
-            if let known = tableHeights.first(where: { $0.data == data && $0.bodyWidth == bodyWidth }) {
-                heights.append(known.height)
-            } else {
-                let height = measurer.height(of: block, bodyWidth: bodyWidth)
-                tableHeights.append((data: data, bodyWidth: bodyWidth, height: height))
-                heights.append(height)
-            }
-        }
-        return measurer.blocksHeight(fromBlockHeights: heights)
+    /// The usage badge a corpus arm carries, if it is a badged one.
+    private static func corpusUsage(badged: Bool) -> TokenUsage? {
+        badged ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0) : nil
     }
 
     /// A deterministic PRNG, so the corpus is the same on every run and on every

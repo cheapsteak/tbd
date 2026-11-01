@@ -815,9 +815,11 @@ struct SkipAccountPickerPersistenceTests {
             let reloaded = AppState(userDefaults: defaults)
             #expect(reloaded.skipAccountPicker)
 
-            // Toggling back off round-trips too (both branches of the gate).
+            // Toggling back off round-trips too (both branches of the gate),
+            // and `false` is stored as an explicit value, not left absent.
             reloaded.skipAccountPicker = false
             #expect(defaults.bool(forKey: "com.tbd.app.accountPicker.useDefaultWithoutAsking") == false)
+            #expect(defaults.object(forKey: "com.tbd.app.accountPicker.useDefaultWithoutAsking") as? Bool == false)
             #expect(AppState(userDefaults: defaults).skipAccountPicker == false)
         }
     }
@@ -829,27 +831,11 @@ struct SkipAccountPickerPersistenceTests {
         withIsolatedDefaults { defaults in
             let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
             let state = AppState(userDefaults: defaults)
+            // Both checks fail on an unconditional write: `init`'s restore runs the `didSet`.
             #expect(defaults.object(forKey: key) == nil)
 
             state.skipAccountPicker = false
             #expect(defaults.object(forKey: key) == nil)
-            #expect(AppState(userDefaults: defaults).skipAccountPicker == false)
-        }
-    }
-
-    /// The other side of the only-on-change gate: a change in either direction
-    /// is written, and `false` is stored as an explicit value rather than left
-    /// to the absent key's default.
-    @Test func changingSkipAccountPickerPersistsEachNewValue() {
-        withIsolatedDefaults { defaults in
-            let key = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
-            let state = AppState(userDefaults: defaults)
-
-            state.skipAccountPicker = true
-            #expect(defaults.object(forKey: key) as? Bool == true)
-
-            state.skipAccountPicker = false
-            #expect(defaults.object(forKey: key) as? Bool == false)
         }
     }
 
