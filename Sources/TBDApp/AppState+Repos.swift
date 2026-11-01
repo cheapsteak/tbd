@@ -46,6 +46,7 @@ extension AppState {
             let removed = worktrees.removeValue(forKey: repoID) ?? []
             for worktree in removed {
                 forgetDevServerState(worktreeID: worktree.id)
+                forgetChangesSnapshot(worktreeID: worktree.id)
             }
         } catch {
             logger.error("Failed to remove repo: \(error)")

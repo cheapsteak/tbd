@@ -246,9 +246,11 @@ enum SideRegionStrip {
 /// whole life.
 ///
 /// The Changes list has no leaf form, so it draws `ChangesPanelView` in the
-/// leaf's place, keyed and handed its state the same way. A click on one of
-/// its files opens the file here (`ChangesPanelClick`), in a new panel when
-/// Shift is held.
+/// leaf's place, keyed and handed its state the same way, with the worktree's
+/// last loaded list (`AppState.changesSnapshot`) to show while it loads. Its
+/// control is `PaneRefreshControl`, a spinner while the list loads. A click
+/// on one of its files opens the file here (`ChangesPanelClick`), in a new
+/// panel when Shift is held.
 ///
 /// History steps go out as panel operations through the active panel's
 /// daemon action set. The render toggle, copy-address and refresh act on the
@@ -259,7 +261,8 @@ struct SideRegionView: View {
     @Environment(AppState.self) var appState
 
     /// Each panel's control state: its rendered/source toggle, whether its
-    /// file can render, its web page's address and the copy checkmark. Pruned
+    /// file can render, its web page's address and the copy checkmark, and
+    /// the Changes list's refresh count and loading flag. Pruned
     /// to the strip's panels — the worktree's and the tab's own — as they
     /// change.
     @State private var chromeStore = PaneChromeStore()
@@ -305,6 +308,7 @@ struct SideRegionView: View {
                 ChangesPanelView(
                     worktree: worktree,
                     chrome: active.chrome,
+                    cachedSnapshot: appState.changesSnapshot(worktreeID: worktree.id),
                     onOpenFile: { relativePath, newPanel in
                         send(ChangesPanelClick.operation(
                             worktreePath: worktree.path, relativePath: relativePath, shift: newPanel))
@@ -382,8 +386,12 @@ struct SideRegionView: View {
                 addMenu
 
                 if let active, let control = activeControl(active) {
-                    PaneChromeControlButton(control: control) {
-                        active.chrome.perform(control, contentURL: active.tab.webURL)
+                    if control == .refresh {
+                        PaneRefreshControl(chrome: active.chrome)
+                    } else {
+                        PaneChromeControlButton(control: control) {
+                            active.chrome.perform(control, contentURL: active.tab.webURL)
+                        }
                     }
                 }
 

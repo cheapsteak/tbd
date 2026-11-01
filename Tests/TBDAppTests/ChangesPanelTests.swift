@@ -52,6 +52,20 @@ struct ChangesPanelTests {
         return worktreeID
     }
 
+    private static func localWorktree() throws -> LocalWorktree {
+        try #require(LocalWorktree(Self.worktree(id: UUID(), repoID: UUID())))
+    }
+
+    /// A Changes list holding one changed, unstaged file at `path`.
+    private static func snapshot(unstaged path: String) -> ChangesSnapshot {
+        ChangesSnapshot(
+            statuses: [GitFileStatus(path: path, indexStatus: " ", workingStatus: "M")], branch: [])
+    }
+
+    private static func unstagedPaths(_ snapshot: ChangesSnapshot?) -> [String] {
+        snapshot?.unstaged.map { $0.path } ?? []
+    }
+
     // MARK: - A file click
 
     @Test("a click on a file opens it, by absolute path, where the reuse rule places it")
@@ -259,6 +273,121 @@ struct ChangesPanelTests {
         #expect(refresh.systemImage == "arrow.clockwise")
         #expect(refresh.help == "Refresh")
         #expect(refresh.tint == nil)
+    }
+
+    @Test("the loading flag stays up until the latest load ends, whichever order loads end in")
+    func refreshFlagFollowsLatestLoad() {
+        let chrome = PaneChromeState(pasteboard: { _ in Issue.record("unexpected pasteboard write") })
+        #expect(!chrome.isRefreshing)
+
+        // A refresh supersedes a load that ends after the newer one began.
+        let superseded = chrome.beginRefresh()
+        #expect(chrome.isRefreshing)
+        let latest = chrome.beginRefresh()
+        chrome.endRefresh(superseded)
+        #expect(chrome.isRefreshing, "the superseded load leaves the flag to the one still running")
+        chrome.endRefresh(latest)
+        #expect(!chrome.isRefreshing)
+
+        // The latest load ends first; the superseded one ending later changes nothing.
+        let older = chrome.beginRefresh()
+        let newer = chrome.beginRefresh()
+        chrome.endRefresh(newer)
+        #expect(!chrome.isRefreshing)
+        chrome.endRefresh(older)
+        #expect(!chrome.isRefreshing)
+    }
+
+    // MARK: - The Changes cache
+
+    @Test("a list made while a load runs starts from the worktree's last loaded list")
+    func cachedSnapshotShowsBeforeLoadCompletes() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let gate = PanelCallGate()
+            let loads = PanelEventLog()
+            let first = Self.snapshot(unstaged: "first.swift")
+            let second = Self.snapshot(unstaged: "second.swift")
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                guard loads.events.count > 1 else { return first }
+                await gate.wait()
+                return second
+            }
+            let cachedBeforeLoad = state.changesSnapshot(worktreeID: worktree.id) != nil
+            #expect(!cachedBeforeLoad, "nothing loaded yet")
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+
+            // The list comes to the front again: its own load is in flight,
+            // and the cache still holds the first load's list for it to show.
+            let reload = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the second load is in flight")
+            let shownWhileLoading = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            let expectedWhileLoading: [String] = ["first.swift"]
+            #expect(shownWhileLoading == expectedWhileLoading)
+
+            gate.release()
+            _ = await reload.value
+            let shownAfter = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            let expectedAfter: [String] = ["second.swift"]
+            #expect(shownAfter == expectedAfter, "the finished load replaces the cached list")
+        }
+    }
+
+    @Test("a load cancelled before it returns stores nothing, so a newer load's list stays")
+    func cancelledLoadKeepsNewerSnapshot() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let gate = PanelCallGate()
+            let loads = PanelEventLog()
+            let older = Self.snapshot(unstaged: "older.swift")
+            let newer = Self.snapshot(unstaged: "newer.swift")
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                guard loads.events.count == 1 else { return newer }
+                await gate.wait()
+                return older
+            }
+            let superseded = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the first load is in flight")
+
+            // A refresh cancels the first load and runs a newer one, which
+            // lands before the first one's git reads return.
+            superseded.cancel()
+            let newest = await state.loadChangesSnapshot(worktree: worktree)
+            gate.release()
+            let supersededResult = await superseded.value
+
+            let supersededReturnedList = supersededResult != nil
+            #expect(!supersededReturnedList, "the cancelled load hands the list nothing to show")
+            let expected: [String] = ["newer.swift"]
+            let returned = Self.unstagedPaths(newest)
+            let stored = Self.unstagedPaths(state.changesSnapshot(worktreeID: worktree.id))
+            #expect(returned == expected)
+            #expect(stored == expected)
+        }
+    }
+
+    @Test("archiving a worktree drops its cached Changes list")
+    func archiveForgetsChangesSnapshot() async throws {
+        try await Fixture.withState { state in
+            let repoID = UUID()
+            let row = Self.worktree(id: UUID(), repoID: repoID)
+            state.worktrees[repoID] = [row]
+            let worktree = try #require(LocalWorktree(row))
+            let loaded = Self.snapshot(unstaged: "a.swift")
+            state.changesLoader = { @MainActor _, _ in loaded }
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let cachedBeforeArchive = state.changesSnapshot(worktreeID: worktree.id) != nil
+            try #require(cachedBeforeArchive, "precondition: a list is cached")
+
+            state.removeArchivedWorktreeFromState(id: worktree.id)
+
+            let cachedAfterArchive = state.changesSnapshot(worktreeID: worktree.id) != nil
+            #expect(!cachedAfterArchive)
+        }
     }
 
     // MARK: - The retired column's keys

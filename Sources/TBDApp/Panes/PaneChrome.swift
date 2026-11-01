@@ -6,7 +6,7 @@ import TBDShared
 /// The state a pane's per-kind controls read: whether a file shows its
 /// rendered view or its source, whether it can render at all, a web page's
 /// current address, the checkmark a copy of that address shows, and the
-/// Changes list's refresh count.
+/// Changes list's refresh count and whether it is loading.
 ///
 /// It lives apart from the leaf (`PanePlaceholder`) so that the view drawing
 /// the controls can own it. On the daemon path the controls sit in the tab
@@ -35,6 +35,14 @@ final class PaneChromeState {
     /// How many times the refresh control has been pressed. The Changes list
     /// reloads whenever it changes (`ChangesPanelView`).
     private(set) var refreshCount = 0
+
+    /// True while the Changes list is loading, from ``beginRefresh()`` until
+    /// the latest load's ``endRefresh(_:)``. The strip draws a spinner in
+    /// place of the refresh control meanwhile (`PaneRefreshControl`).
+    private(set) var isRefreshing = false
+
+    /// The token of the latest load ``beginRefresh()`` began.
+    @ObservationIgnored private var latestRefresh = 0
 
     /// A web pane's live state, whose `currentURL` follows in-page navigation.
     /// It is an `ObservableObject`, and this class does not forward its
@@ -76,6 +84,22 @@ final class PaneChromeState {
             guard !Task.isCancelled else { return }
             self?.didCopyAddress = false
         }
+    }
+
+    /// Marks a load of the Changes list begun, and returns the token its
+    /// ``endRefresh(_:)`` hands back.
+    func beginRefresh() -> Int {
+        latestRefresh &+= 1
+        if !isRefreshing { isRefreshing = true }
+        return latestRefresh
+    }
+
+    /// Marks the load `token` names ended, cancelled or not. Only the latest
+    /// load clears ``isRefreshing``: one a newer load superseded leaves it to
+    /// that one, which is still running.
+    func endRefresh(_ token: Int) {
+        guard token == latestRefresh, isRefreshing else { return }
+        isRefreshing = false
     }
 
     /// Does what `control`'s button does to this state: the render toggle
@@ -258,6 +282,31 @@ struct PaneChromeControlButton: View {
             image.foregroundStyle(.secondary)
         case nil:
             image
+        }
+    }
+}
+
+// MARK: - PaneRefreshControl
+
+/// The Changes list's refresh control: the ``PaneChromeControl/refresh``
+/// button, or, while the list loads (`PaneChromeState.isRefreshing`), a small
+/// spinner in the same 28 pt slot. It is its own view so that only it, not
+/// the strip around it, redraws as a load begins and ends.
+struct PaneRefreshControl: View {
+    let chrome: PaneChromeState
+
+    var body: some View {
+        if chrome.isRefreshing {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 28)
+                .frame(maxHeight: .infinity)
+                .help("Refreshing")
+                .accessibilityLabel(Text("Refreshing"))
+        } else {
+            PaneChromeControlButton(control: .refresh) {
+                chrome.perform(.refresh, contentURL: nil)
+            }
         }
     }
 }

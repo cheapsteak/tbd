@@ -156,15 +156,89 @@ enum ChangesPanelClick {
     }
 }
 
+// MARK: - ChangesSnapshot
+
+/// One load of a worktree's Changes list: its staged, changed and untracked
+/// files from `git status`, and the files its branch changed since it left
+/// the default branch.
+struct ChangesSnapshot {
+    var staged: [GitFileStatus]
+    var unstaged: [GitFileStatus]
+    var untracked: [GitFileStatus]
+    var branch: [BranchFileChange]
+
+    /// Sorts `statuses` into the three `git status` lists. A file with both
+    /// staged and unstaged edits is in both of those.
+    init(statuses: [GitFileStatus], branch: [BranchFileChange]) {
+        staged = statuses.filter(\.isStaged)
+        unstaged = statuses.filter(\.isUnstaged)
+        untracked = statuses.filter(\.isUntracked)
+        self.branch = branch
+    }
+
+    /// No file in any list.
+    var isEmpty: Bool {
+        staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && branch.isEmpty
+    }
+
+    /// Runs `git status` and, for any worktree but the main one, the branch
+    /// diff against `origin/<defaultBranch>`, side by side, each on a
+    /// background queue.
+    static func load(worktree: LocalWorktree, defaultBranch: String) async -> ChangesSnapshot {
+        async let statuses = loadGitStatus(at: worktree.path)
+        async let branch = worktree.status == .main
+            ? [BranchFileChange]()
+            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
+        return await ChangesSnapshot(statuses: statuses, branch: branch)
+    }
+}
+
+// MARK: - The Changes cache
+
+extension AppState {
+    /// The worktree's Changes list as its last load left it, or nil before
+    /// any load of it has finished.
+    func changesSnapshot(worktreeID: UUID) -> ChangesSnapshot? {
+        changesSnapshots[worktreeID]
+    }
+
+    /// Loads the worktree's Changes list through `changesLoader`, against its
+    /// repo's default branch ("main" when the repo is not known), stores it
+    /// in `changesSnapshots`, and returns it.
+    ///
+    /// A load whose task was cancelled by the time it returned stores nothing
+    /// and returns nil. The list cancels its load when a refresh begins a
+    /// newer one or the list goes away, and a newer load may already have
+    /// stored a fresher reading than the cancelled one's.
+    func loadChangesSnapshot(worktree: LocalWorktree) async -> ChangesSnapshot? {
+        let defaultBranch = repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
+        let snapshot = await changesLoader(worktree, defaultBranch)
+        guard !Task.isCancelled else { return nil }
+        changesSnapshots[worktree.id] = snapshot
+        return snapshot
+    }
+
+    /// Drops a worktree's cached Changes list when the worktree leaves app
+    /// state: archived, or removed with its repo.
+    func forgetChangesSnapshot(worktreeID: UUID) {
+        changesSnapshots.removeValue(forKey: worktreeID)
+    }
+}
+
 // MARK: - ChangesPanelView
 
 /// The worktree's Changes list as a side-panel tab: its staged, changed,
 /// untracked and branch files, in sections that fold.
 ///
 /// The strip around it names it, closes it and carries its refresh control
-/// (`PaneChromeControl.refresh`), so it draws no header of its own. It loads
-/// when it appears and again whenever that control bumps
-/// `chrome.refreshCount`.
+/// (`PaneRefreshControl`), so it draws no header of its own.
+///
+/// It is a worktree panel, but a new view is made whenever it comes to the
+/// front or another workspace tab is selected. So it starts from the
+/// worktree's last loaded list (`AppState.changesSnapshot`), handed in as
+/// `cachedSnapshot`, and loads again when it appears and whenever the refresh
+/// control bumps `chrome.refreshCount`. While a load runs, the strip shows a
+/// spinner in place of the refresh control (`PaneChromeState.isRefreshing`).
 ///
 /// A click on a file hands its worktree-relative path to `onOpenFile`, with
 /// whether Shift was held, read as the click lands. A double-click opens the
@@ -173,16 +247,28 @@ struct ChangesPanelView: View {
     /// Every read below is of a directory on this disk, so the panel takes the
     /// proven-local wrapper rather than a bare `Worktree`.
     let worktree: LocalWorktree
-    /// The panel's control state, whose `refreshCount` the list reloads on.
+    /// The panel's control state, whose `refreshCount` the list reloads on
+    /// and whose `isRefreshing` it raises while it loads.
     let chrome: PaneChromeState
     let onOpenFile: @MainActor (_ relativePath: String, _ newPanel: Bool) -> Void
     @Environment(AppState.self) var appState
 
-    @State private var staged: [GitFileStatus] = []
-    @State private var unstaged: [GitFileStatus] = []
-    @State private var untracked: [GitFileStatus] = []
-    @State private var branchChanges: [BranchFileChange] = []
-    @State private var isLoading = false
+    /// What the list shows: the snapshot it was made with, then each of its
+    /// own loads'. Nil until one of those exists, when the list is blank
+    /// rather than saying "No changes".
+    @State private var snapshot: ChangesSnapshot?
+
+    init(
+        worktree: LocalWorktree,
+        chrome: PaneChromeState,
+        cachedSnapshot: ChangesSnapshot?,
+        onOpenFile: @escaping @MainActor (_ relativePath: String, _ newPanel: Bool) -> Void
+    ) {
+        self.worktree = worktree
+        self.chrome = chrome
+        self.onOpenFile = onOpenFile
+        _snapshot = State(initialValue: cachedSnapshot)
+    }
 
     var body: some View {
         fileList
@@ -193,46 +279,41 @@ struct ChangesPanelView: View {
     private var fileList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && branchChanges.isEmpty && !isLoading {
-                    Text("No changes")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 20)
-                }
-                if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: onOpenFile)
-                }
-                if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
-                }
-                if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
-                }
-                if !branchChanges.isEmpty {
-                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: onOpenFile)
+                if let snapshot {
+                    if snapshot.isEmpty {
+                        Text("No changes")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 20)
+                    }
+                    if !snapshot.staged.isEmpty {
+                        FileStatusSection(title: "Staged", files: snapshot.staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.unstaged.isEmpty {
+                        FileStatusSection(title: "Changes", files: snapshot.unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.untracked.isEmpty {
+                        FileStatusSection(title: "Untracked", files: snapshot.untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
+                    if !snapshot.branch.isEmpty {
+                        BranchChangeSection(title: "Branch", files: snapshot.branch, worktreePath: worktree.path, onFileClick: onOpenFile)
+                    }
                 }
             }
             .padding(.vertical, 4)
         }
     }
 
-    private var defaultBranch: String {
-        appState.repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
-    }
-
+    /// Loads the list (`AppState.loadChangesSnapshot`) and shows the result,
+    /// with the strip's spinner up meanwhile. A load cancelled before it
+    /// returns shows nothing, and leaves the spinner to the load that
+    /// superseded it, if any.
     private func refresh() async {
-        isLoading = true
-        async let statusTask = loadGitStatus(at: worktree.path)
-        async let branchTask = worktree.status == .main
-            ? [BranchFileChange]()
-            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
-        let statuses = await statusTask
-        staged = statuses.filter(\.isStaged)
-        unstaged = statuses.filter(\.isUnstaged)
-        untracked = statuses.filter(\.isUntracked)
-        branchChanges = await branchTask
-        isLoading = false
+        let token = chrome.beginRefresh()
+        defer { chrome.endRefresh(token) }
+        guard let loaded = await appState.loadChangesSnapshot(worktree: worktree) else { return }
+        snapshot = loaded
     }
 }
 

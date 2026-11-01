@@ -977,6 +977,22 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
+    /// Worktree → its Changes list as the last load left it
+    /// (`loadChangesSnapshot`), so the list, which is made anew whenever it
+    /// comes to the front or another workspace tab is selected, shows it at
+    /// once while its own load runs. In memory only. Dropped when the
+    /// worktree is archived or removed with its repo
+    /// (`forgetChangesSnapshot`). A cache no view observes: the list reads it
+    /// once, when it is made.
+    @ObservationIgnored var changesSnapshots: [UUID: ChangesSnapshot] = [:]
+    /// How `loadChangesSnapshot` reads a worktree's Changes list, given the
+    /// checkout and the default branch its branch diff compares against: git
+    /// on background queues (`ChangesSnapshot.load`). Injectable so a test
+    /// can hold a load in flight without a checkout.
+    @ObservationIgnored var changesLoader: @MainActor (LocalWorktree, String) async -> ChangesSnapshot =
+        { worktree, defaultBranch in
+            await ChangesSnapshot.load(worktree: worktree, defaultBranch: defaultBranch)
+        }
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
