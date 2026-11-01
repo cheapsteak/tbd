@@ -22,7 +22,8 @@ struct MainToolbarLayoutTests {
     @Test func chromeFollowsTheFlag() {
         let suite = TestDefaultsSuite("MainToolbarLayoutTests.chrome")
         defer { suite.tearDown() }
-        #expect(MainWindowChrome.resolve(suite.defaults) == .swiftUI)
+        let unsetExpected: MainWindowChrome = AppState.appKitSidebarDefault ? .appKit : .swiftUI
+        #expect(MainWindowChrome.resolve(suite.defaults) == unsetExpected)
         suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
         #expect(MainWindowChrome.resolve(suite.defaults) == .appKit)
         suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
@@ -35,6 +36,37 @@ struct MainToolbarLayoutTests {
             .sidebarTrackingSeparator, ID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: false)) == expected)
+    }
+
+    @Test func shownOrderWithEveryRightHandItem() {
+        let state = MainToolbarLayoutState(
+            sidebarCollapsed: false, showsServers: true, showsTranscript: true,
+            showsReconnect: true, showsStop: true)
+        let expected: [NSToolbarItem.Identifier] = [
+            ID.toggleSidebar, ID.back, ID.forward, .flexibleSpace, ID.repoFilter,
+            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
+            ID.servers, .space, ID.remoteTranscript, ID.remoteReconnect, ID.remoteStop,
+        ]
+        #expect(Self.ids(state) == expected)
+    }
+
+    @Test func collapsedOrderWithServersAndReconnect() {
+        let state = MainToolbarLayoutState(
+            sidebarCollapsed: true, showsServers: true, showsTranscript: false,
+            showsReconnect: true, showsStop: false)
+        let expected: [NSToolbarItem.Identifier] = [
+            ID.toggleSidebar, ID.back, ID.forward,
+            .sidebarTrackingSeparator, ID.title, .flexibleSpace,
+            ID.servers, .space, ID.remoteReconnect,
+        ]
+        #expect(Self.ids(state) == expected)
+    }
+
+    @Test func everyEmittedIdentifierIsAllowed() {
+        let allowed = Set(ID.allowed)
+        for state in MainToolbarLayoutState.allCombinations {
+            #expect(Self.ids(state).allSatisfy { allowed.contains($0) })
+        }
     }
 
     @Test func collapsedOrder() {
@@ -86,7 +118,8 @@ struct MainToolbarLayoutTests {
             let wantsSpace = state.showsServers && anyRemote
             #expect(list.contains(.space) == wantsSpace)
             if wantsSpace, let serversIndex = list.firstIndex(of: ID.servers) {
-                #expect(list[serversIndex + 1] == .space)
+                let after = list.dropFirst(serversIndex + 1).first
+                #expect(after == .space)
             }
         }
     }

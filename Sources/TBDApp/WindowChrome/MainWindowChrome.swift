@@ -12,6 +12,7 @@ enum MainWindowChrome: Equatable {
     case appKit
 
     /// `.appKit` exactly when the native sidebar flag is on in `defaults`.
+    @MainActor
     static func resolve(_ defaults: UserDefaults) -> MainWindowChrome {
         AppState.appKitSidebarEnabled(defaults) ? .appKit : .swiftUI
     }
