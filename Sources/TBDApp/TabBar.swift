@@ -97,7 +97,8 @@ struct TabBarTrailingItems {
     /// or nil when its kind has none.
     var selectedTabControl: PaneChromeControl?
     var onSelectedTabControl: @MainActor () -> Void
-    /// True while the side region is collapsed and has panels.
+    /// True while the side region is hidden: collapsed, without a panel, or
+    /// not loaded yet (`PanelSurfaceWorkspaceView.showsExpandButton`).
     var showsExpandButton: Bool
     var onExpand: @MainActor () -> Void
 
@@ -139,7 +140,6 @@ struct TabBar: View {
     var onAddClaudeProfile: (UUID) -> Void = { _ in }
     var onChooseAccount: () -> Void = {}
     var onAddCodex: () -> Void = {}
-    var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     // Park (formerly suspend/resume) is a row-level action now; fork moved to
@@ -207,8 +207,7 @@ struct TabBar: View {
                     onAddClaude: onAddClaude,
                     onAddClaudeProfile: onAddClaudeProfile,
                     onChooseAccount: onChooseAccount,
-                    onAddCodex: onAddCodex,
-                    onAddNote: onAddNote
+                    onAddCodex: onAddCodex
                 )
             }
             // Exactly the width the trailing group leaves, the tabs and the +
@@ -251,9 +250,9 @@ struct TabBar: View {
                 action: onHistoryTab
             )
 
-            // Brings back the collapsed side region. It shows only while the
-            // region is collapsed, and the strip's collapse button only while
-            // it is visible, so `⌘\` is bound on one of the two at a time.
+            // Shows the hidden side region. It shows only while the region is
+            // hidden, and the strip's collapse button only while it is
+            // visible, so `⌘\` is bound on one of the two at a time.
             if trailing.showsExpandButton {
                 SidePanelToggleButton(collapsed: true) {
                     trailing.onExpand()
@@ -344,7 +343,6 @@ private struct AddTabButton: View {
     let onAddClaudeProfile: (UUID) -> Void
     let onChooseAccount: () -> Void
     let onAddCodex: () -> Void
-    let onAddNote: () -> Void
     @State private var isHovering = false
     /// Optimistic placeholder, deliberately NOT `.detect()`.
     ///
@@ -392,8 +390,7 @@ private struct AddTabButton: View {
             onClaude: onAddClaude,
             onClaudeProfile: onAddClaudeProfile,
             onChooseAccount: onChooseAccount,
-            onCodex: onAddCodex,
-            onNote: onAddNote
+            onCodex: onAddCodex
         )
         let menu = AddTabMenu.build(
             profiles: profiles,
@@ -470,29 +467,25 @@ final class MenuCoordinator: NSObject {
     let onClaudeProfile: (UUID) -> Void
     let onChooseAccount: () -> Void
     let onCodex: () -> Void
-    let onNote: () -> Void
 
     init(
         onShell: @escaping () -> Void,
         onClaude: @escaping () -> Void,
         onClaudeProfile: @escaping (UUID) -> Void,
         onChooseAccount: @escaping () -> Void = {},
-        onCodex: @escaping () -> Void,
-        onNote: @escaping () -> Void
+        onCodex: @escaping () -> Void
     ) {
         self.onShell = onShell
         self.onClaude = onClaude
         self.onClaudeProfile = onClaudeProfile
         self.onChooseAccount = onChooseAccount
         self.onCodex = onCodex
-        self.onNote = onNote
     }
 
     @objc func addShell() { onShell() }
     @objc func addClaude() { onClaude() }
     @objc func chooseAccount() { onChooseAccount() }
     @objc func addCodex() { onCodex() }
-    @objc func addNote() { onNote() }
 
     /// Profile menu items carry their `ModelProfile.id` in `representedObject`.
     /// A nil representedObject (should not happen for profile items) is a no-op.
@@ -586,15 +579,6 @@ enum AddTabMenu {
             codexItem.target = coordinator
             menu.addItem(codexItem)
         }
-
-        menu.addItem(.separator())
-
-        let noteItem = NSMenuItem(
-            title: "Note", action: #selector(MenuCoordinator.addNote), keyEquivalent: ""
-        )
-        noteItem.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
-        noteItem.target = coordinator
-        menu.addItem(noteItem)
 
         return menu
     }

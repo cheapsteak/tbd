@@ -14,6 +14,10 @@ struct SideRegionTab: Equatable, Identifiable {
     /// The session `.jsonl` a transcript tab's file menu acts on. Nil for the
     /// other kinds, and until the terminal's row carries one.
     let transcriptPath: String?
+    /// One of the worktree's panels — a note or the Changes list — which
+    /// every workspace tab of the worktree shows, rather than one of this
+    /// workspace tab's own.
+    let isWorktreeWide: Bool
 
     /// The content as the leaf view, and the file menu, take it; nil for the
     /// Changes list, which has no leaf form.
@@ -52,16 +56,65 @@ struct SideStripHistoryButtons: Equatable {
     let forward: Bool
 }
 
+/// One item of the side strip's + menu: a new note, the Changes list, or a
+/// note of the worktree that no panel shows yet.
+enum SideStripAddItem: Hashable, Identifiable {
+    case newNote
+    case changes
+    case note(id: UUID, title: String)
+
+    /// Stable across rebuilds of the menu: a note's is its ID, so a renamed
+    /// note keeps its item.
+    var id: String {
+        switch self {
+        case .newNote: return "new-note"
+        case .changes: return "changes"
+        case .note(let id, _): return "note-\(id.uuidString)"
+        }
+    }
+
+    /// The item's text in the menu.
+    var title: String {
+        switch self {
+        case .newNote: return "New Note"
+        case .changes: return "Changes"
+        case .note(_, let title): return title
+        }
+    }
+
+    /// The item's symbol: a listed note and the Changes list take the icon
+    /// their tab shows.
+    var systemImage: String {
+        switch self {
+        case .newNote: return "square.and.pencil"
+        case .changes: return PanelKind.changes.tabSystemImage
+        case .note: return PanelKind.note.tabSystemImage
+        }
+    }
+}
+
 enum SideRegionStrip {
-    /// The strip's tabs, in the region's order. A panel with no current
-    /// content — only malformed decoded data can produce one — is left out
-    /// rather than drawn blank.
+    /// The strip's tabs: the worktree's panels first, in the worktree's
+    /// order, then the tab's own panels, in the region's order. An own panel
+    /// with no current content — only malformed decoded data can produce one
+    /// — is left out rather than drawn blank.
     static func tabs(
-        for side: SideRegion,
+        for surface: WorkspaceTabSurface,
         noteTitle: (UUID) -> String?,
         transcriptPath: (UUID) -> String?
     ) -> [SideRegionTab] {
-        side.panels.compactMap { panel in
+        let activePanelID = surface.side.activePanelID
+        let worktreeTabs = surface.worktreePanels.map { panel -> SideRegionTab in
+            let content = panel.content.panelContent
+            return SideRegionTab(
+                id: panel.id,
+                content: content,
+                title: title(for: content, noteTitle: noteTitle),
+                isActive: panel.id == activePanelID,
+                transcriptPath: nil,
+                isWorktreeWide: true)
+        }
+        let ownTabs = surface.side.panels.compactMap { panel -> SideRegionTab? in
             guard let content = panel.content else { return nil }
             var path: String?
             if case .transcript(let terminalID) = content,
@@ -72,8 +125,43 @@ enum SideRegionStrip {
                 id: panel.id,
                 content: content,
                 title: title(for: content, noteTitle: noteTitle),
-                isActive: panel.id == side.activePanelID,
-                transcriptPath: path)
+                isActive: panel.id == activePanelID,
+                transcriptPath: path,
+                isWorktreeWide: false)
+        }
+        return worktreeTabs + ownTabs
+    }
+
+    /// The + menu's items: New Note and Changes, then every note in `notes`
+    /// that no worktree panel shows, in `notes` order, titled as its tab
+    /// would be — an untitled note reads "Note". Changes is always offered:
+    /// choosing it while its panel is open brings that panel forward.
+    static func addMenuItems(notes: [NoteSummary], worktreePanels: [WorktreePanel]) -> [SideStripAddItem] {
+        var shownNoteIDs = Set<UUID>()
+        for panel in worktreePanels {
+            if case .note(let noteID) = panel.content {
+                shownNoteIDs.insert(noteID)
+            }
+        }
+        let unshown = notes.filter { !shownNoteIDs.contains($0.id) }.map { note in
+            SideStripAddItem.note(
+                id: note.id,
+                title: title(for: .note(noteID: note.id), noteTitle: { _ in note.title }))
+        }
+        return [.newNote, .changes] + unshown
+    }
+
+    /// The panel operation a + menu item sends: `open` for the Changes list
+    /// or a listed note, which the daemon shows as a worktree panel. Nil for
+    /// New Note, which first creates the note (`AppState.createNote`).
+    static func addMenuOperation(for item: SideStripAddItem) -> PanelOperation? {
+        switch item {
+        case .newNote:
+            return nil
+        case .changes:
+            return .open(content: .changes, newPanel: false)
+        case .note(let id, _):
+            return .open(content: .note(noteID: id), newPanel: false)
         }
     }
 
@@ -129,18 +217,25 @@ enum SideRegionStrip {
 /// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`), so
 /// the two read as one row split by the divider, and clipped to its frame, so
 /// it never draws over the divider. Left to right it holds history search,
-/// back and forward for the active panel; the panel tabs, each selecting on a
-/// click, closing from its ×, offering the file menu on a right-click for a
-/// file or transcript, and showing its tooltip on hover; then, at the
-/// trailing edge, the active panel's own control and the collapse button,
-/// which carries `⌘\` while the region shows. The history buttons are always
-/// drawn and only disabled, so the tabs never shift under the pointer.
+/// back and forward for the active panel; the panel tabs — the worktree's
+/// panels (notes and the Changes list), which every workspace tab of the
+/// worktree shows, then this tab's own — each selecting on a click, closing
+/// from its ×, offering the file menu on a right-click for a file or
+/// transcript, and showing its tooltip on hover; then, at the trailing edge,
+/// the + menu, the active panel's own control and the collapse button, which
+/// carries `⌘\` while the region shows. The history buttons are always drawn
+/// and only disabled, so the tabs never shift under the pointer; they are
+/// dimmed in front of a note or the Changes list, which have no history.
+///
+/// The + menu offers New Note, which creates a note and shows it here
+/// (`AppState.createNote`); Changes; and every note of the worktree that no
+/// panel shows (`SideRegionStrip.addMenuItems`), each of which it opens.
 ///
 /// A note tab is renamed in place, by a double-click or the Rename Tab item
 /// its right-click offers, and the rename writes the note's title
-/// (`AppState.renameNote`). Its × closes the panel and deletes the note,
-/// asking first when the note has content (`AppState.closeSidePanel`); every
-/// other tab's × only closes its panel.
+/// (`AppState.commitSideNoteRename`). Its × closes the panel and deletes the
+/// note, asking first when the note has content (`AppState.closeSidePanel`);
+/// every other tab's ×, the Changes list's included, only closes its panel.
 ///
 /// The leaf draws no header: the tab names and closes the panel, and the strip
 /// carries its history buttons and its control. The control reads the
@@ -160,7 +255,8 @@ struct SideRegionView: View {
 
     /// Each panel's control state: its rendered/source toggle, whether its
     /// file can render, its web page's address and the copy checkmark. Pruned
-    /// to the region's panels as they change.
+    /// to the strip's panels — the worktree's and the tab's own — as they
+    /// change.
     @State private var chromeStore = PaneChromeStore()
     @State private var showHistoryPalette = false
     /// The note tab whose rename field is open, if any.
@@ -177,7 +273,7 @@ struct SideRegionView: View {
 
     var body: some View {
         let tabs = SideRegionStrip.tabs(
-            for: surface.side,
+            for: surface,
             noteTitle: { noteID in
                 appState.notes[worktree.id]?.first(where: { $0.id == noteID })?.title
             },
@@ -205,7 +301,7 @@ struct SideRegionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onChange(of: surface.side.panels.map(\.id)) { _, panelIDs in
+        .onChange(of: Self.panelIDs(of: surface)) { _, panelIDs in
             chromeStore.prune(keeping: Set(panelIDs))
         }
         .onChange(of: active?.tab.id) { _, _ in
@@ -213,6 +309,11 @@ struct SideRegionView: View {
             // closes it rather than show that panel's under the same anchor.
             showHistoryPalette = false
         }
+    }
+
+    /// Every panel the strip can show: the worktree's, then the tab's own.
+    private static func panelIDs(of surface: WorkspaceTabSurface) -> [PanelID] {
+        surface.worktreePanels.map(\.id) + surface.side.panels.map(\.id)
     }
 
     private func activePanel(for tab: SideRegionTab) -> ActivePanel {
@@ -231,11 +332,12 @@ struct SideRegionView: View {
 
     // MARK: - Strip
 
-    /// The history buttons, the tabs, the active panel's control and the
-    /// collapse button. The scroll view of tabs takes the width between the
-    /// two ends, which keep their full width however many tabs there are,
-    /// and scrolls the active panel's tab into view when the strip appears,
-    /// when another panel comes to the front and when the tabs change.
+    /// The history buttons, the tabs, the + menu, the active panel's control
+    /// and the collapse button. The scroll view of tabs takes the width
+    /// between the two ends, which keep their full width however many tabs
+    /// there are, and scrolls the active panel's tab into view when the strip
+    /// appears, when another panel comes to the front and when the tabs
+    /// change.
     private func strip(tabs: [SideRegionTab], active: ActivePanel?) -> some View {
         ScrollViewReader { proxy in
             stripRow(tabs: tabs, active: active)
@@ -262,6 +364,8 @@ struct SideRegionView: View {
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 0) {
+                addMenu
+
                 if let active, let control = activeControl(active) {
                     PaneChromeControlButton(control: control) {
                         active.chrome.perform(control, contentURL: active.tab.webURL)
@@ -435,10 +539,9 @@ struct SideRegionView: View {
     }
 
     /// The tab's title, or, while a note tab is being renamed, its rename
-    /// field. A note's rename commits as one on the workspace tab bar does
-    /// (`AppState.commitSideNoteRename`): a new title when the trimmed text is
-    /// not blank and differs from the note's title, and the note's workspace
-    /// tab's label cleared.
+    /// field. A note's rename commits a new title when the trimmed text is not
+    /// blank and differs from the note's title, and nothing otherwise
+    /// (`AppState.commitSideNoteRename`).
     @ViewBuilder
     private func tabTitle(_ tab: SideRegionTab) -> some View {
         let title = Text(tab.title)
@@ -477,6 +580,67 @@ struct SideRegionView: View {
 
     // MARK: Trailing edge
 
+    /// The + menu (`SideRegionStrip.addMenuItems`): New Note and Changes,
+    /// then, below a divider, the worktree's notes that no panel shows. It is
+    /// keyed by its items, so a changed note list always reaches the menu
+    /// AppKit builds.
+    private var addMenu: some View {
+        let items = SideRegionStrip.addMenuItems(
+            notes: appState.notes[worktree.id] ?? [], worktreePanels: surface.worktreePanels)
+        let fixed = items.filter { !Self.isListedNote($0) }
+        let listed = items.filter { Self.isListedNote($0) }
+        return Menu {
+            ForEach(fixed) { item in
+                addMenuButton(item)
+            }
+            if !listed.isEmpty {
+                Divider()
+                ForEach(listed) { item in
+                    addMenuButton(item)
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 11))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 28)
+        .frame(maxHeight: .infinity)
+        .help("Add a side panel")
+        .accessibilityLabel(Text("Add a side panel"))
+        .id(items)
+    }
+
+    private static func isListedNote(_ item: SideStripAddItem) -> Bool {
+        if case .note = item { return true }
+        return false
+    }
+
+    private func addMenuButton(_ item: SideStripAddItem) -> some View {
+        Button {
+            chooseAddMenuItem(item)
+        } label: {
+            Label(item.title, systemImage: item.systemImage)
+        }
+    }
+
+    /// Opens the Changes list or a listed note in this tab, or creates a note
+    /// and opens it here.
+    private func chooseAddMenuItem(_ item: SideStripAddItem) {
+        if let operation = SideRegionStrip.addMenuOperation(for: item) {
+            send(operation)
+            return
+        }
+        let appState = appState
+        let worktreeID = surface.worktreeID
+        let tabID = surface.id
+        Task { @MainActor in
+            await appState.createNote(worktreeID: worktreeID, tabID: tabID)
+        }
+    }
+
     /// The active panel's control, read from its chrome state.
     private func activeControl(_ active: ActivePanel) -> PaneChromeControl? {
         SideRegionStrip.trailingControl(
@@ -495,10 +659,10 @@ struct SideRegionView: View {
 
 /// The button that hides or shows the side region: the strip's collapse
 /// button while the region shows (`collapsed` false), and the workspace tab
-/// bar's expand button while it is collapsed (`collapsed` true). Both carry
+/// bar's expand button while it is hidden (`collapsed` true). Both carry
 /// `⌘\`, and at most one of them draws at a time — the collapse button with
 /// the strip, only while the region shows, and the expand button only while
-/// it is collapsed with panels — so the shortcut is bound once.
+/// it is hidden — so the shortcut is bound once.
 struct SidePanelToggleButton: View {
     /// Whether the side region is collapsed, so the button shows it.
     let collapsed: Bool

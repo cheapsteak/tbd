@@ -38,25 +38,51 @@ private enum NoteContentRead: Sendable {
 extension AppState {
     // MARK: - Note Actions
 
-    /// Create a note in a worktree and add a new tab for it.
-    func createNote(worktreeID: UUID) async {
+    /// Create a note in a worktree from the side strip's New Note, and show
+    /// it in the side panel of the workspace tab `tabID`: the note is opened
+    /// as a worktree panel, so every workspace tab of the worktree shows it,
+    /// and it comes to the front in `tabID`. A note is never a workspace tab.
+    ///
+    /// The note's summary lands in `notes` before the open goes out, so its
+    /// tab reads the note's title, and the + menu does not list it, from the
+    /// moment the panel arrives. A failed create opens nothing; a failed open
+    /// leaves the note, which the + menu then lists.
+    func createNote(worktreeID: UUID, tabID: UUID) async {
+        let note: Note
         do {
-            let note = try await daemonClient.createNote(worktreeID: worktreeID)
-            // `notes` holds metadata only — the daemon hands back a full
-            // `Note` here, so summarize it rather than caching content.
-            notes[worktreeID, default: []].append(NoteSummary(from: note))
-            let tab = Tab(id: note.id, content: .note(noteID: note.id), label: nil)
-            tabs[worktreeID, default: []].append(tab)
+            note = try await noteCreator(worktreeID)
         } catch {
-            logger.error("Failed to create note: \(error)")
+            logger.error("Failed to create note: \(error, privacy: .public)")
             handleConnectionError(error)
+            return
+        }
+        // `notes` holds metadata only — the daemon hands back a full `Note`
+        // here, so summarize it rather than caching content.
+        notes[worktreeID, default: []].append(NoteSummary(from: note))
+        await applyPanelOperation(
+            worktreeID: worktreeID, tabID: tabID,
+            .open(content: .note(noteID: note.id), newPanel: false))
+    }
+
+    /// Adopts one `note.list` answer for `worktreeIDs`: each worktree's
+    /// summaries replace its entry in `notes` when they differ, and a
+    /// worktree the answer names no note for is left with none. A note shows
+    /// in the side panel as a worktree panel, never as a workspace tab, so
+    /// this touches no tab.
+    func adoptNotes(_ fetched: [NoteSummary], worktreeIDs: Set<UUID>) {
+        let byWorktree = Dictionary(grouping: fetched, by: { $0.worktreeID })
+        for worktreeID in worktreeIDs {
+            let summaries = byWorktree[worktreeID] ?? []
+            if summaries != notes[worktreeID] ?? [] {
+                notes[worktreeID] = summaries
+            }
         }
     }
 
     /// Rename a note. TITLE ONLY — note content no longer travels this path;
     /// the app writes the file itself (`saveNoteContent`). Every control that
-    /// edits a note's title comes here: its tab, in the workspace tab bar or
-    /// the side region's strip, and the legacy pane header's title.
+    /// edits a note's title comes here: its tab in the side region's strip,
+    /// and the legacy pane header's title.
     ///
     /// Synchronous, like `renameTab`: the new title lands in `notes` at once,
     /// in the same frame as the rename field closing, so the tab never flashes
@@ -232,14 +258,14 @@ extension AppState {
     /// Content lives in the file; the legacy DB column still holds it for the
     /// handful of rows the daemon's startup export never drained. Neither
     /// source alone is the answer, so the union lives here rather than at the
-    /// call sites — `closeTab` hard-deletes the note row, so a wrong `false`
-    /// is a silent delete. For the same reason a close lands the note's
-    /// pending editor saves first (`flushPendingNoteSave`), so the file this
-    /// stats holds what was typed.
+    /// call sites — `closeSidePanel` hard-deletes the note row, so a wrong
+    /// `false` is a silent delete. For the same reason a close lands the
+    /// note's pending editor saves first (`flushPendingNoteSave`), so the file
+    /// this stats holds what was typed.
     ///
-    /// Synchronous, and one stat: it runs on a user gesture (closing a tab),
-    /// never on the poll. That is the whole reason it is allowed to touch the
-    /// filesystem at all.
+    /// Synchronous, and one stat: it runs on a user gesture (closing a note's
+    /// side-panel tab), never on the poll. That is the whole reason it is
+    /// allowed to touch the filesystem at all.
     func noteHasContent(worktreeID: UUID, noteID: UUID) -> Bool {
         if notes[worktreeID]?.first(where: { $0.id == noteID })?.hasLegacyContent == true {
             return true

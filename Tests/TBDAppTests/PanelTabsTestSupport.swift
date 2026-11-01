@@ -58,6 +58,10 @@ enum PanelTabsFixture {
             Issue.record("unexpected note.delete")
             throw UnstubbedSeam(seam: "note.delete")
         }
+        state.noteCreator = { @MainActor _ in
+            Issue.record("unexpected note.create")
+            throw UnstubbedSeam(seam: "note.create")
+        }
         try await body(state)
     }
 

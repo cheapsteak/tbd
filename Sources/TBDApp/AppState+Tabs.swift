@@ -17,9 +17,8 @@ enum DropEdge: Sendable, Equatable {
 /// anchor, derive one" with "the caller captured no valid pre-mutation
 /// selection". Those need opposite handling — deriving after a mutation reads
 /// the already-mutated array, where a stale index has silently re-bound to
-/// whatever slid into its slot (the note tab is last, so usually Notes), and
-/// pinning that would hand the resolver an arbitrary tab it then honours as a
-/// deliberate choice.
+/// whatever slid into its slot, and pinning that would hand the resolver an
+/// arbitrary tab it then honours as a deliberate choice.
 enum ActiveTabAnchor: Sendable, Equatable {
     /// Derive the anchor from the current selection. Correct only for a pure
     /// reorder — i.e. when no tab has been added or removed since that
@@ -41,11 +40,12 @@ extension AppState {
     /// Single source of truth for "which tab is showing". Every read of
     /// `activeTabIndices` that used to spell its own `?? 0` / `min(idx, count - 1)`
     /// fallback routes through here, because those spellings disagreed: a stale or
-    /// oversized index clamped to `count - 1`, and the daemon appends a worktree's
-    /// note tab LAST, so the clamp landed on Notes for every freshly-created
-    /// worktree. Falling forward to the first non-note tab instead lands on the
-    /// agent — matching the daemon's own "active = primary" default — while a
-    /// note-only worktree still shows its note at index 0.
+    /// oversized index clamped to `count - 1`, landing on whatever tab was last.
+    /// Falling forward to the first non-note tab instead lands on the agent —
+    /// matching the daemon's own "active = primary" default. A note tab exists
+    /// only in memory from an older build until a reconcile drops it
+    /// (`reconcileTabs`); a worktree holding nothing else still shows it at
+    /// index 0.
     ///
     /// Never overrides a deliberate selection: an in-range stored index is
     /// returned as-is, note tab or not. Returns 0 for an empty tab array;
@@ -85,7 +85,7 @@ extension AppState {
     /// mutation of `tabs[worktreeID]`. A nil `tabID` — or one that no longer
     /// exists — clears the entry rather than leaving a stale index behind, so
     /// `resolvedActiveTabIndex`'s first-non-note default takes over instead of a
-    /// clamp that would land on the trailing note tab.
+    /// clamp that would land on whatever tab is last.
     ///
     /// Writes nothing when the entry already holds the right value — every
     /// write to `activeTabIndices` notifies every view that reads it.
@@ -259,7 +259,7 @@ extension AppState {
     /// valid selection to capture. `.derive` reads the live array and is correct
     /// only for a pure reorder; using it after a mutation would read the
     /// already-mutated array, where the stored index has silently re-bound to
-    /// whatever slid into that slot (with the note tab last, usually Notes).
+    /// whatever slid into that slot.
     func applyStoredOrder(worktreeID: UUID, anchor: ActiveTabAnchor = .derive) {
         let followID: UUID?
         switch anchor {
@@ -352,18 +352,12 @@ extension AppState {
         }
     }
 
-    /// Commit a note's rename field in the side region's strip by the same
-    /// rule as the workspace tab bar's (`commitTabRename`): the note's title,
-    /// when the text is new and not blank (`TabRename.noteTitle`), and either
-    /// way a cleared label on the note's own workspace tab, so that tab shows
-    /// the title too. A worktree whose tab list holds no tab on the note gets
-    /// the title alone.
+    /// Commit a note's rename field in the side region's strip: the note's
+    /// title, when the trimmed text is not blank and differs from the note's
+    /// title (`TabRename.noteTitle`), through `renameNote`. Anything else
+    /// writes nothing. The tab shows the note's title, so the title is all
+    /// there is to set.
     func commitSideNoteRename(noteID: UUID, worktreeID: UUID, text: String) {
-        let content = PaneContent.note(noteID: noteID)
-        if let tab = tabs[worktreeID]?.first(where: { $0.content == content }) {
-            commitTabRename(tabID: tab.id, worktreeID: worktreeID, content: content, text: text)
-            return
-        }
         let currentTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
         guard let title = TabRename.noteTitle(text: text, currentNoteTitle: currentTitle) else { return }
         renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
@@ -391,60 +385,21 @@ extension AppState {
     // MARK: - Close
 
     /// Close one tab and clean up resources owned by that tab. This is shared
-    /// by the tab bar close button and the Cmd-W menu shortcut.
-    ///
-    /// Closing a note tab asks first when the note has content, and that is
-    /// read from the note's content file. So a note some editor has open is
-    /// closed on a task, which first lands the save that editor may still
-    /// hold on its debounce (`flushPendingNoteSave`) — a note typed into and
-    /// closed inside that window would otherwise read as empty, close without
-    /// asking, and lose the text — then finds the tab again by its ID, since
-    /// it may have moved or closed meanwhile. That task is returned, for a
-    /// caller that must wait for the close. Every other tab, including a note
-    /// no editor has open, closes before this returns, and nil is returned.
-    @discardableResult
-    func closeTab(worktreeID: UUID, index: Int) -> Task<Void, Never>? {
-        guard let arr = tabs[worktreeID],
-              arr.indices.contains(index) else { return nil }
-        let tabID = arr[index].id
-        guard case .note(let noteID) = arr[index].content,
-              hasNoteSaveFlusher(noteID: noteID) else {
-            closeTabNow(worktreeID: worktreeID, index: index)
-            return nil
-        }
-        return Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.flushPendingNoteSave(noteID: noteID)
-            guard let index = self.tabs[worktreeID]?.firstIndex(where: { $0.id == tabID }) else { return }
-            self.closeTabNow(worktreeID: worktreeID, index: index)
-        }
-    }
-
-    /// `closeTab` once nothing is left to flush: asks before closing a note
-    /// with content, then closes the tab at `index` at once.
-    private func closeTabNow(worktreeID: UUID, index: Int) {
+    /// by the tab bar close button and the Cmd-W menu shortcut. The tab closes
+    /// before this returns.
+    func closeTab(worktreeID: UUID, index: Int) {
         guard var arr = tabs[worktreeID],
               arr.indices.contains(index) else { return }
 
         let tab = arr[index]
 
-        // Closing a note tab hard-deletes the note row. Confirm first when
-        // the note has content; an empty note closes silently as before.
-        if case .note(let noteID) = tab.content,
-           let note = notes[worktreeID]?.first(where: { $0.id == noteID }),
-           noteHasContent(worktreeID: worktreeID, noteID: noteID),
-           !noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) {
-            return
-        }
-
         // Whether the tab being closed is the one on screen decides what the
         // selection does. Both captures must happen BEFORE the array is
         // mutated. Closing the ACTIVE tab moves the selection to whichever tab
         // takes its slot; closing a BACKGROUND tab must leave the user exactly
-        // where they were. The call site used to clamp unconditionally, which
-        // slid the selection one tab to the right on every background close —
-        // onto the trailing note tab, which the resolver then honours as a
-        // deliberate choice.
+        // where they were: a clamp would slide the selection one tab to the
+        // right on every background close, onto a tab the resolver then
+        // honours as a deliberate choice.
         let closingActiveTab = resolvedActiveTabIndex(worktreeID: worktreeID) == index
         let selectionToPreserve = closingActiveTab ? nil : explicitActiveTabID(worktreeID: worktreeID)
 
@@ -488,12 +443,6 @@ extension AppState {
             }
         }
 
-        if case .note(let noteID) = tab.content {
-            Task {
-                await deleteNote(noteID: noteID, worktreeID: worktreeID)
-            }
-        }
-
         if closingActiveTab {
             if arr.isEmpty {
                 activeTabIndices.removeValue(forKey: worktreeID)
@@ -515,19 +464,17 @@ extension AppState {
         }
     }
 
-    /// `closeTab(worktreeID:index:)` for the tab with this ID, returning its
-    /// task the same way.
-    @discardableResult
-    func closeTab(worktreeID: UUID, tabID: UUID) -> Task<Void, Never>? {
+    /// `closeTab(worktreeID:index:)` for the tab with this ID.
+    func closeTab(worktreeID: UUID, tabID: UUID) {
         guard let arr = tabs[worktreeID],
               let index = arr.firstIndex(where: { $0.id == tabID }) else {
             if focusedTabCloseContext?.worktreeID == worktreeID,
                focusedTabCloseContext?.tabID == tabID {
                 focusedTabCloseContext = nil
             }
-            return nil
+            return
         }
-        return closeTab(worktreeID: worktreeID, index: index)
+        closeTab(worktreeID: worktreeID, index: index)
     }
 
     var canCloseFocusedTab: Bool {

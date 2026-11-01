@@ -31,7 +31,8 @@ struct PanelSurfaceLoadKey: Equatable {
 
 /// One workspace tab drawn from the daemon-owned surface (panel tabs spec,
 /// "The renderer"): the primary's column on the left, the split divider, and
-/// the side region on the right while it has panels and is not collapsed.
+/// the side region on the right while it has panels — its own or the
+/// worktree's — and is not collapsed (`WorkspaceTabSurface.isSideVisible`).
 ///
 /// Each column starts with its own strip of tabs, and the two share one row:
 /// this view draws the workspace tab bar over the primary's column, so the bar
@@ -39,7 +40,7 @@ struct PanelSurfaceLoadKey: Equatable {
 /// row. With the region hidden, the bar spans the whole width. The bar's
 /// trailing end carries the selected tab's own control
 /// (`WorkspaceTabBarChrome`), Session History, and the expand button while
-/// the region is collapsed and has panels. No pane draws a header: the
+/// the region is hidden. No pane draws a header: the
 /// primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
@@ -129,9 +130,9 @@ struct PanelSurfaceWorkspaceView: View {
         let chrome = primaryChromes.state(for: tabID)
         // Read here, not in the `GeometryReader` closure, so what the bar's
         // trailing items read is a dependency of this body.
-        let trailing = trailingItems(side: side, chrome: chrome)
+        let trailing = trailingItems(chrome: chrome)
+        let showsSide = surface?.isSideVisible ?? false
         GeometryReader { geometry in
-            let showsSide = side.isVisible
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
             let shares = Self.shares(drag: dividerDrag, tabID: tabID, width: side.width)
@@ -220,12 +221,13 @@ struct PanelSurfaceWorkspaceView: View {
     }
 
     /// The bar's trailing items: the primary's control, read from `chrome`,
-    /// and the expand button while `side` is collapsed with panels.
-    private func trailingItems(side: SideRegion, chrome: PaneChromeState) -> TabBarTrailingItems {
+    /// and the expand button while the side region is hidden.
+    private func trailingItems(chrome: PaneChromeState) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
         let tabID = tab.id
         let content = primaryContent
+        let surface = surface
 
         var isClaudeTerminal = false
         var transcriptOpen = false
@@ -268,9 +270,10 @@ struct PanelSurfaceWorkspaceView: View {
                     break
                 }
             },
-            showsExpandButton: Self.showsExpandButton(side: side),
+            showsExpandButton: Self.showsExpandButton(surface: surface),
             onExpand: {
-                appState.sendPanelOperation(worktreeID: worktreeID, tabID: tabID, .setCollapsed(false))
+                appState.sendPanelOperation(
+                    worktreeID: worktreeID, tabID: tabID, Self.expandOperation(surface: surface))
             })
     }
 
@@ -348,11 +351,22 @@ struct PanelSurfaceWorkspaceView: View {
         CGSize(width: width, height: primaryLeafHeight)
     }
 
-    /// The expand button shows while the region is collapsed and has panels to
-    /// show; an empty region has nothing to expand. It never shows while the
-    /// region is visible, when the strip's collapse button carries `⌘\`.
-    static func showsExpandButton(side: SideRegion) -> Bool {
-        side.collapsed && !side.panels.isEmpty
+    /// The expand button shows whenever the side region is hidden: collapsed,
+    /// without a panel of its own or the worktree's, or not loaded yet
+    /// (`surface` nil). It never shows while the region is visible, when the
+    /// strip's collapse button carries `⌘\`.
+    static func showsExpandButton(surface: WorkspaceTabSurface?) -> Bool {
+        !(surface?.isSideVisible ?? false)
+    }
+
+    /// What the expand button sends: a region with panels is uncollapsed; one
+    /// with none, or a tab with no surface yet, opens the Changes list, so the
+    /// button always shows something.
+    static func expandOperation(surface: WorkspaceTabSurface?) -> PanelOperation {
+        if surface?.hasPanels == true {
+            return .setCollapsed(false)
+        }
+        return .open(content: .changes, newPanel: false)
     }
 }
 

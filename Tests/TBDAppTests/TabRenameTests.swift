@@ -10,13 +10,13 @@ import TestSupport
 // its RPC fails with no daemon running, after the in-memory change these
 // tests assert (as `TabReorderTests` does).
 
-/// The controls that live on a workspace tab now that panes draw no header
-/// (panel tabs spec, "The renderer"): renaming a note's tab — in the workspace
-/// tab bar or the side region's strip — writes the note's title and clears its
-/// workspace tab's label, renaming any other tab sets its label, a rename
-/// asked for on one bar survives the bar moving to another view, the
-/// right-click menu offers the terminal's pin, a web tab's tooltip is its
-/// full address, and a tab's rename field keeps the label's width.
+/// The controls that live on a tab now that panes draw no header (panel tabs
+/// spec, "The renderer"): renaming a note's tab in the side region's strip
+/// writes the note's title and nothing else, a workspace tab bar's note tab
+/// writes the title and clears its label, renaming any other tab sets its
+/// label, a rename asked for on one bar survives the bar moving to another
+/// view, the right-click menu offers the terminal's pin, a web tab's tooltip
+/// is its full address, and a tab's rename field keeps the label's width.
 @Suite("Tab rename, pin and tooltip")
 @MainActor
 struct TabRenameTests {
@@ -153,69 +153,37 @@ struct TabRenameTests {
 
     // MARK: - Renaming a note from the side region's strip
 
-    @Test("renaming a note from the side region's strip writes its title and clears its workspace tab's label, and no other tab's")
-    func sideNoteRenameWritesTitleAndClearsItsTabsLabel() async {
+    @Test("renaming a note from the side region's strip writes its title alone; a blank or unchanged one writes nothing")
+    func sideNoteRenameWritesTitleOnly() async {
         await Fixture.withState { state in
             let worktreeID = UUID()
             let noteID = UUID()
-            // The note's workspace tab is found by its content, not by its ID.
-            let noteTab = TBDShared.Tab(id: UUID(), content: .note(noteID: noteID), label: "x")
             let other = Fixture.terminalTab(label: "agent")
+            // A note tab held in memory from an older build keeps its label:
+            // the rename sets the title and touches no tab.
+            let leftover = TBDShared.Tab(id: UUID(), content: .note(noteID: noteID), label: "x")
             state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")]]
-            state.tabs = [worktreeID: [other, noteTab]]
+            state.tabs = [worktreeID: [other, leftover]]
             let writes = Self.stubTitleUpdater(state, worktreeID: worktreeID)
+
+            for text in ["   ", "", "Note", " Note \n"] {
+                state.commitSideNoteRename(noteID: noteID, worktreeID: worktreeID, text: text)
+            }
+            await Fixture.drainMainActor()
+
+            #expect(writes.writes.isEmpty, "a blank or unchanged title writes nothing")
+            #expect(state.noteRenameTails.isEmpty, "nor starts a rename")
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Note")
 
             state.commitSideNoteRename(noteID: noteID, worktreeID: worktreeID, text: "  Plan ")
 
-            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Plan")
-            #expect(Self.label(state, tabID: noteTab.id, worktreeID: worktreeID) == nil,
-                    "the note's workspace tab shows the title")
-            #expect(Self.label(state, tabID: other.id, worktreeID: worktreeID) == "agent")
-
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Plan",
+                    "the trimmed title shows at once")
             await Fixture.drainMainActor()
-
             let expectedWrites: [NoteTitleWrite] = [NoteTitleWrite(noteID: noteID, title: "Plan")]
             #expect(writes.writes == expectedWrites)
-        }
-    }
-
-    @Test("an empty or unchanged rename from the side region's strip keeps the note's title and still clears the label")
-    func sideNoteBlankOrUnchangedRenameKeepsTitle() async {
-        await Fixture.withState { state in
-            let noteID = UUID()
-            for text in ["   ", "Note"] {
-                let seeded = Self.seedNoteTab(state, noteID: noteID, title: "Note", label: "x")
-                let writes = Self.stubTitleUpdater(state, worktreeID: seeded.worktreeID)
-
-                state.commitSideNoteRename(noteID: noteID, worktreeID: seeded.worktreeID, text: text)
-                await Fixture.drainMainActor()
-
-                #expect(Self.noteTitle(state, noteID: noteID, worktreeID: seeded.worktreeID) == "Note",
-                        "\"\(text)\" keeps the note's title")
-                #expect(Self.label(state, tabID: seeded.tab.id, worktreeID: seeded.worktreeID) == nil,
-                        "\"\(text)\" still clears the tab's label")
-                #expect(writes.writes.isEmpty, "\"\(text)\" writes no title")
-            }
-        }
-    }
-
-    @Test("renaming from the side region's strip a note with no workspace tab writes its title alone")
-    func sideNoteRenameWithoutAWorkspaceTab() async {
-        await Fixture.withState { state in
-            let worktreeID = UUID()
-            let noteID = UUID()
-            let other = Fixture.terminalTab(label: "agent")
-            state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")]]
-            state.tabs = [worktreeID: [other]]
-            let writes = Self.stubTitleUpdater(state, worktreeID: worktreeID)
-
-            state.commitSideNoteRename(noteID: noteID, worktreeID: worktreeID, text: "Plan")
-            await Fixture.drainMainActor()
-
-            let expectedWrites: [NoteTitleWrite] = [NoteTitleWrite(noteID: noteID, title: "Plan")]
-            #expect(writes.writes == expectedWrites)
-            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Plan")
-            #expect(Self.label(state, tabID: other.id, worktreeID: worktreeID) == "agent")
+            let expectedTabs: [TBDShared.Tab] = [other, leftover]
+            #expect(state.tabs[worktreeID] == expectedTabs, "no workspace tab changes")
         }
     }
 

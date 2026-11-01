@@ -44,15 +44,14 @@ enum NoteEditorFixture {
     }
 }
 
-/// × on a note decides whether to ask from the note's content file
-/// (`noteHasContent`), and the editor writes that file on a 500 ms debounce.
-/// So a close first lands every save an open editor still holds
-/// (`AppState.flushPendingNoteSave`, through the registry each
+/// × on a note's side-panel tab decides whether to ask from the note's
+/// content file (`noteHasContent`), and the editor writes that file on a
+/// 500 ms debounce. So a close first lands every save an open editor still
+/// holds (`AppState.flushPendingNoteSave`, through the registry each
 /// `NotePaneModel` joins when it loads a note); otherwise a note typed into
 /// and closed inside the window reads as empty, closes without asking, and
-/// takes the typed text with it. These cases drive the registry and the
-/// workspace tab's `closeTab`; the side tab's `closeSidePanel` is in
-/// `SidePanelNoteCloseTests`.
+/// takes the typed text with it. These cases drive the registry; the close
+/// that relies on it, `closeSidePanel`, is in `SidePanelNoteCloseTests`.
 @Suite("Note close flushes the pending save", .clockDriven)
 @MainActor
 struct NotePendingSaveCloseTests {
@@ -61,31 +60,13 @@ struct NotePendingSaveCloseTests {
 
     private static let typed = "typed inside the debounce window"
 
-    /// A worktree whose one tab is an empty note (no content file, no legacy
-    /// content), with the note's summary in `notes`.
-    private static func seedNoteTab(_ state: AppState) -> (worktreeID: UUID, noteID: UUID) {
+    /// A worktree with one empty note (no content file, no legacy content),
+    /// whose summary is in `notes`.
+    private static func seedNote(_ state: AppState) -> (worktreeID: UUID, noteID: UUID) {
         let worktreeID = UUID()
         let note = NoteSummary(worktreeID: worktreeID, title: "Notes")
         state.notes = [worktreeID: [note]]
-        state.tabs = [worktreeID: [noteTab(note.id)]]
         return (worktreeID, note.id)
-    }
-
-    private static func noteTab(_ noteID: UUID) -> TBDShared.Tab {
-        TBDShared.Tab(id: noteID, content: .note(noteID: noteID), label: nil)
-    }
-
-    /// Stubs the confirmation to answer `answer`, and the delete to succeed,
-    /// recording both.
-    private static func stubNoteSeams(_ state: AppState, confirming answer: Bool) -> NoteCloseRecorder {
-        let recorder = NoteCloseRecorder()
-        state.noteCloseConfirmer = { _, _ in recorder.confirm(answer: answer) }
-        state.noteDeleter = { @MainActor noteID in recorder.delete(noteID) }
-        return recorder
-    }
-
-    private static func tabIDs(_ state: AppState, _ worktreeID: UUID) -> [UUID] {
-        state.tabs[worktreeID]?.map(\.id) ?? []
     }
 
     // MARK: - The registry
@@ -95,7 +76,7 @@ struct NotePendingSaveCloseTests {
         await Fixture.withState { state in
             let root = Editor.useScratchNoteFiles(state)
             defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let (worktreeID, noteID) = Self.seedNote(state)
             let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
             #expect(editor.loaded, "precondition: the editor loaded the note")
             Editor.type(Self.typed, into: editor, state: state)
@@ -135,7 +116,7 @@ struct NotePendingSaveCloseTests {
         try await Fixture.withState { state in
             let root = Editor.useScratchNoteFiles(state)
             defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let (worktreeID, noteID) = Self.seedNote(state)
             let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
             let gate = PanelCallGate()
             _ = Self.holdFirstWrite(state, on: gate)
@@ -173,7 +154,7 @@ struct NotePendingSaveCloseTests {
         try await Fixture.withState { state in
             let root = Editor.useScratchNoteFiles(state)
             defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let (worktreeID, noteID) = Self.seedNote(state)
             let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
             let gate = PanelCallGate()
             let starts = Self.holdFirstWrite(state, on: gate)
@@ -237,7 +218,7 @@ struct NotePendingSaveCloseTests {
         await Fixture.withState { state in
             let root = Editor.useScratchNoteFiles(state)
             defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let (worktreeID, noteID) = Self.seedNote(state)
             let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
             let before = editor.saveFlusherRegistration
             #expect(before != nil, "precondition: loading registered the editor")
@@ -263,7 +244,7 @@ struct NotePendingSaveCloseTests {
         await Fixture.withState { state in
             let root = Editor.useScratchNoteFiles(state)
             defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
+            let (worktreeID, noteID) = Self.seedNote(state)
             var editor: NotePaneModel? = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
             weak var released = editor
             #expect(state.hasNoteSaveFlusher(noteID: noteID), "precondition: the editor registered")
@@ -276,164 +257,5 @@ struct NotePendingSaveCloseTests {
             #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == nil,
                     "a released editor's registration wrote to the note")
         }
-    }
-
-    // MARK: - × on the workspace tab
-
-    @Test("× on a note tab with an edit still pending asks, and declining keeps the tab and the note")
-    func closeTabWithPendingEditAsksAndDeclineKeepsAll() async throws {
-        try await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
-            Editor.type(Self.typed, into: editor, state: state)
-            let notes = Self.stubNoteSeams(state, confirming: false)
-
-            let started = state.closeTab(worktreeID: worktreeID, index: 0)
-            let closing = try #require(started, "a note an editor has open closes on a task")
-            await closing.value
-            await Fixture.drainMainActor()
-
-            #expect(notes.confirmations == 1, "the pending edit makes the note non-empty, so × asks")
-            let expectedTabs: [UUID] = [noteID]
-            #expect(Self.tabIDs(state, worktreeID) == expectedTabs, "declining keeps the tab")
-            #expect(notes.deleted.isEmpty, "declining deletes nothing")
-            #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == Self.typed)
-        }
-    }
-
-    @Test("× on a note tab with an edit still pending, confirmed, closes and deletes the note with the text on disk")
-    func closeTabWithPendingEditConfirmedKeepsTextOnDisk() async throws {
-        try await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
-            Editor.type(Self.typed, into: editor, state: state)
-            let notes = Self.stubNoteSeams(state, confirming: true)
-
-            let started = state.closeTab(worktreeID: worktreeID, index: 0)
-            let closing = try #require(started, "a note an editor has open closes on a task")
-            await closing.value
-            await Fixture.drainMainActor()
-
-            #expect(notes.confirmations == 1)
-            #expect(Self.tabIDs(state, worktreeID).isEmpty)
-            let expectedDeleted: [UUID] = [noteID]
-            #expect(notes.deleted == expectedDeleted)
-            #expect(Editor.onDisk(state, worktreeID: worktreeID, noteID: noteID) == Self.typed,
-                    "the typed text is in the file the delete keeps")
-        }
-    }
-
-    @Test("× on an empty note tab whose open editor holds nothing closes and deletes it without asking")
-    func closeTabOfEmptyNoteWithEditorClosesWithoutAsking() async throws {
-        try await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let editor = await Editor.open(state, noteID: noteID, worktreeID: worktreeID)
-            #expect(editor.loaded, "precondition: the editor loaded the note")
-            // Declining would keep the tab, so a prompt cannot go unnoticed.
-            let notes = Self.stubNoteSeams(state, confirming: false)
-
-            let started = state.closeTab(worktreeID: worktreeID, index: 0)
-            let closing = try #require(started, "a note an editor has open closes on a task")
-            await closing.value
-            await Fixture.drainMainActor()
-
-            #expect(notes.confirmations == 0)
-            #expect(Self.tabIDs(state, worktreeID).isEmpty)
-            let expectedDeleted: [UUID] = [noteID]
-            #expect(notes.deleted == expectedDeleted)
-        }
-    }
-
-    @Test("× on a note tab no editor has open closes it before returning")
-    func closeTabOfNoteWithoutEditorClosesAtOnce() async {
-        await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let notes = Self.stubNoteSeams(state, confirming: false)
-
-            let closing = state.closeTab(worktreeID: worktreeID, index: 0)
-
-            let closedOnATask = closing != nil
-            #expect(!closedOnATask, "nothing to flush, so no task")
-            #expect(Self.tabIDs(state, worktreeID).isEmpty, "the tab closed before closeTab returned")
-            await Fixture.drainMainActor()
-            #expect(notes.confirmations == 0)
-            let expectedDeleted: [UUID] = [noteID]
-            #expect(notes.deleted == expectedDeleted)
-        }
-    }
-
-    @Test("a note tab that moves while its save lands is the tab closed")
-    func closeTabFindsTheNoteTabAgainAfterTheFlush() async throws {
-        try await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let other = Fixture.terminalTab(label: "shell")
-            let inserted = Fixture.terminalTab(label: "inserted")
-            state.tabs[worktreeID]?.append(other)
-            _ = state.registerNoteSaveFlusher(noteID: noteID) { [weak state] in
-                state?.tabs[worktreeID]?.insert(inserted, at: 0)
-            }
-            let notes = Self.stubNoteSeams(state, confirming: false)
-
-            let started = state.closeTab(worktreeID: worktreeID, index: 0)
-            let closing = try #require(started, "a note an editor has open closes on a task")
-            await closing.value
-            await Fixture.drainMainActor()
-
-            let expectedTabs: [UUID] = [inserted.id, other.id]
-            #expect(Self.tabIDs(state, worktreeID) == expectedTabs, "the note tab, now second, closed")
-            let expectedDeleted: [UUID] = [noteID]
-            #expect(notes.deleted == expectedDeleted)
-        }
-    }
-
-    @Test("a note tab that closes while its save lands closes nothing else")
-    func closeTabOfNoteGoneAfterTheFlushClosesNothing() async throws {
-        try await Fixture.withState { state in
-            let root = Editor.useScratchNoteFiles(state)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let (worktreeID, noteID) = Self.seedNoteTab(state)
-            let other = Fixture.terminalTab(label: "shell")
-            state.tabs[worktreeID]?.append(other)
-            _ = state.registerNoteSaveFlusher(noteID: noteID) { [weak state] in
-                state?.tabs[worktreeID]?.removeAll { $0.id == noteID }
-            }
-            let notes = Self.stubNoteSeams(state, confirming: false)
-
-            let started = state.closeTab(worktreeID: worktreeID, index: 0)
-            let closing = try #require(started, "a note an editor has open closes on a task")
-            await closing.value
-            await Fixture.drainMainActor()
-
-            let expectedTabs: [UUID] = [other.id]
-            #expect(Self.tabIDs(state, worktreeID) == expectedTabs, "the tab now at the old index stays")
-            #expect(notes.confirmations == 0)
-            #expect(notes.deleted.isEmpty)
-        }
-    }
-}
-
-/// Every confirmation asked and every note deleted, in order.
-@MainActor
-final class NoteCloseRecorder {
-    private(set) var confirmations = 0
-    private(set) var deleted: [UUID] = []
-
-    func confirm(answer: Bool) -> Bool {
-        confirmations += 1
-        return answer
-    }
-
-    func delete(_ noteID: UUID) {
-        deleted.append(noteID)
     }
 }

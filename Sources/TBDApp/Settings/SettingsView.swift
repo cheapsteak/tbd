@@ -31,8 +31,9 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
+    static let autoCreateNotesLabel = "Open a Notes panel for new worktrees"
     static let autoCreateNotesHelp =
-        "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
+        "Turn this off to skip the empty Notes panel in ordinary new worktrees. " +
         "Conversations revived on a fresh branch still receive their populated provenance note."
 
     @Environment(AppState.self) var appState
@@ -187,7 +188,7 @@ struct GeneralSettingsTab: View {
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
 
-                Toggle("Create a Notes tab for new worktrees", isOn: Binding(
+                Toggle(Self.autoCreateNotesLabel, isOn: Binding(
                     get: { appState.autoCreateNotesEnabled },
                     set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
                 ))

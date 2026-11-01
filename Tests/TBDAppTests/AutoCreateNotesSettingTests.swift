@@ -6,7 +6,7 @@ import TBDShared
 @Suite("Automatic Notes setting")
 @MainActor
 struct AutoCreateNotesSettingTests {
-    @Test("defaults to creating Notes tabs")
+    @Test("defaults to opening a Notes panel")
     func defaultsEnabled() {
         let state = AppState()
 
@@ -64,11 +64,16 @@ struct AutoCreateNotesSettingTests {
         #expect(state.alertMessage != nil)
     }
 
-    @Test("help text names only fresh-branch conversation revival")
+    @Test("the toggle names a Notes panel, not a tab")
+    func labelNamesAPanel() {
+        #expect(GeneralSettingsTab.autoCreateNotesLabel == "Open a Notes panel for new worktrees")
+    }
+
+    @Test("help text names a Notes panel and only fresh-branch conversation revival")
     func helpTextNamesPreciseException() {
         #expect(
             GeneralSettingsTab.autoCreateNotesHelp ==
-                "Turn this off to skip empty Notes tabs in ordinary new worktrees. " +
+                "Turn this off to skip the empty Notes panel in ordinary new worktrees. " +
                 "Conversations revived on a fresh branch still receive their populated provenance note."
         )
     }

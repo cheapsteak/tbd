@@ -8,13 +8,14 @@ import TestSupport
 // file `noteHasContent` stats. Every daemon hop goes through an injected seam
 // (`PanelTabsFixture`), so no socket opens, and no confirmation alert runs.
 
-/// Closing a note's side-region tab (panel tabs spec, "The renderer"):
-/// `AppState.closeSidePanel` asks first when the note has content — whether or
-/// not `notes` holds its summary yet, and counting an edit an open editor
-/// still holds on its save debounce — then closes the panel and deletes the
-/// note, and deletes nothing when the user declines or the daemon refuses the
-/// close. The `close` operation itself keeps the note, so the daemon action
-/// set's close never deletes one.
+/// Closing a note's side-region tab (side panel notes spec, "App"): a note is
+/// a worktree panel, and `AppState.closeSidePanel` asks first when the note
+/// has content — whether or not `notes` holds its summary yet, and counting
+/// an edit an open editor still holds on its save debounce — then closes the
+/// panel and deletes the note, and deletes nothing when the user declines or
+/// the daemon refuses the close. The `close` operation itself keeps the note,
+/// so the daemon action set's close never deletes one. The Changes list's ×
+/// and a tab's own panel's × only close.
 @Suite("Side-region note close")
 @MainActor
 struct SidePanelNoteCloseTests {
@@ -22,7 +23,7 @@ struct SidePanelNoteCloseTests {
 
     // MARK: - Fixtures
 
-    /// A workspace tab in the copy whose side region holds one panel.
+    /// A workspace tab in the copy whose side strip holds one panel, in front.
     private struct Seeded {
         let surface: WorkspaceTabSurface
         let panelID: PanelID
@@ -30,30 +31,37 @@ struct SidePanelNoteCloseTests {
         var tabID: UUID { surface.id }
     }
 
-    /// Seeds the copy with one tab whose side region shows `content`, and,
-    /// for a note, the note's summary unless `withSummary` is false — the
-    /// note an agent opened before the notes refresh landed.
+    /// Seeds the copy with one tab whose side strip shows `content` in
+    /// front: a note or the Changes list as a worktree panel, anything else as
+    /// the tab's own panel. A note also gets its summary unless `withSummary`
+    /// is false — the note an agent opened before the notes refresh landed.
     private static func seed(
         _ state: AppState, content: PanelContent, withSummary: Bool = true
     ) -> Seeded {
         let worktreeID = UUID()
         let tabID = UUID()
-        let panel = ViewerPanel(id: UUID(), content: content)
-        let surface = WorkspaceTabSurface(
-            id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: tabID),
-            side: SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id]),
-            revision: 1)
+        let panelID = UUID()
+        var surface = WorkspaceTabSurface(
+            id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: tabID), revision: 1)
+        if let worktreeContent = WorktreePanelContent(content) {
+            surface.worktreePanels = [WorktreePanel(id: panelID, content: worktreeContent)]
+            surface.side = SideRegion(activePanelID: panelID)
+        } else {
+            let panel = ViewerPanel(id: panelID, content: content)
+            surface.side = SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id])
+        }
         state.panelSurfaces = [worktreeID: [tabID: surface]]
         if case .note(let noteID) = content, withSummary {
             state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Plan")]]
         }
-        return Seeded(surface: surface, panelID: panel.id)
+        return Seeded(surface: surface, panelID: panelID)
     }
 
-    /// The daemon's tab once the close has applied: the side region empty.
+    /// The daemon's tab once the close has applied: no panel left.
     private static func closed(_ seeded: Seeded) -> WorkspaceTabSurface {
         var reply = seeded.surface
         reply.side = .empty
+        reply.worktreePanels = []
         reply.revision += 1
         return reply
     }
@@ -92,7 +100,7 @@ struct SidePanelNoteCloseTests {
     // MARK: - Notes
 
     @Test("closing a side-region note with content asks, then closes the panel and deletes the note")
-    func noteWithContentAsksThenClosesAndDeletes() async throws {
+    func closeSidePanelStillAsksThenDeletes() async throws {
         try await Fixture.withState { state in
             let noteID = UUID()
             let seeded = Self.seed(state, content: .note(noteID: noteID))
@@ -229,6 +237,34 @@ struct SidePanelNoteCloseTests {
         }
     }
 
+    @Test("closing a side-region note with an edit still pending, confirmed, closes and deletes it with the text on disk", .fastPassBounded)
+    func pendingEditConfirmedClosesAndDeletesWithTextOnDisk() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID))
+            let root = NoteEditorFixture.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let editor = await NoteEditorFixture.open(state, noteID: noteID, worktreeID: seeded.worktreeID)
+            let typed = "typed inside the debounce window"
+            NoteEditorFixture.type(typed, into: editor, state: state)
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            let notes = Self.stubNoteSeams(state, confirming: true)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            #expect(notes.confirmations == 1)
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
+            let onDisk = NoteEditorFixture.onDisk(state, worktreeID: seeded.worktreeID, noteID: noteID)
+            #expect(onDisk == typed, "the typed text is in the file the delete keeps")
+        }
+    }
+
     @Test("closing an empty side-region note whose open editor holds nothing closes and deletes without asking", .fastPassBounded)
     func emptyNoteWithEditorClosesAndDeletesWithoutAsking() async {
         await Fixture.withState { state in
@@ -335,6 +371,27 @@ struct SidePanelNoteCloseTests {
     }
 
     // MARK: - Other panels and the operation alone
+
+    @Test("closing the Changes list only closes it")
+    func changesPanelOnlyCloses() async {
+        await Fixture.withState { state in
+            let seeded = Self.seed(state, content: .changes)
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            let notes = Self.stubNoteSeams(state, confirming: true)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .changes)
+
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            #expect(notes.confirmations == 0)
+            #expect(notes.deleted.isEmpty)
+            #expect(state.panelSurface(worktreeID: seeded.worktreeID, tabID: seeded.tabID)?.hasPanels == false,
+                    "the daemon's reply is adopted")
+        }
+    }
 
     @Test("closing a side-region file panel only closes it")
     func filePanelOnlyCloses() async {

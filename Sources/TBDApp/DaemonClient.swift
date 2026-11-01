@@ -1212,7 +1212,7 @@ actor DaemonClient {
         try await callVoidAsync(method: method, params: params)
     }
 
-    /// Set whether ordinary new worktrees start with an empty Notes tab.
+    /// Set whether ordinary new worktrees start with an empty Notes panel.
     func setAutoCreateNotes(enabled: Bool) async throws {
         try await callVoidAsync(
             method: RPCMethod.configSetAutoCreateNotes,

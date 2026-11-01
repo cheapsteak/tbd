@@ -30,8 +30,7 @@ private func makeCoordinator(
         onClaude: {},
         onClaudeProfile: onClaudeProfile,
         onChooseAccount: onChooseAccount,
-        onCodex: {},
-        onNote: {}
+        onCodex: {}
     )
 }
 
@@ -112,7 +111,6 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(menu.items.contains { $0.title == "Claude" } == false)
     #expect(menu.items.contains { $0.title.hasPrefix("Work") } == false)
     #expect(menu.items.contains { $0.title == "Codex" })
-    #expect(menu.items.contains { $0.title == "Note" })
 }
 
 @MainActor
@@ -128,7 +126,27 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(menu.items.contains { $0.title == "Claude" })
     #expect(menu.items.contains { $0.title.hasPrefix("Work") })
     #expect(menu.items.contains { $0.title == "Codex" } == false)
-    #expect(menu.items.contains { $0.title == "Note" })
+}
+
+/// A note is made only from the side strip's + menu, as a worktree panel; the
+/// workspace tab bar's + menu offers terminals alone, whatever is installed.
+@MainActor
+@Test func workspacePlusMenuHasNoNoteItem() {
+    let availabilities: [AgentExecutableAvailability] = [
+        .allAvailable,
+        AgentExecutableAvailability(claude: false, codex: false),
+    ]
+    for availability in availabilities {
+        let menu = AddTabMenu.build(
+            profiles: [makeProfile(name: "Work")],
+            availability: availability,
+            coordinator: makeCoordinator()
+        )
+        #expect(menu.items.contains { $0.title.contains("Note") } == false, "\(availability)")
+        #expect(menu.items.contains { $0.isSeparatorItem } == false,
+                "no separator is left over at the end of the menu: \(availability)")
+        #expect(menu.items.first?.title == "Shell")
+    }
 }
 
 @MainActor
@@ -190,7 +208,6 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 
     #expect(item("Claude").action == #selector(MenuCoordinator.addClaude))
     #expect(item("Codex").action == #selector(MenuCoordinator.addCodex))
-    #expect(item("Note").action == #selector(MenuCoordinator.addNote))
 }
 
 @MainActor

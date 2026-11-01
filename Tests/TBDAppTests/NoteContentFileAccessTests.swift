@@ -306,9 +306,6 @@ struct NoteContentFileAccessTests {
     func closeConfirmerReceivesTheResolvedPath() async {
         await withState { state in
             let seed = seedNote(state: state, hasLegacyContent: true)
-            state.tabs[seed.worktreeID] = [
-                Tab(id: seed.noteID, content: .note(noteID: seed.noteID), label: nil)
-            ]
 
             var advertised: String?
             state.noteCloseConfirmer = { _, path in
@@ -316,7 +313,10 @@ struct NoteContentFileAccessTests {
                 return false
             }
 
-            state.closeTab(worktreeID: seed.worktreeID, index: 0)
+            // Declined, so the close stops before any panel operation.
+            await state.closeSidePanel(
+                worktreeID: seed.worktreeID, tabID: UUID(), panelID: UUID(),
+                content: .note(noteID: seed.noteID))
 
             #expect(advertised == seed.path,
                     "the advertised path must be the one the app writes to")
