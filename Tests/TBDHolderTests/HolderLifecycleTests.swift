@@ -36,7 +36,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -71,7 +71,7 @@ struct HolderLifecycleTests {
 
         #expect(fixture.spawnerExitStatus == 0, "the bootstrap shell should have exited cleanly")
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -95,7 +95,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let first = try fixture.connect()
+        let first = try await fixture.connect()
         defer { first.close() }
         guard case .described(let description) = try first.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -103,7 +103,7 @@ struct HolderLifecycleTests {
         }
         fixture.trackChild(description.childPID)
 
-        let second = try fixture.connect()
+        let second = try await fixture.connect()
         defer { second.close() }
         #expect(try second.receive() == .rejected(version: HolderProtocolVersion.busySentinel))
 
@@ -123,7 +123,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         let (response, fds) = try client.requestWithFDs(.handOverPTY)
         defer { fds.forEach { close($0) } }
@@ -156,7 +156,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
             return
@@ -172,8 +172,14 @@ struct HolderLifecycleTests {
         }
         #expect(!processIsAlive(fixture.holderPID))
         // Nothing may report the child any more, and nothing may bring a new
-        // holder up in its place on its own.
-        #expect(throws: TestHolderError.self) { _ = try fixture.connect(receiveTimeout: 1.0) }
+        // holder up in its place on its own. `connect` throws at once here and
+        // does not wait out its deadline: with the socket gone the attempt
+        // fails with ENOENT, which it never retries, and a socket file left
+        // behind would be refused by a dead holder, which it never retries
+        // either.
+        await #expect(throws: TestHolderError.self) {
+            _ = try await fixture.connect(receiveTimeout: 1.0)
+        }
         #expect(!FileManager.default.fileExists(atPath: fixture.socketPath))
     }
 
@@ -207,7 +213,7 @@ struct HolderLifecycleTests {
         let childPID: Int32
         var master: Int32 = -1
         do {
-            let client = try fixture.connect()
+            let client = try await fixture.connect()
             defer { client.close() }
             let (response, fds) = try client.requestWithFDs(.handOverPTY)
             guard case .handedOverPTY(let description) = response, let received = fds.first else {
@@ -277,7 +283,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -327,7 +333,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -377,7 +383,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect(receiveTimeout: 15.0)
+        let client = try await fixture.connect(receiveTimeout: 15.0)
         defer { client.close() }
         let (response, fds) = try client.requestWithFDs(.handOverPTY)
         defer { fds.forEach { close($0) } }
@@ -423,7 +429,7 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
 
-        let client = try fixture.connect(receiveTimeout: 15.0)
+        let client = try await fixture.connect(receiveTimeout: 15.0)
         defer { client.close() }
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -503,7 +509,7 @@ struct HolderLifecycleTests {
         let (fixture, jobPID) = try await Self.holderWithAnAlreadyExitedChild(code: 7)
         defer { fixture.tearDown() }
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         defer { client.close() }
         let (response, fds) = try client.requestWithFDs(.handOverPTY)
         defer { fds.forEach { close($0) } }
@@ -529,7 +535,7 @@ struct HolderLifecycleTests {
         // holder's poll wakes on the connect, so one that was coming arrives
         // long before 0.3 s. The answer to the real request below gets the
         // ordinary budget back.
-        let client = try fixture.connect(receiveTimeout: 0.3)
+        let client = try await fixture.connect(receiveTimeout: 0.3)
         defer { client.close() }
         #expect(
             try client.frameArrivingUnsolicited() == nil,
@@ -550,7 +556,7 @@ struct HolderLifecycleTests {
         let (fixture, _) = try await Self.holderWithAnAlreadyExitedChild(code: 0)
         defer { fixture.tearDown() }
 
-        let client = try fixture.connect()
+        let client = try await fixture.connect()
         #expect(try client.request(.forget) == .forgotten)
         client.close()
 
