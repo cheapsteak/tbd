@@ -685,6 +685,8 @@ applies that rule in the absence pass of every complete snapshot, from `list` or
 from the `events` snapshot. A session last seen unarchived, or whose last
 payload cannot be read, follows the ordinary drift rule. TBD does not display
 `hidden_archived`. A lane TBD had archived stays revivable through `unarchive`.
+Until a provider's `describe` is on file, TBD holds sessions last seen archived
+the same way, because it cannot yet rule out a horizon.
 
 **If you ignore it.** Nothing changes. You list every session, and a listing you
 cannot finish reports `complete: false`, as section 1 says.

@@ -298,7 +298,9 @@ struct SnapshotCompletenessTests {
     /// Describes `fake` with the given extra describe JSON, then drives two
     /// complete snapshots through `apply` after one that sights an archived
     /// session. Returns the mirror row.
-    private func rowAfterAbsences(describeExtra: String) async throws -> RemoteSessionRow {
+    private func rowAfterAbsences(
+        describeExtra: String, describe: Bool = true, archived: Bool = true
+    ) async throws -> RemoteSessionRow {
         let db = try TBDDatabase(inMemory: true)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
@@ -312,9 +314,9 @@ struct SnapshotCompletenessTests {
         let m = RemoteProviderManager(
             db: db, subscriptions: StateSubscriptionManager(), runner: invoker,
             registryURL: registryURL)
-        await m.describeAllForTests()
+        if describe { await m.describeAllForTests() }
         try await m.apply(
-            snapshot: [RemoteSessionPayload(id: "a", state: .exited, agentState: .idle, archived: true)],
+            snapshot: [RemoteSessionPayload(id: "a", state: .exited, agentState: .idle, archived: archived)],
             provider: "fake")
         try await m.apply(snapshot: [], provider: "fake")
         try await m.apply(snapshot: [], provider: "fake")
@@ -329,6 +331,16 @@ struct SnapshotCompletenessTests {
 
     @Test func noDeclaredHorizonRetiresTheSameRow() async throws {
         #expect(try await rowAfterAbsences(describeExtra: "").gone)
+    }
+
+    @Test func noDescribeOnFileHoldsAnArchivedRow() async throws {
+        let row = try await rowAfterAbsences(describeExtra: "", describe: false)
+        #expect(row.gone == false)
+        #expect(row.missingCount == 0)
+    }
+
+    @Test func noDescribeOnFileStillRetiresAnUnarchivedRow() async throws {
+        #expect(try await rowAfterAbsences(describeExtra: "", describe: false, archived: false).gone)
     }
 
     @Test func aMalformedHorizonIsReadAsAbsentSoTheRowRetires() async throws {

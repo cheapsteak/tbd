@@ -288,7 +288,8 @@ public struct RemoteSessionStore: Sendable {
     /// exact behavior.
     ///
     /// `honorsArchiveHorizon` is true when the provider declares an archive
-    /// horizon (`docs/remote-provider-contract.md` § Archive horizon). Such a
+    /// horizon (`docs/remote-provider-contract.md` § Archive horizon), or
+    /// when the caller has no describe on file to rule one out. Such a
     /// provider may leave long-archived, exited sessions out of a complete
     /// snapshot, so the absence pass skips every row whose most recent
     /// sighting had `archived: true`: no `missingCount` step, no `gone`. The
