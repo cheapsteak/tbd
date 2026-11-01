@@ -5,39 +5,59 @@ import TBDShared
 
 /// The remote-transcript gates in `RemoteSessionDetailGates` and the remote
 /// composer's state. Each gate is tested on both branches, per repo policy for
-/// behavior-gating conditionals: the capability present and absent.
+/// behavior-gating conditionals: the capability present and absent, and the
+/// session attached and not.
 @Suite("Remote transcript — pure gates and composer state")
 struct RemoteTranscriptGatesTests {
-    // MARK: - showsTranscriptToggle(capabilities:)
+    // MARK: - showsTranscriptToggle(capabilities:attached:)
 
-    @Test func toggleShownWithTranscriptRead() {
+    @Test func toggleShownOnlyWhileAttachedWithTranscriptRead() {
         #expect(RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: ["attach", "transcript.read"]))
-    }
-
-    @Test func toggleHiddenWithoutTranscriptRead() {
-        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(capabilities: []))
+            capabilities: ["attach", "transcript.read"], attached: true))
+        // Not attached, the transcript leads and cannot be hidden.
+        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(
+            capabilities: ["attach", "transcript.read"], attached: false))
+        #expect(!RemoteSessionDetailGates.showsTranscriptToggle(capabilities: [], attached: true))
         // The pre-namespace spelling and the sibling transcript capabilities
         // are not `transcript.read`.
         #expect(!RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: ["transcript", "transcript.retain", "transcript.recall"]))
+            capabilities: ["transcript", "transcript.retain", "transcript.recall"], attached: true))
     }
 
-    // MARK: - showsTranscriptPane(capabilities:open:)
+    // MARK: - showsTranscriptPane(capabilities:attached:hiddenByToggle:)
 
-    @Test func paneShownWhenToggleOfferedAndOpen() {
+    @Test func paneAlwaysShownWhileNotAttached() {
         #expect(RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["transcript.read"], open: true))
+            capabilities: ["transcript.read"], attached: false, hiddenByToggle: false))
+        #expect(RemoteSessionDetailGates.showsTranscriptPane(
+            capabilities: ["transcript.read"], attached: false, hiddenByToggle: true))
     }
 
-    @Test func paneHiddenWhenClosed() {
+    @Test func paneHiddenByTheToggleOnlyWhileAttached() {
+        #expect(RemoteSessionDetailGates.showsTranscriptPane(
+            capabilities: ["transcript.read"], attached: true, hiddenByToggle: false))
         #expect(!RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["transcript.read"], open: false))
+            capabilities: ["transcript.read"], attached: true, hiddenByToggle: true))
     }
 
-    @Test func paneHiddenWithoutTranscriptReadEvenIfOpen() {
-        #expect(!RemoteSessionDetailGates.showsTranscriptPane(
-            capabilities: ["attach"], open: true))
+    @Test func paneNeverShownWithoutTranscriptRead() {
+        for attached in [false, true] {
+            for hiddenByToggle in [false, true] {
+                #expect(!RemoteSessionDetailGates.showsTranscriptPane(
+                    capabilities: ["attach"], attached: attached, hiddenByToggle: hiddenByToggle))
+            }
+        }
+    }
+
+    // MARK: - transcriptLeads(capabilities:attached:)
+
+    @Test func transcriptLeadsOnlyWhileNotAttached() {
+        #expect(RemoteSessionDetailGates.transcriptLeads(
+            capabilities: ["transcript.read"], attached: false))
+        #expect(!RemoteSessionDetailGates.transcriptLeads(
+            capabilities: ["transcript.read"], attached: true))
+        #expect(!RemoteSessionDetailGates.transcriptLeads(
+            capabilities: ["attach"], attached: false))
     }
 
     // MARK: - offersComposer

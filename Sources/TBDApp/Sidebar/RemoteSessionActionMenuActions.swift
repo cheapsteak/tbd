@@ -40,7 +40,7 @@ struct RemoteSessionActionMenuActions {
                 provider: session.provider, sessionID: session.payload.id),
             exited: session.payload.state == .exited,
             deleteEnabled: appState.remoteDeleteEnabled,
-            isAttached: appState.attachedRemoteSelections.contains(selection),
+            isAttached: appState.remoteSessionIsAttached(selection),
             liveAttachUnavailable: !appState.remoteSessionAttachesWhenSelected(selection)
         )
     }

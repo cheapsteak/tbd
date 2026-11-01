@@ -200,18 +200,22 @@ The leg needs no soak flag of its own, unlike the retained-transcripts leg besid
 
 ### Opening the transcript
 
-Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read`.
+Remote sessions get a **Transcript** toggle in the window toolbar beside Reconnect and Stop, shown only when the provider declares `transcript.read` and the session is attached. Until it attaches, the transcript is the pane's main side (see "Layout") and cannot be closed.
 
 With the flag on, background sync keeps the cache current, so the pane opens over it and the cached first paint described under "Layout" shows it at once. For a session with no cache yet, the first sync is a tail reset, so the pane fills from 12 message records rather than streaming the whole history page by page.
 
-Whether the transcript is open is one preference shared by every remote session, stored in `UserDefaults` under `remoteTranscriptOpen`. Unset reads as open, so the first remote session a user views shows its transcript. Closing it with the toggle stores `false`, and every remote session then opens without it until the toggle stores `true` again.
+The transcript opens by default, every time. While a session is not attached it is always shown. Each time the user attaches a session, the transcript opens beside the terminal. The toggle hides it for the session on screen only. Switching to another session, reattaching, or a reconnect the user asks for shows it again; a connection the app restarts on its own — after a network change, a wake from sleep, or an unexpected exit — keeps it hidden, so the terminal never narrows without a gesture behind it. Nothing is persisted.
 
 ### Layout
 
-`RemoteSessionDetailView`'s content area becomes a horizontal split:
+`RemoteSessionDetailView`'s content area is a horizontal split of two halves:
 
-- **Left** – what the pane shows today: the attached terminal, the detached prompt, or the log fallback. `RemoteAttachPager` stays mounted whether or not the split is open, because unmounting it drops every live attach connection. Both halves are on screen together, so no hidden terminal is left receiving input.
-- **Right** – `RemoteTranscriptPaneView`, built the way Session History's transcript view is: `TableTranscriptView` and `TranscriptPresentation` with a `TranscriptCardContext` whose `terminalID` is nil.
+- **The terminal side** – the attached terminal, the detached prompt, the sign-in prompt, or the log fallback. `RemoteAttachPager` stays mounted whatever the split shows, because unmounting it drops every live attach connection. Both halves are on screen together, so no hidden terminal is left receiving input.
+- **The transcript** – `RemoteTranscriptPaneView`, built the way Session History's transcript view is: `TableTranscriptView` and `TranscriptPresentation` with a `TranscriptCardContext` whose `terminalID` is nil.
+
+Which half leads depends on whether the session is attached. Attached, the terminal is the main side on the left and the transcript sits on the right. Not attached, the transcript is the main side on the left, and the terminal side, holding the Attach prompt or the log, sits on the right. Attaching and detaching swap them. A provider without `transcript.read` shows the terminal side alone.
+
+The split places its halves by role rather than by order. Both keep a fixed position in the view tree and only where each is drawn changes, so a swap never remounts `RemoteAttachPager`. The divider sets the width of whichever half is on the right. `RemoteAttachPager` itself is laid out where the attached terminal is drawn — the left half, or the whole pane without the transcript — behind the other halves. A swap alone therefore never resizes a kept-alive terminal of another session; it takes a new width only when the right half's width changes or the session on screen differs in whether its transcript shows.
 
 The pane tails the cache file with the existing `TranscriptSource`, keyed in `sessionTranscripts` as `remote:<provider>/<sessionID>`. When `generation` changes it drops its items, reads the file from the start, and scrolls to the bottom. When `head` changes it also re-reads the whole file, which stays small, but first records the top visible row and its offset, and restores both afterwards so the rows on screen do not move. The anchor is the record `uuid` behind that row; when no visible row has one, the pane keeps its old distance from the bottom.
 
@@ -282,7 +286,7 @@ Each gate is tested on both branches.
 - **Namespace cutover** – read, retain, import, recall, and `delete --retain` require the namespaced capabilities and invoke the namespaced verbs; a provider declaring the bare `transcript` is refused by `remote.transcriptSync` and offered no transcript pane, and one declaring only `retain` is offered neither retain nor `--retain`.
 - **OrphanGC leg** – keeps a directory whose session has an undismissed `remote_session` row or an unarchived `worktree` row, keeps one written within `gcGraceSeconds`, reclaims one outside the window whose only rows are dismissed or archived, reclaims one with no rows at all, and does nothing with `gcEnabled` off; a successful `remote.delete` and `remote.dismiss` remove only their own session's directory, and a failed delete removes nothing.
 - **Sync driver**, on an injected clock – the 3-second cadence; a sync that is not caught up is followed at once, after its page is published, until one catches up and the cadence resumes; a failed sync waits the interval even mid-load; hiding the pane mid-load starts no further sync while the one in flight still publishes; a sync finishing after the driver is retired, or after a switch to another session, publishes nothing; a pane mounted over an existing cache has the file's path and `state.json`'s generation before any sync completes, and no cache file leaves it in the full loading state.
-- **App gates** – toolbar toggle visibility against the capability; the open preference unset, closed, and reopened, on an isolated `UserDefaults(suiteName:)`; composer state hidden, running, exited, and blocked; the Settings toggle writes through `config.setRemoteTranscriptLiveSyncEnabled` and reads back from `daemon.capabilities`, and a failed write leaves the capabilities unchanged.
+- **App gates** – toolbar toggle visibility against the capability and the attach state; the transcript shown whenever the session is not attached; hidden by the toggle while attached, shown again after switching sessions, reattaching or a reconnect the user asks for, and still hidden after a restart the app makes on its own; the halves' order when attached, when not attached and without the capability, with `RemoteAttachPager` keeping its identity across a swap; composer state hidden, running, exited, and blocked; the Settings toggle writes through `config.setRemoteTranscriptLiveSyncEnabled` and reads back from `daemon.capabilities`, and a failed write leaves the capabilities unchanged.
 - **Earlier history in the pane** – scrolling near the top triggers exactly one load; the anchor row stays put across a `head` bump; a `generation` bump scrolls to the bottom; the header overlay's four states, and the overlay hidden while idle away from the top.
 
 ## Rollout
@@ -299,7 +303,9 @@ Each gate is tested on both branches.
 - **Deduplicating records by `uuid` instead of a `reset` flag.** Handles a replay of the same conversation but not a switch to a new one, and some record types carry no `uuid`.
 - **Holding transcripts only in app memory.** No files and no reclaimer, but every launch and every eviction refetches the whole conversation, which is the slowest path on a transport that pages.
 - **Pushing transcript records on `events`.** Lowest latency, but it is a per-session stream shape the remote design has already declined; cursor polling comes first, and the evidence that would reopen this is a sync cadence users find too slow.
-- **A per-session open state for the transcript.** Hiding the transcript is a standing preference about how a user views remote sessions, not a fact about one session, and a per-session state would make every newly viewed session ignore it.
+- **A remembered open state shared by every session.** One close hides the transcript in every session from then on, including sessions the user opens to read what happened. A session that is not attached has nothing else to show, so the transcript opens every time and hiding it lasts only while the user stays on that session.
+- **The transcript always on the left.** Nothing moves on attach, but the user would type into the narrower half.
+- **Only the transcript until a session attaches.** Simpler, but the Attach prompt and the log fallback would need a new home.
 - **A new contract major for the rename.** Makes an un-updated provider unusable instead of degrading two of its verbs; see the namespace section.
 - **A `before` cursor that the provider refuses once the session moves to a new conversation.** Simpler for the provider, but a `/clear` landing between a sync and a scroll-up is a benign race, and this would turn it into an error.
 - **Two flags, one for tail-first loading and one for background sync that requires it.** Background sync without tail mode fetches every session's whole history in the background, so the halves are not independently useful and a second flag only adds a combination nobody should run.

@@ -483,6 +483,11 @@ final class AppState {
             if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
                 sidebarSelectionGeneration &+= 1
             }
+            // Leaving a session ends its transcript hide; reselecting the
+            // same session keeps it (`remoteTranscriptHiddenSelection`).
+            if let old = oldValue, old != selectedRemoteSession {
+                endRemoteTranscriptHide(for: old)
+            }
         }
     }
 
@@ -828,14 +833,33 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
-    /// Whether a remote session's detail pane shows its transcript beside the
-    /// terminal. One standing preference for every remote session, not a
-    /// per-session fact, so a newly viewed session follows it. Unset reads as
-    /// open, so the first remote session a user views shows its transcript;
-    /// the toolbar toggle stores an explicit `true`/`false`.
-    var remoteTranscriptOpen: Bool = true {
-        didSet { userDefaults.set(remoteTranscriptOpen, forKey: Self.remoteTranscriptOpenKey) }
-    }
+    /// The remote session whose transcript the toolbar toggle has hidden, or
+    /// nil when no transcript is hidden. In memory only and never persisted:
+    /// the transcript opens by default, every time.
+    ///
+    /// A hide ends when a person acts: it lasts until the user leaves the
+    /// session, reattaches, or asks for a reconnect. A connection the app
+    /// restarts on its own keeps it, so the terminal never narrows without a
+    /// gesture behind it.
+    ///
+    /// - **Leaving** – `selectedRemoteSession` moves to any other session, or
+    ///   to none. Reselecting the same session keeps the hide.
+    /// - **Reattaching** – the Attach or Reattach button
+    ///   (`reattachRemoteSession`) or the context menu's Attach
+    ///   (`selectRemoteSession(provider:sessionID:reattach:)`).
+    /// - **A reconnect the user asks for** – the toolbar's or the context
+    ///   menu's Reconnect, or the CLI's `remote.reconnect`
+    ///   (`reconnectRemoteSession`).
+    ///
+    /// Everything else keeps it: an exit, an unmount, and the restart after a
+    /// network change or a wake (`restartRemoteAttachChildren(startedBefore:)`).
+    /// While the session is not attached its transcript shows regardless of
+    /// the hide, because the pane applies a hide only while attached.
+    ///
+    /// Set only by `toggleRemoteTranscript`. Cleared only by
+    /// `endRemoteTranscriptHide(for:)`, which writes only when the value
+    /// changes.
+    var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -1503,10 +1527,13 @@ final class AppState {
     /// Explicit Attach/Reattach button action. Records connection intent and
     /// clears both clean-detach and pending-reconnect state, bypassing the
     /// backoff window. Provider eligibility still gates the resulting mount.
+    /// A deliberate gesture, so it also ends a transcript hide on `selection`
+    /// (`remoteTranscriptHiddenSelection`).
     func reattachRemoteSession(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
         touchAttachedRemoteSession(selection)
+        endRemoteTranscriptHide(for: selection)
     }
 
     /// The restart generation `selection`'s attach terminal is currently
@@ -1637,12 +1664,20 @@ final class AppState {
     /// unregistered or `.needsAuth`). No pane would mount for it, so
     /// clearing its detach and backoff state would discard real bookkeeping
     /// for zero effect.
+    ///
+    /// - Parameter keepsTranscriptHide: whether a transcript hide on
+    ///   `selection` survives the reconnect (`remoteTranscriptHiddenSelection`).
+    ///   `false`, the default, is a reconnect the user asks for — the
+    ///   toolbar's or the context menu's Reconnect, or the CLI's
+    ///   `remote.reconnect` — and ends the hide when the reconnect goes ahead.
+    ///   `true` is a restart the app makes on its own, which keeps it
+    ///   (`restartRemoteAttachChildren(startedBefore:)`).
     @discardableResult
-    func reconnectRemoteSession(_ selection: RemoteSessionSelection) -> Bool {
+    func reconnectRemoteSession(_ selection: RemoteSessionSelection, keepsTranscriptHide: Bool = false) -> Bool {
         guard attachEligibleRemoteSelections.contains(selection) else { return false }
         let wasDetached = explicitlyDetachedRemoteSessions[selection] != nil
             || pendingReconnectRemoteSessions[selection] != nil
-        guard wasDetached || attachedRemoteSelections.contains(selection) else { return false }
+        guard wasDetached || remoteSessionIsAttached(selection) else { return false }
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
         // `startedAt: nil` — the replacement child reports its own spawn time
@@ -1650,13 +1685,16 @@ final class AppState {
         remoteAttachGenerations[selection] = RemoteAttachGeneration(
             generation: remoteAttachGeneration(for: selection) + 1, startedAt: nil)
         touchAttachedRemoteSession(selection)
+        if !keepsTranscriptHide {
+            endRemoteTranscriptHide(for: selection)
+        }
         return true
     }
 
     /// Restarts every attached selection whose child has a recorded spawn time
     /// before `date` — the network-change path's step 1 — and returns how many.
     ///
-    /// Each restart is a plain `reconnectRemoteSession`, so a live child's
+    /// Each restart is a `reconnectRemoteSession`, so a live child's
     /// leftover pending-reconnect entry is dropped, exactly as for the manual
     /// Reconnect: that entry predates the child that is running now, and
     /// carrying it would re-arm the health gate
@@ -1666,6 +1704,11 @@ final class AppState {
     /// a respawn loop is re-established by the first failure after the
     /// restart; the restart cadence itself is bounded by the watcher's
     /// debounce.
+    ///
+    /// Unlike the manual Reconnect, each restart keeps a transcript hide
+    /// (`keepsTranscriptHide: true`): nobody asked for it, so it must not
+    /// bring the transcript back and narrow the terminal
+    /// (`remoteTranscriptHiddenSelection`).
     ///
     /// `recentlyAttachedRemoteSessions` is restored to its prior order
     /// afterwards: every restart ends in `touchAttachedRemoteSession`, which
@@ -1685,7 +1728,7 @@ final class AppState {
         var restarted = 0
         for selection in attachedRemoteSelections {
             guard let startedAt = remoteAttachStartedAt(for: selection), startedAt < date else { continue }
-            if reconnectRemoteSession(selection) { restarted += 1 }
+            if reconnectRemoteSession(selection, keepsTranscriptHide: true) { restarted += 1 }
         }
         // Unconditional, and load-bearing beyond the order restore: this is
         // the spec's third effect, "re-evaluate now"
@@ -2688,8 +2731,6 @@ final class AppState {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
-    /// Named in the remote-transcript spec; left unprefixed to match it.
-    static let remoteTranscriptOpenKey = "remoteTranscriptOpen"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     /// Emits a debounced event when the network path changes or the machine
@@ -2726,7 +2767,6 @@ final class AppState {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
-        remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
