@@ -4,6 +4,14 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Notes")
 
+/// One note's latest rename still persisting (`AppState.noteRenameTails`):
+/// its task, which the next rename of that note awaits first, and a token
+/// that tells the task whether it is still the latest when it ends.
+struct NoteRenameTail {
+    let token: UUID
+    let task: Task<Void, Never>
+}
+
 /// Outcome of reading a note's content file. Distinguishes a file that is
 /// absent (loads as empty) from one that is present but unreadable (must not
 /// load at all) — `try? String(contentsOfFile:)` alone collapses the two.
@@ -59,26 +67,49 @@ extension AppState {
     /// task. A failure puts the previous title back — unless a later rename
     /// has replaced this one meanwhile, which keeps its own — and is handed
     /// to `handleConnectionError`.
+    ///
+    /// One note's renames persist one at a time, in the order they were
+    /// made: each waits for the one before it (`noteRenameTails`). Sent side
+    /// by side they could commit out of order, leaving the daemon on an older
+    /// title than the app shows until the next notes refresh brought it back.
     func renameNote(noteID: UUID, worktreeID: UUID, title: String) {
         let previousTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
         patchNoteSummary(noteID: noteID, worktreeID: worktreeID) { $0.title = title }
-        Task {
-            do {
-                let updated = try await noteTitleUpdater(noteID, title)
-                // As `updateNote`: patch the fields the call changed.
-                patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
-                    $0.title = updated.title
-                    $0.updatedAt = updated.updatedAt
-                }
-            } catch {
-                logger.error("Failed to rename note: \(error, privacy: .public)")
-                if let previousTitle {
-                    patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
-                        $0.title = previousTitle
-                    }
-                }
-                handleConnectionError(error)
+        let before = noteRenameTails[noteID]?.task
+        let token = UUID()
+        let task = Task { @MainActor [weak self] in
+            await before?.value
+            await self?.persistNoteRename(
+                noteID: noteID, worktreeID: worktreeID, title: title, previousTitle: previousTitle)
+            // The chain has drained unless a later rename queued behind this one.
+            if self?.noteRenameTails[noteID]?.token == token {
+                self?.noteRenameTails.removeValue(forKey: noteID)
             }
+        }
+        noteRenameTails[noteID] = NoteRenameTail(token: token, task: task)
+    }
+
+    /// One rename's persist: the title goes to the daemon, and the summary
+    /// takes the daemon's answer, or `previousTitle` back on a failure, while
+    /// the note still shows this rename's title.
+    private func persistNoteRename(
+        noteID: UUID, worktreeID: UUID, title: String, previousTitle: String?
+    ) async {
+        do {
+            let updated = try await noteTitleUpdater(noteID, title)
+            // As `updateNote`: patch the fields the call changed.
+            patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
+                $0.title = updated.title
+                $0.updatedAt = updated.updatedAt
+            }
+        } catch {
+            logger.error("Failed to rename note: \(error, privacy: .public)")
+            if let previousTitle {
+                patchNoteSummary(noteID: noteID, worktreeID: worktreeID, whileTitled: title) {
+                    $0.title = previousTitle
+                }
+            }
+            handleConnectionError(error)
         }
     }
 

@@ -254,6 +254,11 @@ final class AppState {
     /// `NoteStore`); a pane that needs content reads it off disk with
     /// `noteContent(noteID:worktreeID:)`.
     var notes: [UUID: [NoteSummary]] = [:]
+    /// Each note's latest rename still persisting (`renameNote`), which the
+    /// next rename of that note waits for, so the daemon commits a note's
+    /// titles in the order they were typed. An entry goes once its rename has
+    /// persisted and no later one is queued behind it.
+    @ObservationIgnored var noteRenameTails: [UUID: NoteRenameTail] = [:]
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the

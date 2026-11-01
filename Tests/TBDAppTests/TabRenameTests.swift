@@ -187,6 +187,78 @@ struct TabRenameTests {
         }
     }
 
+    @Test("two renames of one note reach the daemon in order, though the first finishes after the second was asked for")
+    func renamesOfOneNotePersistInOrder() async throws {
+        try await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seedNoteTab(state, noteID: noteID, title: "Note", label: nil)
+            let worktreeID = seeded.worktreeID
+            let log = PanelEventLog()
+            let gate = PanelCallGate()
+            state.noteTitleUpdater = { @MainActor noteID, title in
+                log.record("call \(title)")
+                // The first rename's write is still in flight on the daemon
+                // until the test releases it.
+                if title == "First" { await gate.wait() }
+                log.record("commit \(title)")
+                return Note(id: noteID, worktreeID: worktreeID, title: title)
+            }
+
+            state.renameNote(noteID: noteID, worktreeID: worktreeID, title: "First")
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the first rename is in flight")
+            state.renameNote(noteID: noteID, worktreeID: worktreeID, title: "Second")
+            await Fixture.drainMainActor()
+
+            let whileFirstInFlight: [String] = ["call First"]
+            #expect(log.events == whileFirstInFlight, "the second rename waits for the first")
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Second",
+                    "the app shows the latest title at once")
+
+            gate.release()
+            await Fixture.drainMainActor()
+
+            let expectedEvents: [String] = ["call First", "commit First", "call Second", "commit Second"]
+            #expect(log.events == expectedEvents)
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: worktreeID) == "Second")
+            #expect(state.noteRenameTails.isEmpty, "the chain drained")
+        }
+    }
+
+    @Test("renames of two notes do not wait for each other")
+    func renamesOfTwoNotesDoNotWait() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let heldID = UUID()
+            let freeID = UUID()
+            state.notes = [worktreeID: [
+                NoteSummary(id: heldID, worktreeID: worktreeID, title: "Held"),
+                NoteSummary(id: freeID, worktreeID: worktreeID, title: "Free"),
+            ]]
+            let log = PanelEventLog()
+            let gate = PanelCallGate()
+            state.noteTitleUpdater = { @MainActor noteID, title in
+                log.record("call \(title)")
+                if noteID == heldID { await gate.wait() }
+                log.record("commit \(title)")
+                return Note(id: noteID, worktreeID: worktreeID, title: title)
+            }
+
+            state.renameNote(noteID: heldID, worktreeID: worktreeID, title: "Held renamed")
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the first note's rename is in flight")
+            state.renameNote(noteID: freeID, worktreeID: worktreeID, title: "Free renamed")
+            await Fixture.drainMainActor()
+
+            let whileHeld: [String] = ["call Held renamed", "call Free renamed", "commit Free renamed"]
+            #expect(log.events == whileHeld, "the other note's rename went out beside the held one")
+
+            gate.release()
+            await Fixture.drainMainActor()
+            #expect(state.noteRenameTails.isEmpty)
+        }
+    }
+
     // MARK: - A rename across a change of view
 
     @Test("a pending rename opens the matching tab's field once, and no other tab's")
