@@ -118,6 +118,17 @@ revision guard needs nothing new.
   Afterwards a note shows only in its worktree panel, which `note.delete`
   removes, so no panel is left showing a deleted note.
 
+  The migration narrows no terminal. Nearly every worktree has its starter
+  Notes note, so a worktree panel would otherwise open the side region of
+  every tab the moment the app updates, with nothing the user did behind it.
+  So a tab whose side region had no panels comes out collapsed, with the
+  worktree's first panel in front, one ◫ away. A tab that had panels keeps
+  its collapse state and the panel in front, and the worktree panels join its
+  strip; the one exception is a tab whose own note panel was in front, which
+  brings the note's worktree panel forward, as above. New worktrees differ on
+  purpose: creation opens the starter note visibly, which is what the
+  "Open a Notes panel for new worktrees" setting asks for.
+
   The JSON edit of `tabOrder` takes the Swift escape hatch in
   `SQLMigrationLoader.inlineTimestampMigrations`, unless the `.sql` allowlist
   can express it.
@@ -189,7 +200,9 @@ tabs, so they are reached through the side panel's + menu until one does.
     is on, and opens none when it is off.
   - The migration moves a note out of `tabOrder` into the worktree's panels,
     replaces a tab's own note panel with the worktree panel (in front when the
-    old one was), and leaves a worktree with no notes untouched.
+    old one was), collapses a tab whose side region had no panels, leaves a
+    tab that had panels with its collapse state and front, and leaves a
+    worktree with no notes untouched.
 - **CLI:** parsing for `--changes` and `tbd note list`.
 - **App:**
   - No note becomes a workspace tab.
