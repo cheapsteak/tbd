@@ -20,8 +20,10 @@ import SwiftUI
 ///   `sceneBridgingOptions = []`, so none of them claims the window's toolbar
 ///   or title, which belong to the toolbar controller. A hosted tree starts
 ///   from a fresh environment, so each gets `AppState`, the appearance
-///   settings and the transcript overlay coordinator again. The controllers'
-///   `sizingOptions` are `[]`: the split items size the panes.
+///   settings and the transcript overlay coordinator again, and
+///   `appState.userDefaults` as its `@AppStorage` store, the one the window's
+///   own tree uses. The controllers' `sizingOptions` are `[]`: the split
+///   items size the panes.
 ///
 /// `updateNSViewController` refreshes only the Stop confirmation's closure.
 /// The panes and the toolbar follow `AppState` themselves, so no AppKit
@@ -94,12 +96,15 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         coordinator.toolbarController = nil
     }
 
-    /// `root` with the environment every hosted tree needs.
+    /// `root` with the environment every hosted tree needs. The `@AppStorage`
+    /// store is `appState.userDefaults`: `.standard` in the app, and a test's
+    /// suite in a test, which a hosted tree would otherwise not inherit.
     private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
         root
             .environment(appState)
             .environmentObject(appearance)
             .environmentObject(overlayCoordinator)
+            .defaultAppStorage(appState.userDefaults)
     }
 
     private func hostingController<Root: View>(_ root: Root) -> NSViewController {

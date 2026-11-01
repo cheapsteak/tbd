@@ -87,12 +87,61 @@ struct MainWindowChromeMountTests {
         #expect(mount.toolbarController == nil)
     }
 
+    // MARK: - Hosted panes' storage
+
+    /// The hosted panes read `@AppStorage` from `appState.userDefaults`, as
+    /// the window's own tree does, not from `.standard`: a hosted tree starts
+    /// from a fresh environment. Observed through the sidebar, whose
+    /// `@AppStorage(appKitSidebarKey)` picks the native outline or the
+    /// `List`. The suite is flipped both ways, so the test discriminates
+    /// whatever `.standard` holds for that key on the machine running it.
+    @Test func hostedPanesReadTheStatesStore() async throws {
+        let mount = ChromeMount(chrome: .appKit, label: "hostedStore")
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        let sidebarPane = split.sidebarItem.viewController.view
+
+        mount.suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
+        let native = try await waitForChrome("the hosted sidebar to mount the native outline from the suite") {
+            !ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
+        }
+        #expect(native)
+
+        mount.suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
+        let list = try await waitForChrome("the hosted sidebar to mount the List from the suite") {
+            ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
+                && !OffscreenHost<AnyView>.descendants(NSTableView.self, of: sidebarPane).isEmpty
+        }
+        #expect(list)
+    }
+
     // MARK: - The toolbar in the hosted window
+
+    /// Positive control for `toolbarSurvivesAnAppStateChange`: in this
+    /// harness, a root hosting view given `.all` does bridge the scene, so
+    /// SwiftUI puts a toolbar on the window for a tree that declares one.
+    /// The root hosting view is a subview of the host's ground, not the
+    /// window's content view; without this, the survival test could pass
+    /// only because SwiftUI never reached the window's toolbar.
+    @Test func swiftUIChromeBridgesItsToolbarOntoTheWindow() async throws {
+        let mount = ChromeMount(chrome: .swiftUI, label: "bridges", sceneBridgingOptions: .all)
+        defer { mount.tearDown() }
+
+        let bridged = try await waitForChrome("SwiftUI to put the scene's toolbar on the window") {
+            mount.host.window.toolbar != nil
+        }
+        try #require(bridged)
+        let swiftUIOwned = !(mount.host.window.toolbar?.delegate is MainToolbarController)
+        #expect(swiftUIOwned)
+    }
 
     /// Review focus 1: a SwiftUI update of the window's hierarchy must leave
     /// the AppKit toolbar on the window, or the next apply must put it back.
     /// The root hosting view bridges the scene, as the app window's root does,
-    /// so SwiftUI is free to claim the window's toolbar.
+    /// so SwiftUI is free to claim the window's toolbar; that the bridging is
+    /// live in this harness is `swiftUIChromeBridgesItsToolbarOntoTheWindow`'s
+    /// job, and this test proves nothing without it passing.
     @Test func toolbarSurvivesAnAppStateChange() async throws {
         let mount = ChromeMount(chrome: .appKit, label: "survives", sceneBridgingOptions: .all)
         defer { mount.tearDown() }
@@ -426,6 +475,13 @@ private final class ChromeMount {
         guard let tabView = OffscreenHost<AnyView>.descendants(NSTabView.self, of: pane).first else { return false }
         let frame = tabView.convert(tabView.bounds, to: nil)
         return frame.height > 0 && frame.maxY <= host.window.contentLayoutRect.maxY + 0.5
+    }
+
+    /// The native sidebar's root views under `pane`.
+    static func nativeSidebarRoots(in pane: NSView) -> [NSView] {
+        OffscreenHost<AnyView>.descendants(NSView.self, of: pane).filter {
+            $0.identifier == NativeSidebarView.rootViewIdentifier
+        }
     }
 
     var trackingSeparator: NSTrackingSeparatorToolbarItem? {
