@@ -82,6 +82,12 @@ worktree panels first, then the tab's own panels.
 - **`close` on a worktree panel** removes it from the worktree, so from every
   workspace tab. Each tab that had it in front brings its most recent remaining
   panel forward. Closing alone never deletes a note (see "Notes").
+- **`close` on a tab's own panel** works as before, with one addition. When it
+  closes the panel in front and leaves the tab with no panels of its own while
+  worktree panels remain, the first worktree panel comes forward and the
+  region collapses. Nearly every worktree has a note, so without this the
+  transcript button and a file's × would leave the region open on the note
+  rather than hide it.
 - **`select`** is per tab, as before.
 
 A change to the worktree's panel list rewrites every workspace tab surface of
@@ -176,7 +182,10 @@ revision guard needs nothing new.
   - open but not in front, or the region collapsed: select it;
   - in front and visible: close it.
 
-  It becomes a menu command, so it works without a toolbar button.
+  It becomes a menu command, so it works without a toolbar button. A tab the
+  daemon could not import, such as one with a terminal split off, still draws
+  through the legacy split layout, which has no side region: there ⌘⇧E beeps,
+  and the worktree's notes and Changes are reached from any other tab.
 
 ## CLI and agent guidance
 
@@ -201,6 +210,8 @@ tabs, so they are reached through the side panel's + menu until one does.
 
 - **Shared:**
   - The reducer opens, selects and closes worktree panels, and selects per tab.
+  - Closing the own panel in front collapses the region when it leaves only
+    worktree panels, and changes no collapse otherwise.
   - A close moves each affected tab's front to its most recent remaining panel.
   - `history` and `navigate` on a worktree panel are refused.
   - The validator enforces the kinds rule and both at-most-one rules.
@@ -235,6 +246,10 @@ tabs, so they are reached through the side panel's + menu until one does.
 
 ## Risks
 
+- **Legacy-drawn tabs have no side region.** A tab with a terminal split off
+  cannot be imported and draws through the legacy split layout, so with the
+  Changes column gone it reaches notes and Changes only through another tab of
+  its worktree.
 - **Surfaces whose primary was a note lose their side panels** in the
   migration. Those panels were opened beside a note tab, and their files and
   pages can be reopened.
