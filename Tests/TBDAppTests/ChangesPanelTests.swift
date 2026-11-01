@@ -114,7 +114,7 @@ struct ChangesPanelTests {
 
     // MARK: - ⌘⇧E's target
 
-    @Test("⌘⇧E with no worktree, several, or a tab with no surface yet sends nothing")
+    @Test("⌘⇧E with no worktree selected, or several, sends nothing")
     func toggleChangesPanelWithoutTargetDoesNothing() async {
         await Fixture.withState { state in
             let envelopes = Fixture.collectEnvelopes(
@@ -126,16 +126,9 @@ struct ChangesPanelTests {
             await Fixture.drainMainActor()
             #expect(envelopes.envelopes.isEmpty)
 
-            // A selected worktree whose active tab the copy holds no surface for.
+            // Two worktrees selected, each with a surface: no single target.
             let tab = Fixture.terminalTab()
             let worktreeID = Self.selectWorktree(state, tabs: [tab])
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == nil)
-            state.toggleChangesPanel()
-            await Fixture.drainMainActor()
-            #expect(envelopes.envelopes.isEmpty)
-            #expect(syncs.sent.isEmpty, "nothing flushes a tab sync for a toggle that sends nothing")
-
-            // Two worktrees selected, each with a surface: no single target.
             let otherTab = Fixture.terminalTab()
             let otherID = Self.selectWorktree(state, tabs: [otherTab])
             state.panelSurfaces = [
@@ -148,6 +141,51 @@ struct ChangesPanelTests {
             state.toggleChangesPanel()
             await Fixture.drainMainActor()
             #expect(envelopes.envelopes.isEmpty)
+            #expect(syncs.sent.isEmpty, "nothing flushes a tab sync for a toggle that sends nothing")
+        }
+    }
+
+    @Test("⌘⇧E on a daemon-path tab with no surface yet opens Changes, as ◫ does")
+    func toggleChangesPanelWithoutSurfaceOpensChanges() async throws {
+        try await Fixture.withState { state in
+            let tab = Fixture.terminalTab()
+            let worktreeID = Self.selectWorktree(state, tabs: [tab])
+            let renderPath = state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id)
+            try #require(renderPath == .daemon(nil), "precondition: the tab is on the daemon path with no surface")
+            let envelopes = Fixture.collectEnvelopes(
+                state, replying: Self.surface(
+                    tabID: tab.id, worktreeID: worktreeID, worktreePanels: [], active: nil))
+
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+
+            let opening = try Fixture.single(envelopes.envelopes)
+            let expectedOpen: PanelOperation = .open(content: .changes, newPanel: false)
+            #expect(opening.operation == expectedOpen)
+            #expect(opening.worktreeID == worktreeID)
+            #expect(opening.tabID == tab.id)
+            #expect(opening.baseRevision == nil, "the copy held no surface, so no revision")
+        }
+    }
+
+    @Test("⌘⇧E on a tab that renders legacy sends nothing and beeps")
+    func toggleChangesPanelOnLegacyTabBeeps() async throws {
+        try await Fixture.withState { state in
+            // The fixture's `panel.apply` and `panel.syncTabs` record an issue
+            // if either is reached.
+            let beeps = PanelEventLog()
+            state.refusalBeep = { @MainActor in beeps.record("beep") }
+            let tab = Fixture.terminalTab()
+            let worktreeID = Self.selectWorktree(state, tabs: [tab])
+            state.panelSyncSkippedTabIDs = [tab.id]
+            let renderPath = state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id)
+            try #require(renderPath == .legacy, "precondition: the last sync skipped the tab")
+
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+
+            let expectedBeeps: [String] = ["beep"]
+            #expect(beeps.events == expectedBeeps)
         }
     }
 

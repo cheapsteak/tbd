@@ -434,15 +434,23 @@ extension AppState {
     /// resolved active tab — by `PaneActions.changesToggleDecision`, so it
     /// opens Changes, brings it forward, or closes it.
     ///
+    /// A tab on the daemon path with no surface in the copy yet opens
+    /// Changes, as the workspace tab bar's ◫ does there;
+    /// `applyPanelOperation` sends any pending tab sync first, so the daemon
+    /// knows the tab. A tab that renders legacy (`workspaceRenderPath`) has
+    /// no side region, so ⌘⇧E sends nothing there and beeps
+    /// (`refusalBeep`).
+    ///
     /// Does nothing without that tab: no selection, several worktrees, a
-    /// remote one, or a worktree with no tabs. Nor without the tab's surface
-    /// in the copy, which the decision reads: a tab the daemon has not
-    /// imported yet, or skipped and draws legacy, has none.
+    /// remote one, or a worktree with no tabs.
     func toggleChangesPanel() {
         guard selectedWorktreeIDs.count == 1,
               let worktree = selectedLocalWorktree,
-              let tab = resolvedActiveTab(worktreeID: worktree.id),
-              let surface = panelSurface(worktreeID: worktree.id, tabID: tab.id) else { return }
+              let tab = resolvedActiveTab(worktreeID: worktree.id) else { return }
+        guard case .daemon(let surface) = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id) else {
+            refusalBeep()
+            return
+        }
         let decision = PaneActions.changesToggleDecision(surface: surface)
         sendPanelOperation(worktreeID: worktree.id, tabID: tab.id, decision.operation(opening: .changes))
     }

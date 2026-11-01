@@ -755,6 +755,11 @@ final class AppState {
     /// once something has touched `NSApplication.shared`, never active).
     @ObservationIgnored var isAppActive: @MainActor () -> Bool = { NSApp?.isActive ?? false }
 
+    /// The system alert sound a refused command plays, such as ⌘⇧E on a tab
+    /// that renders legacy (`toggleChangesPanel`). Injectable so a test can
+    /// count beeps without playing any.
+    @ObservationIgnored var refusalBeep: @MainActor () -> Void = { NSSound.beep() }
+
     /// Worktree IDs the user is actually looking at: `visibleWorktreeIDs`
     /// while TBD is active, and none while it is in the background. A selected
     /// or pinned worktree is not being watched while the user is in another

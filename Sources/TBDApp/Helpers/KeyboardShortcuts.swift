@@ -94,9 +94,9 @@ struct TBDCommands: Commands {
             .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
-        // Ungated, like the prompt commands: it does nothing without a selected
-        // local worktree whose active tab has a surface
-        // (`AppState.toggleChangesPanel`).
+        // Ungated, like the prompt commands: it does nothing without a single
+        // selected local worktree with an active tab, and beeps on a tab that
+        // renders legacy (`AppState.toggleChangesPanel`).
         CommandGroup(after: .sidebar) {
             Button("Toggle Changes") {
                 Task { @MainActor in appState.toggleChangesPanel() }
