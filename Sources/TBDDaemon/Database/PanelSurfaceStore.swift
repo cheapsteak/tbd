@@ -420,8 +420,18 @@ public struct PanelSurfaceStore: Sendable {
     static func loadSurface(
         _ record: WorkspaceTabSurfaceRecord, db: GRDB.Database
     ) throws -> WorkspaceTabSurface? {
-        let historiesByTab = try Self.histories(tabKeys: [record.id], db: db)
         let worktreePanels = try Self.storedWorktreePanels(worktreeKey: record.worktreeID, db: db)
+        return try Self.loadSurface(record, worktreePanels: worktreePanels, db: db)
+    }
+
+    /// One row's surface with its own histories and `worktreePanels` joined
+    /// in, or nil when the row cannot be read. `worktreePanels` must be the
+    /// stored list of the worktree the row names, for a caller that has
+    /// already read it.
+    static func loadSurface(
+        _ record: WorkspaceTabSurfaceRecord, worktreePanels: [WorktreePanel], db: GRDB.Database
+    ) throws -> WorkspaceTabSurface? {
+        let historiesByTab = try Self.histories(tabKeys: [record.id], db: db)
         return record.toModel(histories: historiesByTab[record.id] ?? [:], worktreePanels: worktreePanels)
     }
 
@@ -680,7 +690,8 @@ public struct PanelSurfaceStore: Sendable {
             let status = try String.fetchOne(
                 db, sql: "SELECT status FROM worktree WHERE id = ?", arguments: [worktreeID.uuidString])
             guard status != WorktreeStatus.archived.rawValue else { return outcome }
-            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
+            let worktreeKey = worktreeID.uuidString
+            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeKey, db: db)
 
             let listedKeys = entries.map(\.tabID.uuidString)
             let graceCutoff = now.addingTimeInterval(-Self.awaitingListingGrace)
@@ -702,7 +713,15 @@ public struct PanelSurfaceStore: Sendable {
                 guard seen.insert(entry.tabID).inserted else { continue }
 
                 let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: entry.tabID.uuidString)
-                let current = try record.flatMap { try Self.loadSurface($0, db: db) }
+                // A row under this worktree joins in the list read above; one
+                // still under another worktree joins in that worktree's, as
+                // any read of it does.
+                let current = try record.flatMap { stored -> WorkspaceTabSurface? in
+                    if stored.worktreeID == worktreeKey {
+                        return try Self.loadSurface(stored, worktreePanels: worktreePanels, db: db)
+                    }
+                    return try Self.loadSurface(stored, db: db)
+                }
                 guard let record, let current else {
                     guard let candidate = entry.importCandidate else {
                         if let record, record.awaitingListing {
