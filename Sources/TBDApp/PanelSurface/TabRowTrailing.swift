@@ -1,4 +1,5 @@
 import SwiftUI
+import TBDShared
 
 // MARK: - TabRowEdgeControls
 
@@ -10,11 +11,12 @@ import SwiftUI
 /// the end of the workspace tab bar while it is hidden
 /// (`TabBarTrailingItem`).
 ///
-/// `PanelSurfaceWorkspaceView.edgeControls` builds them, values and actions
-/// together, so the strip and the bar draw the same two buttons from one
-/// decision. The workspace view builds them for the bar, and `SideRegionView`
-/// builds them for the strip from the same plain inputs, so no view hands
-/// another a struct of closures SwiftUI cannot compare.
+/// `make` builds them, values and actions together, so the strip and the bar
+/// draw the same two buttons from one decision. The workspace view builds
+/// them for the bar, only while the bar draws them
+/// (`PanelSurfaceWorkspaceView.barEdgeControls`), and `SideRegionView` builds
+/// them for the strip from the same plain inputs, so no view hands another a
+/// struct of closures SwiftUI cannot compare.
 struct TabRowEdgeControls {
     /// The transcript button (`WorkspaceTabBarChrome.transcriptControl`), or
     /// nil while the transcript view is off.
@@ -37,6 +39,63 @@ struct TabRowEdgeControls {
         }
         items.append(.notes(notes))
         return items
+    }
+
+    /// The transcript and Notes buttons of the workspace tab `tabID`, whose
+    /// primary is `primary`, with what a press of each sends. One function
+    /// decides both, so the side region's strip and the workspace tab bar,
+    /// whichever reaches the window's right edge, draw the same two buttons:
+    /// `PanelSurfaceWorkspaceView` calls it for the bar, and `SideRegionView`
+    /// for the strip.
+    ///
+    /// - **The transcript button** is the one
+    ///   `WorkspaceTabBarChrome.transcriptControl` decides: on while a Claude
+    ///   terminal's transcript panel exists, whether or not it is in front.
+    ///   Enabled, a press opens, selects or closes that panel through the
+    ///   daemon action set (`PaneActions.toggleTranscript`), the only set that
+    ///   can send it; disabled, a press sends nothing.
+    /// - **The Notes button** (`PanelSurfaceWorkspaceView.notesControl`)
+    ///   shows, brings forward or closes the worktree's first note
+    ///   (`AppState.toggleNotesPanel`).
+    @MainActor
+    static func make(
+        appState: AppState,
+        worktreeID: UUID,
+        tabID: UUID,
+        primary: PaneContent,
+        surface: WorkspaceTabSurface?,
+        transcriptViewEnabled: Bool
+    ) -> TabRowEdgeControls {
+        var isClaudeTerminal = false
+        var transcriptOpen = false
+        if case .terminal(let terminalID) = primary {
+            isClaudeTerminal = appState.terminal(id: terminalID, in: worktreeID)?.isClaudeResumable == true
+            if isClaudeTerminal && transcriptViewEnabled {
+                transcriptOpen = PaneActions.daemon(
+                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
+                ).isTranscriptOpen(terminalID)
+            }
+        }
+        let transcript = WorkspaceTabBarChrome.transcriptControl(
+            primary: primary,
+            isClaudeTerminal: isClaudeTerminal,
+            transcriptViewEnabled: transcriptViewEnabled,
+            transcriptOpen: transcriptOpen)
+
+        return TabRowEdgeControls(
+            transcript: transcript,
+            onTranscript: {
+                guard transcript?.isEnabled == true, case .terminal(let terminalID) = primary else { return }
+                PaneActions.daemon(
+                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
+                ).toggleTranscript(primary, terminalID)
+            },
+            notes: PanelSurfaceWorkspaceView.notesControl(surface: surface, notes: appState.notes[worktreeID]),
+            onNotes: {
+                Task { @MainActor in
+                    await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
+                }
+            })
     }
 }
 

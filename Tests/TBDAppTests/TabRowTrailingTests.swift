@@ -94,39 +94,50 @@ struct TabRowTrailingTests {
             side: side, worktreePanels: worktreePanels, revision: 1)
     }
 
-    /// Seeds the copy with `surface` — none for nil — and returns the edge
-    /// controls `PanelSurfaceWorkspaceView` draws for the world's tab showing
-    /// `primary`.
-    private static func edge(
-        _ state: AppState, _ world: World, primary: PaneContent, surface: WorkspaceTabSurface?,
-        transcriptViewEnabled: Bool = true
-    ) -> TabRowEdgeControls {
+    /// Seeds the copy with `surface`, or with no surface for nil.
+    private static func seed(_ state: AppState, _ world: World, surface: WorkspaceTabSurface?) {
         if let surface {
             state.panelSurfaces = [world.worktreeID: [world.tabID: surface]]
         } else {
             state.panelSurfaces = [:]
         }
-        return PanelSurfaceWorkspaceView.edgeControls(
+    }
+
+    /// Seeds the copy with `surface` and returns the edge controls
+    /// `TabRowEdgeControls.make` builds for the world's tab showing `primary`:
+    /// the strip's, and the bar's while it draws them.
+    private static func edge(
+        _ state: AppState, _ world: World, primary: PaneContent, surface: WorkspaceTabSurface?,
+        transcriptViewEnabled: Bool = true
+    ) -> TabRowEdgeControls {
+        seed(state, world, surface: surface)
+        return TabRowEdgeControls.make(
             appState: state, worktreeID: world.worktreeID, tabID: world.tabID, primary: primary,
             surface: surface, transcriptViewEnabled: transcriptViewEnabled)
     }
 
-    /// The bar's trailing items for `primary` over `surface`, composed as
-    /// `PanelSurfaceWorkspaceView` composes them, with a file that can render
-    /// and every viewer control at rest.
-    private static func barItems(
-        primary: PaneContent, surface: WorkspaceTabSurface?, edge: TabRowEdgeControls
-    ) -> [TabBarTrailingItem] {
+    /// Seeds the copy with `surface` and returns the bar's trailing items for
+    /// the world's tab showing `primary`, composed as
+    /// `PanelSurfaceWorkspaceView` composes them: edge controls only while
+    /// the bar draws them (`barEdgeControls`), a file that can render, and
+    /// every viewer control at rest.
+    private static func bar(
+        _ state: AppState, _ world: World, primary: PaneContent, surface: WorkspaceTabSurface?,
+        transcriptViewEnabled: Bool = true
+    ) -> TabBarTrailingItems {
+        seed(state, world, surface: surface)
         let viewerControl = WorkspaceTabBarChrome.viewerControl(
             primary: primary, canRender: true, showingSource: false, copied: false)
+        let barEdge = PanelSurfaceWorkspaceView.barEdgeControls(
+            appState: state, worktreeID: world.worktreeID, tabID: world.tabID, primary: primary,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
         return TabBarTrailingItems(
             viewerControl: viewerControl,
             onViewerControl: {},
-            edge: edge,
+            edge: barEdge,
             showsSide: PanelSurfaceWorkspaceView.showsSide(surface: surface),
             showsExpandButton: PanelSurfaceWorkspaceView.showsExpandButton(surface: surface),
-            onExpand: {}
-        ).items
+            onExpand: {})
     }
 
     /// The strip's trailing items with `activePanel` in front, composed as
@@ -153,16 +164,18 @@ struct TabRowTrailingTests {
         _ state: AppState, _ world: World, primary: PaneContent, transcriptViewEnabled: Bool = true
     ) -> Row {
         let hidden = surface(world)
-        let hiddenEdge = edge(
+        let hiddenBar = bar(
             state, world, primary: primary, surface: hidden, transcriptViewEnabled: transcriptViewEnabled)
         let webPanel = ViewerPanel(id: UUID(), content: .web(pageURL))
         let shown = surface(
             world, side: SideRegion(panels: [webPanel], activePanelID: webPanel.id, recency: [webPanel.id]))
+        let shownBar = bar(
+            state, world, primary: primary, surface: shown, transcriptViewEnabled: transcriptViewEnabled)
         let shownEdge = edge(
             state, world, primary: primary, surface: shown, transcriptViewEnabled: transcriptViewEnabled)
         return Row(
-            hiddenBar: barItems(primary: primary, surface: hidden, edge: hiddenEdge),
-            shownBar: barItems(primary: primary, surface: shown, edge: shownEdge),
+            hiddenBar: hiddenBar.items,
+            shownBar: shownBar.items,
             shownStrip: stripItems(activePanel: .web(pageURL), edge: shownEdge))
     }
 
@@ -427,8 +440,7 @@ struct TabRowTrailingTests {
             let shownEdge = Self.edge(state, world, primary: world.claude, surface: shown)
             let strip = Self.stripItems(
                 activePanel: .transcript(terminalID: world.claudeTerminalID), edge: shownEdge)
-            let hiddenEdge = Self.edge(state, world, primary: world.claude, surface: hidden)
-            let bar = Self.barItems(primary: world.claude, surface: hidden, edge: hiddenEdge)
+            let bar = Self.bar(state, world, primary: world.claude, surface: hidden).items
 
             // A transcript panel has no control of its own.
             let expectedStrip: [SideStripTrailingItem] = [
@@ -446,10 +458,8 @@ struct TabRowTrailingTests {
     func beforeTheSurfaceLoads() async {
         await Fixture.withState { state in
             let world = Self.world(state)
-            let claudeEdge = Self.edge(state, world, primary: world.claude, surface: nil)
-            let claude = Self.barItems(primary: world.claude, surface: nil, edge: claudeEdge)
-            let plainEdge = Self.edge(state, world, primary: world.plain, surface: nil)
-            let plain = Self.barItems(primary: world.plain, surface: nil, edge: plainEdge)
+            let claude = Self.bar(state, world, primary: world.claude, surface: nil).items
+            let plain = Self.bar(state, world, primary: world.plain, surface: nil).items
 
             let expectedClaude: [TabBarTrailingItem] = [
                 .sessionHistory, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOff)),
@@ -459,6 +469,33 @@ struct TabRowTrailingTests {
             ]
             #expect(claude == expectedClaude)
             #expect(plain == expectedPlain)
+        }
+    }
+
+    /// While the region shows, `SideRegionView` builds the strip's own edge
+    /// controls, so the bar builds none and reads nothing for them.
+    @Test("the bar builds edge controls only while it draws them: none while the side region shows")
+    func barBuildsEdgeControlsOnlyWhileItDrawsThem() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let webPanel = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
+            let shown = Self.surface(
+                world, side: SideRegion(panels: [webPanel], activePanelID: webPanel.id, recency: [webPanel.id]))
+
+            let shownBar = Self.bar(state, world, primary: world.claude, surface: shown)
+            let shownCarriesEdge = shownBar.edge != nil
+            #expect(!shownCarriesEdge, "no edge controls while the side region shows")
+            let last: TabBarTrailingItem? = shownBar.items.last
+            let sessionHistory: TabBarTrailingItem? = .sessionHistory
+            #expect(last == sessionHistory, "the bar ends at Session History")
+
+            // Hidden, and before the surface loads, the bar carries them.
+            let hiddenBar = Self.bar(state, world, primary: world.claude, surface: Self.surface(world))
+            let hiddenCarriesEdge = hiddenBar.edge != nil
+            #expect(hiddenCarriesEdge, "edge controls while the side region is hidden")
+            let unloadedBar = Self.bar(state, world, primary: world.claude, surface: nil)
+            let unloadedCarriesEdge = unloadedBar.edge != nil
+            #expect(unloadedCarriesEdge, "edge controls before the surface loads")
         }
     }
 

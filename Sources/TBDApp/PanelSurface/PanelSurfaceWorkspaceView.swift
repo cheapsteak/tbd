@@ -44,11 +44,12 @@ struct PanelSurfaceLoadKey: Equatable {
 /// right edge, just before the button that hides or shows the region: at the
 /// end of the side region's strip, before its collapse button, while the
 /// region shows, and at the end of the bar, before the expand button, while
-/// it is hidden. One function decides them for both rows (`edgeControls`):
-/// this view calls it for the bar, and `SideRegionView` calls it for the
-/// strip with the same primary and transcript setting, which this view passes
-/// to it as plain values rather than closures. No pane draws a header: the
-/// primary's leaf gets its tab's state from `primaryChromes`, and the bar
+/// it is hidden. One function decides them for both rows
+/// (`TabRowEdgeControls.make`): this view calls it for the bar, only while
+/// the bar draws them (`barEdgeControls`), and `SideRegionView` calls it for
+/// the strip with the same primary and transcript setting, which this view
+/// passes to it as plain values rather than closures. No pane draws a header:
+/// the primary's leaf gets its tab's state from `primaryChromes`, and the bar
 /// draws the control that state drives. While a pre-session hook runs, the
 /// primary's column shows `PreSessionSetupBanner` under the bar, so the
 /// order is bar, banner, content, as on every other path.
@@ -142,13 +143,13 @@ struct PanelSurfaceWorkspaceView: View {
         let showsSide = Self.showsSide(surface: surface)
         let primary = primaryContent
         let transcriptViewEnabled = self.transcriptViewEnabled
-        // Read here, not in the `GeometryReader` closure, so what the edge
-        // controls and the bar's trailing items read is a dependency of this
-        // body.
-        let edge = Self.edgeControls(
+        // Read here, not in the `GeometryReader` closure, so what the bar's
+        // trailing items read is a dependency of this body. The bar's edge
+        // controls are built only while the bar draws them.
+        let barEdge = Self.barEdgeControls(
             appState: appState, worktreeID: worktree.id, tabID: tabID, primary: primary,
             surface: surface, transcriptViewEnabled: transcriptViewEnabled)
-        let trailing = trailingItems(chrome: chrome, edge: edge, showsSide: showsSide)
+        let trailing = trailingItems(chrome: chrome, edge: barEdge, showsSide: showsSide)
         GeometryReader { geometry in
             let thickness = SplitDividerMetrics.lineThickness
             let availableSpace = max(geometry.size.width - thickness, 0)
@@ -246,10 +247,11 @@ struct PanelSurfaceWorkspaceView: View {
     /// The bar's trailing items (`TabBarTrailingItem.items`): the primary's
     /// viewer control, read from `chrome`, and Session History; then, while
     /// the side region is hidden (`showsSide` false), the transcript and Notes
-    /// buttons from `edge`, and the expand button once the tab's surface is
-    /// known (`showsExpandButton`).
+    /// buttons from `edge` (`barEdgeControls`, nil while the region shows),
+    /// and the expand button once the tab's surface is known
+    /// (`showsExpandButton`).
     private func trailingItems(
-        chrome: PaneChromeState, edge: TabRowEdgeControls, showsSide: Bool
+        chrome: PaneChromeState, edge: TabRowEdgeControls?, showsSide: Bool
     ) -> TabBarTrailingItems {
         let appState = appState
         let worktreeID = worktree.id
@@ -283,59 +285,23 @@ struct PanelSurfaceWorkspaceView: View {
             })
     }
 
-    /// The transcript and Notes buttons of the workspace tab `tabID`, whose
-    /// primary is `primary`, with what a press of each sends. One function
-    /// decides both, so the side region's strip and the workspace tab bar,
-    /// whichever reaches the window's right edge, draw the same two buttons:
-    /// this view calls it for the bar, and `SideRegionView` for the strip.
-    ///
-    /// - **The transcript button** is the one
-    ///   `WorkspaceTabBarChrome.transcriptControl` decides: on while a Claude
-    ///   terminal's transcript panel exists, whether or not it is in front.
-    ///   Enabled, a press opens, selects or closes that panel through the
-    ///   daemon action set (`PaneActions.toggleTranscript`), the only set that
-    ///   can send it; disabled, a press sends nothing.
-    /// - **The Notes button** (`notesControl`) shows, brings forward or closes
-    ///   the worktree's first note (`AppState.toggleNotesPanel`).
+    /// The transcript and Notes buttons the workspace tab bar draws
+    /// (`TabRowEdgeControls.make`), or nil while the side region shows
+    /// (`showsSide`): the strip draws them then, and `SideRegionView` builds
+    /// its own, so the bar reads nothing for buttons it will not draw.
     @MainActor
-    static func edgeControls(
+    static func barEdgeControls(
         appState: AppState,
         worktreeID: UUID,
         tabID: UUID,
         primary: PaneContent,
         surface: WorkspaceTabSurface?,
         transcriptViewEnabled: Bool
-    ) -> TabRowEdgeControls {
-        var isClaudeTerminal = false
-        var transcriptOpen = false
-        if case .terminal(let terminalID) = primary {
-            isClaudeTerminal = appState.terminal(id: terminalID, in: worktreeID)?.isClaudeResumable == true
-            if isClaudeTerminal && transcriptViewEnabled {
-                transcriptOpen = PaneActions.daemon(
-                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                ).isTranscriptOpen(terminalID)
-            }
-        }
-        let transcript = WorkspaceTabBarChrome.transcriptControl(
-            primary: primary,
-            isClaudeTerminal: isClaudeTerminal,
-            transcriptViewEnabled: transcriptViewEnabled,
-            transcriptOpen: transcriptOpen)
-
-        return TabRowEdgeControls(
-            transcript: transcript,
-            onTranscript: {
-                guard transcript?.isEnabled == true, case .terminal(let terminalID) = primary else { return }
-                PaneActions.daemon(
-                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                ).toggleTranscript(primary, terminalID)
-            },
-            notes: notesControl(surface: surface, notes: appState.notes[worktreeID]),
-            onNotes: {
-                Task { @MainActor in
-                    await appState.toggleNotesPanel(worktreeID: worktreeID, tabID: tabID)
-                }
-            })
+    ) -> TabRowEdgeControls? {
+        guard !showsSide(surface: surface) else { return nil }
+        return TabRowEdgeControls.make(
+            appState: appState, worktreeID: worktreeID, tabID: tabID, primary: primary,
+            surface: surface, transcriptViewEnabled: transcriptViewEnabled)
     }
 
     /// Sends the released drag's width, clamped to the model's range, for the

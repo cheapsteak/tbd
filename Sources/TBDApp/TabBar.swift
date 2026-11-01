@@ -96,52 +96,34 @@ enum TabRowMetrics {
 /// the expand button. A bar drawn anywhere else (Session History open, a tab
 /// whose layout still splits off a terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
-    /// The items, left to right.
-    let items: [TabBarTrailingItem]
+    /// The primary's own control (`WorkspaceTabBarChrome.viewerControl`), or
+    /// nil when its kind has none.
+    let viewerControl: PaneChromeControl?
     /// What the primary's viewer control does.
     let onViewerControl: @MainActor () -> Void
-    /// The transcript and Notes buttons the `.edge` items draw, with their
-    /// actions; nil for a bar that has none (`none`).
+    /// The transcript and Notes buttons, with their actions, while the bar
+    /// draws them (`PanelSurfaceWorkspaceView.barEdgeControls`); nil while
+    /// the side region shows, whose strip draws its own, and for a bar off
+    /// the daemon path (`none`).
     let edge: TabRowEdgeControls?
+    /// Whether the side region shows beside the primary
+    /// (`PanelSurfaceWorkspaceView.showsSide`).
+    let showsSide: Bool
+    /// Whether the expand button shows
+    /// (`PanelSurfaceWorkspaceView.showsExpandButton`).
+    let showsExpandButton: Bool
     /// What the expand button does.
     let onExpand: @MainActor () -> Void
 
-    /// The daemon path's items: `viewerControl`, the primary's own control
-    /// (`WorkspaceTabBarChrome.viewerControl`), or nil when its kind has
-    /// none; Session History; and, while the side region is hidden
-    /// (`showsSide` false), `edge`'s buttons and the expand button when
-    /// `showsExpandButton` (`PanelSurfaceWorkspaceView.showsExpandButton`).
-    init(
-        viewerControl: PaneChromeControl?,
-        onViewerControl: @escaping @MainActor () -> Void,
-        edge: TabRowEdgeControls,
-        showsSide: Bool,
-        showsExpandButton: Bool,
-        onExpand: @escaping @MainActor () -> Void
-    ) {
-        self.init(
-            items: TabBarTrailingItem.items(
-                viewerControl: viewerControl,
-                edgeItems: edge.items,
-                showsSide: showsSide,
-                showsExpandButton: showsExpandButton),
-            onViewerControl: onViewerControl,
-            edge: edge,
-            onExpand: onExpand)
-    }
-
-    /// Stores what it is given: the daemon path's init above, and `none`,
-    /// whose items no input decides.
-    private init(
-        items: [TabBarTrailingItem],
-        onViewerControl: @escaping @MainActor () -> Void,
-        edge: TabRowEdgeControls?,
-        onExpand: @escaping @MainActor () -> Void
-    ) {
-        self.items = items
-        self.onViewerControl = onViewerControl
-        self.edge = edge
-        self.onExpand = onExpand
+    /// The items, left to right (`TabBarTrailingItem.items`). Derived from
+    /// `edge` rather than stored beside it, so an `.edge` item exists only
+    /// while `edge` is set to act for it.
+    var items: [TabBarTrailingItem] {
+        TabBarTrailingItem.items(
+            viewerControl: viewerControl,
+            edgeItems: edge?.items ?? [],
+            showsSide: showsSide,
+            showsExpandButton: showsExpandButton)
     }
 
     /// Session History alone: no viewer control, no transcript or Notes
@@ -151,7 +133,9 @@ struct TabBarTrailingItems {
     /// `Sendable` type, which a struct of closures is not, and building an
     /// empty value costs nothing.
     static var none: TabBarTrailingItems {
-        TabBarTrailingItems(items: [.sessionHistory], onViewerControl: {}, edge: nil, onExpand: {})
+        TabBarTrailingItems(
+            viewerControl: nil, onViewerControl: {}, edge: nil,
+            showsSide: false, showsExpandButton: false, onExpand: {})
     }
 }
 
@@ -300,7 +284,7 @@ struct TabBar: View {
                 action: onHistoryTab
             )
         case .edge(let edgeItem):
-            // `.edge` items come only with the edge controls that act for them.
+            // Set whenever an `.edge` item exists (`TabBarTrailingItems.items`).
             if let edge = trailing.edge {
                 TabRowEdgeButton(item: edgeItem, edge: edge)
             }

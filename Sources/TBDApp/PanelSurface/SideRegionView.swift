@@ -228,7 +228,7 @@ enum SideRegionStrip {
 /// shows (`SideStripTrailingItem.items`). The transcript and Notes buttons
 /// belong to the window's right edge, which the strip reaches while it shows.
 /// The strip builds them with the function that builds the workspace tab
-/// bar's (`PanelSurfaceWorkspaceView.edgeControls`), from the tab's `primary`
+/// bar's (`TabRowEdgeControls.make`), from the tab's `primary`
 /// and `transcriptViewEnabled`, which the workspace view passes in as plain
 /// values, so both rows draw the same two buttons and SwiftUI can still tell
 /// when this view's inputs are unchanged. The history buttons are always drawn
@@ -309,7 +309,7 @@ struct SideRegionView: View {
         // The same builder the workspace tab bar's buttons come from, so the
         // two rows agree; read here, so what it reads is a dependency of this
         // body.
-        let edge = PanelSurfaceWorkspaceView.edgeControls(
+        let edge = TabRowEdgeControls.make(
             appState: appState, worktreeID: surface.worktreeID, tabID: surface.id, primary: primary,
             surface: surface, transcriptViewEnabled: transcriptViewEnabled)
 
@@ -427,8 +427,12 @@ struct SideRegionView: View {
         // the clip below cuts it there, off the divider. The + menu, the
         // active panel's control, the transcript and Notes buttons and the
         // collapse button stay in reach, since they act at the window's edge.
+        // The content shape keeps clicks to the strip's frame too, because a
+        // clip limits drawing, not hit testing, and the clipped buttons would
+        // otherwise take clicks over the end of the workspace tab bar.
         .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
         .clipped()
+        .contentShape(Rectangle())
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
