@@ -1004,6 +1004,11 @@ struct PRStatusManagerBindingTests {
                 "the recheck was still running after its deadline elapsed")
     }
 
+    /// How long a recheck child sleeps: it must outlive every wait before and
+    /// including the one that checks it died, so only a signal can end it
+    /// inside them. Each test's `defer` kills it by its recorded pid.
+    private static let recheckChildLifetimeSeconds = Int(TestDeadlines.saturatedPassSeconds) * 5
+
     @Test("a recheck child that ignores SIGTERM is killed by its deadline",
           .clockDriven)
     func recheckChildIsKilledWhenItIgnoresSIGTERM() async throws {
@@ -1055,7 +1060,11 @@ struct PRStatusManagerBindingTests {
                 else { return await gl.run(args: args, repoPath: path) }
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
-                    args: ["-c", "trap '' TERM; echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    args: [
+                        "-c",
+                        "trap '' TERM; echo $$ > '\(pidFile.path)'; "
+                            + "exec sleep \(Self.recheckChildLifetimeSeconds)",
+                    ],
                     repoPath: dir.path,
                     clock: clock)
             },
@@ -1123,7 +1132,7 @@ struct PRStatusManagerBindingTests {
                 else { return await gl.run(args: args, repoPath: path) }
                 return await PRStatusManager.runCLI(
                     executable: "/bin/sh",
-                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep 120"],
+                    args: ["-c", "echo $$ > '\(pidFile.path)'; exec sleep \(Self.recheckChildLifetimeSeconds)"],
                     repoPath: dir.path,
                     clock: clock)
             },

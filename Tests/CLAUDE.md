@@ -1091,9 +1091,8 @@ crash announces itself; this does not. **The tell was the duration**: 62 s for
 what should have been a fast assertion failure, i.e. two bounded waits timing
 out back to back against a 30 s `ciSafeDeadline` (with `ciSafeDeadline` at
 120 s the same signature is ~240 s). When an assertion failure took far longer
-than an
-assertion failure should, suspect a swallowed waiter before you believe the
-message.
+than an assertion failure should, suspect a swallowed waiter before you believe
+the message.
 
 ### The event-driven clock — `Tests/TestSupport/EventDrivenTestClock.swift`
 

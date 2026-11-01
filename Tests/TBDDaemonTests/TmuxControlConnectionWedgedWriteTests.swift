@@ -23,6 +23,16 @@ import TestSupport
 @Suite("TmuxControlConnection wedged-write teardown (R7-H1)")
 struct TmuxControlConnectionWedgedWriteTests {
 
+    /// How long a stub sleeps. It must outlive every wait before and including
+    /// the last one that checks the write was unwedged — three
+    /// `saturatedPass` waits and a 300 ms settle — because a stub that ended
+    /// on its own would tear the pty down and unwedge the write without
+    /// `stop()` having killed it. `offset` keeps each test's duration unique
+    /// for `killStub`.
+    private static func stubLifetimeSeconds(offset: Int) -> Int {
+        Int(TestDeadlines.saturatedPassSeconds) * 5 + offset
+    }
+
     /// Executable stub "tmux" that ignores its args, holds the pty replica
     /// open, and never reads stdin — so a big master-side write wedges.
     private func makeStub(sleepSeconds: Int) throws -> String {
@@ -68,7 +78,7 @@ struct TmuxControlConnectionWedgedWriteTests {
 
     @Test("stop() returns bounded while a pty write is wedged, and releases the writer")
     func stopReturnsWhileWriteWedged() async throws {
-        let sleepSeconds = 271
+        let sleepSeconds = Self.stubLifetimeSeconds(offset: 1)
         let stub = try makeStub(sleepSeconds: sleepSeconds)
         defer {
             killStub(sleepSeconds: sleepSeconds)
@@ -105,7 +115,7 @@ struct TmuxControlConnectionWedgedWriteTests {
 
     @Test("a wedged write cannot permanently starve ensureConnection for the server (R7-H1 + R6-M4)")
     func wedgedWriteDoesNotStarveSuccessor() async throws {
-        let sleepSeconds = 272
+        let sleepSeconds = Self.stubLifetimeSeconds(offset: 2)
         let stub = try makeStub(sleepSeconds: sleepSeconds)
         defer {
             killStub(sleepSeconds: sleepSeconds)

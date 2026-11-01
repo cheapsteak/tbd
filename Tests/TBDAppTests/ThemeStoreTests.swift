@@ -191,26 +191,30 @@ struct ThemeStoreTests {
             foreground: "#ffffff", background: "#000000",
             cursor: "#ffffff", selection: "#505050"
         )
-        // The watcher's stream starts at `kFSEventStreamEventIdSinceNow`, so a
-        // write made right after `startWatching()` can fall before the point the
-        // stream counts as now when `fseventsd` lags, and no event for it ever
-        // arrives. CI shows that loss: on each red run every other test in the
-        // pass had finished 18–40 s before this one gave up, so nothing was
-        // queued ahead of the watcher's main-actor callback, and the reload still
-        // never came. A user adds a theme long after the watcher is live, so the
-        // miss is a property of this test's timing, not of the behaviour under
-        // test. The wait therefore re-adds the file every few seconds until a
-        // reload is seen: re-adding is how the test waits for the stream to be
-        // live. Each re-add removes the file first, so it is still an add, and
-        // the retry path never calls `reloadFromDisk()` — only the watcher's own
-        // callback can fill `userThemes`, so a broken watcher still fails here.
+        // Two phases. The watcher's stream starts at
+        // `kFSEventStreamEventIdSinceNow`, so a write made right after
+        // `startWatching()` can fall before the point the stream counts as now
+        // when `fseventsd` lags, and no event for it ever arrives. CI shows that
+        // loss: on each red run every other test in the pass had finished
+        // 18–40 s before this one gave up, so nothing was queued ahead of the
+        // watcher's main-actor callback, and the reload still never came. A user
+        // adds a theme long after the watcher is live, so the miss is a property
+        // of this test's timing, not of the behaviour under test.
         //
-        // The wait is a hang guard, not a tolerance window: it ends on the first
-        // satisfying probe. Its budget is `TestDeadlines.saturatedPass` because
-        // this poll and the callback's `Task { @MainActor in ... }` reload both
-        // need turns on the main actor, which every `@MainActor` test in the
-        // pass queues for; green runs have reported this test at up to 87.6 s
-        // (Tests/CLAUDE.md, "Population is the scheduler").
+        // Phase 1 waits for the stream to be live: it re-adds `ext.json` every
+        // few seconds until a reload is seen. Each re-add removes the file
+        // first, so it is still an add, and the retry path never calls
+        // `reloadFromDisk()`, so only the watcher's own callback can fill
+        // `userThemes`. Phase 2 then adds `ext2.json` once, with no re-adds:
+        // the stream is proven live, so the since-now miss cannot apply, and a
+        // watcher that drops a single add fails the test.
+        //
+        // Each wait is a hang guard, not a tolerance window: it ends on the
+        // first satisfying probe. Its budget is `TestDeadlines.saturatedPass`
+        // because the poll and the callback's `Task { @MainActor in ... }`
+        // reload both need turns on the main actor, which every `@MainActor`
+        // test in the pass queues for; green runs have reported this test at up
+        // to 87.6 s (Tests/CLAUDE.md, "Population is the scheduler").
         let contents = try JSONEncoder().encode(theme)
         let adder = ThemeFileAdder(file: themesDir.appendingPathComponent("ext.json"), contents: contents)
         let reAddInterval: Duration = .seconds(5)
@@ -250,8 +254,43 @@ struct ThemeStoreTests {
                     .contentsOfDirectory(atPath: themesDir.path)))
                 """)
         }
-        #expect(store.userThemes.count == 1)
-        #expect(store.userThemes.first?.id == "ext")
+        let afterFirst = store.userThemes.map(\.id)
+        #expect(afterFirst == ["ext"])
+
+        // Phase 2: one add, no re-adds.
+        let second = UserTerminalTheme(
+            schemaVersion: 1, id: "ext2", displayName: "Ext 2",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(second).write(to: themesDir.appendingPathComponent("ext2.json"))
+        let secondStart = ContinuousClock.now
+        let secondOutcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(100)
+        ) { @Sendable in
+            await MainActor.run { () -> Bool in
+                store.userThemes.contains { theme in theme.id == "ext2" }
+            }
+        }
+        switch secondOutcome {
+        case .satisfied:
+            break
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw Failure("""
+                the themes-directory watcher missed a single add once its stream was live — \
+                ext2.json, added once, not seen after \(ContinuousClock.now - secondStart) \
+                (budget \(TestDeadlines.saturatedPass)); \
+                userThemes=\(store.userThemes.map(\.id)), \
+                loadErrors=\(store.loadErrors), \
+                directory contents=\(String(describing: try? FileManager.default
+                    .contentsOfDirectory(atPath: themesDir.path)))
+                """)
+        }
+        let ids = store.userThemes.map(\.id).sorted()
+        #expect(ids == ["ext", "ext2"])
     }
 
     @Test("saveAs rejects display names that slugify to empty")
