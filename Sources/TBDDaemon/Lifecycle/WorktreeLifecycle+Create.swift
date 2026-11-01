@@ -816,11 +816,18 @@ extension WorktreeLifecycle {
 
     /// Creates the initial "Notes" note and opens it as a worktree panel
     /// (side panel notes spec, "New worktrees"), which every workspace tab of
-    /// the worktree shows in its side panel. The note stays out of the tab
+    /// the worktree carries in its side panel. The note stays out of the tab
     /// order, so the primary terminal keeps focus. Ordinary creates leave it
     /// empty; a conversation carryover supplies the populated provenance
-    /// seed. Opening the panel selects nothing; any surface it rewrote is
-    /// broadcast, and a surface a later tab sync imports joins the panel in.
+    /// seed.
+    ///
+    /// Opening the panel selects nothing. So that the starter note shows,
+    /// the worktree's active tab, the primary terminal, gets its surface
+    /// written open with the note in front when it has none yet
+    /// (`seedActiveTabSurface`); every other tab a later sync imports starts
+    /// collapsed. The seeded surface and any surface the open rewrote are
+    /// broadcast together.
+    ///
     /// Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
     /// terminals are already valid.
@@ -834,13 +841,39 @@ extension WorktreeLifecycle {
                     content: seed
                 )
             }
-            let changedSurfaces = try await db.panelSurface.openWorktreePanel(
+            var changedSurfaces = try await db.panelSurface.openWorktreePanel(
                 worktreeID: worktreeID, content: .note(noteID: note.id), now: now())
+            do {
+                if let seeded = try await seedActiveTabSurface(worktreeID: worktreeID, noteID: note.id) {
+                    changedSurfaces.append(seeded)
+                }
+            } catch {
+                logger.warning("failed to open the initial note panel in the main tab of \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             subscriptions?.broadcastWorktreePanelsChanged(
                 worktreeID: worktreeID, surfaces: changedSurfaces)
         } catch {
             logger.warning("failed to create initial note panel for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Writes the surface of the worktree's active tab open, with the note's
+    /// worktree panel in front (`PanelSurfaceStore.seedSurface`), and returns
+    /// it. Nil, writing nothing, when the active tab is not a terminal of
+    /// this worktree (a terminal tab's ID is its terminal's), or already has
+    /// a surface. The surface sits at the tab's index in the tab order, 0
+    /// when the order does not name it.
+    private func seedActiveTabSurface(worktreeID: UUID, noteID: UUID) async throws -> WorkspaceTabSurface? {
+        guard let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: worktreeID),
+              let terminal = try await db.terminals.get(id: activeTabID),
+              terminal.worktreeID == worktreeID else {
+            return nil
+        }
+        let tabOrder = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+        return try await db.panelSurface.seedSurface(
+            tabID: activeTabID, worktreeID: worktreeID, primary: .terminal(terminalID: terminal.id),
+            position: tabOrder.firstIndex(of: activeTabID) ?? 0,
+            showing: .note(noteID: noteID), now: now())
     }
 
     /// Attempts to create a git worktree, trying origin/<default> then falling back

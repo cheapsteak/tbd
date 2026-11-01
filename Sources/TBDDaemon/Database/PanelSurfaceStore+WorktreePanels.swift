@@ -68,6 +68,38 @@ extension PanelSurfaceStore {
         }
     }
 
+    /// Writes a surface for a tab that has none yet, open, with the worktree
+    /// panel showing `content` in front, and returns it. Writes nothing and
+    /// returns nil when the tab already has a row, readable or not, or when
+    /// no worktree panel shows `content`. Worktree creation runs it for the
+    /// main tab after `openWorktreePanel`, so the starter note shows beside
+    /// the primary terminal, while a tab a sync imports later starts
+    /// collapsed (`syncTabs`).
+    ///
+    /// The surface has no panels of its own, no label, the default width
+    /// and the revision counter's next value, and is stored at `position`.
+    /// Its row is marked `awaitingListing`, as a promote's moved rows are:
+    /// the app lists the tab only once it has loaded it, and a sync built
+    /// before then must not prune the row. The first sync that lists the tab
+    /// finds a readable row and changes only its position, label and
+    /// primary, never its collapse state.
+    public func seedSurface(
+        tabID: UUID, worktreeID: UUID, primary: PrimaryContent, position: Int,
+        showing content: WorktreePanelContent, now: Date
+    ) async throws -> WorkspaceTabSurface? {
+        try await writer.write { db -> WorkspaceTabSurface? in
+            guard try WorkspaceTabSurfaceRecord.fetchOne(db, key: tabID.uuidString) == nil else { return nil }
+            let worktreePanels = try Self.storedWorktreePanels(worktreeKey: worktreeID.uuidString, db: db)
+            guard let front = worktreePanels.first(where: { $0.content == content }) else { return nil }
+            let surface = WorkspaceTabSurface(
+                id: tabID, worktreeID: worktreeID, primary: primary,
+                side: SideRegion(activePanelID: front.id, collapsed: false),
+                worktreePanels: worktreePanels, revision: try Self.nextRevision(db: db))
+            try Self.writeSurface(surface, position: position, awaitingListing: true, db: db, now: now)
+            return surface
+        }
+    }
+
     /// Removes the worktree panel showing `content`, inside a caller's write
     /// transaction, and rewrites every readable surface of the worktree with
     /// the remaining list; a surface that had it in front brings its most
