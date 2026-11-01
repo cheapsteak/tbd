@@ -320,14 +320,19 @@ struct RemoteSessionDetailView: View {
     /// `content != .attach`, so the pager simply stays transparent and
     /// non-hit-testable behind whatever renders instead.
     ///
-    /// It sits in its own slot rather than inside `terminalArea` so that a
-    /// kept-alive terminal of another session is never resized when the pane
-    /// swaps. While the session on screen has no mounted tab, the pager keeps
-    /// the previous tab selected and laid out, transparent, and each resize of
-    /// that terminal reaches its remote program. The slot is always laid out
-    /// where the attached terminal is drawn, so viewing a session that is not
-    /// attached — which moves `terminalArea` into the right half — leaves the
-    /// pager where it is.
+    /// It sits in its own slot rather than inside `terminalArea`, laid out
+    /// where the attached terminal is drawn — the left half, or the whole pane
+    /// without the transcript — whichever half leads, so a swap never moves or
+    /// resizes it. That matters because, while the session on screen has no
+    /// mounted tab, the pager keeps the previous tab selected and laid out,
+    /// transparent, and each resize of that terminal reaches its remote
+    /// program. Viewing a session that is not attached moves `terminalArea`
+    /// into the right half and leaves the pager where it is, so a kept-alive
+    /// terminal behind an unattached session keeps its size. The pager still
+    /// takes a new width when the right half's width changes, or when the
+    /// session on screen differs in whether its transcript shows. While the
+    /// session on screen is not attached, the pager sits behind the transcript
+    /// or the terminal side's prompt.
     private func attachPager(slotShown: Bool) -> some View {
         RemoteAttachPager(
             mounts: appState.attachedRemoteMountKeys,

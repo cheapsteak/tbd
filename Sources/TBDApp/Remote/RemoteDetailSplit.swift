@@ -14,12 +14,13 @@ import SwiftUI
 /// `liveTerminal` is always laid out where the attached terminal is drawn —
 /// the left half, or the whole pane without the transcript — whatever
 /// `transcriptLeads` says, and it is drawn behind everything else. It hosts
-/// `RemoteAttachPager`, which keeps other sessions' terminals alive and laid
-/// out while the session on screen is not attached. Were it inside the
-/// terminal side, viewing a session that is not attached would move it into
-/// the right half with the terminal side and resize each kept-alive terminal's
-/// remote program. The terminal side draws over it, and renders nothing while
-/// attached so the live terminal shows through.
+/// `RemoteAttachPager`, which keeps other sessions' terminals alive. While
+/// the session on screen is not attached, the pager keeps the tab it last
+/// showed selected, and that one terminal stays laid out. Were the pager
+/// inside the terminal side, viewing a session that is not attached would
+/// move it into the right half with the terminal side and resize that
+/// terminal's remote program. The terminal side draws over it, and renders
+/// nothing while attached so the live terminal shows through.
 ///
 /// The one property this container exists for is that **the split never
 /// remounts any of its parts** — not when the transcript shows or hides, and
@@ -98,10 +99,12 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
     /// Without the transcript the terminal side and the live terminal span the
     /// whole width and `transcriptLeads` changes nothing. With it, the right
     /// half is `rightWidth` wide (already clamped), the divider sits just left
-    /// of it, and the left half takes what remains. The terminal side takes the
-    /// right half when `transcriptLeads`, the left half otherwise. The live
-    /// terminal takes the left half either way, which is where the terminal side
-    /// is drawn while attached.
+    /// of it, and the left half takes what remains. The right half never
+    /// extends past the pane: in a pane narrower than `rightWidth` plus the
+    /// divider, it takes what the divider leaves and the left half is empty.
+    /// The terminal side takes the right half when `transcriptLeads`, the left
+    /// half otherwise. The live terminal takes the left half either way, which
+    /// is where the terminal side is drawn while attached.
     nonisolated static func columns(
         totalWidth: CGFloat, rightWidth: CGFloat, dividerWidth: CGFloat,
         showsTranscript: Bool, transcriptLeads: Bool
@@ -111,10 +114,11 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
             return RemoteDetailSplitColumns(
                 terminal: whole, divider: nil, transcript: nil, liveTerminal: whole)
         }
-        let leftWidth = max(0, totalWidth - rightWidth - dividerWidth)
+        let cappedRightWidth = min(rightWidth, max(0, totalWidth - dividerWidth))
+        let leftWidth = max(0, totalWidth - cappedRightWidth - dividerWidth)
         let left = RemoteDetailSplitColumn(x: 0, width: leftWidth)
         let middle = RemoteDetailSplitColumn(x: leftWidth, width: dividerWidth)
-        let right = RemoteDetailSplitColumn(x: leftWidth + dividerWidth, width: rightWidth)
+        let right = RemoteDetailSplitColumn(x: leftWidth + dividerWidth, width: cappedRightWidth)
         return RemoteDetailSplitColumns(
             terminal: transcriptLeads ? right : left,
             divider: middle,
@@ -122,22 +126,28 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
             liveTerminal: left)
     }
 
-    /// Never narrower than its minimum, and never so wide that less than
-    /// `leftMinWidth` remains for the left half and the divider.
+    /// The stored right-half width, clamped for a pane `totalWidth` wide (see
+    /// `clamp`): the left half keeps `leftMinWidth` whenever the pane is wide
+    /// enough for both minimums and the divider; otherwise the right half
+    /// keeps `rightMinWidth` and the left half shrinks. `columns` then keeps
+    /// the right half inside the pane.
     private func clampedRightWidth(totalWidth: CGFloat) -> CGFloat {
         Self.clamp(
             rightWidth, totalWidth: totalWidth,
-            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth)
+            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth, dividerWidth: Self.dividerHitWidth)
     }
 
-    /// Clamps the right half's width to at least `rightMin`, and to never so
-    /// wide that less than `leftMin` remains for the left half and the divider.
-    /// In a pane too narrow for both minimums, the right half keeps its minimum
-    /// and the left half shrinks.
+    /// Clamps the right half's width to at least `rightMin`, and to at most
+    /// what leaves `leftMin` for the left half once the divider has its
+    /// `dividerWidth`. So the left half keeps `leftMin` whenever the pane is
+    /// wide enough for both minimums and the divider. In a narrower pane the
+    /// lower bound wins: the right half keeps `rightMin` and the left half
+    /// shrinks. The result can still exceed what the pane has room for;
+    /// `columns` caps the right half at the pane.
     nonisolated static func clamp(
-        _ width: CGFloat, totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat
+        _ width: CGFloat, totalWidth: CGFloat, leftMin: CGFloat, rightMin: CGFloat, dividerWidth: CGFloat
     ) -> CGFloat {
-        let upper = max(rightMin, totalWidth - leftMin)
+        let upper = max(rightMin, totalWidth - leftMin - dividerWidth)
         return min(max(width, rightMin), upper)
     }
 
@@ -156,7 +166,8 @@ struct RemoteDetailSplit<TerminalSide: View, TranscriptSide: View, LiveTerminal:
                         if dragOrigin == nil { dragOrigin = origin }
                         rightWidth = Self.clamp(
                             origin - value.translation.width, totalWidth: totalWidth,
-                            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth)
+                            leftMin: Self.leftMinWidth, rightMin: Self.rightMinWidth,
+                            dividerWidth: Self.dividerHitWidth)
                     }
                     .onEnded { _ in dragOrigin = nil })
             .accessibilityHidden(true)

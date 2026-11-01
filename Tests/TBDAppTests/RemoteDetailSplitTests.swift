@@ -298,15 +298,44 @@ struct RemoteDetailSplitTests {
             transcript: RemoteDetailSplitColumn(x: 120, width: 280),
             liveTerminal: RemoteDetailSplitColumn(x: 0, width: 114))
         #expect(narrow == narrowExpected)
+
+        // Narrower than the right half plus the divider: the right half is
+        // capped at what the divider leaves, so it never extends past the
+        // pane, and the left half is empty.
+        let tooNarrow: RemoteDetailSplitColumns = Split.columns(
+            totalWidth: 250, rightWidth: 280, dividerWidth: 6,
+            showsTranscript: true, transcriptLeads: false)
+        let tooNarrowExpected: RemoteDetailSplitColumns = RemoteDetailSplitColumns(
+            terminal: RemoteDetailSplitColumn(x: 0, width: 0),
+            divider: RemoteDetailSplitColumn(x: 0, width: 6),
+            transcript: RemoteDetailSplitColumn(x: 6, width: 244),
+            liveTerminal: RemoteDetailSplitColumn(x: 0, width: 0))
+        #expect(tooNarrow == tooNarrowExpected)
     }
 
-    @Test("the right half is clamped between its minimum and what leaves the left minimum for the left half and the divider")
+    @Test("the right half is clamped between its minimum and what leaves the left minimum beside the divider")
     func clamp() {
-        #expect(Split.clamp(100, totalWidth: 1000, leftMin: 240, rightMin: 280) == 280)
-        #expect(Split.clamp(500, totalWidth: 1000, leftMin: 240, rightMin: 280) == 500)
-        #expect(Split.clamp(900, totalWidth: 1000, leftMin: 240, rightMin: 280) == 760)
-        // Too narrow for both minimums: the right minimum wins, and the left
-        // half shrinks.
-        #expect(Split.clamp(500, totalWidth: 400, leftMin: 240, rightMin: 280) == 280)
+        let belowMinimum: CGFloat = Split.clamp(
+            100, totalWidth: 1000, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let belowMinimumExpected: CGFloat = 280
+        #expect(belowMinimum == belowMinimumExpected)
+
+        let inRange: CGFloat = Split.clamp(
+            500, totalWidth: 1000, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let inRangeExpected: CGFloat = 500
+        #expect(inRange == inRangeExpected)
+
+        // The upper bound leaves the left minimum and the divider: 1000 − 240 − 6.
+        let aboveMaximum: CGFloat = Split.clamp(
+            900, totalWidth: 1000, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let aboveMaximumExpected: CGFloat = 754
+        #expect(aboveMaximum == aboveMaximumExpected)
+
+        // Too narrow for both minimums and the divider: the right minimum
+        // wins, and the left half shrinks.
+        let tooNarrow: CGFloat = Split.clamp(
+            500, totalWidth: 400, leftMin: 240, rightMin: 280, dividerWidth: 6)
+        let tooNarrowExpected: CGFloat = 280
+        #expect(tooNarrow == tooNarrowExpected)
     }
 }
