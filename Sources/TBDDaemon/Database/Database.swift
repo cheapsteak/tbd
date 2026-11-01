@@ -120,8 +120,9 @@ public final class TBDDatabase: Sendable {
     /// for closed-terminal captures (`~/tbd/terminal-history`).
     ///
     /// Nothing is migrated here: the schema is copied, with SQLite's online
-    /// backup, from `inMemoryTemplate`, which runs `buildMigrator()` once per
-    /// process. Running the whole chain in every init is what stalled CI's
+    /// backup, from `inMemoryTemplate`, which runs the resource integrity
+    /// check and `buildMigrator()` once per process. A failure of either is
+    /// rethrown by every init. Running the whole chain in every init is what stalled CI's
     /// fast passes for 2–20 s at a time: stack samples taken in those stalls
     /// found the three cooperative-pool threads spending most of their
     /// samples inside the migrator, one test database at a time. The copy is
@@ -155,25 +156,26 @@ public final class TBDDatabase: Sendable {
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)
         self.retainedTranscripts = RetainedTranscriptStore(writer: queue)
-        // The same gates `init(path:)` runs. `migrationsForRegistration()`
-        // cannot throw, so without this a resource bundle that failed to
-        // resolve under `scripts/test.sh` would surface as scattered "no such
-        // column" failures instead of one diagnostic naming every path
-        // searched.
-        try queue.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         try Self.inMemoryTemplate.get().backup(to: queue)
     }
 
     /// The database every `init(inMemory:)` copies: an empty in-memory
-    /// database taken through `buildMigrator()` once, on first use, and never
-    /// written again. A migration failure is kept and rethrown by every
-    /// `init(inMemory:)`, so each fails as if it had run the migrator itself.
+    /// database that has passed the resource integrity check and been taken
+    /// through `buildMigrator()` once, on first use, and never written again.
+    /// A failure of either is kept and rethrown by every `init(inMemory:)`, so
+    /// each fails as if it had run them itself.
     /// GRDB's `backup(to:)` reads the template on its serial queue, so
     /// concurrent copies take turns, each a page copy of a small database:
     /// the schema and the few rows the migrations seed. It also clears the
     /// destination connection's schema cache when it finishes.
     private static let inMemoryTemplate: Result<DatabaseQueue, any Error> = Result {
         let template = try DatabaseQueue()
+        // The same gates `init(path:)` runs. `migrationsForRegistration()`
+        // cannot throw, so without this a resource bundle that failed to
+        // resolve under `scripts/test.sh` would surface as scattered "no such
+        // column" failures instead of one diagnostic naming every path
+        // searched. It runs before the migrator, on the empty template.
+        try template.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
         try TBDDatabase.buildMigrator().migrate(template)
         return template
     }

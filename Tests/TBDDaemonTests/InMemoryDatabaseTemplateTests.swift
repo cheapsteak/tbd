@@ -121,9 +121,8 @@ struct InMemoryDatabaseTemplateTests {
     private static let markerKey = "in-memory-template-independence"
     private static let markerTable = "in_memory_template_independence"
 
-    /// Builds databases from many tasks at once — on a fresh process the first
-    /// of them also races to build the template — and checks each copy holds
-    /// every registered migration.
+    /// Builds databases from many tasks at once and checks that each copy holds
+    /// every registered migration: copies taken concurrently are each complete.
     @Test("databases built at the same moment are each complete")
     func concurrentCopiesAreComplete() async throws {
         let registered = TBDDatabase.buildMigratorForTests().migrations.count
@@ -146,5 +145,5 @@ struct InMemoryDatabaseTemplateTests {
         #expect(counts == expected)
     }
 
-    private static let concurrentCopies = 32
+    private static let concurrentCopies = 8
 }

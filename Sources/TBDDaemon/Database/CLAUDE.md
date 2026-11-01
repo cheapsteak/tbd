@@ -182,6 +182,17 @@ files and inline Swift escape-hatch migrations merged into one
 identifier-sorted list. An escape-hatch migration therefore lands in authoring
 order among the files rather than at the end.
 
+## In-memory test databases copy one template
+
+`TBDDatabase(inMemory:)` copies a database migrated once per test process, so
+the full chain run on an empty database must leave no row whose value depends on
+the clock, the environment (`TBD_HOME`, `$HOME`) or the filesystem: such a value
+would be frozen at whatever the first test saw. Today the only such write,
+v10's conductors row, is deleted again by v24. `InMemoryDatabaseTemplateTests`
+compares a copy with a fresh migration, but it cannot see a value taken from the
+environment, so review enforces this rule. A migration that needs such a seed
+must also change how in-memory databases are built.
+
 ## Migration history is frozen
 
 A migration file that has landed on `origin/main` may not be modified or
