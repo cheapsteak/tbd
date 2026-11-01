@@ -3084,10 +3084,10 @@ final class AppState {
         guard let wtTabs = tabs[worktreeID] else { return nil }
         var includedPaneIDs = Set<UUID>()
         let legacyTabs: [LegacyTabPayload] = wtTabs.map { tab in
-            let layout = layouts[tab.id]
+            let payload = legacyTabPayload(for: tab)
             includedPaneIDs.insert(tab.content.paneID)
-            if let layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
-            return LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layout)
+            if let layout = payload.layout { includedPaneIDs.formUnion(layout.allPaneIDs()) }
+            return payload
         }
         let includedPaneHistories = paneHistories.filter { includedPaneIDs.contains($0.key) }
         return PanelSyncTabsParams(
@@ -3095,6 +3095,12 @@ final class AppState {
             tabs: legacyTabs,
             paneHistories: includedPaneHistories
         )
+    }
+
+    /// One tab as `panel.syncTabs` sends it: its label, content and legacy
+    /// layout.
+    func legacyTabPayload(for tab: TBDShared.Tab) -> LegacyTabPayload {
+        LegacyTabPayload(tabID: tab.id, label: tab.label, content: tab.content, layout: layouts[tab.id])
     }
 
     // MARK: - Selection Persistence

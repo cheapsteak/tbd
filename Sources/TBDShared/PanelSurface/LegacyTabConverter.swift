@@ -61,11 +61,27 @@ public enum LegacyTabConverter {
         return .converted(surface)
     }
 
+    /// Why `convert` would skip `tab`, or nil when it would convert it: the
+    /// verdict of `convert` itself, so it covers every reason a tab is
+    /// skipped. The app asks it to render a tab legacy before any sync has
+    /// named it skipped, with the payload and histories the sync would send,
+    /// so the app and the daemon cannot disagree about a tab. Pure: it reads
+    /// nothing but its arguments.
+    public static func skipReason(
+        worktreeID: UUID,
+        tab: LegacyTabPayload,
+        paneHistories: [UUID: MRUHistory<PaneContent>]
+    ) -> String? {
+        guard case .skipped(let reason) = convert(
+            worktreeID: worktreeID, tab: tab, paneHistories: paneHistories)
+        else { return nil }
+        return reason
+    }
+
     /// The first terminal, in pre-order, that a tab's legacy `layout` holds
     /// anywhere but its primary pane, the tab's `content`; nil when it holds
     /// none. A tab without a layout is its primary alone, so it holds none.
-    /// This is the test `convert` skips a tab by, and the app asks it too, to
-    /// render such a tab legacy before any sync has named it skipped.
+    /// `convert` skips a tab that holds one.
     public static func terminalOutsidePrimary(content: PaneContent, layout: LayoutNode?) -> UUID? {
         let tree = layout ?? .pane(content)
         for pane in viewerPanes(of: tree, primaryPaneID: content.paneID) {

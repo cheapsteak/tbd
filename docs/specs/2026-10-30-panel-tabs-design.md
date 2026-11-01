@@ -379,6 +379,9 @@ The converter in `TBDShared` maps one legacy tab to one surface:
   so a daemon-made tab would be deleted by the next sync. Terminal splits
   cannot be created since spec C's phase 1, so only layouts older than that
   carry one.
+- A tab whose conversion the surface model cannot hold, such as two panes on
+  one terminal's transcript where the model allows one view per terminal, is
+  skipped the same way rather than losing a pane.
 - Each viewer pane in the legacy layout becomes one `ViewerPanel`, in pre-order,
   with a freshly minted panel ID. Legacy pane IDs cannot be reused: a note
   pane's ID is the note's own ID, so one note open in two tabs would collide,
@@ -573,14 +576,15 @@ hidden, the workspace tab bar spans the whole width. No pane draws a header.
 
 `TerminalContainerView.layoutContent` asks one plain function,
 `workspaceRenderPath(worktreeID:tabID:)`. It returns the legacy path only for a
-tab whose layout still splits off a terminal: one the last sync named in
+tab the converter skips (see "Legacy import"): one the last sync named in
 `skippedTabIDs`, or, before any sync names it, one the copy holds no surface
-for and whose legacy layout holds a terminal outside the primary by the
-converter's own test (`LegacyTabConverter.terminalOutsidePrimary`). The skipped
-set lives only in memory, so after a launch it is the converter's test that
-draws such a tab legacy from its first frame; without it, the tab would draw
-the daemon path, its second terminal hidden, until the first sync answered, and
-then rebuild its terminal view as legacy. Every other tab takes the daemon
+for and that the converter would skip by its own verdict
+(`LegacyTabConverter.skipReason`, which runs the conversion the sync runs, on
+the payload the sync sends). The skipped set lives only in memory, so after a
+launch it is the converter's verdict that draws such a tab legacy from its
+first frame; without it, the tab would draw the daemon path, the panes the
+surface cannot hold hidden, until the first sync answered, and then rebuild its
+terminal view as legacy. Every other tab takes the daemon
 path, and a tab with a surface always does: with the copy's surface when it
 holds one, and with an empty side region until then. A new tab therefore draws
 the same layout before and after its surface arrives, and its terminal view is
@@ -621,8 +625,9 @@ Each branch is tested both ways, asserting opposite outcomes.
     acknowledgement; launch loads each worktree once, after the sync.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none.
-  - The render branch: a skipped tab renders legacy; a tab whose layout
-    splits off a terminal renders legacy before any sync names it while the
+  - The render branch: a skipped tab renders legacy; a tab the converter
+    would skip, whose layout splits off a terminal or holds two panes on one
+    terminal's transcript, renders legacy before any sync names it while the
     copy holds no surface for it, and the daemon path once it holds one; a tab
     with no surface whose layout splits off only viewers renders the daemon
     path; a tab with a surface renders the daemon path with it; a tab with no

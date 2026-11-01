@@ -107,6 +107,43 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    /// The converter also skips a tab whose conversion the surface model
+    /// cannot hold — two panes on one terminal's transcript — and the render
+    /// branch asks for its whole verdict, not just the terminal test.
+    @Test("a tab with no surface whose layout holds two panes on one transcript renders legacy before any sync names it")
+    func duplicateTranscriptRendersLegacyBeforeAnySync() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = .split(
+                id: UUID(), direction: .horizontal,
+                children: [
+                    .pane(tab.content),
+                    .pane(.liveTranscript(id: UUID(), terminalID: tab.id)),
+                    .pane(.liveTranscript(id: UUID(), terminalID: tab.id)),
+                ],
+                ratios: [0.4, 0.3, 0.3])
+
+            #expect(state.panelSyncSkippedTabIDs.isEmpty, "precondition: no sync has named it")
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .legacy)
+        }
+    }
+
+    @Test("a tab with no surface whose layout holds one pane on its transcript renders the daemon path with none")
+    func singleTranscriptRendersDaemonAwaitingSurface() async {
+        await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tab = Fixture.terminalTab(label: "agent")
+            state.tabs[worktreeID] = [tab]
+            state.layouts[tab.id] = Self.layout(
+                around: tab, beside: .liveTranscript(id: UUID(), terminalID: tab.id))
+
+            let awaitingSurface: WorkspaceRenderPath = .daemon(nil)
+            #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == awaitingSurface)
+        }
+    }
+
     @Test("a tab whose layout splits off a terminal renders the daemon path when the copy holds its surface")
     func terminalSplitWithASurfaceRendersDaemon() async {
         await Fixture.withState { state in

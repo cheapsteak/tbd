@@ -39,15 +39,16 @@ extension AppState {
         panelSurfaces[worktreeID]?[tabID]
     }
 
-    /// The renderer for one workspace tab. Legacy only for a tab whose layout
-    /// still splits off a terminal: one the last tab sync skipped
-    /// (`panelSyncSkippedTabIDs`), or, before any sync names it, one the copy
-    /// holds no surface for and whose legacy layout holds a terminal outside
-    /// the primary by the converter's own test
-    /// (`legacyLayoutSplitsOffTerminal`). The skipped set lives only in
-    /// memory, so after a launch that test draws such a tab legacy from its
-    /// first frame, rather than flipping it to legacy once the first sync
-    /// answers, which would rebuild its primary's terminal view.
+    /// The renderer for one workspace tab. Legacy only for a tab the daemon
+    /// cannot import: one the last tab sync skipped (`panelSyncSkippedTabIDs`),
+    /// or, before any sync names it, one the copy holds no surface for and
+    /// that the converter would skip, by its own verdict
+    /// (`legacyConverterSkips`) — a terminal outside the primary, or a layout
+    /// the surface cannot hold, such as two panes on one terminal's
+    /// transcript. The skipped set lives only in memory, so after a launch
+    /// that verdict draws such a tab legacy from its first frame, rather than
+    /// flipping it to legacy once the first sync answers, which would rebuild
+    /// its primary's terminal view.
     ///
     /// Every other tab takes the daemon path, a tab with a surface always.
     /// The copy fills asynchronously, so a tab with no surface yet takes it
@@ -56,21 +57,23 @@ extension AppState {
     func workspaceRenderPath(worktreeID: UUID, tabID: UUID) -> WorkspaceRenderPath {
         guard !panelSyncSkippedTabIDs.contains(tabID) else { return .legacy }
         let surface = panelSurface(worktreeID: worktreeID, tabID: tabID)
-        if surface == nil, legacyLayoutSplitsOffTerminal(worktreeID: worktreeID, tabID: tabID) {
+        if surface == nil, legacyConverterSkips(worktreeID: worktreeID, tabID: tabID) {
             return .legacy
         }
         return .daemon(surface)
     }
 
-    /// Whether the tab's legacy layout (`layouts`) holds a terminal anywhere
-    /// but its primary, by the very test the converter skips a tab by
-    /// (`LegacyTabConverter.terminalOutsidePrimary`). False for a tab with no
-    /// layout, or one this worktree's tab list does not hold.
-    private func legacyLayoutSplitsOffTerminal(worktreeID: UUID, tabID: UUID) -> Bool {
-        guard let layout = layouts[tabID],
-              let tab = tabs[worktreeID]?.first(where: { $0.id == tabID })
-        else { return false }
-        return LegacyTabConverter.terminalOutsidePrimary(content: tab.content, layout: layout) != nil
+    /// Whether the daemon's import would skip the tab: the converter's own
+    /// verdict (`LegacyTabConverter.skipReason`, which runs `convert`), on
+    /// the payload the tab sync sends for it (`legacyTabPayload`) and the
+    /// pane histories, which `convert` reads by this tab's pane IDs as the
+    /// sync sends them. Pure and free of I/O; asked only while the copy holds
+    /// no surface for the tab. False for a tab this worktree's tab list does
+    /// not hold.
+    private func legacyConverterSkips(worktreeID: UUID, tabID: UUID) -> Bool {
+        guard let tab = tabs[worktreeID]?.first(where: { $0.id == tabID }) else { return false }
+        return LegacyTabConverter.skipReason(
+            worktreeID: worktreeID, tab: legacyTabPayload(for: tab), paneHistories: paneHistories) != nil
     }
 
     // MARK: - Loading
@@ -428,9 +431,10 @@ extension AppState {
 
     /// The observer on `layouts`, for the one tab whose legacy layout still
     /// matters: one the daemon skipped, because its layout holds a terminal
-    /// outside the primary. It has no surface and renders legacy, and closing
-    /// that extra terminal edits `layouts`, not `tabs`, so without this
-    /// nothing would offer it to the daemon again.
+    /// outside the primary or panes the surface cannot hold. It has no
+    /// surface and renders legacy, and closing that extra terminal or pane
+    /// edits `layouts`, not `tabs`, so without this nothing would offer it to
+    /// the daemon again.
     ///
     /// Marks dirty the worktree of each tab the last sync skipped
     /// (`panelSyncSkippedTabIDs`) whose layout differs from

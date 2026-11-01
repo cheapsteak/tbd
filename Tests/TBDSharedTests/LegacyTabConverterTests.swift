@@ -149,8 +149,7 @@ struct LegacyTabConverterTests {
                 == .skipped("tab \(viewerTab.tabID): terminal \(primaryTerminal) outside the primary"))
     }
 
-    /// The test `convert` skips by, which the app also asks to render a tab
-    /// legacy before any sync has named it skipped.
+    /// One of the tests `convert` skips a tab by.
     @Test func terminalOutsidePrimaryNamesTheTerminalBesideThePrimary() {
         let primaryTerminal = UUID()
         let otherTerminal = UUID()
@@ -184,6 +183,39 @@ struct LegacyTabConverterTests {
         }
         #expect(reason.hasPrefix("tab \(tab.tabID): "))
         #expect(reason.contains("duplicateTranscriptView"))
+    }
+
+    /// The verdict the app asks before any sync has named a tab skipped: it
+    /// is `convert`'s own, so it names every reason a tab is skipped for.
+    @Test func skipReasonIsConvertsVerdictForEveryReason() {
+        let terminalID = UUID()
+        let primary = PaneContent.terminal(terminalID: terminalID)
+        let terminalSplit = Fixture.tab(primary, layout: Fixture.hsplit(
+            [.pane(primary), .pane(.terminal(terminalID: UUID()))], [0.5, 0.5]))
+        let twoTranscripts = Fixture.tab(primary, layout: Fixture.hsplit([
+            .pane(primary),
+            .pane(.liveTranscript(id: UUID(), terminalID: terminalID)),
+            .pane(.liveTranscript(id: UUID(), terminalID: terminalID)),
+        ], [0.4, 0.3, 0.3]))
+        let viewerSplit = Fixture.tab(primary, layout: Fixture.hsplit(
+            [.pane(primary), .pane(.codeViewer(id: UUID(), path: "/a"))], [0.5, 0.5]))
+
+        for tab in [terminalSplit, twoTranscripts, viewerSplit, Fixture.tab(primary)] {
+            let reason = LegacyTabConverter.skipReason(
+                worktreeID: Fixture.worktreeID, tab: tab, paneHistories: [:])
+            let expected: String?
+            if case .skipped(let skipped) = Fixture.convert(tab) { expected = skipped } else { expected = nil }
+            #expect(reason == expected, "tab \(tab.tabID)")
+        }
+        let terminalReason = LegacyTabConverter.skipReason(
+            worktreeID: Fixture.worktreeID, tab: terminalSplit, paneHistories: [:])
+        let transcriptReason = LegacyTabConverter.skipReason(
+            worktreeID: Fixture.worktreeID, tab: twoTranscripts, paneHistories: [:])
+        let viewerReason = LegacyTabConverter.skipReason(
+            worktreeID: Fixture.worktreeID, tab: viewerSplit, paneHistories: [:])
+        #expect(terminalReason != nil)
+        #expect(transcriptReason?.contains("duplicateTranscriptView") == true)
+        #expect(viewerReason == nil)
     }
 
     // MARK: - Histories
