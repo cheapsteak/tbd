@@ -1732,10 +1732,10 @@ extension AppState {
             if let main = inRepo.first(where: { $0.status == .main }) {
                 result.append(main)
             }
-            // Top-level active/creating worktrees in this repo, sorted by sortOrder.
+            // Top-level active/creating worktrees in this repo, in sibling order.
             let topLevel = inRepo
                 .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
-                .sorted { $0.sortOrder < $1.sortOrder }
+                .sorted(by: Worktree.precedesSibling)
             for wt in topLevel {
                 appendSubtree(wt, depth: 0, into: &result)
             }

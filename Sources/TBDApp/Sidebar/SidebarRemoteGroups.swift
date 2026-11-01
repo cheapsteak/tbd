@@ -28,7 +28,7 @@ struct SidebarRemoteGroups {
         init(worktrees: [Worktree], sessions: [RemoteSessionInfo], providers: [RemoteProviderStatus]) {
             children = Dictionary(grouping: worktrees.filter {
                 $0.parentWorktreeID != nil && ($0.status == .active || $0.status == .creating)
-            }, by: { $0.parentWorktreeID! }).mapValues { $0.sorted { $0.sortOrder < $1.sortOrder } }
+            }, by: { $0.parentWorktreeID! }).mapValues { $0.sorted(by: Worktree.precedesSibling) }
             rowsByID = Dictionary(worktrees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var bindings: [UUID: Set<UUID>] = [:]
             for row in worktrees {

@@ -196,13 +196,14 @@ extension AppState {
         Self.topLevelWorktrees(worktrees[repoID] ?? [])
     }
 
-    /// Active and creating parentless rows sorted by `sortOrder`: the one
-    /// definition of a section's top level, shared by the row list, the
-    /// grouped partition and drag reorder's index snapshot, so a plain index
-    /// move always lands on the rows the user sees.
+    /// Active and creating parentless rows in sibling order
+    /// (`Worktree.precedesSibling`): the one definition of a section's top
+    /// level, shared by the row list, the grouped partition and drag
+    /// reorder's index snapshot, so a plain index move always lands on the
+    /// rows the user sees.
     nonisolated static func topLevelWorktrees(_ rows: [Worktree]) -> [Worktree] {
         rows.filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
-            .sorted { $0.sortOrder < $1.sortOrder }
+            .sorted(by: Worktree.precedesSibling)
     }
 
     /// The repository section's rows under the current grouping setting.
