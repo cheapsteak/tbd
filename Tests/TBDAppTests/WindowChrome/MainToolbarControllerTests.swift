@@ -433,6 +433,41 @@ struct MainToolbarControllerTests {
         #expect(back)
     }
 
+    /// A second install during the cooldown, as a window ordered back in or
+    /// unminimized makes through `viewDidAppear`, leaves the replacement on
+    /// the window, both at once and after the apply it schedules. Only the
+    /// cooldown's end puts the toolbar back.
+    @Test(.clockDriven) func installDuringTheCooldownLeavesTheReplacement() async throws {
+        let clock = EventDrivenTestClock()
+        let fixture = ToolbarFixture(
+            label: "installDuringTheCooldownLeavesTheReplacement",
+            now: TestDateSource().provider, clock: clock)
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        let kept = try await fixture.replaceUntilTheCooldownStarts(label: "reinstall")
+        try #require(controller.isInReinstallCooldown)
+
+        let before = controller.applyCount
+        controller.install(on: window, split: fixture.split)
+        #expect(window.toolbar === kept)
+        let applied = try await waitForMainActorCondition("the apply the install during the cooldown scheduled") {
+            controller.applyCount > before
+        }
+        try #require(applied)
+        #expect(window.toolbar === kept)
+        #expect(controller.isInReinstallCooldown)
+
+        try await clock.requireAdvanceWhenArmed(
+            by: MainToolbarController.reinstallCooldown, timeout: TestDeadlines.saturatedPass)
+        let back = try await waitForMainActorCondition("the toolbar to come back when the cooldown ends") {
+            window.toolbar === controller.toolbar
+        }
+        #expect(back)
+    }
+
     /// Replacements older than `replacementWindow` stop counting: after the
     /// cap's worth inside one window and a quiet spell, one more is put back
     /// at once instead of starting the cooldown.

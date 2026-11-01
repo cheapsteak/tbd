@@ -26,9 +26,9 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   schedules an apply at once, through KVO on `window.toolbar`, so it does
 ///   not wait for an unrelated change. More than `maxReplacementsInWindow`
 ///   replacements within `replacementWindow` start a `reinstallCooldown`, in
-///   which applies leave the window's toolbar alone, so the two never
-///   ping-pong. When it ends, the controller schedules the apply that puts
-///   the toolbar back.
+///   which applies and installs leave the window's toolbar alone, so the two
+///   never ping-pong. When it ends, the controller schedules the apply that
+///   puts the toolbar back.
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width".
@@ -105,8 +105,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Whether the window showed our toolbar at the last change the watch
     /// saw, so only a change away from ours counts as a replacement.
     private var windowShowsOurToolbar = false
-    /// The running cooldown. While it is set, applies leave the window's
-    /// toolbar alone and the watch ignores the window's changes.
+    /// The running cooldown. While it is set, applies and installs leave the
+    /// window's toolbar alone and the watch ignores the window's changes.
     private var cooldown: Task<Void, Never>?
 
     /// Whether a toolbar that replaced ours too often is being left on the
@@ -153,7 +153,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// Puts the toolbar on `window`, follows `split`'s collapse, the window's
     /// appearance and its `toolbar`, and schedules the first apply. Safe to
-    /// call again for the same window.
+    /// call again for the same window, as each `viewDidAppear` does. During a
+    /// cooldown it records the window and the split but leaves the window's
+    /// toolbar alone: a window ordered back in or unminimized must not restart
+    /// the trade the cooldown stops, and the cooldown's end puts ours back.
     func install(on window: NSWindow, split: MainSplitViewController) {
         // Before the toolbar is set: setting it asks the delegate for items,
         // and the tracking separator needs the split.
@@ -163,11 +166,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         split.onSidebarCollapsedChange = { [weak self] collapsed in
             self?.sidebarCollapsedChanged(collapsed)
         }
-        if window.toolbar !== toolbar {
+        if cooldown == nil, window.toolbar !== toolbar {
             attach(to: window)
         }
         isInstalled = true
-        windowShowsOurToolbar = true
+        windowShowsOurToolbar = window.toolbar === toolbar
         // Both handlers are `@Sendable`; AppKit sets both values on the main
         // thread, and `performOnMain` covers any other. Neither reads its
         // change object. The toolbar's is registered after `attach`, so the
