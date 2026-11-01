@@ -1288,20 +1288,30 @@ jobs:
       # That is within about 6 s of the 100 s at which `Tests/CLAUDE.md`
       # ("Population is the scheduler") says to split — `saturatedPass` less
       # its 18 s margin — and pass 2's timing tests flake in that tail; one
-      # failed after 94.2 s. A split runs its halves one after the other, so it
-      # saves no main-thread time and costs another ~26 s of startup. What it
-      # buys is a per-test tail roughly half as long, because a test queues
-      # behind only its own half's main-actor work.
+      # failed after 94.2 s. A split does not reduce the main-thread work, and
+      # it adds an invocation's startup, ~26 s. What it buys is a shorter tail,
+      # because a test queues behind only its own half's main-actor work.
+      #
+      # Measured on the split's first green run (41352611270): 2a's slowest
+      # test reported 41.0 s (p90 34.1 s, p99 40.9 s) and 2b's 37.5 s (p90
+      # 29.4 s, p99 36.0 s), against 67.2–94.5 s with one step. The two steps
+      # took 61 s and 57 s, 118 s together, against 87–123 s for the single
+      # pass-2 step on recent runs of `main`. On that run the split cost no
+      # measurable job time: halving the main-thread queue saved about what
+      # the extra invocation's startup costs. That is one run.
       #
       # So pass 2's cut is measured too, on the resource that binds it:
       # main-thread time, not test count. Through `P`, TBDAppTests holds 51.6%
       # and 53.6% of pass 2's main-thread samples in two whole-pass profiles,
       # and 52% of its own tests. Step 2a takes `^TBDAppTests\.[A-P]`; step 2b
       # takes everything else outside the daemon targets — TBDAppTests Q–Z,
-      # TBDSharedTests, TBDCLITests, TBDKernelTests, TBDHolderTests,
-      # TBDPeerHelperTests and the app tests that sit in no suite. That is why
-      # 2b executes about 4,540 tests to 2a's 2,700 while each carries about
-      # half the main-thread time.
+      # TBDSharedTests, TBDCLITests, TBDKernelTests, TBDHolderTests and
+      # TBDPeerHelperTests. A suite-less app test runs in 2b unless its
+      # function name starts with an uppercase A–P: its ID is
+      # `TBDAppTests.Name()`, which 2a's filter also matches. Swift function
+      # names are normally lowercase, so in practice suite-less app tests run
+      # in 2b. That is why 2b executed 4,739 tests to 2a's 2,501 on that run
+      # while each carries about half the main-thread time.
       #
       # Why steps 1b and 2b are COMPLEMENTS and not enumerations
       #
@@ -1358,11 +1368,13 @@ jobs:
       # counts this cut's first run prints, which is the only source that
       # measures what actually executes.
       #
-      # The two app halves are floored at 1500 and 2500, against the ~2,700 and
-      # ~4,540 tests they execute. They sit far below either half for the same
-      # reasons as the daemon floors: the executed count drifts from run to
-      # run, and a floor is there to catch a collapse, not to track the
-      # population.
+      # The two app halves are floored at 1400 and 2500, against the 2,501 and
+      # 4,739 tests they executed on the split's first green run
+      # (41352611270). They sit far below either half for the same reasons as
+      # the daemon floors: the executed count drifts from run to run, and a
+      # floor is there to catch a collapse, not to track the population. 2a's
+      # floor is one no other step uses, so `scripts/nightly-flake-stress.test.sh`
+      # catches a change to it on its own.
       #
       # And the executed count is NOT stable run to run: two CI runs on one PR,
       # on commits differing only in doc comments (zero tests added,
@@ -1497,15 +1509,15 @@ jobs:
         # 15. A step bound wide enough for the per-test limits to fire first and
         # attribute a hang to a named test would buy nothing now: the watchdog
         # does that job sooner and with a stack. It bounds the pass at 600 s —
-        # against a 69–96 s test run for the whole of pass 2 as one step — so
-        # the platform bound only has to clear the budget plus the sampling and
+        # against 61 s of step time on the split's first green run — so the
+        # platform bound only has to clear the budget plus the sampling and
         # kill sweep.
         timeout-minutes: 15
         run: |
           read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-app-a --budget-seconds 600 \
-            --floor 1500 \
+            --floor 1400 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
             -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDAppTests\.[A-P]' \
                --xunit-output /tmp/xunit-app-a.xml --experimental-xunit-message-failure
@@ -1518,7 +1530,8 @@ jobs:
         # on its own. Its `if:` is 1b's, for 1b's reasons, so a red 2a does not
         # skip it.
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
-        # 15 and a 600 s budget, for 2a's reasons.
+        # 15 and a 600 s budget, for 2a's reasons; 57 s of step time on that
+        # run.
         timeout-minutes: 15
         run: |
           read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
