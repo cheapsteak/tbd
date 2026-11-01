@@ -277,17 +277,34 @@ struct TabBar: View {
 /// and would swap one set for the other whenever the column crossed the width
 /// the tabs need. Here a resize only moves the scroll area's edge: no tab
 /// item is rebuilt.
+///
+/// Each subview's ideal size is measured once, when SwiftUI makes or updates
+/// the layout's cache, and both `sizeThatFits` and `placeSubviews` read it
+/// from there: an ideal size does not depend on the proposal.
 struct TabsThenAddLayout: Layout {
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+    /// The subviews' ideal sizes, in order.
+    struct Cache {
+        var idealSizes: [CGSize]
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(idealSizes: Self.idealSizes(of: subviews))
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache.idealSizes = Self.idealSizes(of: subviews)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        let ideals = cache.idealSizes
         let widths = Self.widths(idealWidths: ideals.map(\.width), available: proposal.width)
         let height = proposal.height ?? ideals.map(\.height).max() ?? 0
         return CGSize(width: widths.reduce(0, +), height: height)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         let widths = Self.widths(
-            idealWidths: subviews.map { $0.sizeThatFits(.unspecified).width },
+            idealWidths: cache.idealSizes.map(\.width),
             available: bounds.width)
         var x = bounds.minX
         for (subview, width) in zip(subviews, widths) {
@@ -308,6 +325,10 @@ struct TabsThenAddLayout: Layout {
         let rest: [CGFloat] = Array(idealWidths.dropFirst())
         let firstWidth: CGFloat = max(0, min(first, available - rest.reduce(0, +)))
         return [firstWidth] + rest
+    }
+
+    private static func idealSizes(of subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
     }
 }
 
