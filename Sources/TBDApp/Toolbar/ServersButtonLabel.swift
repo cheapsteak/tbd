@@ -22,7 +22,11 @@ struct ServersButtonLabel: View {
             Image(nsImage: Self.bakedIcon(running: runningCount > 0, colorScheme: colorScheme))
                 .renderingMode(.original)
         }
-        .accessibilityLabel(runningCount > 0 ? "Dev servers, \(runningCount) running" : "Dev servers")
+        .accessibilityLabel(Self.accessibilityLabel(runningCount: runningCount))
+    }
+
+    static func accessibilityLabel(runningCount: Int) -> String {
+        runningCount > 0 ? "Dev servers, \(runningCount) running" : "Dev servers"
     }
 
     static func title(runningCount: Int) -> String {
