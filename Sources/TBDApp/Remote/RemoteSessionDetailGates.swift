@@ -98,29 +98,42 @@ enum RemoteSessionDetailGates {
     // MARK: - Remote transcript
 
     /// Whether the window toolbar offers the Transcript toggle for a remote
-    /// session: the provider declares `transcript.read`.
-    static func showsTranscriptToggle(capabilities: [String]) -> Bool {
-        capabilities.contains(transcriptReadCapability)
+    /// session: the provider declares `transcript.read` and the session is
+    /// attached. Until it attaches the transcript is the pane's main side and
+    /// cannot be hidden, so a toggle there would have nothing to do.
+    static func showsTranscriptToggle(capabilities: [String], attached: Bool) -> Bool {
+        attached && capabilities.contains(transcriptReadCapability)
     }
 
-    /// Whether the detail pane shows the transcript half of its split: the
-    /// toggle is offered and the shared `remoteTranscriptOpen` preference
-    /// says open. A hidden toggle hides the pane too, so a provider that
-    /// stops declaring `transcript.read` never leaves a pane nothing can
-    /// close.
-    static func showsTranscriptPane(capabilities: [String], open: Bool) -> Bool {
-        open && showsTranscriptToggle(capabilities: capabilities)
+    /// Whether the detail pane shows the transcript half of its split. With
+    /// `transcript.read` declared, a session that is not attached always shows
+    /// it, and an attached one shows it unless the toolbar toggle has hidden
+    /// it for that session (`hiddenByToggle`). A hide has no effect once the
+    /// session stops being attached, so the transcript comes back the moment
+    /// it does. Without `transcript.read` there is no transcript to show.
+    static func showsTranscriptPane(capabilities: [String], attached: Bool, hiddenByToggle: Bool) -> Bool {
+        capabilities.contains(transcriptReadCapability) && (!attached || !hiddenByToggle)
+    }
+
+    /// Whether the transcript is the main side of the split, on the left,
+    /// with the terminal side (the Attach prompt, the sign-in prompt or the
+    /// log) on the right: the provider declares `transcript.read` and the
+    /// session is not attached. An attached session leads with its terminal
+    /// and keeps the transcript on the right.
+    static func transcriptLeads(capabilities: [String], attached: Bool) -> Bool {
+        !attached && capabilities.contains(transcriptReadCapability)
     }
 
     /// Whether the transcript pane's composer is on screen and enabled: the
-    /// pane is shown (`showsTranscriptPane`) and the composer's state accepts
-    /// a message. `RemoteComposerState.resolve` already folds in
-    /// `offersComposer`, so a provider without `send-submit` answers false.
+    /// pane is shown (`transcriptShown`, `showsTranscriptPane`'s answer for
+    /// the session, which already folds in `transcript.read`) and the
+    /// composer's state accepts a message. `RemoteComposerState.resolve`
+    /// already folds in `offersComposer`, so a provider without
+    /// `send-submit` answers false.
     static func transcriptComposerTakesInput(
-        capabilities: [String], transcriptOpen: Bool, composerState: RemoteComposerState
+        transcriptShown: Bool, composerState: RemoteComposerState
     ) -> Bool {
-        showsTranscriptPane(capabilities: capabilities, open: transcriptOpen)
-            && composerState.isEnabled
+        transcriptShown && composerState.isEnabled
     }
 
     /// Whether a remote session can have a submitting composer at all:

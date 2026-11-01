@@ -205,7 +205,7 @@ struct RemoteSessionDetailView: View {
     /// one, so "not in this set" means either never attached or detached —
     /// `detachInfo` tells the two apart.
     private var isAttached: Bool {
-        appState.attachedRemoteSelections.contains(selection)
+        appState.remoteSessionIsAttached(selection)
     }
 
     /// Covers both detach mechanisms — a clean, explicit detach
@@ -276,12 +276,11 @@ struct RemoteSessionDetailView: View {
 
     // MARK: - Content
 
-    /// A horizontal split: the terminal side on the left, and — when the
-    /// provider declares `transcript.read` and the shared
-    /// `remoteTranscriptOpen` preference says open — the transcript on the
-    /// right. The split is always the container, even with one child, so
-    /// opening or closing the transcript only adds or removes the second
-    /// child and never restructures the left one: `RemoteAttachPager` stays
+    /// A horizontal split: the terminal side on the left, and — when
+    /// `remoteSessionShowsTranscriptPane` says the session shows it — the
+    /// transcript on the right. The split is always the container, even with
+    /// one child, so opening or closing the transcript only adds or removes
+    /// the second child and never restructures the left one: `RemoteAttachPager` stays
     /// mounted either way (see `terminalArea` and `RemoteDetailSplit`).
     private var contentArea: some View {
         RemoteDetailSplit(showsTrailing: appState.remoteSessionShowsTranscriptPane(selection)) {
@@ -441,8 +440,7 @@ struct RemoteSessionDetailView: View {
             snapshotFresh: providerStatus?.hasStaleSnapshot != true,
             hasLiveAttachedPane: showsAttachSlot,
             transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
-                capabilities: capabilities,
-                transcriptOpen: appState.remoteTranscriptOpen,
+                transcriptShown: appState.remoteSessionShowsTranscriptPane(selection),
                 composerState: appState.remoteComposerState(for: selection)))
     }
 

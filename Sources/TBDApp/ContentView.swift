@@ -344,21 +344,20 @@ struct ContentView: View {
                 // session's live: plain buttons (no badges to flatten) on
                 // one fused capsule, like back/forward.
                 if let selection = appState.selectedRemoteSession {
-                    let showsReconnect = appState.attachedRemoteSelections.contains(selection)
+                    let showsReconnect = appState.remoteSessionIsAttached(selection)
                     let showsStop = appState.remoteSessionShowsStop(selection)
                     let showsTranscriptToggle = appState.remoteSessionShowsTranscriptToggle(selection)
+                    let transcriptShown = appState.remoteSessionShowsTranscriptPane(selection)
                     if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
-                                // One preference for every remote session
-                                // (`remoteTranscriptOpen`), not per session.
+                                // Shown only while attached; hides the transcript for this session only.
                                 Button {
-                                    appState.toggleRemoteTranscriptOpen()
+                                    appState.toggleRemoteTranscript(selection)
                                 } label: {
-                                    Image(systemName: appState.remoteTranscriptOpen
-                                          ? "text.bubble.fill" : "text.bubble")
+                                    Image(systemName: transcriptShown ? "text.bubble.fill" : "text.bubble")
                                 }
-                                .help(appState.remoteTranscriptOpen ? "Hide transcript" : "Show transcript")
+                                .help(transcriptShown ? "Hide transcript" : "Show transcript")
                             }
                             if showsReconnect {
                                 // Restarts the local `attach` child in place —

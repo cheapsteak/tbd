@@ -24,23 +24,53 @@ extension AppState {
         remoteProviders.first { $0.config.name == selection.provider }?.describe?.capabilities ?? []
     }
 
-    /// Whether the window toolbar offers the Transcript toggle for `selection`.
+    /// Whether the window toolbar offers the Transcript toggle for
+    /// `selection`: its provider declares `transcript.read` and it is
+    /// attached (`remoteSessionIsAttached`).
     func remoteSessionShowsTranscriptToggle(_ selection: RemoteSessionSelection) -> Bool {
         RemoteSessionDetailGates.showsTranscriptToggle(
-            capabilities: remoteProviderCapabilities(for: selection))
+            capabilities: remoteProviderCapabilities(for: selection),
+            attached: remoteSessionIsAttached(selection))
     }
 
-    /// Whether `selection`'s detail pane shows the transcript half of its split.
+    /// Whether `selection`'s detail pane shows the transcript half of its
+    /// split: always while it is not attached, and while it is attached
+    /// unless the toolbar toggle has hidden it for this session
+    /// (`remoteTranscriptHiddenSelection`).
     func remoteSessionShowsTranscriptPane(_ selection: RemoteSessionSelection) -> Bool {
         RemoteSessionDetailGates.showsTranscriptPane(
             capabilities: remoteProviderCapabilities(for: selection),
-            open: remoteTranscriptOpen)
+            attached: remoteSessionIsAttached(selection),
+            hiddenByToggle: remoteTranscriptHiddenSelection == selection)
     }
 
-    /// The toolbar toggle's action. Stores an explicit value, so the choice
-    /// survives relaunch and applies to every remote session.
-    func toggleRemoteTranscriptOpen() {
-        remoteTranscriptOpen.toggle()
+    /// Whether the transcript is the main side of `selection`'s split, with
+    /// the terminal side on the right: its provider declares
+    /// `transcript.read` and it is not attached. Attaching and detaching swap
+    /// the halves.
+    func remoteSessionTranscriptLeads(_ selection: RemoteSessionSelection) -> Bool {
+        RemoteSessionDetailGates.transcriptLeads(
+            capabilities: remoteProviderCapabilities(for: selection),
+            attached: remoteSessionIsAttached(selection))
+    }
+
+    /// The toolbar toggle's action: hides `selection`'s transcript, or shows
+    /// it again when it is the one hidden. Only one session's transcript is
+    /// ever hidden, and nothing is persisted. A no-op whenever the toggle is
+    /// not offered, so a session that is not attached never records a hide.
+    func toggleRemoteTranscript(_ selection: RemoteSessionSelection) {
+        guard remoteSessionShowsTranscriptToggle(selection) else { return }
+        remoteTranscriptHiddenSelection = remoteTranscriptHiddenSelection == selection ? nil : selection
+    }
+
+    /// Drops a transcript hide that belongs to any session other than
+    /// `selection`, so a hide never outlives its session being on screen.
+    /// Called when the selection changes and when the detail view's shown
+    /// attach slot changes. Writes only when there is a hide to drop, so the
+    /// many calls that change nothing emit no observation.
+    func clearRemoteTranscriptHide(unlessFor selection: RemoteSessionSelection?) {
+        guard let hidden = remoteTranscriptHiddenSelection, hidden != selection else { return }
+        remoteTranscriptHiddenSelection = nil
     }
 
     /// The mirrored row for `selection`, or nil while it is not in the mirror.

@@ -118,37 +118,40 @@ struct RemoteSessionDetailGatesTests {
         }
     }
 
-    // MARK: - transcriptComposerTakesInput(capabilities:transcriptOpen:composerState:)
+    // MARK: - transcriptComposerTakesInput(transcriptShown:composerState:)
 
     private static let transcriptCapabilities = ["send", "transcript.read", "send-submit"]
 
     private func footerShown(
         capabilities: [String] = transcriptCapabilities,
-        transcriptOpen: Bool = true,
+        transcriptShown: Bool = true,
         composerState: RemoteComposerState = .running
     ) -> Bool {
         RemoteSessionDetailGates.showsSendFooter(
             capabilities: capabilities, gone: false, snapshotFresh: true, hasLiveAttachedPane: false,
             transcriptComposerTakesInput: RemoteSessionDetailGates.transcriptComposerTakesInput(
-                capabilities: capabilities, transcriptOpen: transcriptOpen,
-                composerState: composerState))
+                transcriptShown: transcriptShown, composerState: composerState))
     }
 
     @Test func composerTakesInputWithThePaneOpenAndARunningSession() {
         #expect(RemoteSessionDetailGates.transcriptComposerTakesInput(
-            capabilities: Self.transcriptCapabilities, transcriptOpen: true, composerState: .running))
+            transcriptShown: true, composerState: .running))
         #expect(!footerShown())
     }
 
     @Test func footerStaysWhileTheTranscriptPaneIsClosed() {
         #expect(!RemoteSessionDetailGates.transcriptComposerTakesInput(
-            capabilities: Self.transcriptCapabilities, transcriptOpen: false, composerState: .running))
-        #expect(footerShown(transcriptOpen: false))
+            transcriptShown: false, composerState: .running))
+        #expect(footerShown(transcriptShown: false))
     }
 
     @Test func footerStaysWithoutTranscriptRead() {
-        // No `transcript.read`: no pane, so no composer, whatever is open.
-        #expect(footerShown(capabilities: ["send", "send-submit"]))
+        // No `transcript.read`: no pane, so no composer, attached or not.
+        let capabilities = ["send", "send-submit"]
+        let transcriptShown = RemoteSessionDetailGates.showsTranscriptPane(
+            capabilities: capabilities, attached: false, hiddenByToggle: false)
+        #expect(!transcriptShown)
+        #expect(footerShown(capabilities: capabilities, transcriptShown: transcriptShown))
     }
 
     /// Without `send-submit` the resolver hides the composer, and the footer —

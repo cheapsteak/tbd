@@ -478,6 +478,10 @@ final class AppState {
             if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
                 sidebarSelectionGeneration &+= 1
             }
+            // A transcript hide belongs to the session on screen. Moving to
+            // another session or off remote sessions altogether shows it
+            // again; reselecting the same session keeps it.
+            clearRemoteTranscriptHide(unlessFor: selectedRemoteSession)
         }
     }
 
@@ -823,14 +827,16 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
-    /// Whether a remote session's detail pane shows its transcript beside the
-    /// terminal. One standing preference for every remote session, not a
-    /// per-session fact, so a newly viewed session follows it. Unset reads as
-    /// open, so the first remote session a user views shows its transcript;
-    /// the toolbar toggle stores an explicit `true`/`false`.
-    var remoteTranscriptOpen: Bool = true {
-        didSet { userDefaults.set(remoteTranscriptOpen, forKey: Self.remoteTranscriptOpenKey) }
-    }
+    /// The one remote session whose transcript the toolbar toggle has hidden,
+    /// or nil when no transcript is hidden. In memory only and never
+    /// persisted: the transcript opens by default, every time. A hide lasts
+    /// only while its session stays selected with its attach slot on screen —
+    /// `selectedRemoteSession` clears it when the selection moves anywhere
+    /// else, and `setRemoteAttachSlotShown` clears it when the detail view
+    /// stops showing that session's attach slot — so switching sessions or
+    /// reattaching shows the transcript again. Written only by
+    /// `toggleRemoteTranscript` and `clearRemoteTranscriptHide(unlessFor:)`.
+    var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -2671,8 +2677,6 @@ final class AppState {
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
-    /// Named in the remote-transcript spec; left unprefixed to match it.
-    static let remoteTranscriptOpenKey = "remoteTranscriptOpen"
     private static let remoteSessionDisplayNamesKey = "com.tbd.app.remoteSessionDisplayNames"
 
     /// Emits a debounced event when the network path changes or the machine
@@ -2709,7 +2713,6 @@ final class AppState {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
-        remoteTranscriptOpen = userDefaults.object(forKey: Self.remoteTranscriptOpenKey) as? Bool ?? true
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
