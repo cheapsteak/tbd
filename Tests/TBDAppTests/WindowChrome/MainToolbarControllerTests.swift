@@ -152,6 +152,30 @@ struct MainToolbarControllerTests {
 
     // MARK: - Collapse
 
+    /// The toggle and the arrows lead the toolbar, ahead of the tracking
+    /// separator, and stay visible beside the window buttons with the sidebar
+    /// shown, collapsed and shown again.
+    ///
+    /// - **Position.** AppKit gives an image item, such as the toggle or an
+    ///   arrow, no view and no frame through any public API, so those three
+    ///   are placed by order: they open `toolbar.items`, before the
+    ///   separator, and are visible. The view-based items do have frames,
+    ///   checked in window coordinates against the zoom button and the
+    ///   divider the separator tracks. Shown, the filter sits right of the
+    ///   zoom button and left of the divider, and the title right of the
+    ///   divider. Collapsed, the title sits right of the zoom button and left
+    ///   of where the shown sidebar ended, so the toolbar followed the
+    ///   collapse. AppKit lays visible items out in order, so the toggle and
+    ///   arrows lie between the zoom button and the item after them.
+    /// - **Control.** "Visible" means something only if `visibleItems` can
+    ///   leave an item out here, and a 1200 pt window fits everything. So the
+    ///   sidebar is then narrowed below what its section's items need, and
+    ///   one of them must leave `visibleItems` while it stays in `items`, as
+    ///   the spec's "Width" says AppKit drops an item that does not fit its
+    ///   section. Which one AppKit drops, and whether it squeezes the filter
+    ///   first, is AppKit's choice, so any of the four counts. The title, in
+    ///   the wide main section, must stay visible, so an empty `visibleItems`
+    ///   cannot pass for a drop.
     @Test func toggleAndArrowsSurviveACollapse() async throws {
         let fixture = ToolbarFixture(label: "toggleAndArrowsSurviveACollapse")
         defer { fixture.tearDown() }
@@ -165,22 +189,40 @@ struct MainToolbarControllerTests {
             MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
         ]
 
-        // Not animated: an offscreen window need not run an animation through.
+        // Shown.
+        #expect(fixture.leadsBeforeTheSeparator(leading))
+        let shownPlaced = try await waitForMainActorCondition("the shown sidebar's items to be visible and placed") {
+            fixture.showsAll(leading) && fixture.edges()?.placedOverAShownSidebar == true
+        }
+        #expect(shownPlaced)
+        #expect(fixture.showsAll(leading))
+        let shown = try #require(fixture.edges())
+        let shownFilter = try #require(shown.filter)
+        #expect(shown.buttonsMaxX <= shownFilter.minX)
+        #expect(shownFilter.maxX <= shown.dividerX)
+        #expect(shown.dividerX <= shown.title.minX)
+        let shownDividerX = shown.dividerX
+
+        // Collapsed. Not animated: an offscreen window need not run an
+        // animation through.
         fixture.split.sidebarItem.isCollapsed = true
         let filterLeft = try await waitForMainActorCondition("the filter to leave on collapse") {
             !fixture.identifiers.contains(MainToolbarItemID.repoFilter)
         }
         try #require(filterLeft)
-        let collapsedLeading = Array(fixture.identifiers.prefix(3))
-        #expect(collapsedLeading == leading)
+        #expect(fixture.leadsBeforeTheSeparator(leading))
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
-        let leadingVisible = try await waitForMainActorCondition("the toggle and arrows to be visible") {
-            fixture.window.layoutIfNeeded()
-            let visible = Set((fixture.controller.toolbar.visibleItems ?? []).map { $0.itemIdentifier })
-            return leading.allSatisfy { visible.contains($0) }
+        let collapsedPlaced = try await waitForMainActorCondition("the collapsed sidebar's items to be visible and placed") {
+            fixture.showsAll(leading)
+                && fixture.edges()?.placedBesideTheWindowButtons(shownDividerX: shownDividerX) == true
         }
-        #expect(leadingVisible)
+        #expect(collapsedPlaced)
+        #expect(fixture.showsAll(leading))
+        let collapsed = try #require(fixture.edges())
+        #expect(collapsed.buttonsMaxX <= collapsed.title.minX)
+        #expect(collapsed.title.minX < shownDividerX)
 
+        // Shown again.
         fixture.split.sidebarItem.isCollapsed = false
         let filterBack = try await waitForMainActorCondition("the filter to return on expansion") {
             fixture.identifiers.contains(MainToolbarItemID.repoFilter)
@@ -190,9 +232,41 @@ struct MainToolbarControllerTests {
         let filterIndex = try #require(expanded.firstIndex(of: MainToolbarItemID.repoFilter))
         let separatorIndex = try #require(expanded.firstIndex(of: MainToolbarItemID.sidebarSeparator))
         #expect(filterIndex < separatorIndex)
-        let expandedLeading = Array(expanded.prefix(3))
-        #expect(expandedLeading == leading)
+        #expect(fixture.leadsBeforeTheSeparator(leading))
         #expect(expanded == fixture.expectedIdentifiers())
+        let reshownPlaced = try await waitForMainActorCondition("the re-shown sidebar's items to be visible and placed") {
+            fixture.showsAll(leading) && fixture.edges()?.placedOverAShownSidebar == true
+        }
+        #expect(reshownPlaced)
+        #expect(fixture.showsAll(leading))
+        let reshown = try #require(fixture.edges())
+        let reshownFilter = try #require(reshown.filter)
+        #expect(reshown.buttonsMaxX <= reshownFilter.minX)
+        #expect(reshownFilter.maxX <= reshown.dividerX)
+        #expect(reshown.dividerX <= reshown.title.minX)
+
+        // Control: a sidebar too narrow for its section's items drops one.
+        let narrow = MainToolbarMetrics.windowButtonsWidth + MainToolbarMetrics.iconItemWidth
+        try #require(narrow < MainToolbarMetrics.sidebarMinimumThickness)
+        // Minimum first, so the minimum never exceeds the maximum.
+        fixture.split.sidebarItem.minimumThickness = narrow
+        fixture.split.sidebarItem.maximumThickness = narrow
+        fixture.split.splitView.setPosition(narrow, ofDividerAt: 0)
+        let narrowed = try await waitForMainActorCondition("the sidebar to narrow to \(narrow) pt") {
+            fixture.window.layoutIfNeeded()
+            guard let pane = fixture.sidebarPane else { return false }
+            return abs(pane.frame.width - narrow) < 1
+        }
+        try #require(narrowed)
+        let sidebarSection: [NSToolbarItem.Identifier] = leading + [MainToolbarItemID.repoFilter]
+        let dropped = try await waitForMainActorCondition("an item of the narrowed sidebar's section to leave visibleItems") {
+            fixture.window.layoutIfNeeded()
+            let visible = fixture.visibleIdentifiers
+            let present = Set(fixture.identifiers)
+            let droppedOne = sidebarSection.contains { present.contains($0) && !visible.contains($0) }
+            return droppedOne && visible.contains(MainToolbarItemID.title)
+        }
+        try #require(dropped)
     }
 
     // MARK: - Back and forward
@@ -1203,6 +1277,55 @@ private final class ToolbarFixture {
         controller.item(MainToolbarItemID.repoFilter)?.view as? NSPopUpButton
     }
 
+    // MARK: Placement
+
+    /// The identifiers of the items AppKit shows, leaving out any it dropped.
+    var visibleIdentifiers: Set<NSToolbarItem.Identifier> {
+        Set((controller.toolbar.visibleItems ?? []).map(\.itemIdentifier))
+    }
+
+    /// Whether every item in `wanted` is visible.
+    func showsAll(_ wanted: [NSToolbarItem.Identifier]) -> Bool {
+        let visible = visibleIdentifiers
+        return wanted.allSatisfy { visible.contains($0) }
+    }
+
+    /// Whether `leading` opens the toolbar's items, all of it ahead of the
+    /// tracking separator.
+    func leadsBeforeTheSeparator(_ leading: [NSToolbarItem.Identifier]) -> Bool {
+        let ids = identifiers
+        guard let separator = ids.firstIndex(of: MainToolbarItemID.sidebarSeparator) else { return false }
+        return Array(ids.prefix(leading.count)) == leading && leading.count <= separator
+    }
+
+    /// The sidebar's pane as the split arranges it. The first divider, which
+    /// the tracking separator follows, sits at its trailing edge.
+    var sidebarPane: NSView? {
+        split.splitView.arrangedSubviews.first
+    }
+
+    /// The toolbar's public frames after a layout pass, or nil until the
+    /// window has a zoom button, the split a sidebar pane, and the title
+    /// view a place in the window.
+    func edges() -> ToolbarEdges? {
+        window.layoutIfNeeded()
+        guard let zoom = window.standardWindowButton(.zoomButton),
+              let pane = sidebarPane,
+              let title = Self.placedFrame(of: titleView, in: window) else { return nil }
+        return ToolbarEdges(
+            buttonsMaxX: zoom.convert(zoom.bounds, to: nil).maxX,
+            dividerX: pane.convert(pane.bounds, to: nil).maxX,
+            filter: filterPopup.flatMap { Self.placedFrame(of: $0, in: window) },
+            title: title)
+    }
+
+    /// `view`'s frame in window coordinates, once it sits in `window` with a
+    /// width.
+    static func placedFrame(of view: NSView, in window: NSWindow) -> NSRect? {
+        guard view.window === window, view.frame.width > 0 else { return nil }
+        return view.convert(view.bounds, to: nil)
+    }
+
     // MARK: State
 
     /// Selects the first worktree and gives it one server: running with
@@ -1253,5 +1376,32 @@ private final class ToolbarFixture {
         let controller = NSViewController()
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: windowSize.height))
         return controller
+    }
+}
+
+/// Where the toolbar's publicly framed parts sit, in window coordinates: the
+/// window buttons' trailing edge, the divider the tracking separator follows,
+/// and the two view-based items. An image item, such as the toggle or an
+/// arrow, has no public frame, so it is placed against these by order.
+private struct ToolbarEdges {
+    /// The zoom button's trailing edge, where the window buttons end.
+    var buttonsMaxX: CGFloat
+    /// The sidebar pane's trailing edge, where the first divider sits.
+    var dividerX: CGFloat
+    /// The filter popup, while it is in the toolbar and laid out.
+    var filter: NSRect?
+    var title: NSRect
+
+    /// The sidebar shown: the filter right of the window buttons and left of
+    /// the divider, and the title right of the divider.
+    var placedOverAShownSidebar: Bool {
+        guard let filter else { return false }
+        return buttonsMaxX <= filter.minX && filter.maxX <= dividerX && dividerX <= title.minX
+    }
+
+    /// The sidebar collapsed: the title right of the window buttons and left
+    /// of `shownDividerX`, where the shown sidebar ended.
+    func placedBesideTheWindowButtons(shownDividerX: CGFloat) -> Bool {
+        buttonsMaxX <= title.minX && title.minX < shownDividerX
     }
 }
