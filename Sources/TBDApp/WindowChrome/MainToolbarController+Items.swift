@@ -26,6 +26,46 @@ struct ToolbarImageKey {
     var key: String
 }
 
+/// The view of a compact leading toolbar item: a plain view holding the
+/// item's accessory-bar button, pinned to its four edges.
+///
+/// The button is not the item's view itself because `NSToolbarItem` forwards
+/// `isBordered`, `isEnabled`, `target`, `action` and `image` to a view that
+/// answers them. A bordered button as an item's view makes the item bordered,
+/// which gives it a Liquid Glass background, and adjacent glass items share
+/// one capsule. A plain view answers none of them, so the item keeps its own
+/// `isBordered = false` and shows no glass, while the bordered button one
+/// level down keeps its own hover highlight. That is why this class must not
+/// gain any of those properties.
+///
+/// AppKit measures the host, which carries the item's size constraints. The
+/// button's edge constraints are required, so they hold it to the host's size
+/// over the accessory-bar bezel's wider intrinsic size. The host is not an
+/// accessibility element, so VoiceOver lands on the button.
+final class ToolbarIconButtonHost: NSView {
+    let button: NSButton
+
+    init(button: NSButton) {
+        self.button = button
+        super.init(frame: button.frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: leadingAnchor),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor),
+            button.topAnchor.constraint(equalTo: topAnchor),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
 extension MainToolbarController {
     // MARK: Item construction
 
@@ -71,13 +111,16 @@ extension MainToolbarController {
         }
     }
 
-    /// A compact leading button: a view item whose view is an accessory-bar
-    /// `NSButton`, `iconButtonWidth` by `iconButtonHeight`, with the symbol at
+    /// A compact leading button: a view item whose view is a
+    /// `ToolbarIconButtonHost`, `iconButtonWidth` by `iconButtonHeight`,
+    /// holding an accessory-bar `NSButton` with the symbol at
     /// `iconGlyphPointSize`. The button is bordered but shows its border only
     /// while the pointer is inside it, so it highlights on hover and shows no
-    /// bezel at rest. A view item's target and action are its view's, and its
-    /// overflow row is an explicit menu form carrying the same target and
-    /// action.
+    /// bezel at rest. The item is not bordered, and the host answers none of
+    /// the properties an item forwards to its view, so the item has no Liquid
+    /// Glass background (see `ToolbarIconButtonHost`). The button carries the
+    /// target and action, the item neither, and the item's overflow row is an
+    /// explicit menu form carrying the same target and action.
     private func makeIconButtonItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, target: AnyObject?, action: Selector
     ) -> NSToolbarItem {
@@ -94,15 +137,17 @@ extension MainToolbarController {
         button.setAccessibilityLabel(tip)
         button.target = target
         button.action = action
-        button.translatesAutoresizingMaskIntoConstraints = false
-        let width = button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth)
+
+        let host = ToolbarIconButtonHost(button: button)
+        let width = host.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth)
         width.identifier = Self.iconButtonWidthID
-        let height = button.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight)
+        let height = host.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight)
         height.identifier = Self.iconButtonHeightID
         NSLayoutConstraint.activate([width, height])
 
         let item = NSToolbarItem(itemIdentifier: identifier)
-        item.view = button
+        item.view = host
+        item.isBordered = false
         item.label = tip
         item.toolTip = tip
         let form = NSMenuItem(title: tip, action: action, keyEquivalent: "")
@@ -111,10 +156,10 @@ extension MainToolbarController {
         return item
     }
 
-    /// The identifiers of a compact button's size constraints, which name
-    /// them in a layout log and let a test find them among the content-size
-    /// constraints AppKit gives the button once it is laid out. Required, so
-    /// they win over the bezel's wider intrinsic size.
+    /// The identifiers of a compact item's size constraints, on its host,
+    /// which name them in a layout log and let a test find them among the
+    /// host's other constraints. Required, so with the button's required edge
+    /// constraints they win over the bezel's wider intrinsic size.
     static let iconButtonWidthID = "tbd.toolbar.iconButton.width"
     static let iconButtonHeightID = "tbd.toolbar.iconButton.height"
 
@@ -148,14 +193,16 @@ extension MainToolbarController {
     /// because validation would enable it whenever its target answers the
     /// action; `canGoBack` and `canGoForward` decide instead, through
     /// `updateContent(_:)`, and `validateMenuItem(_:)` for its overflow row.
-    /// It starts disabled, as do its button, which `isEnabled` forwards to,
-    /// and its overflow row.
+    /// It starts disabled, as do its button and its overflow row: the item's
+    /// `isEnabled` does not reach a button its host holds, so the button is
+    /// disabled itself.
     private func makeHistoryItem(
         _ identifier: NSToolbarItem.Identifier, symbol: String, tip: String, action: Selector
     ) -> NSToolbarItem {
         let item = makeIconButtonItem(identifier, symbol: symbol, tip: tip, target: self, action: action)
         item.autovalidates = false
         item.isEnabled = false
+        (item.view as? ToolbarIconButtonHost)?.button.isEnabled = false
         item.menuFormRepresentation?.isEnabled = false
         return item
     }
@@ -360,12 +407,17 @@ extension MainToolbarController {
         }
     }
 
-    /// Enables or disables `item`, and with it its button and its overflow
-    /// row, setting each only when it differs. The overflow menu may or may
-    /// not validate its rows, so the row's own flag follows too.
+    /// Enables or disables `item`, its button and its overflow row, setting
+    /// each only when it differs. The item's `isEnabled` does not reach a
+    /// button its host holds, so the button's own flag is set, and the
+    /// overflow menu may or may not validate its rows, so the row's own flag
+    /// follows too.
     private func updateEnabled(_ item: NSToolbarItem, _ enabled: Bool) {
         if item.isEnabled != enabled {
             item.isEnabled = enabled
+        }
+        if let button = (item.view as? ToolbarIconButtonHost)?.button, button.isEnabled != enabled {
+            button.isEnabled = enabled
         }
         if let form = item.menuFormRepresentation, form.isEnabled != enabled {
             form.isEnabled = enabled

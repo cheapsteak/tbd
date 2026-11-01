@@ -135,18 +135,31 @@ turn, never during a SwiftUI update, which can re-enter layout.
 The toggle, back and forward match the leading buttons of a macOS 27 toolbar
 whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
 
-- **View** – each is a view item whose view is an `NSButton`, 20 pt wide and
-  28 pt tall, held by required constraints. AppKit centres items vertically,
-  which puts the glyphs on the window buttons' line.
-- **Pitch** – 28 pt: the 20 pt button plus AppKit's spacing between items,
+- **View** – each is a view item whose view is a plain host view, 20 pt wide
+  and 28 pt tall, held by required constraints. The host holds an
+  accessory-bar `NSButton` pinned to its four edges by required constraints,
+  which win over the bezel's wider intrinsic size. AppKit centres items
+  vertically, which puts the glyphs on the window buttons' line.
+- **Pitch** – 28 pt: the 20 pt host plus AppKit's spacing between items,
   which is not public and is estimated at 8 pt.
 - **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt and
   regular weight. Back and forward draw grey while disabled.
 - **Hover** – the button is bordered with `showsBorderOnlyWhileMouseInside`,
   so its bezel shows only while the pointer is over it: it highlights on hover
   and shows no border at rest.
-- **No capsule** – AppKit has no public API to remove a view item's Liquid
-  Glass background, so the live check confirms that none shows.
+- **No glass** – `NSToolbarItem` forwards `isBordered`, `isEnabled`, target,
+  action and image to its view when the view answers them, so a bordered
+  button as the item's view would make the item bordered. A bordered item
+  gets a Liquid Glass background, and adjacent glass items share one capsule,
+  so the three buttons would sit together on one. The host answers none of
+  those, so the item keeps its own `isBordered = false`, set explicitly, and
+  shows no glass, as the title item does. The bordered button one level down
+  keeps its own hover highlight.
+- **Wiring** – the button carries the target and action, and the item
+  neither. The item's `isEnabled` does not reach a button inside the host, so
+  back and forward enable and disable the item, the button and the overflow
+  row separately, each only when it differs. The host is not an accessibility
+  element, so VoiceOver lands on the button.
 
 ### The overflow menu
 
@@ -231,9 +244,11 @@ No durable resource is added.
   false after setup and after a layout pass; both separator styles `.none`.
 - **The toggle survives a collapse:** in a hosted window, the toggle and arrows
   are still toolbar items after the sidebar collapses.
-- **Compact buttons:** each is a view item whose button holds 20 × 28 pt, with
-  its tool tip, target and action; the sidebar's minimum thickness is the
-  "Width" formula.
+- **Compact buttons:** each is an unbordered view item whose host answers
+  neither `isBordered` nor `setBordered:` and holds 20 × 28 pt, and whose
+  button fills the host, with its tool tip, target and action; back and
+  forward start disabled, button included; the sidebar's minimum thickness is
+  the "Width" formula.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
   none, sends its action from a menu item without raising; the filter's form
   mirrors the popup and sets the filter.
@@ -250,8 +265,10 @@ No durable resource is added.
 ## Risks
 
 - **Two toolbars to keep in step** until the SwiftUI path is deleted.
-- **macOS 27 reportedly draws a bar behind toolbar buttons;** unverified for
-  the compact buttons, whose glass AppKit gives no public way to remove.
+- **Keeping glass off the compact buttons relies on forwarding.** They have
+  none because their item is unbordered and its view forwards nothing. If a
+  macOS release gives glass to view items by another rule, the three buttons
+  would share one capsule; the live check confirms none shows.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.

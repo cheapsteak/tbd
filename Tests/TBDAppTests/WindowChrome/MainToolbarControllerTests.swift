@@ -186,9 +186,10 @@ struct MainToolbarControllerTests {
         try await fixture.ready()
 
         let toggle = try #require(fixture.controller.item(MainToolbarItemID.toggleSidebar))
-        #expect(toggle.target === fixture.split)
-        #expect(toggle.action == #selector(NSSplitViewController.toggleSidebar(_:)))
-        #expect(toggle.view is NSButton)
+        #expect(toggle.view is ToolbarIconButtonHost)
+        let toggleButton = try #require(ToolbarFixture.iconButton(of: toggle))
+        #expect(toggleButton.target === fixture.split)
+        #expect(toggleButton.action == #selector(NSSplitViewController.toggleSidebar(_:)))
         let compactWidths = [CGFloat](repeating: MainToolbarMetrics.iconButtonWidth, count: 3)
         let leading: [NSToolbarItem.Identifier] = [
             MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
@@ -259,19 +260,30 @@ struct MainToolbarControllerTests {
 
     // MARK: - Compact leading buttons
 
-    /// The toggle, back and forward are view items, each a bordered button
-    /// that shows its border only under the pointer, held at the compact size
-    /// by required constraints, with its tool tip, label and accessibility
-    /// description, and its target and action on the button, on the item,
-    /// which forwards them, and on its overflow row. Once laid out, a button
-    /// also carries AppKit's content-size constraints for the bezel, wider
-    /// than the compact width, so its own constraints are found by their
-    /// identifiers, and its fitting width shows the required width wins.
+    /// The toggle, back and forward are view items whose view is a
+    /// `ToolbarIconButtonHost`: the structure that keeps Liquid Glass off
+    /// them. A bordered button as an item's view makes the item bordered,
+    /// which gives it glass, so the item is not bordered and its view answers
+    /// neither `isBordered` nor `setBordered:`, and the item holds no target
+    /// or action of its own, which it would if the view forwarded them.
+    ///
+    /// The host's button is an accessory-bar button, bordered but showing its
+    /// border only under the pointer, image-only, with its tool tip and
+    /// accessibility description, its target and action, and pinned to the
+    /// host's four edges by required constraints. The host holds the compact
+    /// size by required constraints, found by their identifiers among its
+    /// edge constraints, and its fitting size is the compact size. The
+    /// overflow row carries the item's label, target and action.
     @Test func leadingButtonsAreCompactViewItems() async throws {
         let fixture = ToolbarFixture(label: "leadingButtonsAreCompactViewItems")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let compactSize = NSSize(width: MainToolbarMetrics.iconButtonWidth, height: MainToolbarMetrics.iconButtonHeight)
+        let allEdges: Set<Int> = [
+            NSLayoutConstraint.Attribute.leading.rawValue, NSLayoutConstraint.Attribute.trailing.rawValue,
+            NSLayoutConstraint.Attribute.top.rawValue, NSLayoutConstraint.Attribute.bottom.rawValue,
+        ]
 
         let buttons: [(NSToolbarItem.Identifier, String, AnyObject?, Selector)] = [
             (MainToolbarItemID.toggleSidebar, "Toggle Sidebar", fixture.split,
@@ -282,9 +294,23 @@ struct MainToolbarControllerTests {
         ]
         for (identifier, tip, target, action) in buttons {
             let item = try #require(controller.item(identifier))
-            let button = try #require(item.view as? NSButton)
+            let host = try #require(item.view as? ToolbarIconButtonHost)
+            let button = host.button
+
+            // What keeps the glass off: an unbordered item over a view that
+            // forwards nothing.
+            #expect(item.isBordered == false)
+            let answersBordered = host.responds(to: #selector(getter: NSButton.isBordered))
+            let answersSetBordered = host.responds(to: #selector(setter: NSButton.isBordered))
+            #expect(answersBordered == false)
+            #expect(answersSetBordered == false)
+            let itemHasTarget = item.target != nil
+            #expect(!itemHasTarget)
+            #expect(item.action == nil)
+
             #expect(item.label == tip)
             #expect(item.toolTip == tip)
+            #expect(button.superview === host)
             #expect(button.toolTip == tip)
             #expect(button.image?.accessibilityDescription == tip)
             #expect(button.imagePosition == .imageOnly)
@@ -293,26 +319,28 @@ struct MainToolbarControllerTests {
             #expect(button.showsBorderOnlyWhileMouseInside)
             #expect(button.target === target)
             #expect(button.action == action)
-            #expect(item.target === target)
-            #expect(item.action == action)
+            #expect(host.translatesAutoresizingMaskIntoConstraints == false)
             #expect(button.translatesAutoresizingMaskIntoConstraints == false)
-            let widths = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonWidthID)
-            let heights = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonHeightID)
+            let pinnedEdges = ToolbarFixture.pinnedEdges(of: button, in: host)
+            #expect(pinnedEdges == allEdges)
+
+            let widths = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonWidthID)
+            let heights = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonHeightID)
             try #require(widths.count == 1)
             try #require(heights.count == 1)
             let width = widths[0]
             let height = heights[0]
-            #expect(width.firstItem === button)
+            #expect(width.firstItem === host)
             #expect(width.firstAttribute == .width)
             #expect(width.relation == .equal)
             #expect(width.priority == .required)
             #expect(width.constant == MainToolbarMetrics.iconButtonWidth)
-            #expect(height.firstItem === button)
+            #expect(height.firstItem === host)
             #expect(height.firstAttribute == .height)
             #expect(height.relation == .equal)
             #expect(height.priority == .required)
             #expect(height.constant == MainToolbarMetrics.iconButtonHeight)
-            #expect(button.fittingSize.width == MainToolbarMetrics.iconButtonWidth)
+            #expect(host.fittingSize == compactSize)
             let row = try #require(item.menuFormRepresentation)
             #expect(row.title == tip)
             #expect(row.target === target)
@@ -343,7 +371,7 @@ struct MainToolbarControllerTests {
             (MainToolbarItemID.forward, "chevron.right", NSSize(width: 6, height: 11)),
         ]
         for (identifier, symbol, reference) in references {
-            let button = try #require(fixture.controller.item(identifier)?.view as? NSButton)
+            let button = try #require(ToolbarFixture.iconButton(of: fixture.controller.item(identifier)))
             #expect(button.imageScaling == .scaleNone)
             let glyph = try #require(button.image)
             let imageSize = glyph.size
@@ -360,10 +388,28 @@ struct MainToolbarControllerTests {
 
     // MARK: - Back and forward
 
+    /// A Back or Forward item starts disabled, with its button and its
+    /// overflow row, as the delegate makes it and before any apply: the item
+    /// does not forward `isEnabled` to a button its host holds, so each is
+    /// set on its own. Each apply then sets the item, the button and the row
+    /// from the snapshot.
     @Test func backForwardEnablementFollowsTheSnapshot() async throws {
         let fixture = ToolbarFixture(label: "backForwardEnablementFollowsTheSnapshot")
         defer { fixture.tearDown() }
         try await fixture.ready()
+
+        let controller = fixture.controller
+        let history: [NSToolbarItem.Identifier] = [MainToolbarItemID.back, MainToolbarItemID.forward]
+        for identifier in history {
+            let made = controller.toolbar(
+                controller.toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: false)
+            let fresh = try #require(made)
+            let freshButton = try #require(ToolbarFixture.iconButton(of: fresh))
+            let freshRow = try #require(fresh.menuFormRepresentation)
+            #expect(fresh.isEnabled == false)
+            #expect(freshButton.isEnabled == false)
+            #expect(freshRow.isEnabled == false)
+        }
 
         var snapshot = MainToolbarSnapshot.make(from: fixture.state)
         snapshot.canGoBack = true
@@ -371,8 +417,8 @@ struct MainToolbarControllerTests {
         fixture.controller.apply(snapshot)
         let back = try #require(fixture.controller.item(MainToolbarItemID.back))
         let forward = try #require(fixture.controller.item(MainToolbarItemID.forward))
-        let backButton = try #require(back.view as? NSButton)
-        let forwardButton = try #require(forward.view as? NSButton)
+        let backButton = try #require(ToolbarFixture.iconButton(of: back))
+        let forwardButton = try #require(ToolbarFixture.iconButton(of: forward))
         let backRow = try #require(back.menuFormRepresentation)
         let forwardRow = try #require(forward.menuFormRepresentation)
         #expect(back.isEnabled == true)
@@ -2082,6 +2128,24 @@ private final class ToolbarFixture {
         view.constraints.filter { $0.identifier == identifier }
     }
 
+    /// A compact leading item's button, inside the host that is the item's
+    /// view.
+    static func iconButton(of item: NSToolbarItem?) -> NSButton? {
+        (item?.view as? ToolbarIconButtonHost)?.button
+    }
+
+    /// The raw attributes of the edges by which `host`'s constraints pin
+    /// `subview` to the same edge of `host`: required, equal, with no offset.
+    static func pinnedEdges(of subview: NSView, in host: NSView) -> Set<Int> {
+        let pins = host.constraints.filter { constraint in
+            constraint.firstItem === subview && constraint.secondItem === host
+                && constraint.firstAttribute == constraint.secondAttribute
+                && constraint.relation == .equal && constraint.priority == .required
+                && constraint.multiplier == 1 && constraint.constant == 0
+        }
+        return Set(pins.map { $0.firstAttribute.rawValue })
+    }
+
     // MARK: Overflow rows
 
     /// Whether `item` is one of TBD's own, which the overflow menu can show:
@@ -2095,8 +2159,8 @@ private final class ToolbarFixture {
     /// action standing in for any the form lacks, as AppKit's default row
     /// carries them; and the rows of the form's submenu, or, for an
     /// `NSMenuToolbarItem` whose form has none, of its menu, which is its
-    /// form unless one is set. For a view item the target and action are
-    /// its view's.
+    /// form unless one is set. For a view item whose view answers them, the
+    /// target and action are its view's.
     static func overflowRow(of item: NSToolbarItem) -> OverflowRow {
         let form = item.menuFormRepresentation
         let title = form?.title ?? item.label
