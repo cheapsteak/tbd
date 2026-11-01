@@ -14,13 +14,25 @@ public enum RecordedChild {
     /// somebody else's process.
     public static func killIfStartedBeforeWriting(pidFile: String) {
         guard let text = try? String(contentsOfFile: pidFile, encoding: .utf8),
-              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0,
+              let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)),
               let attributes = try? FileManager.default.attributesOfItem(atPath: pidFile),
-              let written = attributes[.modificationDate] as? Date,
+              let written = attributes[.modificationDate] as? Date
+        else { return }
+        killIfStarted(pid, noLaterThan: written)
+    }
+
+    /// The same check for a pid the test learned another way, such as from the
+    /// parent's `Process` once `run()` has returned: SIGKILLs `pid` only if the
+    /// process holding it started no later than `learned`, the moment the test
+    /// learned it. The child started before that moment, and a process that
+    /// takes the pid over afterwards started after it.
+    public static func killIfStarted(_ pid: pid_t, noLaterThan learned: Date) {
+        guard pid > 0,
               let started = ProcessStartTime.startTime(pid: pid),
-              // The kernel's start time and the file system's modification
-              // date have different precision; 1 ms absorbs the difference.
-              started <= written.addingTimeInterval(0.001)
+              // The kernel's start time has a different precision from a file
+              // system's modification date or a `Date` taken here; 1 ms
+              // absorbs the difference.
+              started <= learned.addingTimeInterval(0.001)
         else { return }
         kill(pid, SIGKILL)
     }

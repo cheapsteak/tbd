@@ -443,10 +443,15 @@ struct BoundedProcessRunnerTests {
     /// after the child's whole lifetime, and this fails then with the elapsed
     /// time in the message.
     ///
-    /// Only a child that was already ignoring SIGTERM when the SIGTERM came can
-    /// tell the escalation apart from the SIGTERM, so a call whose child was
-    /// cut off before its `trap` is repeated rather than counted — see
-    /// `runUntilTheEscalationKillsAChild`.
+    /// **The run timeout is `TestDeadlines.childStartup`, because only a child
+    /// that was already ignoring SIGTERM when the SIGTERM came can tell the
+    /// escalation apart from the SIGTERM.** The runner measures the deadline
+    /// from before `Process.run()`. Under a shorter one, a spawn that outlasts
+    /// it is followed at once by the post-spawn SIGTERM, which ends `/bin/sh`
+    /// before it runs `trap '' TERM`, and that child's death proves nothing.
+    /// The pid the child writes after its `trap` is the proof that it was
+    /// TERM-proof in time, so a missing file fails the test, with what the
+    /// parent saw.
     ///
     /// The *wedged-snapshot* property — that a blocking snapshot cannot cost
     /// another call its deadline — is pinned deterministically by
@@ -456,20 +461,45 @@ struct BoundedProcessRunnerTests {
         let scratch = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratch) }
         let pidFile = scratch.appendingPathComponent("pid")
+        let probe = SpawnProbe(keepsProcess: true)
         // On every exit path, and only while the pid still names the child:
-        // the escalation under test normally kills and reaps it first.
-        defer { RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path) }
+        // the escalation under test normally kills and reaps it first. Both by
+        // the child's own record and by the parent's, so a child that never
+        // wrote its file is reclaimed too.
+        defer {
+            RecordedChild.killIfStartedBeforeWriting(pidFile: pidFile.path)
+            probe.killChild()
+        }
 
-        guard let elapsed = try await Self.runUntilTheEscalationKillsAChild(
-            call: "the call", timeout: .milliseconds(300), pidFile: pidFile,
-            reaped: "the TERM-ignoring child to be reaped")
-        else { return }
+        let started = ContinuousClock.now
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", Self.termIgnoringScript(pidFile: pidFile)],
+            currentDirectory: nil,
+            timeout: TestDeadlines.childStartup,
+            stdio: .pipes,
+            didCreateProcess: probe.record)
+        let elapsed = ContinuousClock.now - started
+        // `run()` has returned, so the parent can see the pid; noting it now
+        // lets the cleanup above reclaim the child from every exit below.
+        _ = probe.recordChildPid()
+
+        guard case .timedOut = outcome else {
+            Issue.record("expected .timedOut, got \(outcome)")
+            return
+        }
         #expect(elapsed < .seconds(Self.childLifetimeSeconds),
                 """
-                a 300 ms deadline resolved after \(elapsed), which is past the \
+                a \(TestDeadlines.childStartup) deadline resolved after \(elapsed), which is past the \
                 \(Self.childLifetimeSeconds)s the child would have slept — the call waited its \
                 child out instead of killing it
                 """)
+
+        let pid = try Self.pidRecordedByChild("the child", pidFile: pidFile, probe: probe)
+        try await waitFor(
+            "the TERM-ignoring child to be reaped",
+            observed: { Self.isAlive(pid) ? "pid \(pid) still alive" : "pid \(pid) gone" }
+        ) { !Self.isAlive(pid) }
     }
 
     /// A second bounded call's deadline AND its SIGKILL escalation must both be
@@ -505,41 +535,56 @@ struct BoundedProcessRunnerTests {
     /// and the post-spawn kill send only SIGTERM themselves, which a child that
     /// has run its `trap` ignores, and queue the SIGKILL on the watchdog — so a
     /// reaped second child that recorded its own pid is proof the watchdog was
-    /// free. Both observations complete
-    /// before the release, and `firstReturned` records that the first call
-    /// really was still wedged while they were made.
+    /// free. Both observations complete before the release, and
+    /// `firstReturned` records that the first call really was still wedged
+    /// while they were made.
     ///
-    /// A second child that never recorded its pid was ended by SIGTERM before
-    /// it could ignore it, which the clock armer can do with the watchdog
-    /// wedged, so its death proves nothing and the second call is repeated —
-    /// see `runUntilTheEscalationKillsAChild`. The first call needs no such
-    /// care: it is the hold, and its deadline action reaches the seam whatever
-    /// state its child was in.
+    /// **Every call's run timeout is `TestDeadlines.childStartup`, so that pid
+    /// is recorded in time.** A child cut off before its `trap` dies of the
+    /// SIGTERM, which the clock armer can deliver with the watchdog wedged, so
+    /// its death proves nothing, and a missing pid file fails the test with
+    /// what the parent saw. At 200 ms this test went red in fast pass 1a (runs
+    /// 41354244199 and 41334860240) on exactly that. The 44.8 s reported for
+    /// one of them was the test's duration, which includes time queued before
+    /// its body ran; no bounded wait expired. The red was the `#require` on a
+    /// pid file the child never wrote: a spawn slower than the 200 ms deadline
+    /// let the post-spawn SIGTERM kill `/bin/sh` before `trap '' TERM`. The
+    /// 45 s arming default of `EventDrivenTestClock` played no part, since
+    /// nothing advances or awaits that clock.
     ///
     /// Verified by mutation: running the deposited work inline in the deadline
     /// action (`beforeDeadlineSnapshot?(); _ = snapshot()` in place of the
     /// `deferredSnapshot.deposit`, which is exactly the pre-fix structure) wedges
     /// the watchdog on the hold, and the second call's child is still alive when
-    /// the bounded wait gives up.
+    /// the bounded wait gives up. The deadline's length does not change that:
+    /// the first call's deadline still fires only on the watchdog, and a second
+    /// child already ignoring SIGTERM when its deadline comes can be ended only
+    /// by the SIGKILL queued behind the wedge.
     @Test func aSecondDeadlineIsServedWhileAnotherCallsSnapshotIsWedged() async throws {
         let scratch = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratch) }
         let firstPidFile = scratch.appendingPathComponent("first")
         let secondPidFile = scratch.appendingPathComponent("second")
+        let firstProbe = SpawnProbe(keepsProcess: true)
+        let secondProbe = SpawnProbe(keepsProcess: true)
         // On every exit path, and only while each pid still names its child:
-        // the escalation under test normally kills and reaps both first.
+        // the escalation under test normally kills and reaps both first. Both
+        // by each child's own record and by its parent's, so a child that never
+        // wrote its file is reclaimed too.
         defer {
             RecordedChild.killIfStartedBeforeWriting(pidFile: firstPidFile.path)
             RecordedChild.killIfStartedBeforeWriting(pidFile: secondPidFile.path)
+            firstProbe.killChild()
+            secondProbe.killChild()
         }
 
-        // Entry is announced asynchronously (nothing on the observing side ever
-        // blocks a thread); the hold itself is a semaphore, because the seam is
-        // a synchronous closure and blocking it IS the condition under test.
-        let (snapshotEntered, snapshotDidEnter) = AsyncStream<Void>.makeStream()
+        // The seam announces its entry with a flag the test polls, so nothing
+        // on the observing side ever blocks a thread; the hold itself is a
+        // semaphore, because the seam is a synchronous closure and blocking it
+        // IS the condition under test.
+        let snapshotEntered = Flag()
         let releaseSnapshot = DispatchSemaphore(value: 0)
         let firstReturned = Flag()
-        let firstChild = SpawnedChild()
 
         // `gateHoldingTask`, not `Task`: this task blocks a thread for the whole
         // observation below, and a cooperative-pool thread is exactly what the
@@ -549,42 +594,72 @@ struct BoundedProcessRunnerTests {
                 executable: "/bin/sh",
                 arguments: ["-c", Self.termIgnoringScript(pidFile: firstPidFile)],
                 currentDirectory: nil,
-                timeout: .milliseconds(200),
+                timeout: TestDeadlines.childStartup,
                 stdio: .pipes,
                 clock: EventDrivenTestClock(),
                 beforeDeadlineSnapshot: {
-                    snapshotDidEnter.yield()
+                    snapshotEntered.set()
                     releaseSnapshot.waitForGate("the first call's deadline snapshot")
                 },
-                didCreateProcess: firstChild.record)
-            await firstReturned.set()
-            // A call that returns without reaching its deadline snapshot never
-            // yields, so the stream ends here too: the entry wait below then
-            // reports that instead of waiting forever.
-            snapshotDidEnter.finish()
+                didCreateProcess: firstProbe.record)
+            firstReturned.set()
             return outcome
         }
-        var entries = snapshotEntered.makeAsyncIterator()
-        guard await entries.next() != nil else {
-            let unheld = await first.value
-            Issue.record(
-                "the first call returned without reaching its deadline snapshot: \(String(describing: unheld))")
+
+        // Bounded, and its two ways to end are told apart: the first call
+        // reaching its snapshot, or returning without ever reaching it. The
+        // wait contains the first call's whole run timeout, so its bound is
+        // that timeout plus the shared handshake budget.
+        let settled = try await waitFor(
+            "the first call to reach its deadline snapshot or return",
+            deadline: TestDeadlines.childStartup + TestDeadlines.saturatedPass,
+            observed: { "entered: \(snapshotEntered.value), returned: \(firstReturned.value)" }
+        ) { snapshotEntered.value || firstReturned.value }
+        guard snapshotEntered.value else {
+            // Nothing is held. Open the gate anyway, so an entry that comes
+            // after all passes straight through instead of parking.
+            releaseSnapshot.signal()
+            if settled {
+                let unheld = await first.value
+                Issue.record(
+                    "the first call returned without reaching its deadline snapshot: \(String(describing: unheld))")
+            }
             return
         }
+        // With the snapshot deferred, it runs only after `run()` has returned,
+        // so the parent can now see the first child's pid; noting it here lets
+        // the cleanup above reclaim that child from now on.
+        _ = firstProbe.recordChildPid()
 
         // Everything in this block happens with the first call's snapshot
         // held. The release runs on every way out of it, a thrown error
         // included, so a failure here cannot leave the first call parked until
-        // its gate gives up. On a healthy run the hold lasts the second call's
-        // attempts, budgeted at one `saturatedPass`, plus one quick reap, which
-        // keeps it inside the gate's own `TestGate.deadline`.
+        // its gate gives up. The hold lasts the second call's run timeout plus
+        // its reap: about one `childStartup` on a healthy run, and at most one
+        // `childStartup` plus one `saturatedPass` wait, inside the gate's own
+        // `TestGate.deadline`.
         let returnedEarly: Bool
         do {
             defer { releaseSnapshot.signal() }
-            try await Self.runUntilTheEscalationKillsAChild(
-                call: "the second call", timeout: .milliseconds(200), pidFile: secondPidFile,
-                reaped: "the second call's TERM-ignoring child to be reaped while a snapshot is wedged")
-            returnedEarly = await firstReturned.value
+            let secondOutcome = try await runBoundedProcess(
+                executable: "/bin/sh",
+                arguments: ["-c", Self.termIgnoringScript(pidFile: secondPidFile)],
+                currentDirectory: nil,
+                timeout: TestDeadlines.childStartup,
+                stdio: .pipes,
+                didCreateProcess: secondProbe.record)
+            _ = secondProbe.recordChildPid()
+            guard case .timedOut = secondOutcome else {
+                Issue.record("expected the second call to time out, got \(secondOutcome)")
+                return
+            }
+            let secondPid = try Self.pidRecordedByChild(
+                "the second child", pidFile: secondPidFile, probe: secondProbe)
+            try await waitFor(
+                "the second call's TERM-ignoring child to be reaped while a snapshot is wedged",
+                observed: { Self.isAlive(secondPid) ? "pid \(secondPid) still alive" : "pid \(secondPid) gone" }
+            ) { !Self.isAlive(secondPid) }
+            returnedEarly = firstReturned.value
         }
         #expect(!returnedEarly,
                 """
@@ -597,9 +672,7 @@ struct BoundedProcessRunnerTests {
             Issue.record("expected the first call to time out, got \(String(describing: firstOutcome))")
             return
         }
-        // From the parent, not the child's own file: the deadline can end the
-        // first child before it records anything, and that is no failure here.
-        let firstPid = try #require(firstChild.pid, "the first call never spawned its child")
+        let firstPid = try Self.pidRecordedByChild("the first child", pidFile: firstPidFile, probe: firstProbe)
         try await waitFor(
             "the first call's TERM-ignoring child to be reaped",
             observed: { Self.isAlive(firstPid) ? "pid \(firstPid) still alive" : "pid \(firstPid) gone" }
@@ -608,114 +681,48 @@ struct BoundedProcessRunnerTests {
 
     // MARK: - Fixtures
 
-    /// Records whether the held call has returned yet, so "observed while
-    /// wedged" is asserted rather than assumed. An actor because the setter runs
-    /// on the gate executor and the reader on the cooperative pool.
-    private actor Flag {
-        private(set) var value = false
-        func set() { value = true }
-    }
-
-    /// The child a bounded call spawned, as its parent sees it.
-    /// `didCreateProcess` hands over the `Process` just before `run()`, when it
-    /// has no pid yet, so the pid is read later, once the call has returned.
-    /// Unlike the child's own pid file, it exists however early the deadline
-    /// ended the child. A locked class because the hook is `@Sendable` and the
-    /// test reads it from another task.
-    private final class SpawnedChild: @unchecked Sendable {
+    /// A one-way flag: whether the held call has returned yet, so "observed
+    /// while wedged" is asserted rather than assumed, and whether the seam has
+    /// been entered. A locked class rather than an actor because the seam is a
+    /// synchronous closure that must set it without awaiting, and the reader
+    /// is a poll on the cooperative pool.
+    private final class Flag: @unchecked Sendable {
         private let lock = NSLock()
-        private var process: Process?
-
-        var record: @Sendable (Process) -> Void {
-            { [self] process in lock.withLock { self.process = process } }
-        }
-
-        /// The child's pid; nil while `run()` has not returned, or if it threw.
-        var pid: pid_t? {
-            let identifier = lock.withLock { process?.processIdentifier } ?? 0
-            return identifier > 0 ? identifier : nil
-        }
+        private var isSet = false
+        var value: Bool { lock.withLock { isSet } }
+        func set() { lock.withLock { isSet = true } }
     }
 
-    /// Runs bounded calls of `timeout` on fresh TERM-ignoring children until
-    /// one child is ended by the SIGKILL escalation, and returns how long that
-    /// call took; nil once a failure has been recorded.
+    /// The pid `child` wrote after its `trap`, which is the proof that it was
+    /// already ignoring SIGTERM when the deadline's SIGTERM came.
     ///
-    /// **An attempt counts only if its child was already ignoring SIGTERM when
-    /// the SIGTERM came, and the child's own pid file is the witness.** The
-    /// script writes the file after `trap '' TERM`, so a file naming the child
-    /// means no SIGTERM could have ended it and only the escalation's SIGKILL
-    /// could. A child without one was almost always ended by SIGTERM before it
-    /// ran its `trap`, and its death proves nothing. The runner makes that race
-    /// real: it measures the deadline from before `Process.run()`, so a spawn
-    /// that outlasts it is followed at once by the post-spawn SIGTERM,
-    /// which reaches a shell that has not run a line yet, and even a quick
-    /// spawn leaves the shell to be scheduled before the deadline. CI stack
-    /// samples caught `posix_spawn` taking about a second in fast pass 1a,
-    /// against a 200 ms deadline. Such an attempt is repeated, within one
-    /// `TestDeadlines.saturatedPass` budget, so a slow spawn neither reddens a
-    /// healthy run nor lets a broken escalation pass: under a broken one, the
-    /// first child that does run its `trap` in time stays alive and the wait
-    /// for it fails, and if none ever does the budget fails the test.
-    ///
-    /// The pid the wait watches comes from the parent (`SpawnedChild`) rather
-    /// than from that file, because the file is missing exactly when the spawn
-    /// was slow, and a `#require` on it turned a slow spawn into a red test.
-    @discardableResult
-    private static func runUntilTheEscalationKillsAChild(
-        call: String, timeout: Duration, pidFile: URL, reaped: String,
-        sourceLocation: SourceLocation = #_sourceLocation
-    ) async throws -> Duration? {
-        let budgetEnd = ContinuousClock.now + TestDeadlines.saturatedPass
-        var attempts = 0
-        while true {
-            attempts += 1
-            let child = SpawnedChild()
-            let started = ContinuousClock.now
-            let outcome = try await runBoundedProcess(
-                executable: "/bin/sh",
-                arguments: ["-c", termIgnoringScript(pidFile: pidFile)],
-                currentDirectory: nil,
-                timeout: timeout,
-                stdio: .pipes,
-                didCreateProcess: child.record)
-            let elapsed = ContinuousClock.now - started
-            guard case .timedOut = outcome else {
-                Issue.record("expected \(call) to time out, got \(outcome)", sourceLocation: sourceLocation)
-                return nil
-            }
-            guard let pid = child.pid else {
-                Issue.record("\(call) timed out without having spawned its child", sourceLocation: sourceLocation)
-                return nil
-            }
-            let gone = try await waitFor(
-                reaped,
-                observed: { Self.isAlive(pid) ? "pid \(pid) still alive" : "pid \(pid) gone" },
-                sourceLocation: sourceLocation
-            ) { !Self.isAlive(pid) }
-            guard gone else { return nil }
-            // Read only once the child is gone, so it can write nothing more.
-            if readPid(from: pidFile) == pid { return elapsed }
-            guard ContinuousClock.now < budgetEnd else {
-                Issue.record(
-                    BoundedWaitTimeout(
-                        what: "\(call) to spawn a child that ignored SIGTERM before its deadline signalled it",
-                        observed: "\(attempts) attempts, each child ended before it recorded its pid",
-                        deadline: TestDeadlines.saturatedPass),
-                    sourceLocation: sourceLocation)
-                return nil
-            }
-        }
+    /// When the file is missing, the error says what the parent saw instead:
+    /// no pid means `run()` never returned one, and a pid that is gone means
+    /// the child was ended before its `trap`, by a spawn or a first turn on a
+    /// core slower than `TestDeadlines.childStartup`. Thrown rather than
+    /// recorded as a comment, so that text lands on the failure's primary line.
+    private static func pidRecordedByChild(_ child: String, pidFile: URL, probe: SpawnProbe) throws -> pid_t {
+        let parentPid = probe.recordChildPid()
+        if let pid = readPid(from: pidFile) { return pid }
+        let parentView = parentPid.map { "pid \($0), \(isAlive($0) ? "still alive" : "gone")" }
+            ?? "no pid, so run() never returned one"
+        throw ChildNeverRecordedItsPid(
+            description: "\(child) never recorded its pid in \(pidFile.lastPathComponent); its parent saw \(parentView)")
+    }
+
+    private struct ChildNeverRecordedItsPid: Error, CustomStringConvertible {
+        let description: String
     }
 
     /// How long the TERM-ignoring sleeper lives. Two jobs, and the second is why
     /// the number is this large.
     ///
-    /// It must dominate every `waitFor` in this suite — all of which are
-    /// `TestDeadlines.saturatedPass` (120 s) — so a child that is gone is a child
-    /// something KILLED, never one that finished its sleep inside the wait. Each
-    /// such child is signalled by the escalation under test and, failing that,
-    /// by its test's own `defer`.
+    /// It must dominate a child's run timeout plus every `waitFor` that checks
+    /// on it — `TestDeadlines.childStartup` (15 s) plus
+    /// `TestDeadlines.saturatedPass` (120 s) — so a child that is gone is a
+    /// child something KILLED, never one that finished its sleep inside the
+    /// wait. Each such child is signalled by the escalation under test and,
+    /// failing that, by its test's own `defer`.
     ///
     /// It is also the elapsed bound in
     /// `aTermIgnoringChildIsKilledByTheEscalationAtItsDeadline`, which is what
@@ -734,7 +741,8 @@ struct BoundedProcessRunnerTests {
     /// surviving process is the shell's own pid and nothing is left behind for a
     /// sweep. The record follows the `trap`, so a child that wrote it was
     /// already ignoring SIGTERM when the deadline's SIGTERM arrived; one that
-    /// was not would have died before writing.
+    /// was not would have died before writing. `TestDeadlines.childStartup` is
+    /// what gives it time to.
     private static func termIgnoringScript(pidFile: URL) -> String {
         "trap '' TERM; echo $$ > '\(pidFile.path)'; exec /bin/sleep \(childLifetimeSeconds)"
     }
@@ -823,6 +831,13 @@ struct BoundedProcessRunnerTests {
 /// and `Process` closes nothing that lacks `FD_CLOEXEC` (see
 /// `HolderDescriptorInheritanceTests`), so an unrelated long-running child
 /// could fake a leak.
+///
+/// The deadline tests use it for something else: the child's pid as its parent
+/// sees it, for cleanup and for diagnosing a child that never recorded its own.
+/// The hook runs before `run()`, when there is no pid yet, so a probe made
+/// with `keepsProcess` holds the `Process` until it is read; the weak reference
+/// alone could lose it the moment the runner lets go. The pins are inert there:
+/// nothing reads them, and they close with the probe.
 private final class SpawnProbe: @unchecked Sendable {
     private struct Descriptor {
         let role: String
@@ -837,9 +852,19 @@ private final class SpawnProbe: @unchecked Sendable {
 
     private let lock = NSLock()
     private weak var process: Process?
+    /// Set only when `keepsProcess`; a probe asked whether the `Process`
+    /// outlives the call must not be what keeps it alive.
+    private var keptProcess: Process?
+    private let keepsProcess: Bool
+    /// The pid `recordChildPid()` first read, and when.
+    private var childPid: (pid: pid_t, readAt: Date)?
     private var descriptors: [Descriptor] = []
     private var pins: [Int32] = []
     private var pinFailures: [String] = []
+
+    init(keepsProcess: Bool = false) {
+        self.keepsProcess = keepsProcess
+    }
 
     deinit { closeDuplicates() }
 
@@ -879,11 +904,35 @@ private final class SpawnProbe: @unchecked Sendable {
             }
             lock.withLock {
                 self.process = process
+                if keepsProcess { keptProcess = process }
                 descriptors = found
                 pins = newPins
                 pinFailures = failures
             }
         }
+    }
+
+    /// The child's pid as its parent sees it: read from the `Process`, which
+    /// has one once `run()` has returned. Nil before then, after a failed
+    /// spawn, or once a probe that does not keep its `Process` has lost it.
+    /// The first read that finds one also notes when, for `killChild()`.
+    func recordChildPid() -> pid_t? {
+        lock.withLock {
+            if let childPid { return childPid.pid }
+            guard let pid = (keptProcess ?? process)?.processIdentifier, pid > 0 else { return nil }
+            childPid = (pid, Date())
+            return pid
+        }
+    }
+
+    /// SIGKILLs the child by the pid `recordChildPid()` read, under
+    /// `RecordedChild`'s own check: only if the process holding that pid
+    /// started no later than the read. `run()` had returned by then, so the
+    /// child passes, and a process that takes the pid over afterwards does not.
+    /// Does nothing if no pid was read.
+    func killChild() {
+        guard let recorded = lock.withLock({ childPid }) else { return }
+        RecordedChild.killIfStarted(recorded.pid, noLaterThan: recorded.readAt)
     }
 
     var descriptorCount: Int { lock.withLock { descriptors.count } }

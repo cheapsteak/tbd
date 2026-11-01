@@ -170,6 +170,32 @@ public enum TestDeadlines {
     /// Derived from `saturatedPassSeconds`, so it moves with it. The lifetime is
     /// a backstop: ending the child is still the spawning test's job.
     public static let outlivingChildSeconds: Int = Int(saturatedPassSeconds) * 5
+
+    /// How long a test allows between asking `Process` to run a child and that
+    /// child running its first lines, in a loaded fast pass: 15 s.
+    ///
+    /// A test whose subject is a deadline acting on a child it spawned uses
+    /// this as that deadline, so the child has always run its own first lines
+    /// (a `trap`, a pid file) before the deadline acts. `runBoundedProcess`
+    /// measures its deadline from before `Process.run()`, so the spawn and the
+    /// child's first turn on a core both count against it. CI stack samples
+    /// caught `posix_spawn` taking about 1 s in a loaded pass, and pass-wide
+    /// stalls are at most about 8 s; 15 s clears the two together with 6 s to
+    /// spare.
+    ///
+    /// It is not ``saturatedPass``. That is a hang-catcher a healthy run never
+    /// reaches, so it can be generous. This is a deadline a healthy run waits
+    /// out in full every time, so it has to be short.
+    ///
+    /// Two bounds sit above it. ``outlivingChildSeconds`` must outlast it plus
+    /// one ``saturatedPass`` wait, so a child that is gone inside such a wait
+    /// was ended rather than having finished its sleep: 600 s against 135 s.
+    /// And a gate held across one such deadline plus one ``saturatedPass``
+    /// wait must stay inside ``TestGate/deadline``, which
+    /// `BoundedProcessRunnerTests.aSecondDeadlineIsServedWhileAnotherCallsSnapshotIsWedged`
+    /// does when the property it tests is broken: 135 s plus a spawn, against
+    /// 150 s.
+    public static let childStartup: Duration = .seconds(15)
 }
 
 /// Carries a bounded wait's OBSERVED state on the primary failure line
