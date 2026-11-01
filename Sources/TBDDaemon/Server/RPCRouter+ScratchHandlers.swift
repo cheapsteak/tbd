@@ -418,8 +418,7 @@ extension RPCRouter {
             return .refused("Scratch directory missing on disk: \(wt.path)")
         }
 
-        // Reopens the note panels the archive deleted.
-        let reopened = try await db.worktrees.revive(id: wt.id)
+        try await db.worktrees.revive(id: wt.id)
 
         // Re-read BEFORE broadcasting, and return the stored row rather than a
         // mutated snapshot: the caller that answers with a row must answer with
@@ -434,7 +433,6 @@ extension RPCRouter {
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path)))
-        subscriptions.broadcastPanelSurfacesChanged(worktreeID: wt.id, surfaces: reopened)
         scratchLogger.info(
             "\(method, privacy: .public): \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return .revived(revived)

@@ -70,9 +70,7 @@ extension WorktreeLifecycle {
         let existingArchived = try await db.worktrees.list(repoID: repoID, status: .archived)
         if let match = existingArchived.first(where: { $0.localPath == path }) {
             adoptLogger.info("adoptWorktree: reviving archived row \(match.id, privacy: .public) for \(path, privacy: .public)")
-            // Leaving `.archived` reopens the note panels.
-            let reopened = try await db.worktrees.updateStatus(id: match.id, status: .active)
-            subscriptions?.broadcastPanelSurfacesChanged(worktreeID: match.id, surfaces: reopened)
+            try await db.worktrees.updateStatus(id: match.id, status: .active)
             // Honor caller's displayName override on revival — without this, a
             // user calling `tbd worktree adopt <path> --name "New Label"` would
             // silently keep the row's old archived name.

@@ -347,10 +347,8 @@ extension RemoteLaneLifecycle {
                 mirrored = (session, provider)
             }
         }
-        // The row write reopens the note panels the archive deleted.
-        let reopened: [WorkspaceTabSurface]
         do {
-            reopened = try await db.worktrees.revive(id: worktree.id)
+            try await db.worktrees.revive(id: worktree.id)
         } catch {
             await manager.withdrawFilingDecision(
                 worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
@@ -364,7 +362,6 @@ extension RemoteLaneLifecycle {
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,
             name: worktree.name, path: worktree.localPath)))
-        subscriptions.broadcastPanelSurfacesChanged(worktreeID: worktree.id, surfaces: reopened)
         return nil
     }
 

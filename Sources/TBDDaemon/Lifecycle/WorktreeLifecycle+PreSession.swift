@@ -566,11 +566,7 @@ extension WorktreeLifecycle {
             case .markActive:
                 try await db.worktrees.updateStatus(id: worktree.id, status: .active)
             case .revive(let clearSessions):
-                // The row left `.archived` for `.creating` before the hook
-                // ran, and its note panels reopened then; a row that is not
-                // `.archived` reopens nothing here.
-                let reopened = try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions)
-                subscriptions?.broadcastPanelSurfacesChanged(worktreeID: worktree.id, surfaces: reopened)
+                try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions)
                 // Deliberate revive: disarm auto-archive so a still-merged PR
                 // doesn't immediately re-archive the worktree the user just revived.
                 do {

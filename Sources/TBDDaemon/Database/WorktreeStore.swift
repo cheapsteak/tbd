@@ -461,44 +461,14 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Update a worktree's status.
-    ///
-    /// A write that takes the row out of `archived` reopens its note panels
-    /// in the same transaction, as `revive` does, and returns the surfaces
-    /// that rewrote (`reopenNotePanelsIfRevived`). A revive gated on a
-    /// `preSession` hook leaves `archived` here, for `.creating`, and
-    /// adopting an archived worktree's path leaves it here, for `.active`.
-    /// `now` stamps the rewritten surfaces' `updatedAt`.
-    @discardableResult
-    public func updateStatus(
-        id: UUID, status: WorktreeStatus, now: Date = Date()
-    ) async throws -> [WorkspaceTabSurface] {
-        try await writer.write { db -> [WorkspaceTabSurface] in
+    public func updateStatus(id: UUID, status: WorktreeStatus) async throws {
+        try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
-            let previousStatus = record.status
             record.status = status.rawValue
             try record.update(db)
-            return try Self.reopenNotePanelsIfRevived(
-                record, from: previousStatus, id: id, now: now, db: db)
         }
-    }
-
-    /// The note panels a status write reopens, inside its transaction: when
-    /// it took the row out of `archived`, a worktree panel for each of the
-    /// worktree's notes that has none, in creation order, and the surfaces
-    /// that rewrote (`PanelSurfaceStore.reopenNotePanels`). Archiving
-    /// deleted the panels and kept the notes, so a revive brings them back.
-    /// Nothing for any other write, and nothing for a row a scratch promote
-    /// retired, whose notes stay with it unshown.
-    private static func reopenNotePanelsIfRevived(
-        _ record: WorktreeRecord, from previousStatus: String, id: UUID, now: Date,
-        db: GRDB.Database
-    ) throws -> [WorkspaceTabSurface] {
-        let archived = WorktreeStatus.archived.rawValue
-        guard previousStatus == archived, record.status != archived,
-              record.promotedToRepoID == nil else { return [] }
-        return try PanelSurfaceStore.reopenNotePanels(worktreeID: id, now: now, in: db)
     }
 
     /// Delete a worktree by ID, and with it its terminal rows.
@@ -801,8 +771,7 @@ public struct WorktreeStore: Sendable {
     /// Deletes the worktree's panel rows in the same transaction: its
     /// workspace tab surfaces with their histories, its worktree panels and
     /// its operation receipts (`PanelSurfaceStore.deleteSurfaces`). Its note
-    /// rows stay, and a revive reopens a worktree panel for each of them
-    /// (`revive`).
+    /// rows stay.
     ///
     /// Returns the IDs of the workspace tabs whose panel surfaces the archive
     /// deleted. The caller that drives the archive broadcasts them
@@ -845,9 +814,8 @@ public struct WorktreeStore: Sendable {
             // through here.
             // The one that does not, a scratch promote, moves them to the main
             // worktree first (`promoteScratchMigration`), so it leaves none
-            // behind. A revive reopens a panel for each note
-            // (`reopenNotePanelsIfRevived`), and the next tab sync imports
-            // the tabs again.
+            // behind. A revive brings none of them back: the next tab sync
+            // imports the tabs again, and a note shows once someone opens it.
             return try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
         }
     }
@@ -887,24 +855,11 @@ public struct WorktreeStore: Sendable {
     /// When `clearSessions` is true (default), also clears archived Claude
     /// sessions and their spawn values. Pass false to preserve both when the
     /// primary agent wasn't restored (e.g. skipClaude).
-    ///
-    /// A row that was `archived` gets its note panels back in the same
-    /// transaction: a worktree panel for each of its notes that has none, in
-    /// creation order (`reopenNotePanelsIfRevived`). Returns the surfaces
-    /// that rewrote, for the caller to broadcast
-    /// (`StateSubscriptionManager.broadcastPanelSurfacesChanged`); usually
-    /// none, because the archive deleted them. A row a `preSession` hook
-    /// gated left `archived` earlier, in `updateStatus`, which reopened its
-    /// panels then. `now` stamps the rewritten surfaces' `updatedAt`.
-    @discardableResult
-    public func revive(
-        id: UUID, clearSessions: Bool = true, now: Date = Date()
-    ) async throws -> [WorkspaceTabSurface] {
-        try await writer.write { db -> [WorkspaceTabSurface] in
+    public func revive(id: UUID, clearSessions: Bool = true) async throws {
+        try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
-            let previousStatus = record.status
             record.status = WorktreeStatus.active.rawValue
             record.archivedAt = nil
             if clearSessions {
@@ -912,8 +867,6 @@ public struct WorktreeStore: Sendable {
                 record.archivedClaudeSpawnExtras = nil
             }
             try record.update(db)
-            return try Self.reopenNotePanelsIfRevived(
-                record, from: previousStatus, id: id, now: now, db: db)
         }
     }
 

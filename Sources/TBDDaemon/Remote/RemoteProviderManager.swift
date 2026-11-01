@@ -1282,10 +1282,8 @@ public actor RemoteProviderManager {
             )
             return
         }
-        // The row write reopens the note panels the archive deleted.
-        let reopened: [WorkspaceTabSurface]
         do {
-            reopened = try await db.worktrees.revive(id: row.id)
+            try await db.worktrees.revive(id: row.id)
         } catch {
             await log.appendOutcome(
                 confirms: actuationID, result: .transportFailed, error: "\(error)")
@@ -1304,7 +1302,6 @@ public actor RemoteProviderManager {
                 WorktreeDelta(
                     worktreeID: row.id, repoID: row.repoID, name: row.name,
                     path: row.localPath, status: .active)))
-        subscriptions.broadcastPanelSurfacesChanged(worktreeID: row.id, surfaces: reopened)
     }
 
     /// Drops watermarks older than two poll intervals. Nothing needs them
