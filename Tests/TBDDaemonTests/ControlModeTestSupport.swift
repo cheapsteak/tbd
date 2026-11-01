@@ -43,24 +43,25 @@ import Testing
 /// binding constraint rather than an incidental one.
 ///
 /// The pass that binds this value is fast pass 2 (everything but the two
-/// daemon targets, ~7200 tests). Measured on four green CI runs, its slowest
-/// test reported 77.1 s, 67.2 s, 68.1 s and 86.3 s (p90 55–71 s, p99
-/// 66–85 s), and runner noise alone moves that tail by about twenty seconds.
-/// Fast passes 1a and 1b report shorter tails (slowest 54.3–74.2 s and
-/// 26.5–34.2 s). A reported duration there also includes the time a test
+/// daemon targets, ~7200 tests). Measured on five green CI runs with pass 2
+/// as one step, its slowest test reported 67.2–94.5 s (p90 55–79 s, p99
+/// 66–93 s), and runner noise alone moves that tail by about twenty seconds.
+/// Fast passes 1a and 1b report shorter tails (slowest 51.7–74.2 s and
+/// 22.5–34.2 s). A reported duration there also includes the time a test
 /// waits for its body to start, which a wait inside the body never pays, so
 /// those figures bound a wait only loosely.
 ///
 /// The sizing rule clears the worst green tail by about 18 s, because runner
-/// noise alone moves it by about twenty. 120 s clears pass 2's 86.3 s by
-/// about 34 s, and the deadline still elapses only on a genuine hang. Nothing
-/// below about 105 s satisfies the rule, and a step that small does not repay
+/// noise alone moves it by about twenty. 120 s clears pass 2's 94.5 s by
+/// about 25 s, and the deadline still elapses only on a genuine hang. Nothing
+/// below about 113 s satisfies the rule, and a step that small does not repay
 /// re-deriving the values coupled to this one: `TestGate.deadline`,
 /// `.fastPassBounded`, and the tier-3 suite limits summed from chains of
-/// these waits. Pass 2 is main-thread bound, so a split would add about 26 s
-/// of startup and save no main-thread time, though it would roughly halve the
-/// tail; the trigger to split is its green maximum nearing about 100 s
-/// (`Tests/CLAUDE.md`, "Population is the scheduler").
+/// these waits. A tail within about 6 s of the 100 s trigger is why pass 2
+/// runs as two steps, 2a and 2b, cut by main-thread time; the split should
+/// roughly halve its tail, and the figures here are re-measured on the
+/// halves' first green runs (`Tests/CLAUDE.md`, "Population is the
+/// scheduler").
 ///
 /// ## The interaction with `.clockDriven` — read before changing either value
 ///

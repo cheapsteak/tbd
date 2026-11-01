@@ -27,18 +27,20 @@ public extension Trait where Self == TimeLimitTrait {
     /// runner, so a test's *reported* duration is mostly time suspended waiting
     /// for a thread. Mined from green CI runs: fast pass 1a
     /// (`^TBDDaemonTests\.[A-O]`, ~3200 tests) reported a slowest test of
-    /// 54.3–74.2 s (p99 49–66 s); fast pass 1b (the rest of the daemon target,
-    /// ~3900 tests) 26.5–34.2 s (p99 25–31 s); fast pass 2 (everything else,
-    /// ~7200 tests) 67.2–86.3 s (p90 55–71 s, p99 66–85 s). A limit of one
-    /// minute therefore sits **below the p99** of every healthy pass 2
-    /// measured, and inside the range of its p90 — it is a coin flip on green
-    /// runs, and it fired that way on three `TerminalLockedAccessTests` tests
-    /// at the same instant, twice in five days, with no hang anywhere. Five
-    /// minutes clears the largest measured maximum by about 3.5x while staying
-    /// a small fraction of the step budget. The full derivation — how 300 s
-    /// composes with `ciSafeDeadline` (120 s) and the arming waits (45 s), and
-    /// the invariant the three satisfy together — is on ``clockDriven`` below;
-    /// re-derive all of them together when the population moves materially.
+    /// 51.7–74.2 s; fast pass 1b (the rest of the daemon target, ~3900 tests)
+    /// 22.5–34.2 s; fast pass 2 (everything else, ~7200 tests), measured as
+    /// one step, 67.2–94.5 s (p90 55–79 s, p99 66–93 s). Pass 2 runs as two
+    /// steps, 2a and 2b, which should roughly halve that tail; re-measure it on
+    /// their first green runs. A limit of one minute sits **below the p99** of
+    /// every healthy pass 2 measured, and inside the range of its p90 — it is a
+    /// coin flip on green runs, and it fired that way on three
+    /// `TerminalLockedAccessTests` tests at the same instant, twice in five
+    /// days, with no hang anywhere. Five minutes clears the largest measured
+    /// maximum by about 3x while staying a small fraction of the step budget.
+    /// The full derivation — how 300 s composes with `ciSafeDeadline` (120 s)
+    /// and the arming waits (45 s), and the invariant the three satisfy
+    /// together — is on ``clockDriven`` below; re-derive all of them together
+    /// when the population moves materially.
     ///
     /// **(b) The rule: a fast-pass suite uses this trait rather than a literal
     /// `.timeLimit`, unless the limit is itself the regression detector.** A
