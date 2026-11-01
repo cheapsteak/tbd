@@ -170,7 +170,7 @@ struct TabRenameTests {
         }
     }
 
-    @Test("a failed note rename leaves a later rename's title")
+    @Test("a failed note rename followed by one that succeeds ends on the second's title")
     func failedNoteRenameKeepsLaterTitle() async {
         await Fixture.withState { state in
             let noteID = UUID()
@@ -184,6 +184,50 @@ struct TabRenameTests {
 
             #expect(writes.writes.count == 2)
             #expect(Self.noteTitle(state, noteID: noteID, worktreeID: seeded.worktreeID) == "Second")
+            #expect(state.noteRenameTails.isEmpty, "the chain drained")
+        }
+    }
+
+    /// The first failure leaves the title to the rename queued behind it,
+    /// which must put back what the daemon holds — not the first rename's
+    /// title, which never persisted.
+    @Test("two failed renames of one note restore the title the daemon holds")
+    func twoFailedNoteRenamesRestoreTheDaemonsTitle() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seedNoteTab(state, noteID: noteID, title: "Note", label: nil)
+            let writes = Self.stubTitleUpdater(state, worktreeID: seeded.worktreeID, refuses: { _ in true })
+
+            state.renameNote(noteID: noteID, worktreeID: seeded.worktreeID, title: "First")
+            state.renameNote(noteID: noteID, worktreeID: seeded.worktreeID, title: "Second")
+            await Fixture.drainMainActor()
+
+            let expectedWrites: [NoteTitleWrite] = [
+                NoteTitleWrite(noteID: noteID, title: "First"),
+                NoteTitleWrite(noteID: noteID, title: "Second"),
+            ]
+            #expect(writes.writes == expectedWrites)
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: seeded.worktreeID) == "Note")
+            #expect(state.noteRenameTails.isEmpty, "the chain drained")
+        }
+    }
+
+    @Test("a note rename that succeeds then one that fails restores the first's title")
+    func failedNoteRenameAfterASuccessRestoresIt() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seedNoteTab(state, noteID: noteID, title: "Note", label: nil)
+            let writes = Self.stubTitleUpdater(
+                state, worktreeID: seeded.worktreeID, refuses: { $0 == "Second" })
+
+            state.renameNote(noteID: noteID, worktreeID: seeded.worktreeID, title: "First")
+            state.renameNote(noteID: noteID, worktreeID: seeded.worktreeID, title: "Second")
+            await Fixture.drainMainActor()
+
+            #expect(writes.writes.count == 2)
+            #expect(Self.noteTitle(state, noteID: noteID, worktreeID: seeded.worktreeID) == "First",
+                    "the daemon holds the first title")
+            #expect(state.noteRenameTails.isEmpty, "the chain drained")
         }
     }
 

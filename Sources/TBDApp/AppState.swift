@@ -2411,7 +2411,7 @@ final class AppState {
     /// test can prove that ordinary (non-empty) saves never reach it.
     @ObservationIgnored lazy var noteEmptier: @MainActor (UUID) async throws -> Note =
         { [daemonClient] noteID in try await daemonClient.updateNote(noteID: noteID, content: "") }
-    /// How a note's new title reaches the daemon (`updateNote`, `renameNote`).
+    /// How a note's new title reaches the daemon (`renameNote`).
     /// Injectable so a test can drive a rename that persists and one that
     /// fails, without a daemon.
     @ObservationIgnored lazy var noteTitleUpdater: @MainActor (UUID, String) async throws -> Note =

@@ -702,12 +702,13 @@ struct EditableNoteTitle: View {
         }
     }
 
+    /// Commits the trimmed text as the note's title when it is not blank and
+    /// differs from the title (`TabRename.noteTitle`), through `renameNote`,
+    /// so a rename here and one on the note's tab persist in the order they
+    /// were made.
     private func commitEdit() {
         isEditing = false
-        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != note?.title else { return }
-        Task {
-            await appState.updateNote(noteID: noteID, worktreeID: worktreeID, title: trimmed)
-        }
+        guard let title = TabRename.noteTitle(text: editText, currentNoteTitle: note?.title) else { return }
+        appState.renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
     }
 }
