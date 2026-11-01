@@ -205,6 +205,41 @@ struct ChangesPanelTests {
         }
     }
 
+    @Test("⌘⇧E while Session History fills the worktree sends nothing and beeps")
+    func toggleChangesPanelWhileHistoryShowsBeeps() async throws {
+        try await Fixture.withState { state in
+            let beeps = PanelEventLog()
+            state.refusalBeep = { @MainActor in beeps.record("beep") }
+            let tab = Fixture.terminalTab()
+            let worktreeID = Self.selectWorktree(state, tabs: [tab])
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let changesInFront = Self.surface(
+                tabID: tab.id, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id)
+            state.panelSurfaces = [worktreeID: [tab.id: changesInFront]]
+            let envelopes = Fixture.collectEnvelopes(state, replying: changesInFront)
+            let renderPath = state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id)
+            try #require(renderPath == .daemon(changesInFront),
+                         "precondition: the hidden tab is on the daemon path with Changes in front")
+            state.historyActiveWorktrees = [worktreeID]
+
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+
+            #expect(envelopes.envelopes.isEmpty, "the tab behind Session History is left alone")
+            let expectedBeeps: [String] = ["beep"]
+            #expect(beeps.events == expectedBeeps)
+
+            // Session History closed: the same tab takes ⌘⇧E again.
+            state.historyActiveWorktrees = []
+            state.toggleChangesPanel()
+            await Fixture.drainMainActor()
+            let closing = try Fixture.single(envelopes.envelopes)
+            let expectedClose: PanelOperation = .close(panelID: changes.id)
+            #expect(closing.operation == expectedClose)
+            #expect(beeps.events == expectedBeeps, "no further beep")
+        }
+    }
+
     @Test("⌘⇧E sends its decision to the selected worktree's active tab")
     func toggleChangesPanelSendsDecisionToActiveTab() async throws {
         try await Fixture.withState { state in

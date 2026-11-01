@@ -440,7 +440,9 @@ extension AppState {
     /// surface loads; `applyPanelOperation` sends any pending tab sync first,
     /// so the daemon knows the tab. A tab that renders legacy (`workspaceRenderPath`) has
     /// no side region, so ⌘⇧E sends nothing there and beeps
-    /// (`refusalBeep`).
+    /// (`refusalBeep`). So does a worktree showing Session History
+    /// (`historyActiveWorktrees`), which fills the detail area in place of
+    /// the tab and its side region.
     ///
     /// Does nothing without that tab: no selection, several worktrees, a
     /// remote one, or a worktree with no tabs.
@@ -448,7 +450,9 @@ extension AppState {
         guard selectedWorktreeIDs.count == 1,
               let worktree = selectedLocalWorktree,
               let tab = resolvedActiveTab(worktreeID: worktree.id) else { return }
-        guard case .daemon(let surface) = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id) else {
+        guard !historyActiveWorktrees.contains(worktree.id),
+              case .daemon(let surface) = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id)
+        else {
             refusalBeep()
             return
         }
