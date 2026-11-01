@@ -361,6 +361,12 @@ extension AppState {
     /// deleting the note removes its workspace tab too. Any other panel just
     /// closes.
     ///
+    /// Whether the note has content (`noteHasContent`) is asked whether or not
+    /// `notes` holds the note's summary yet — an agent can open a note just
+    /// before the notes refresh lands. Without one, the confirmation names the
+    /// note "Note", as the note's tab in the strip reads until the summary
+    /// arrives.
+    ///
     /// The `close` operation itself keeps the note — the daemon action set's
     /// close sends it alone — so an agent's `tbd panel close` does too.
     func closeSidePanel(
@@ -371,10 +377,10 @@ extension AppState {
             await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close)
             return
         }
-        if let note = notes[worktreeID]?.first(where: { $0.id == noteID }),
-           noteHasContent(worktreeID: worktreeID, noteID: noteID),
-           !noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) {
-            return
+        if noteHasContent(worktreeID: worktreeID, noteID: noteID) {
+            let note = notes[worktreeID]?.first(where: { $0.id == noteID })
+                ?? NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")
+            guard noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) else { return }
         }
         // A refused close leaves the panel on screen, so its note must stay.
         guard await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close) != nil else {

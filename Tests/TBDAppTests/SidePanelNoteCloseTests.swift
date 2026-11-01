@@ -9,10 +9,11 @@ import TestSupport
 // (`PanelTabsFixture`), so no socket opens, and no confirmation alert runs.
 
 /// Closing a note's side-region tab (panel tabs spec, "The renderer"):
-/// `AppState.closeSidePanel` asks first when the note has content, then closes
-/// the panel and deletes the note, and deletes nothing when the user declines
-/// or the daemon refuses the close. The `close` operation itself keeps the
-/// note, so the daemon action set's close never deletes one.
+/// `AppState.closeSidePanel` asks first when the note has content — whether or
+/// not `notes` holds its summary yet — then closes the panel and deletes the
+/// note, and deletes nothing when the user declines or the daemon refuses the
+/// close. The `close` operation itself keeps the note, so the daemon action
+/// set's close never deletes one.
 @Suite("Side-region note close")
 @MainActor
 struct SidePanelNoteCloseTests {
@@ -29,8 +30,11 @@ struct SidePanelNoteCloseTests {
     }
 
     /// Seeds the copy with one tab whose side region shows `content`, and,
-    /// for a note, the note's summary.
-    private static func seed(_ state: AppState, content: PanelContent) -> Seeded {
+    /// for a note, the note's summary unless `withSummary` is false — the
+    /// note an agent opened before the notes refresh landed.
+    private static func seed(
+        _ state: AppState, content: PanelContent, withSummary: Bool = true
+    ) -> Seeded {
         let worktreeID = UUID()
         let tabID = UUID()
         let panel = ViewerPanel(id: UUID(), content: content)
@@ -39,7 +43,7 @@ struct SidePanelNoteCloseTests {
             side: SideRegion(panels: [panel], activePanelID: panel.id, recency: [panel.id]),
             revision: 1)
         state.panelSurfaces = [worktreeID: [tabID: surface]]
-        if case .note(let noteID) = content {
+        if case .note(let noteID) = content, withSummary {
             state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Plan")]]
         }
         return Seeded(surface: surface, panelID: panel.id)
@@ -79,7 +83,7 @@ struct SidePanelNoteCloseTests {
     /// recording both.
     private static func stubNoteSeams(_ state: AppState, confirming answer: Bool) -> NoteSeamRecorder {
         let recorder = NoteSeamRecorder()
-        state.noteCloseConfirmer = { _, _ in recorder.confirm(answer) }
+        state.noteCloseConfirmer = { note, _ in recorder.confirm(note, answer: answer) }
         state.noteDeleter = { @MainActor noteID in recorder.delete(noteID) }
         return recorder
     }
@@ -194,6 +198,84 @@ struct SidePanelNoteCloseTests {
         }
     }
 
+    // MARK: - A note whose summary has not loaded
+
+    @Test("a side-region note whose summary has not loaded still asks when it has content, then closes and deletes")
+    func unloadedNoteWithContentAsksThenClosesAndDeletes() async throws {
+        try await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID), withSummary: false)
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Self.writeContent("- ship it\n", state: state, worktreeID: seeded.worktreeID, noteID: noteID)
+            try #require(state.notes[seeded.worktreeID] == nil, "precondition: no summary for the note")
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            let notes = Self.stubNoteSeams(state, confirming: true)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            let asked = try Fixture.single(notes.confirmedNotes)
+            #expect(asked.id == noteID, "the confirmation names the note being closed")
+            #expect(asked.worktreeID == seeded.worktreeID)
+            #expect(asked.title == "Note", "a note with no summary is asked about as \"Note\"")
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
+        }
+    }
+
+    @Test("a declined confirmation for a side-region note whose summary has not loaded changes nothing")
+    func unloadedNoteDeclinedChangesNothing() async throws {
+        try await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID), withSummary: false)
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Self.writeContent("- ship it\n", state: state, worktreeID: seeded.worktreeID, noteID: noteID)
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            #expect(notes.confirmations == 1)
+            #expect(envelopes.envelopes.isEmpty, "a declined close sends nothing")
+            #expect(notes.deleted.isEmpty)
+            #expect(state.panelSurface(worktreeID: seeded.worktreeID, tabID: seeded.tabID) == seeded.surface)
+        }
+    }
+
+    @Test("an empty side-region note whose summary has not loaded closes and deletes without asking")
+    func unloadedEmptyNoteClosesAndDeletesWithoutAsking() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID), withSummary: false)
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            #expect(!state.noteHasContent(worktreeID: seeded.worktreeID, noteID: noteID),
+                    "precondition: no content file and no legacy content")
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            // Declining would block the close, so a prompt cannot go unnoticed.
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.closeSidePanel(
+                worktreeID: seeded.worktreeID, tabID: seeded.tabID,
+                panelID: seeded.panelID, content: .note(noteID: noteID))
+
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            #expect(notes.confirmations == 0)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
+        }
+    }
+
     // MARK: - Other panels and the operation alone
 
     @Test("closing a side-region file panel only closes it")
@@ -245,11 +327,14 @@ struct SidePanelNoteCloseTests {
 /// The note confirmations asked and the notes deleted, in order.
 @MainActor
 private final class NoteSeamRecorder {
-    private(set) var confirmations = 0
+    /// The note each confirmation named.
+    private(set) var confirmedNotes: [NoteSummary] = []
     private(set) var deleted: [UUID] = []
 
-    func confirm(_ answer: Bool) -> Bool {
-        confirmations += 1
+    var confirmations: Int { confirmedNotes.count }
+
+    func confirm(_ note: NoteSummary, answer: Bool) -> Bool {
+        confirmedNotes.append(note)
         return answer
     }
 
