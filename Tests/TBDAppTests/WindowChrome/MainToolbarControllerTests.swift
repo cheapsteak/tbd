@@ -263,14 +263,15 @@ struct MainToolbarControllerTests {
     /// that shows its border only under the pointer, held at the compact size
     /// by required constraints, with its tool tip, label and accessibility
     /// description, and its target and action on the button, on the item,
-    /// which forwards them, and on its overflow row.
+    /// which forwards them, and on its overflow row. Once laid out, a button
+    /// also carries AppKit's content-size constraints for the bezel, wider
+    /// than the compact width, so its own constraints are found by their
+    /// identifiers, and its fitting width shows the required width wins.
     @Test func leadingButtonsAreCompactViewItems() async throws {
         let fixture = ToolbarFixture(label: "leadingButtonsAreCompactViewItems")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
-        let expectedWidth: [CGFloat] = [MainToolbarMetrics.iconButtonWidth]
-        let expectedHeight: [CGFloat] = [MainToolbarMetrics.iconButtonHeight]
 
         let buttons: [(NSToolbarItem.Identifier, String, AnyObject?, Selector)] = [
             (MainToolbarItemID.toggleSidebar, "Toggle Sidebar", fixture.split,
@@ -295,10 +296,23 @@ struct MainToolbarControllerTests {
             #expect(item.target === target)
             #expect(item.action == action)
             #expect(button.translatesAutoresizingMaskIntoConstraints == false)
-            let widths = ToolbarFixture.requiredConstants(of: button, .width)
-            let heights = ToolbarFixture.requiredConstants(of: button, .height)
-            #expect(widths == expectedWidth)
-            #expect(heights == expectedHeight)
+            let widths = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonWidthID)
+            let heights = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonHeightID)
+            try #require(widths.count == 1)
+            try #require(heights.count == 1)
+            let width = widths[0]
+            let height = heights[0]
+            #expect(width.firstItem === button)
+            #expect(width.firstAttribute == .width)
+            #expect(width.relation == .equal)
+            #expect(width.priority == .required)
+            #expect(width.constant == MainToolbarMetrics.iconButtonWidth)
+            #expect(height.firstItem === button)
+            #expect(height.firstAttribute == .height)
+            #expect(height.relation == .equal)
+            #expect(height.priority == .required)
+            #expect(height.constant == MainToolbarMetrics.iconButtonHeight)
+            #expect(button.fittingSize.width == MainToolbarMetrics.iconButtonWidth)
             let row = try #require(item.menuFormRepresentation)
             #expect(row.title == tip)
             #expect(row.target === target)
@@ -2063,16 +2077,9 @@ private final class ToolbarFixture {
         return view.convert(view.bounds, to: nil)
     }
 
-    /// The constants of `view`'s required, equal constraints on its own
-    /// `attribute`, such as a fixed width.
-    static func requiredConstants(of view: NSView, _ attribute: NSLayoutConstraint.Attribute) -> [CGFloat] {
-        view.constraints
-            .filter { constraint in
-                constraint.firstItem === view && constraint.secondItem == nil
-                    && constraint.firstAttribute == attribute && constraint.relation == .equal
-                    && constraint.priority == .required
-            }
-            .map(\.constant)
+    /// `view`'s own constraints carrying `identifier`.
+    static func constraints(of view: NSView, identified identifier: String) -> [NSLayoutConstraint] {
+        view.constraints.filter { $0.identifier == identifier }
     }
 
     // MARK: Overflow rows

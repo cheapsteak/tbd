@@ -95,10 +95,11 @@ extension MainToolbarController {
         button.target = target
         button.action = action
         button.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth),
-            button.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight),
-        ])
+        let width = button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonWidth)
+        width.identifier = Self.iconButtonWidthID
+        let height = button.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight)
+        height.identifier = Self.iconButtonHeightID
+        NSLayoutConstraint.activate([width, height])
 
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.view = button
@@ -109,6 +110,13 @@ extension MainToolbarController {
         item.menuFormRepresentation = form
         return item
     }
+
+    /// The identifiers of a compact button's size constraints, which name
+    /// them in a layout log and let a test find them among the content-size
+    /// constraints AppKit gives the button once it is laid out. Required, so
+    /// they win over the bezel's wider intrinsic size.
+    static let iconButtonWidthID = "tbd.toolbar.iconButton.width"
+    static let iconButtonHeightID = "tbd.toolbar.iconButton.height"
 
     /// `symbol` at the leading buttons' point size and regular weight,
     /// carrying `description` for accessibility.
