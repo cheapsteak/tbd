@@ -10,9 +10,9 @@ import DaemonTestSupport
 @Suite("PanelTabsMigration")
 struct PanelTabsMigrationTests {
 
-    /// The newest migration identifier before `panel_tabs`. Migrating only
-    /// this far reproduces the schema a daemon that predates it ran on.
-    private static let lastIdentifierBeforePanelTabs = "20261025182152_config_holder_claim_reconcile"
+    /// The migration identifier immediately before `panel_tabs`. Migrating
+    /// only this far reproduces the schema the daemon just before it ran on.
+    private static let lastIdentifierBeforePanelTabs = "20261030170000_reset_hook_written_activity"
 
     /// The v1 panel rows hold the split-tree layout the v2 model cannot read,
     /// so the `panel_tabs` migration deletes every one of them. Rows written

@@ -352,8 +352,11 @@ extension AppState {
     /// a workspace note tab does (`closeTab`): when the note has content the
     /// user is asked first, and a declined confirmation sends nothing; then
     /// the panel closes, and only once the daemon has applied that close is
-    /// the note deleted. Nothing in the app lists notes, so a note closed and
-    /// kept would be unreachable. Any other panel just closes.
+    /// the note deleted. One rule holds on every tab: every note in a
+    /// worktree has its own workspace tab, whose × already asks and then
+    /// deletes the note, so × on the note's side tab does the same, and
+    /// deleting the note removes its workspace tab too. Any other panel just
+    /// closes.
     ///
     /// The `close` operation itself keeps the note — the daemon action set's
     /// close sends it alone — so an agent's `tbd panel close` does too.
