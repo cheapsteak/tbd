@@ -108,9 +108,11 @@ enum RemoteSessionDetailGates {
     /// Whether the detail pane shows the transcript half of its split. With
     /// `transcript.read` declared, a session that is not attached always shows
     /// it, and an attached one shows it unless the toolbar toggle has hidden
-    /// it for that session (`hiddenByToggle`). A hide has no effect once the
-    /// session stops being attached, so the transcript comes back the moment
-    /// it does. Without `transcript.read` there is no transcript to show.
+    /// it for that session's current attach connection (`hiddenByToggle`).
+    /// A hide has no effect once the session stops being attached, so the
+    /// transcript comes back the moment it does, and a new connection is not
+    /// hidden by the old one's hide. Without `transcript.read` there is no
+    /// transcript to show.
     static func showsTranscriptPane(capabilities: [String], attached: Bool, hiddenByToggle: Bool) -> Bool {
         capabilities.contains(transcriptReadCapability) && (!attached || !hiddenByToggle)
     }

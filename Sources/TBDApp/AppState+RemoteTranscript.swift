@@ -35,13 +35,13 @@ extension AppState {
 
     /// Whether `selection`'s detail pane shows the transcript half of its
     /// split: always while it is not attached, and while it is attached
-    /// unless the toolbar toggle has hidden it for this session
-    /// (`remoteTranscriptHiddenSelection`).
+    /// unless the toolbar toggle has hidden it for this session's current
+    /// connection (`remoteTranscriptHiddenAttach`).
     func remoteSessionShowsTranscriptPane(_ selection: RemoteSessionSelection) -> Bool {
         RemoteSessionDetailGates.showsTranscriptPane(
             capabilities: remoteProviderCapabilities(for: selection),
             attached: remoteSessionIsAttached(selection),
-            hiddenByToggle: remoteTranscriptHiddenSelection == selection)
+            hiddenByToggle: remoteTranscriptHiddenAttach == remoteAttachMountKey(for: selection))
     }
 
     /// Whether the transcript is the main side of `selection`'s split, with
@@ -54,23 +54,35 @@ extension AppState {
             attached: remoteSessionIsAttached(selection))
     }
 
-    /// The toolbar toggle's action: hides `selection`'s transcript, or shows
-    /// it again when it is the one hidden. Only one session's transcript is
-    /// ever hidden, and nothing is persisted. A no-op whenever the toggle is
-    /// not offered, so a session that is not attached never records a hide.
+    /// The toolbar toggle's action: hides the transcript of `selection`'s
+    /// current connection, or shows it again when that connection's is the
+    /// one hidden. Only one transcript is ever hidden, and nothing is
+    /// persisted. A no-op unless the toggle is offered for `selection` and
+    /// `selection` is the session on screen, so a session that is not attached
+    /// or not selected never records a hide.
     func toggleRemoteTranscript(_ selection: RemoteSessionSelection) {
-        guard remoteSessionShowsTranscriptToggle(selection) else { return }
-        remoteTranscriptHiddenSelection = remoteTranscriptHiddenSelection == selection ? nil : selection
+        guard selection == selectedRemoteSession, remoteSessionShowsTranscriptToggle(selection) else { return }
+        let key = remoteAttachMountKey(for: selection)
+        remoteTranscriptHiddenAttach = remoteTranscriptHiddenAttach == key ? nil : key
     }
 
     /// Drops a transcript hide that belongs to any session other than
     /// `selection`, so a hide never outlives its session being on screen.
     /// Called when the selection changes and when the detail view's shown
-    /// attach slot changes. Writes only when there is a hide to drop, so the
-    /// many calls that change nothing emit no observation.
+    /// attach slot changes. A hide on `selection` itself is kept even when it
+    /// names an older connection: it no longer hides anything, because the
+    /// pane compares it against the current mount key. Writes only when there
+    /// is a hide to drop, so the many calls that change nothing emit no
+    /// observation.
     func clearRemoteTranscriptHide(unlessFor selection: RemoteSessionSelection?) {
-        guard let hidden = remoteTranscriptHiddenSelection, hidden != selection else { return }
-        remoteTranscriptHiddenSelection = nil
+        guard let hidden = remoteTranscriptHiddenAttach, hidden.selection != selection else { return }
+        remoteTranscriptHiddenAttach = nil
+    }
+
+    /// The key `selection`'s attach terminal is mounted under now: the
+    /// connection a transcript hide on it would belong to.
+    private func remoteAttachMountKey(for selection: RemoteSessionSelection) -> RemoteAttachMountKey {
+        RemoteAttachMountKey(selection: selection, generation: remoteAttachGeneration(for: selection))
     }
 
     /// The mirrored row for `selection`, or nil while it is not in the mirror.

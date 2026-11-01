@@ -351,7 +351,8 @@ struct ContentView: View {
                     if showsReconnect || showsStop || showsTranscriptToggle {
                         ToolbarItemGroup(placement: .primaryAction) {
                             if showsTranscriptToggle {
-                                // Shown only while attached; hides the transcript for this session only.
+                                // Shown only while attached; hides the transcript for this
+                                // session's current connection only.
                                 Button {
                                     appState.toggleRemoteTranscript(selection)
                                 } label: {

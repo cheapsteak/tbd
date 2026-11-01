@@ -478,9 +478,10 @@ final class AppState {
             if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
                 sidebarSelectionGeneration &+= 1
             }
-            // A transcript hide belongs to the session on screen. Moving to
-            // another session or off remote sessions altogether shows it
-            // again; reselecting the same session keeps it.
+            // A transcript hide belongs to the session on screen and its
+            // current connection. Moving to another session or off remote
+            // sessions altogether shows it again; reselecting the same
+            // session keeps it.
             clearRemoteTranscriptHide(unlessFor: selectedRemoteSession)
         }
     }
@@ -827,16 +828,23 @@ final class AppState {
     var skipAccountPicker: Bool = false {
         didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
     }
-    /// The one remote session whose transcript the toolbar toggle has hidden,
+    /// The attach connection whose transcript the toolbar toggle has hidden —
+    /// a session plus the restart generation its terminal is mounted under —
     /// or nil when no transcript is hidden. In memory only and never
-    /// persisted: the transcript opens by default, every time. A hide lasts
-    /// only while its session stays selected with its attach slot on screen —
-    /// `selectedRemoteSession` clears it when the selection moves anywhere
-    /// else, and `setRemoteAttachSlotShown` clears it when the detail view
-    /// stops showing that session's attach slot — so switching sessions or
-    /// reattaching shows the transcript again. Written only by
-    /// `toggleRemoteTranscript` and `clearRemoteTranscriptHide(unlessFor:)`.
-    var remoteTranscriptHiddenSelection: RemoteSessionSelection? = nil
+    /// persisted: the transcript opens by default, every time.
+    ///
+    /// A hide belongs to one connection. It hides the pane only while that
+    /// session is attached under exactly this key, so a new connection —
+    /// Reconnect, or a restart after a network change, both of which bump the
+    /// generation — shows the transcript again with no clearing call. Three
+    /// writes end a hide outright: `selectedRemoteSession` when the selection
+    /// moves to any other session, `setRemoteAttachSlotShown` when the detail
+    /// view stops showing that session's attach slot, and
+    /// `markRemoteSessionDetached` when that session's connection exits. So
+    /// switching sessions, reattaching or reconnecting shows the transcript
+    /// again. Written only by `toggleRemoteTranscript`,
+    /// `clearRemoteTranscriptHide(unlessFor:)` and `markRemoteSessionDetached`.
+    var remoteTranscriptHiddenAttach: RemoteAttachMountKey? = nil
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -1446,6 +1454,9 @@ final class AppState {
     /// `reconnectRemoteSession` has since superseded is dropped: that child
     /// was killed on purpose, and recording its exit would detach — or put
     /// into backoff — the fresh child that replaced it. `nil` skips the check.
+    /// An exit that is not dropped also ends a transcript hide on `selection`
+    /// (`remoteTranscriptHiddenAttach`); a dropped one leaves the hide, which
+    /// may belong to the replacement, alone.
     ///
     /// `now` is the instant the backoff window is measured from — the date
     /// seam, defaulted so no production call site changes, so a test can
@@ -1459,6 +1470,14 @@ final class AppState {
     ) {
         if let generation, generation != remoteAttachGeneration(for: selection) {
             return
+        }
+        // This connection has ended, and a transcript hide belongs to one
+        // connection, so whatever connects next shows the transcript again.
+        // Cleared here rather than left to the detail view: an exit that
+        // recovers before SwiftUI draws the not-attached state never reports
+        // its attach slot hidden. Written only when there is a hide to drop.
+        if remoteTranscriptHiddenAttach?.selection == selection {
+            remoteTranscriptHiddenAttach = nil
         }
         // The child that reported this exit is gone, so its spawn time must
         // not outlive it. `handleNetworkChange` reads a recorded start as "a

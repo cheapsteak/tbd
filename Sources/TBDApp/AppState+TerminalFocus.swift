@@ -126,9 +126,12 @@ extension AppState {
     /// leaves its window (a switch to another session) resigns on its own.
     ///
     /// It also drops a transcript hide for any session other than the one
-    /// now shown. A detach reports `nil` here before any reattach can report
-    /// the session again, so a reattached session always opens with its
-    /// transcript showing.
+    /// now shown, so a hide never outlives its session's attach slot being on
+    /// screen. Reporting the same session again keeps its hide. A detach
+    /// reports `nil` here before any reattach can report the session again,
+    /// and a connection that exited has already dropped its hide in
+    /// `markRemoteSessionDetached`, so a reattached session always opens with
+    /// its transcript showing.
     func setRemoteAttachSlotShown(_ selection: RemoteSessionSelection?) {
         clearRemoteTranscriptHide(unlessFor: selection)
         if let previous = remoteAttachSlotShownSelection, previous != selection,
