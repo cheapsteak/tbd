@@ -84,7 +84,13 @@ public enum SQLMigrationLoader {
     /// file, and merges into the same identifier-sorted list, so it lands in
     /// authoring order rather than at the end. Adding one is the exception:
     /// prefer a `.sql` file, which no other branch can conflict with.
-    public static let inlineTimestampMigrations: [RegisteredMigration] = []
+    public static let inlineTimestampMigrations: [RegisteredMigration] = [
+        // Notes move into worktree panels: a JSON edit of each worktree's tab
+        // order and of the tabs' side regions, which no `.sql` form expresses.
+        RegisteredMigration(identifier: "20261101170100_side_panel_notes") { db in
+            try SidePanelNotesMigration.run(db)
+        },
+    ]
 
     // MARK: - Locating the resource bundle
 

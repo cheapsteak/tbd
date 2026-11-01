@@ -519,9 +519,10 @@ import Testing
 
     // MARK: - Shipped migration manifest
 
-    /// Every shipped timestamp migration is named here deliberately. Adding or
-    /// removing a resource must update this manifest, while the frozen Swift
-    /// block remains independently pinned by `SchemaBaselineDriftTests`.
+    /// Every shipped timestamp migration, `.sql` file or inline Swift, is named
+    /// here deliberately. Adding or removing one must update this manifest,
+    /// while the frozen Swift block remains independently pinned by
+    /// `SchemaBaselineDriftTests`.
     @Test func theShippedMigrationsMatchTheExpectedManifest() throws {
         let expected = [
             "20260816122608_worktree_remote_parent_assigned",
@@ -575,10 +576,15 @@ import Testing
             "20261030194425_panel_tabs",
             "20261101170000_worktree_panel",
         ]
+        let expectedInline = ["20261101170100_side_panel_notes"]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)
-        #expect(SQLMigrationLoader.inlineTimestampMigrations.isEmpty)
-        #expect(SQLMigrationLoader.migrationsForRegistration().map(\.identifier) == expected)
+        let inline = SQLMigrationLoader.inlineTimestampMigrations.map(\.identifier)
+        #expect(inline == expectedInline)
+        #expect(SidePanelNotesMigration.identifier == "20261101170100_side_panel_notes")
+        let registered = SQLMigrationLoader.migrationsForRegistration().map(\.identifier)
+        let expectedRegistered: [String] = (expected + expectedInline).sorted()
+        #expect(registered == expectedRegistered)
     }
 
     /// Every `.sql` file committed under `Sources/TBDDaemon/Database/Migrations/`
@@ -616,7 +622,10 @@ import Testing
         #expect(identifiers.first == "v1")
         let frozen = identifiers.prefix { !SQLMigrationLoader.isTimestampIdentifier($0) }
         #expect(frozen.last == SchemaBaselineDriftTests.frozenBlockLastIdentifier)
-        #expect(SQLMigrationLoader.inlineTimestampMigrations.isEmpty)
+        let inlineAreTimestamped = SQLMigrationLoader.inlineTimestampMigrations.allSatisfy {
+            SQLMigrationLoader.isTimestampIdentifier($0.identifier)
+        }
+        #expect(inlineAreTimestamped)
     }
 
     /// The committed migrations directory in the checkout, resolved from this

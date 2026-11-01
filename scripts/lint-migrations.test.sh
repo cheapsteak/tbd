@@ -305,10 +305,13 @@ test_stray_file_in_the_directory() {
 test_identifier_uniqueness() {
   local d mutant; d="$(mkrepo)"
   # An author who writes both a .sql file and an inline Swift escape hatch
-  # under one identifier: GRDB would run exactly one of them, silently.
+  # under one identifier: GRDB would run exactly one of them, silently. The
+  # entry goes first in the list, whatever entries the list already holds.
   sed -i '' \
-    's|public static let inlineTimestampMigrations: \[RegisteredMigration\] = \[\]|public static let inlineTimestampMigrations: [RegisteredMigration] = [RegisteredMigration(identifier: "20260303000000_dup") { _ in }]|' \
+    's|public static let inlineTimestampMigrations: \[RegisteredMigration\] = \[|&RegisteredMigration(identifier: "20260303000000_dup") { _ in }, |' \
     "$d/Sources/TBDDaemon/Database/SQLMigrationLoader.swift"
+  assert_eq "the fixture's inline list carries the colliding entry" \
+    "$(grep -c '"20260303000000_dup"' "$d/Sources/TBDDaemon/Database/SQLMigrationLoader.swift")" "1"
   write_migration "$d" "20260303000000_dup.sql" "CREATE TABLE IF NOT EXISTS lint_dup (x TEXT);"
   commit_fixture "$d" "add colliding migration"
   run_lint "$SCRIPT" "$d"
