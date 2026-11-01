@@ -30,11 +30,14 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
     case spawnFailed(Int32)
     case holderNeverReportedItsPID(diagnostics: String)
     case connectFailed(path: String, errno: Int32)
-    /// Every connect was refused (ECONNREFUSED) and then the holder was found
-    /// dead, so it can never start accepting.
-    case holderExitedBeforeAccepting(path: String, refusedAttempts: Int, diagnostics: String)
-    /// Every connect was refused while the holder stayed alive, until the
-    /// shared deadline ran out.
+    /// `HolderFixture.connect` hit an error it does not retry; `underlying`
+    /// is that error, with the holder's log beside it.
+    case connectFailedWithHolderLog(underlying: any Error, diagnostics: String)
+    /// Each of one `connect` call's attempts was refused (ECONNREFUSED), and
+    /// the holder has since exited, so it can never start accepting.
+    case holderExitedWhileRefusing(path: String, refusedAttempts: Int, diagnostics: String)
+    /// Each of one `connect` call's attempts was refused while the holder
+    /// stayed alive, until the shared deadline ran out.
     case connectRefusedUntilDeadline(path: String, refusedAttempts: Int, elapsed: Duration, diagnostics: String)
     case noResponse
 
@@ -48,12 +51,14 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
             return "the bootstrap shell never wrote a holder pid.\n\(diagnostics)"
         case .connectFailed(let path, let code):
             return "could not connect to \(path): \(String(cString: strerror(code))) (errno \(code))"
-        case .holderExitedBeforeAccepting(let path, let attempts, let diagnostics):
-            return "the holder exited after \(attempts) refused connect attempts to \(path), "
-                + "without ever accepting a connection\n\(diagnostics)"
+        case .connectFailedWithHolderLog(let underlying, let diagnostics):
+            return "\(underlying)\n\(diagnostics)"
+        case .holderExitedWhileRefusing(let path, let attempts, let diagnostics):
+            return "all \(attempts) of this call's connect attempts to \(path) were refused "
+                + "(errno \(ECONNREFUSED)), and the holder has since exited\n\(diagnostics)"
         case .connectRefusedUntilDeadline(let path, let attempts, let elapsed, let diagnostics):
-            return "the deadline ran out with every connect to \(path) refused (errno \(ECONNREFUSED)): "
-                + "\(attempts) attempts over \(elapsed), the holder still alive but never accepting"
+            return "the deadline ran out with all \(attempts) of this call's connect attempts to \(path) "
+                + "refused (errno \(ECONNREFUSED)) over \(elapsed); the holder was still alive at the last one"
                 + "\n\(diagnostics)"
         case .noResponse:
             return "the holder closed the connection without answering"
@@ -462,13 +467,13 @@ final class HolderFixture {
     /// only a refusal: a refused connect never reaches the holder's `accept`,
     /// so a retry cannot leave a stray client behind. Every other error is
     /// thrown at once, and so is a refusal from a holder that is no longer
-    /// alive, since a dead holder can never start listening.
+    /// alive, since a dead holder can never start listening. Every error thrown
+    /// here carries the holder's log.
     ///
     /// The attempts run inside `waitUntil`, so they share its pace, its
     /// deadline and its cancellation handling. When the deadline runs out,
     /// `waitUntil` records its own timeout first, as it does for `start`'s pid
-    /// wait, and the error thrown here adds the attempt count and the holder's
-    /// log.
+    /// wait, and the error thrown here adds the attempt count.
     func connect(
         receiveTimeout: TimeInterval = 5.0,
         sourceLocation: SourceLocation = #_sourceLocation
@@ -477,24 +482,29 @@ final class HolderFixture {
         var attempts = 0
         var client: TestHolderClient?
         var failure: (any Error)?
-        var holderExited = false
-        await waitUntil("the holder at \(socketPath) to accept a connection", sourceLocation: sourceLocation) {
+        let settled = await waitUntil(
+            "the holder at \(socketPath) to accept a connection\n\(diagnostics())",
+            sourceLocation: sourceLocation
+        ) {
             attempts += 1
             do {
                 client = try connectOnce(receiveTimeout: receiveTimeout)
                 return true
             } catch TestHolderError.connectFailed(_, let code) where code == ECONNREFUSED {
-                holderExited = !processIsAlive(holderPID)
-                return holderExited
+                return !processIsAlive(holderPID)
             } catch {
                 failure = error
                 return true
             }
         }
         if let client { return client }
-        if let failure { throw failure }
-        if holderExited {
-            throw TestHolderError.holderExitedBeforeAccepting(
+        if let failure {
+            throw TestHolderError.connectFailedWithHolderLog(underlying: failure, diagnostics: diagnostics())
+        }
+        if settled {
+            // Settled with neither a client nor another error: the last
+            // attempt was refused by a holder that had exited.
+            throw TestHolderError.holderExitedWhileRefusing(
                 path: socketPath, refusedAttempts: attempts, diagnostics: diagnostics())
         }
         // `waitUntil` returns false both when the harness cancelled the test
@@ -510,7 +520,7 @@ final class HolderFixture {
     /// One connect attempt, with no retry: what `connect` repeats, and what
     /// `tearDown` uses directly, since it runs from a `defer` and cannot
     /// suspend.
-    private func connectOnce(receiveTimeout: TimeInterval = 5.0) throws -> TestHolderClient {
+    private func connectOnce(receiveTimeout: TimeInterval) throws -> TestHolderClient {
         try TestHolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout)
     }
 
