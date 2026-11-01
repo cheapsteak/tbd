@@ -10,14 +10,14 @@ import TestSupport
 /// docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar" and
 /// "Width".
 ///
-/// Every fixture's toolbar has an identifier of its own: toolbars that share
-/// one mirror each other's item changes, and tests interleave at each wait.
+/// Every toolbar has an identifier of its own, so toolbars from tests that
+/// interleave at each wait never mirror each other's item changes.
 ///
 /// `apply` defers through `DispatchQueue.main.async` and toolbar layout runs
-/// on the run loop, so tests wait by suspending (`waitUntil`), never by
-/// pumping (Tests/CLAUDE.md, "`@MainActor` tests: suspend to drain, never
-/// pump"). Assertions after a direct `apply` run before any suspension, so a
-/// scheduled apply cannot land between the two.
+/// on the run loop, so tests wait by suspending (`waitUntil`, over
+/// `pollUntilTrue`), never by pumping (Tests/CLAUDE.md, "`@MainActor` tests:
+/// suspend to drain, never pump"). Assertions after a direct `apply` run
+/// before any suspension, so a scheduled apply cannot land between the two.
 @MainActor
 @Suite("Main toolbar controller")
 struct MainToolbarControllerTests {
@@ -44,7 +44,46 @@ struct MainToolbarControllerTests {
         #expect(fixture.controller.toolbar.allowsUserCustomization == false)
         #expect(fixture.controller.toolbar.autosavesConfiguration == false)
         #expect(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
-        #expect(MainToolbarController.toolbarIdentifier == "tbd.mainToolbar")
+
+        // Unique per controller, so no two toolbars mirror each other.
+        let identifier = fixture.controller.toolbar.identifier
+        #expect(identifier.hasPrefix("tbd.mainToolbar."))
+        let other = MainToolbarController(appState: fixture.state, titleView: NSView(), requestRemoteStop: { _ in })
+        #expect(other.toolbar.identifier.hasPrefix("tbd.mainToolbar."))
+        #expect(other.toolbar.identifier != identifier)
+    }
+
+    /// An item AppKit asks for without inserting it must not take the one
+    /// shared title view out of the toolbar's title item.
+    @Test func throwawayTitleItemLeavesTheTitleViewAlone() async throws {
+        let fixture = ToolbarFixture(label: "throwawayTitleItemLeavesTheTitleViewAlone")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        try #require(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
+
+        let throwaway = fixture.controller.toolbar(
+            fixture.controller.toolbar, itemForItemIdentifier: MainToolbarItemID.title,
+            willBeInsertedIntoToolbar: false)
+        #expect(throwaway != nil)
+        #expect(throwaway?.view == nil)
+        #expect(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
+    }
+
+    /// The split nested in a container, as SwiftUI's hosting view nests it in
+    /// the app, so AppKit's own sidebar discovery cannot stand in for the
+    /// controller's binding.
+    @Test func trackingSeparatorFollowsANestedSplit() async throws {
+        let fixture = ToolbarFixture(label: "trackingSeparatorFollowsANestedSplit", nested: true)
+        defer { fixture.tearDown() }
+        try #require(fixture.window.contentViewController !== fixture.split)
+        try #require(fixture.split.parent === fixture.window.contentViewController)
+        try await fixture.ready()
+
+        let separator = try #require(
+            fixture.controller.item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem)
+        let bound: NSSplitView? = separator.splitView
+        #expect(bound === fixture.split.splitView)
+        #expect(separator.dividerIndex == 0)
     }
 
     @Test func noSwiftUIItems() async throws {
@@ -92,7 +131,7 @@ struct MainToolbarControllerTests {
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
         let leadingVisible = try await waitUntil("the toggle and arrows to be visible") {
             fixture.window.layoutIfNeeded()
-            let visible = Set((fixture.controller.toolbar.visibleItems ?? []).map(\.itemIdentifier))
+            let visible = Set((fixture.controller.toolbar.visibleItems ?? []).map { $0.itemIdentifier })
             return leading.allSatisfy { visible.contains($0) }
         }
         #expect(leadingVisible)
@@ -277,8 +316,9 @@ struct MainToolbarControllerTests {
 
         // The appearance change alone schedules the re-bake, through KVO.
         fixture.window.appearance = dark
+        let lightID = ObjectIdentifier(light)
         let followed = try await waitUntil("the Servers icon to follow the appearance") {
-            servers.image !== light
+            servers.image.map { ObjectIdentifier($0) } != lightID
         }
         #expect(followed)
 
@@ -356,25 +396,31 @@ struct MainToolbarControllerTests {
 
 // MARK: - Waiting
 
-/// Checks `condition` until it holds, suspending between checks so main-queue
-/// work and run-loop layout get to run. What it waits for is main-queue or
-/// run-loop work, which a suspension of this main-actor body lets run first,
-/// so the cap counts hops rather than time.
+/// Waits until `condition` holds on the main actor, through `pollUntilTrue`
+/// (Tests/CLAUDE.md, "Assertion hygiene" 5), suspending between reads so
+/// main-queue work and run-loop layout get to run.
 ///
-/// The verdict is a fresh read after the last sleep, never the loop's exit,
-/// and a cancelled sleep throws rather than spinning (Tests/CLAUDE.md,
-/// "Assertion hygiene" 5). A miss is recorded as an error, so its text
-/// reaches the CI summary.
+/// Returns true once it holds. A timeout is recorded as an error naming what
+/// was awaited and how long the wait took, so the text reaches the CI summary,
+/// and returns false. Cancellation throws: the harness ended the test, and no
+/// timeout is invented for it.
 @MainActor
-private func waitUntil(_ what: String, _ condition: () -> Bool) async throws -> Bool {
+private func waitUntil(
+    _ what: String, _ condition: @escaping @MainActor @Sendable () -> Bool
+) async throws -> Bool {
     let start = ContinuousClock.now
-    for _ in 0..<300 {
-        if condition() { return true }
-        try await Task.sleep(for: .milliseconds(5))
+    let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+        await MainActor.run { condition() }
     }
-    if condition() { return true }
-    Issue.record(WaitTimedOut(what: what, elapsed: ContinuousClock.now - start))
-    return false
+    switch outcome {
+    case .satisfied:
+        return true
+    case .cancelled:
+        throw CancellationError()
+    case .timedOut:
+        Issue.record(WaitTimedOut(what: what, elapsed: ContinuousClock.now - start))
+        return false
+    }
 }
 
 private struct WaitTimedOut: Error, CustomStringConvertible {
@@ -382,7 +428,7 @@ private struct WaitTimedOut: Error, CustomStringConvertible {
     let elapsed: Duration
 
     var description: String {
-        "Timed out waiting for \(what) after \(elapsed) and 300 checks"
+        "Timed out waiting for \(what) after \(elapsed)"
     }
 }
 
@@ -410,7 +456,10 @@ private final class ToolbarFixture {
     let window: NSWindow
     var stopRequests: [RemoteSessionSelection] = []
 
-    init(label: String) {
+    /// - Parameter nested: puts the split inside a plain container controller,
+    ///   which is the window's `contentViewController`, instead of making the
+    ///   split the content itself.
+    init(label: String, nested: Bool = false) {
         _ = NSApplication.shared
         let suite = TestDefaultsSuite("MainToolbarControllerTests.\(label)")
         self.suite = suite
@@ -438,9 +487,7 @@ private final class ToolbarFixture {
             content: ToolbarFixture.makePane(width: size.width - sidebarWidth),
             autosaveName: nil)
         let titleView = NSTextField(labelWithString: "feature")
-        let controller = MainToolbarController(
-            appState: state, titleView: titleView, requestRemoteStop: { _ in },
-            identifier: "tbd.mainToolbar.test.\(UUID().uuidString)")
+        let controller = MainToolbarController(appState: state, titleView: titleView, requestRemoteStop: { _ in })
         split.onViewDidAppear = { [weak controller, weak split] window in
             guard let controller, let split else { return }
             controller.install(on: window, split: split)
@@ -463,7 +510,17 @@ private final class ToolbarFixture {
         // The window takes its first size from the view; start it at the
         // final one so no transient narrow layout happens on the way.
         split.view.setFrameSize(size)
-        window.contentViewController = split
+        if nested {
+            let container = NSViewController()
+            container.view = NSView(frame: NSRect(origin: .zero, size: size))
+            container.addChild(split)
+            split.view.frame = container.view.bounds
+            split.view.autoresizingMask = [.width, .height]
+            container.view.addSubview(split.view)
+            window.contentViewController = container
+        } else {
+            window.contentViewController = split
+        }
         window.setContentSize(size)
         window.setFrameOrigin(ToolbarFixture.offscreenOrigin)
         window.orderFront(nil)
@@ -473,6 +530,8 @@ private final class ToolbarFixture {
     /// depends on `viewDidAppear` arriving, then waits for the first apply.
     func ready() async throws {
         controller.install(on: window, split: split)
+        let controller = self.controller
+        let window = self.window
         let applied = try await waitUntil("the first apply") {
             controller.appliedSnapshot != nil && window.toolbar === controller.toolbar
         }

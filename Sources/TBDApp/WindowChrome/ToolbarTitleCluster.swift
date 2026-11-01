@@ -4,8 +4,12 @@ import TBDShared
 /// The main window's title: the selected worktree's title and notes button,
 /// or the selected remote session's name. Both toolbars draw it, SwiftUI's as
 /// its `.principal` item and the AppKit one in a hosting view.
+///
+/// `appState` is passed in, not read from the environment, so the view has no
+/// `@Environment` dependency inside the `.principal` toolbar item — the
+/// `WorktreeTitleView` convention.
 struct ToolbarTitleCluster: View {
-    @Environment(AppState.self) private var appState
+    let appState: AppState
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }

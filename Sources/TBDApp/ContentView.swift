@@ -102,12 +102,12 @@ struct ContentView: View {
 
                 if #available(macOS 26.0, *) {
                     ToolbarItem(placement: .principal) {
-                        ToolbarTitleCluster()
+                        ToolbarTitleCluster(appState: appState)
                     }
                     .sharedBackgroundVisibility(.hidden)
                 } else {
                     ToolbarItem(placement: .principal) {
-                        ToolbarTitleCluster()
+                        ToolbarTitleCluster(appState: appState)
                     }
                 }
 

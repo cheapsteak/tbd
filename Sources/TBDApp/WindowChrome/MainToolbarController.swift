@@ -25,10 +25,12 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 /// and "Width".
 @MainActor
 final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
-    /// One main window, so one toolbar under this identifier. Toolbars that
-    /// share an identifier mirror each other's item changes, which is why
-    /// tests pass identifiers of their own.
-    nonisolated static let toolbarIdentifier = NSToolbar.Identifier("tbd.mainToolbar")
+    /// Each toolbar's identifier is this plus a UUID. Toolbars that share an
+    /// identifier mirror each other's item changes; with autosave and
+    /// customization off, that mirroring is the identifier's only effect, and
+    /// it is unwanted — a reopened window's toolbar would follow the old one,
+    /// and tests running side by side would follow each other's.
+    nonisolated static let identifierPrefix = "tbd.mainToolbar."
 
     let toolbar: NSToolbar
     let appState: AppState
@@ -62,18 +64,15 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// The Servers icon per running state, appearance and accessibility label.
     var serversImages: [String: NSImage] = [:]
 
-    /// - Parameter identifier: tests pass a unique one, so toolbars from
-    ///   tests running side by side do not mirror each other's items.
     init(
         appState: AppState,
         titleView: NSView,
-        requestRemoteStop: @escaping (RemoteSessionSelection) -> Void,
-        identifier: NSToolbar.Identifier = MainToolbarController.toolbarIdentifier
+        requestRemoteStop: @escaping (RemoteSessionSelection) -> Void
     ) {
         self.appState = appState
         self.titleView = titleView
         self.requestRemoteStop = requestRemoteStop
-        toolbar = NSToolbar(identifier: identifier)
+        toolbar = NSToolbar(identifier: MainToolbarController.identifierPrefix + UUID().uuidString)
         filterMenuTracker = FilterMenuTracker()
         super.init()
         toolbar.displayMode = .iconOnly
@@ -233,7 +232,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
-        makeItem(itemIdentifier)
+        makeItem(itemIdentifier, willBeInserted: flag)
     }
 
     // MARK: NSMenuDelegate (the Servers menu)

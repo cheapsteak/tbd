@@ -25,7 +25,11 @@ extension MainToolbarController {
     /// follows `AppState` is filled in by `updateContent(_:)`, which looks the
     /// current item up by identifier. `nil` leaves the standard spaces to the
     /// toolbar.
-    func makeItem(_ identifier: NSToolbarItem.Identifier) -> NSToolbarItem? {
+    ///
+    /// - Parameter willBeInserted: false when AppKit asks for an item it will
+    ///   not put in the toolbar. The title item then goes without the shared
+    ///   title view, which one view can only be in once.
+    func makeItem(_ identifier: NSToolbarItem.Identifier, willBeInserted: Bool) -> NSToolbarItem? {
         switch identifier {
         case MainToolbarItemID.toggleSidebar:
             return makeToggleItem()
@@ -38,6 +42,9 @@ extension MainToolbarController {
         case MainToolbarItemID.repoFilter:
             return makeFilterItem()
         case .sidebarTrackingSeparator:
+            // AppKit makes this item itself for the standard identifier and
+            // may never ask; `bindTrackingSeparator()` binds whichever item
+            // the toolbar holds. This serves the case where it does ask.
             guard let split else {
                 itemsLogger.error("Main toolbar asked for the tracking separator before it had a split")
                 return nil
@@ -45,7 +52,7 @@ extension MainToolbarController {
             return NSTrackingSeparatorToolbarItem(
                 identifier: .sidebarTrackingSeparator, splitView: split.splitView, dividerIndex: 0)
         case MainToolbarItemID.title:
-            return makeTitleItem()
+            return makeTitleItem(withView: willBeInserted)
         case MainToolbarItemID.servers:
             return makeServersItem()
         case MainToolbarItemID.remoteTranscript:
@@ -121,11 +128,12 @@ extension MainToolbarController {
 
     /// The title cluster. Its compression resistance sits below the
     /// right-hand items', so a long title truncates before they are dropped.
-    private func makeTitleItem() -> NSToolbarItem {
-        titleView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    private func makeTitleItem(withView: Bool) -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.title)
-        item.view = titleView
         item.isBordered = false
+        guard withView else { return item }
+        titleView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        item.view = titleView
         return item
     }
 
@@ -165,6 +173,7 @@ extension MainToolbarController {
         if let split {
             item(MainToolbarItemID.toggleSidebar)?.target = split
         }
+        bindTrackingSeparator()
         item(MainToolbarItemID.back)?.isEnabled = snapshot.canGoBack
         item(MainToolbarItemID.forward)?.isEnabled = snapshot.canGoForward
         if let popup = item(MainToolbarItemID.repoFilter)?.view as? NSPopUpButton {
@@ -179,6 +188,22 @@ extension MainToolbarController {
                 systemSymbolName: remote.transcriptSymbolName, accessibilityDescription: remote.transcriptHelp)
             transcript.toolTip = remote.transcriptHelp
         }
+    }
+
+    /// Points the toolbar's tracking separator at the split's first divider.
+    /// AppKit creates the item for `.sidebarTrackingSeparator` and finds a
+    /// sidebar on its own, but only documents that for a split it can
+    /// discover; in the app the split sits inside SwiftUI's hosting view, so
+    /// the binding is made explicit on every apply.
+    private func bindTrackingSeparator() {
+        guard let split,
+              let separator = item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem else { return }
+        // Read as optional: an item AppKit has not bound yet holds no split view.
+        let bound: NSSplitView? = separator.splitView
+        guard bound !== split.splitView || separator.dividerIndex != 0 else { return }
+        separator.splitView = split.splitView
+        separator.dividerIndex = 0
+        itemsLogger.debug("Main toolbar bound the tracking separator to the main split")
     }
 
     private func updateFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
