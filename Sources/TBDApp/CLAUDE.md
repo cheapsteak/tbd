@@ -27,6 +27,15 @@ macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **a
 - A bare `Menu` / `Menu(primaryAction:)` toolbar item (an `NSMenuToolbarItem`) is greedy: it tends to fuse with an adjacent bordered item even with a spacer. Putting it inside a `ControlGroup` (boundary) is what reliably isolates it.
 - Last-resort escape hatches if SwiftUI keeps fusing: `.sharedBackgroundVisibility(.hidden)` (removes an item's glass entirely — separate grouping but no background), or drop to a custom `NSToolbar` + `NSToolbarDelegate` with `NSMenuToolbarItem` and explicit space items.
 
+### AppKit `NSToolbarItem`: which items get glass
+
+`NSToolbarItem` forwards most getters and setters, `isBordered` among them, to its view when the view answers them, so whether an item gets glass depends on its view:
+
+- **An image item with `isBordered = false`:** no glass.
+- **A view item whose view has its own `isBordered`** (an `NSButton`, an `NSPopUpButton`): the item reports the view's value, so a bordered button gets glass, and adjacent glass items fuse onto one capsule. Measured in this app: three adjacent view items whose views were bordered accessory-bar buttons sat on one shared capsule.
+- **A view item whose view has no `isBordered`** (a plain `NSView`, an `NSHostingView`) **and `item.isBordered = false`:** no glass. The leading buttons (`ToolbarIconButtonHost` in `MainToolbarController+Items.swift`) and the title stay off glass this way; the leading buttons' bordered button sits one level down and keeps its own hover highlight.
+- So to keep a button off glass, never make a bordered control the item's view directly. Wrap it in a plain view and set the target and action on the button and the overflow row; an item with a custom view keeps no target or action its view does not answer, so the item reads nil (measured on CI). The wrapper's item is a `ToolbarIconButtonItem`: the item reports its button's state, and setting the item's flag sets the button and the overflow row, so set the item's `isEnabled`, never the button's.
+
 ### Split button (primary action + dropdown)
 
 `Menu(content:label:primaryAction:)` is the toolbar **split button**: the label is the primary click; an attached **chevron** opens the menu. Per Apple's HIG this chevron is the correct affordance for a labeled action with options (an ellipsis "More" is discouraged for discoverability, and there is no native vertical-ellipsis SF Symbol).

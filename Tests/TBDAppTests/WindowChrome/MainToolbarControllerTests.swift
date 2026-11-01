@@ -186,9 +186,10 @@ struct MainToolbarControllerTests {
         try await fixture.ready()
 
         let toggle = try #require(fixture.controller.item(MainToolbarItemID.toggleSidebar))
-        #expect(toggle.target === fixture.split)
-        #expect(toggle.action == #selector(NSSplitViewController.toggleSidebar(_:)))
-        #expect(toggle.view is NSButton)
+        #expect(toggle.view is ToolbarIconButtonHost)
+        let toggleButton = try #require(ToolbarFixture.iconButton(of: toggle))
+        #expect(toggleButton.target === fixture.split)
+        #expect(toggleButton.action == #selector(NSSplitViewController.toggleSidebar(_:)))
         let compactWidths = [CGFloat](repeating: MainToolbarMetrics.iconButtonWidth, count: 3)
         let leading: [NSToolbarItem.Identifier] = [
             MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
@@ -259,19 +260,31 @@ struct MainToolbarControllerTests {
 
     // MARK: - Compact leading buttons
 
-    /// The toggle, back and forward are view items, each a bordered button
-    /// that shows its border only under the pointer, held at the compact size
-    /// by required constraints, with its tool tip, label and accessibility
-    /// description, and its target and action on the button, on the item,
-    /// which forwards them, and on its overflow row. Once laid out, a button
-    /// also carries AppKit's content-size constraints for the bezel, wider
-    /// than the compact width, so its own constraints are found by their
-    /// identifiers, and its fitting width shows the required width wins.
+    /// The toggle, back and forward are `ToolbarIconButtonItem`s whose view is
+    /// a `ToolbarIconButtonHost`: the structure that keeps Liquid Glass off
+    /// them. A bordered button as an item's view makes the item bordered,
+    /// which gives it glass, so the item is not bordered and its view answers
+    /// none of the selectors an item forwards to its view (`isBordered`,
+    /// `isEnabled`, `target`, `action` and `image`, getters and setters). No
+    /// item autovalidates: `validate` does nothing for an item with a custom
+    /// view, and none of the three wants validating.
+    ///
+    /// The host's button is an accessory-bar button, bordered but showing its
+    /// border only under the pointer, image-only, with its tool tip and
+    /// accessibility description, its target and action, which the item
+    /// does not keep (an item with a custom view keeps none the view does not
+    /// answer, so it reads nil), and pinned to the
+    /// host's four edges by required constraints, so once laid out its frame
+    /// is the host's bounds. The host holds the compact size by required
+    /// constraints, found by their identifiers among its edge constraints,
+    /// and its fitting size is the compact size. The overflow row carries the
+    /// item's label, target and action.
     @Test func leadingButtonsAreCompactViewItems() async throws {
         let fixture = ToolbarFixture(label: "leadingButtonsAreCompactViewItems")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let compactSize = NSSize(width: MainToolbarMetrics.iconButtonWidth, height: MainToolbarMetrics.iconButtonHeight)
 
         let buttons: [(NSToolbarItem.Identifier, String, AnyObject?, Selector)] = [
             (MainToolbarItemID.toggleSidebar, "Toggle Sidebar", fixture.split,
@@ -281,10 +294,20 @@ struct MainToolbarControllerTests {
              #selector(MainToolbarController.navigateForward(_:))),
         ]
         for (identifier, tip, target, action) in buttons {
-            let item = try #require(controller.item(identifier))
-            let button = try #require(item.view as? NSButton)
+            let item = try #require(controller.item(identifier) as? ToolbarIconButtonItem)
+            let host = try #require(item.view as? ToolbarIconButtonHost)
+            let button = try #require(item.button)
+
+            // What keeps the glass off: an unbordered item over a view that
+            // forwards nothing.
+            #expect(item.isBordered == false)
+            let answered = ToolbarFixture.answeredForwardedSelectors(of: host)
+            #expect(answered.isEmpty, "the host answers \(answered)")
+            #expect(item.autovalidates == false)
+
             #expect(item.label == tip)
             #expect(item.toolTip == tip)
+            #expect(button.superview === host)
             #expect(button.toolTip == tip)
             #expect(button.image?.accessibilityDescription == tip)
             #expect(button.imagePosition == .imageOnly)
@@ -293,26 +316,35 @@ struct MainToolbarControllerTests {
             #expect(button.showsBorderOnlyWhileMouseInside)
             #expect(button.target === target)
             #expect(button.action == action)
-            #expect(item.target === target)
-            #expect(item.action == action)
+            let itemHasNoTarget = item.target == nil
+            #expect(itemHasNoTarget)
+            #expect(item.action == nil)
+            #expect(host.translatesAutoresizingMaskIntoConstraints == false)
             #expect(button.translatesAutoresizingMaskIntoConstraints == false)
-            let widths = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonWidthID)
-            let heights = ToolbarFixture.constraints(of: button, identified: MainToolbarController.iconButtonHeightID)
+            let pinnedEdges = ToolbarFixture.pinnedEdges(of: button, in: host)
+            #expect(pinnedEdges == ToolbarFixture.allEdges)
+            host.layoutSubtreeIfNeeded()
+            let buttonFrame = button.frame
+            let hostBounds = host.bounds
+            #expect(buttonFrame == hostBounds)
+
+            let widths = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonWidthID)
+            let heights = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonHeightID)
             try #require(widths.count == 1)
             try #require(heights.count == 1)
             let width = widths[0]
             let height = heights[0]
-            #expect(width.firstItem === button)
+            #expect(width.firstItem === host)
             #expect(width.firstAttribute == .width)
             #expect(width.relation == .equal)
             #expect(width.priority == .required)
             #expect(width.constant == MainToolbarMetrics.iconButtonWidth)
-            #expect(height.firstItem === button)
+            #expect(height.firstItem === host)
             #expect(height.firstAttribute == .height)
             #expect(height.relation == .equal)
             #expect(height.priority == .required)
             #expect(height.constant == MainToolbarMetrics.iconButtonHeight)
-            #expect(button.fittingSize.width == MainToolbarMetrics.iconButtonWidth)
+            #expect(host.fittingSize == compactSize)
             let row = try #require(item.menuFormRepresentation)
             #expect(row.title == tip)
             #expect(row.target === target)
@@ -322,6 +354,93 @@ struct MainToolbarControllerTests {
             MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
         ]
         #expect(fixture.leadsBeforeTheSeparator(leading))
+    }
+
+    /// Setting `isEnabled` on the toggle item moves its button and its
+    /// overflow row with it, through the base class's property as AppKit
+    /// would set it. No apply sets the toggle's flag, so this is the one path
+    /// the Back and Forward tests do not cover: the host forwards nothing, and
+    /// only the item (`ToolbarIconButtonItem`) carries the flag down.
+    @Test func toggleEnablementMovesItsButtonAndRow() async throws {
+        let fixture = ToolbarFixture(label: "toggleEnablementMovesItsButtonAndRow")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let toggle = try #require(fixture.controller.item(MainToolbarItemID.toggleSidebar))
+        let button = try #require(ToolbarFixture.iconButton(of: toggle))
+        let row = try #require(toggle.menuFormRepresentation)
+
+        toggle.isEnabled = false
+        #expect(toggle.isEnabled == false)
+        #expect(button.isEnabled == false)
+        #expect(row.isEnabled == false)
+
+        toggle.isEnabled = true
+        #expect(toggle.isEnabled == true)
+        #expect(button.isEnabled == true)
+        #expect(row.isEnabled == true)
+    }
+
+    /// A compact item survives AppKit's copy, which archives the item's view
+    /// and unarchives the copy's, so the host decodes rather than trapping.
+    /// The copy is a `ToolbarIconButtonItem`, still unbordered, over a new
+    /// `ToolbarIconButtonHost` whose button carries the original's glyph and
+    /// action, pinned to the host's edges, with the host at the compact size:
+    /// the constraints are archived with it. Straight after the copy, before
+    /// the test sets anything, the copy's flag is its button's, whatever
+    /// AppKit set as it copied. AppKit enables the copy as it copies, whatever
+    /// the original's flag, so the test then sets the copy's `isEnabled` both
+    /// ways and checks that its button and row follow, rather than comparing
+    /// the flag with the original's. The button's target is not compared: an
+    /// archive keeps a target only when it archives the target too.
+    ///
+    /// The items are fresh from the delegate, as AppKit asks for one it will
+    /// not insert, so no window state rides along in the archive.
+    @Test func leadingItemsSurviveACopy() async throws {
+        let fixture = ToolbarFixture(label: "leadingItemsSurviveACopy")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let compactSize = NSSize(width: MainToolbarMetrics.iconButtonWidth, height: MainToolbarMetrics.iconButtonHeight)
+        let leading: [NSToolbarItem.Identifier] = [
+            MainToolbarItemID.toggleSidebar, MainToolbarItemID.back, MainToolbarItemID.forward,
+        ]
+        let flags = [false, true]
+
+        for identifier in leading {
+            let made = controller.toolbar(
+                controller.toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: false)
+            let original = try #require(made as? ToolbarIconButtonItem)
+            let originalHost = original.view
+            let originalButton = try #require(original.button)
+
+            let copied = try #require(original.copy() as? ToolbarIconButtonItem)
+            let host = try #require(copied.view as? ToolbarIconButtonHost)
+            let button = try #require(copied.button)
+            #expect(button.isEnabled == copied.isEnabled)
+            #expect(host !== originalHost)
+            #expect(copied.itemIdentifier == identifier)
+            #expect(copied.isBordered == false)
+            let answered = ToolbarFixture.answeredForwardedSelectors(of: host)
+            #expect(answered.isEmpty, "the copied host answers \(answered)")
+            let glyphDescription = button.image?.accessibilityDescription
+            #expect(glyphDescription == originalButton.image?.accessibilityDescription)
+            #expect(button.action == originalButton.action)
+
+            let pinnedEdges = ToolbarFixture.pinnedEdges(of: button, in: host)
+            #expect(pinnedEdges == ToolbarFixture.allEdges)
+            let widths = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonWidthID)
+            let heights = ToolbarFixture.constraints(of: host, identified: MainToolbarController.iconButtonHeightID)
+            #expect(widths.count == 1)
+            #expect(heights.count == 1)
+            #expect(host.fittingSize == compactSize)
+
+            let row = try #require(copied.menuFormRepresentation)
+            for enabled in flags {
+                copied.isEnabled = enabled
+                #expect(button.isEnabled == enabled)
+                #expect(row.isEnabled == enabled)
+            }
+        }
     }
 
     /// Each leading glyph, as its button carries it, against the size the
@@ -343,7 +462,7 @@ struct MainToolbarControllerTests {
             (MainToolbarItemID.forward, "chevron.right", NSSize(width: 6, height: 11)),
         ]
         for (identifier, symbol, reference) in references {
-            let button = try #require(fixture.controller.item(identifier)?.view as? NSButton)
+            let button = try #require(ToolbarFixture.iconButton(of: fixture.controller.item(identifier)))
             #expect(button.imageScaling == .scaleNone)
             let glyph = try #require(button.image)
             let imageSize = glyph.size
@@ -360,10 +479,30 @@ struct MainToolbarControllerTests {
 
     // MARK: - Back and forward
 
+    /// A Back or Forward item starts disabled, with its button and its
+    /// overflow row, as the delegate makes it and before any apply. Each apply
+    /// then sets the item from the snapshot, and the item keeps the button and
+    /// the row in step (`ToolbarIconButtonItem`). A row disabled directly
+    /// while its item is enabled comes back on the next apply that enables
+    /// Back, though the item already shows that value: the apply compares the
+    /// row as well as the item.
     @Test func backForwardEnablementFollowsTheSnapshot() async throws {
         let fixture = ToolbarFixture(label: "backForwardEnablementFollowsTheSnapshot")
         defer { fixture.tearDown() }
         try await fixture.ready()
+
+        let controller = fixture.controller
+        let history: [NSToolbarItem.Identifier] = [MainToolbarItemID.back, MainToolbarItemID.forward]
+        for identifier in history {
+            let made = controller.toolbar(
+                controller.toolbar, itemForItemIdentifier: identifier, willBeInsertedIntoToolbar: false)
+            let fresh = try #require(made)
+            let freshButton = try #require(ToolbarFixture.iconButton(of: fresh))
+            let freshRow = try #require(fresh.menuFormRepresentation)
+            #expect(fresh.isEnabled == false)
+            #expect(freshButton.isEnabled == false)
+            #expect(freshRow.isEnabled == false)
+        }
 
         var snapshot = MainToolbarSnapshot.make(from: fixture.state)
         snapshot.canGoBack = true
@@ -371,8 +510,8 @@ struct MainToolbarControllerTests {
         fixture.controller.apply(snapshot)
         let back = try #require(fixture.controller.item(MainToolbarItemID.back))
         let forward = try #require(fixture.controller.item(MainToolbarItemID.forward))
-        let backButton = try #require(back.view as? NSButton)
-        let forwardButton = try #require(forward.view as? NSButton)
+        let backButton = try #require(ToolbarFixture.iconButton(of: back))
+        let forwardButton = try #require(ToolbarFixture.iconButton(of: forward))
         let backRow = try #require(back.menuFormRepresentation)
         let forwardRow = try #require(forward.menuFormRepresentation)
         #expect(back.isEnabled == true)
@@ -395,6 +534,16 @@ struct MainToolbarControllerTests {
         #expect(forward.isEnabled == true)
         #expect(forwardButton.isEnabled == true)
         #expect(forwardRow.isEnabled == true)
+
+        snapshot.canGoBack = true
+        fixture.controller.apply(snapshot)
+        try #require(back.isEnabled)
+        try #require(backRow.isEnabled)
+        backRow.isEnabled = false
+        fixture.controller.apply(snapshot)
+        #expect(back.isEnabled == true)
+        #expect(backButton.isEnabled == true)
+        #expect(backRow.isEnabled == true)
     }
 
     /// The Back and Forward overflow rows validate against history, as their
@@ -1328,10 +1477,19 @@ struct MainToolbarControllerTests {
 
     /// During a cooldown the window shows another toolbar, and an apply an
     /// observed change asked for, finding nothing the toolbar shows changed,
-    /// still does nothing: no apply runs, so no content is updated on the
-    /// detached toolbar. A change the toolbar does show is still applied,
-    /// leaving the replacement on the window. The cooldown is never advanced,
-    /// so it runs throughout; the fixture's teardown cancels it.
+    /// still does nothing: no apply runs for that change, so no content is
+    /// updated on the detached toolbar. A change the toolbar does show is
+    /// still applied, leaving the replacement on the window. The cooldown is
+    /// never advanced, so it runs throughout; the fixture's teardown cancels
+    /// it.
+    ///
+    /// The count asserted is `observedOnlyApplyCount`, not `applyCount`: only
+    /// an observed change moves it. Anything else that asks for an apply,
+    /// such as the window's appearance watch, can do so at any turn of a
+    /// loaded pass, after the check that found none queued: its apply either
+    /// joins the one the change queued, which then runs in full, or runs
+    /// after it. Either adds to `applyCount` and neither moves the count
+    /// asserted.
     @Test func anUnchangedObservedChangeDuringTheCooldownDoesNotReapply() async throws {
         let fixture = ToolbarFixture(
             label: "anUnchangedObservedChangeDuringTheCooldownDoesNotReapply",
@@ -1354,31 +1512,31 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("once the cooldown started") {
-            () throws -> (applies: Int, changes: Int) in
-            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            () throws -> (observedOnlyApplies: Int, changes: Int) in
+            let counts = (
+                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let appliesBefore = before.applies
+        let observedOnlyAppliesBefore = before.observedOnlyApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.applyCount == appliesBefore)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
         #expect(window.toolbar === kept)
         #expect(controller.isInReinstallCooldown)
 
         let repoID = fixture.repos[1].id
         fixture.state.repoFilter = repoID
         let applied = try await waitForMainActorCondition("the apply for a change the toolbar shows") {
-            controller.applyCount > appliesBefore
+            controller.appliedSnapshot?.filter.selected == repoID
         }
         try #require(applied)
-        #expect(controller.appliedSnapshot?.filter.selected == repoID)
         #expect(window.toolbar === kept)
         #expect(controller.isInReinstallCooldown)
     }
@@ -1541,7 +1699,9 @@ struct MainToolbarControllerTests {
     /// The apply count alone cannot tell: the stale registrations' calls
     /// coalesce into the one queued apply. `observedChangeCount` counts the
     /// registrations that acted, and is what goes wrong without the
-    /// generation check.
+    /// generation check. Both counts are read in the turn behind the
+    /// change's apply, so an apply something else asks for after it is not
+    /// counted against the change.
     @Test func oneObservedChangeActsOnce() async throws {
         let fixture = ToolbarFixture(label: "oneObservedChangeActsOnce")
         defer { fixture.tearDown() }
@@ -1567,12 +1727,9 @@ struct MainToolbarControllerTests {
         let appliesBefore = fixture.controller.applyCount
         let repoID = fixture.repos[1].id
         fixture.state.repoFilter = repoID
-        let applied = try await waitForMainActorCondition("the apply the filter change scheduled") {
-            fixture.controller.applyCount > appliesBefore
-        }
-        try #require(applied)
-        #expect(fixture.controller.observedChangeCount == changesBefore + 1)
-        #expect(fixture.controller.applyCount == appliesBefore + 1)
+        let after = try await fixture.countsBehindTheQueuedApply()
+        #expect(after.observedChanges == changesBefore + 1)
+        #expect(after.applies == appliesBefore + 1)
         #expect(fixture.controller.appliedSnapshot?.filter.selected == repoID)
     }
 
@@ -1581,7 +1738,9 @@ struct MainToolbarControllerTests {
     /// apply. That apply finds the snapshot, the collapse and the appearance
     /// as the toolbar shows them and does no layout or content work. It still
     /// re-arms the tracking: a change to the selected worktree's list is
-    /// applied after it.
+    /// applied after it. The count asserted is the one only an observed
+    /// change moves, for the reason
+    /// `anUnchangedObservedChangeDuringTheCooldownDoesNotReapply` gives.
     @Test func anotherWorktreesServersDoNotReapply() async throws {
         let fixture = ToolbarFixture(label: "anotherWorktreesServersDoNotReapply")
         defer { fixture.tearDown() }
@@ -1596,58 +1755,57 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("before another worktree's servers change") {
-            () throws -> (applies: Int, changes: Int) in
-            let counts = (applies: controller.applyCount, changes: controller.observedChangeCount)
+            () throws -> (observedOnlyApplies: Int, changes: Int) in
+            let counts = (
+                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let appliesBefore = before.applies
+        let observedOnlyAppliesBefore = before.observedOnlyApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.applyCount == appliesBefore)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
 
         fixture.showServers(url: nil)
         let applied = try await waitForMainActorCondition("the apply for the selected worktree's change") {
-            controller.applyCount > appliesBefore
+            controller.appliedSnapshot?.servers?.isRunning == false
         }
-        try #require(applied)
-        #expect(controller.appliedSnapshot?.servers?.isRunning == false)
+        #expect(applied)
     }
 
     /// An apply asked for by anything but an observed change runs in full
     /// with nothing changed: a repeated install, as a second `viewDidAppear`
     /// makes, and `scheduleApply()`, through which the replacement and
     /// appearance watches, the cooldown's end and the filter menu's close
-    /// all ask.
+    /// all ask. Each count is read in the turn behind the request's apply,
+    /// so an apply something else asks for after it is not counted against
+    /// the request. Neither request's apply is one only observed changes
+    /// asked for, so `observedOnlyApplyCount` stays where it was.
     @Test func requestedAppliesRunWithNothingChanged() async throws {
         let fixture = ToolbarFixture(label: "requestedAppliesRunWithNothingChanged")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let observedOnlyAppliesBefore = controller.observedOnlyApplyCount
 
         let beforeInstall = controller.applyCount
         controller.install(on: fixture.window)
         try #require(controller.applyScheduled)
-        let installRan = try await waitForMainActorCondition("the apply a repeated install queued") {
-            !controller.applyScheduled
-        }
-        try #require(installRan)
-        #expect(controller.applyCount == beforeInstall + 1)
+        let afterInstall = try await fixture.countsBehindTheQueuedApply()
+        #expect(afterInstall.applies == beforeInstall + 1)
 
         let beforeRequest = controller.applyCount
         controller.scheduleApply()
         try #require(controller.applyScheduled)
-        let requestRan = try await waitForMainActorCondition("the apply scheduleApply() queued") {
-            !controller.applyScheduled
-        }
-        try #require(requestRan)
-        #expect(controller.applyCount == beforeRequest + 1)
+        let afterRequest = try await fixture.countsBehindTheQueuedApply()
+        #expect(afterRequest.applies == beforeRequest + 1)
+        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
     }
 
     // MARK: - Content
@@ -2022,6 +2180,32 @@ private final class ToolbarFixture {
         throw ApplyQueuedBeforeTheTestsTurn(what: what, gaps: gaps)
     }
 
+    /// The controller's counts in the main-queue turn right behind the apply
+    /// queued now: the one the caller's change or request just queued, or
+    /// the one already queued that it joined.
+    ///
+    /// The controller queues each apply with `DispatchQueue.main.async`, and
+    /// the main queue runs blocks in the order they were queued, so the
+    /// block queued here runs once that apply has, and before any apply
+    /// queued after it. A wait's probe gives no such order: it reaches the
+    /// main actor after a hop through the cooperative pool, and another
+    /// source can queue and run an apply in between. So a count that one
+    /// change's apply should move by exactly one is read here. This awaits
+    /// one main-queue turn and nothing else, as every `@MainActor` test's own
+    /// resumption does, so it takes no deadline.
+    func countsBehindTheQueuedApply() async throws -> ApplyCounts {
+        try #require(controller.applyScheduled, "no apply is queued to read behind")
+        let controller = self.controller
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    continuation.resume(returning: ApplyCounts(
+                        applies: controller.applyCount, observedChanges: controller.observedChangeCount))
+                }
+            }
+        }
+    }
+
     /// Replaces the toolbar `count` times, waiting each time for the
     /// controller to put it back.
     func replaceAndWaitForReinstall(times count: Int, label: String) async throws {
@@ -2145,6 +2329,42 @@ private final class ToolbarFixture {
         view.constraints.filter { $0.identifier == identifier }
     }
 
+    /// A compact leading item's button, as the item finds it.
+    static func iconButton(of item: NSToolbarItem?) -> NSButton? {
+        (item as? ToolbarIconButtonItem)?.button
+    }
+
+    /// The selectors `NSToolbarItem` forwards to a view that answers them,
+    /// which a compact item's host must not answer.
+    static let forwardedSelectorNames = [
+        "isBordered", "setBordered:", "isEnabled", "setEnabled:", "target", "setTarget:",
+        "action", "setAction:", "image", "setImage:",
+    ]
+
+    /// Which of `forwardedSelectorNames` `view` answers.
+    static func answeredForwardedSelectors(of view: NSView) -> [String] {
+        forwardedSelectorNames.filter { view.responds(to: NSSelectorFromString($0)) }
+    }
+
+    /// The raw attributes of all four edges, as `pinnedEdges(of:in:)` names
+    /// them.
+    static let allEdges: Set<Int> = [
+        NSLayoutConstraint.Attribute.leading.rawValue, NSLayoutConstraint.Attribute.trailing.rawValue,
+        NSLayoutConstraint.Attribute.top.rawValue, NSLayoutConstraint.Attribute.bottom.rawValue,
+    ]
+
+    /// The raw attributes of the edges by which `host`'s constraints pin
+    /// `subview` to the same edge of `host`: required, equal, with no offset.
+    static func pinnedEdges(of subview: NSView, in host: NSView) -> Set<Int> {
+        let pins = host.constraints.filter { constraint in
+            constraint.firstItem === subview && constraint.secondItem === host
+                && constraint.firstAttribute == constraint.secondAttribute
+                && constraint.relation == .equal && constraint.priority == .required
+                && constraint.multiplier == 1 && constraint.constant == 0
+        }
+        return Set(pins.map { $0.firstAttribute.rawValue })
+    }
+
     // MARK: Overflow rows
 
     /// Whether `item` is one of TBD's own, which the overflow menu can show:
@@ -2158,8 +2378,8 @@ private final class ToolbarFixture {
     /// action standing in for any the form lacks, as AppKit's default row
     /// carries them; and the rows of the form's submenu, or, for an
     /// `NSMenuToolbarItem` whose form has none, of its menu, which is its
-    /// form unless one is set. For a view item the target and action are
-    /// its view's.
+    /// form unless one is set. For a view item whose view answers them, the
+    /// target and action are its view's.
     static func overflowRow(of item: NSToolbarItem) -> OverflowRow {
         let form = item.menuFormRepresentation
         let title = form?.title ?? item.label
@@ -2236,6 +2456,13 @@ private final class ToolbarFixture {
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: windowSize.height))
         return controller
     }
+}
+
+/// The controller's apply and observed-change counts, as
+/// `countsBehindTheQueuedApply()` reads them.
+private struct ApplyCounts: Sendable {
+    let applies: Int
+    let observedChanges: Int
 }
 
 /// `withNoApplyQueued` never found the test's own turn with no apply queued:

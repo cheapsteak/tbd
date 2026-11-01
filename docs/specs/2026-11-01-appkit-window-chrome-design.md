@@ -135,18 +135,51 @@ turn, never during a SwiftUI update, which can re-enter layout.
 The toggle, back and forward match the leading buttons of a macOS 27 toolbar
 whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
 
-- **View** – each is a view item whose view is an `NSButton`, 20 pt wide and
-  28 pt tall, held by required constraints. AppKit centres items vertically,
-  which puts the glyphs on the window buttons' line.
-- **Pitch** – 28 pt: the 20 pt button plus AppKit's spacing between items,
+- **View** – each is a view item whose view is a plain host view, 20 pt wide
+  and 28 pt tall, held by required constraints. The host holds an
+  accessory-bar `NSButton` pinned to its four edges by required constraints,
+  which win over the bezel's wider intrinsic size. AppKit centres items
+  vertically, which puts the glyphs on the window buttons' line.
+- **Pitch** – 28 pt: the 20 pt host plus AppKit's spacing between items,
   which is not public and is estimated at 8 pt.
 - **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt and
   regular weight. Back and forward draw grey while disabled.
 - **Hover** – the button is bordered with `showsBorderOnlyWhileMouseInside`,
   so its bezel shows only while the pointer is over it: it highlights on hover
   and shows no border at rest.
-- **No capsule** – AppKit has no public API to remove a view item's Liquid
-  Glass background, so the live check confirms that none shows.
+- **No glass** – `NSToolbarItem` forwards `isBordered`, `isEnabled`, target,
+  action and image to its view when the view answers them, so a bordered
+  button as the item's view would make the item bordered. A bordered item
+  gets a Liquid Glass background, and adjacent glass items share one capsule,
+  so the three buttons would sit together on one. The host answers none of
+  those, so the item keeps its own `isBordered = false`, set explicitly, and
+  shows no glass, as the title item does. The bordered button one level down
+  keeps its own hover highlight.
+- **Wiring** – the target and action are set on the button and the overflow
+  row. An item with a custom view keeps no target or action its view does
+  not answer, so the item reads nil (measured on CI); glass follows
+  `isBordered`, not these. For the same reason the
+  item is a `ToolbarIconButtonItem`, an `NSToolbarItem` subclass that
+  reports its button's state: setting the item's flag sets the button and the
+  overflow row, and the setter compares the item's own flag, the button and
+  the row, and sets each only when it differs. Back and forward set the item
+  alone, and only when the item or its row differs from the snapshot, because
+  calling the `isEnabled` setter posts KVO change notifications for `enabled`
+  even when nothing changes. So an apply that changes nothing sets nothing,
+  and a row that drifted comes back on the next one. No compact item
+  autovalidates: `NSToolbarItem`'s `validate` does nothing for an item with a
+  custom view, and none of the three wants validating. The host is not an
+  accessibility element, so VoiceOver lands on the button.
+- **Copies** – the toolbar never shows a copy, because user customization is
+  off (`allowsUserCustomization = false` in `MainToolbarController`). AppKit
+  copies a view item by archiving its view and unarchiving the copy's, and
+  the host decodes only so that a copy AppKit makes cannot crash: it keeps no
+  stored property (its button is its subview) and marks its constraints
+  `shouldBeArchived`, so a copy keeps its size and edges. The item subclass
+  keeps no stored property either, so it inherits `init(itemIdentifier:)`,
+  which a copy calls on the item's own class. A copied Back or Forward button
+  keeps its action but not its target, since an archive keeps a target only
+  when it archives the target too; no displayed item depends on that.
 
 ### The overflow menu
 
@@ -231,9 +264,15 @@ No durable resource is added.
   false after setup and after a layout pass; both separator styles `.none`.
 - **The toggle survives a collapse:** in a hosted window, the toggle and arrows
   are still toolbar items after the sidebar collapses.
-- **Compact buttons:** each is a view item whose button holds 20 × 28 pt, with
-  its tool tip, target and action; the sidebar's minimum thickness is the
-  "Width" formula.
+- **Compact buttons:** each is an unbordered `ToolbarIconButtonItem` that does
+  not autovalidate, whose host answers none of the selectors an item forwards
+  and holds 20 × 28 pt, and whose button fills the host, with its tool tip,
+  target and action, which the item does not keep (it reads nil); back and forward start
+  disabled, button included, and an apply brings back a row that drifted;
+  setting the toggle item's `isEnabled` moves its button and row; a copy keeps
+  the subclass, the host, its layout and the button's glyph and action, and
+  its flag is its button's; the sidebar's minimum thickness is the "Width"
+  formula.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
   none, sends its action from a menu item without raising; the filter's form
   mirrors the popup and sets the filter.
@@ -250,8 +289,11 @@ No durable resource is added.
 ## Risks
 
 - **Two toolbars to keep in step** until the SwiftUI path is deleted.
-- **macOS 27 reportedly draws a bar behind toolbar buttons;** unverified for
-  the compact buttons, whose glass AppKit gives no public way to remove.
+- **Keeping glass off the compact buttons relies on forwarding.** They have
+  none because their item is unbordered and its view forwards nothing. If a
+  macOS release gives glass to view items by another rule, the three buttons
+  would share one capsule. No test can see glass, so only the live check on
+  screen shows whether a capsule appears.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.
