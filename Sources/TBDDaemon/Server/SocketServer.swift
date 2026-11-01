@@ -39,7 +39,7 @@ public final class SocketServer: Sendable {
     /// Keeps the shutdown to one run, however many `stop()` calls arrive. See
     /// `ShutdownLatch` for why a second run would hang rather than merely
     /// repeat itself.
-    private let shutdownLatch = ShutdownLatch()
+    private let shutdownLatch: ShutdownLatch
 
     /// Runs in `start()` between `bind(2)` and NIO adopting the bound
     /// descriptor, and may throw to fail the start from inside that window.
@@ -86,7 +86,10 @@ public final class SocketServer: Sendable {
         router: RPCRouter,
         socketPath: String?,
         beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?,
-        duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)? = nil
+        duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)? = nil,
+        // Tests only: where the shutdown latch schedules its single run.
+        // Production passes nil, the cooperative pool. See `ShutdownLatch`.
+        shutdownExecutor: (any TaskExecutor)? = nil
     ) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
@@ -94,6 +97,7 @@ public final class SocketServer: Sendable {
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         self.beforeAdoptingBoundSocket = beforeAdoptingBoundSocket
         self.duringIdentityClaim = duringIdentityClaim
+        self.shutdownLatch = ShutdownLatch(executor: shutdownExecutor)
     }
 
     /// Start listening on the Unix domain socket.

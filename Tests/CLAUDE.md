@@ -552,10 +552,12 @@ production seams hand their work to an unstructured task on purpose —
 other callers await — and that work is then scheduled on the cooperative pool
 however the test started the call. It is not pinning a thread, and no
 `gateHoldingTask` can move it. Where the test owns the callee, inject the
-executor into the callee instead: `ShutdownLatch(executor:)` and
+executor into the callee instead: `ShutdownLatch(executor:)`,
+`SocketServer`'s `shutdownExecutor:` (which forwards to its latch) and
 `ControlModeInputRouter(executor:)` are those seams, and
-`ServerShutdownLatchTests` and the two control-mode input suites build on
-`GateExecutor.shared` so their work leaves the shared queue altogether. The
+`ServerShutdownLatchTests`, `SocketServerSocketOwnershipTests` and the two
+control-mode input suites build on `GateExecutor.shared` so their work leaves
+the shared queue altogether. The
 router's case shows the reach: its consumer is one unstructured task, but the
 preference carries from there into the `TmuxControlCommandClient` actor and the
 paste sends beyond it, so injecting at that single seam takes the whole
@@ -582,14 +584,15 @@ the executor removes the hops from the shared queue and costs nothing. (The one
 deliberate exception to the single priority is swift-clocks' `megaYield`, which
 creates background-QoS tasks on purpose; see "Clock and date seams".)
 
-Where the test reaches the hop through production code it does not construct —
-a server's `stop()` — the bound is all that is left: release a gate from beyond
-it at `TestDeadlines.saturatedPass` (90 s) and give the outer observation a
-strictly larger budget, so a genuinely lost handshake still reports before the
-wedge does. A snappier inner bound reports
-starvation the outer bound was sized to tolerate — which is exactly how
-`SocketServerSocketOwnershipTests` went red on a 30 s staging gate while every
-assertion in the test passed.
+Where the test reaches the hop through production code that offers no such
+seam — a server whose `stop()` builds its latch with the default — the bound is
+all that is left: release a gate from beyond it at
+`TestDeadlines.saturatedPass` (90 s) and give the outer observation a strictly
+larger budget, so a genuinely lost handshake still reports before the wedge
+does. Keep that ordering of bounds even where the seam exists. A snappier inner
+bound reports starvation the outer bound was sized to tolerate — which is
+exactly how `SocketServerSocketOwnershipTests` went red on a 30 s staging gate
+while every assertion in the test passed.
 
 **Wait on a gate from a task, not a bare `Thread`, whenever the test owns the
 thread.** `Test.current` and `Configuration.current` are task-locals; without
