@@ -144,14 +144,14 @@ struct SingleWorktreeView: View {
         if let worktree {
             let localWorktree = LocalWorktree(worktree)
             let daemonTab = daemonPathTab(worktree: localWorktree)
-            let rendersDaemonPath = daemonTab != nil
+            let onDaemonPath = daemonTab != nil
             let showsPreSessionBanner = appState.showsPreSessionBanner(for: worktree)
             VStack(spacing: 0) {
                 // The full-width tab bar on every path but the daemon one,
                 // where `PanelSurfaceWorkspaceView` draws it over the primary's
                 // column. Drawn even with no tabs, so the + menu and history
                 // button remain reachable from the empty state.
-                if !rendersDaemonPath {
+                if !onDaemonPath {
                     tabBar()
 
                     Divider()
@@ -162,7 +162,7 @@ struct SingleWorktreeView: View {
                 // explain why no agent terminal exists yet. On the daemon path
                 // `PanelSurfaceWorkspaceView` draws it under its own tab bar,
                 // so on every path it sits between the bar and the content.
-                if !rendersDaemonPath && showsPreSessionBanner {
+                if !onDaemonPath && showsPreSessionBanner {
                     PreSessionSetupBanner()
                     Divider()
                 }
@@ -177,7 +177,7 @@ struct SingleWorktreeView: View {
                     worktree: localWorktree, daemonTab: daemonTab,
                     showsPreSessionBanner: showsPreSessionBanner)
                     .background {
-                        if !rendersDaemonPath {
+                        if !onDaemonPath {
                             GeometryReader { geometry in
                                 Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                             }
@@ -346,7 +346,13 @@ struct SingleWorktreeView: View {
         // A selection with no checkout on this disk shows no tab.
         let shownTab = worktree != nil ? activeTab : nil
         let historyActive = appState.historyActiveWorktrees.contains(worktreeID)
-        let renderPath = shownTab.map { appState.workspaceRenderPath(worktreeID: worktreeID, tabID: $0.id) }
+        // While Session History is open no tab is drawn, so the path is not
+        // asked for, and this body does not depend on what decides it (the
+        // skipped set, the copy, the legacy layouts) then. `rendersDaemonPath`
+        // still makes the decision.
+        let renderPath: WorkspaceRenderPath? = historyActive
+            ? nil
+            : shownTab.map { appState.workspaceRenderPath(worktreeID: worktreeID, tabID: $0.id) }
         guard Self.rendersDaemonPath(historyActive: historyActive, renderPath: renderPath),
               let shownTab, let worktree, case .daemon(let surface)? = renderPath
         else { return nil }

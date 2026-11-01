@@ -5,7 +5,8 @@ import TBDShared
 
 /// What the transcript button sends on the daemon path, where it sits at the
 /// trailing end of the workspace tab bar while a Claude terminal's tab is
-/// selected (panel tabs spec, "The transcript button").
+/// selected and the transcript view setting is on (panel tabs spec, "The
+/// transcript button").
 enum TranscriptToggleDecision: Equatable {
     /// No transcript panel for the terminal: open one.
     case open

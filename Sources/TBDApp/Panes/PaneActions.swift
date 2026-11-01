@@ -17,8 +17,8 @@ enum PaneHistoryStep: Equatable {
 /// Everything `PanePlaceholder` asks of the workspace around it, injected
 /// instead of performed in place.
 ///
-/// The leaf renders one pane — its content, and where no tab row carries its
-/// controls its header and history chevrons too — but it does not own the
+/// The leaf renders one pane — its content, and, where no tab row carries its
+/// controls, its header and history chevrons too — but it does not own the
 /// tree it sits in. Every structural change it triggers, and the two things
 /// it needs to know about that tree (whether a transcript is open, which
 /// history to show), goes through this set, so the same leaf can render on
