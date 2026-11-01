@@ -9,12 +9,15 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 /// (`MainWindowChrome.appKit`): the toolbar's delegate, and the one place
 /// that changes its items.
 ///
-/// - **Install.** `install(on:split:)` puts the toolbar on the window once the
+/// - **The split.** One controller serves one split, given at init and kept,
+///   weakly, for the controller's whole life. The toolbar's tracking
+///   separator is made bound to it and never re-bound.
+/// - **Install.** `install(on:)` puts the toolbar on the window once the
 ///   split appears in it, wires the split's collapse report, and watches the
 ///   window's appearance and its `toolbar`. It sets nothing on the toolbar
 ///   beyond `window.toolbar`; every item change goes through `scheduleApply()`.
-///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off
-///   and lets go of the window and the split.
+///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off,
+///   unhooks the split's collapse report and lets go of the window.
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
 ///   runs inside `withObservationTracking`, and a change schedules one apply on
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
@@ -74,9 +77,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     var requestRemoteStop: (RemoteSessionSelection) -> Void
 
     private(set) weak var window: NSWindow?
+    /// The split this controller serves, set once at init. Weak, as SwiftUI
+    /// owns the split; once it is gone the tracking separator is refused.
     private(set) weak var split: MainSplitViewController?
 
-    /// Between `install(on:split:)` and `uninstall(fallbackWindow:)`: the
+    /// Between `install(on:)` and `uninstall(fallbackWindow:)`: the
     /// stretch in which applies are scheduled and a replaced toolbar is put
     /// back.
     private(set) var isInstalled = false
@@ -160,14 +165,18 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// image is not set again.
     var shownImageKeys: [NSToolbarItem.Identifier: ToolbarImageKey] = [:]
 
+    /// - Parameter split: the split this controller serves for its whole
+    ///   life. Its toolbar's tracking separator is bound to it.
     init(
         appState: AppState,
+        split: MainSplitViewController,
         titleView: NSView,
         requestRemoteStop: @escaping (RemoteSessionSelection) -> Void,
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.appState = appState
+        self.split = split
         self.titleView = titleView
         self.requestRemoteStop = requestRemoteStop
         self.now = now
@@ -184,23 +193,24 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     // MARK: Install
 
-    /// Puts the toolbar on `window`, follows `split`'s collapse, the window's
-    /// appearance and its `toolbar`, and schedules the first apply. Safe to
-    /// call again for the same window, as each `viewDidAppear` does. During a
-    /// cooldown it records the window and the split but leaves the window's
+    /// Puts the toolbar on `window`, follows the split's collapse, the
+    /// window's appearance and its `toolbar`, and schedules the first apply.
+    /// Safe to call again for the same window, as each `viewDidAppear` does.
+    /// During a cooldown it records the window but leaves the window's
     /// toolbar alone: a window ordered back in or unminimized must not restart
     /// the trade the cooldown stops, and the cooldown's end puts ours back.
-    func install(on window: NSWindow, split: MainSplitViewController) {
-        // Before the toolbar is set: setting it asks the delegate for items,
-        // and the tracking separator needs the split.
+    func install(on window: NSWindow) {
+        // Before the toolbar is set: setting it asks the delegate for its
+        // default items, which follow the collapse.
         self.window = window
-        self.split = split
-        sidebarCollapsed = split.isSidebarCollapsed
-        split.onSidebarCollapsedChange = { [weak self] collapsed in
-            self?.sidebarCollapsedChanged(collapsed)
+        if let split {
+            sidebarCollapsed = split.isSidebarCollapsed
+            split.onSidebarCollapsedChange = { [weak self] collapsed in
+                self?.sidebarCollapsedChanged(collapsed)
+            }
         }
-        // An item a layout could not get may be servable now, as the
-        // tracking separator is once the split is known.
+        // Each install tries every item again, including one an earlier
+        // layout could not get.
         layoutSync.reset()
         if cooldown == nil, window.toolbar !== toolbar {
             attach(to: window)
@@ -223,11 +233,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Stops following the window and takes the toolbar off it, if it still
     /// shows it; a toolbar something else put there stays. The watching stops
     /// first, so the removal is not taken for a replacement, and a running
-    /// cooldown is cancelled. Then it lets go of the window and the split,
-    /// whose collapse report it unhooks, so nothing it followed schedules
-    /// work and a later install, on this window or another, starts clean.
-    /// `fallbackWindow` is checked when the toolbar was never installed. Safe
-    /// to call again.
+    /// cooldown is cancelled. Then it unhooks the split's collapse report and
+    /// lets go of the window, so nothing it followed schedules work and a
+    /// later install, on this window or another, starts clean. The split
+    /// stays this controller's. `fallbackWindow` is checked when the toolbar
+    /// was never installed. Safe to call again.
     func uninstall(fallbackWindow: NSWindow? = nil) {
         isInstalled = false
         appearanceObservation?.invalidate()
@@ -242,7 +252,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }
         split?.onSidebarCollapsedChange = nil
         window = nil
-        split = nil
         windowShowsOurToolbar = false
         // A registration still armed is stale from here on.
         observationGeneration &+= 1

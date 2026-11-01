@@ -32,7 +32,7 @@ extension MainToolbarController {
     /// A fresh item for `identifier`, as the delegate hands out. Content that
     /// follows `AppState` is filled in by `updateContent(_:)`, which looks the
     /// current item up by identifier. `nil` leaves the standard spaces to the
-    /// toolbar.
+    /// toolbar, and refuses the tracking separator once its split is gone.
     ///
     /// - Parameter willBeInserted: false when AppKit asks for an item it will
     ///   not put in the toolbar. The title item then goes without the shared
@@ -49,16 +49,8 @@ extension MainToolbarController {
                                    action: #selector(navigateForward(_:)))
         case MainToolbarItemID.repoFilter:
             return makeFilterItem()
-        case .sidebarTrackingSeparator:
-            // AppKit makes this item itself for the standard identifier and
-            // may never ask; `bindTrackingSeparator()` binds whichever item
-            // the toolbar holds. This serves the case where it does ask.
-            guard let split else {
-                itemsLogger.error("Main toolbar asked for the tracking separator before it had a split")
-                return nil
-            }
-            return NSTrackingSeparatorToolbarItem(
-                identifier: .sidebarTrackingSeparator, splitView: split.splitView, dividerIndex: 0)
+        case MainToolbarItemID.sidebarSeparator:
+            return makeTrackingSeparator()
         case MainToolbarItemID.title:
             return makeTitleItem(withView: willBeInserted)
         case MainToolbarItemID.servers:
@@ -87,6 +79,21 @@ extension MainToolbarController {
         item.target = split
         item.action = #selector(NSSplitViewController.toggleSidebar(_:))
         return item
+    }
+
+    /// The tracking separator, bound to the split's first divider as it is
+    /// made and never changed afterwards: the window watches the item's split
+    /// view through private KVO registrations, and re-binding an item whose
+    /// earlier split view has gone raises. Once the split is gone there is
+    /// nothing to bind it to, so the insert is refused and `ToolbarLayoutSync`
+    /// lays out the rest without it.
+    private func makeTrackingSeparator() -> NSToolbarItem? {
+        guard let split else {
+            itemsLogger.error("Main toolbar asked for the tracking separator after its split was gone")
+            return nil
+        }
+        return NSTrackingSeparatorToolbarItem(
+            identifier: MainToolbarItemID.sidebarSeparator, splitView: split.splitView, dividerIndex: 0)
     }
 
     /// Back or Forward. Not `isNavigational`, which would move it after the
@@ -180,10 +187,6 @@ extension MainToolbarController {
     /// value is set only when it differs from what the item holds, so an
     /// apply that changes nothing sets nothing.
     func updateContent(_ snapshot: MainToolbarSnapshot) {
-        if let split, let toggle = item(MainToolbarItemID.toggleSidebar), toggle.target !== split {
-            toggle.target = split
-        }
-        bindTrackingSeparator()
         if let back = item(MainToolbarItemID.back), back.isEnabled != snapshot.canGoBack {
             back.isEnabled = snapshot.canGoBack
         }
@@ -221,33 +224,6 @@ extension MainToolbarController {
         if item.toolTip != help {
             item.toolTip = help
         }
-    }
-
-    /// Points the toolbar's tracking separator at the split's first divider.
-    /// AppKit creates the item for `.sidebarTrackingSeparator` and finds a
-    /// sidebar on its own, but only documents that for a split it can
-    /// discover; in the app the split sits inside SwiftUI's hosting view, so
-    /// every apply checks the binding, and sets it only when it differs.
-    private func bindTrackingSeparator() {
-        guard let split,
-              let separator = item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem else { return }
-        guard Self.boundSplitView(of: separator) !== split.splitView || separator.dividerIndex != 0 else { return }
-        separator.splitView = split.splitView
-        separator.dividerIndex = 0
-        itemsLogger.debug("Main toolbar bound the tracking separator to the main split")
-    }
-
-    /// The split view `separator` is bound to, or `nil` when it is bound to
-    /// none.
-    ///
-    /// `splitView` is declared nonnull, so Swift reads it as `NSSplitView`,
-    /// but the item AppKit makes for `.sidebarTrackingSeparator`, through the
-    /// plain `init(itemIdentifier:)`, holds none until it is bound. Reading
-    /// that through the property would carry a nil reference in a non-optional
-    /// value, so it is read through KVC, which returns `nil` for an unset
-    /// property.
-    static func boundSplitView(of separator: NSTrackingSeparatorToolbarItem) -> NSSplitView? {
-        separator.value(forKey: "splitView") as? NSSplitView
     }
 
     private func updateFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {

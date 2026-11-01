@@ -8,9 +8,10 @@ import SwiftUI
 ///
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
-/// - **The toolbar.** A `MainToolbarController` with the title cluster in a
-///   hosting view, installed on the window the main-actor turn after the
-///   split's `onViewDidAppear`: AppKit can deliver that from inside SwiftUI's
+/// - **The toolbar.** A `MainToolbarController` made for the split, which it
+///   serves for its whole life, with the title cluster in a hosting view. It
+///   is installed on the window the main-actor turn after the split's
+///   `onViewDidAppear`: AppKit can deliver that from inside SwiftUI's
 ///   insertion of the representable, and the toolbar never changes inside a
 ///   SwiftUI update. The coordinator holds the controller, so it lives as
 ///   long as the split; the toolbar holds its delegate only weakly.
@@ -58,23 +59,24 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     }
 
     func makeNSViewController(context: Context) -> MainSplitViewController {
-        let titleView = NSHostingView(rootView: withAppEnvironment(ToolbarTitleCluster(appState: appState)))
-        titleView.sceneBridgingOptions = []
-        let toolbarController = MainToolbarController(
-            appState: appState, titleView: titleView, requestRemoteStop: requestRemoteStop)
         let split = MainSplitViewController(
             sidebar: hostingController(SidebarView()),
             content: hostingController(MainDetailArea()),
             autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
-        // Weak both ways: the split holds this closure, and the coordinator
-        // holds the toolbar controller. Deferred one main-actor turn, so the
+        let titleView = NSHostingView(rootView: withAppEnvironment(ToolbarTitleCluster(appState: appState)))
+        titleView.sceneBridgingOptions = []
+        let toolbarController = MainToolbarController(
+            appState: appState, split: split, titleView: titleView, requestRemoteStop: requestRemoteStop)
+        // Weak both ways: this closure holds the controller weakly, as the
+        // controller holds the split. SwiftUI owns the split and the
+        // coordinator the controller. Deferred one main-actor turn, so the
         // install never runs inside the SwiftUI update that inserted the split.
-        split.onViewDidAppear = { [weak toolbarController, weak split] window in
-            guard let toolbarController, let split else { return }
-            DispatchQueue.main.async { [weak toolbarController, weak split, weak window] in
+        split.onViewDidAppear = { [weak toolbarController] window in
+            guard let toolbarController else { return }
+            DispatchQueue.main.async { [weak toolbarController, weak window] in
                 MainActor.assumeIsolated {
-                    guard let toolbarController, let split, let window else { return }
-                    toolbarController.install(on: window, split: split)
+                    guard let toolbarController, let window else { return }
+                    toolbarController.install(on: window)
                 }
             }
         }

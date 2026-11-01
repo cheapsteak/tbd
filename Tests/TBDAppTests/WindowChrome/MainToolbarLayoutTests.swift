@@ -33,7 +33,7 @@ struct MainToolbarLayoutTests {
     @Test func shownOrder() {
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
-            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: false)) == expected)
     }
@@ -44,7 +44,7 @@ struct MainToolbarLayoutTests {
             showsReconnect: true, showsStop: true)
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.toggleSidebar, ItemID.back, ItemID.forward, .flexibleSpace, ItemID.repoFilter,
-            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
             ItemID.servers, .space, ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
         ]
         #expect(Self.ids(state) == expected)
@@ -56,7 +56,7 @@ struct MainToolbarLayoutTests {
             showsReconnect: true, showsStop: false)
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.toggleSidebar, ItemID.back, ItemID.forward,
-            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
             ItemID.servers, .space, ItemID.remoteReconnect,
         ]
         #expect(Self.ids(state) == expected)
@@ -72,7 +72,7 @@ struct MainToolbarLayoutTests {
     @Test func collapsedOrder() {
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.toggleSidebar, ItemID.back, ItemID.forward,
-            .sidebarTrackingSeparator, ItemID.title, .flexibleSpace,
+            ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
         ]
         #expect(Self.ids(Self.state(collapsed: true)) == expected)
     }
@@ -89,8 +89,24 @@ struct MainToolbarLayoutTests {
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
             #expect(Array(list.prefix(3)) == lead)
-            let separator = list.firstIndex(of: .sidebarTrackingSeparator)
+            let separator = list.firstIndex(of: ItemID.sidebarSeparator)
             #expect((separator ?? 0) > 2)
+        }
+    }
+
+    /// The layout names the tracking separator only by TBD's own identifier,
+    /// once in every state, and never by the standard one: AppKit builds its
+    /// own item for `.sidebarTrackingSeparator`, and re-binding that item
+    /// raises.
+    @Test func theStandardTrackingSeparatorIsNeverLaidOut() {
+        let standard = NSToolbarItem.Identifier.sidebarTrackingSeparator
+        let allowsStandard = ItemID.allowed.contains(standard)
+        #expect(!allowsStandard)
+        for state in MainToolbarLayoutState.allCombinations {
+            let list = Self.ids(state)
+            #expect(!list.contains(standard))
+            let separators = list.filter { $0 == ItemID.sidebarSeparator }
+            #expect(separators.count == 1)
         }
     }
 
@@ -125,7 +141,7 @@ struct MainToolbarLayoutTests {
     }
 
     @Test func noPRAndNoFilePanelItem() {
-        #expect(ItemID.custom.count == 9)
+        #expect(ItemID.custom.count == 10)
         let distinct = Set(ItemID.custom)
         #expect(distinct.count == ItemID.custom.count)
         let allowed: [NSToolbarItem.Identifier] = ItemID.custom + ItemID.standard
@@ -152,7 +168,7 @@ struct MainToolbarLayoutTests {
     /// Run through `MainToolbarLayout.perform`, the loop the toolbar runs.
     @Test func editsNeverTouchTheLeadingItems() {
         let protected: Set<NSToolbarItem.Identifier> = [
-            ItemID.toggleSidebar, ItemID.back, ItemID.forward, .sidebarTrackingSeparator,
+            ItemID.toggleSidebar, ItemID.back, ItemID.forward, ItemID.sidebarSeparator,
         ]
         let all = MainToolbarLayoutState.allCombinations
         for a in all {
@@ -179,12 +195,12 @@ struct MainToolbarLayoutTests {
     /// index, each of which assumed it took, reaches the list.
     @Test func performStopsAtAnInsertThatAddsNothing() {
         let leading: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
-        let items = FakeToolbarItems(leading, refusing: [.sidebarTrackingSeparator])
+        let items = FakeToolbarItems(leading, refusing: [ItemID.sidebarSeparator])
         let edits = MainToolbarLayout.edits(from: leading, to: Self.ids(Self.state(collapsed: true)))
 
         let stop = items.perform(edits)
 
-        let refusedInsert = ToolbarEdit.insert(.sidebarTrackingSeparator, at: 3)
+        let refusedInsert = ToolbarEdit.insert(ItemID.sidebarSeparator, at: 3)
         let expectedStop = ToolbarEditStop.noEffect(refusedInsert)
         #expect(stop == expectedStop)
         let expectedAttempts: [ToolbarEdit] = [refusedInsert]
@@ -214,7 +230,7 @@ struct MainToolbarLayoutTests {
     /// not try it again. A changed target tries it again, and so does a
     /// reset, which lands it once the toolbar serves it.
     @Test func aRefusedItemIsLeftOutUntilTheTargetChangesOrAReset() {
-        let separator: Set<NSToolbarItem.Identifier> = [.sidebarTrackingSeparator]
+        let separator: Set<NSToolbarItem.Identifier> = [ItemID.sidebarSeparator]
         let collapsed = Self.ids(Self.state(collapsed: true))
         let expanded = Self.ids(Self.state(collapsed: false))
         let leading: [NSToolbarItem.Identifier] = [ItemID.toggleSidebar, ItemID.back, ItemID.forward]
@@ -223,7 +239,7 @@ struct MainToolbarLayoutTests {
 
         let first = items.pass(&sync, to: collapsed)
         let firstExpected = ToolbarLayoutSync.Outcome.stopped(
-            .noEffect(.insert(.sidebarTrackingSeparator, at: 3)), retry: true)
+            .noEffect(.insert(ItemID.sidebarSeparator, at: 3)), retry: true)
         #expect(first == firstExpected)
         #expect(sync.refused == separator)
 
@@ -240,7 +256,7 @@ struct MainToolbarLayoutTests {
 
         let changed = items.pass(&sync, to: expanded)
         let changedExpected = ToolbarLayoutSync.Outcome.stopped(
-            .noEffect(.insert(.sidebarTrackingSeparator, at: 5)), retry: true)
+            .noEffect(.insert(ItemID.sidebarSeparator, at: 5)), retry: true)
         #expect(changed == changedExpected)
         let expandedWithoutSeparator = expanded.filter { !separator.contains($0) }
         #expect(items.list == expandedWithoutSeparator)
@@ -258,7 +274,7 @@ struct MainToolbarLayoutTests {
     /// toolbar never serves end once every one of them is left out, where
     /// passes that kept trying them would never land.
     @Test func passesOverItemsNeverServedEnd() {
-        let refusing: Set<NSToolbarItem.Identifier> = [.sidebarTrackingSeparator, ItemID.title]
+        let refusing: Set<NSToolbarItem.Identifier> = [ItemID.sidebarSeparator, ItemID.title]
         let target = Self.ids(Self.state(collapsed: false))
         let items = FakeToolbarItems([], refusing: refusing)
         var sync = ToolbarLayoutSync()

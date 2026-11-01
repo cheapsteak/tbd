@@ -8,20 +8,27 @@ enum MainToolbarItemID {
     static let back = NSToolbarItem.Identifier("tbd.toolbar.back")
     static let forward = NSToolbarItem.Identifier("tbd.toolbar.forward")
     static let repoFilter = NSToolbarItem.Identifier("tbd.toolbar.repoFilter")
+    /// The tracking separator between the sidebar's part of the toolbar and
+    /// the main area's, under an identifier of TBD's own. AppKit builds its
+    /// own item for the standard `.sidebarTrackingSeparator`, bound to a
+    /// divider it finds itself, and re-binding that item can raise a KVO
+    /// exception. For this identifier the toolbar's delegate makes the item,
+    /// bound to the split from the start.
+    static let sidebarSeparator = NSToolbarItem.Identifier("tbd.toolbar.sidebarTrackingSeparator")
     static let title = NSToolbarItem.Identifier("tbd.toolbar.title")
     static let servers = NSToolbarItem.Identifier("tbd.toolbar.servers")
     static let remoteTranscript = NSToolbarItem.Identifier("tbd.toolbar.remoteTranscript")
     static let remoteReconnect = NSToolbarItem.Identifier("tbd.toolbar.remoteReconnect")
     static let remoteStop = NSToolbarItem.Identifier("tbd.toolbar.remoteStop")
 
-    /// TBD's own items, in toolbar order: the one list of them.
+    /// TBD's own identifiers, in toolbar order: the one list of them.
     static let custom: [NSToolbarItem.Identifier] = [
-        toggleSidebar, back, forward, repoFilter, title,
+        toggleSidebar, back, forward, repoFilter, sidebarSeparator, title,
         servers, remoteTranscript, remoteReconnect, remoteStop,
     ]
 
-    /// The standard identifiers the layout uses.
-    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace, .space, .sidebarTrackingSeparator]
+    /// The standard identifiers the layout uses: the spaces only.
+    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace, .space]
 
     /// Every identifier the toolbar delegate may be asked for.
     static let allowed: [NSToolbarItem.Identifier] = custom + standard
@@ -64,7 +71,7 @@ enum MainToolbarLayout {
             ids.append(.flexibleSpace)
             ids.append(MainToolbarItemID.repoFilter)
         }
-        ids.append(.sidebarTrackingSeparator)
+        ids.append(MainToolbarItemID.sidebarSeparator)
         ids.append(MainToolbarItemID.title)
         ids.append(.flexibleSpace)
 
@@ -160,12 +167,12 @@ enum MainToolbarLayout {
 /// Keeps the toolbar's items in step with a layout's target, one pass per
 /// apply, through `MainToolbarLayout.perform`.
 ///
-/// A pass that stops at an insert the toolbar's delegate could not serve
-/// leaves that identifier out of the passes after it, so the next one lands
-/// the rest of the layout instead of stopping in the same place. The
-/// identifier is tried again once the target changes, or after `reset()`,
-/// which the controller calls on install, when the item may be servable
-/// again: the tracking separator, say, once the split is known.
+/// A pass that stops at an insert the toolbar's delegate could not serve,
+/// such as the tracking separator once its split is gone, leaves that
+/// identifier out of the passes after it, so the next one lands the rest of
+/// the layout instead of stopping in the same place. The identifier is tried
+/// again once the target changes, or after `reset()`, which the controller
+/// calls on each install.
 ///
 /// A stop asks for another pass only when that pass would get further,
 /// because it leaves out one more identifier. The target holds only so many,

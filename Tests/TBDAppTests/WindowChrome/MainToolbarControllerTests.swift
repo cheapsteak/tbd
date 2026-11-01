@@ -50,7 +50,9 @@ struct MainToolbarControllerTests {
         // Unique per controller, so no two toolbars mirror each other.
         let identifier = fixture.controller.toolbar.identifier
         #expect(identifier.hasPrefix("tbd.mainToolbar."))
-        let other = MainToolbarController(appState: fixture.state, titleView: NSView(), requestRemoteStop: { _ in })
+        let otherSplit = ToolbarFixture.makeSplit()
+        let other = MainToolbarController(
+            appState: fixture.state, split: otherSplit, titleView: NSView(), requestRemoteStop: { _ in })
         #expect(other.toolbar.identifier.hasPrefix("tbd.mainToolbar."))
         #expect(other.toolbar.identifier != identifier)
     }
@@ -72,10 +74,9 @@ struct MainToolbarControllerTests {
     }
 
     /// The split nested in a container, as SwiftUI's hosting view nests it in
-    /// the app. The nesting is meant to keep AppKit's own sidebar discovery
-    /// from standing in for the controller's binding, but AppKit may still
-    /// find a split nested as a child view controller, so this pins the
-    /// binding's outcome without proving discovery would have missed it.
+    /// the app. The toolbar's tracking separator is the item its delegate
+    /// made for TBD's own identifier, bound to the split's first divider from
+    /// the start, wherever the split sits in the window.
     @Test func trackingSeparatorFollowsANestedSplit() async throws {
         let fixture = ToolbarFixture(label: "trackingSeparatorFollowsANestedSplit", nested: true)
         defer { fixture.tearDown() }
@@ -84,26 +85,50 @@ struct MainToolbarControllerTests {
         try await fixture.ready()
 
         let separator = try #require(
-            fixture.controller.item(.sidebarTrackingSeparator) as? NSTrackingSeparatorToolbarItem)
-        let bound = MainToolbarController.boundSplitView(of: separator)
+            fixture.controller.item(MainToolbarItemID.sidebarSeparator) as? NSTrackingSeparatorToolbarItem)
+        let bound: NSSplitView? = separator.splitView
         #expect(bound === fixture.split.splitView)
         #expect(separator.dividerIndex == 0)
     }
 
-    /// The separator's split view is declared nonnull, but an item made the
-    /// way AppKit makes the standard one, through `init(itemIdentifier:)`,
-    /// holds none. The controller's read reports none for it rather than
-    /// trusting the annotation, and reports the split view a bound item holds.
-    @Test func separatorReadReportsAnUnboundItem() {
-        let unbound = NSTrackingSeparatorToolbarItem(itemIdentifier: .sidebarTrackingSeparator)
-        let unboundView = MainToolbarController.boundSplitView(of: unbound)
-        #expect(unboundView == nil)
+    /// AppKit builds and binds its own item for the standard
+    /// `.sidebarTrackingSeparator`, and re-binding that item raises, so the
+    /// toolbar never holds one: not after install, not with every
+    /// conditional item shown, and not across a collapse and an expansion.
+    /// Its one tracking separator is under TBD's own identifier.
+    @Test func noStandardTrackingSeparatorEverAppears() async throws {
+        let fixture = ToolbarFixture(label: "noStandardTrackingSeparatorEverAppears")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let standard = NSToolbarItem.Identifier.sidebarTrackingSeparator
+        #expect(!fixture.identifiers.contains(standard))
+        #expect(fixture.identifiers.contains(MainToolbarItemID.sidebarSeparator))
 
-        let splitView = NSSplitView()
-        let bound = NSTrackingSeparatorToolbarItem(
-            identifier: .sidebarTrackingSeparator, splitView: splitView, dividerIndex: 0)
-        let boundView = MainToolbarController.boundSplitView(of: bound)
-        #expect(boundView === splitView)
+        fixture.showServers(url: "http://localhost:3000")
+        fixture.showRemoteSession()
+        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        try #require(fixture.identifiers.contains(MainToolbarItemID.remoteStop))
+        #expect(!fixture.identifiers.contains(standard))
+
+        // Not animated: an offscreen window need not run an animation through.
+        fixture.split.sidebarItem.isCollapsed = true
+        let collapsed = try await waitForMainActorCondition("the filter to leave on collapse") {
+            !fixture.identifiers.contains(MainToolbarItemID.repoFilter)
+        }
+        try #require(collapsed)
+        #expect(!fixture.identifiers.contains(standard))
+
+        fixture.split.sidebarItem.isCollapsed = false
+        let expanded = try await waitForMainActorCondition("the filter to return on expansion") {
+            fixture.identifiers.contains(MainToolbarItemID.repoFilter)
+        }
+        try #require(expanded)
+        #expect(!fixture.identifiers.contains(standard))
+
+        let separators = fixture.controller.toolbar.items.filter { $0 is NSTrackingSeparatorToolbarItem }
+        let separatorIDs = separators.map(\.itemIdentifier)
+        let expectedIDs: [NSToolbarItem.Identifier] = [MainToolbarItemID.sidebarSeparator]
+        #expect(separatorIDs == expectedIDs)
     }
 
     @Test func noSwiftUIItems() async throws {
@@ -163,7 +188,7 @@ struct MainToolbarControllerTests {
         try #require(filterBack)
         let expanded = fixture.identifiers
         let filterIndex = try #require(expanded.firstIndex(of: MainToolbarItemID.repoFilter))
-        let separatorIndex = try #require(expanded.firstIndex(of: .sidebarTrackingSeparator))
+        let separatorIndex = try #require(expanded.firstIndex(of: MainToolbarItemID.sidebarSeparator))
         #expect(filterIndex < separatorIndex)
         let expandedLeading = Array(expanded.prefix(3))
         #expect(expandedLeading == leading)
@@ -554,7 +579,7 @@ struct MainToolbarControllerTests {
         try #require(controller.isInReinstallCooldown)
 
         let before = controller.applyCount
-        controller.install(on: window, split: fixture.split)
+        controller.install(on: window)
         #expect(window.toolbar === kept)
         let applied = try await waitForMainActorCondition("the apply the install during the cooldown scheduled") {
             controller.applyCount > before
@@ -676,15 +701,18 @@ struct MainToolbarControllerTests {
         #expect(fixture.window.toolbar == nil)
     }
 
-    /// Uninstalling lets go of the window and the split. A collapse of the
-    /// old split then reaches nothing: KVO reports it at once, and a report
-    /// still wired would record the state. An install on a fresh window
-    /// counts no replacement from the old one: with the date frozen and the
-    /// cap's worth made before the uninstall, one more on the fresh window is
-    /// put back at once rather than starting the cooldown.
-    @Test func uninstallLetsGoOfTheWindowAndTheSplit() async throws {
+    /// Uninstalling lets go of the window and unhooks the split's collapse
+    /// report; the split stays the controller's, as it is for the
+    /// controller's whole life. A collapse of the split then reaches nothing:
+    /// KVO reports it at once, and a report still wired would record the
+    /// state. An install on a fresh window, the split moved into it, counts
+    /// no replacement from the old one: with the date frozen and the cap's
+    /// worth made before the uninstall, one more on the fresh window is put
+    /// back at once rather than starting the cooldown. That install wires the
+    /// report again and reads the collapse it missed.
+    @Test func uninstallLetsGoOfTheWindowAndUnhooksTheSplit() async throws {
         let fixture = ToolbarFixture(
-            label: "uninstallLetsGoOfTheWindowAndTheSplit",
+            label: "uninstallLetsGoOfTheWindowAndUnhooksTheSplit",
             now: TestDateSource().provider, clock: EventDrivenTestClock())
         defer { fixture.tearDown() }
         try await fixture.ready()
@@ -698,28 +726,30 @@ struct MainToolbarControllerTests {
 
         controller.uninstall()
         #expect(controller.window == nil)
-        #expect(controller.split == nil)
+        #expect(controller.split === fixture.split)
         let reportUnhooked = fixture.split.onSidebarCollapsedChange == nil
         #expect(reportUnhooked)
 
-        let oldSplit = fixture.split
-        oldSplit.sidebarItem.isCollapsed = true
-        let collapsed = try await waitForMainActorCondition("the old split to collapse") {
-            oldSplit.isSidebarCollapsed
+        let split = fixture.split
+        split.sidebarItem.isCollapsed = true
+        let collapsed = try await waitForMainActorCondition("the split to collapse") {
+            split.isSidebarCollapsed
         }
         try #require(collapsed)
         #expect(controller.sidebarCollapsed == false)
         #expect(controller.applyScheduled == false)
 
-        let fresh = ToolbarFixture.makeShownWindow()
+        let freshWindow = fixture.moveSplitToAFreshWindow()
         defer {
             controller.uninstall()
-            ToolbarFixture.takeDown(fresh.window)
+            ToolbarFixture.takeDown(freshWindow)
         }
-        let freshWindow = fresh.window
         let appliesBefore = controller.applyCount
-        controller.install(on: freshWindow, split: fresh.split)
+        controller.install(on: freshWindow)
         #expect(controller.window === freshWindow)
+        #expect(controller.sidebarCollapsed)
+        let reportRehooked = split.onSidebarCollapsedChange != nil
+        #expect(reportRehooked)
         try #require(freshWindow.toolbar === controller.toolbar)
         let applied = try await waitForMainActorCondition("the fresh install's apply, with none queued after it") {
             controller.applyCount > appliesBefore && !controller.applyScheduled
@@ -830,7 +860,7 @@ struct MainToolbarControllerTests {
         let controller = fixture.controller
 
         let beforeInstall = controller.applyCount
-        controller.install(on: fixture.window, split: fixture.split)
+        controller.install(on: fixture.window)
         try #require(controller.applyScheduled)
         let installRan = try await waitForMainActorCondition("the apply a repeated install queued") {
             !controller.applyScheduled
@@ -1018,10 +1048,10 @@ private final class ToolbarFixture {
         let split = ToolbarFixture.makeSplit()
         let titleView = NSTextField(labelWithString: "feature")
         let controller = MainToolbarController(
-            appState: state, titleView: titleView, requestRemoteStop: { _ in }, now: now, clock: clock)
-        split.onViewDidAppear = { [weak controller, weak split] window in
-            guard let controller, let split else { return }
-            controller.install(on: window, split: split)
+            appState: state, split: split, titleView: titleView, requestRemoteStop: { _ in },
+            now: now, clock: clock)
+        split.onViewDidAppear = { [weak controller] window in
+            controller?.install(on: window)
         }
         self.split = split
         self.titleView = titleView
@@ -1082,14 +1112,19 @@ private final class ToolbarFixture {
         window.orderFront(nil)
     }
 
-    /// A second window shown as the fixture's is, over a split of its own
-    /// that installs nothing when it appears. Its owner uninstalls whatever
-    /// controller it gave the window before `takeDown(_:)`.
-    static func makeShownWindow() -> (window: NSWindow, split: MainSplitViewController) {
-        let split = makeSplit()
-        let window = makeWindow()
-        show(split, in: window, nested: false)
-        return (window, split)
+    /// Moves the split out of the fixture's window, which is left with an
+    /// empty content view, into a fresh window shown as the fixture's is, and
+    /// returns that window. The split installs nothing as it appears there.
+    /// The caller uninstalls whatever controller it gave the window before
+    /// `takeDown(_:)`.
+    func moveSplitToAFreshWindow() -> NSWindow {
+        split.onViewDidAppear = nil
+        window.contentViewController = nil
+        window.contentView = NSView(frame: NSRect(origin: .zero, size: Self.windowSize))
+        split.removeFromParent()
+        let fresh = Self.makeWindow()
+        Self.show(split, in: fresh, nested: false)
+        return fresh
     }
 
     /// Orders `window` out and empties it.
@@ -1104,7 +1139,7 @@ private final class ToolbarFixture {
     /// and for no further apply to be queued, so a test starts with nothing
     /// pending that could stand in for the trigger it is about.
     func ready() async throws {
-        controller.install(on: window, split: split)
+        controller.install(on: window)
         let controller = self.controller
         let window = self.window
         let applied = try await waitForMainActorCondition("the first apply, with none queued after it") {

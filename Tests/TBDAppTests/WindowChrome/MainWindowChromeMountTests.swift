@@ -192,7 +192,9 @@ struct MainWindowChromeMountTests {
 
     /// The toolbar's tracking separator is bound to the split, with the split
     /// inside SwiftUI's hosting view as in the app, rather than in a container
-    /// a test built.
+    /// a test built. It is the item the toolbar made for TBD's own identifier,
+    /// and no item for the standard `.sidebarTrackingSeparator`, which AppKit
+    /// would build and bind itself, is on the toolbar beside it.
     @Test func appKitChromeBindsTheTrackingSeparatorToTheHostedSplit() async throws {
         let mount = ChromeMount(chrome: .appKit, label: "trackingSeparator")
         defer { mount.tearDown() }
@@ -209,6 +211,8 @@ struct MainWindowChromeMountTests {
         let bound: NSSplitView? = separator.splitView
         #expect(bound === split.splitView)
         #expect(separator.dividerIndex == 0)
+        let standard = NSToolbarItem.Identifier.sidebarTrackingSeparator
+        #expect(!mount.toolbarIdentifiers.contains(standard))
     }
 
     // MARK: - The selection's server refresh, on both chromes
@@ -261,12 +265,12 @@ struct MainWindowChromeMountTests {
         defer { suite.tearDown() }
         let state = AppState(userDefaults: suite.defaults)
 
-        let ownWindow = Self.makeWindow()
         let ownSplit = Self.makeSplit()
+        let ownWindow = Self.makeWindow(over: ownSplit)
         let own = MainWindowSplitView.Coordinator()
         own.toolbarController = MainToolbarController(
-            appState: state, titleView: NSView(), requestRemoteStop: { _ in })
-        own.toolbarController?.install(on: ownWindow, split: ownSplit)
+            appState: state, split: ownSplit, titleView: NSView(), requestRemoteStop: { _ in })
+        own.toolbarController?.install(on: ownWindow)
         ownSplit.onViewDidAppear = { _ in }
         try #require(ownWindow.toolbar != nil)
         try #require(ownWindow.toolbar === own.toolbarController?.toolbar)
@@ -277,12 +281,12 @@ struct MainWindowChromeMountTests {
         let appearHookCleared = ownSplit.onViewDidAppear == nil
         #expect(appearHookCleared)
 
-        let otherWindow = Self.makeWindow()
         let otherSplit = Self.makeSplit()
+        let otherWindow = Self.makeWindow(over: otherSplit)
         let replaced = MainWindowSplitView.Coordinator()
         replaced.toolbarController = MainToolbarController(
-            appState: state, titleView: NSView(), requestRemoteStop: { _ in })
-        replaced.toolbarController?.install(on: otherWindow, split: otherSplit)
+            appState: state, split: otherSplit, titleView: NSView(), requestRemoteStop: { _ in })
+        replaced.toolbarController?.install(on: otherWindow)
         let other = NSToolbar(identifier: "MainWindowChromeMountTests.other")
         otherWindow.toolbar = other
 
@@ -293,12 +297,17 @@ struct MainWindowChromeMountTests {
 
     // MARK: - Helpers
 
-    /// A titled window, never shown: a toolbar belongs to a titlebar.
-    private static func makeWindow() -> NSWindow {
+    /// A titled window, never shown, over `split`: a toolbar belongs to a
+    /// titlebar, and its tracking separator follows a split in its window.
+    private static func makeWindow(over split: MainSplitViewController) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: ChromeMount.size),
             styleMask: ChromeMount.styleMask, backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
+        // The window takes its size from the view; start it at the final one.
+        split.view.setFrameSize(ChromeMount.size)
+        window.contentViewController = split
+        window.setContentSize(ChromeMount.size)
         return window
     }
 
@@ -471,9 +480,11 @@ private final class ChromeMount {
         }
     }
 
+    /// The window toolbar's item for `MainToolbarItemID.sidebarSeparator`,
+    /// when it is a tracking separator.
     var trackingSeparator: NSTrackingSeparatorToolbarItem? {
-        for item in host.window.toolbar?.items ?? [] {
-            if let separator = item as? NSTrackingSeparatorToolbarItem { return separator }
+        for item in host.window.toolbar?.items ?? [] where item.itemIdentifier == MainToolbarItemID.sidebarSeparator {
+            return item as? NSTrackingSeparatorToolbarItem
         }
         return nil
     }
