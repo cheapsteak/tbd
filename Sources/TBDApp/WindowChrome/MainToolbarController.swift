@@ -23,19 +23,22 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   list, so an apply only an observed change asked for does nothing when
 ///   the snapshot, the collapse and the appearance are what the last apply
 ///   showed and our toolbar is on the window. Every other apply runs in full.
-/// - **Apply.** Re-installs the toolbar if something replaced it on the window,
-///   diffs the items against `MainToolbarLayout.identifiers(for:)` through
-///   `ToolbarLayoutSync`, with inserts and removes only, so the items both
-///   layouts share are never rebuilt and an edit that does not take stops the
-///   rest, then updates the present items' content in place, setting only
+/// - **Apply.** Re-installs the toolbar if another toolbar replaced it on the
+///   window, diffs the items against `MainToolbarLayout.identifiers(for:)`
+///   through `ToolbarLayoutSync`, with inserts and removes only, so the items
+///   both layouts share are never rebuilt and an edit that does not take stops
+///   the rest, then updates the present items' content in place, setting only
 ///   what changed.
-/// - **Replacement.** A change of the window's `toolbar` away from ours
+/// - **Replacement.** A change of the window's `toolbar` from ours to another
 ///   schedules an apply at once, through KVO on `window.toolbar`, so it does
-///   not wait for an unrelated change. More than `maxReplacementsInWindow`
-///   replacements within `replacementWindow` start a `reinstallCooldown`, in
-///   which applies and installs leave the window's toolbar alone, so the two
-///   never ping-pong. When it ends, the controller schedules the apply that
-///   puts the toolbar back.
+///   not wait for an unrelated change. A change to no toolbar is a removal,
+///   such as window teardown makes before the split is dismantled, not a
+///   replacement: it neither counts nor brings ours back. More than
+///   `maxReplacementsInWindow` replacements within `replacementWindow` start a
+///   `reinstallCooldown`, in which applies and installs leave the window's
+///   toolbar alone, so the two never ping-pong. When it ends, the controller
+///   schedules the apply that puts the toolbar back if another still holds
+///   the window.
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width".
@@ -126,10 +129,12 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Waits out `reinstallCooldown`. Injected so a test drives the cooldown
     /// in virtual time.
     private let clock: any Clock<Duration>
-    /// The replacements inside the current `replacementWindow`.
-    private var recentReplacements: [Date] = []
-    /// Whether the window showed our toolbar at the last change the watch
-    /// saw, so only a change away from ours counts as a replacement.
+    /// The replacements inside the current `replacementWindow`. Readable for
+    /// tests.
+    private(set) var recentReplacements: [Date] = []
+    /// Whether ours was the last toolbar the watch saw on the window, so only
+    /// a change away from ours counts as a replacement. A change to no
+    /// toolbar leaves it as it was.
     private var windowShowsOurToolbar = false
     /// The running cooldown. While it is set, applies and installs leave the
     /// window's toolbar alone and the watch ignores the window's changes.
@@ -254,19 +259,25 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         scheduleApply()
     }
 
-    /// The window's `toolbar` changed. A change away from ours is a
-    /// replacement, and counts toward the cooldown; a change from one other
-    /// toolbar to another does not. Anything but ours schedules the apply that
-    /// puts ours back, unless a cooldown is running or this replacement
+    /// The window's `toolbar` changed. A change from ours to another toolbar
+    /// is a replacement, and counts toward the cooldown; a change from one
+    /// other toolbar to another does not. Another toolbar schedules the apply
+    /// that puts ours back, unless a cooldown is running or this replacement
     /// started one. Applies never count: only the window's changes do.
+    ///
+    /// A change to no toolbar is a removal, such as window teardown makes
+    /// before the split is dismantled, and nothing is competing for the
+    /// window: it counts nothing and puts nothing back, so a closing window
+    /// gets no toolbar and no cooldown starts. It leaves what the watch last
+    /// saw as it was, so ours, then none, then another counts once.
     private func windowToolbarChanged() {
-        guard isInstalled, let window else { return }
-        let showsOurs = window.toolbar === toolbar
+        guard isInstalled, let window, let shown = window.toolbar else { return }
+        let showsOurs = shown === toolbar
         let replaced = windowShowsOurToolbar && !showsOurs
         windowShowsOurToolbar = showsOurs
         guard !showsOurs, cooldown == nil else { return }
         if replaced {
-            recordReplacement(leaving: window.toolbar)
+            recordReplacement(leaving: shown)
             guard cooldown == nil else { return }
         }
         scheduleApply()
@@ -275,7 +286,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Counts a replacement, dropping those older than `replacementWindow`.
     /// One more than `maxReplacementsInWindow` starts the cooldown and clears
     /// the count, so the first replacement after the cooldown starts afresh.
-    private func recordReplacement(leaving found: NSToolbar?) {
+    private func recordReplacement(leaving found: NSToolbar) {
         let at = now()
         recentReplacements.removeAll { at.timeIntervalSince($0) > Self.replacementWindow }
         recentReplacements.append(at)
@@ -287,11 +298,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
     /// Leaves `found` on the window for `reinstallCooldown`, logging once,
     /// then schedules the apply that puts our toolbar back. `uninstall`
     /// cancels it.
-    private func startCooldown(leaving found: NSToolbar?) {
+    private func startCooldown(leaving found: NSToolbar) {
         let cap = Self.maxReplacementsInWindow
         let span = Self.replacementWindow
         let pause = Self.reinstallCooldown
-        let foundID = found?.identifier ?? "none"
+        let foundID = found.identifier
         toolbarLogger.error("""
             Main toolbar was replaced more than \(cap, privacy: .public) times within \
             \(span, privacy: .public) s; leaving the window's toolbar (\(foundID, privacy: .public)) \
@@ -405,8 +416,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         toolbarLogger.debug("Main toolbar apply \(self.applyCount, privacy: .public)")
         appliedSnapshot = snapshot
         // Something else, such as a SwiftUI scene update, can set the window's
-        // toolbar; ours comes back here, except during a cooldown.
-        if isInstalled, cooldown == nil, let window, window.toolbar !== toolbar {
+        // toolbar; ours comes back here, except during a cooldown or when the
+        // window has none.
+        if reattachIsDue, let window {
             toolbarLogger.info("Main toolbar was replaced on its window; re-installing it")
             attach(to: window)
         }
@@ -416,6 +428,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate {
         // A layout that stopped short is never taken as shown, so the next
         // apply re-diffs whatever asked for it.
         appliedInputs = landed ? inputs(for: snapshot) : nil
+    }
+
+    /// Whether an apply puts the toolbar back on its window: it is installed,
+    /// no cooldown is leaving another toolbar in place, and another toolbar,
+    /// not none, holds the window. A window with no toolbar had it removed,
+    /// as its teardown does before the split is dismantled, and ours must not
+    /// return to a closing window.
+    private var reattachIsDue: Bool {
+        guard isInstalled, cooldown == nil, let shown = window?.toolbar else { return false }
+        return shown !== toolbar
     }
 
     /// Brings the items to `target` through `layoutSync`, and returns whether

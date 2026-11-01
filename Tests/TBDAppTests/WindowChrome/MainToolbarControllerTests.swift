@@ -353,6 +353,41 @@ struct MainToolbarControllerTests {
         #expect(fixture.identifiers == fixture.expectedIdentifiers())
     }
 
+    /// A change of the window's toolbar to none is a removal, as window
+    /// teardown makes before the split is dismantled, not a competing
+    /// toolbar: it counts no replacement and queues nothing, and a later
+    /// apply leaves the window without a toolbar rather than putting ours
+    /// back on a closing window. Another toolbar after the removal is still
+    /// a replacement of ours: it counts once and is put back.
+    @Test func aRemovedToolbarIsNotAReplacement() async throws {
+        let fixture = ToolbarFixture(label: "aRemovedToolbarIsNotAReplacement")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+        try #require(controller.applyScheduled == false)
+        try #require(controller.recentReplacements.isEmpty)
+
+        window.toolbar = nil
+        // KVO reports synchronously, so a watch that took the removal for a
+        // replacement would have counted it and queued an apply by now.
+        #expect(controller.recentReplacements.isEmpty)
+        #expect(controller.applyScheduled == false)
+        #expect(controller.isInstalled)
+
+        let appliesBefore = controller.applyCount
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(controller.applyCount == appliesBefore + 1)
+        #expect(window.toolbar == nil)
+
+        window.toolbar = NSToolbar(identifier: "MainToolbarControllerTests.afterRemoval")
+        #expect(controller.recentReplacements.count == 1)
+        let back = try await waitForMainActorCondition("a toolbar set after the removal to be replaced by ours") {
+            window.toolbar === controller.toolbar
+        }
+        #expect(back)
+    }
+
     /// One replacement past `maxReplacementsInWindow` inside one
     /// `replacementWindow` starts the cooldown: that replacement stays and
     /// queues nothing. When the cooldown runs out, the controller puts the
