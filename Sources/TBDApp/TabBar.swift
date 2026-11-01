@@ -766,24 +766,11 @@ enum TabPinMenu {
     }
 }
 
-/// What committing a tab's rename field writes (panel tabs spec, "The
-/// renderer"): a note tab's rename is its note's title, and any other tab's
-/// is the tab's label.
-enum TabRename: Equatable {
-    /// Set the tab's label to this text (`AppState.renameTab`, which trims it
-    /// and clears the label for blank text).
-    case label(String)
-    /// Write the note's title — nil leaves the title as it is — and clear the
-    /// tab's label, so the tab shows the title.
-    case note(noteID: UUID, title: String?)
-
-    /// The rename for a tab showing `content`, committed with `text`, while
-    /// its note (for a note tab) is titled `currentNoteTitle`.
-    static func commit(content: PaneContent, text: String, currentNoteTitle: String?) -> TabRename {
-        guard case .note(let noteID) = content else { return .label(text) }
-        return .note(noteID: noteID, title: noteTitle(text: text, currentNoteTitle: currentNoteTitle))
-    }
-
+/// What renaming a note writes (panel tabs spec, "The renderer"): a note's
+/// tab in the side region's strip (`AppState.commitSideNoteRename`) and its
+/// pane's title field rename the note itself. A workspace tab's rename field
+/// sets the tab's label (`AppState.renameTab`).
+enum TabRename {
     /// The title a note's rename writes: the trimmed text, or nil when it is
     /// blank or already the note's title.
     static func noteTitle(text: String, currentNoteTitle: String?) -> String? {
@@ -1000,11 +987,10 @@ private struct TabBarItem: View {
                             text: tabLabel,
                             isEditing: $isEditing,
                             onCommit: { newText in
-                                appState.commitTabRename(
+                                appState.renameTab(
                                     tabID: tab.id,
                                     worktreeID: worktreeID,
-                                    content: tab.content,
-                                    text: newText
+                                    newLabel: newText
                                 )
                             },
                             editorFont: .systemFont(ofSize: 11),

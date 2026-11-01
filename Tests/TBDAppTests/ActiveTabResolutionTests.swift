@@ -17,9 +17,10 @@ import TestSupport
 // (`daemonCapabilitiesFetcher`, `panelGetFetcher`, ...), so nothing touches
 // the network or `~/tbd`.
 //
-// Regression coverage for "a new worktree opens on its Notes tab": the daemon
-// appends the note LAST in tab order, so every `?? 0` / `min(idx, count - 1)`
-// fallback in the app resolved a missing or stale selection to Notes.
+// Regression coverage for a missing or stale selection landing on the last
+// tab: every `?? 0` / `min(idx, count - 1)` fallback in the app spelled its
+// own default, and the clamp resolved a stale selection to whatever tab was
+// last rather than to the agent at the front.
 
 @MainActor
 @Suite("Active tab resolution")
@@ -79,29 +80,18 @@ struct ActiveTabResolutionTests {
 
     // MARK: - Resolver defaults
 
-    @Test("nothing selected resolves to the agent tab, never the trailing note")
-    func unselectedWorktreeResolvesToAgentNotNote() {
+    @Test("nothing selected resolves to the first tab, never the trailing one")
+    func unselectedWorktreeResolvesToFirstTab() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), noteTab(note)]
+            let shell = UUID()
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), terminalTab(shell), fileTab(file)]
 
             #expect(state.activeTabIndices[worktreeID] == nil)
             #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
-        }
-    }
-
-    @Test("a note-only worktree still shows its note at index 0")
-    func noteOnlyWorktreeResolvesToTheNote() {
-        withState { state in
-            let worktreeID = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [noteTab(note)]
-
-            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == note)
         }
     }
 
@@ -115,34 +105,33 @@ struct ActiveTabResolutionTests {
         }
     }
 
-    @Test("an in-range selection is returned verbatim, note tab or not")
+    @Test("an in-range selection is returned verbatim")
     func inRangeSelectionIsNeverOverridden() {
         withState { state in
             let worktreeID = UUID()
             let claude = UUID()
-            let note = UUID()
-            state.tabs[worktreeID] = [terminalTab(claude), noteTab(note)]
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude), fileTab(file)]
             state.activeTabIndices[worktreeID] = 1
 
             #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 1)
-            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == note)
+            #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == file)
         }
     }
 
     // MARK: - Stale index
 
-    @Test("a stale out-of-range index falls forward to the first non-note tab")
-    func staleIndexResolvesToFirstNonNoteTab() {
+    @Test("a stale out-of-range index falls back to the first tab, not a clamp onto the last")
+    func staleIndexResolvesToFirstTab() {
         withState { state in
             let worktreeID = UUID()
-            let leadingNote = UUID()
             let claude = UUID()
-            let trailingNote = UUID()
-            // A leading note proves the fallback is "first NON-NOTE", not "first".
-            state.tabs[worktreeID] = [noteTab(leadingNote), terminalTab(claude), noteTab(trailingNote)]
+            let shell = UUID()
+            let file = UUID()
+            state.tabs[worktreeID] = [terminalTab(claude, label: "Claude"), terminalTab(shell), fileTab(file)]
             state.activeTabIndices[worktreeID] = 7  // stale — the array used to be longer
 
-            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 1)
+            #expect(state.resolvedActiveTabIndex(worktreeID: worktreeID) == 0)
             #expect(state.resolvedActiveTab(worktreeID: worktreeID)?.id == claude)
         }
     }

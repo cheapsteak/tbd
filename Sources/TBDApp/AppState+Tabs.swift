@@ -35,31 +35,22 @@ extension AppState {
     // MARK: - Active tab resolution
 
     /// The tab index a worktree should display: the stored selection when it is
-    /// still in range, otherwise the FIRST non-note tab, otherwise 0.
+    /// still in range, otherwise 0, the first tab.
     ///
     /// Single source of truth for "which tab is showing". Every read of
     /// `activeTabIndices` that used to spell its own `?? 0` / `min(idx, count - 1)`
     /// fallback routes through here, because those spellings disagreed: a stale or
     /// oversized index clamped to `count - 1`, landing on whatever tab was last.
-    /// Falling forward to the first non-note tab instead lands on the agent —
-    /// matching the daemon's own "active = primary" default. A note tab exists
-    /// only in memory from an older build until a reconcile drops it
-    /// (`reconcileTabs`); a worktree holding nothing else still shows it at
-    /// index 0.
+    /// Falling back to the first tab instead lands on the agent, matching the
+    /// daemon's own "active = primary" default.
     ///
     /// Never overrides a deliberate selection: an in-range stored index is
-    /// returned as-is, note tab or not. Returns 0 for an empty tab array;
-    /// callers must guard on `isEmpty` before indexing.
+    /// returned as-is. Returns 0 for an empty tab array too; callers must
+    /// guard on `isEmpty` before indexing.
     func resolvedActiveTabIndex(worktreeID: UUID) -> Int {
-        let arr = tabs[worktreeID] ?? []
-        guard !arr.isEmpty else { return 0 }
-        if let stored = activeTabIndices[worktreeID], arr.indices.contains(stored) {
-            return stored
-        }
-        return arr.firstIndex { tab in
-            if case .note = tab.content { return false }
-            return true
-        } ?? 0
+        guard let stored = activeTabIndices[worktreeID],
+              let arr = tabs[worktreeID], arr.indices.contains(stored) else { return 0 }
+        return stored
     }
 
     /// The tab a worktree should display, or nil when it has no tabs.
@@ -84,7 +75,7 @@ extension AppState {
     /// Re-point the stored active index at `tabID`'s CURRENT position after a
     /// mutation of `tabs[worktreeID]`. A nil `tabID` — or one that no longer
     /// exists — clears the entry rather than leaving a stale index behind, so
-    /// `resolvedActiveTabIndex`'s first-non-note default takes over instead of a
+    /// `resolvedActiveTabIndex`'s first-tab default takes over instead of a
     /// clamp that would land on whatever tab is last.
     ///
     /// Writes nothing when the entry already holds the right value — every
@@ -184,7 +175,7 @@ extension AppState {
             // so the resolved index reflects the persisted order. If the stored
             // ID no longer exists (tab was deleted), gracefully fall through and
             // leave activeTabIndices unchanged (the view layer then shows the
-            // first non-note tab via `resolvedActiveTabIndex`).
+            // first tab via `resolvedActiveTabIndex`).
             if let activeID = response.activeTabID,
                let arr = tabs[worktreeID],
                let idx = arr.firstIndex(where: { $0.id == activeID }),
@@ -329,26 +320,6 @@ extension AppState {
                 logger.error("renameTab persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
                 handleConnectionError(error)
             }
-        }
-    }
-
-    /// Commit a workspace tab's rename field (`TabRename.commit`). A note tab
-    /// writes the note's title — when the text is new and not blank — and
-    /// clears the tab's label either way, so the tab shows the title. Any
-    /// other tab sets its label through `renameTab`.
-    func commitTabRename(tabID: UUID, worktreeID: UUID, content: PaneContent, text: String) {
-        var currentNoteTitle: String?
-        if case .note(let noteID) = content {
-            currentNoteTitle = notes[worktreeID]?.first(where: { $0.id == noteID })?.title
-        }
-        switch TabRename.commit(content: content, text: text, currentNoteTitle: currentNoteTitle) {
-        case .label(let label):
-            renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: label)
-        case .note(let noteID, let title):
-            if let title {
-                renameNote(noteID: noteID, worktreeID: worktreeID, title: title)
-            }
-            renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "")
         }
     }
 
