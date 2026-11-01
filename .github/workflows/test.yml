@@ -1522,6 +1522,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # THROWAWAY STALL DIAGNOSTIC (do not merge): scripts/ci/stall-sampler.py output.
+      - name: Upload stall sampler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stall-diag
+          path: /tmp/stall-diag/
+          if-no-files-found: warn
+          retention-days: 7
+
       # `warn`, not `ignore`: an absent file means the metrics wiring broke, and
       # that must be visible rather than silently producing an empty dashboard.
       - name: Upload retry metrics
