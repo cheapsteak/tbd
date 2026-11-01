@@ -15,9 +15,27 @@ public struct PanelGetParams: Codable, Sendable, Equatable {
 public struct PanelGetResult: Codable, Sendable, Equatable {
     public let tabs: [WorkspaceTabSurface]
     public let activeTabID: UUID?
-    public init(tabs: [WorkspaceTabSurface], activeTabID: UUID?) {
+    /// The worktree's panels, in strip order: the list every tab in `tabs`
+    /// carries, given once more so a reader needs no tab to find them.
+    public let worktreePanels: [WorktreePanel]
+    public init(tabs: [WorkspaceTabSurface], activeTabID: UUID?, worktreePanels: [WorktreePanel] = []) {
         self.tabs = tabs
         self.activeTabID = activeTabID
+        self.worktreePanels = worktreePanels
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tabs, activeTabID, worktreePanels
+    }
+
+    /// Decodes a missing `worktreePanels` as no worktree panels, so a reply
+    /// from a daemon that predates them still decodes.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.tabs = try container.decode([WorkspaceTabSurface].self, forKey: .tabs)
+        self.activeTabID = try container.decodeIfPresent(UUID.self, forKey: .activeTabID)
+        self.worktreePanels = try container.decodeIfPresent(
+            [WorktreePanel].self, forKey: .worktreePanels) ?? []
     }
 }
 

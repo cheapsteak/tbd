@@ -11,8 +11,9 @@ extension PanelContent {
     /// the legacy pane identity of the file, web and transcript cases. A note
     /// keeps its note ID, because that is what the note case carries — so a
     /// leaf's `content.paneID` is not its panel ID, and the daemon action set
-    /// is handed the panel ID separately.
-    func paneContent(panelID: PanelID) -> PaneContent {
+    /// is handed the panel ID separately. Nil for the Changes list, which has
+    /// no leaf form: the side region draws it itself.
+    func paneContent(panelID: PanelID) -> PaneContent? {
         switch self {
         case .file(let reference):
             return .codeViewer(id: panelID, path: reference.path)
@@ -22,6 +23,8 @@ extension PanelContent {
             return .liveTranscript(id: panelID, terminalID: terminalID)
         case .note(let noteID):
             return .note(noteID: noteID)
+        case .changes:
+            return nil
         }
     }
 }
@@ -29,8 +32,12 @@ extension PanelContent {
 extension MRUHistory where Element == PanelContent {
     /// A panel's history as the leaf's chevrons and history palette show it.
     /// Order and cursor are kept, so an index the palette picks is the index
-    /// the daemon's `jump` takes.
-    func paneHistory(panelID: PanelID) -> PaneHistory {
-        map { $0.paneContent(panelID: panelID) }
+    /// the daemon's `jump` takes. Nil when an entry has no leaf form, which
+    /// only Changes content has and no tab's own panel holds
+    /// (`PanelSurfaceValidator`).
+    func paneHistory(panelID: PanelID) -> PaneHistory? {
+        let mapped = map { $0.paneContent(panelID: panelID) }
+        guard !mapped.entries.contains(nil) else { return nil }
+        return mapped.map { $0! }
     }
 }

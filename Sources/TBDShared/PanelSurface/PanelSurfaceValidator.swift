@@ -1,15 +1,17 @@
 import Foundation
 
 public enum PanelSurfaceViolation: Equatable, Sendable {
-    /// Two panels in the side region share this ID.
+    /// Two panels share this ID: two of the tab's own, two worktree panels,
+    /// or one of each.
     case duplicatePanelID(PanelID)
-    /// `activePanelID` names no panel in a region that has panels.
+    /// `activePanelID` names neither one of the tab's own panels nor a
+    /// worktree panel, while there is a panel.
     case activePanelMissing(PanelID)
-    /// The region has no panels but names an active one.
+    /// There is no panel of either kind, but one is named active.
     case activePanelWithoutPanels
-    /// The region has panels but none is active.
+    /// There is a panel of either kind, but none is active.
     case noActivePanel
-    /// `recency` is not a permutation of the panel IDs.
+    /// `recency` is not a permutation of the tab's own panel IDs.
     case recencyMismatch
     /// The panel's history is empty or its cursor is out of range.
     case malformedHistory(PanelID)
@@ -21,29 +23,38 @@ public enum PanelSurfaceViolation: Equatable, Sendable {
     case duplicateTranscriptView(terminalID: UUID)
     /// `width` is not finite or lies outside `SideRegion.widthRange`.
     case widthOutOfRange(Double)
+    /// One of the tab's own panels holds note or Changes content in its
+    /// history, which only a worktree panel may show.
+    case tabPanelShowsWorktreeContent(PanelID)
+    /// More than one worktree panel shows this note.
+    case duplicateNotePanel(noteID: UUID)
+    /// More than one worktree panel shows the Changes list.
+    case duplicateChangesPanel
 }
 
-/// Structural invariants from the panel tabs spec ("The model"). Resource
-/// checks (a note or terminal belongs to an allowed worktree) need daemon
-/// context and live in the coordinator, not here.
+/// Structural invariants from the panel tabs spec ("The model") and the side
+/// panel notes spec ("The model"). Resource checks (a note or terminal
+/// belongs to an allowed worktree) need daemon context and live in the
+/// coordinator, not here.
 public enum PanelSurfaceValidator {
     public static func violations(in surface: WorkspaceTabSurface) -> [PanelSurfaceViolation] {
         let side = surface.side
         let panelIDs = side.panels.map(\.id)
+        let worktreePanelIDs = surface.worktreePanels.map(\.id)
         var found: [PanelSurfaceViolation] = []
 
         var seenPanels = Set<PanelID>()
-        for id in panelIDs where !seenPanels.insert(id).inserted {
+        for id in panelIDs + worktreePanelIDs where !seenPanels.insert(id).inserted {
             found.append(.duplicatePanelID(id))
         }
 
         if let active = side.activePanelID {
-            if side.panels.isEmpty {
+            if !surface.hasPanels {
                 found.append(.activePanelWithoutPanels)
-            } else if side.panel(id: active) == nil {
+            } else if side.panel(id: active) == nil, surface.worktreePanel(id: active) == nil {
                 found.append(.activePanelMissing(active))
             }
-        } else if !side.panels.isEmpty {
+        } else if surface.hasPanels {
             found.append(.noActivePanel)
         }
 
@@ -65,6 +76,9 @@ public enum PanelSurfaceValidator {
             if Set(history.entries.map(\.kind)).count > 1 {
                 found.append(.historyMixesKinds(panel.id))
             }
+            if history.entries.contains(where: { WorktreePanelContent($0) != nil }) {
+                found.append(.tabPanelShowsWorktreeContent(panel.id))
+            }
         }
 
         // Views are what panels show now; a transcript held only further back
@@ -79,6 +93,22 @@ public enum PanelSurfaceValidator {
 
         if !(side.width.isFinite && SideRegion.widthRange.contains(side.width)) {
             found.append(.widthOutOfRange(side.width))
+        }
+
+        var shownNotes = Set<UUID>()
+        var showsChanges = false
+        for panel in surface.worktreePanels {
+            switch panel.content {
+            case .note(let noteID):
+                if !shownNotes.insert(noteID).inserted {
+                    found.append(.duplicateNotePanel(noteID: noteID))
+                }
+            case .changes:
+                if showsChanges {
+                    found.append(.duplicateChangesPanel)
+                }
+                showsChanges = true
+            }
         }
 
         return found

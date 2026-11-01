@@ -437,6 +437,7 @@ struct PanelSurfaceRenderBranchTests {
         let web = PanelContent.web(Self.pageURL)
         let note = PanelContent.note(noteID: UUID())
         let transcript = PanelContent.transcript(terminalID: UUID())
+        let changes = PanelContent.changes
 
         let backOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: true, forward: false)
         let forwardOnly: SideStripHistoryButtons = SideStripHistoryButtons(search: true, back: false, forward: true)
@@ -447,11 +448,12 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.historyButtons(for: file, history: onOlder) == forwardOnly)
         #expect(SideRegionStrip.historyButtons(for: web, history: onNewer) == backOnly)
         #expect(SideRegionStrip.historyButtons(for: web, history: single) == searchOnly)
-        // A note or a transcript is dimmed, even over a history a file would
-        // step through.
+        // A note, a transcript or the Changes list is dimmed, even over a
+        // history a file would step through.
         #expect(SideRegionStrip.historyButtons(for: note, history: onNewer) == dimmed)
         #expect(SideRegionStrip.historyButtons(for: transcript, history: onNewer) == dimmed)
         #expect(SideRegionStrip.historyButtons(for: transcript, history: onOlder) == dimmed)
+        #expect(SideRegionStrip.historyButtons(for: changes, history: onNewer) == dimmed)
         // A file whose history is unknown has nothing to step through.
         #expect(SideRegionStrip.historyButtons(for: file, history: nil) == dimmed)
     }
@@ -483,8 +485,9 @@ struct PanelSurfaceRenderBranchTests {
         #expect(SideRegionStrip.trailingControl(
             for: web, canRender: true, showingSource: true, copied: false) == notCopied)
 
-        // A note and a transcript have none, whatever the inputs say.
-        let withoutControl: [PanelContent] = [note, transcript]
+        // A note, a transcript and the Changes list have none, whatever the
+        // inputs say.
+        let withoutControl: [PanelContent] = [note, transcript, .changes]
         for content in withoutControl {
             #expect(SideRegionStrip.trailingControl(
                 for: content, canRender: true, showingSource: true, copied: true) == nil, "\(content)")

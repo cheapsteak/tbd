@@ -113,6 +113,10 @@ struct LocalizedErrorPayloadTests {
             ),
             ("PanelOperationError.invalidWidth", PanelOperationError.invalidWidth(0.95)),
             ("PanelOperationError.historyUnavailable", PanelOperationError.historyUnavailable(panelID)),
+            (
+                "PanelOperationError.worktreePanelHasNoHistory",
+                PanelOperationError.worktreePanelHasNoHistory(panelID)
+            ),
             ("CLIInstallerError.linkCreationFailed", CLIInstallerError.linkCreationFailed("remove existing: EACCES")),
             (
                 "CLIInstallerError.crossDeviceLink",
@@ -175,6 +179,11 @@ struct LocalizedErrorPayloadTests {
             PanelOperationError.historyUnavailable(panelID),
             [panelID.uuidString],
             "PanelOperationError.historyUnavailable"
+        )
+        assertRenders(
+            PanelOperationError.worktreePanelHasNoHistory(panelID),
+            [panelID.uuidString],
+            "PanelOperationError.worktreePanelHasNoHistory"
         )
     }
 

@@ -232,7 +232,7 @@ struct PanelCoordinatorTests {
         let result = try await coordinator.apply(envelope(
             worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: note.id), newPanel: false)))
 
-        #expect(result.tab.side.panels.contains { $0.content == .note(noteID: note.id) })
+        #expect(result.tab.worktreePanel(showing: .note(noteID: note.id)) != nil)
     }
 
     @Test func transcriptOfForeignTerminalIsInvalidResource() async throws {

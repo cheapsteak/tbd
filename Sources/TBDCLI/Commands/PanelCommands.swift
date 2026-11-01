@@ -449,6 +449,8 @@ func describe(_ content: PanelContent) -> String {
         return "transcript \(terminalID)"
     case .note(let noteID):
         return "note \(noteID)"
+    case .changes:
+        return "changes"
     }
 }
 

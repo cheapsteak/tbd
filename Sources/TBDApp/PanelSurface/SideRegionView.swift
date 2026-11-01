@@ -15,8 +15,9 @@ struct SideRegionTab: Equatable, Identifiable {
     /// other kinds, and until the terminal's row carries one.
     let transcriptPath: String?
 
-    /// The content as the leaf view, and the file menu, take it.
-    var paneContent: PaneContent { content.paneContent(panelID: id) }
+    /// The content as the leaf view, and the file menu, take it; nil for the
+    /// Changes list, which has no leaf form.
+    var paneContent: PaneContent? { content.paneContent(panelID: id) }
 
     /// The note a note tab shows, which its rename titles and its × deletes;
     /// nil for the other kinds.
@@ -86,9 +87,9 @@ enum SideRegionStrip {
     /// The history buttons for the active panel's `content` and `history`.
     /// A file or web panel steps through its history: search while it has
     /// entries, back toward older entries and forward toward newer ones as
-    /// the cursor allows. A note or transcript panel has no history to step
-    /// through, and neither does a panel whose history is unknown, so all
-    /// three are disabled.
+    /// the cursor allows. A note, transcript or Changes panel has no history
+    /// to step through, and neither does a panel whose history is unknown, so
+    /// all three are disabled.
     static func historyButtons(for content: PanelContent, history: PaneHistory?) -> SideStripHistoryButtons {
         switch content {
         case .file, .web:
@@ -97,7 +98,7 @@ enum SideRegionStrip {
                 search: PaneHistoryPaletteButtonModel.isEnabled(entryCount: history.entries.count),
                 back: history.canGoBack,
                 forward: history.canGoForward)
-        case .note, .transcript:
+        case .note, .transcript, .changes:
             break
         }
         return SideStripHistoryButtons(search: false, back: false, forward: false)
@@ -106,8 +107,8 @@ enum SideRegionStrip {
     /// The active panel's own control, drawn before the collapse button:
     /// its kind's viewer control (`PaneChromeControl.viewerControl`), the
     /// rendered/source toggle for a file that can render and copy-address for
-    /// a web page. A file that cannot render, a note and a transcript have
-    /// none.
+    /// a web page. A file that cannot render, a note, a transcript and the
+    /// Changes list have none.
     static func trailingControl(
         for content: PanelContent,
         canRender: Bool,
@@ -190,9 +191,9 @@ struct SideRegionView: View {
 
             Divider()
 
-            if let active {
+            if let active, let paneContent = active.tab.paneContent {
                 PanePlaceholder(
-                    content: active.tab.paneContent,
+                    content: paneContent,
                     worktree: worktree,
                     tabID: surface.id,
                     actions: active.actions,
@@ -217,11 +218,15 @@ struct SideRegionView: View {
     private func activePanel(for tab: SideRegionTab) -> ActivePanel {
         let actions = PaneActions.daemon(
             appState: appState, worktreeID: surface.worktreeID, tabID: surface.id, panelID: tab.id)
+        var history: PaneHistory?
+        if let paneContent = tab.paneContent {
+            history = actions.history(paneContent)
+        }
         return ActivePanel(
             tab: tab,
             chrome: chromeStore.state(for: tab.id),
             actions: actions,
-            history: actions.history(tab.paneContent))
+            history: history)
     }
 
     // MARK: - Strip
@@ -299,14 +304,14 @@ struct SideRegionView: View {
                 .disabled(!enabled.search)
 
             historyStepButton(icon: "chevron.left", help: "Back") {
-                guard let active else { return }
-                active.actions.historyStep(active.tab.paneContent, .back)
+                guard let active, let paneContent = active.tab.paneContent else { return }
+                active.actions.historyStep(paneContent, .back)
             }
             .disabled(!enabled.back)
 
             historyStepButton(icon: "chevron.right", help: "Forward") {
-                guard let active else { return }
-                active.actions.historyStep(active.tab.paneContent, .forward)
+                guard let active, let paneContent = active.tab.paneContent else { return }
+                active.actions.historyStep(paneContent, .forward)
             }
             .disabled(!enabled.forward)
         }
@@ -332,9 +337,9 @@ struct SideRegionView: View {
         .help("Search panel history")
         .accessibilityLabel(Text("Search panel history"))
         .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
-            if let active, let history = active.history {
+            if let active, let history = active.history, let paneContent = active.tab.paneContent {
                 PaneHistoryPaletteView(history: history) { index in
-                    active.actions.historyStep(active.tab.paneContent, .jump(index))
+                    active.actions.historyStep(paneContent, .jump(index))
                 }
             }
         }
@@ -422,8 +427,10 @@ struct SideRegionView: View {
                     renamingPanelID = tab.id
                 }
             }
+        } else if let paneContent = tab.paneContent {
+            item.headerFileContextMenu(for: paneContent, transcriptPath: tab.transcriptPath)
         } else {
-            item.headerFileContextMenu(for: tab.paneContent, transcriptPath: tab.transcriptPath)
+            item
         }
     }
 

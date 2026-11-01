@@ -13,9 +13,10 @@ struct PanelSurfaceValidatorTests {
         .file(FileReference(path: path))
     }
 
-    private func surface(_ side: SideRegion) -> WorkspaceTabSurface {
+    private func surface(_ side: SideRegion, worktreePanels: [WorktreePanel] = []) -> WorkspaceTabSurface {
         WorkspaceTabSurface(id: UUID(), worktreeID: UUID(),
-                            primary: .terminal(terminalID: UUID()), side: side)
+                            primary: .terminal(terminalID: UUID()), side: side,
+                            worktreePanels: worktreePanels)
     }
 
     /// A region that satisfies every rule over `panels`: the first panel is
@@ -26,8 +27,10 @@ struct PanelSurfaceValidatorTests {
                    recency: panels.map(\.id), collapsed: false, width: width)
     }
 
-    private func violations(_ side: SideRegion) -> [PanelSurfaceViolation] {
-        PanelSurfaceValidator.violations(in: surface(side))
+    private func violations(
+        _ side: SideRegion, worktreePanels: [WorktreePanel] = []
+    ) -> [PanelSurfaceViolation] {
+        PanelSurfaceValidator.violations(in: surface(side, worktreePanels: worktreePanels))
     }
 
     // MARK: - Valid surfaces
@@ -165,5 +168,99 @@ struct PanelSurfaceValidatorTests {
             return
         }
         #expect(reported.isNaN)
+    }
+
+    // MARK: - Worktree panels
+
+    @Test func surfaceWithWorktreePanelsIsValid() {
+        let own = ViewerPanel(id: UUID(), content: file("/a"))
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let otherNote = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        let worktreePanels = [note, otherNote, changes]
+        #expect(violations(region([own]), worktreePanels: worktreePanels) == [])
+    }
+
+    /// The panel in front may be a worktree panel, while `recency` still
+    /// covers only the tab's own panels.
+    @Test func frontNamingAWorktreePanelIsValid() {
+        let own = ViewerPanel(id: UUID(), content: file("/a"))
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let withOwn = SideRegion(panels: [own], activePanelID: note.id, recency: [own.id])
+        #expect(violations(withOwn, worktreePanels: [note]) == [])
+
+        let worktreeOnly = SideRegion(panels: [], activePanelID: note.id, recency: [])
+        #expect(violations(worktreeOnly, worktreePanels: [note]) == [])
+    }
+
+    @Test func noFrontWithOnlyWorktreePanelsIsNoActivePanel() {
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let side = SideRegion(panels: [], activePanelID: nil, recency: [])
+        #expect(violations(side, worktreePanels: [note]) == [.noActivePanel])
+    }
+
+    @Test func frontNamingNeitherKindIsMissing() {
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let stray = UUID()
+        let side = SideRegion(panels: [], activePanelID: stray, recency: [])
+        #expect(violations(side, worktreePanels: [note]) == [.activePanelMissing(stray)])
+    }
+
+    @Test func recencyNamingAWorktreePanelIsAMismatch() {
+        let own = ViewerPanel(id: UUID(), content: file("/a"))
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let withOwn = SideRegion(panels: [own], activePanelID: own.id, recency: [own.id, note.id])
+        #expect(violations(withOwn, worktreePanels: [note]) == [.recencyMismatch])
+
+        let worktreeOnly = SideRegion(panels: [], activePanelID: note.id, recency: [note.id])
+        #expect(violations(worktreeOnly, worktreePanels: [note]) == [.recencyMismatch])
+    }
+
+    @Test func idSharedBetweenAnOwnAndAWorktreePanelIsADuplicate() {
+        let id = UUID()
+        let own = ViewerPanel(id: id, content: file("/a"))
+        let changes = WorktreePanel(id: id, content: .changes)
+        #expect(violations(region([own]), worktreePanels: [changes]) == [.duplicatePanelID(id)])
+    }
+
+    @Test func idSharedBetweenTwoWorktreePanelsIsADuplicate() {
+        let id = UUID()
+        let note = WorktreePanel(id: id, content: .note(noteID: UUID()))
+        let changes = WorktreePanel(id: id, content: .changes)
+        let side = SideRegion(panels: [], activePanelID: id, recency: [])
+        #expect(violations(side, worktreePanels: [note, changes]) == [.duplicatePanelID(id)])
+    }
+
+    /// Note and Changes content belongs to worktree panels: an own panel
+    /// showing it, or holding it further back in its history, is refused.
+    @Test func ownPanelHoldingWorktreeContentIsAViolation() {
+        let notePanel = ViewerPanel(id: UUID(), content: .note(noteID: UUID()))
+        let changesPanel = ViewerPanel(id: UUID(), content: .changes)
+        for panel in [notePanel, changesPanel] {
+            #expect(violations(region([panel])) == [.tabPanelShowsWorktreeContent(panel.id)],
+                    "\(String(describing: panel.content))")
+        }
+
+        // A file panel holding a note further back mixes kinds as well.
+        let noteBehind = ViewerPanel(
+            id: UUID(),
+            history: PanelHistory(entries: [file("/a"), .note(noteID: UUID())], cursor: 0))
+        #expect(violations(region([noteBehind]))
+            == [.historyMixesKinds(noteBehind.id), .tabPanelShowsWorktreeContent(noteBehind.id)])
+    }
+
+    @Test func twoWorktreePanelsOnOneNoteIsAViolation() {
+        let noteID = UUID()
+        let first = WorktreePanel(id: UUID(), content: .note(noteID: noteID))
+        let second = WorktreePanel(id: UUID(), content: .note(noteID: noteID))
+        let side = SideRegion(panels: [], activePanelID: first.id, recency: [])
+        #expect(violations(side, worktreePanels: [first, second]) == [.duplicateNotePanel(noteID: noteID)])
+    }
+
+    @Test func twoChangesPanelsIsAViolation() {
+        let first = WorktreePanel(id: UUID(), content: .changes)
+        let second = WorktreePanel(id: UUID(), content: .changes)
+        let side = SideRegion(panels: [], activePanelID: first.id, recency: [])
+        #expect(violations(side, worktreePanels: [first, second]) == [.duplicateChangesPanel])
     }
 }

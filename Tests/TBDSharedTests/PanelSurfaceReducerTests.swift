@@ -18,6 +18,10 @@ enum ReducerFixture {
     static let c = id(3)
     static let t = id(4)
     static let w = id(5)
+    // Worktree panel IDs.
+    static let n1 = id(6)
+    static let n2 = id(7)
+    static let ch = id(8)
     /// What `makeID` hands the reducer in the table rows.
     static let fresh = id(99)
 
@@ -41,10 +45,22 @@ enum ReducerFixture {
         ViewerPanel(id: id, history: PanelHistory(entries: entries, cursor: cursor))
     }
 
-    static func surface(_ side: SideRegion, revision: UInt64 = 0) -> WorkspaceTabSurface {
+    /// A worktree panel showing note `n` (the note `note(n)` names).
+    static func notePanel(_ id: PanelID, _ n: Int) -> WorktreePanel {
+        WorktreePanel(id: id, content: .note(noteID: Self.id(700 + n)))
+    }
+
+    static func changesPanel(_ id: PanelID) -> WorktreePanel {
+        WorktreePanel(id: id, content: .changes)
+    }
+
+    static func surface(
+        _ side: SideRegion, worktreePanels: [WorktreePanel] = [], revision: UInt64 = 0
+    ) -> WorkspaceTabSurface {
         WorkspaceTabSurface(
             id: id(900), worktreeID: id(901),
-            primary: .terminal(terminalID: id(902)), side: side, revision: revision)
+            primary: .terminal(terminalID: id(902)), side: side,
+            worktreePanels: worktreePanels, revision: revision)
     }
 }
 
@@ -116,9 +132,9 @@ extension OpenReuseRow {
         OpenReuseRow(
             name: "an empty region gets its first panel",
             before: .empty,
-            operation: .open(content: Fixture.note(1), newPanel: false),
+            operation: .open(content: Fixture.web("/w"), newPanel: false),
             after: SideRegion(
-                panels: [Fixture.panel(Fixture.fresh, Fixture.note(1))],
+                panels: [Fixture.panel(Fixture.fresh, Fixture.web("/w"))],
                 activePanelID: Fixture.fresh, recency: [Fixture.fresh])),
         OpenReuseRow(
             name: "a transcript never reuses a transcript panel",
@@ -475,7 +491,9 @@ struct PanelSurfaceReducerTests {
         let operations: [PanelOperation] = [
             .open(content: Fixture.file("/b"), newPanel: false),      // exact match
             .open(content: Fixture.file("/d"), newPanel: false),      // reuse
-            .open(content: Fixture.note(1), newPanel: false),         // new panel
+            .open(content: Fixture.transcript(Fixture.terminal1), newPanel: false), // new panel
+            .open(content: Fixture.note(1), newPanel: false),         // new worktree panel
+            .open(content: .changes, newPanel: true),                 // new worktree panel
             .navigate(panelID: Fixture.a, destination: Fixture.file("/b")), // no-op navigation
             .navigate(panelID: Fixture.a, destination: Fixture.file("/e")),
             .history(panelID: Fixture.a, action: .back),
@@ -503,5 +521,233 @@ struct PanelSurfaceReducerTests {
                 .navigate(panelID: Fixture.a, destination: Fixture.web("/w")), to: surface)
         }
         #expect(surface == copy)
+    }
+
+    // MARK: - Worktree panels
+
+    private func applySurface(
+        _ operation: PanelOperation, to surface: WorkspaceTabSurface
+    ) throws -> WorkspaceTabSurface {
+        try PanelSurfaceReducer.apply(operation, to: surface, makeID: { Fixture.fresh })
+    }
+
+    @Test func openNoteAppendsWorktreePanelAndSelects() throws {
+        // A collapsed region with one own panel, and a Changes panel already
+        // in the worktree: the note's panel goes after it.
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))],
+            activePanelID: Fixture.a, recency: [Fixture.a], collapsed: true, width: 0.3)
+        let start = Fixture.surface(side, worktreePanels: [Fixture.changesPanel(Fixture.ch)])
+        // `newPanel` plays no part in opening worktree content.
+        for newPanel in [false, true] {
+            let out = try applySurface(.open(content: Fixture.note(1), newPanel: newPanel), to: start)
+
+            let expectedPanels = [Fixture.changesPanel(Fixture.ch), Fixture.notePanel(Fixture.fresh, 1)]
+            #expect(out.worktreePanels == expectedPanels, "newPanel \(newPanel)")
+            #expect(out.side == SideRegion(
+                panels: side.panels, activePanelID: Fixture.fresh, recency: [Fixture.a],
+                collapsed: false, width: 0.3), "newPanel \(newPanel)")
+            #expect(out.revision == 1)
+            #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
+        }
+    }
+
+    @Test func openExistingWorktreeContentSelects() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))],
+            activePanelID: Fixture.a, recency: [Fixture.a], collapsed: true)
+        let worktreePanels = [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]
+        let start = Fixture.surface(side, worktreePanels: worktreePanels)
+
+        let note = try applySurface(.open(content: Fixture.note(1), newPanel: false), to: start)
+        #expect(note.worktreePanels == worktreePanels)
+        #expect(note.side == SideRegion(
+            panels: side.panels, activePanelID: Fixture.n1, recency: [Fixture.a], collapsed: false))
+
+        let changes = try applySurface(.open(content: .changes, newPanel: true), to: start)
+        #expect(changes.worktreePanels == worktreePanels)
+        #expect(changes.side == SideRegion(
+            panels: side.panels, activePanelID: Fixture.ch, recency: [Fixture.a], collapsed: false))
+
+        // Opening the same note twice from nothing keeps one panel, whatever
+        // the second open's `newPanel`.
+        var nextID = 0
+        let makeID: () -> UUID = {
+            nextID += 1
+            return ReducerFixture.id(nextID)
+        }
+        let once = try PanelSurfaceReducer.apply(
+            .open(content: Fixture.note(2), newPanel: false), to: Fixture.surface(.empty), makeID: makeID)
+        let twice = try PanelSurfaceReducer.apply(
+            .open(content: Fixture.note(2), newPanel: true), to: once, makeID: makeID)
+        #expect(twice.worktreePanels == [Fixture.notePanel(Fixture.id(1), 2)])
+        #expect(twice.side == SideRegion(activePanelID: Fixture.id(1)))
+        #expect(PanelSurfaceValidator.violations(in: twice).isEmpty)
+    }
+
+    @Test func selectWorktreePanelKeepsRecency() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a")), Fixture.panel(Fixture.b, Fixture.file("/b"))],
+            activePanelID: Fixture.a, recency: [Fixture.a, Fixture.b], collapsed: true, width: 0.3)
+        let worktreePanels = [Fixture.notePanel(Fixture.n1, 1)]
+        let out = try applySurface(
+            .select(panelID: Fixture.n1), to: Fixture.surface(side, worktreePanels: worktreePanels))
+        #expect(out.side == SideRegion(
+            panels: side.panels, activePanelID: Fixture.n1, recency: [Fixture.a, Fixture.b],
+            collapsed: false, width: 0.3))
+        #expect(out.worktreePanels == worktreePanels)
+        #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
+    }
+
+    @Test func closeWorktreePanelFallsBackToRecencyThenWorktreePanels() throws {
+        // Own panels: the most recent one comes forward.
+        let withOwn = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a")), Fixture.panel(Fixture.b, Fixture.file("/b"))],
+            activePanelID: Fixture.n1, recency: [Fixture.b, Fixture.a])
+        let ownOut = try applySurface(
+            .close(panelID: Fixture.n1),
+            to: Fixture.surface(
+                withOwn, worktreePanels: [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]))
+        #expect(ownOut.worktreePanels == [Fixture.changesPanel(Fixture.ch)])
+        #expect(ownOut.side == SideRegion(
+            panels: withOwn.panels, activePanelID: Fixture.b, recency: [Fixture.b, Fixture.a]))
+        #expect(PanelSurfaceValidator.violations(in: ownOut).isEmpty)
+
+        // No own panels: the first remaining worktree panel comes forward.
+        let worktreeOnly = SideRegion(activePanelID: Fixture.n2)
+        let worktreeOut = try applySurface(
+            .close(panelID: Fixture.n2),
+            to: Fixture.surface(worktreeOnly, worktreePanels: [
+                Fixture.notePanel(Fixture.n1, 1), Fixture.notePanel(Fixture.n2, 2), Fixture.changesPanel(Fixture.ch),
+            ]))
+        let remaining = [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]
+        #expect(worktreeOut.worktreePanels == remaining)
+        #expect(worktreeOut.side == SideRegion(activePanelID: Fixture.n1))
+        #expect(PanelSurfaceValidator.violations(in: worktreeOut).isEmpty)
+
+        // None left: nothing is in front, and the region hides.
+        let last = try applySurface(
+            .close(panelID: Fixture.n1),
+            to: Fixture.surface(SideRegion(activePanelID: Fixture.n1), worktreePanels: [Fixture.notePanel(Fixture.n1, 1)]))
+        #expect(last.worktreePanels.isEmpty)
+        #expect(last.side == .empty)
+        #expect(!last.isSideVisible)
+        #expect(PanelSurfaceValidator.violations(in: last).isEmpty)
+
+        // A worktree panel closed behind an own panel leaves the front alone.
+        let behind = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))], activePanelID: Fixture.a, recency: [Fixture.a])
+        let behindOut = try applySurface(
+            .close(panelID: Fixture.n1),
+            to: Fixture.surface(behind, worktreePanels: [Fixture.notePanel(Fixture.n1, 1)]))
+        #expect(behindOut.worktreePanels.isEmpty)
+        #expect(behindOut.side == behind)
+    }
+
+    @Test func closeOwnPanelFallsBackToWorktreePanel() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))], activePanelID: Fixture.a, recency: [Fixture.a])
+        let worktreePanels = [Fixture.notePanel(Fixture.n1, 1), Fixture.changesPanel(Fixture.ch)]
+        let out = try applySurface(
+            .close(panelID: Fixture.a), to: Fixture.surface(side, worktreePanels: worktreePanels))
+        #expect(out.side == SideRegion(activePanelID: Fixture.n1))
+        #expect(out.worktreePanels == worktreePanels)
+        #expect(out.isSideVisible)
+        #expect(PanelSurfaceValidator.violations(in: out).isEmpty)
+    }
+
+    @Test func historyAndNavigateOnWorktreePanelRefused() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))], activePanelID: Fixture.n1, recency: [Fixture.a])
+        let surface = Fixture.surface(side, worktreePanels: [Fixture.notePanel(Fixture.n1, 1)])
+        let actions: [PanelHistoryAction] = [.back, .forward, .jump(index: 0)]
+        for action in actions {
+            #expect(throws: PanelOperationError.worktreePanelHasNoHistory(Fixture.n1), "\(action)") {
+                _ = try applySurface(.history(panelID: Fixture.n1, action: action), to: surface)
+            }
+        }
+        #expect(throws: PanelOperationError.worktreePanelHasNoHistory(Fixture.n1)) {
+            _ = try applySurface(.navigate(panelID: Fixture.n1, destination: Fixture.note(2)), to: surface)
+        }
+    }
+
+    @Test func navigateOwnPanelToNoteIsKindMismatch() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a"))], activePanelID: Fixture.a, recency: [Fixture.a])
+        #expect(throws: PanelOperationError.kindMismatch(panelID: Fixture.a, expected: .file, actual: .note)) {
+            _ = try apply(.navigate(panelID: Fixture.a, destination: Fixture.note(1)), to: side)
+        }
+        #expect(throws: PanelOperationError.kindMismatch(panelID: Fixture.a, expected: .file, actual: .changes)) {
+            _ = try apply(.navigate(panelID: Fixture.a, destination: .changes), to: side)
+        }
+    }
+
+    @Test func ownPanelOpenedWhileWorktreePanelInFrontGoesFirst() throws {
+        let side = SideRegion(
+            panels: [Fixture.panel(Fixture.a, Fixture.file("/a")),
+                     Fixture.panel(Fixture.t, Fixture.transcript(Fixture.terminal1))],
+            activePanelID: Fixture.n1, recency: [Fixture.a, Fixture.t])
+        let worktreePanels = [Fixture.notePanel(Fixture.n1, 1)]
+        let start = Fixture.surface(side, worktreePanels: worktreePanels)
+
+        let created = try applySurface(.open(content: Fixture.web("/w"), newPanel: false), to: start)
+        let expectedPanels: [ViewerPanel] = [Fixture.panel(Fixture.fresh, Fixture.web("/w"))] + side.panels
+        #expect(created.side == SideRegion(
+            panels: expectedPanels,
+            activePanelID: Fixture.fresh, recency: [Fixture.fresh, Fixture.a, Fixture.t]))
+        #expect(created.worktreePanels == worktreePanels)
+        #expect(PanelSurfaceValidator.violations(in: created).isEmpty)
+
+        // Reuse passes over the worktree panel in front to the most recent
+        // own panel of the kind.
+        let reused = try applySurface(.open(content: Fixture.file("/b"), newPanel: false), to: start)
+        #expect(reused.side == SideRegion(
+            panels: [Fixture.panel(Fixture.a, entries: [Fixture.file("/b"), Fixture.file("/a")]),
+                     Fixture.panel(Fixture.t, Fixture.transcript(Fixture.terminal1))],
+            activePanelID: Fixture.a, recency: [Fixture.a, Fixture.t]))
+    }
+
+    @Test func adoptingRepairsFront() {
+        let ownPanels = [Fixture.panel(Fixture.a, Fixture.file("/a")), Fixture.panel(Fixture.b, Fixture.file("/b"))]
+        let note = Fixture.notePanel(Fixture.n1, 1)
+        let changes = Fixture.changesPanel(Fixture.ch)
+
+        // The front's panel left the list: the most recent own panel comes
+        // forward, and collapse and revision stay as they were.
+        let withOwn = Fixture.surface(
+            SideRegion(panels: ownPanels, activePanelID: Fixture.n1, recency: [Fixture.b, Fixture.a], collapsed: true),
+            worktreePanels: [note, changes], revision: 5)
+        let ownOut = PanelSurfaceReducer.adopting([changes], into: withOwn)
+        #expect(ownOut.worktreePanels == [changes])
+        #expect(ownOut.side == SideRegion(
+            panels: ownPanels, activePanelID: Fixture.b, recency: [Fixture.b, Fixture.a], collapsed: true))
+        #expect(ownOut.revision == 5)
+        #expect(PanelSurfaceValidator.violations(in: ownOut).isEmpty)
+
+        // With no own panels, the list's first panel comes forward; with an
+        // empty list, nothing does.
+        let worktreeOnly = Fixture.surface(SideRegion(activePanelID: Fixture.n1), worktreePanels: [note, changes])
+        let firstOut = PanelSurfaceReducer.adopting([changes], into: worktreeOnly)
+        #expect(firstOut.side.activePanelID == Fixture.ch)
+        #expect(PanelSurfaceValidator.violations(in: firstOut).isEmpty)
+        let emptyOut = PanelSurfaceReducer.adopting([], into: worktreeOnly)
+        #expect(emptyOut.side.activePanelID == nil)
+        #expect(PanelSurfaceValidator.violations(in: emptyOut).isEmpty)
+
+        // Nothing in front and a list to show: its first panel comes forward.
+        let nothing = Fixture.surface(.empty)
+        let shownOut = PanelSurfaceReducer.adopting([note, changes], into: nothing)
+        #expect(shownOut.side == SideRegion(activePanelID: Fixture.n1))
+        #expect(PanelSurfaceValidator.violations(in: shownOut).isEmpty)
+
+        // A front that still names a panel is kept, of either kind.
+        let ownFront = Fixture.surface(
+            SideRegion(panels: ownPanels, activePanelID: Fixture.a, recency: [Fixture.a, Fixture.b]),
+            worktreePanels: [note])
+        #expect(PanelSurfaceReducer.adopting([changes], into: ownFront).side == ownFront.side)
+        let worktreeFront = Fixture.surface(
+            SideRegion(panels: ownPanels, activePanelID: Fixture.n1, recency: [Fixture.a, Fixture.b]),
+            worktreePanels: [note])
+        #expect(PanelSurfaceReducer.adopting([changes, note], into: worktreeFront).side == worktreeFront.side)
     }
 }

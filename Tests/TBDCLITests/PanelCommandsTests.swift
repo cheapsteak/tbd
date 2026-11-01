@@ -469,6 +469,11 @@ struct PanelSideRegionRenderingTests {
         let content = PanelContent.file(FileReference(path: "/a.md", presentation: .rendered))
         #expect(describe(content) == "file /a.md (rendered)")
     }
+
+    @Test func changesIsDescribedByItsKind() {
+        let content = PanelContent.changes
+        #expect(describe(content) == "changes")
+    }
 }
 
 /// `tbd panel list`: one `panel.get`, scoped to `--tab` when given. Scoped

@@ -273,7 +273,7 @@ public actor PanelCoordinator {
                   note.worktreeID == worktreeID else {
                 throw PanelCoordinatorError.invalidResource("note \(noteID) not in worktree")
             }
-        case .file, .web:
+        case .file, .web, .changes:
             break
         }
     }

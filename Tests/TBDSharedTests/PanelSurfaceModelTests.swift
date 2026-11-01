@@ -8,25 +8,29 @@ struct PanelSurfaceModelTests {
     private let plan = PanelContent.file(FileReference(path: "docs/plan.md", presentation: .rendered))
     private let old = PanelContent.file(FileReference(path: "/old.md"))
 
-    /// A surface exercising every field: all four panel kinds, a file panel
-    /// whose cursor is not at the front, a recency order unlike the strip
-    /// order, a collapsed region and a non-default width.
+    /// A surface exercising every field: all five panel kinds — file, web
+    /// and transcript as the tab's own panels, note and Changes as worktree
+    /// panels — a file panel whose cursor is not at the front, a recency
+    /// order unlike the strip order, a collapsed region and a non-default
+    /// width.
     private func fullSurface() -> WorkspaceTabSurface {
         var fileHistory = PanelHistory.seeded(with: old)
         fileHistory.recordReplacement(outgoing: old, incoming: plan)
         _ = fileHistory.goBack()
         let filePanel = ViewerPanel(id: UUID(), history: fileHistory)
         let webPanel = ViewerPanel(id: UUID(), content: .web(Self.site))
-        let notePanel = ViewerPanel(id: UUID(), content: .note(noteID: UUID()))
         let transcriptPanel = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
+        let notePanel = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let changesPanel = WorktreePanel(id: UUID(), content: .changes)
         return WorkspaceTabSurface(
             id: UUID(), worktreeID: UUID(), label: "claude",
             primary: .terminal(terminalID: UUID()),
             side: SideRegion(
-                panels: [filePanel, webPanel, notePanel, transcriptPanel],
+                panels: [filePanel, webPanel, transcriptPanel],
                 activePanelID: webPanel.id,
-                recency: [webPanel.id, transcriptPanel.id, filePanel.id, notePanel.id],
+                recency: [webPanel.id, transcriptPanel.id, filePanel.id],
                 collapsed: true, width: 0.35),
+            worktreePanels: [notePanel, changesPanel],
             revision: 7)
     }
 
@@ -47,8 +51,11 @@ struct PanelSurfaceModelTests {
         let surface = WorkspaceTabSurface(
             id: UUID(), worktreeID: UUID(), primary: .terminal(terminalID: UUID()))
         #expect(surface.side == .empty)
+        #expect(surface.worktreePanels.isEmpty)
         #expect(surface.label == nil)
         #expect(surface.revision == 0)
+        #expect(!surface.hasPanels)
+        #expect(!surface.isSideVisible)
     }
 
     // MARK: - Kinds
@@ -58,6 +65,71 @@ struct PanelSurfaceModelTests {
         #expect(PanelContent.web(Self.site).kind == .web)
         #expect(PanelContent.note(noteID: UUID()).kind == .note)
         #expect(PanelContent.transcript(terminalID: UUID()).kind == .transcript)
+        #expect(PanelContent.changes.kind == .changes)
+    }
+
+    // MARK: - Worktree panels
+
+    @Test func worktreeContentIsNoteAndChangesOnly() {
+        let noteID = UUID()
+        #expect(WorktreePanelContent(.note(noteID: noteID)) == .note(noteID: noteID))
+        #expect(WorktreePanelContent(.changes) == .changes)
+        #expect(WorktreePanelContent(plan) == nil)
+        #expect(WorktreePanelContent(.web(Self.site)) == nil)
+        #expect(WorktreePanelContent(.transcript(terminalID: UUID())) == nil)
+
+        #expect(WorktreePanelContent.note(noteID: noteID).panelContent == .note(noteID: noteID))
+        #expect(WorktreePanelContent.changes.panelContent == .changes)
+    }
+
+    @Test func worktreePanelsLookUpByIDAndContent() {
+        let noteID = UUID()
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: noteID))
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        let own = ViewerPanel(id: UUID(), content: plan)
+        let surface = WorkspaceTabSurface(
+            id: UUID(), worktreeID: UUID(), primary: .terminal(terminalID: UUID()),
+            side: SideRegion(panels: [own], activePanelID: note.id, recency: [own.id]),
+            worktreePanels: [note, changes])
+
+        #expect(surface.worktreePanel(id: changes.id) == changes)
+        #expect(surface.worktreePanel(id: own.id) == nil, "an own panel is no worktree panel")
+        #expect(surface.worktreePanel(id: UUID()) == nil)
+        #expect(surface.worktreePanel(showing: .note(noteID: noteID)) == note)
+        #expect(surface.worktreePanel(showing: .changes) == changes)
+        #expect(surface.worktreePanel(showing: .note(noteID: UUID())) == nil)
+        #expect(surface.side.panel(id: note.id) == nil, "a worktree panel is no own panel")
+    }
+
+    /// The side region shows when the tab has a panel of either kind and is
+    /// not collapsed: worktree panels alone are enough.
+    @Test func sideIsVisibleWithEitherKindOfPanelAndNotCollapsed() {
+        let own = ViewerPanel(id: UUID(), content: plan)
+        let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        func surface(own panels: [ViewerPanel], worktree: [WorktreePanel], collapsed: Bool) -> WorkspaceTabSurface {
+            WorkspaceTabSurface(
+                id: UUID(), worktreeID: UUID(), primary: .terminal(terminalID: UUID()),
+                side: SideRegion(panels: panels, activePanelID: (panels.first?.id ?? worktree.first?.id),
+                                 recency: panels.map(\.id), collapsed: collapsed),
+                worktreePanels: worktree)
+        }
+
+        let worktreeOnly = surface(own: [], worktree: [note], collapsed: false)
+        #expect(worktreeOnly.hasPanels)
+        #expect(worktreeOnly.isSideVisible)
+        #expect(!worktreeOnly.side.isVisible, "the region alone sees no worktree panel")
+
+        let ownOnly = surface(own: [own], worktree: [], collapsed: false)
+        #expect(ownOnly.hasPanels)
+        #expect(ownOnly.isSideVisible)
+
+        let collapsed = surface(own: [own], worktree: [note], collapsed: true)
+        #expect(collapsed.hasPanels)
+        #expect(!collapsed.isSideVisible)
+
+        let empty = surface(own: [], worktree: [], collapsed: false)
+        #expect(!empty.hasPanels)
+        #expect(!empty.isSideVisible)
     }
 
     // MARK: - Viewer panel

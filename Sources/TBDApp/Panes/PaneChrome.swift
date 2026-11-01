@@ -149,7 +149,7 @@ enum PaneChromeControl: Equatable {
     /// that row is — the workspace tab bar for a primary, the side region's
     /// strip for a panel: the rendered/source toggle for a file that can
     /// render, and copy-address for a web page. A file that cannot render, a
-    /// note and a transcript have none.
+    /// note, a transcript and the Changes list have none.
     static func viewerControl(
         for kind: PanelKind, canRender: Bool, showingSource: Bool, copied: Bool
     ) -> PaneChromeControl? {
@@ -159,7 +159,7 @@ enum PaneChromeControl: Equatable {
             return .renderToggle(showingSource: showingSource)
         case .web:
             return .copyAddress(copied: copied)
-        case .note, .transcript:
+        case .note, .transcript, .changes:
             return nil
         }
     }
