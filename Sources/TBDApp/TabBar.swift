@@ -893,11 +893,12 @@ private struct TabBarItem: View {
     /// the rename field's minimum.
     @State private var labelWidth: CGFloat = 0
     /// The applications Open With offers for `fileMenuTarget`'s file, looked
-    /// up off the main actor when the item mounts or that file changes, and
+    /// up off the main actor when the item appears or that file changes, and
     /// again each time the pointer enters the item, so the right-click that
     /// almost always follows a hover finds the list fresh; never while the
-    /// menu is built (`RevealAndOpenWithMenuItems`).
-    @State private var fileMenuApps: [OpenWithApp] = []
+    /// menu is built (`RevealAndOpenWithMenuItems`). One lookup at a time,
+    /// and none outlives the item's file or the item (`OpenWithAppsLookup`).
+    @StateObject private var fileMenuApps = OpenWithAppsLookup()
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @AppStorage(AppState.showClaudeTabUsageTooltipKey)
     private var showClaudeTabUsageTooltip: Bool = true
@@ -1098,13 +1099,15 @@ private struct TabBarItem: View {
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
-        .task(id: fileMenuTarget?.path) {
-            await refreshFileMenuApps()
+        .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
+        .onChange(of: fileMenuTarget?.path) { _, path in
+            fileMenuApps.show(path: path)
         }
+        .onDisappear { fileMenuApps.stop() }
         .onHover { hovering in
             isHovering = hovering
             if hovering {
-                Task { await refreshFileMenuApps() }
+                fileMenuApps.pointerEntered()
             }
         }
         .simultaneousGesture(
@@ -1259,21 +1262,6 @@ private struct TabBarItem: View {
         }
     }
 
-    /// Looks up `fileMenuApps` for `fileMenuTarget`'s file off the main
-    /// actor (`lookUpOpenWithApps`) and writes it only when it changed, and
-    /// only while that file is still the target's. Most tabs have no file:
-    /// their list stays empty without a lookup, and an equal write would only
-    /// re-evaluate this item.
-    private func refreshFileMenuApps() async {
-        guard let path = fileMenuTarget?.path else {
-            if !fileMenuApps.isEmpty { fileMenuApps = [] }
-            return
-        }
-        let apps = await lookUpOpenWithApps(forPath: path)
-        guard path == fileMenuTarget?.path, apps != fileMenuApps else { return }
-        fileMenuApps = apps
-    }
-
     /// The terminal this tab renders, for deep-link anchoring — nil for
     /// non-terminal panes (webview, code viewer, note), whose links fall back
     /// to the worktree alone.
@@ -1285,7 +1273,7 @@ private struct TabBarItem: View {
     private var contextMenuContent: some View {
         if let fileTarget = fileMenuTarget {
             Button(fileTarget.copyLabel) { copyToPasteboard(fileTarget.path) }
-            RevealAndOpenWithMenuItems(path: fileTarget.path, apps: fileMenuApps)
+            RevealAndOpenWithMenuItems(path: fileTarget.path, apps: fileMenuApps.apps)
         }
 
         Button("Copy Link") {

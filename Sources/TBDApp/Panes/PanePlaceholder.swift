@@ -592,41 +592,34 @@ extension View {
 
 /// The pane-header file menu for `target`, or no menu for none. The
 /// applications Open With offers are looked up off the main actor
-/// (`lookUpOpenWithApps`) when the view mounts or the file changes, and again
-/// each time the pointer enters it, so the right-click that almost always
-/// follows a hover finds a file created since mount, or a handler installed
+/// (`OpenWithAppsLookup`) when the view appears or the file changes, and
+/// again each time the pointer enters it, so the right-click that almost
+/// always follows a hover finds a file created since, or a handler installed
 /// since, in the list. Never while a body is evaluated: the menu reads them
-/// back from `apps`.
+/// back from `lookup.apps`.
 private struct HeaderFileContextMenu: ViewModifier {
     let target: HeaderMenuTarget?
-    @State private var apps: [OpenWithApp] = []
+    @StateObject private var lookup = OpenWithAppsLookup()
 
     func body(content: Content) -> some View {
         if let target {
             content
                 .contextMenu {
                     Button(target.copyLabel) { copyToPasteboard(target.path) }
-                    RevealAndOpenWithMenuItems(path: target.path, apps: apps)
+                    RevealAndOpenWithMenuItems(path: target.path, apps: lookup.apps)
                 }
-                .task(id: target.path) {
-                    await refreshApps(forPath: target.path)
+                .onAppear { lookup.show(path: target.path) }
+                .onChange(of: target.path) { _, path in
+                    lookup.show(path: path)
                 }
+                .onDisappear { lookup.stop() }
                 .onHover { hovering in
                     guard hovering else { return }
-                    Task { await refreshApps(forPath: target.path) }
+                    lookup.pointerEntered()
                 }
         } else {
             content
         }
-    }
-
-    /// Writes `apps` only when the lookup changed them, and only while
-    /// `path` is still the target's file: an equal write would re-evaluate
-    /// the view, and a lookup for a file the view has left behind is stale.
-    private func refreshApps(forPath path: String) async {
-        let found = await lookUpOpenWithApps(forPath: path)
-        guard path == target?.path, found != apps else { return }
-        apps = found
     }
 }
 
