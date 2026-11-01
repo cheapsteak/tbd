@@ -679,7 +679,35 @@ def stop_heartbeat(proc, err):
 # The follower: main thread.
 
 
+def start_whole_sample(args, st, paths, err, ev):
+    """--mode whole: ONE long `sample` of the helper, run through a detached
+    shell wrapper (own session) so it outlives this sampler and finishes
+    writing its report after the helper exits. The wrapper records sample's
+    exit status in <name>-whole-helper.exit."""
+    base = os.path.join(args.out_dir, "%s-whole-helper" % args.name)
+    pid = st.helper_pid
+    started = utc()
+    rec = {"mode": "whole", "helper_pid": pid, "sample_start_utc": started,
+           "sample_file": base + ".txt", "status_file": base + ".status",
+           "exit_file": base + ".exit", "sample_seconds": 900,
+           "sample_exit_status": None, "sample_exit_status_note": "see exit_file"}
+    try:
+        with open(base + ".status", "wb") as status:
+            subprocess.Popen(
+                ["sh", "-c", 'sample "$1" 900 10 -mayDie -file "$2"; echo $? > "$3"',
+                 "sh", str(pid), base + ".txt", base + ".exit"],
+                stdin=subprocess.DEVNULL, stdout=status, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        ev("whole-pass sample started on helper pid %d" % pid)
+    except Exception:
+        rec["launch_error"] = True
+        err.exc("launch whole sample")
+    with open(paths["captures"], "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
 def follow(args, st, paths, err, ev):
+    whole_started = False
     fh, ino, buf = None, None, b""
     events = []  # (mono, wall) arrival of each progress line
     cap = None
@@ -744,6 +772,14 @@ def follow(args, st, paths, err, ev):
             cap = None
             st.capturing = False
 
+        if (args.mode == "whole" and not whole_started and st.run_started
+                and st.helper_pid is not None and alive(st.helper_pid)):
+            whole_started = True
+            try:
+                start_whole_sample(args, st, paths, err, ev)
+            except Exception:
+                err.exc("whole sample")
+
         reason = None
         if st.stop:
             reason = st.stop_reason or "signal"
@@ -778,7 +814,8 @@ def follow(args, st, paths, err, ev):
                    % cap["index"])
                 st.stop_reason = reason
                 return
-        elif (cap is None and st.run_started and st.captures_started < args.max_captures
+        elif (args.mode == "stall" and cap is None and st.run_started
+              and st.captures_started < args.max_captures
               and st.helper_pid is not None and st.last_progress_mono is not None):
             quiet = now - st.last_progress_mono
             spaced = last_capture_end is None or (
@@ -858,6 +895,7 @@ def main():
     p.add_argument("--sample-seconds", type=int, default=2)
     p.add_argument("--max-captures", type=int, default=12)
     p.add_argument("--max-runtime", type=float, default=1800.0)
+    p.add_argument("--mode", choices=("stall", "whole"), default="stall")
     p.add_argument("--heartbeat-child", action="store_true")
     p.add_argument("--parent-pid", type=int)
     args = p.parse_args()
