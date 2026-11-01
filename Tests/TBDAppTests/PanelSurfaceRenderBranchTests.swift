@@ -567,6 +567,29 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    /// On the daemon path the bar spans only the primary's column, which a
+    /// wide side region leaves narrow, so its tabs can overflow it.
+    @Test("the tabs keep their full width while the + button fits after them, and scroll past that")
+    func tabsThenAddWidths() {
+        let ideals: [CGFloat] = [300, 32]
+
+        // Room to spare, or exactly enough: the tabs at their full width, the
+        // + button right after them.
+        let fits: [CGFloat] = [300, 32]
+        #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: 500) == fits)
+        #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: 332) == fits)
+        // Too narrow: the tabs take what the + button leaves and scroll, and
+        // the button keeps its width.
+        let overflows: [CGFloat] = [168, 32]
+        #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: 200) == overflows)
+        // Narrower than the + button itself: no width for the tabs, never a
+        // negative one.
+        let squeezed: [CGFloat] = [0, 32]
+        #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: 20) == squeezed)
+        // No width offered: each at its ideal width.
+        #expect(TabsThenAddLayout.widths(idealWidths: ideals, available: nil) == fits)
+    }
+
     @Test("the daemon path measures the main area below its tab row and the divider")
     func mainAreaExcludesTheTabRow() {
         let rowAndDivider: CGFloat = TabRowMetrics.height + 1

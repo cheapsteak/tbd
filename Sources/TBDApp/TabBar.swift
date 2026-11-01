@@ -121,8 +121,11 @@ struct TabBarTrailingItems {
 /// Reads, left to right: the tabs, the + button, then a trailing group of the
 /// selected tab's control, Session History and the expand button, the first
 /// and last only as `trailing` asks. The trailing group keeps its full width
-/// when the tabs overflow a narrow column: the tabs and + button clip at its
-/// edge instead of pushing it out of the row.
+/// at the row's trailing edge however many tabs there are. While the tabs fit
+/// in the width it leaves, the + button sits right after the last one; once
+/// they overflow — a narrow primary column on the daemon path, beside a wide
+/// side region — they scroll horizontally, and the + button stays in view
+/// just after them (`TabsThenAddLayout`).
 struct TabBar: View {
     let tabs: [TBDShared.Tab]
     let worktreeID: UUID
@@ -146,18 +149,24 @@ struct TabBar: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                    TabBarItem(
-                        tab: tab,
-                        index: index,
-                        worktreeID: worktreeID,
-                        isSelected: index == activeTabIndex,
-                        terminal: terminalForTab(tab.id),
-                        onSelect: { activeTabIndex = index },
-                        onClose: { onCloseTab(index) }
-                    )
+            TabsThenAddLayout {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                            TabBarItem(
+                                tab: tab,
+                                index: index,
+                                worktreeID: worktreeID,
+                                isSelected: index == activeTabIndex,
+                                terminal: terminalForTab(tab.id),
+                                onSelect: { activeTabIndex = index },
+                                onClose: { onCloseTab(index) }
+                            )
+                        }
+                    }
                 }
+                // Tabs that fit stay put under a trackpad swipe.
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 
                 AddTabButton(
                     profiles: appState.modelProfiles,
@@ -168,12 +177,12 @@ struct TabBar: View {
                     onAddCodex: onAddCodex,
                     onAddNote: onAddNote
                 )
-                Spacer()
             }
-            // Exactly the width the trailing group leaves, however wide the
-            // tabs are: `minWidth: 0` stops the frame from reporting an
-            // overflowing child's width, which would push the trailing group
-            // past the row's end. The overflow clips here instead.
+            // Exactly the width the trailing group leaves, the tabs and the +
+            // button at its leading edge: `minWidth: 0` stops the frame from
+            // reporting the tabs' full width, which would push the trailing
+            // group past the row's end. Clipped only for a column too narrow
+            // for the + button itself.
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .clipped()
 
@@ -231,6 +240,54 @@ struct TabBar: View {
         .buttonStyle(.borderless)
         .keyboardShortcut("\\", modifiers: .command)
         .help("Show the side panel (⌘\\)")
+    }
+}
+
+// MARK: - TabsThenAddLayout
+
+/// Lays out the workspace tab bar's tabs, a horizontal scroll view, and the
+/// + button after them. The tabs take their ideal width — a horizontal scroll
+/// view's is its content's — while the + button still fits after them, so it
+/// sits right after the last tab. Past that they take the width the button
+/// leaves and scroll, and the button stays in view at the scroll area's end.
+///
+/// A layout rather than a `ViewThatFits` choosing between a plain row and a
+/// scrolling one. That would hold two sets of tab items, each with its own
+/// rename field, hover and drop state, and both picking up a pending rename,
+/// and would swap one set for the other whenever the column crossed the width
+/// the tabs need. Here a resize only moves the scroll area's edge: no tab
+/// item is rebuilt.
+struct TabsThenAddLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideals = subviews.map { $0.sizeThatFits(.unspecified) }
+        let widths = Self.widths(idealWidths: ideals.map(\.width), available: proposal.width)
+        let height = proposal.height ?? ideals.map(\.height).max() ?? 0
+        return CGSize(width: widths.reduce(0, +), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let widths = Self.widths(
+            idealWidths: subviews.map { $0.sizeThatFits(.unspecified).width },
+            available: bounds.width)
+        var x = bounds.minX
+        for (subview, width) in zip(subviews, widths) {
+            subview.place(
+                at: CGPoint(x: x, y: bounds.midY),
+                anchor: .leading,
+                proposal: ProposedViewSize(width: width, height: bounds.height))
+            x += width
+        }
+    }
+
+    /// The width each subview gets, in order: every one after the first its
+    /// ideal width, and the first its ideal width capped to what the others
+    /// leave of `available`, never below zero. With no width offered, each
+    /// takes its ideal width.
+    static func widths(idealWidths: [CGFloat], available: CGFloat?) -> [CGFloat] {
+        guard let first = idealWidths.first, let available else { return idealWidths }
+        let rest = idealWidths.dropFirst()
+        let firstWidth = max(0, min(first, available - rest.reduce(0, +)))
+        return [firstWidth] + rest
     }
 }
 
