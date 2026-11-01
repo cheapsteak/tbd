@@ -930,13 +930,15 @@ public struct PanelSurfaceStore: Sendable {
     ///
     /// Every surface under `toWorktreeID` then carries the merged list: when
     /// it differs from `toWorktreeID`'s own, its readable surfaces are
-    /// rewritten with it (`rewriteSurfaces`). Each readable moved surface
-    /// adopts the merged list (`PanelSurfaceReducer.adopting`) and is stored
-    /// whole, as `rewriteSurfaces` stores one, so a moved tab whose panel in
-    /// front was deleted is stored fronting its most recent own panel, else
-    /// the merged list's first panel. A moved row that cannot be read moves
-    /// with its columns re-pointed and its `layout` and histories as they
-    /// were.
+    /// rewritten with it (`rewriteSurfaces`). A moved tab that had the
+    /// deleted Changes panel in front is first pointed at `toWorktreeID`'s
+    /// Changes panel, which shows the same list. Each readable moved surface
+    /// then adopts the merged list (`PanelSurfaceReducer.adopting`) and is
+    /// stored whole, as `rewriteSurfaces` stores one, so a moved tab whose
+    /// note panel in front was deleted is stored fronting its most recent own
+    /// panel, else the merged list's first panel. A moved row that cannot be
+    /// read moves with its columns re-pointed and its `layout` and histories
+    /// as they were.
     ///
     /// Each moved row is marked `awaitingListing`. The app learns of the
     /// main worktree before this move, so a `panel.syncTabs` it built from
@@ -958,13 +960,16 @@ public struct PanelSurfaceStore: Sendable {
         let ownPanels = try Self.storedWorktreePanels(worktreeKey: toWorktreeID.uuidString, db: db)
         var merged = ownPanels
         var droppedKeys: [String] = []
+        // The deleted Changes panel and the kept one that takes its place.
+        var changesReplacement: (dropped: PanelID, kept: PanelID)?
         for panel in try Self.storedWorktreePanels(worktreeKey: fromWorktreeID.uuidString, db: db) {
             switch panel.content {
             case .note:
                 droppedKeys.append(panel.id.uuidString)
             case .changes:
-                if merged.contains(where: { $0.content == .changes }) {
+                if let kept = merged.first(where: { $0.content == .changes }) {
                     droppedKeys.append(panel.id.uuidString)
+                    changesReplacement = (panel.id, kept.id)
                 } else {
                     merged.append(panel)
                 }
@@ -991,10 +996,14 @@ public struct PanelSurfaceStore: Sendable {
         var moved: [WorkspaceTabSurface] = []
         for (index, record) in rows.enumerated() {
             let position = firstFreePosition + index
-            // Read with the merged list, which repairs a front naming a
-            // deleted panel, then stored whole, so the row names only panels
-            // that exist.
-            guard let readable = record.toModel(
+            // A front naming the deleted Changes panel moves to the kept one
+            // first, so the tab keeps Changes in front. Then read with the
+            // merged list, which repairs a front naming a deleted note panel,
+            // and stored whole, so the row names only panels that exist.
+            let toRead = try changesReplacement.map {
+                try Self.movingFront(of: record, from: $0.dropped, to: $0.kept)
+            } ?? record
+            guard let readable = toRead.toModel(
                 histories: historiesByTab[record.id] ?? [:], worktreePanels: merged) else {
                 var row = record
                 row.worktreeID = toWorktreeID.uuidString
@@ -1020,5 +1029,19 @@ public struct PanelSurfaceStore: Sendable {
             sql: "UPDATE panel_operation_receipt SET worktreeID = ? WHERE worktreeID = ?",
             arguments: [toWorktreeID.uuidString, fromWorktreeID.uuidString])
         return rewritten + moved
+    }
+
+    /// `record` with the panel in front of its stored side region changed
+    /// from `oldFront` to `newFront`. Unchanged when another panel, or none,
+    /// is in front, or when its `layout` does not decode.
+    private static func movingFront(
+        of record: WorkspaceTabSurfaceRecord, from oldFront: PanelID, to newFront: PanelID
+    ) throws -> WorkspaceTabSurfaceRecord {
+        guard var stored = decodeJSON(StoredSideRegion.self, from: record.layout),
+              stored.activePanelID == oldFront else { return record }
+        stored.activePanelID = newFront
+        var moved = record
+        moved.layout = try encodeJSONString(stored)
+        return moved
     }
 }

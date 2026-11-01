@@ -496,50 +496,74 @@ struct WorktreePanelStoreTests {
     }
 
     /// When the main worktree already has a Changes panel, the scratch
-    /// worktree's is deleted, and a moved tab with no own panel that had it
-    /// in front is stored fronting the merged list's first panel, here the
-    /// main worktree's Changes panel. The scratch note panels are deleted all
-    /// the same, and the main worktree's list is unchanged, so its own tab is
-    /// not rewritten and the promote returns only the moved tab.
+    /// worktree's is deleted, and a moved tab that had it in front is stored
+    /// fronting the main worktree's Changes panel — not its most recent own
+    /// panel, and not the merged list's first panel, here the main
+    /// worktree's note panel. The scratch note panels are deleted all the
+    /// same, and the main worktree's list is unchanged, so its own tab is not
+    /// rewritten and the promote returns only the moved tabs.
     @Test func promoteDropsTheScratchChangesPanelWhenMainHasOne() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (repoID, scratch, mainID) = try await makePromotePair(db)
         let resident = try await seedTab(db, worktreeID: mainID, position: 0)
+        let mainNote = try await db.notes.create(worktreeID: mainID)
+        try await db.openWorktreePanelForTests(worktreeID: mainID, content: .note(noteID: mainNote.id))
         try await db.openWorktreePanelForTests(worktreeID: mainID, content: .changes)
-        let mainChanges = try #require(try await db.panelSurface.worktreePanels(worktreeID: mainID).first)
+        let mainPanels = try await db.panelSurface.worktreePanels(worktreeID: mainID)
+        let mainContent: [WorktreePanelContent] = [.note(noteID: mainNote.id), .changes]
+        try #require(mainPanels.map(\.content) == mainContent,
+                     "precondition: the merged list's first panel is not Changes")
+        let mainChanges = mainPanels[1]
         let residentBefore = try #require(try await db.panelSurface.surface(tabID: resident.id))
 
         let note = try await db.notes.create(worktreeID: scratch.id)
-        let movedTab = try await seedEmptyTab(db, worktreeID: scratch.id, position: 0)
+        let ownPanelID = UUID()
+        let withOwnPanel = try await seedTab(db, worktreeID: scratch.id, panelID: ownPanelID, position: 0)
+        let withoutPanels = try await seedEmptyTab(db, worktreeID: scratch.id, position: 1)
         try await db.openWorktreePanelForTests(worktreeID: scratch.id, content: .note(noteID: note.id))
         try await db.openWorktreePanelForTests(worktreeID: scratch.id, content: .changes)
         let scratchChanges = try #require(
             try await db.panelSurface.worktreePanels(worktreeID: scratch.id).last)
-        _ = try await db.panelSurface.applyReducing(
-            operationID: UUID(), tabID: movedTab.id, worktreeID: scratch.id, now: Date()
-        ) { current in
-            try PanelSurfaceReducer.apply(.select(panelID: scratchChanges.id), to: current)
+        for tab in [withOwnPanel, withoutPanels] {
+            _ = try await db.panelSurface.applyReducing(
+                operationID: UUID(), tabID: tab.id, worktreeID: scratch.id, now: Date()
+            ) { current in
+                try PanelSurfaceReducer.apply(.select(panelID: scratchChanges.id), to: current)
+            }
         }
+        // Precondition: both scratch tabs show the scratch Changes panel.
+        let scratchSurfaces = try await db.panelSurface.surfaces(worktreeID: scratch.id)
+        let frontsBefore: [PanelID?] = [scratchChanges.id, scratchChanges.id]
+        try #require(scratchSurfaces.map(\.side.activePanelID) == frontsBefore)
 
         let returned = try await db.worktrees.promoteScratchMigration(
             scratchID: scratch.id, mainWorktreeID: mainID, repoID: repoID,
             tmuxServer: scratch.tmuxServer)
 
-        #expect(try await db.panelSurface.worktreePanels(worktreeID: mainID) == [mainChanges])
+        #expect(try await db.panelSurface.worktreePanels(worktreeID: mainID) == mainPanels)
         #expect(try await panelRowCount(db, worktreeID: scratch.id) == 0)
         #expect(try await panelRowExists(db, panelID: scratchChanges.id) == false,
                 "the scratch Changes panel is dropped and its row deleted")
         #expect(try await notePanelRowCount(db, noteID: note.id) == 0, "no note panel survives anywhere")
 
         let surfaces = try await db.panelSurface.surfaces(worktreeID: mainID)
-        try #require(surfaces.map(\.id) == [resident.id, movedTab.id])
+        try #require(surfaces.map(\.id) == [resident.id, withOwnPanel.id, withoutPanels.id])
         #expect(surfaces[0] == residentBefore, "the main worktree's list did not change")
-        #expect(surfaces[1].worktreePanels == [mainChanges])
-        #expect(surfaces[1].side.activePanelID == mainChanges.id,
+        let movedFronts = surfaces.dropFirst().map(\.side.activePanelID)
+        let expectedFronts: [PanelID?] = [mainChanges.id, mainChanges.id]
+        #expect(movedFronts == expectedFronts,
                 "a moved tab fronting the dropped Changes panel fronts the main worktree's")
-        #expect(returned == [surfaces[1]])
-        #expect(try await storedLayout(db, tabID: movedTab.id).activePanelID == mainChanges.id,
-                "the stored row, not only the read, names the kept Changes panel")
+        for moved in surfaces.dropFirst() {
+            #expect(moved.worktreePanels == mainPanels)
+        }
+        let keptOwnPanels: [PanelID] = surfaces[1].side.panels.map(\.id)
+        let expectedOwnPanels: [PanelID] = [ownPanelID]
+        #expect(keptOwnPanels == expectedOwnPanels, "the moved tab keeps its own panel")
+        #expect(returned == Array(surfaces.dropFirst()))
+        for tab in [withOwnPanel, withoutPanels] {
+            #expect(try await storedLayout(db, tabID: tab.id).activePanelID == mainChanges.id,
+                    "the stored row, not only the read, names the kept Changes panel")
+        }
     }
 
     /// A moved row that cannot be read still moves: re-pointed to the main
