@@ -1456,6 +1456,13 @@ struct MainToolbarControllerTests {
         #expect(withoutURL.toolTip == "Dev servers")
     }
 
+    /// A change of the window's appearance between light and dark re-bakes
+    /// the Servers icon with nothing else asking for an apply: the watch
+    /// queues the apply that compares first, and the color scheme is among
+    /// what it compares. Both ways are checked. Each icon the change shows is
+    /// the one an apply at the new scheme shows, as a direct apply right
+    /// after it sets no other: the toolbar sets an image only when the key it
+    /// is baked from, which holds the scheme, differs.
     @Test func serversIconReBakesOnAppearance() async throws {
         let dark = try #require(NSAppearance(named: .darkAqua))
         let aqua = try #require(NSAppearance(named: .aqua))
@@ -1466,25 +1473,95 @@ struct MainToolbarControllerTests {
         defer { fixture.tearDown() }
         fixture.window.appearance = aqua
         try await fixture.ready()
+        let controller = fixture.controller
         fixture.showServers(url: "http://localhost:3000")
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let servers = try #require(fixture.controller.item(MainToolbarItemID.servers))
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let servers = try #require(controller.item(MainToolbarItemID.servers))
         let light = try #require(servers.image)
         #expect(light.accessibilityDescription == "Dev servers, 1 running")
         #expect(light.isTemplate == false)
 
-        // The appearance change alone schedules the re-bake, through KVO.
+        // The appearance change alone applies the re-bake, through KVO.
+        let appliesBeforeDark = controller.applyCount
         fixture.window.appearance = dark
         let lightID = ObjectIdentifier(light)
-        let followed = try await waitForMainActorCondition("the Servers icon to follow the appearance") {
+        let followedDark = try await waitForMainActorCondition("the Servers icon to follow the dark appearance") {
             servers.image.map { ObjectIdentifier($0) } != lightID
         }
-        #expect(followed)
+        try #require(followedDark)
+        #expect(controller.applyCount > appliesBeforeDark)
+        #expect(controller.currentColorScheme == .dark)
+        let darkIcon = try #require(servers.image)
+        #expect(darkIcon.accessibilityDescription == "Dev servers, 1 running")
+        #expect(darkIcon.isTemplate == false)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(servers.image === darkIcon)
 
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let rebaked = try #require(servers.image)
-        #expect(rebaked !== light)
-        #expect(rebaked.accessibilityDescription == "Dev servers, 1 running")
+        let appliesBeforeLight = controller.applyCount
+        fixture.window.appearance = aqua
+        let darkID = ObjectIdentifier(darkIcon)
+        let followedLight = try await waitForMainActorCondition("the Servers icon to follow the light appearance") {
+            servers.image.map { ObjectIdentifier($0) } != darkID
+        }
+        try #require(followedLight)
+        #expect(controller.applyCount > appliesBeforeLight)
+        #expect(controller.currentColorScheme == .light)
+        let lightIcon = try #require(servers.image)
+        #expect(lightIcon.accessibilityDescription == "Dev servers, 1 running")
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        #expect(servers.image === lightIcon)
+    }
+
+    /// A report that the window's appearance changed, leaving its color
+    /// scheme as it was, applies nothing: the watch queues the apply that
+    /// compares first, which finds the scheme the Servers icon is baked for
+    /// unchanged. The report is the KVO notification the watch observes,
+    /// posted by hand with the appearance untouched, so it certainly reaches
+    /// the watch and certainly keeps the scheme; a set of the appearance the
+    /// window already has may post nothing at all.
+    ///
+    /// Whether the watch asked for an apply in full is read from the queued
+    /// apply's flag, in the same synchronous segment as the post and the
+    /// check that found none queued before it, so nothing else can reach the
+    /// flag in between. `applyCount` read behind the apply could not be
+    /// trusted the same way: a `scheduleApply()` from another source in the
+    /// turns before the queued apply runs joins it, makes it run in full and
+    /// moves `applyCount`, though the watch asked for no such apply. What is
+    /// read behind it holds whatever joins: an apply in full does not move
+    /// `comparedApplyCount`, and at an unchanged scheme it keeps the Servers
+    /// icon, as the compared apply does.
+    @Test func anAppearanceReportThatKeepsTheColorSchemeDoesNotReapply() async throws {
+        let aqua = try #require(NSAppearance(named: .aqua))
+        let fixture = ToolbarFixture(label: "anAppearanceReportThatKeepsTheColorSchemeDoesNotReapply")
+        defer { fixture.tearDown() }
+        fixture.window.appearance = aqua
+        try await fixture.ready()
+        let controller = fixture.controller
+        let window = fixture.window
+
+        fixture.showServers(url: "http://localhost:3000")
+        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
+            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
+        }
+        try #require(shown)
+        let servers = try #require(controller.item(MainToolbarItemID.servers))
+        let icon = try #require(servers.image)
+
+        let comparedBefore = try await fixture.withNoApplyQueued("before the appearance report") { () throws -> Int in
+            let compared = controller.comparedApplyCount
+            try #require(controller.currentColorScheme == .light)
+            window.willChangeValue(forKey: "effectiveAppearance")
+            window.didChangeValue(forKey: "effectiveAppearance")
+            #expect(controller.currentColorScheme == .light)
+            // KVO reports synchronously, so the watch has queued its apply
+            // by now, and asked for one that compares first.
+            #expect(controller.applyScheduled)
+            #expect(controller.queuedApplyRunsInFull == false)
+            return compared
+        }
+        let after = try await fixture.countsBehindTheQueuedApply()
+        #expect(after.comparedApplies == comparedBefore)
+        #expect(servers.image === icon)
     }
 
     // MARK: - Re-install
@@ -1768,13 +1845,15 @@ struct MainToolbarControllerTests {
     /// never advanced, so it runs throughout; the fixture's teardown cancels
     /// it.
     ///
-    /// The count asserted is `observedOnlyApplyCount`, not `applyCount`: only
-    /// an observed change moves it. Anything else that asks for an apply,
-    /// such as the window's appearance watch, can do so at any turn of a
-    /// loaded pass, after the check that found none queued: its apply either
-    /// joins the one the change queued, which then runs in full, or runs
-    /// after it. Either adds to `applyCount` and neither moves the count
-    /// asserted.
+    /// The count asserted is `comparedApplyCount`, not `applyCount`: only an
+    /// apply that compared first moves it, as the change's apply does.
+    /// Anything that asks through `scheduleApply()`, such as a second install
+    /// from the split's `viewDidAppear`, can do so at any turn of a loaded
+    /// pass, after the check that found none queued: its apply either joins
+    /// the one the change queued, which then runs in full, or runs after it.
+    /// Either adds to `applyCount` and neither moves the count asserted. The
+    /// appearance watch compares first too, so a report from it that keeps
+    /// the color scheme moves neither.
     @Test func anUnchangedObservedChangeDuringTheCooldownDoesNotReapply() async throws {
         let fixture = ToolbarFixture(
             label: "anUnchangedObservedChangeDuringTheCooldownDoesNotReapply",
@@ -1797,22 +1876,21 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("once the cooldown started") {
-            () throws -> (observedOnlyApplies: Int, changes: Int) in
-            let counts = (
-                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
+            () throws -> (comparedApplies: Int, changes: Int) in
+            let counts = (comparedApplies: controller.comparedApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let observedOnlyAppliesBefore = before.observedOnlyApplies
+        let comparedAppliesBefore = before.comparedApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
+        #expect(controller.comparedApplyCount == comparedAppliesBefore)
         #expect(window.toolbar === kept)
         #expect(controller.isInReinstallCooldown)
 
@@ -2023,8 +2101,8 @@ struct MainToolbarControllerTests {
     /// apply. That apply finds the snapshot, the collapse and the appearance
     /// as the toolbar shows them and does no layout or content work. It still
     /// re-arms the tracking: a change to the selected worktree's list is
-    /// applied after it. The count asserted is the one only an observed
-    /// change moves, for the reason
+    /// applied after it. The count asserted is the one only an apply that
+    /// compared first moves, for the reason
     /// `anUnchangedObservedChangeDuringTheCooldownDoesNotReapply` gives.
     @Test func anotherWorktreesServersDoNotReapply() async throws {
         let fixture = ToolbarFixture(label: "anotherWorktreesServersDoNotReapply")
@@ -2040,22 +2118,21 @@ struct MainToolbarControllerTests {
 
         let other = fixture.worktrees[1].id
         let before = try await fixture.withNoApplyQueued("before another worktree's servers change") {
-            () throws -> (observedOnlyApplies: Int, changes: Int) in
-            let counts = (
-                observedOnlyApplies: controller.observedOnlyApplyCount, changes: controller.observedChangeCount)
+            () throws -> (comparedApplies: Int, changes: Int) in
+            let counts = (comparedApplies: controller.comparedApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
             fixture.state.devServerLists[other] = fixture.list(
                 [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
             return counts
         }
-        let observedOnlyAppliesBefore = before.observedOnlyApplies
+        let comparedAppliesBefore = before.comparedApplies
         let changesBefore = before.changes
         let ran = try await waitForMainActorCondition("the change to be observed and its apply to run") {
             controller.observedChangeCount > changesBefore && !controller.applyScheduled
         }
         try #require(ran)
         #expect(controller.observedChangeCount == changesBefore + 1)
-        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
+        #expect(controller.comparedApplyCount == comparedAppliesBefore)
 
         fixture.showServers(url: nil)
         let applied = try await waitForMainActorCondition("the apply for the selected worktree's change") {
@@ -2064,20 +2141,20 @@ struct MainToolbarControllerTests {
         #expect(applied)
     }
 
-    /// An apply asked for by anything but an observed change runs in full
-    /// with nothing changed: a repeated install, as a second `viewDidAppear`
-    /// makes, and `scheduleApply()`, through which the replacement and
-    /// appearance watches, the cooldown's end and the filter menu's close
-    /// all ask. Each count is read in the turn behind the request's apply,
-    /// so an apply something else asks for after it is not counted against
-    /// the request. Neither request's apply is one only observed changes
-    /// asked for, so `observedOnlyApplyCount` stays where it was.
+    /// An apply asked for through `scheduleApply()` runs in full with nothing
+    /// changed: a repeated install, as a second `viewDidAppear` makes, and
+    /// `scheduleApply()` itself, through which the replacement watch, a
+    /// collapse report, the cooldown's end and the filter menu's close all
+    /// ask. Each count is read in the turn behind the request's apply, so an
+    /// apply something else asks for after it is not counted against the
+    /// request. Neither request's apply compares first, so
+    /// `comparedApplyCount` stays where it was.
     @Test func requestedAppliesRunWithNothingChanged() async throws {
         let fixture = ToolbarFixture(label: "requestedAppliesRunWithNothingChanged")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
-        let observedOnlyAppliesBefore = controller.observedOnlyApplyCount
+        let comparedAppliesBefore = controller.comparedApplyCount
 
         let beforeInstall = controller.applyCount
         controller.install(on: fixture.window)
@@ -2090,7 +2167,7 @@ struct MainToolbarControllerTests {
         try #require(controller.applyScheduled)
         let afterRequest = try await fixture.countsBehindTheQueuedApply()
         #expect(afterRequest.applies == beforeRequest + 1)
-        #expect(controller.observedOnlyApplyCount == observedOnlyAppliesBefore)
+        #expect(controller.comparedApplyCount == comparedAppliesBefore)
     }
 
     // MARK: - Content
@@ -2436,9 +2513,10 @@ private final class ToolbarFixture {
     /// A wait for none queued is not enough on its own. Its probe runs in an
     /// earlier main-actor turn than the test body, which has to win the main
     /// actor back once the wait returns, and anything that runs in that gap
-    /// can queue an apply: `scheduleApply()` from the window's
-    /// `effectiveAppearance` watch, a collapse report or a cooldown's end, or
-    /// an observed `AppState` change. That apply is a
+    /// can queue an apply: `scheduleApply()` from an install, a collapse
+    /// report or a cooldown's end, or the comparing apply the window's
+    /// `effectiveAppearance` watch or an observed `AppState` change queues.
+    /// That apply is a
     /// `DispatchQueue.main.async` block queued behind the body, so a body that
     /// then asserts its own change queued nothing would see it. So the check
     /// is made here first, with nothing that can suspend between it and
@@ -2485,7 +2563,8 @@ private final class ToolbarFixture {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     continuation.resume(returning: ApplyCounts(
-                        applies: controller.applyCount, observedChanges: controller.observedChangeCount))
+                        applies: controller.applyCount, comparedApplies: controller.comparedApplyCount,
+                        observedChanges: controller.observedChangeCount))
                 }
             }
         }
@@ -2800,10 +2879,11 @@ private final class ToolbarFixture {
     }
 }
 
-/// The controller's apply and observed-change counts, as
+/// The controller's apply, compared-apply and observed-change counts, as
 /// `countsBehindTheQueuedApply()` reads them.
 private struct ApplyCounts: Sendable {
     let applies: Int
+    let comparedApplies: Int
     let observedChanges: Int
 }
 
@@ -2811,9 +2891,9 @@ private struct ApplyCounts: Sendable {
 /// after each wait for none, something had queued one again before the test
 /// ran. Each gap names the observed-change and apply counts at the quiet
 /// probe and at the test's turn; an observed-change count that rose names an
-/// observed `AppState` change as the source, and one that did not names
-/// `scheduleApply()` — the appearance watch, a collapse report or a
-/// cooldown's end.
+/// observed `AppState` change as the source, and one that did not names the
+/// appearance watch or `scheduleApply()` — an install, a collapse report or
+/// a cooldown's end.
 private struct ApplyQueuedBeforeTheTestsTurn: Error, CustomStringConvertible {
     let what: String
     let gaps: [String]
@@ -2823,8 +2903,8 @@ private struct ApplyQueuedBeforeTheTestsTurn: Error, CustomStringConvertible {
         no turn with no apply queued \(what): after each of \(gaps.count) wait(s) for \
         none, an apply was queued again before the test's turn — \
         \(gaps.joined(separator: "; ")). A rise in observed changes names an observed \
-        AppState change as the source; none names scheduleApply() (appearance, \
-        collapse, cooldown end).
+        AppState change as the source; none names the appearance watch or \
+        scheduleApply() (install, collapse, cooldown end).
         """
     }
 }
