@@ -5,8 +5,9 @@ import Testing
 import TBDShared
 import TestSupport
 
-// Tier 1: in-process state only. The bulk run's archive call is a fake, so no
-// test reaches a daemon, and none shows a modal.
+// Tier 1: in-process state only. Every archive call goes to a fake, through
+// the bulk run's closure or `AppState`'s seams (`ArchiveRecorder`), so no test
+// reaches a daemon, plays the refusal beep, or shows a modal.
 
 // MARK: - Fixtures
 
@@ -26,22 +27,66 @@ private func acmeProvider() -> RemoteProviderStatus {
                          remediationCommand: nil, lastSuccessfulSnapshotAt: Date())
 }
 
-/// The targets an Archive Selection item carries, or nil for any other item.
-private func archiveSelectionTargets(_ item: RowActionMenu.Item) -> [UUID]? {
-    guard case let .action(action) = item, case let .archiveSelection(targetIDs) = action.kind else { return nil }
-    return targetIDs
+/// Whether `items` hold an Archive Selection item.
+private func hasArchiveSelection(_ items: [RowActionMenu.Item]) -> Bool {
+    items.contains { item in
+        guard case let .action(action) = item else { return false }
+        return action.kind == .archiveSelection
+    }
 }
 
-/// The one Archive Selection item a menu in selection mode is.
-private func archiveSelectionMenu(_ targetIDs: [UUID]) -> [RowActionMenu.Item] {
-    let enabled = !targetIDs.isEmpty
-    return [.action(.init(
-        kind: .archiveSelection(targetIDs: targetIDs),
+/// The one Archive Selection item a menu in selection mode is: enabled when
+/// a selected row is archivable, and disabled with its help otherwise.
+private func archiveSelectionMenu(enabled: Bool) -> [RowActionMenu.Item] {
+    [.action(.init(
+        kind: .archiveSelection,
         title: RowActionMenu.archiveSelectionLabel,
         role: .destructive,
         isEnabled: enabled,
         disabledHelp: enabled ? nil : RowActionMenu.archiveSelectionNothingArchivableHelp
     ))]
+}
+
+/// Records every daemon call an archive makes through `AppState`'s seams, and
+/// every refusal beep, so no test reaches a daemon or plays a sound.
+@MainActor
+private final class ArchiveRecorder {
+    /// `worktree.archive` calls, through `worktreeArchiver`.
+    var worktreeCalls: [UUID] = []
+    /// `scratch.archive` calls, through `scratchArchiver`.
+    var scratchCalls: [UUID] = []
+    /// Archived-scratch list calls, through `archivedScratchFetcher`.
+    var scratchRefreshes = 0
+    var beeps = 0
+    /// Rows whose `worktree.archive` fails, and with what.
+    var failures: [UUID: any Error] = [:]
+
+    func install(on state: AppState) {
+        state.worktreeArchiver = { [self] id, _, _ in
+            worktreeCalls.append(id)
+            if let error = failures[id] { throw error }
+        }
+        state.scratchArchiver = { [self] id in scratchCalls.append(id) }
+        state.archivedScratchFetcher = { [self] in
+            scratchRefreshes += 1
+            return []
+        }
+        state.refusalBeep = { [self] in beeps += 1 }
+    }
+
+    /// Waits until `count` `worktree.archive` calls have been made: a
+    /// gesture starts its archive in a task of its own.
+    func waitForWorktreeCalls(_ count: Int, sourceLocation: SourceLocation = #_sourceLocation) async {
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { self.worktreeCalls.count >= count }
+        }
+        guard outcome == .timedOut else { return }
+        Issue.record(
+            BoundedWaitTimeout(
+                what: "\(count) worktree.archive call(s)", observed: "\(worktreeCalls.count) made",
+                deadline: TestDeadlines.saturatedPass),
+            sourceLocation: sourceLocation)
+    }
 }
 
 // MARK: - Pure decisions
@@ -53,22 +98,42 @@ struct SelectionArchiveDecisionTests {
     @Test func aRowInATwoRowSelectionActsOnTheSelection() {
         let a = UUID(), b = UUID()
         let selected: Set<UUID> = [a, b]
-        let acts = SelectionArchive.actsOnSelection(rowID: a, selectedIDs: selected)
+        let acts = SelectionArchive.actsOnSelection(rowID: a, selectedIDs: selected, resolves: { _ in true })
         #expect(acts)
     }
 
-    @Test func aRowOutsideTheSelectionActsOnItself() {
+    /// A row outside the selection is answered without resolving any ID, so
+    /// the menu built on every right-click stays cheap.
+    @Test func aRowOutsideTheSelectionActsOnItselfWithoutResolvingAnything() {
         let a = UUID(), b = UUID(), outside = UUID()
         let selected: Set<UUID> = [a, b]
-        let acts = SelectionArchive.actsOnSelection(rowID: outside, selectedIDs: selected)
+        var resolved: [UUID] = []
+        let acts = SelectionArchive.actsOnSelection(rowID: outside, selectedIDs: selected, resolves: {
+            resolved.append($0)
+            return true
+        })
         #expect(!acts)
+        #expect(resolved.isEmpty)
     }
 
     @Test func theOnlySelectedRowActsOnItself() {
         let a = UUID()
         let selected: Set<UUID> = [a]
-        let acts = SelectionArchive.actsOnSelection(rowID: a, selectedIDs: selected)
+        let acts = SelectionArchive.actsOnSelection(rowID: a, selectedIDs: selected, resolves: { _ in true })
         #expect(!acts)
+    }
+
+    /// Two or more selected IDs means two or more that resolve to a row: a
+    /// stale ID does not make a selection of one into a selection of two.
+    @Test func aStaleIDDoesNotCountTowardTwoRows() {
+        let a = UUID(), b = UUID(), stale = UUID()
+        let rows: Set<UUID> = [a, b]
+        let withOneRow = SelectionArchive.actsOnSelection(
+            rowID: a, selectedIDs: [a, stale], resolves: { rows.contains($0) })
+        #expect(!withOneRow)
+        let withTwoRows = SelectionArchive.actsOnSelection(
+            rowID: a, selectedIDs: [a, b, stale], resolves: { rows.contains($0) })
+        #expect(withTwoRows)
     }
 
     // MARK: Eligibility, row by row
@@ -193,52 +258,7 @@ struct SelectionArchiveDecisionTests {
         #expect(targets == expected)
     }
 
-    // MARK: Run order
-
-    @Test func descendantsComeBeforeTheirAncestorsAndSidebarOrderIsKept() {
-        let repo = UUID()
-        let parent = row("parent", repoID: repo, order: 0)
-        let first = row("first", repoID: repo, parent: parent.id, order: 0)
-        let grandchild = row("grandchild", repoID: repo, parent: first.id)
-        let second = row("second", repoID: repo, parent: parent.id, order: 1)
-        let sibling = row("sibling", repoID: repo, order: 1)
-        let order = SelectionArchive.childrenFirst([parent, first, grandchild, second, sibling])
-        let expected = [grandchild.id, first.id, second.id, parent.id, sibling.id]
-        #expect(order == expected)
-    }
-
-    @Test func aRowWhoseParentIsNotListedIsARoot() {
-        let repo = UUID()
-        let before = row("before", repoID: repo)
-        let orphan = row("orphan", repoID: repo, parent: UUID())
-        let after = row("after", repoID: repo)
-        let order = SelectionArchive.childrenFirst([before, orphan, after])
-        let expected = [before.id, orphan.id, after.id]
-        #expect(order == expected)
-    }
-
-    @Test func aChildListedBeforeItsParentStillComesFirst() {
-        let repo = UUID()
-        let parent = row("parent", repoID: repo)
-        let child = row("child", repoID: repo, parent: parent.id)
-        let order = SelectionArchive.childrenFirst([parent, child])
-        let reversed = SelectionArchive.childrenFirst([child, parent])
-        let expected = [child.id, parent.id]
-        #expect(order == expected)
-        #expect(reversed == expected)
-    }
-
-    @Test func aLoopingParentChainStillReturnsEveryRowOnce() {
-        let repo = UUID()
-        let aID = UUID(), bID = UUID()
-        let a = row("a", repoID: repo, id: aID, parent: bID)
-        let b = row("b", repoID: repo, id: bID, parent: aID)
-        let free = row("free", repoID: repo)
-        let order = SelectionArchive.childrenFirst([a, b, free, a])
-        let expected: Set<UUID> = [aID, bID, free.id]
-        #expect(order.count == 3)
-        #expect(Set(order) == expected)
-    }
+    // MARK: Targets
 
     @Test func targetsSkipRowsThatCannotGoAndFollowTheRunOrder() {
         let a = UUID(), main = UUID(), c = UUID()
@@ -254,9 +274,11 @@ struct SelectionArchiveDecisionTests {
 
     // MARK: Routing
 
-    @Test func noTargetsRouteNowhere() {
+    /// The menu's item is disabled then, so a refusal comes from the
+    /// shortcut, or from a selection that changed under an open menu.
+    @Test func noTargetsAreRefused() {
         let route = SelectionArchive.route([])
-        #expect(route == .nothing)
+        #expect(route == .refuse)
     }
 
     @Test func oneTargetTakesTheSingleRowArchive() {
@@ -409,12 +431,6 @@ struct ArchiveSelectionCallSiteTests {
         try body(state, suite.defaults, fixture)
     }
 
-    /// Every Archive Selection item's targets in `items`; empty when the list
-    /// has none.
-    private func archiveSelectionItems(_ items: [RowActionMenu.Item]) -> [[UUID]] {
-        items.compactMap { archiveSelectionTargets($0) }
-    }
-
     /// The menu `SidebarContextMenu` and `SidebarMenus` build for a row.
     private func rowMenu(_ state: AppState, _ worktree: Worktree) -> RowActionMenuActions {
         RowActionMenuActions(appState: state, worktree: worktree, onRename: {}, followsSelection: true)
@@ -425,15 +441,18 @@ struct ArchiveSelectionCallSiteTests {
         RowActionMenuActions(appState: state, worktree: worktree, onRename: {})
     }
 
-    @Test("right-click inside a selection: Archive Selection alone, its targets children first")
+    @Test("right-click inside a selection: Archive Selection alone, and its targets run children first")
     func insideASelection() throws {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.parent.id, f.child.id, f.sibling.id]
             let actions = rowMenu(state, f.sibling)
             #expect(actions.actsOnSelection)
             let items = actions.items()
-            let expected = archiveSelectionMenu([f.child.id, f.parent.id, f.sibling.id])
+            let expected = archiveSelectionMenu(enabled: true)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            let runOrder = [f.child.id, f.parent.id, f.sibling.id]
+            #expect(targets == runOrder)
         }
     }
 
@@ -442,8 +461,10 @@ struct ArchiveSelectionCallSiteTests {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.main.id, f.creating.id]
             let items = rowMenu(state, f.main).items()
-            let expected = archiveSelectionMenu([])
+            let expected = archiveSelectionMenu(enabled: false)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            #expect(targets.isEmpty)
         }
     }
 
@@ -457,8 +478,7 @@ struct ArchiveSelectionCallSiteTests {
             let items = actions.items()
             let ownMenu = titleMenu(state, f.sibling).items()
             #expect(items == ownMenu)
-            let selectionItems = archiveSelectionItems(items)
-            #expect(selectionItems.isEmpty)
+            #expect(!hasArchiveSelection(items))
             let archiveTitles = items.compactMap { item -> String? in
                 guard case let .action(action) = item, action.kind == .archive else { return nil }
                 return action.title
@@ -478,8 +498,21 @@ struct ArchiveSelectionCallSiteTests {
             let items = actions.items()
             let ownMenu = titleMenu(state, f.sibling).items()
             #expect(items == ownMenu)
-            let selectionItems = archiveSelectionItems(items)
-            #expect(selectionItems.isEmpty)
+            #expect(!hasArchiveSelection(items))
+        }
+    }
+
+    /// A stale ID, one whose row has gone, is no row: the selection holds one.
+    @Test("right-click on a row selected with one stale ID: the row's own menu")
+    func aRowSelectedWithAStaleID() throws {
+        try withState { state, _, f in
+            state.selectedWorktreeIDs = [f.sibling.id, UUID()]
+            let actions = rowMenu(state, f.sibling)
+            #expect(!actions.actsOnSelection)
+            let items = actions.items()
+            let ownMenu = titleMenu(state, f.sibling).items()
+            #expect(items == ownMenu)
+            #expect(!hasArchiveSelection(items))
         }
     }
 
@@ -492,8 +525,7 @@ struct ArchiveSelectionCallSiteTests {
             let actions = titleMenu(state, f.sibling)
             #expect(!actions.actsOnSelection)
             let items = actions.items()
-            let selectionItems = archiveSelectionItems(items)
-            #expect(selectionItems.isEmpty)
+            #expect(!hasArchiveSelection(items))
             #expect(items.count > 1)
         }
     }
@@ -503,8 +535,11 @@ struct ArchiveSelectionCallSiteTests {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.parent.id, f.sibling.id]
             let items = rowMenu(state, f.parent).items()
-            let expected = archiveSelectionMenu([f.sibling.id])
+            let expected = archiveSelectionMenu(enabled: true)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            let expectedTargets = [f.sibling.id]
+            #expect(targets == expectedTargets)
         }
     }
 
@@ -516,8 +551,11 @@ struct ArchiveSelectionCallSiteTests {
             state.remoteProviders = [acmeProvider()]
             state.selectedWorktreeIDs = [lane.id, f.sibling.id]
             let items = rowMenu(state, lane).items()
-            let expected = archiveSelectionMenu([f.sibling.id])
+            let expected = archiveSelectionMenu(enabled: true)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            let expectedTargets = [f.sibling.id]
+            #expect(targets == expectedTargets)
         }
     }
 
@@ -528,8 +566,11 @@ struct ArchiveSelectionCallSiteTests {
             state.scratchWorktrees = [scratch]
             state.selectedWorktreeIDs = [f.sibling.id, scratch.id]
             let items = rowMenu(state, scratch).items()
-            let expected = archiveSelectionMenu([scratch.id, f.sibling.id])
+            let expected = archiveSelectionMenu(enabled: true)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            let expectedTargets = [scratch.id, f.sibling.id]
+            #expect(targets == expectedTargets)
         }
     }
 
@@ -540,11 +581,9 @@ struct ArchiveSelectionCallSiteTests {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.main.id, f.sibling.id]
             let items = rowMenu(state, f.main).items()
-            let found = archiveSelectionItems(items)
-            let targets = try #require(found.first)
-            let expectedTargets = [f.sibling.id]
-            #expect(targets == expectedTargets)
-            let route = SelectionArchive.route(targets)
+            let expected = archiveSelectionMenu(enabled: true)
+            #expect(items == expected)
+            let route = SelectionArchive.route(state.selectionArchiveTargets())
             #expect(route == .single(f.sibling.id))
         }
     }
@@ -557,8 +596,7 @@ struct ArchiveSelectionCallSiteTests {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.parent.id, f.child.id, f.sibling.id]
             let context = rowMenu(state, f.parent).context()
-            let expected = RowActionMenu.Context(
-                selection: .init(archiveTargetIDs: [f.child.id, f.parent.id, f.sibling.id]))
+            let expected = RowActionMenu.Context(selection: .init(hasArchivableRow: true))
             #expect(context == expected)
             // The gate's other branch: the same row outside a selection
             // derives its own facts.
@@ -577,8 +615,71 @@ struct ArchiveSelectionCallSiteTests {
             state.worktrees[f.repo.id, default: []].append(creatingChild)
             state.selectedWorktreeIDs = [f.sibling.id, creatingChild.id, f.parent.id, f.child.id]
             let items = rowMenu(state, f.sibling).items()
-            let expected = archiveSelectionMenu([f.child.id, f.parent.id])
+            let expected = archiveSelectionMenu(enabled: true)
             #expect(items == expected)
+            let targets = state.selectionArchiveTargets()
+            let expectedTargets = [f.child.id, f.parent.id]
+            #expect(targets == expectedTargets)
+        }
+    }
+
+    // MARK: The run order
+
+    /// The run order is the sidebar's own walk with each row after its
+    /// nested worktrees: the same rows `allWorktreesOrdered` lists, with the
+    /// Scratch section first.
+    @Test("the run order is the sidebar's walk, children first, after the Scratch section")
+    func theRunOrderIsTheSidebarWalkChildrenFirst() throws {
+        try withState { state, _, f in
+            let first = row("first", repoID: f.repo.id, parent: f.parent.id, order: 0)
+            let grandchild = row("grandchild", repoID: f.repo.id, parent: first.id)
+            let second = row("second", repoID: f.repo.id, parent: f.parent.id, order: 1)
+            let scratch = row("scratch", repoID: nil)
+            state.worktrees = [f.repo.id: [f.main, f.parent, first, grandchild, second, f.sibling]]
+            state.scratchWorktrees = [scratch]
+
+            let sidebar = state.allWorktreesOrdered.map(\.id)
+            let expectedSidebar = [f.main.id, f.parent.id, first.id, grandchild.id, second.id, f.sibling.id]
+            #expect(sidebar == expectedSidebar)
+
+            let runOrder = state.selectionArchiveRunOrder
+            let expectedRunOrder = [scratch.id, f.main.id, grandchild.id, first.id, second.id, f.parent.id, f.sibling.id]
+            #expect(runOrder == expectedRunOrder)
+        }
+    }
+
+    /// A failed row is not in the sidebar's walk, and neither is the active
+    /// worktree nested under it. They still run children first, even when
+    /// the child sorts after its parent.
+    @Test("rows the walk does not reach still run children first")
+    func rowsTheWalkMissesStillRunChildrenFirst() throws {
+        try withState { state, _, f in
+            let failed = row("failed", repoID: f.repo.id, order: 0, status: .failed)
+            let underFailed = row("under-failed", repoID: f.repo.id, parent: failed.id, order: 9)
+            state.worktrees[f.repo.id, default: []] += [failed, underFailed]
+            let runOrder = state.selectionArchiveRunOrder
+            let failedIndex = try #require(runOrder.firstIndex(of: failed.id))
+            let childIndex = try #require(runOrder.firstIndex(of: underFailed.id))
+            #expect(childIndex < failedIndex)
+        }
+    }
+
+    /// Two rows whose parent links loop are reached from no row the walk
+    /// starts from, and are still listed, once each.
+    @Test("rows whose parent links loop are each listed once")
+    func loopingParentLinksAreEachListedOnce() throws {
+        try withState { state, _, f in
+            let aID = UUID(), bID = UUID(), selfID = UUID()
+            let a = row("loop-a", repoID: f.repo.id, id: aID, parent: bID)
+            let b = row("loop-b", repoID: f.repo.id, id: bID, parent: aID)
+            let selfLoop = row("loop-self", repoID: f.repo.id, id: selfID, parent: selfID)
+            state.worktrees[f.repo.id, default: []] += [a, b, selfLoop]
+            let runOrder = state.selectionArchiveRunOrder
+            let resolvable = state.allWorktrees.map(\.id)
+            #expect(runOrder.count == resolvable.count)
+            let runOrderSet = Set(runOrder)
+            let resolvableSet = Set(resolvable)
+            #expect(runOrderSet == resolvableSet)
         }
     }
 
@@ -624,18 +725,142 @@ struct ArchiveSelectionCallSiteTests {
             // Selected with another row that cannot go, it is held to the
             // selection's rules, and nothing can go.
             state.selectedWorktreeIDs = [lane.id, f.main.id]
-            #expect(state.archiveShortcutRoute() == .beep)
+            #expect(state.archiveShortcutRoute() == .refuse)
         }
     }
 
-    @Test("the shortcut beeps for two or more selected rows of which none can go")
-    func theShortcutBeepsWhenNothingSelectedCanGo() throws {
+    @Test("the shortcut refuses two or more selected rows of which none can go")
+    func theShortcutRefusesWhenNothingSelectedCanGo() throws {
         try withState { state, _, f in
             state.selectedWorktreeIDs = [f.main.id, f.creating.id]
-            #expect(state.archiveShortcutRoute() == .beep)
-            state.selectedWorktreeIDs = [UUID(), UUID()]
-            #expect(state.archiveShortcutRoute() == .beep)
+            #expect(state.archiveShortcutRoute() == .refuse)
         }
+    }
+
+    /// Stale IDs are no rows: a selection of one row and a stale ID is a
+    /// selection of one row, and two stale IDs are none.
+    @Test("the shortcut counts only selected IDs that resolve to a row")
+    func theShortcutCountsResolvedRows() throws {
+        try withState { state, _, f in
+            state.selectedWorktreeIDs = [f.sibling.id, UUID()]
+            #expect(state.archiveShortcutRoute() == .single(f.sibling.id))
+            // The main row alone is refused in silence, as it always was.
+            state.selectedWorktreeIDs = [f.main.id, UUID()]
+            #expect(state.archiveShortcutRoute() == .nothing)
+            state.selectedWorktreeIDs = [UUID(), UUID()]
+            #expect(state.archiveShortcutRoute() == .nothing)
+        }
+    }
+
+    @Test("the shortcut beeps, and archives nothing, when nothing in a selection of two or more can go")
+    func theShortcutBeepsWhenNothingCanGo() {
+        let suite = TestDefaultsSuite("TBDAppTests.ArchiveSelectionShortcut")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let recorder = ArchiveRecorder()
+        recorder.install(on: state)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = row("acme", repoID: repo.id, status: .main)
+        let creating = row("creating", repoID: repo.id, order: 1, status: .creating)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [main, creating]]
+
+        state.selectedWorktreeIDs = [main.id, creating.id]
+        state.archiveSelectedWorktree()
+        #expect(recorder.beeps == 1)
+
+        // The other branches: nothing selected is no command at all.
+        state.selectedWorktreeIDs = []
+        state.archiveSelectedWorktree()
+        #expect(recorder.beeps == 1)
+        #expect(recorder.worktreeCalls.isEmpty)
+    }
+
+    @Test("the shortcut archives several rows in run order, and one row through the single-row archive")
+    func theShortcutArchivesTheSelection() async {
+        let suite = TestDefaultsSuite("TBDAppTests.ArchiveSelectionShortcut")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let recorder = ArchiveRecorder()
+        recorder.install(on: state)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = row("acme-parent", repoID: repo.id, order: 0)
+        let child = row("acme-child", repoID: repo.id, parent: parent.id)
+        let sibling = row("acme-sibling", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [parent, child, sibling]]
+
+        state.selectedWorktreeIDs = [parent.id, child.id]
+        state.archiveSelectedWorktree()
+        await recorder.waitForWorktreeCalls(2)
+        let bulk = [child.id, parent.id]
+        #expect(recorder.worktreeCalls == bulk)
+
+        state.selectedWorktreeIDs = [sibling.id]
+        state.archiveSelectedWorktree()
+        await recorder.waitForWorktreeCalls(3)
+        let all = [child.id, parent.id, sibling.id]
+        #expect(recorder.worktreeCalls == all)
+        #expect(recorder.beeps == 0)
+        #expect(state.alertMessage == nil)
+    }
+
+    // MARK: Picking Archive Selection
+
+    /// The menu decides only whether the item is enabled. Picking it reads
+    /// the selection as it is then: a row that left the selection after the
+    /// menu was built is not archived.
+    @Test("picking Archive Selection archives the selection as it is when picked")
+    func pickingResolvesTheLiveSelection() async {
+        let suite = TestDefaultsSuite("TBDAppTests.ArchiveSelectionPick")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let recorder = ArchiveRecorder()
+        recorder.install(on: state)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = row("acme-parent", repoID: repo.id, order: 0)
+        let child = row("acme-child", repoID: repo.id, parent: parent.id)
+        let sibling = row("acme-sibling", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [parent, child, sibling]]
+
+        state.selectedWorktreeIDs = [parent.id, child.id, sibling.id]
+        let actions = rowMenu(state, sibling)
+        let items = actions.items()
+        let expected = archiveSelectionMenu(enabled: true)
+        #expect(items == expected)
+
+        state.selectedWorktreeIDs = [child.id, sibling.id]
+        actions.run(.archiveSelection)
+        await recorder.waitForWorktreeCalls(2)
+        let archived = [child.id, sibling.id]
+        #expect(recorder.worktreeCalls == archived)
+        #expect(state.findWorktree(id: parent.id) != nil)
+        #expect(recorder.beeps == 0)
+    }
+
+    @Test("picking Archive Selection when nothing selected can go any more beeps and archives nothing")
+    func pickingWithNothingLeftToArchiveBeeps() {
+        let suite = TestDefaultsSuite("TBDAppTests.ArchiveSelectionPick")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let recorder = ArchiveRecorder()
+        recorder.install(on: state)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let main = row("acme", repoID: repo.id, status: .main)
+        let first = row("acme-first", repoID: repo.id, order: 0)
+        let second = row("acme-second", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [main, first, second]]
+
+        state.selectedWorktreeIDs = [first.id, second.id]
+        let actions = rowMenu(state, first)
+        state.selectedWorktreeIDs = [main.id, first.id]
+        state.worktrees = [repo.id: [main]]
+        actions.run(.archiveSelection)
+
+        #expect(recorder.beeps == 1)
+        #expect(recorder.worktreeCalls.isEmpty)
     }
 
     // MARK: The native sidebar and dock
@@ -723,6 +948,9 @@ struct ArchiveSelectionBulkRunTests {
         /// `selectionArchiveInFlight` as each call saw it, for the tests
         /// that record it.
         var inFlightSeen: [Bool] = []
+        /// `selectionArchivePendingIDs` as each call saw it, for the tests
+        /// that record it.
+        var pendingSeen: [Set<UUID>] = []
 
         func archive(_ worktree: Worktree) throws {
             calls.append(worktree.id)
@@ -730,15 +958,19 @@ struct ArchiveSelectionBulkRunTests {
         }
     }
 
-    private func makeState() -> (AppState, () -> Void) {
+    /// A state whose daemon calls and refusal beeps all land in the
+    /// returned recorder.
+    private func makeState() -> (AppState, ArchiveRecorder, () -> Void) {
         let suite = TestDefaultsSuite("TBDAppTests.ArchiveSelectionBulkRun")
         let state = AppState(userDefaults: suite.defaults)
-        return (state, { suite.tearDown() })
+        let recorder = ArchiveRecorder()
+        recorder.install(on: state)
+        return (state, recorder, { suite.tearDown() })
     }
 
     @Test("every row is tried children first, failures make one summary, and nothing is retried")
     func aMixOfSuccessesAndRefusals() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let parent = row("acme-parent", repoID: repo.id, order: 0)
@@ -785,7 +1017,7 @@ struct ArchiveSelectionBulkRunTests {
 
     @Test("when every row goes, there is no alert")
     func allSucceed() async {
-        let (state, teardown) = makeState()
+        let (state, recorder, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id, order: 0)
@@ -808,11 +1040,13 @@ struct ArchiveSelectionBulkRunTests {
         let seen = [true, true]
         #expect(fake.inFlightSeen == seen)
         #expect(!state.selectionArchiveInFlight)
+        #expect(state.selectionArchivePendingIDs.isEmpty)
+        #expect(recorder.beeps == 0)
     }
 
     @Test("a row gone before its turn is not attempted, and the summary counts only what was")
     func aRowGoneBeforeItsTurnIsNotAttempted() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id, order: 0)
@@ -832,7 +1066,7 @@ struct ArchiveSelectionBulkRunTests {
 
     @Test("a refused child holds back its parent, which is not sent to the daemon")
     func aRefusedChildHoldsBackItsParent() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let parent = row("acme-parent", repoID: repo.id, order: 0)
@@ -857,11 +1091,12 @@ struct ArchiveSelectionBulkRunTests {
         let remaining = Set((state.worktrees[repo.id] ?? []).map(\.id))
         let kept: Set<UUID> = [parent.id, child.id]
         #expect(remaining == kept)
+        #expect(state.selectionArchivePendingIDs.isEmpty)
     }
 
     @Test("a refused grandchild holds back the whole chain above it, each naming the row below")
     func aRefusedGrandchildHoldsBackTheChain() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let parent = row("acme-parent", repoID: repo.id)
@@ -888,7 +1123,7 @@ struct ArchiveSelectionBulkRunTests {
 
     @Test("a dropped connection stops the run, and the rows left share one line")
     func aConnectionFailureStopsTheRun() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id, order: 0)
@@ -916,6 +1151,8 @@ struct ArchiveSelectionBulkRunTests {
             2 more not attempted: lost the connection to the daemon.
             """
         #expect(state.alertMessage == summary)
+        // The rows it never reached are no longer the run's.
+        #expect(state.selectionArchivePendingIDs.isEmpty)
     }
 
     /// The other branch: a refusal that is not a lost connection leaves the
@@ -923,7 +1160,7 @@ struct ArchiveSelectionBulkRunTests {
     /// count.
     @Test("a refusal does not stop the run, and a lost connection on the last row adds no line")
     func aRefusalDoesNotStopTheRun() async {
-        let (state, teardown) = makeState()
+        let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id, order: 0)
@@ -948,10 +1185,10 @@ struct ArchiveSelectionBulkRunTests {
     }
 
     /// The row menu and the shortcut, or the shortcut twice: a bulk trigger
-    /// while a run is in progress archives nothing.
-    @Test("a bulk trigger during a run starts nothing")
+    /// while a run is in progress archives nothing, and beeps.
+    @Test("a bulk trigger during a run starts nothing, and beeps")
     func aBulkTriggerDuringARunStartsNothing() async {
-        let (state, teardown) = makeState()
+        let (state, recorder, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id, order: 0)
@@ -974,13 +1211,14 @@ struct ArchiveSelectionBulkRunTests {
         let sent = [first.id, second.id]
         #expect(fake.calls == sent)
         #expect(nested.calls.isEmpty)
+        #expect(recorder.beeps == 1)
         #expect(state.findWorktree(id: other.id) != nil)
         #expect(!state.selectionArchiveInFlight)
     }
 
-    @Test("a trigger while a run holds the flag archives nothing and leaves the flag set")
+    @Test("a trigger while a run holds the flag archives nothing, beeps, and leaves the flag set")
     func aTriggerWhileTheFlagIsSetArchivesNothing() async {
-        let (state, teardown) = makeState()
+        let (state, recorder, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let first = row("acme-first", repoID: repo.id)
@@ -992,8 +1230,163 @@ struct ArchiveSelectionBulkRunTests {
         await state.archiveInBulk([first.id]) { try fake.archive($0) }
 
         #expect(fake.calls.isEmpty)
+        #expect(recorder.beeps == 1)
         #expect(state.selectionArchiveInFlight)
+        #expect(state.selectionArchivePendingIDs.isEmpty)
         #expect(state.alertMessage == nil)
         #expect(state.findWorktree(id: first.id) != nil)
+    }
+
+    // MARK: The rows a run owns
+
+    /// While a run goes, the rows it has yet to finish are its own. A
+    /// single-row archive of one, from the row's own menu or the shortcut,
+    /// is refused with a beep and sends nothing, and the run archives the row
+    /// in its turn, once.
+    @Test("the run owns each row until its turn ends, and a single-row archive of one is refused")
+    func theRunOwnsEachRowUntilItsTurnEnds() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = row("acme-first", repoID: repo.id, order: 0)
+        let second = row("acme-second", repoID: repo.id, order: 1)
+        let third = row("acme-third", repoID: repo.id, order: 2)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [first, second, third]]
+
+        let fake = FakeArchiver()
+        let firstID = first.id
+        let thirdID = third.id
+        await state.archiveInBulk([first.id, second.id, third.id]) { worktree in
+            fake.pendingSeen.append(state.selectionArchivePendingIDs)
+            if worktree.id == firstID {
+                await state.archiveWorktree(id: thirdID)
+            }
+            try fake.archive(worktree)
+        }
+
+        let sent = [first.id, second.id, third.id]
+        #expect(fake.calls == sent)
+        // The single-row archive of the third row sent nothing.
+        #expect(recorder.worktreeCalls.isEmpty)
+        #expect(recorder.beeps == 1)
+        let pendingSeen: [Set<UUID>] = [[first.id, second.id, third.id], [second.id, third.id], [third.id]]
+        #expect(fake.pendingSeen == pendingSeen)
+        #expect(state.selectionArchivePendingIDs.isEmpty)
+        #expect(state.alertMessage == nil)
+    }
+
+    @Test("a single-row archive of a row a run owns sends nothing and beeps; of another row it runs as before")
+    func aSingleRowArchiveOfAnOwnedRowIsRefused() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let owned = row("acme-owned", repoID: repo.id, order: 0)
+        let free = row("acme-free", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [owned, free]]
+        state.selectionArchivePendingIDs = [owned.id]
+
+        await state.archiveWorktree(id: owned.id)
+        #expect(recorder.worktreeCalls.isEmpty)
+        #expect(recorder.beeps == 1)
+        #expect(state.findWorktree(id: owned.id) != nil)
+        #expect(state.alertMessage == nil)
+
+        await state.archiveWorktree(id: free.id)
+        let sent = [free.id]
+        #expect(recorder.worktreeCalls == sent)
+        #expect(recorder.beeps == 1)
+        #expect(state.findWorktree(id: free.id) == nil)
+        #expect(state.alertMessage == nil)
+    }
+
+    @Test("a scratch archive of a row a run owns sends nothing and beeps; of another row it runs as before")
+    func aScratchArchiveOfAnOwnedRowIsRefused() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        let owned = row("acme-owned", repoID: nil)
+        let free = row("acme-free", repoID: nil)
+        state.scratchWorktrees = [owned, free]
+        state.selectionArchivePendingIDs = [owned.id]
+
+        // From the scratch row's own Archive, and through
+        // `archiveWorktree(id:)`, which refuses before it hands a scratch row
+        // on: one beep each.
+        await state.archiveScratch(id: owned.id)
+        await state.archiveWorktree(id: owned.id)
+        #expect(recorder.scratchCalls.isEmpty)
+        #expect(recorder.worktreeCalls.isEmpty)
+        #expect(recorder.beeps == 2)
+        #expect(state.findWorktree(id: owned.id) != nil)
+
+        await state.archiveScratch(id: free.id)
+        let sent = [free.id]
+        #expect(recorder.scratchCalls == sent)
+        #expect(recorder.scratchRefreshes == 1)
+        #expect(recorder.beeps == 2)
+        #expect(state.findWorktree(id: free.id) == nil)
+    }
+
+    // MARK: The Archived tab
+
+    /// A refusal is not a lost connection: the tab is still refreshed.
+    @Test("a run that archives scratch rows refreshes the Archived tab once, a refusal notwithstanding")
+    func scratchRowsRefreshTheArchivedTabOnce() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = row("acme-first", repoID: nil)
+        let second = row("acme-second", repoID: nil)
+        let refused = row("acme-refused", repoID: repo.id)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [refused]]
+        state.scratchWorktrees = [first, second]
+
+        let fake = FakeArchiver()
+        fake.failures[refused.id] = DaemonClientError.rpcError("Refused.", code: nil)
+        await state.archiveInBulk([first.id, second.id, refused.id]) { try fake.archive($0) }
+
+        #expect(recorder.scratchRefreshes == 1)
+        #expect(state.alertMessage == "Archived 2 of 3 worktrees.\n\nacme-refused: Refused.")
+    }
+
+    /// The refresh is a daemon call too, and after a lost connection it
+    /// could only fail.
+    @Test("a run stopped by a lost connection does not refresh the Archived tab")
+    func aLostConnectionSkipsTheArchivedTabRefresh() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let scratch = row("acme-scratch", repoID: nil)
+        let lost = row("acme-lost", repoID: repo.id)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [lost]]
+        state.scratchWorktrees = [scratch]
+
+        let fake = FakeArchiver()
+        fake.failures[lost.id] = DaemonClientError.daemonNotRunning
+        await state.archiveInBulk([scratch.id, lost.id]) { try fake.archive($0) }
+
+        let sent = [scratch.id, lost.id]
+        #expect(fake.calls == sent)
+        #expect(recorder.scratchRefreshes == 0)
+        #expect(state.findWorktree(id: scratch.id) == nil)
+    }
+
+    // MARK: Routes
+
+    /// A refusal's beep is the gesture's (`startArchive`), played before any
+    /// task starts; running the route itself archives nothing and plays
+    /// nothing.
+    @Test("running a route that archives nothing sends nothing and plays nothing")
+    func routesThatArchiveNothingSendNothing() async {
+        let (state, recorder, teardown) = makeState()
+        defer { teardown() }
+        await state.runArchive(.nothing)
+        await state.runArchive(.refuse)
+        #expect(recorder.worktreeCalls.isEmpty)
+        #expect(recorder.scratchCalls.isEmpty)
+        #expect(recorder.beeps == 0)
     }
 }

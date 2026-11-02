@@ -37,10 +37,11 @@ enum RowActionMenu {
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
         case archive
-        /// Archive every archivable row of a multi-row selection. Carries the
-        /// rows in run order, as `SelectionArchive.targets` resolved them when
-        /// the menu was built.
-        case archiveSelection(targetIDs: [UUID])
+        /// Archive every archivable row of a multi-row selection. Carries
+        /// nothing: the rows, and the order they run in, are resolved from the
+        /// live selection when the item is picked (`AppState.archiveSelection()`),
+        /// not when the menu is built.
+        case archiveSelection
         /// Destroy the remote session behind this lane
         /// (`docs/remote-provider-contract.md` § `delete <id>`), behind the
         /// default-off `remote_delete_enabled` flag. Local rows never offer it.
@@ -109,12 +110,14 @@ enum RowActionMenu {
     }
 
     /// The multi-row selection a menu acts on instead of its own row: set when
-    /// the row is selected and the selection holds two or more rows
-    /// (`SelectionArchive.actsOnSelection`).
+    /// the row is selected and two or more selected IDs resolve to a row
+    /// (`SelectionArchive.actsOnSelection`). It holds only what the menu
+    /// shows, so building the menu never walks the sidebar for a run order.
     struct Selection: Equatable {
-        /// The selection's archivable rows in run order
-        /// (`SelectionArchive.targets`). Empty when none of them is.
-        var archiveTargetIDs: [UUID]
+        /// Whether at least one selected row can be archived with the
+        /// selection (`AppState.selectionHasArchivableRow()`). Archive
+        /// Selection is enabled exactly when it is set.
+        var hasArchivableRow: Bool
     }
 
     /// The small set of live inputs the current `SidebarContextMenu` reads from
@@ -341,13 +344,13 @@ enum RowActionMenu {
 
     /// The menu for a row in a multi-row selection: Archive Selection alone.
     private static func selectionItems(_ selection: Selection) -> [Item] {
-        let targets = selection.archiveTargetIDs
+        let enabled = selection.hasArchivableRow
         return [.action(Action(
-            kind: .archiveSelection(targetIDs: targets),
+            kind: .archiveSelection,
             title: archiveSelectionLabel,
             role: .destructive,
-            isEnabled: !targets.isEmpty,
-            disabledHelp: targets.isEmpty ? archiveSelectionNothingArchivableHelp : nil
+            isEnabled: enabled,
+            disabledHelp: enabled ? nil : archiveSelectionNothingArchivableHelp
         ))]
     }
 

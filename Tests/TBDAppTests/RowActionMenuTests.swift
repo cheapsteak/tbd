@@ -765,11 +765,9 @@ struct RowActionMenuPinTests {
 /// check for the items someone thought to exclude.
 @Suite("RowActionMenu — selection")
 struct RowActionMenuSelectionTests {
-    private static func archiveSelection(
-        _ targetIDs: [UUID], enabled: Bool = true, help: String? = nil
-    ) -> [RowActionMenu.Item] {
+    private static func archiveSelection(enabled: Bool = true, help: String? = nil) -> [RowActionMenu.Item] {
         [.action(.init(
-            kind: .archiveSelection(targetIDs: targetIDs),
+            kind: .archiveSelection,
             title: RowActionMenu.archiveSelectionLabel,
             role: .destructive,
             isEnabled: enabled,
@@ -777,9 +775,8 @@ struct RowActionMenuSelectionTests {
         ))]
     }
 
-    @Test("inside a selection with archivable rows: Archive Selection alone, enabled, carrying the targets")
-    func selectionWithTargetsIsOneEnabledItem() {
-        let targets = [UUID(), UUID()]
+    @Test("inside a selection with an archivable row: Archive Selection alone, enabled")
+    func selectionWithAnArchivableRowIsOneEnabledItem() {
         // Every conditional a regular row has is on, so any row item that
         // reached selection mode would show in the list.
         let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
@@ -790,27 +787,26 @@ struct RowActionMenuSelectionTests {
                                         branch: "tbd/x",
                                         claudeSessions: [session("Claude 1")],
                                         hasPreSessionHook: true,
-                                        selection: .init(archiveTargetIDs: targets))
+                                        selection: .init(hasArchivableRow: true))
         let items = RowActionMenu.items(context: ctx)
-        let expected = Self.archiveSelection(targets)
+        let expected = Self.archiveSelection()
         #expect(items == expected)
         #expect(RowActionMenu.archiveSelectionLabel == "Archive Selection")
     }
 
     @Test("inside a selection where nothing is archivable: the one item, disabled, with help")
-    func selectionWithNoTargetsIsOneDisabledItem() {
-        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", selection: .init(archiveTargetIDs: []))
+    func selectionWithNothingArchivableIsOneDisabledItem() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", selection: .init(hasArchivableRow: false))
         let items = RowActionMenu.items(context: ctx)
         let expected = Self.archiveSelection(
-            [], enabled: false, help: RowActionMenu.archiveSelectionNothingArchivableHelp)
+            enabled: false, help: RowActionMenu.archiveSelectionNothingArchivableHelp)
         #expect(items == expected)
         #expect(!RowActionMenu.archiveSelectionNothingArchivableHelp.isEmpty)
     }
 
     @Test("selection mode wins over the scratch, main and remote branches")
     func selectionOverridesEveryRowBranch() {
-        let targets = [UUID(), UUID()]
-        let selection = RowActionMenu.Selection(archiveTargetIDs: targets)
+        let selection = RowActionMenu.Selection(hasArchivableRow: true)
         let contexts = [
             RowActionMenu.Context(hasRepoID: false, isScratch: true, selection: selection),
             RowActionMenu.Context(status: .main, selection: selection),
@@ -821,7 +817,7 @@ struct RowActionMenuSelectionTests {
                                   remoteDeleteEnabled: true,
                                   selection: selection),
         ]
-        let expected = Self.archiveSelection(targets)
+        let expected = Self.archiveSelection()
         for ctx in contexts {
             let items = RowActionMenu.items(context: ctx)
             #expect(items == expected)

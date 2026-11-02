@@ -113,7 +113,8 @@ struct FindWorktreeScratchTests {
 /// branch and a row still creating, and send anything else to
 /// `archiveWorktree(id:)` for the daemon to judge. With two or more it takes
 /// the whole selection, with the eligibility the row menu's Archive Selection
-/// uses, and beeps when nothing selected can go. `archiveWorktree(id:)` is
+/// uses, and refuses, with the beep, when nothing selected can go. A selected
+/// ID that resolves to no row does not count toward two. `archiveWorktree(id:)` is
 /// scratch-aware and self-routes a single scratch row to the `scratch.archive`
 /// RPC; the daemon routes them too, so either door reaches the same body.
 @MainActor
@@ -185,7 +186,7 @@ struct ArchiveShortcutRouteTests {
                 makeWorktree(id: otherID, repoID: repo.id, order: 1),
             ]]
             state.selectedWorktreeIDs = [otherID, parentID, childID]
-            let expected = AppState.ArchiveShortcutRoute.bulk([childID, parentID, otherID])
+            let expected = SelectionArchive.Route.bulk([childID, parentID, otherID])
             #expect(state.archiveShortcutRoute() == expected)
         }
     }
@@ -224,8 +225,8 @@ struct ArchiveShortcutRouteTests {
 
     /// In a selection of two or more, the selection's rules apply: a parent
     /// whose active child is not selected is held back, and with nothing
-    /// else selected that can go, the shortcut beeps.
-    @Test func aSelectionWithNothingArchivableBeeps() {
+    /// else selected that can go, the shortcut refuses, with the beep.
+    @Test func aSelectionWithNothingArchivableIsRefused() {
         withState { state in
             let repoID = UUID()
             let parentID = UUID()
@@ -236,7 +237,7 @@ struct ArchiveShortcutRouteTests {
                 makeWorktree(id: UUID(), repoID: repoID, parent: parentID),
             ]]
             state.selectedWorktreeIDs = [parentID, mainID]
-            #expect(state.archiveShortcutRoute() == .beep)
+            #expect(state.archiveShortcutRoute() == .refuse)
         }
     }
 
