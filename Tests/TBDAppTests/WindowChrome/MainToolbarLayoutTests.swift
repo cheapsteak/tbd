@@ -294,29 +294,34 @@ struct MainToolbarLayoutTests {
 
     /// The sidebar's minimum thickness is the leading inset, the leading item
     /// holding three buttons one pitch each, one spacing after it and one
-    /// before the filter, around the empty flexible space, the filter at its
-    /// widest and the margin before the separator: 322 pt with the measured
-    /// inset and the estimated spacing.
+    /// before the filter, around the empty flexible space, the 44 pt slot
+    /// AppKit gives the filter's item and the margin before the separator:
+    /// 256 pt with the measured inset and slot and the estimated spacing,
+    /// above the SwiftUI sidebar's 220 pt minimum.
     @Test func minimumThicknessFitsTheSidebarSection() {
         let inset: CGFloat = MainToolbarMetrics.firstItemLeadingInset
         let pitch: CGFloat = MainToolbarMetrics.iconButtonPitch
         let leading: CGFloat = MainToolbarMetrics.leadingButtonsWidth
         let spacing: CGFloat = MainToolbarMetrics.interItemSpacing
-        let filter: CGFloat = MainToolbarMetrics.filterMaxWidth
+        let filter: CGFloat = MainToolbarMetrics.filterSlotWidth
         let padding: CGFloat = MainToolbarMetrics.sectionPadding
         let derived: CGFloat = inset + leading + 2 * spacing + filter + padding
         let minimum: CGFloat = MainToolbarMetrics.sidebarMinimumThickness
         let maximum: CGFloat = MainToolbarMetrics.sidebarMaximumThickness
+        let swiftUISidebarMinimum: CGFloat = 220
         #expect(minimum == derived)
-        #expect(minimum == 322)
+        #expect(minimum == 256)
         #expect(minimum < maximum)
+        #expect(minimum > swiftUISidebarMinimum)
 
         let threePitches: CGFloat = 3 * pitch
         #expect(leading == threePitches)
         #expect(pitch == 28)
         #expect(inset == 92)
+        #expect(filter == 44)
         #expect(MainToolbarMetrics.iconButtonHeight == 28)
         #expect(MainToolbarMetrics.iconGlyphPointSize == 13)
+        #expect(MainToolbarMetrics.iconButtonCornerRadius == 6)
     }
 
     /// The title item's widths: a minimum below the ideal below the maximum,

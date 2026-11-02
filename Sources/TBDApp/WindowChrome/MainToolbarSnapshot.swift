@@ -12,6 +12,37 @@ struct RepoFilterPresentation: Equatable {
     var selected: UUID?
     /// False when `selected` names a repo that is not in `options`.
     var selectedIsKnown: Bool
+
+    /// The first option's title, which chooses no repo.
+    static let allReposTitle = "All Repos"
+    /// The filter button's tool tip while no repo filter is set.
+    static let inactiveHelp = "Filter sidebar by repository"
+
+    /// Whether a repo filter is set: `selected` names a repo, known or gone.
+    /// A filter naming a repo that is gone still filters the sidebar, to no
+    /// repo at all.
+    var isActive: Bool { selected != nil }
+
+    /// The title of the option `selected` names: "All Repos" when it names
+    /// none, the repo's name, or `nil` when it names a repo that is gone.
+    var selectedTitle: String? {
+        guard selectedIsKnown else { return nil }
+        return options.first { $0.id == selected }?.title
+    }
+
+    /// The filter button's tool tip: what the button does while no filter is
+    /// set, and which repo it filters by while one is.
+    var help: String {
+        guard isActive else { return Self.inactiveHelp }
+        guard let selectedTitle else { return "Filtering by a removed repository" }
+        return "Filtering by \(selectedTitle)"
+    }
+
+    /// The filter button's accessibility value: "All Repos", the repo it
+    /// filters by, or "Removed repository" when that repo is gone.
+    var accessibilityValue: String {
+        selectedTitle ?? "Removed repository"
+    }
 }
 
 /// The Servers button for the one selected worktree.
@@ -67,7 +98,7 @@ struct MainToolbarSnapshot: Equatable {
 
     @MainActor
     static func make(from appState: AppState) -> MainToolbarSnapshot {
-        var options = [RepoFilterPresentation.Option(id: nil, title: "All Repos")]
+        var options = [RepoFilterPresentation.Option(id: nil, title: RepoFilterPresentation.allReposTitle)]
         options += appState.repos.map { RepoFilterPresentation.Option(id: $0.id, title: $0.displayName) }
         let selected = appState.repoFilter
         let filter = RepoFilterPresentation(
