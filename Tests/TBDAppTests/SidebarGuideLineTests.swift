@@ -5,19 +5,21 @@ import Testing
 import TBDShared
 import TestSupport
 
-// Tier 1 for the pure parts — the style, the line geometry and the two
-// active-ancestor rules — checked directly. The outline's and the dock's
-// wiring runs through controllers mounted offscreen: the pointer is driven
-// through the hover tracker's own entry points, the selection through
-// `AppState` and through the outline's `selectRowIndexes`, as a click lands.
+// Tier 1 for the pure parts — the style, the line geometry and its fade, and
+// the outline's and the dock's rules for each row's part in each line and for
+// the active lines — checked directly. The outline's and the dock's wiring
+// runs through controllers mounted offscreen: the pointer is driven through
+// the hover tracker's own entry points, the selection through `AppState` and
+// through the outline's `selectRowIndexes`, as a click lands.
 
-/// The native sidebar's guide lines: hairlines at rest, the focused group's
-/// line at full strength, and the highlight tint over a highlight.
+/// The native sidebar's guide lines: one per parent, fading in under its
+/// icon and branching to each child in a rounded turn; hairlines at rest, the
+/// focused group's line at full strength, and the highlight tint over a
+/// highlight.
 @MainActor
 @Suite("Sidebar guide lines")
 struct SidebarGuideLineTests {
     typealias Style = SidebarGuideLine.Style
-    typealias Segment = SidebarGuideLine.Segment
 
     static let bounds = NSRect(x: 0, y: 0, width: 300, height: 28)
 
@@ -97,49 +99,213 @@ struct SidebarGuideLineTests {
         #expect(widths == expected)
     }
 
-    // MARK: Lines
+    // MARK: Shape
 
-    /// Each line runs the row's full height from its x, so a whole-point x
-    /// and a whole-pixel width cover whole pixels; an x off the pixel grid
-    /// moves left onto it rather than straddling two pixels.
-    @Test func linesCoverWholeDevicePixels() {
-        let rest = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 2)
-        let active = SidebarGuideLine.style(isActive: true, isOnHighlight: false, backingScale: 2)
-        let segments = SidebarGuideLine.segments(xs: [28, 44], active: [1], gap: nil, isOnHighlight: false,
-                                                 in: Self.bounds, backingScale: 2)
-        let expected = [
-            Segment(rect: NSRect(x: 28, y: 0, width: 0.5, height: 28), style: rest),
-            Segment(rect: NSRect(x: 44, y: 0, width: 1, height: 28), style: active),
-        ]
-        #expect(segments == expected)
-        let pixelEdges = segments.flatMap { [$0.rect.minX * 2, $0.rect.maxX * 2] }
-        let wholeEdges = pixelEdges.map { $0.rounded() }
-        #expect(pixelEdges == wholeEdges, "A line edge falls inside a device pixel: \(pixelEdges)")
+    typealias Guide = SidebarGuideLine.Guide
+    typealias Pieces = SidebarGuideLine.Pieces
+    typealias Turn = SidebarGuideLine.Turn
+    typealias Fade = SidebarGuideLine.Fade
+    typealias Run = SidebarGuideLine.Run
 
-        let offGridRetina = SidebarGuideLine.segments(xs: [28.75], active: [], gap: nil, isOnHighlight: false,
-                                                      in: Self.bounds, backingScale: 2)
-        let offGridStandard = SidebarGuideLine.segments(xs: [28.75], active: [], gap: nil, isOnHighlight: false,
-                                                        in: Self.bounds, backingScale: 1)
-        let retinaRects = offGridRetina.map(\.rect)
-        let standardRects = offGridStandard.map(\.rect)
-        let expectedRetina = [NSRect(x: 28.5, y: 0, width: 0.5, height: 28)]
-        let expectedStandard = [NSRect(x: 28, y: 0, width: 1, height: 28)]
-        #expect(retinaRects == expectedRetina)
-        #expect(standardRects == expectedStandard)
+    static let rest = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 2)
+    static let active = SidebarGuideLine.style(isActive: true, isOnHighlight: false, backingScale: 2)
+
+    /// Every constant the lines' shape draws with.
+    @Test func shapeValues() {
+        #expect(SidebarNativeMetrics.guideLineOffset == 6)
+        #expect(SidebarGuideLine.iconHalfHeight == 6)
+        #expect(SidebarGuideLine.stubGap == 2)
+        #expect(SidebarGuideLine.fadeLength == 12)
+        #expect(SidebarGuideLine.fadeStopCount == 9)
+        #expect(SidebarGuideLine.branchRadius == 4)
+        #expect(SidebarGuideLine.tickInset == 3)
     }
 
-    /// The gap leaves out its one line, and `Alphas.none` leaves out every
-    /// line: the comparison without guide lines.
-    @Test func gapAndNoneLeaveLinesOut() {
-        let gapped = SidebarGuideLine.segments(xs: [28, 44], active: [0, 1], gap: 1, isOnHighlight: false,
-                                               in: Self.bounds, backingScale: 2)
-        let gappedXs = gapped.map(\.rect.minX)
-        let outermostOnly: [CGFloat] = [28]
-        #expect(gappedXs == outermostOnly)
+    /// The pieces of the line under x 26 that a 28 pt row draws at 2x, for a
+    /// child whose content starts at 36, so its tick ends at 33.
+    static func pieces(_ role: SidebarGuideLine.Role, style: Style = SidebarGuideLineTests.rest, fadeStart: CGFloat? = nil,
+                       height: CGFloat = 28, fadeLength: CGFloat = SidebarGuideLine.fadeLength) -> Pieces? {
+        SidebarGuideLine.pieces(role: role, x: 26, tickEnd: 33, fadeStart: fadeStart, style: style,
+                                in: NSRect(x: 0, y: 0, width: 300, height: height), backingScale: 2,
+                                fadeLength: fadeLength)
+    }
 
-        let none = SidebarGuideLine.segments(xs: [28, 44], active: [0], gap: nil, isOnHighlight: true,
-                                             in: Self.bounds, backingScale: 2, alphas: .none)
-        #expect(none.isEmpty)
+    /// Each part a row can draw: a passing line the full height; a branch
+    /// the full height with its quarter turn of 4 pt on the row's centre and
+    /// its tick out to the child's content less 3 pt; the last child's line
+    /// from the top into its turn, and nothing below; the parent's stub from
+    /// 2 pt under its icon to the bottom, fading in.
+    @Test func piecesForEachRole() {
+        let fullHeight = NSRect(x: 26, y: 0, width: 0.5, height: 28)
+        let expectedPassing = Pieces(vertical: fullHeight, turn: nil, fade: nil, style: Self.rest)
+        #expect(Self.pieces(.passing) == expectedPassing)
+
+        let branchTurn = Turn(lineX: 26.25, startY: 10.25, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
+        let expectedBranch = Pieces(vertical: fullHeight, turn: branchTurn, fade: nil, style: Self.rest)
+        #expect(Self.pieces(.branch) == expectedBranch)
+        #expect(branchTurn.turnY == 10.25)
+
+        let lastTurn = Turn(lineX: 26.25, startY: 0, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
+        let expectedLast = Pieces(vertical: nil, turn: lastTurn, fade: nil, style: Self.rest)
+        #expect(Self.pieces(.last) == expectedLast)
+
+        let stubRect = NSRect(x: 26, y: 22, width: 0.5, height: 6)
+        let stubFade = Fade(rect: stubRect, start: 22, length: 12)
+        let expectedStub = Pieces(vertical: stubRect, turn: nil, fade: stubFade, style: Self.rest)
+        #expect(Self.pieces(.stub) == expectedStub)
+
+        // A point-wide active line: the turn's stroke stays half a width
+        // inside the line's edges and the tick's.
+        let activeTurn = Turn(lineX: 26.5, startY: 10.5, tickY: 14.5, endX: 33, radius: 4, width: 1)
+        let activeRect = NSRect(x: 26, y: 0, width: 1, height: 28)
+        let expectedActive = Pieces(vertical: activeRect, turn: activeTurn, fade: nil, style: Self.active)
+        #expect(Self.pieces(.branch, style: Self.active) == expectedActive)
+
+        // A tick that would end inside the turn runs to the turn's end.
+        let short = SidebarGuideLine.pieces(role: .branch, x: 26, tickEnd: 20, fadeStart: nil, style: Self.rest,
+                                            in: Self.bounds, backingScale: 2)
+        #expect(short?.turn?.endX == 30.25)
+
+        // A line with no alpha draws nothing.
+        let hidden = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 2, alphas: .none)
+        #expect(Self.pieces(.passing, style: hidden) == nil)
+    }
+
+    /// The line's left edge and the tick's top edge sit on device-pixel
+    /// boundaries at 1x and 2x — an x or a centre off the grid moves left or
+    /// up onto it — so every edge covers whole pixels.
+    @Test func piecesAlignToDevicePixels() throws {
+        let oddRow = NSRect(x: 0, y: 0, width: 300, height: 27)
+        let retinaStyle = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 2)
+        let standardStyle = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 1)
+        let retina = try #require(SidebarGuideLine.pieces(
+            role: .branch, x: 28.75, tickEnd: 40, fadeStart: nil, style: retinaStyle, in: oddRow, backingScale: 2))
+        let standard = try #require(SidebarGuideLine.pieces(
+            role: .branch, x: 28.75, tickEnd: 40, fadeStart: nil, style: standardStyle, in: oddRow, backingScale: 1))
+        let expectedRetina = Pieces(
+            vertical: NSRect(x: 28.5, y: 0, width: 0.5, height: 27),
+            turn: Turn(lineX: 28.75, startY: 9.75, tickY: 13.75, endX: 40, radius: 4, width: 0.5),
+            fade: nil, style: retinaStyle)
+        let expectedStandard = Pieces(
+            vertical: NSRect(x: 28, y: 0, width: 1, height: 27),
+            turn: Turn(lineX: 28.5, startY: 9.5, tickY: 13.5, endX: 40, radius: 4, width: 1),
+            fade: nil, style: standardStyle)
+        #expect(retina == expectedRetina)
+        #expect(standard == expectedStandard)
+
+        let retinaEdges = Self.pixelEdges(retina, scale: 2)
+        let standardEdges = Self.pixelEdges(standard, scale: 1)
+        let wholeRetina = retinaEdges.map { $0.rounded() }
+        let wholeStandard = standardEdges.map { $0.rounded() }
+        #expect(retinaEdges == wholeRetina, "An edge falls inside a device pixel at 2x: \(retinaEdges)")
+        #expect(standardEdges == wholeStandard, "An edge falls inside a device pixel at 1x: \(standardEdges)")
+    }
+
+    /// The line's left and right edges and the tick's top and bottom edges,
+    /// in device pixels.
+    static func pixelEdges(_ pieces: Pieces, scale: CGFloat) -> [CGFloat] {
+        var edges: [CGFloat] = []
+        if let vertical = pieces.vertical {
+            edges += [vertical.minX * scale, vertical.maxX * scale]
+        }
+        if let turn = pieces.turn {
+            let half = turn.width / 2
+            edges += [(turn.lineX - half) * scale, (turn.lineX + half) * scale,
+                      (turn.tickY - half) * scale, (turn.tickY + half) * scale]
+        }
+        return edges
+    }
+
+    /// The fade runs 12 pt from clear where the stub starts. A 28 pt
+    /// parent's stub holds the first 6 pt and its first child's top the
+    /// other 6; a 36 pt parent's stub holds 10, leaving 2. An only child
+    /// carries the fade into the line that ends in its turn. A later child, a
+    /// fade spent above the row, and a fade of length 0 draw no fade.
+    @Test func fadeRunsFromTheStubIntoTheFirstChild() throws {
+        #expect(SidebarGuideLine.stubStart(rowHeight: 28) == 22)
+        #expect(SidebarGuideLine.continuedFadeStart(ownerHeight: 28) == -6)
+        #expect(SidebarGuideLine.stubStart(rowHeight: 36) == 26)
+        #expect(SidebarGuideLine.continuedFadeStart(ownerHeight: 36) == -10)
+
+        let stubFade = try #require(Self.pieces(.stub)?.fade)
+        #expect(stubFade.startFraction == 0)
+        #expect(stubFade.endFraction == 0.5)
+
+        let child = try #require(Self.pieces(.branch, fadeStart: -6))
+        let childFade = Fade(rect: NSRect(x: 26, y: 0, width: 7, height: 6), start: -6, length: 12)
+        let fullHeight = NSRect(x: 26, y: 0, width: 0.5, height: 28)
+        #expect(child.fade == childFade)
+        #expect(child.vertical == fullHeight)
+        #expect(childFade.startFraction == 0.5)
+        #expect(childFade.endFraction == 1)
+
+        let tallStub = try #require(Self.pieces(.stub, height: 36))
+        let tallStubRect = NSRect(x: 26, y: 26, width: 0.5, height: 10)
+        let tallStubFade = Fade(rect: tallStubRect, start: 26, length: 12)
+        #expect(tallStub.vertical == tallStubRect)
+        #expect(tallStub.fade == tallStubFade)
+        #expect(tallStubFade.startFraction == 0)
+        #expect(abs(tallStubFade.endFraction - 10.0 / 12.0) < 1e-9)
+
+        let tallChildFade = try #require(Self.pieces(.branch, fadeStart: -10)?.fade)
+        let expectedTallChild = Fade(rect: NSRect(x: 26, y: 0, width: 7, height: 2), start: -10, length: 12)
+        #expect(tallChildFade == expectedTallChild)
+        #expect(abs(tallChildFade.startFraction - 10.0 / 12.0) < 1e-9)
+        #expect(tallChildFade.endFraction == 1)
+
+        let only = try #require(Self.pieces(.last, fadeStart: -6))
+        #expect(only.fade == childFade)
+        #expect(only.turn?.startY == 0)
+
+        #expect(Self.pieces(.branch)?.fade == nil, "A later child carries no fade")
+        #expect(Self.pieces(.branch, fadeStart: -12)?.fade == nil, "A fade spent above the row draws none in it")
+        let unfadedStub = Self.pieces(.stub, fadeLength: 0)
+        let stubRect = NSRect(x: 26, y: 22, width: 0.5, height: 6)
+        #expect(unfadedStub?.fade == nil)
+        #expect(unfadedStub?.vertical == stubRect)
+        #expect(Self.pieces(.branch, fadeStart: -6, fadeLength: 0)?.fade == nil)
+    }
+
+    /// The fade's gradient samples smoothstep at nine even stops, clear to
+    /// opaque.
+    @Test func fadeFollowsSmoothstep() {
+        let stops = SidebarGuideLine.fadeStops()
+        let locations = stops.map(\.location)
+        let alphas = stops.map(\.alpha)
+        let expectedLocations: [CGFloat] = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1]
+        let expectedAlphas: [CGFloat] = [0, 0.04296875, 0.15625, 0.31640625, 0.5, 0.68359375, 0.84375,
+                                         0.95703125, 1]
+        #expect(locations == expectedLocations)
+        #expect(alphas.count == expectedAlphas.count)
+        let deviation = zip(alphas, expectedAlphas).map { abs($0 - $1) }.max() ?? 1
+        #expect(deviation < 1e-9, "The fade's alphas are \(alphas)")
+        #expect(SidebarGuideLine.smoothstep(-1) == 0)
+        #expect(SidebarGuideLine.smoothstep(2) == 1)
+        #expect(SidebarGuideLine.fadeGradient() != nil)
+    }
+
+    /// The turn's stroke runs down the line from its start, turns, and ends
+    /// at the tick's end on the tick's centreline.
+    @Test func turnPathRunsDownTurnsAndTicks() {
+        let branch = Turn(lineX: 26.25, startY: 10.25, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
+        let last = Turn(lineX: 26.25, startY: 0, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
+        let branchPath = SidebarGuideLine.turnPath(branch)
+        let lastPath = SidebarGuideLine.turnPath(last)
+        let tickEnd = CGPoint(x: 33, y: 14.25)
+        #expect(branchPath.currentPoint == tickEnd)
+        #expect(lastPath.currentPoint == tickEnd)
+        let branchBox = branchPath.boundingBoxOfPath
+        let lastBox = lastPath.boundingBoxOfPath
+        let expectedBranchBox = NSRect(x: 26.25, y: 10.25, width: 6.75, height: 4)
+        let expectedLastBox = NSRect(x: 26.25, y: 0, width: 6.75, height: 14.25)
+        #expect(Self.isClose(branchBox, expectedBranchBox), "The branch's turn spans \(branchBox)")
+        #expect(Self.isClose(lastBox, expectedLastBox), "The last child's turn spans \(lastBox)")
+    }
+
+    static func isClose(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        let tolerance: CGFloat = 1e-6
+        return abs(lhs.minX - rhs.minX) < tolerance && abs(lhs.minY - rhs.minY) < tolerance
+            && abs(lhs.width - rhs.width) < tolerance && abs(lhs.height - rhs.height) < tolerance
     }
 
     /// The indices of a row's line owners that are active.
@@ -154,14 +320,27 @@ struct SidebarGuideLineTests {
         #expect(empty.isEmpty)
     }
 
+    /// A run on the owner's first child carries the fade from the owner's
+    /// row height; every other run carries none.
+    @Test func guidesCarryTheFadeOnTheFirstChild() {
+        let owner = SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(1))
+        let other = SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(2))
+        let runs = [Run(owner: other, level: 0, role: .passing, continuesFade: false),
+                    Run(owner: owner, level: 1, role: .last, continuesFade: true)]
+        let guides = SidebarGuideLine.guides(for: runs) { $0 == owner ? 36 : nil }
+        let expected = [Guide(level: 0, role: .passing), Guide(level: 1, role: .last, fadeStart: -10)]
+        #expect(guides == expected)
+    }
+
     /// The row view draws grey on a plain row and the nest target, accent on
-    /// a hovered or selected one, the active line at full strength, and
-    /// breaks the nearest ancestor's line for the pin.
+    /// a hovered or selected one, the active lines at full strength, its own
+    /// line last, and leaves out the line the pin sits on.
     @Test func rowViewStylesItsLines() {
         let rowView = SidebarRowView(frame: Self.bounds)
         rowView.appearance = NSAppearance(named: .aqua)
         let rowInset = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false)
-        let base = SidebarRowView.Configuration(contentOrigin: rowInset, guideCount: 2, activeGuides: [1])
+        let guides = [Guide(level: 0, role: .passing), Guide(level: 1, role: .last)]
+        let base = SidebarRowView.Configuration(contentOrigin: rowInset, level: 2, guides: guides, activeGuides: [1])
         let rest = SidebarGuideLine.style(isActive: false, isOnHighlight: false, backingScale: 2)
         let active = SidebarGuideLine.style(isActive: true, isOnHighlight: false, backingScale: 2)
         let restAccent = SidebarGuideLine.style(isActive: false, isOnHighlight: true, backingScale: 2)
@@ -170,9 +349,11 @@ struct SidebarGuideLineTests {
         let accent = [restAccent, activeAccent]
 
         rowView.configuration = base
-        let plainXs = rowView.guideSegments(backingScale: 2).map(\.rect.minX)
-        let expectedXs: [CGFloat] = [28, 44]
+        let plainXs = Self.lineLefts(rowView)
+        let expectedXs: [CGFloat] = [26, 42]
         #expect(plainXs == expectedXs)
+        #expect(rowView.guideLineXs == expectedXs)
+        #expect(rowView.tickEndX == 49)
         #expect(Self.styles(rowView) == grey, "A plain row draws grey lines")
 
         rowView.configuration.isHovered = true
@@ -190,18 +371,41 @@ struct SidebarGuideLineTests {
         rowView.configuration.isNestTarget = true
         #expect(Self.styles(rowView) == grey, "The nest target keeps grey lines")
 
+        // The row's own line starts last, at its own level, in its own
+        // strength.
         rowView.configuration = base
-        rowView.configuration.showsPinGap = true
-        let gappedXs = rowView.guideSegments(backingScale: 2).map(\.rect.minX)
-        let outermostOnly: [CGFloat] = [28]
-        #expect(gappedXs == outermostOnly, "The pin breaks the nearest ancestor's line")
+        rowView.configuration.drawsStub = true
+        let stubbedXs = Self.lineLefts(rowView)
+        let expectedStubbedXs: [CGFloat] = [26, 42, 58]
+        #expect(stubbedXs == expectedStubbedXs)
+        let restingStub = [rest, active, rest]
+        #expect(Self.styles(rowView) == restingStub)
+        rowView.configuration.isStubActive = true
+        let activeStub = [rest, active, active]
+        #expect(Self.styles(rowView) == activeStub)
 
-        let hidden = rowView.guideSegments(backingScale: 2, alphas: .none)
+        // The pin sits on the line a level up: that one leaves the row, the
+        // line two levels up and the row's own stay.
+        rowView.configuration.showsPinGap = true
+        let gappedXs = Self.lineLefts(rowView)
+        let expectedGappedXs: [CGFloat] = [26, 58]
+        #expect(gappedXs == expectedGappedXs, "The pin breaks only the line under it")
+
+        let hidden = rowView.guidePieces(backingScale: 2, alphas: .none)
         #expect(hidden.isEmpty)
     }
 
     static func styles(_ rowView: SidebarRowView) -> [Style] {
-        rowView.guideSegments(backingScale: 2).map(\.style)
+        rowView.guidePieces(backingScale: 2).map(\.style)
+    }
+
+    /// The left edge of each line the row draws, in order.
+    static func lineLefts(_ rowView: SidebarRowView) -> [CGFloat] {
+        rowView.guidePieces(backingScale: 2).map { pieces in
+            if let vertical = pieces.vertical { return vertical.minX }
+            if let turn = pieces.turn { return turn.lineX - turn.width / 2 }
+            return -1
+        }
     }
 
     // MARK: The outline's rule
@@ -308,6 +512,70 @@ struct SidebarGuideLineTests {
         #expect(tree.isShown(id("remoteChild")))
         #expect(!tree.isShown(id("shelvedChild")))
         #expect(!tree.isShown(.worktree(SidebarTreeDiffTests.uuid(999))))
+    }
+
+    /// Each row's part in each worktree line above it, and whether it starts
+    /// its own. A group under a worktree, and every row in it, draw none of
+    /// that worktree's line, which ends at its last worktree child; a row
+    /// whose only child is a group, open or closed, starts no line.
+    @Test func treeShapeRule() {
+        let fixture = Self.ruleTree()
+        let tree = fixture.tree
+        func id(_ name: String) -> SidebarNodeID { fixture.id(name) }
+        func run(_ owner: String, _ role: SidebarGuideLine.Role, fade: Bool = false) -> Run {
+            Run(owner: id(owner), level: 0, role: role, continuesFade: fade)
+        }
+        let names = ["parent", "first", "grandchild", "second", "remoteGroup", "remoteChild", "session", "leaf",
+                     "shelved", "shelvedChild", "outer", "inner", "deep"]
+        let runs = names.map { tree.guideRuns(of: id($0)) }
+        let expected: [[Run]] = [
+            [], // parent: its own line starts here
+            [run("parent", .branch, fade: true)], // the first child carries the fade on
+            [run("parent", .passing), run("first", .last, fade: true)], // parent's line passes by
+            [run("parent", .last)], // the last worktree child, though a group follows it
+            [], // the group draws none of parent's line
+            [], // nor does a row in it
+            [], // nor a session
+            [], [], [], // top-level rows, and a row in a closed group
+            [], // outer: its own line starts here
+            [run("outer", .last, fade: true)], // an only child
+            [], // under a group, and under outer's last child
+        ]
+        #expect(runs == expected)
+        let starts = names.map { tree.startsGuide(id($0)) }
+        let expectedStarts = [true, true, false, false, false, false, false, false, false, false, true, false, false]
+        #expect(starts == expectedStarts)
+
+        // A line from further up passes a group and the rows inside it:
+        // acme ▸ top ▸ (middle ▸ Remote ▸ (inside, session), after).
+        let uuids = (200...204).map { SidebarTreeDiffTests.uuid($0) }
+        let group = SidebarGroupID(owner: .parent(uuids[1]), kind: .remote)
+        let crossing = SidebarTree(roots: [
+            SidebarDropPolicyTests.repo(SidebarTreeDiffTests.uuid(210), [
+                SidebarDropPolicyTests.row(uuids[0], home: nil, [
+                    SidebarDropPolicyTests.row(uuids[1], home: nil, [
+                        SidebarDropPolicyTests.group(group, [
+                            SidebarDropPolicyTests.row(uuids[2], home: nil), SidebarDropPolicyTests.session(uuids[3]),
+                        ]),
+                    ]),
+                    SidebarDropPolicyTests.row(uuids[4], home: nil),
+                ]),
+            ]),
+        ])
+        let top = SidebarNodeID.worktree(uuids[0])
+        let middle = SidebarNodeID.worktree(uuids[1])
+        let crossed: [SidebarNodeID] = [middle, .group(group), .worktree(uuids[2]), .remoteSession(uuids[3]),
+                                        .worktree(uuids[4])]
+        let crossingRuns = crossed.map { crossing.guideRuns(of: $0) }
+        let passing = Run(owner: top, level: 0, role: .passing, continuesFade: false)
+        let expectedCrossing: [[Run]] = [
+            [Run(owner: top, level: 0, role: .branch, continuesFade: true)],
+            [passing], [passing], [passing],
+            [Run(owner: top, level: 0, role: .last, continuesFade: false)],
+        ]
+        #expect(crossingRuns == expectedCrossing)
+        #expect(crossing.startsGuide(top))
+        #expect(!crossing.startsGuide(middle), "A row whose only child is a group starts no line")
     }
 
     // MARK: The outline
@@ -433,13 +701,13 @@ struct SidebarGuideLineTests {
         #expect(h.controller.activeGuideAncestors == parentGroup, h.evidence(names))
 
         // The selected row draws its line in the highlight tint; its sibling
-        // keeps grey.
+        // keeps grey, for its parent's line and for the start of its own.
         let secondView = try #require(h.rowView(.worktree(f.second.id), make: true) as? SidebarRowView)
         let firstView = try #require(h.rowView(.worktree(f.first.id), make: true) as? SidebarRowView)
-        let secondColors = secondView.guideSegments(backingScale: 2).map(\.style.color)
-        let firstColors = firstView.guideSegments(backingScale: 2).map(\.style.color)
+        let secondColors = secondView.guidePieces(backingScale: 2).map(\.style.color)
+        let firstColors = firstView.guidePieces(backingScale: 2).map(\.style.color)
         let accent: [SidebarGuideLine.ColorRole] = [.highlightTint]
-        let grey: [SidebarGuideLine.ColorRole] = [.secondaryLabel]
+        let grey: [SidebarGuideLine.ColorRole] = [.secondaryLabel, .secondaryLabel]
         #expect(secondColors == accent, h.rowViewEvidence(.worktree(f.second.id), captured: secondView, names))
         #expect(firstColors == grey, h.rowViewEvidence(.worktree(f.first.id), captured: firstView, names))
 
@@ -483,6 +751,193 @@ struct SidebarGuideLineTests {
         tracker.pointerExited()
         let selectionOnly = try Self.activeGuides(f.rows, in: h)
         #expect(selectionOnly == Self.firstGroupActive, h.evidence(names))
+    }
+
+    // MARK: The outline's shape
+
+    /// p ▸ (c1 ▸ g1, c2, c3 ▸ g3); solo ▸ only; other, in one repo.
+    struct ShapeFixture {
+        let p: Worktree, c1: Worktree, g1: Worktree, c2: Worktree, c3: Worktree, g3: Worktree
+        let solo: Worktree, only: Worktree, other: Worktree
+
+        var all: [Worktree] { [p, c1, g1, c2, c3, g3, solo, only, other] }
+        var rows: [SidebarNodeID] { all.map { .worktree($0.id) } }
+        var names: [UUID: String] {
+            Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.name) })
+        }
+    }
+
+    static func mountShape(_ h: OutlineHarness) -> ShapeFixture {
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let p = SidebarOutlineControllerTests.row("p", repo, order: 0)
+        let c1 = SidebarOutlineControllerTests.row("c1", repo, parent: p.id, order: 0)
+        let g1 = SidebarOutlineControllerTests.row("g1", repo, parent: c1.id, order: 0)
+        let c2 = SidebarOutlineControllerTests.row("c2", repo, parent: p.id, order: 1)
+        let c3 = SidebarOutlineControllerTests.row("c3", repo, parent: p.id, order: 2)
+        let g3 = SidebarOutlineControllerTests.row("g3", repo, parent: c3.id, order: 0)
+        let solo = SidebarOutlineControllerTests.row("solo", repo, order: 1)
+        let only = SidebarOutlineControllerTests.row("only", repo, parent: solo.id, order: 0)
+        let other = SidebarOutlineControllerTests.row("other", repo, order: 2)
+        let fixture = ShapeFixture(p: p, c1: c1, g1: g1, c2: c2, c3: c3, g3: g3, solo: solo, only: only, other: other)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: fixture.all]
+        h.controller.selectionModifiers = { [] }
+        h.mount()
+        return fixture
+    }
+
+    /// Each fixture row's row view configuration, in `ids` order.
+    static func configurations(_ ids: [SidebarNodeID], in h: OutlineHarness,
+                               _ names: [UUID: String]) throws -> [SidebarRowView.Configuration] {
+        var result: [SidebarRowView.Configuration] = []
+        for id in ids {
+            let view = try #require(h.rowView(id, make: true) as? SidebarRowView,
+                                    "No row view for \(id): \(h.evidence(names).rawValue)")
+            result.append(view.configuration)
+        }
+        return result
+    }
+
+    /// The left edge of each line `id`'s row draws, in order.
+    static func lineLefts(_ id: SidebarNodeID, in h: OutlineHarness) throws -> [CGFloat] {
+        let view = try #require(h.rowView(id, make: true) as? SidebarRowView, "No row view for \(id)")
+        return lineLefts(view)
+    }
+
+    /// A parent with three children: the first carries the fade on, the
+    /// middle branches, the last ends the line. A grandchild before the last
+    /// child draws the parent's line passing; the last child's own child
+    /// draws none of it. An only child is first and last at once, and a leaf
+    /// starts no line.
+    @Test func outlineRowsDrawTheirPartsOfEachLine() throws {
+        let h = OutlineHarness("guides.shape")
+        defer { h.tearDown() }
+        let f = Self.mountShape(h)
+        let names = f.names
+        let configurations = try Self.configurations(f.rows, in: h, names)
+        let levels = configurations.map(\.level)
+        let guides = configurations.map(\.guides)
+        let stubs = configurations.map(\.drawsStub)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        #expect(fade == -6)
+        let expectedLevels = [0, 1, 2, 1, 1, 2, 0, 1, 0]
+        let expectedGuides: [[Guide]] = [
+            [], // p
+            [Guide(level: 0, role: .branch, fadeStart: fade)], // c1, the first child
+            [Guide(level: 0, role: .passing), Guide(level: 1, role: .last, fadeStart: fade)], // g1
+            [Guide(level: 0, role: .branch)], // c2, a middle child
+            [Guide(level: 0, role: .last)], // c3, the last child
+            [Guide(level: 1, role: .last, fadeStart: fade)], // g3, under the last child
+            [], // solo
+            [Guide(level: 0, role: .last, fadeStart: fade)], // only, an only child
+            [], // other, a leaf
+        ]
+        let expectedStubs = [true, true, false, false, true, false, true, false, false]
+        #expect(levels == expectedLevels, h.evidence(names))
+        #expect(guides == expectedGuides, h.evidence(names))
+        #expect(stubs == expectedStubs, h.evidence(names))
+
+        // At rest no line is active, the stubs included; hovering a child
+        // lights its parent's stub, and no other.
+        let restingStubs = configurations.map(\.isStubActive)
+        let noneLit = [false, false, false, false, false, false, false, false, false]
+        #expect(restingStubs == noneLit, h.evidence(names))
+        let tracker = try #require(h.controller.hoverTracker)
+        let c2Point = try #require(SidebarInteractionTests.windowPoint(of: .worktree(f.c2.id), in: h))
+        tracker.pointerMoved(toWindowPoint: c2Point)
+        try #require(h.controller.hoverState.row == .worktree(f.c2.id), h.evidence(names))
+        let hovered = try Self.configurations(f.rows, in: h, names).map(\.isStubActive)
+        let pLit = [true, false, false, false, false, false, false, false, false]
+        #expect(hovered == pLit, h.evidence(names))
+    }
+
+    /// The gutter pin is centred on the line a level up — the parent's — so
+    /// a row showing it leaves that line out; a line further up and the
+    /// row's own line stay. A row without the pin draws them all.
+    @Test func pinBreaksOnlyTheLineUnderIt() throws {
+        let h = OutlineHarness("guides.pin")
+        defer { h.tearDown() }
+        let f = Self.mountShape(h)
+        let names = f.names
+        let p = SidebarNodeID.worktree(f.p.id)
+        let c1 = SidebarNodeID.worktree(f.c1.id)
+        let g1 = SidebarNodeID.worktree(f.g1.id)
+        let pConfigurations = try Self.configurations([p], in: h, names)
+        let origin = try #require(pConfigurations.first?.contentOrigin)
+        let pLine = origin + 6
+        let c1Line = origin + 22
+
+        // At rest no pin shows.
+        let restingG1 = try Self.lineLefts(g1, in: h)
+        let restingC1 = try Self.lineLefts(c1, in: h)
+        let bothLines = [pLine, c1Line]
+        #expect(restingG1 == bothLines, h.evidence(names))
+        #expect(restingC1 == bothLines, h.evidence(names))
+
+        let tracker = try #require(h.controller.hoverTracker)
+        let steps: [(row: SidebarNodeID, lines: [CGFloat], label: String)] = [
+            (g1, [pLine], "the pin breaks c1's line on g1 and leaves p's"),
+            (c1, [c1Line], "the pin breaks p's line on c1 and leaves c1's own"),
+            (p, [pLine], "a top-level row's pin sits on no line"),
+        ]
+        for step in steps {
+            let point = try #require(SidebarInteractionTests.windowPoint(of: step.row, in: h), h.evidence(names))
+            tracker.pointerMoved(toWindowPoint: point)
+            try #require(h.controller.hoverState.row == step.row, h.evidence(names))
+            let stepConfigurations = try Self.configurations([step.row], in: h, names)
+            let gap = try #require(stepConfigurations.first?.showsPinGap)
+            #expect(gap, "\(step.label): \(h.evidence(names).rawValue)")
+            let lines = try Self.lineLefts(step.row, in: h)
+            #expect(lines == step.lines, "\(step.label): \(h.evidence(names).rawValue)")
+        }
+    }
+
+    /// With workflow groups, a worktree's Remote group and the rows in it
+    /// draw none of the worktree's line, which ends at its last worktree
+    /// child. Without a worktree child, its only child the group, the row
+    /// starts no line, the group open or closed.
+    @Test func groupsUnderAWorktreeDrawNoneOfItsLine() throws {
+        let h = OutlineHarness("guides.groups")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let fleet = SidebarTreeBuilderTests.makeFleet(in: h.state)
+        let parentRemote = SidebarGroupID(owner: .parent(fleet.working.id), kind: .remote)
+        h.state.expandedSidebarGroups = [parentRemote]
+        h.mount()
+        let names = [fleet.working.id: "working", fleet.localChild.id: "local child", fleet.worker.id: "worker"]
+        let working = SidebarNodeID.worktree(fleet.working.id)
+        let worker = SidebarNodeID.worktree(fleet.worker.id)
+        let ids: [SidebarNodeID] = [working, .worktree(fleet.localChild.id), .group(parentRemote), worker]
+        try #require(h.row(worker) >= 0, "The worker must show in the open Remote group: \(h.evidence(names).rawValue)")
+
+        let configurations = try Self.configurations(ids, in: h, names)
+        let levels = configurations.map(\.level)
+        let guides = configurations.map(\.guides)
+        let stubs = configurations.map(\.drawsStub)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let expectedLevels = [0, 1, 1, 2]
+        let expectedGuides: [[Guide]] = [[], [Guide(level: 0, role: .last, fadeStart: fade)], [], []]
+        let expectedStubs = [true, false, false, false]
+        #expect(levels == expectedLevels, h.evidence(names))
+        #expect(guides == expectedGuides, h.evidence(names))
+        #expect(stubs == expectedStubs, h.evidence(names))
+
+        // The local child goes: the group is the row's only child.
+        h.state.worktrees[fleet.repoID]?.removeAll { $0.id == fleet.localChild.id }
+        h.controller.flushPendingRebuild()
+        let open = try Self.configurations([working, worker], in: h, names)
+        let openStubs = open.map(\.drawsStub)
+        let openGuides = open.map(\.guides)
+        let neither = [false, false]
+        let noGuides: [[Guide]] = [[], []]
+        #expect(openStubs == neither, h.evidence(names))
+        #expect(openGuides == noGuides, h.evidence(names))
+
+        h.state.expandedSidebarGroups = []
+        h.controller.flushPendingRebuild()
+        let closedConfigurations = try Self.configurations([working], in: h, names)
+        let closed = try #require(closedConfigurations.first)
+        #expect(!closed.drawsStub, h.evidence(names))
     }
 
     // MARK: The dock
@@ -568,6 +1023,105 @@ struct SidebarGuideLineTests {
         let exited = try h.activeGuides(rows)
         #expect(exited == childGroup)
     }
+
+    /// The dock's shape from its preorder rows: the outline's roles, levels
+    /// from depths, the fade on a parent's first child, and nothing of a
+    /// line below its last child.
+    @Test func dockShapeRule() {
+        let ids = (1...7).map { SidebarTreeDiffTests.uuid($0) }
+        let a = SidebarNodeID.worktree(ids[0])
+        let a1 = SidebarNodeID.worktree(ids[1])
+        let a1x = SidebarNodeID.worktree(ids[2])
+        let a2 = SidebarNodeID.worktree(ids[3])
+        let b = SidebarNodeID.worktree(ids[4])
+        let lane = SidebarNodeID.remoteSession(ids[5])
+        let a2x = SidebarNodeID.worktree(ids[6])
+        func row(_ id: SidebarNodeID, _ depth: Int) -> DockRow {
+            DockRow(id: id, kind: .worktree(SidebarCellTests.worktree(name: "row")), depth: depth)
+        }
+        let rows = [row(a, 0), row(a1, 1), row(a1x, 2), row(a2, 1), row(b, 0),
+                    DockRow(id: lane, kind: .remoteSession(SidebarCellTests.session(title: "lane")), depth: 0)]
+        let runs = rows.indices.map { DockTableController.guideRuns(ofRow: $0, in: rows) }
+        let expected: [[Run]] = [
+            [],
+            [Run(owner: a, level: 0, role: .branch, continuesFade: true)],
+            [Run(owner: a, level: 0, role: .passing, continuesFade: false),
+             Run(owner: a1, level: 1, role: .last, continuesFade: true)],
+            [Run(owner: a, level: 0, role: .last, continuesFade: false)],
+            [],
+            [],
+        ]
+        #expect(runs == expected)
+        let starts = rows.indices.map { DockTableController.startsGuide(ofRow: $0, in: rows) }
+        let expectedStarts = [true, true, false, false, false, false]
+        #expect(starts == expectedStarts)
+
+        // The last child's own child draws nothing of the root's line.
+        let tail = [row(a, 0), row(a1, 1), row(a2, 1), row(a2x, 2)]
+        let tailRuns = DockTableController.guideRuns(ofRow: 3, in: tail)
+        let expectedTail = [Run(owner: a2, level: 1, role: .last, continuesFade: true)]
+        #expect(tailRuns == expectedTail)
+    }
+
+    /// The dock's row views draw their parts: the open root starts its line,
+    /// its children branch and end it, a grandchild draws it passing. A
+    /// pinned root whose subtree is closed starts no line; selecting it opens
+    /// the subtree, and the line starts.
+    @Test func dockRowsDrawTheirPartsOfEachLine() throws {
+        let h = GuideDockHarness("guides.dockShape")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        var a = SidebarOutlineControllerTests.row("a", repo, order: 0)
+        a.pinnedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        a.pinSortOrder = 0
+        let a1 = SidebarOutlineControllerTests.row("a1", repo, parent: a.id, order: 0)
+        let a1x = SidebarOutlineControllerTests.row("a1x", repo, parent: a1.id, order: 0)
+        let a2 = SidebarOutlineControllerTests.row("a2", repo, parent: a.id, order: 1)
+        var b = SidebarOutlineControllerTests.row("b", repo, order: 1)
+        b.pinnedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        b.pinSortOrder = 1
+        let b1 = SidebarOutlineControllerTests.row("b1", repo, parent: b.id, order: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [a, a1, a1x, a2, b, b1]]
+        h.state.selectedWorktreeIDs = [a.id]
+        h.mount()
+        let rows: [SidebarNodeID] = [a, a1, a1x, a2, b].map { .worktree($0.id) }
+        let dockIDs = h.dock.rows.map(\.id)
+        try #require(dockIDs == rows, "The dock shows \(dockIDs)")
+
+        let configurations = try h.configurations(rows)
+        let levels = configurations.map(\.level)
+        let guides = configurations.map(\.guides)
+        let stubs = configurations.map(\.drawsStub)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let expectedLevels = [0, 1, 2, 1, 0]
+        let expectedGuides: [[Guide]] = [
+            [],
+            [Guide(level: 0, role: .branch, fadeStart: fade)],
+            [Guide(level: 0, role: .passing), Guide(level: 1, role: .last, fadeStart: fade)],
+            [Guide(level: 0, role: .last)],
+            [],
+        ]
+        let expectedStubs = [true, true, false, false, false]
+        #expect(levels == expectedLevels)
+        #expect(guides == expectedGuides)
+        #expect(stubs == expectedStubs, "A root whose subtree is closed starts no line")
+
+        // Selecting b closes a's subtree and opens b's: a's line goes, b's
+        // starts, and its only child ends it.
+        h.state.selectedWorktreeIDs = [b.id]
+        h.flush()
+        let opened: [SidebarNodeID] = [a, b, b1].map { .worktree($0.id) }
+        let openedIDs = h.dock.rows.map(\.id)
+        try #require(openedIDs == opened, "The dock shows \(openedIDs)")
+        let reopened = try h.configurations(opened)
+        let reopenedStubs = reopened.map(\.drawsStub)
+        let reopenedGuides = reopened.map(\.guides)
+        let expectedReopenedStubs = [false, true, false]
+        let expectedReopenedGuides: [[Guide]] = [[], [], [Guide(level: 0, role: .last, fadeStart: fade)]]
+        #expect(reopenedStubs == expectedReopenedStubs)
+        #expect(reopenedGuides == expectedReopenedGuides)
+    }
 }
 
 /// The sidebar's container, mounted offscreen, for its dock: the shape
@@ -613,6 +1167,19 @@ private final class GuideDockHarness {
         guard index >= 0 else { return nil }
         let rect = dock.table.rect(ofRow: index)
         return dock.table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+    }
+
+    /// Each row's row view configuration, in `ids` order.
+    func configurations(_ ids: [SidebarNodeID]) throws -> [SidebarRowView.Configuration] {
+        host?.layout()
+        var result: [SidebarRowView.Configuration] = []
+        for id in ids {
+            let index = row(id)
+            let view = try #require(dock.table.rowView(atRow: index, makeIfNecessary: true) as? SidebarRowView,
+                                    "No dock row view for \(id) at \(index)")
+            result.append(view.configuration)
+        }
+        return result
     }
 
     /// Each row's active guide lines, in `ids` order.

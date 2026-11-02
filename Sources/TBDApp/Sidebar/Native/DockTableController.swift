@@ -443,6 +443,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             if let old = before[row.id], old != row { changed.insert(row.id) }
         }
         reconfigure(changed)
+        // A row's part in its parent's line follows its siblings, so a
+        // change to the rows or their depths redraws every row's lines.
+        if oldIDs != newIDs || previous.map(\.depth) != target.map(\.depth) {
+            refreshRowViewConfigurations()
+        }
     }
 
     /// `shown`'s rows carrying `latest`'s models: what a held apply shows, so a
@@ -573,9 +578,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard rows.indices.contains(row) else { return PinnedDockMetrics.rowHeight }
-        switch rows[row].kind {
-        case .worktree(let model): return WorktreeRowCell.height(for: model)
-        case .remoteSession(let model): return RemoteSessionRowCell.height(for: model)
+        return Self.height(of: rows[row])
+    }
+
+    /// The fixed height of `row`: its cell's for its model.
+    static func height(of row: DockRow) -> CGFloat {
+        switch row.kind {
+        case .worktree(let model): WorktreeRowCell.height(for: model)
+        case .remoteSession(let model): RemoteSessionRowCell.height(for: model)
         }
     }
 
@@ -608,8 +618,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         applyHover(to: cell, id: id)
     }
 
-    /// The row view's guide lines — one per level of a descendant's depth,
-    /// as `WorktreeRowView` draws them, active where their owner is in
+    /// The row view's guide lines — its part in each line above it, by the
+    /// outline's shape (`guideRuns(ofRow:in:)`), and its own line's start
+    /// when its children show under it — active where their owner is in
     /// `activeGuideAncestors`, broken where the gutter pin shows: on hover,
     /// and always once pinned — and its hover highlight.
     private func configureRowView(_ rowView: SidebarRowView, at index: Int) {
@@ -619,23 +630,86 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
-            configuration.guideCount = row.depth
+            configuration.level = row.depth
+            let runs = Self.guideRuns(ofRow: index, in: rows)
+            configuration.guides = SidebarGuideLine.guides(for: runs) { owner in
+                self.rows.first(where: { $0.id == owner }).map { Self.height(of: $0) }
+            }
             if !activeGuideAncestors.isEmpty {
                 configuration.activeGuides = SidebarGuideLine.activeIndices(
-                    of: Self.guideAncestors(ofRow: index, in: rows), active: activeGuideAncestors)
+                    of: runs.map(\.owner), active: activeGuideAncestors)
             }
+            configuration.drawsStub = Self.startsGuide(ofRow: index, in: rows)
+            configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(row.id)
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
         configuration.isHovered = isHovered
         rowView.configuration = configuration
     }
 
+    /// Re-derives every row view's configuration from the rows each view
+    /// shows: after the rows' structure changes, and when the active guide
+    /// lines change. A view whose configuration is unchanged does not redraw.
+    private func refreshRowViewConfigurations() {
+        table.enumerateAvailableRowViews { rowView, index in
+            guard let rowView = rowView as? SidebarRowView else { return }
+            self.configureRowView(rowView, at: index)
+        }
+    }
+
+    // MARK: Guide line shape
+
+    /// The lines the row at `index` draws a part of, outermost owner first,
+    /// by the outline's shape (`SidebarTree.guideRuns(of:)`): a branch off its
+    /// parent's line, `.last` on the parent's last child; the line of an
+    /// ancestor whose child on the way down has a later sibling, passing; no
+    /// part of a line below where it ended. The rows are a preorder walk, so
+    /// an owner's level is its depth, and a later sibling of the row's
+    /// ancestor at a depth is the next row at that depth before the walk
+    /// climbs above it.
+    static func guideRuns(ofRow index: Int, in rows: [DockRow]) -> [SidebarGuideLine.Run] {
+        guard rows.indices.contains(index), rows[index].isWorktree else { return [] }
+        let depth = rows[index].depth
+        var runs: [SidebarGuideLine.Run] = []
+        for (level, owner) in guideAncestors(ofRow: index, in: rows).enumerated() {
+            let hasLaterSibling = hasLaterRow(atDepth: level + 1, after: index, in: rows)
+            if depth == level + 1 {
+                runs.append(SidebarGuideLine.Run(
+                    owner: owner, level: level, role: hasLaterSibling ? .branch : .last,
+                    continuesFade: index > 0 && rows[index - 1].id == owner))
+            } else if hasLaterSibling {
+                runs.append(SidebarGuideLine.Run(owner: owner, level: level, role: .passing, continuesFade: false))
+            }
+        }
+        return runs
+    }
+
+    /// Whether a worktree row at `depth` follows `index` before the walk
+    /// climbs above `depth`.
+    static func hasLaterRow(atDepth depth: Int, after index: Int, in rows: [DockRow]) -> Bool {
+        var cursor = index + 1
+        while cursor < rows.count, rows[cursor].isWorktree {
+            let next = rows[cursor].depth
+            if next < depth { return false }
+            if next == depth { return true }
+            cursor += 1
+        }
+        return false
+    }
+
+    /// Whether the row at `index` starts a line of its own: a worktree row
+    /// with its children shown under it.
+    static func startsGuide(ofRow index: Int, in rows: [DockRow]) -> Bool {
+        let next = index + 1
+        guard rows.indices.contains(index), rows[index].isWorktree, rows.indices.contains(next) else { return false }
+        return rows[next].isWorktree && rows[next].depth == rows[index].depth + 1
+    }
+
     // MARK: Active guide lines
 
-    /// The rows the row at `index` sits under, outermost first: the owners of
-    /// its guide lines, one per level of its depth. The rows are a preorder
-    /// walk of each pinned subtree, so a row's parent is the nearest row
-    /// above it one level up.
+    /// The rows the row at `index` sits under, outermost first, one per level
+    /// of its depth. The rows are a preorder walk of each pinned subtree, so
+    /// a row's parent is the nearest row above it one level up.
     static func guideAncestors(ofRow index: Int, in rows: [DockRow]) -> [SidebarNodeID] {
         guard rows.indices.contains(index) else { return [] }
         var ancestors: [SidebarNodeID] = []
@@ -658,10 +732,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// none.
     static func activeGuideAncestor(ofRow index: Int, in rows: [DockRow]) -> SidebarNodeID? {
         guard rows.indices.contains(index), rows[index].isWorktree else { return nil }
-        let next = index + 1
-        if rows.indices.contains(next), rows[next].isWorktree, rows[next].depth == rows[index].depth + 1 {
-            return rows[index].id
-        }
+        if startsGuide(ofRow: index, in: rows) { return rows[index].id }
         return guideAncestors(ofRow: index, in: rows).last
     }
 
@@ -691,10 +762,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         let active = focusedGuideAncestors()
         guard active != activeGuideAncestors else { return }
         activeGuideAncestors = active
-        table.enumerateAvailableRowViews { rowView, index in
-            guard let rowView = rowView as? SidebarRowView else { return }
-            self.configureRowView(rowView, at: index)
-        }
+        refreshRowViewConfigurations()
     }
 
     // MARK: Hover

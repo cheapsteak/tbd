@@ -19,9 +19,10 @@ enum SidebarNativeMetrics {
     /// Where the SwiftUI list's row content starts before any row inset.
     static let listEdgeInset: CGFloat = 8
 
-    /// A guide line's offset into its level's indentation step: the line runs
-    /// down the gutter under that level's leading icon.
-    static let guideLineOffset: CGFloat = 8
+    /// A guide line's offset into its owner's indentation step: the owner's
+    /// leading icon is 12 pt wide at the level's origin, so its line runs down
+    /// under the icon's centre.
+    static let guideLineOffset: CGFloat = 6
 
     /// Where a section header's chrome starts: `headerRowLeadingInset`, moved
     /// clear of the row highlight's leading edge.

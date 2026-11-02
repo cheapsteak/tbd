@@ -105,14 +105,17 @@ struct DockTableControllerTests {
         #expect(rootSelected == open, h.evidence(names))
         let depths = h.depths
         #expect(depths == [0, 1, 2, 0])
-        // A descendant's content moves one indentation step per level, and
-        // its row view draws one guide line per level.
+        // A descendant's content moves one indentation step per level. Its
+        // row view draws its parent's line, which ends in its turn, and none
+        // of the root's, which ended at its last child, a1.
         let deepCell = h.cell(.worktree(a1x.id)) as? WorktreeRowCell
         let deepInset = deepCell?.leadingInset
         #expect(deepInset == DockTableController.rowInset + 2 * SidebarNativeMetrics.indentation)
         let deepRowView = h.rowView(.worktree(a1x.id))
-        let deepGuides = deepRowView?.configuration.guideCount
-        #expect(deepGuides == 2)
+        let deepGuides = deepRowView?.configuration.guides
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let parentLine = [SidebarGuideLine.Guide(level: 1, role: .last, fadeStart: fade)]
+        #expect(deepGuides == parentLine)
 
         // Selecting a descendant keeps the subtree open: clicking a child in
         // the dock must not make it vanish.

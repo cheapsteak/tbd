@@ -9,33 +9,40 @@ import AppKit
 /// bounds, with the indentation inside it. Its colour and shape are
 /// `SidebarRowHighlight`'s.
 ///
-/// The guide lines follow depth, in the SwiftUI row's terms. A worktree row's
-/// content sits at the row inset plus `depth * 16`, where its depth splits in
-/// two: the padding a group header adds around its rows (`indentLevel`), and
-/// the row's worktree ancestry (`guideCount`) — `WorktreeRowView`'s
-/// `indentLevel`. One guide line runs per worktree ancestor, at
-/// `depth * 16 + 8` from where the group padding ends, where the SwiftUI row
-/// draws its lines.
+/// The guide lines follow depth, in the SwiftUI row's terms: a row's content
+/// sits at the row inset plus `level * 16`, and an owner's line runs under its
+/// leading icon, `SidebarNativeMetrics.guideLineOffset` into its level. The
+/// configuration names each line the row draws a part of (`guides`) by its
+/// owner's level and the row's part in it, and whether the row starts a line
+/// of its own (`drawsStub`); `SidebarGuideLine` turns those into pieces.
 ///
 /// How each line draws is `SidebarGuideLine`'s: a hairline at rest, full
-/// strength for the lines the controller marks active (`activeGuides`), and
-/// the accent colour over the row's hover or selection highlight.
+/// strength for the lines the controller marks active (`activeGuides`,
+/// `isStubActive`), and the accent colour over the row's hover or selection
+/// highlight.
 final class SidebarRowView: NSTableRowView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.row")
 
     struct Configuration: Equatable {
         /// Where a depth-0 row's content starts in the row view.
         var contentOrigin: CGFloat = 0
-        /// The levels of group padding before the row's own indentation: the
-        /// guide lines start past them.
-        var indentLevel = 0
-        /// One guide line per worktree ancestor.
-        var guideCount = 0
-        /// The guide lines of the focused group, which draw at full
-        /// strength: indices into `guideLineXs`, 0 for the outermost
-        /// ancestor's line. The rest draw at rest.
+        /// The row's own indentation level: its content starts `level`
+        /// indentation steps past `contentOrigin`.
+        var level = 0
+        /// The lines of the worktree rows above the row that it draws a part
+        /// of, outermost first: each owner's level and the row's role in its
+        /// line.
+        var guides: [SidebarGuideLine.Guide] = []
+        /// The lines of the focused group, which draw at full strength:
+        /// indices into `guides`. The rest draw at rest.
         var activeGuides = IndexSet()
-        /// The gutter pin is showing, so the line it would sit on breaks.
+        /// The row's worktree children show, so its own line starts here,
+        /// under its leading icon.
+        var drawsStub = false
+        /// The row's own line is the focused group's.
+        var isStubActive = false
+        /// The gutter pin is showing, so the line it sits on — the one a
+        /// level up, under the pin's centre — leaves the row out.
         var showsPinGap = false
         /// The row's model names it selected though the list does not select
         /// it: a repo, Scratch or provider header, which runs an action on a
@@ -48,6 +55,9 @@ final class SidebarRowView: NSTableRowView {
         /// highlight in the highlight's shape. The outline draws no drop
         /// feedback of its own.
         var isNestTarget = false
+
+        /// How many ancestors' lines the row draws a part of.
+        var guideCount: Int { guides.count }
     }
 
     var configuration = Configuration() {
@@ -91,18 +101,24 @@ final class SidebarRowView: NSTableRowView {
         needsDisplay = true
     }
 
-    /// Where the row's own indentation starts, past its group padding: the
-    /// guide lines are measured from here.
-    var indentOrigin: CGFloat {
-        configuration.contentOrigin + CGFloat(configuration.indentLevel) * SidebarNativeMetrics.indentation
+    /// The x of the line owned by a row at `level`: under its leading icon.
+    /// Whole points, since the content origin, the indentation and the
+    /// offset all are.
+    func lineX(level: Int) -> CGFloat {
+        configuration.contentOrigin + CGFloat(level) * SidebarNativeMetrics.indentation
+            + SidebarNativeMetrics.guideLineOffset
     }
 
-    /// The x of each guide line, nearest ancestor last. Whole points, since
-    /// the content origin, the indentation and the offset all are.
+    /// The x of each ancestor's line the row draws, outermost first.
     var guideLineXs: [CGFloat] {
-        (0..<configuration.guideCount).map {
-            indentOrigin + CGFloat($0) * SidebarNativeMetrics.indentation + SidebarNativeMetrics.guideLineOffset
-        }
+        configuration.guides.map { lineX(level: $0.level) }
+    }
+
+    /// Where a branch's tick ends: `SidebarGuideLine.tickInset` short of the
+    /// row's own content.
+    var tickEndX: CGFloat {
+        configuration.contentOrigin + CGFloat(configuration.level) * SidebarNativeMetrics.indentation
+            - SidebarGuideLine.tickInset
     }
 
     /// Device pixels per point where the row draws: its window's, else the
@@ -111,18 +127,36 @@ final class SidebarRowView: NSTableRowView {
         window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? SidebarGuideLine.defaultBackingScale
     }
 
-    /// The guide lines the row draws, outermost first, each in its style:
-    /// active or at rest, and in the accent colour while the row draws a
-    /// highlight — hovered or selected, not the nest target's wash. The pin
-    /// lands in the row's own gutter, on the nearest ancestor's line, so that
-    /// one segment breaks rather than strike the glyph.
-    func guideSegments(backingScale: CGFloat,
-                       alphas: SidebarGuideLine.Alphas = SidebarGuideLine.alphas) -> [SidebarGuideLine.Segment] {
-        let xs = guideLineXs
-        guard !xs.isEmpty else { return [] }
-        return SidebarGuideLine.segments(
-            xs: xs, active: configuration.activeGuides, gap: configuration.showsPinGap ? xs.count - 1 : nil,
-            isOnHighlight: highlightAlpha != nil, in: bounds, backingScale: backingScale, alphas: alphas)
+    /// What the row draws of each line, outermost ancestor first and its own
+    /// line last, each in its style: active or at rest, and in the accent
+    /// colour while the row draws a highlight — hovered or selected, not the
+    /// nest target's wash. The pin lands in the row's own gutter, centred on
+    /// the line a level up — its parent's — and over that line's turn and
+    /// tick, so that line leaves the row out rather than strike the glyph.
+    func guidePieces(backingScale: CGFloat,
+                     alphas: SidebarGuideLine.Alphas = SidebarGuideLine.alphas) -> [SidebarGuideLine.Pieces] {
+        let isOnHighlight = highlightAlpha != nil
+        let pinnedLevel = configuration.showsPinGap ? configuration.level - 1 : nil
+        let tickEnd = tickEndX
+        var result: [SidebarGuideLine.Pieces] = []
+        func appendPieces(role: SidebarGuideLine.Role, level: Int, fadeStart: CGFloat?, isActive: Bool) {
+            let style = SidebarGuideLine.style(isActive: isActive, isOnHighlight: isOnHighlight,
+                                               backingScale: backingScale, alphas: alphas)
+            if let pieces = SidebarGuideLine.pieces(
+                role: role, x: lineX(level: level), tickEnd: tickEnd, fadeStart: fadeStart,
+                style: style, in: bounds, backingScale: backingScale) {
+                result.append(pieces)
+            }
+        }
+        for (index, guide) in configuration.guides.enumerated() where guide.level != pinnedLevel {
+            appendPieces(role: guide.role, level: guide.level, fadeStart: guide.fadeStart,
+                         isActive: configuration.activeGuides.contains(index))
+        }
+        if configuration.drawsStub {
+            appendPieces(role: .stub, level: configuration.level, fadeStart: nil,
+                         isActive: configuration.isStubActive)
+        }
+        return result
     }
 
     /// The highlight's area: the same on every row.
@@ -199,18 +233,25 @@ final class SidebarRowView: NSTableRowView {
     }
 
     /// The guide lines go over the highlight, as the SwiftUI row overlays
-    /// them on its tint. Each style's alpha multiplies its colour's own, as
-    /// `Color.secondary.opacity(_:)` does.
+    /// them on its tint. The pieces are in flipped coordinates, so an
+    /// unflipped row draws them through a flip. Each style's alpha
+    /// multiplies its colour's own, as `Color.secondary.opacity(_:)` does.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let segments = guideSegments(backingScale: backingScale)
-        guard !segments.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
-        for segment in segments {
-            context.saveGState()
-            context.setAlpha(segment.style.alpha)
-            segment.style.color.nsColor(appearance: effectiveAppearance).setFill()
-            segment.rect.fill()
-            context.restoreGState()
+        let pieces = guidePieces(backingScale: backingScale)
+        guard !pieces.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        if !isFlipped {
+            context.translateBy(x: 0, y: bounds.minY + bounds.maxY)
+            context.scaleBy(x: 1, y: -1)
         }
+        var colors: [SidebarGuideLine.ColorRole: CGColor] = [:]
+        for piece in pieces {
+            let role = piece.style.color
+            let color = colors[role] ?? role.cgColor(appearance: effectiveAppearance)
+            colors[role] = color
+            SidebarGuideLine.draw(piece, color: color, in: context)
+        }
+        context.restoreGState()
     }
 }

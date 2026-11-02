@@ -3,8 +3,8 @@ import Foundation
 /// Which guide lines draw active: the group a focus row — the hovered row, or
 /// a selected worktree row — is in.
 ///
-/// A guide line belongs to a worktree row and runs down every row in its
-/// subtree. A focus row lights the line of its *active ancestor*:
+/// A guide line belongs to a worktree row and runs down past its children
+/// (`guideRuns(of:)`). A focus row lights the line of its *active ancestor*:
 /// - **A worktree row whose subtree shows a worktree row** — a child, or one
 ///   inside an expanded group under it — lights its own line, the one down
 ///   its children.
@@ -14,9 +14,8 @@ import Foundation
 /// - **A top-level worktree row with nothing shown under it, a header, a
 ///   group header, a remote session or the scratch prompt** lights nothing.
 extension SidebarTree {
-    /// The worktree rows `id` sits under, outermost first: the owners of its
-    /// guide lines, one per line. Group headers between them add padding, not
-    /// lines, so they are skipped.
+    /// The worktree rows `id` sits under, outermost first. Group headers
+    /// between them are skipped.
     func worktreeAncestors(of id: SidebarNodeID) -> [SidebarNodeID] {
         var ancestors: [SidebarNodeID] = []
         var current = parent(of: id)
@@ -59,7 +58,7 @@ extension SidebarTree {
     }
 
     /// Whether the outline shows a worktree row under `node`: a child, or one
-    /// inside an expanded group. Those are the rows that draw `node`'s line.
+    /// inside an expanded group.
     private static func showsWorktreeDescendant(_ node: SidebarNode) -> Bool {
         guard node.showsChildren else { return false }
         for child in node.children {

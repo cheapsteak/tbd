@@ -163,30 +163,37 @@ extension SidebarOutlineController {
     /// The row view's indentation, guide lines, model selection, hover and
     /// nest highlight. A header draws selected while `AppState` selects what
     /// it stands for — its repo, the Scratch section, its provider — which a
-    /// rebuild carries to it as a changed model. A worktree row's guide
-    /// lines are its worktree ancestors', and the ones whose owner is in
-    /// `activeGuideAncestors` draw active.
+    /// rebuild carries to it as a changed model. A row's guide lines are its
+    /// part in each worktree line above it (`SidebarTree.guideRuns(of:)`),
+    /// with the fade a parent's first child carries on from the parent's row,
+    /// and a worktree row whose worktree children show starts its own; the
+    /// lines whose owner is in `activeGuideAncestors` draw active.
     func configure(_ rowView: SidebarRowView, node: SidebarNode) {
         let isHovered = hoverState.row == node.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
+        let runs = tree.guideRuns(of: node.id)
+        configuration.guides = SidebarGuideLine.guides(for: runs) { owner in
+            self.tree.node(owner).map { self.rowHeight(for: $0.kind) }
+        }
+        configuration.activeGuides = SidebarGuideLine.activeIndices(
+            of: runs.map(\.owner), active: activeGuideAncestors)
         switch node.kind {
         case .worktree(let model):
-            // `WorktreeRowView`'s `indentLevel`: how many worktree rows the
-            // row sits under.
-            let ancestors = tree.worktreeAncestors(of: node.id)
-            configuration.guideCount = ancestors.count
-            configuration.activeGuides = SidebarGuideLine.activeIndices(of: ancestors, active: activeGuideAncestors)
-            configuration.indentLevel = max(model.depth - ancestors.count, 0)
+            configuration.level = model.depth
+            configuration.drawsStub = tree.startsGuide(node.id)
+            configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(node.id)
             // The pin shows on hover, and always once pinned.
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         case .remoteSession(let model):
-            configuration.indentLevel = model.depth
+            configuration.level = model.depth
+        case .groupHeader(let model):
+            configuration.level = model.depth
         case .scratchHeader(let model), .repoHeader(let model):
             configuration.isSelectedByModel = model.isSelected
         case .providerHeader(let model):
             configuration.isSelectedByModel = model.isSelected
-        case .groupHeader, .scratchPrompt:
+        case .scratchPrompt:
             break
         }
         configuration.isHovered = isHovered && Self.showsHoverHighlight(node.kind)

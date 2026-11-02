@@ -28,13 +28,17 @@ struct SidebarRowHighlightTests {
         let rowInset = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false)
         typealias Configuration = SidebarRowView.Configuration
         let dockInset = DockTableController.rowInset
+        typealias Guide = SidebarGuideLine.Guide
+        let child = [Guide(level: 0, role: .last)]
+        let grandchild = [Guide(level: 0, role: .passing), Guide(level: 1, role: .last)]
+        let inGroup = [Guide(level: 1, role: .last)]
         let configurations: [(label: String, configuration: Configuration, guides: [CGFloat])] = [
             ("depth 0", Configuration(contentOrigin: rowInset), []),
-            ("depth 1", Configuration(contentOrigin: rowInset, guideCount: 1), [28]),
-            ("depth 2", Configuration(contentOrigin: rowInset, guideCount: 2), [28, 44]),
-            ("depth 2 in a group", Configuration(contentOrigin: rowInset, indentLevel: 1, guideCount: 1), [44]),
+            ("depth 1", Configuration(contentOrigin: rowInset, level: 1, guides: child), [26]),
+            ("depth 2", Configuration(contentOrigin: rowInset, level: 2, guides: grandchild), [26, 42]),
+            ("depth 2 in a group", Configuration(contentOrigin: rowInset, level: 2, guides: inGroup), [42]),
             ("selected header", Configuration(contentOrigin: rowInset, isSelectedByModel: true), []),
-            ("dock depth 2", Configuration(contentOrigin: dockInset, guideCount: 2), [28, 44]),
+            ("dock depth 2", Configuration(contentOrigin: dockInset, level: 2, guides: grandchild), [26, 42]),
         ]
         let edgeToEdge = NSRect(x: 0, y: 0, width: 300, height: 28)
         for (label, configuration, guides) in configurations {

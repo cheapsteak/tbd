@@ -81,9 +81,10 @@ extension SidebarOutlineController {
             items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
             // A move changes a row's ancestors even when its own model stays
-            // the same, and the row view's indentation and guide lines follow
-            // them.
-            if !update.steps.isEmpty { refreshRowViewConfigurations() }
+            // the same, and a row's part in its parent's line follows its
+            // siblings; a parent's height sets how far its fade carries into
+            // its first child. The row views' guide lines follow all three.
+            if !update.steps.isEmpty || !update.heightChanged.isEmpty { refreshRowViewConfigurations() }
             noteHeights(update.heightChanged)
         }
         isApplyingStructure = false
