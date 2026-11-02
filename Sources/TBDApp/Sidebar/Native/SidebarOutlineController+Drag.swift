@@ -361,11 +361,11 @@ extension SidebarOutlineController {
         let previous = nestTargetID
         nestTargetID = id
         for changed in [previous, id].compactMap({ $0 }) {
-            guard let item = items.existing(changed), let node = tree.node(changed) else { continue }
+            guard let item = items.existing(changed) else { continue }
             let row = outline.row(forItem: item)
             guard row >= 0, let rowView = outline.rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView
             else { continue }
-            configure(rowView, node: node)
+            configure(rowView, id: changed)
         }
     }
 

@@ -125,9 +125,10 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   each sets its own `identifier`; without one, `makeView(withIdentifier:owner:)`
   never reuses it. `configure` sets every visual property the model drives,
   including opacity, because `prepareForReuse` resets a reused view's alpha. A
-  `SidebarRowView` (`NSTableRowView`) draws the selection tint and the hierarchy
-  guide lines. The existing AppKit views `TypingDotsView` and `InlineTextField`
-  are reused inside the cells.
+  `SidebarRowView` (`NSTableRowView`) draws the row's highlight and the
+  hierarchy guide lines over it ("Row highlight and guide lines" below). The
+  existing AppKit views `TypingDotsView` and `InlineTextField` are reused
+  inside the cells.
 - **`DockTableController`** – an `NSTableView` over `PinnedDockContent.rows`,
   with row models from `SidebarRowModelFactory`, the worktree and remote
   session cells, and the same update loop.
@@ -247,17 +248,104 @@ Today a section header and the top-level rows beneath it share a leading edge,
 and each nesting level adds 16 pt. In outline terms, a row's visual depth is its
 outline level minus one. The outline uses `indentationPerLevel = 16` and
 overrides `frameOfCell(atColumn:row:)` to apply that offset, and
-`SidebarRowView` draws one 1 pt guide line per ancestor at `depth * 16 + 8`, as
-`WorktreeRowView` does today. The native disclosure triangle is hidden by
-overriding `frameOfOutlineCell(atRow:)` to return `.zero`; headers draw today's
-chevrons.
+`SidebarRowView` draws the guide lines from the same depths. The native
+disclosure triangle is hidden by overriding `frameOfOutlineCell(atRow:)` to
+return `.zero`; headers draw today's chevrons.
 
 The outline is configured for custom drawing: `style = .plain`,
 `selectionHighlightStyle = .regular` (`drawSelection(in:)` never runs with
 `.none` or the source-list style), `rowSizeStyle = .custom`, zero vertical
 `intercellSpacing`, and `autoresizesOutlineColumn = false`. `SidebarRowView`
 overrides `interiorBackgroundStyle` so cell text keeps its color on the light
-tint instead of turning white.
+highlight instead of turning white.
+
+### Row highlight and guide lines
+
+`SidebarRowView` draws, under the cell, the row's highlight and the hierarchy
+guide lines over it, in both the outline and the dock. Every value it draws
+with — shape, alphas per state and appearance, widths, fade, radii — lives in
+two enums, `SidebarRowHighlight` and `SidebarGuideLine`, so tuning either is one
+edit, and `SidebarRowHighlightTests` and `SidebarGuideLineTests` pin them.
+
+The highlight is one shape on every row, whatever its depth or kind:
+`SidebarRowHighlight.highlightRect(in:)`, the row's full height, edge to edge,
+with the indentation inside it. Its one hue is the system accent color, so it
+follows the user's setting, at an alpha per state over the sidebar's
+background, with separate light and dark values (`SidebarRowHighlight.light`,
+`.dark`). There is no gray and no border, and a row fills once whatever its
+state:
+
+- **Hover** – a faint wash of the accent, on every row whose click selects
+  something: a worktree, a remote session, the scratch prompt, and a repo,
+  Scratch or provider header. A group header draws none, since its click only
+  opens or closes the group.
+- **Selected** – the list's selection, filled in `drawSelection(in:)`.
+- **Selected and hovered** – the selection, deepened.
+- **Selected by the model** – a repo, Scratch or provider header whose
+  selection is active (`selectedRepoID`, `selectedScratchSection`,
+  `selectedRemoteProvider`) draws as a selected row, though a header takes no
+  list selection.
+- **Nest target** – the highlight's shape, washed and outlined in the accent
+  ("Feedback" under "Drag and drop").
+
+`SidebarRowHighlight` also keeps an inset, rounded variant, the shape of a macOS
+source list: a non-zero `horizontalInset` and `cornerRadius` move the content
+in to clear the highlight's edges (`contentShift(inset:margin:)`), and a run of
+adjacent selected rows rounds only its outer ends. Only the rounded shape
+depends on the neighbors' selection, so only it redraws a row when a
+neighbor's selection changes (`followsNeighbours(cornerRadius:)`).
+
+The guide lines show which worktree rows are nested under which:
+
+- **Owner** – a worktree row with a worktree child shown under it owns one
+  line. The line runs under the owner's leading icon, at the owner's level
+  origin plus `SidebarNativeMetrics.guideLineOffset`.
+- **Start** – the line starts in the owner's own row, just under the icon,
+  and fades in from clear along a smoothstep curve over
+  `SidebarGuideLine.fadeLength`; the fade carries on into the top of the
+  first child's row.
+- **Branches** – each worktree child branches off the line in a rounded
+  quarter turn at its vertical center, then a tick that stops short of its
+  own content. The line ends in its last child's turn, so nothing of it draws
+  below the last child; deeper rows above the last child draw it passing
+  straight by.
+- **Groups** – lines join worktree rows only. A Remote or Exited group under
+  a worktree, and every row inside it, draw none of that worktree's line,
+  which ends at its last worktree child; the lines of worktrees further up
+  pass a group by.
+- **Gutter pin** – a row's pin sits on its parent's line and covers the turn
+  and tick, so that line leaves both out and breaks across the pin's glyph
+  (`SidebarGuideLine.pinGapHalfHeight`), drawing on above it, faded where the
+  fade reaches, and below it where the line goes on to a later child.
+- **Strength** – at rest a line is a one-device-pixel hairline; the *active*
+  lines draw a point wide and stronger. On a row that draws a highlight every
+  line takes the accent blended toward white instead of gray, so a neutral
+  line never muddies the highlight; the blend is resolved once per appearance
+  and kept until the system colors change, when every row view draws again.
+  Each line draws as one shape at its alpha, so the color does not double
+  where the turn leaves the vertical.
+
+A line is active while the row that focuses it — the hovered row, or a
+selected worktree row the list shows — is joined to it. A focus row lights:
+
+- **Its own line**, when it starts one.
+- **Its parent's line**, the one it branches off or ends in, when it starts
+  none and its parent is a worktree.
+- **Nothing** otherwise: a top-level row that starts no line, a worktree row
+  whose only worktree descendants sit in a group under it, a row inside a
+  Remote or Exited group, a header, a group header, a remote session and the
+  scratch prompt.
+
+One set of rules gives every row's part in every line and the lines each focus
+row lights, for both lists: they read a small `GuideHierarchy` protocol — the
+row a row sits under, the rows shown under it, its level, and whether the list
+shows it. `SidebarTree` conforms directly, and the dock reads its preorder rows
+into a `DockGuideHierarchy`. Each list keeps every row's lines once it has
+worked them out: the outline by row ID, from a row's first configuration after
+each apply, with the rest of what the tree gives the row's view; the dock by
+row, worked out again only when its rows' IDs or depths change, so an apply
+that changes only models keeps them. A hover or a selection only looks a row's
+lines up and marks which of them are active.
 
 ## Interaction
 
@@ -269,7 +357,7 @@ tint instead of turning white.
   the SwiftUI headers call today: `selectRepo(id:)`, `selectScratchSection()`,
   `selectRemoteProvider(_:)`, or `toggleSidebarGroup(_:)`. A header whose
   selection is active (`selectedRepoID`, `selectedScratchSection`,
-  `selectedRemoteProvider`) draws today's selected appearance.
+  `selectedRemoteProvider`) draws as a selected row.
 - **Outline to `AppState`.** `SidebarSelectionBridge` writes the same set of IDs
   the `List` tags produce today into `appState.selectedWorktreeIDs`: worktree IDs
   and remote session IDs. That property's `didSet` stays the only place selection
@@ -285,7 +373,8 @@ tint instead of turning white.
   selected row the list does not show — inside a collapsed section, or shown
   only in the other list — stays selected. A row the list shows and the user
   deselects leaves.
-- `SidebarRowView` draws today's tint (accent at 0.2 opacity).
+- A selected row, and a header whose selection is active, draw the selection
+  highlight ("Row highlight and guide lines").
 
 ### Expansion and reveal
 
@@ -320,13 +409,14 @@ tint instead of turning white.
   header's 80 ms debounce. Hovering a chevron dims that section's rows to 0.7
   of their own opacity. The dimming goes on each row's cell, composed with the
   cell's other dimming (a hidden repo, a missing scratch directory, a gone
-  session), not on its row view, so the selection tint and the guide lines keep
+  session), not on its row view, so the highlight and the guide lines keep
   theirs.
 - A worktree row's nested `+` keeps `HoverMenuModel`'s 400 ms hover delay,
   ⌥-click, and close on app deactivation. It opens the existing SwiftUI
   `WorktreeProfilePickerView` in `FloatingPanel`, anchored to the AppKit button.
 - The pin toggle is an AppKit button in the leading gutter, shown on hover and
-  always once pinned. The guide line keeps its gap there.
+  always once pinned. It sits on the row's parent's guide line, which breaks
+  across it ("Row highlight and guide lines").
 - Tooltips for a truncated name and for the PR glyph use a replica of today's
   bubble, drawn in an overlay view below the row. Other help text uses
   `toolTip`.
@@ -730,6 +820,10 @@ Most coverage is pure:
   and preserved relative order of non-carried rows.
 - **`SidebarSelectionBridge`** – both directions, with mixed local and remote
   selections, and the plain and ⌘/⇧ branches of a user's selection.
+- **Row drawing** – the highlight's shape and alphas per state and
+  appearance, the guide lines' pieces for each role, with the fade and the
+  pin's break, and the shape and focus rules read through the outline's tree
+  and through the dock's rows, which give the same answers.
 
 Daemon:
 

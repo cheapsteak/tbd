@@ -11,7 +11,10 @@ extension SidebarOutlineController {
     /// The selected rows light their groups' guide lines, so the row views
     /// take the active lines here: at the end of every apply, and after a
     /// user's selection.
-    func applyModelSelection() {
+    /// - Parameter refreshingRowViews: true after an apply that changed the
+    ///   structure, so every row view takes its configuration afresh here
+    ///   even when the active lines stay the same.
+    func applyModelSelection(refreshingRowViews: Bool = false) {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
         }
@@ -26,7 +29,7 @@ extension SidebarOutlineController {
         if rows != outline.selectedRowIndexes {
             outline.selectRowIndexes(rows, byExtendingSelection: false)
         }
-        refreshActiveGuides()
+        refreshActiveGuides(refreshingRowViews: refreshingRowViews)
     }
 
     /// Tells `AppState`, once, when a selected worktree left the model during

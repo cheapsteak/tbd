@@ -141,7 +141,7 @@ struct SuffixRowIndicatorTests {
         #expect(SuffixRowIndicator.attention.systemImage == "hand.raised.fill")
         #expect(SuffixRowIndicator.suspended.systemImage == "pause.circle.fill")
         #expect(SuffixRowIndicator.working.systemImage == nil)
-        #expect(SuffixRowIndicator.hibernated.systemImage == "moon.zzz.fill")
+        #expect(SuffixRowIndicator.hibernated.systemImage == "moon.fill")
     }
 }
 

@@ -42,7 +42,7 @@ enum SuffixRowIndicator: Equatable {
         case .attention:  return "hand.raised.fill"
         case .working:    return nil
         case .suspended:  return "pause.circle.fill"
-        case .hibernated: return "moon.zzz.fill"
+        case .hibernated: return "moon.fill"
         case .needsAuth:  return "person.crop.circle.badge.exclamationmark"
         case .turnFailed: return "exclamationmark.triangle.fill"
         }

@@ -12,21 +12,25 @@ import AppKit
 /// tick that stops `tickInset` short of the child's own content. The line
 /// ends in its last child's turn, so nothing of it draws below the last
 /// child; deeper rows above the last child draw it passing straight by.
+/// Where a child shows its gutter pin, which sits on its parent's line, the
+/// line leaves out the turn and tick and breaks across the pin's glyph
+/// (`pinGapHalfHeight`), carrying on above and, to a later child, below.
 /// `Role` names a row's part in one line, and `pieces(role:x:tickEnd:...)`
-/// turns that part into the rectangle, curve and fade the row draws.
+/// turns that part into the rectangles, curve and fade the row draws.
 ///
-/// **Strength.** At rest a line is a quiet hairline. The lines of the group
-/// the pointer or the selection is in — the *active* lines — draw at full
-/// strength, so the group you are in stands out. On a row that draws a
-/// highlight, every line takes the highlight's accent colour, blended toward
-/// white, instead of grey, so a neutral line never muddies the tint. Each
-/// line draws as one shape at its alpha, so where its turn leaves the
-/// vertical the colour does not double.
+/// **Strength.** At rest a line is a quiet hairline. The line the hovered
+/// row and each selected row is joined to — the one it starts, or the one it
+/// branches off — is *active* and draws at full strength, so the group you
+/// are in stands out. On a row that draws a highlight, every line takes the
+/// highlight's accent colour, blended toward white, instead of grey, so a
+/// neutral line never muddies the tint. Each line draws as one shape at its
+/// alpha, so where its turn leaves the vertical the colour does not double.
 ///
-/// Which lines are active is the tree's to say
-/// (`SidebarTree.activeGuideAncestor(of:)`), and which part of which line a
-/// row draws too (`SidebarTree.guideRuns(of:)`); how each one draws is here,
-/// beside `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
+/// Which lines are active is the list's hierarchy's to say
+/// (`GuideHierarchy.activeGuideAncestor(of:)`), and which part of which line
+/// a row draws too (`GuideHierarchy.guideRuns(of:)`), by one set of rules for
+/// the outline and the dock; how each one draws is here, beside
+/// `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
 /// `SidebarGuideLineTests` pins every value.
 enum SidebarGuideLine {
     // MARK: Strength
@@ -89,6 +93,11 @@ enum SidebarGuideLine {
     /// How far short of the child's own content the branch's tick stops.
     static let tickInset: CGFloat = 3
 
+    /// How far above and below a row's centre the line the gutter pin sits
+    /// on breaks: half the pin glyph's height — the 10 pt `pin` symbol draws
+    /// 12 pt of ink, centred on the row — and 2 pt clear of it.
+    static let pinGapHalfHeight: CGFloat = 8
+
     // MARK: Style
 
     /// How far a highlighted row's line is blended toward white, per
@@ -107,9 +116,9 @@ enum SidebarGuideLine {
          b: components.b * (1 - fraction) + fraction)
     }
 
-    /// The accent colour as `appearance` resolves it, blended toward white by
-    /// the appearance's mix in Display P3.
-    static func highlightTintColor(appearance: NSAppearance) -> NSColor {
+    /// The accent colour as `appearance` resolves it now, blended toward
+    /// white by the appearance's mix in Display P3.
+    static func resolvedHighlightTint(appearance: NSAppearance) -> NSColor {
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fraction = isDark ? highlightWhiteMix.dark : highlightWhiteMix.light
         var result = NSColor.controlAccentColor
@@ -126,25 +135,97 @@ enum SidebarGuideLine {
         return result
     }
 
+    /// The highlight tint per appearance name, resolved once, so a row
+    /// redraw neither resolves the accent nor converts it to Display P3. A
+    /// change to the system colours — the accent among them — empties it,
+    /// and then it posts `didChangeNotification`, on which every row view
+    /// drawing with it marks itself for display: a row nothing else redraws
+    /// would otherwise keep the old tint. Every row view draws with `shared`;
+    /// a test makes one of its own, on a notification centre of its own.
+    @MainActor
+    final class HighlightTintCache {
+        /// The cache the row views draw with, listening on the default
+        /// notification centre.
+        static let shared = HighlightTintCache()
+
+        /// Posted on `center`, on the main thread and with the cache as its
+        /// object, once the cache has emptied: whatever drew with its tints
+        /// draws again.
+        nonisolated static let didChangeNotification = Notification.Name("tbd.sidebar.highlightTintDidChange")
+
+        /// Where the cache hears that the system colours changed, and posts
+        /// `didChangeNotification`.
+        nonisolated let center: NotificationCenter
+        /// The tints resolved so far, by appearance name.
+        private(set) var colors: [NSAppearance.Name: NSColor] = [:]
+        nonisolated(unsafe) private var observer: (any NSObjectProtocol)?
+
+        /// - Parameter center: where `NSColor.systemColorsDidChangeNotification`
+        ///   arrives. It arrives on the main thread, and empties the cache at
+        ///   once; one posted anywhere else empties it on the next main-loop
+        ///   turn.
+        init(center: NotificationCenter = .default) {
+            self.center = center
+            observer = center.addObserver(
+                forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: nil
+            ) { [weak self] _ in
+                HighlightTintCache.performOnMain { self?.invalidate() }
+            }
+        }
+
+        deinit {
+            if let observer { center.removeObserver(observer) }
+        }
+
+        /// The tint in `appearance`: the one resolved before, or
+        /// `resolvedHighlightTint(appearance:)` now, kept for the next draw.
+        func color(for appearance: NSAppearance) -> NSColor {
+            if let cached = colors[appearance.name] { return cached }
+            let color = SidebarGuideLine.resolvedHighlightTint(appearance: appearance)
+            colors[appearance.name] = color
+            return color
+        }
+
+        /// Empties the cache, so each tint resolves afresh on its next use,
+        /// and tells whatever drew with it to draw again.
+        func invalidate() {
+            colors.removeAll()
+            center.post(name: Self.didChangeNotification, object: self)
+        }
+
+        /// Runs `body` on the main actor: at once when already on the main
+        /// thread, otherwise on the next main-loop turn.
+        nonisolated private static func performOnMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { body() }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
+            }
+        }
+    }
+
     /// The colour a line draws in.
     enum ColorRole: Hashable, Sendable {
         case secondaryLabel
-        /// The accent colour blended toward white (`highlightWhiteMix`).
+        /// The accent colour blended toward white (`highlightWhiteMix`), as
+        /// `tints` keeps it.
         case highlightTint
 
         /// The colour in `appearance`.
-        func nsColor(appearance: NSAppearance) -> NSColor {
+        @MainActor
+        func nsColor(appearance: NSAppearance, tints: HighlightTintCache) -> NSColor {
             switch self {
             case .secondaryLabel: .secondaryLabelColor
-            case .highlightTint: SidebarGuideLine.highlightTintColor(appearance: appearance)
+            case .highlightTint: tints.color(for: appearance)
             }
         }
 
         /// The colour resolved in `appearance`, alpha included.
-        func cgColor(appearance: NSAppearance) -> CGColor {
+        @MainActor
+        func cgColor(appearance: NSAppearance, tints: HighlightTintCache) -> CGColor {
             var resolved: CGColor?
             appearance.performAsCurrentDrawingAppearance {
-                resolved = nsColor(appearance: appearance).cgColor
+                resolved = nsColor(appearance: appearance, tints: tints).cgColor
             }
             return resolved ?? NSColor.secondaryLabelColor.cgColor
         }
@@ -214,13 +295,25 @@ enum SidebarGuideLine {
         var fadeStart: CGFloat?
     }
 
+    /// A row's guide lines as a list keeps them, worked out once for its
+    /// rows (`GuideHierarchy.rowGuides(of:)`), so a hover or a selection only
+    /// looks them up.
+    struct RowGuides: Equatable {
+        /// The row's part in each line above it, outermost first.
+        var guides: [Guide] = []
+        /// Each guide's owner, in `guides`' order: what the active lines
+        /// index.
+        var owners: [SidebarNodeID] = []
+        /// The row starts a line of its own.
+        var startsGuide = false
+    }
+
     /// The guides a row draws for `runs`, outermost first: each run's level
     /// and role, and on the owner's first child where the owner's fade-in
-    /// started, from the owner's row height.
-    static func guides(for runs: [Run], ownerHeight: (SidebarNodeID) -> CGFloat?) -> [Guide] {
+    /// started (`continuedFadeStart`).
+    static func guides(for runs: [Run]) -> [Guide] {
         runs.map { run in
-            let fadeStart = run.continuesFade ? ownerHeight(run.owner).map(continuedFadeStart(ownerHeight:)) : nil
-            return Guide(level: run.level, role: run.role, fadeStart: fadeStart)
+            Guide(level: run.level, role: run.role, fadeStart: run.continuesFade ? continuedFadeStart : nil)
         }
     }
 
@@ -230,12 +323,18 @@ enum SidebarGuideLine {
         rowHeight / 2 + iconHalfHeight + stubGap
     }
 
+    /// The height of every row that owns a line. Only worktree rows own
+    /// lines, and a worktree row is `SidebarNativeMetrics.rowHeight` tall in
+    /// both its height classes: the subtitle variant stacks its two lines
+    /// inside that height (`WorktreeRowCell.subtitleRowHeight`). How far an
+    /// owner's fade carries into its first child is therefore one constant,
+    /// not a lookup of the owner's row.
+    static let ownerRowHeight: CGFloat = SidebarNativeMetrics.rowHeight
+
     /// Where a parent's fade-in starts, down from the top of its first
     /// child's row: above it, by the length of the stub the parent's own row
     /// holds.
-    static func continuedFadeStart(ownerHeight: CGFloat) -> CGFloat {
-        stubStart(rowHeight: ownerHeight) - ownerHeight
-    }
+    static let continuedFadeStart: CGFloat = stubStart(rowHeight: ownerRowHeight) - ownerRowHeight
 
     /// The indices of `ancestors` — a row's line owners, outermost first —
     /// whose lines are active.
@@ -278,17 +377,14 @@ enum SidebarGuideLine {
         /// Where the line is clear. Above the row on the owner's first child.
         var start: CGFloat
         var length: CGFloat
-
-        /// How far through the fade the row's span starts, 0 to 1.
-        var startFraction: CGFloat { (rect.minY - start) / length }
-        /// How far through the fade the row's span ends, 0 to 1.
-        var endFraction: CGFloat { (rect.maxY - start) / length }
     }
 
-    /// What one line draws in one row, in the row's flipped coordinates: a
-    /// filled vertical, a stroked turn, the fade masking them, and the style.
+    /// What one line draws in one row, in the row's flipped coordinates: the
+    /// filled verticals, a stroked turn, the fade masking them, and the style.
     struct Pieces: Equatable, Sendable {
-        var vertical: NSRect?
+        /// The line's straight runs, top to bottom: one, none on a last child
+        /// whose line is all turn, or the two either side of the gutter pin.
+        var verticals: [NSRect]
         var turn: Turn?
         var fade: Fade?
         var style: Style
@@ -312,9 +408,14 @@ enum SidebarGuideLine {
     ///     top, on the owner's first child; a stub's fade starts where the
     ///     stub does, whatever this says.
     ///   - bounds: the row's bounds, flipped: `minY` is the top edge.
+    ///   - pinGap: the gutter pin sits on this line, centred on the row, and
+    ///     covers its turn and tick: the line leaves out both, and breaks
+    ///     across the pin's glyph, `pinGapHalfHeight` above and below the
+    ///     row's centre. What runs above the pin keeps the fade; what runs
+    ///     below it draws only where the line goes on to a later child.
     static func pieces(role: Role, x: CGFloat, tickEnd: CGFloat, fadeStart: CGFloat?, style: Style,
                        in bounds: NSRect, backingScale: CGFloat,
-                       fadeLength: CGFloat = SidebarGuideLine.fadeLength) -> Pieces? {
+                       fadeLength: CGFloat = SidebarGuideLine.fadeLength, pinGap: Bool = false) -> Pieces? {
         guard style.alpha > 0, style.width > 0, bounds.height > 0 else { return nil }
         let scale = backingScale > 0 ? backingScale : defaultBackingScale
         let width = style.width
@@ -337,25 +438,40 @@ enum SidebarGuideLine {
         let tickTop = (bounds.midY * scale).rounded(.down) / scale
         let tickY = tickTop + width / 2
         let endX = max(tickEnd, lineX + branchRadius)
-        let vertical: NSRect?
-        let turn: Turn?
+        func vertical(from start: CGFloat, to end: CGFloat) -> NSRect? {
+            end > start ? NSRect(x: left, y: start, width: width, height: end - start) : nil
+        }
+        var verticals: [NSRect] = []
+        var turn: Turn?
         switch role {
         case .passing, .stub:
-            vertical = NSRect(x: left, y: top, width: width, height: bottom - top)
-            turn = nil
+            if let run = vertical(from: top, to: bottom) { verticals.append(run) }
         case .branch:
-            vertical = NSRect(x: left, y: top, width: width, height: bottom - top)
+            if let run = vertical(from: top, to: bottom) { verticals.append(run) }
             turn = Turn(lineX: lineX, startY: tickY - branchRadius, tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         case .last:
-            vertical = nil
             turn = Turn(lineX: lineX, startY: min(top, tickY - branchRadius), tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         }
 
+        if pinGap {
+            // The straight run the line makes down the row — on a last child,
+            // down to where it would turn — less the pin's span.
+            let spanTop = verticals.first?.minY ?? turn?.startY ?? top
+            let spanBottom = verticals.first?.maxY ?? turn?.turnY ?? bottom
+            let gapTop = ((bounds.midY - pinGapHalfHeight) * scale).rounded(.down) / scale
+            let gapBottom = ((bounds.midY + pinGapHalfHeight) * scale).rounded(.up) / scale
+            verticals.removeAll(keepingCapacity: true)
+            if let above = vertical(from: spanTop, to: min(gapTop, spanBottom)) { verticals.append(above) }
+            if let below = vertical(from: max(gapBottom, spanTop), to: spanBottom) { verticals.append(below) }
+            turn = nil
+            guard !verticals.isEmpty else { return nil }
+        }
+
         var fade: Fade?
         if let fadeY, fadeLength > 0 {
-            let lineTop = vertical?.minY ?? turn?.startY ?? top
+            let lineTop = verticals.first?.minY ?? turn?.startY ?? top
             let spanTop = max(fadeY, lineTop)
             let spanBottom = min(fadeY + fadeLength, bottom)
             if spanBottom > spanTop {
@@ -364,7 +480,7 @@ enum SidebarGuideLine {
                             start: fadeY, length: fadeLength)
             }
         }
-        return Pieces(vertical: vertical, turn: turn, fade: fade, style: style)
+        return Pieces(verticals: verticals, turn: turn, fade: fade, style: style)
     }
 
     /// The turn's stroke: down the line from `startY`, the quarter turn,
@@ -404,8 +520,12 @@ enum SidebarGuideLine {
         }
     }
 
-    /// The fade's mask: grey stops whose alpha follows `fadeStops()`.
-    static func fadeGradient() -> CGGradient? {
+    /// The fade's mask: grey stops whose alpha follows `fadeStops()`. Made
+    /// once, since it never changes; a `CGGradient` is immutable once made.
+    nonisolated(unsafe) static let fadeGradient: CGGradient? = makeFadeGradient()
+
+    /// Builds `fadeGradient`.
+    static func makeFadeGradient() -> CGGradient? {
         let stops = fadeStops()
         let components: [CGFloat] = stops.flatMap { [0, $0.alpha] }
         let locations: [CGFloat] = stops.map(\.location)
@@ -428,7 +548,7 @@ enum SidebarGuideLine {
         let opaque = color.copy(alpha: 1) ?? color
         context.setFillColor(opaque)
         context.setStrokeColor(opaque)
-        if let vertical = pieces.vertical {
+        for vertical in pieces.verticals {
             context.fill(vertical)
         }
         if let turn = pieces.turn {
@@ -437,7 +557,7 @@ enum SidebarGuideLine {
             context.addPath(turnPath(turn))
             context.strokePath()
         }
-        if let fade = pieces.fade, let gradient = fadeGradient() {
+        if let fade = pieces.fade, let gradient = fadeGradient {
             context.saveGState()
             context.clip(to: fade.rect)
             context.setBlendMode(.destinationIn)
