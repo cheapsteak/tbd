@@ -55,8 +55,7 @@ enum SuffixRowIndicator: Equatable {
         case .error:
             return .red
         case .attention:
-            // The shared attention amber: #B7791F light, GitHub attention.fg
-            // #D29922 dark.
+            // The shared attention amber; the values live in AttentionAmber.
             return AttentionAmber.color
         case .working:
             return .secondary

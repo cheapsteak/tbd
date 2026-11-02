@@ -3,7 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 
-/// The transcript's peer colour is lavender at the brightness the amber had,
+/// The transcript's peer colour is lavender at the attention amber's brightness,
 /// the rail's peer notches and the table bubble's peer tint draw it, and the
 /// sidebar's attention amber is untouched.
 @MainActor
@@ -41,7 +41,7 @@ struct PeerLavenderTests {
         0.2126 * linearized(rgb.r) + 0.7152 * linearized(rgb.g) + 0.0722 * linearized(rgb.b)
     }
 
-    /// Keep the brightness the owner asked to keep.
+    /// The peer lavender reads at the attention amber's brightness on each ground: their WCAG luminances match within this.
     private static let luminanceTolerance = 0.01
 
     /// Component tolerance on the 0...255 scale.
@@ -85,14 +85,21 @@ struct PeerLavenderTests {
         }
     }
 
-    @Test("lavender resolves to the exact sRGB values")
-    func exactValues() throws {
-        let aqua = try #require(NSAppearance(named: .aqua))
-        let darkAqua = try #require(NSAppearance(named: .darkAqua))
-        let light = try #require(srgb(PeerLavender.light, in: aqua))
-        let dark = try #require(srgb(PeerLavender.dark, in: darkAqua))
-        #expect(matches(light, (156, 115, 208)))
-        #expect(matches(dark, (180, 150, 220)))
+    @Test("lavender's dynamic forms resolve to the right value in each appearance")
+    func dynamicFormsResolvePerAppearance() throws {
+        let tintAlpha = Double(PeerLavender.bubbleTintAlpha)
+        for c in try cases() {
+            let surfaces: [(String, NSColor, Double)] = [
+                ("nsColor(alpha: 1)", PeerLavender.nsColor(alpha: 1), 1),
+                ("color", NSColor(PeerLavender.color), 1),
+                ("bubbleTintColor", NSColor(PeerLavender.bubbleTintColor), tintAlpha)
+            ]
+            for (label, color, alpha) in surfaces {
+                let got = try #require(srgb(color, in: c.appearance), "\(label) did not resolve in \(c.name)")
+                #expect(matches(got, c.lavender), "\(c.name) \(label): wrong colour")
+                #expect(abs(got.a - alpha) < 0.005, "\(c.name) \(label): alpha \(got.a), expected \(alpha)")
+            }
+        }
     }
 
     // The SwiftUI bubble, the glyphs and the card's sender text keep their colour
@@ -123,7 +130,7 @@ struct PeerLavenderTests {
             let sidebar = NSColor(SuffixRowIndicator.attention.color)
             let got = try #require(srgb(sidebar, in: c.appearance), "sidebar attention did not resolve in \(c.name)")
             #expect(matches(got, c.amber), "\(c.name): sidebar attention changed")
-            let amber = try #require(srgb(c.amberColor, in: c.appearance))
+            let amber = try #require(srgb(NSColor(AttentionAmber.color), in: c.appearance))
             #expect(matches(amber, c.amber), "\(c.name): AttentionAmber changed")
         }
     }
