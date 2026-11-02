@@ -9,16 +9,18 @@ import Foundation
 /// of showing it. So the builder splits it off before comrak sees the text and
 /// shows it as a properties header above the body (`html`).
 ///
-/// A block is front matter only when the very first line is `---` and a later
-/// line is `---` or `...`. Without a closing line there is no front matter and
-/// the source is left exactly as it was.
+/// A block is front matter only when the very first line is `---`, the line
+/// after it is not blank, and a later line is `---` or `...` with no column-0
+/// code fence before it. Anything else is left exactly as it was: a document
+/// may open with a thematic break, and a `---` inside a fenced YAML example
+/// must not close a block that never was one.
 struct MarkdownFrontMatter: Equatable, Sendable {
 
     /// One top-level `key: value` line and the indented lines that continue it.
     struct Entry: Equatable, Sendable {
         let key: String
         /// The rest of the key's own line, trimmed. Empty for `key:`, and for
-        /// a block scalar whose `|` or `>` indicator introduces `continuation`.
+        /// a block scalar's `|` or `>` indicator, which is syntax, not content.
         let value: String
         /// The lines that continue the value — a nested map or list, a block
         /// scalar — with their common indentation removed. Nil when the value
@@ -45,6 +47,11 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         guard let opening = nextLine(in: markdown, from: cursor),
               isDelimiter(opening.content, closing: false)
         else { return (nil, markdown) }
+        // Pandoc's rule: a blank line straight after the opening `---` means
+        // the document opens with a thematic break, not a metadata block.
+        if let first = nextLine(in: markdown, from: opening.next), isBlank(first.content) {
+            return (nil, markdown)
+        }
 
         var lines: [Substring] = []
         cursor = opening.next
@@ -56,6 +63,9 @@ struct MarkdownFrontMatter: Equatable, Sendable {
                 )
                 return (frontMatter, String(markdown[line.next...]))
             }
+            // YAML has no code fences, so one means this is markdown, and the
+            // `---` that would close it may sit inside the fence.
+            if isFence(line.content) { return (nil, markdown) }
             lines.append(line.content)
             cursor = line.next
         }
@@ -98,7 +108,7 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         for line in lines {
             if let pair = keyValue(line) {
                 groups.append((key: pair.key, value: pair.value, more: []))
-            } else if let last = groups.last, continues(last.value, with: line) {
+            } else if let lastValue = groups.last?.value, continues(lastValue, with: line) {
                 groups[groups.count - 1].more.append(line)
             } else if isBlank(line) {
                 continue   // blank lines before the first key
@@ -112,7 +122,7 @@ struct MarkdownFrontMatter: Equatable, Sendable {
                 && group.value.dropFirst().allSatisfy { "+-0123456789".contains($0) }
             return Entry(
                 key: group.key,
-                value: more != nil && isBlockIndicator ? "" : group.value,
+                value: isBlockIndicator ? "" : group.value,
                 continuation: more
             )
         }
@@ -144,6 +154,10 @@ struct MarkdownFrontMatter: Equatable, Sendable {
     private static func continues(_ value: String, with line: Substring) -> Bool {
         guard let first = line.first else { return true }
         return first.isWhitespace || (value.isEmpty && isSequenceItem(line))
+    }
+
+    private static func isFence(_ line: Substring) -> Bool {
+        line.hasPrefix("```") || line.hasPrefix("~~~")
     }
 
     private static func isSequenceItem(_ line: Substring) -> Bool {

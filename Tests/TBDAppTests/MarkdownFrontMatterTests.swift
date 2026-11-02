@@ -99,6 +99,30 @@ struct MarkdownFrontMatterTests {
         #expect(MarkdownFrontMatter.split(" ---\na: b\n---\n").frontMatter == nil)
     }
 
+    @Test("a blank line after the opening --- means a thematic break, not front matter")
+    func openingThematicBreak() {
+        for source in [
+            "---\n\n# Intro\n\nSome *text*\n\n---\n\nMore",
+            "---\n  \t\ntitle: Acme\n---\n",
+        ] {
+            let (frontMatter, body) = MarkdownFrontMatter.split(source)
+            #expect(frontMatter == nil)
+            #expect(body == source)
+        }
+    }
+
+    @Test("a --- inside a fenced code block never closes a block")
+    func fencedCloser() {
+        for source in [
+            "---\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
+            "---\nSetup notes.\n~~~\n---\n~~~\n",
+        ] {
+            let (frontMatter, body) = MarkdownFrontMatter.split(source)
+            #expect(frontMatter == nil)
+            #expect(body == source)
+        }
+    }
+
     // MARK: - Reading it as keys
 
     @Test("an empty value and [] are kept as written, and a URL value does not split the key")
@@ -142,6 +166,17 @@ struct MarkdownFrontMatterTests {
             Entry(key: "compact", value: "", continuation: "- one\n- two"),
             Entry(key: "updated", value: "2026-01-01", continuation: nil),
         ])
+    }
+
+    @Test("a block scalar indicator is not shown as the value, even with no lines after it")
+    func emptyBlockScalar() throws {
+        let block = try #require(MarkdownFrontMatter.split("---\nnotes: |\nsummary: >-\nupdated: 2026-01-01\n---\n").frontMatter)
+        #expect(block.entries == [
+            Entry(key: "notes", value: "", continuation: nil),
+            Entry(key: "summary", value: "", continuation: nil),
+            Entry(key: "updated", value: "2026-01-01", continuation: nil),
+        ])
+        #expect(block.html.contains("<dt>notes</dt><dd></dd>"))
     }
 
     @Test("a block that is not top-level keys has no entries")

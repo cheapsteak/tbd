@@ -92,6 +92,25 @@ struct MarkdownDocumentBuilderTests {
         ) == nil)
     }
 
+    @Test("a document opening with a thematic break renders as it always did")
+    func openingThematicBreakRendersUnchanged() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for source in [
+            "---\n\n# Intro\n\nSome *text*\n\n---\n\nMore",
+            "---\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
+        ] {
+            let doc = try #require(MarkdownDocumentBuilder.build(
+                markdown: source, documentDirectory: dir, worktreeRoot: dir, css: ""
+            ))
+            let unsplit = try #require(MarkdownHTMLRenderer.renderBody(source))
+            #expect(doc.contains(unsplit))
+            #expect(doc.contains("<hr />"))
+            #expect(!doc.contains("tbd-front-matter"))
+        }
+    }
+
     @Test("returns nil when the renderer rejects the input")
     func nilOnRendererFailure() throws {
         let dir = try tempDir()
