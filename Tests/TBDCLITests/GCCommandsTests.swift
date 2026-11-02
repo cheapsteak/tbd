@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import Testing
+import TBDShared
 
 @testable import TBDCLI
 
@@ -70,5 +71,49 @@ struct GCCommandsTests {
         #expect(try GCHangStacks.parse(["on"]).state == "on")
         #expect(try GCHangStacks.parse(["off"]).state == "off")
         #expect(try GCHangStacks.parse([]).state == nil)
+    }
+
+    // Discriminates: dropping the registration removes the name.
+    @Test func keepListIsRegisteredOnTheGCGroup() {
+        let names = GCCommand.configuration.subcommands.map { $0._commandName }
+        #expect(names.contains("keep-list"))
+    }
+
+    // Discriminates: bare `keep-list` must parse to the report command, `customize` to the writer.
+    @Test func keepListWithoutASubcommandIsTheReportAndCustomizeIsTheWriter() throws {
+        #expect(try GCKeepListCommand.parseAsRoot([]) is GCKeepListCommand)
+        #expect(try GCKeepListCommand.parseAsRoot(["customize"]) is GCKeepListCustomize)
+    }
+
+    // Discriminates: asserts path line, shipped-defaults state line, and every pattern indented.
+    @Test func reportForShippedDefaults() {
+        let lines = GCKeepListCommand.report(path: "/x/gc-keep-processes", loaded: .list(.shipped, .shippedDefaults))
+            .components(separatedBy: "\n")
+        #expect(lines[0] == "/x/gc-keep-processes")
+        #expect(lines[1] == "In effect: shipped defaults (run `tbd gc keep-list customize` to edit them)")
+        #expect(Array(lines.dropFirst(2)) == GCKeepList.shippedPatterns.map { "  \($0)" })
+    }
+
+    // Discriminates: the file state line differs from the defaults line and lists only the file's patterns.
+    @Test func reportForYourFile() {
+        let lines = GCKeepListCommand.report(
+            path: "/x/f", loaded: .list(GCKeepList(patterns: ["foo", "bar"]), .file))
+            .components(separatedBy: "\n")
+        #expect(lines == ["/x/f", "In effect: your file", "  foo", "  bar"])
+    }
+
+    // Discriminates: an unreadable file prints the reason and the skip consequence, and no pattern lines.
+    @Test func reportForUnreadable() {
+        let lines = GCKeepListCommand.report(path: "/x/f", loaded: .unreadable(reason: "Permission denied"))
+            .components(separatedBy: "\n")
+        #expect(lines == ["/x/f",
+            "Unreadable (Permission denied): the orphan-process sweep is skipped until it can be read"])
+    }
+
+    // Discriminates: the two outcomes print different messages.
+    @Test func customizeMessages() {
+        #expect(GCKeepListCustomize.message(path: "/x/f", wrote: true) == "Wrote /x/f")
+        #expect(GCKeepListCustomize.message(path: "/x/f", wrote: false)
+            == "/x/f already exists; TBD never rewrites it.")
     }
 }

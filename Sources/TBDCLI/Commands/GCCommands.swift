@@ -9,6 +9,7 @@ struct GCCommand: ParsableCommand {
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
             GCOrphanProcesses.self, GCRetainedTranscripts.self, GCHangStacks.self,
+            GCKeepListCommand.self,
         ]
     )
 }
@@ -217,5 +218,53 @@ struct GCSweep: AsyncParsableCommand {
                                                             resultType: GCSweepResult.self)
         for line in result.planned { print(line) }
         print(dryRun ? "(dry run — nothing deleted)" : "Reaped \(result.reaped) item(s).")
+    }
+}
+
+/// The orphan-process sweep's keep-list: command-line patterns it never
+/// reclaims. The list lives in a file the user owns, so this reads and writes
+/// that file directly and never calls the daemon.
+struct GCKeepListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "keep-list",
+        abstract: "Show the processes the orphan-process sweep never reclaims, or write the file to edit them",
+        subcommands: [GCKeepListCustomize.self])
+
+    /// The report `tbd gc keep-list` prints. Pure, so it is assertable
+    /// without touching the real file.
+    static func report(path: String, loaded: GCKeepList.Loaded) -> String {
+        switch loaded {
+        case .list(let list, let source):
+            let state = source == .shippedDefaults
+                ? "In effect: shipped defaults (run `tbd gc keep-list customize` to edit them)"
+                : "In effect: your file"
+            return ([path, state] + list.patterns.map { "  \($0)" }).joined(separator: "\n")
+        case .unreadable(let reason):
+            return [path,
+                    "Unreadable (\(reason)): the orphan-process sweep is skipped until it can be read"]
+                .joined(separator: "\n")
+        }
+    }
+
+    /// With no subcommand, print the report.
+    mutating func run() throws {
+        let path = TBDConstants.gcKeepProcessesPath
+        print(Self.report(path: path, loaded: GCKeepList.load(path: path)))
+    }
+}
+
+struct GCKeepListCustomize: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "customize",
+        abstract: "Write the shipped keep-list to the file so you can edit it (never overwrites)")
+
+    /// The line `customize` prints, given whether it wrote the file.
+    static func message(path: String, wrote: Bool) -> String {
+        wrote ? "Wrote \(path)" : "\(path) already exists; TBD never rewrites it."
+    }
+
+    mutating func run() throws {
+        let path = TBDConstants.gcKeepProcessesPath
+        print(Self.message(path: path, wrote: try GCKeepList.customize(path: path)))
     }
 }
