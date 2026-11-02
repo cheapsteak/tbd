@@ -157,9 +157,11 @@ public struct OrphanProcessCandidate: Sendable, Equatable {
 /// The rows a process's environment markers are judged against, read back to
 /// back with the rows the cwd classification is built from.
 public struct MarkerRows: Sendable, Equatable {
-    /// Every worktree row that is not archived, local or not. A marker naming
-    /// one keeps its process, so a row this sweep cannot place on disk — a
-    /// remote or still-creating worktree — still protects.
+    /// Every worktree row that is not archived, local or not, and every
+    /// promoted scratch space, whose row is archived while its folder and
+    /// sessions carry on as a repo's main worktree. A marker naming one keeps
+    /// its process, so a row this sweep cannot place on disk — a remote or
+    /// still-creating worktree — still protects.
     public var liveWorktreeIDs: Set<UUID>
     /// Every terminal row. Archiving a worktree removes its tabs, so a
     /// terminal row that exists belongs to work that is still going on.
@@ -334,10 +336,11 @@ public struct OrphanProcessCollector: Sendable {
     /// - its cwd is not under a live worktree. That keeps whatever the
     ///   environment says.
     /// - its environment does not veto it (`judge`). A `TBD_WORKTREE_ID` naming
-    ///   a worktree that is not archived, or a `TBD_TERMINAL_ID` naming a
-    ///   terminal row that exists, keeps it — and when markers disagree, live
-    ///   wins. So does a **readable environment with no marker at all**: no TBD
-    ///   terminal started that process, so it is not this sweep's to kill.
+    ///   a live worktree (one not archived, or a promoted scratch space), or a
+    ///   `TBD_TERMINAL_ID` naming a terminal row that exists, keeps it — and
+    ///   when markers disagree, live wins. So does a **readable environment
+    ///   with no marker at all**: no TBD terminal started that process, so it
+    ///   is not this sweep's to kill.
     ///   That second veto is what spares every process the daemon spawns —
     ///   the per-repo tmux server, `-CC attach` clients, holders, the model
     ///   proxy, none of which carries a marker — whatever cwd it inherited. (A
@@ -697,7 +700,8 @@ public struct OrphanProcessCollector: Sendable {
     }
 
     /// True when `TBD_TERMINAL_ID` names a terminal row that exists, or
-    /// `TBD_WORKTREE_ID` names a worktree that is not archived — the two
+    /// `TBD_WORKTREE_ID` names a live worktree (`MarkerRows.liveWorktreeIDs`:
+    /// one not archived, or a promoted scratch space) — the two
     /// clauses of `judge` that keep on a marker, and the whole of the tree
     /// guard. A terminal ID naming a row that is gone is not one of them: a
     /// closed tab in a worktree still in use is not a death certificate, and a

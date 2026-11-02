@@ -149,6 +149,31 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         return (row.id, canon(dir))
     }
 
+    /// A scratch space promoted into `repo` the way `scratch.promote` retires
+    /// one: the repo's main worktree row, then `promoteScratchMigration`, which
+    /// archives the scratch row with `archivedAt` and `promotedToRepoID` set.
+    /// Hands back the scratch row's ID — what a process started in one of its
+    /// tabs before the promotion still carries as `TBD_WORKTREE_ID`.
+    private func makePromotedScratchRow(db: TBDDatabase, repo: Repo) async throws -> UUID {
+        let scratchPath = sandbox
+            .appendingPathComponent("scratch-spaces", isDirectory: true)
+            .appendingPathComponent("promoted", isDirectory: true).path
+        let scratch = try await db.worktrees.createScratch(
+            name: "promoted", displayName: "promoted", path: scratchPath,
+            tmuxServer: "tbd-scratch")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: "tbd-test")
+        try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            tmuxServer: "tbd-scratch")
+        let row = try #require(try await db.worktrees.get(id: scratch.id))
+        #expect(row.status == .archived)
+        #expect(row.archivedAt != nil)
+        #expect(row.promotedToRepoID == repo.id)
+        return scratch.id
+    }
+
     /// A worktree row at a path the user chose, the way `adoptWorktree` makes
     /// one: under no worktree pool at all, next to whatever else the user keeps
     /// in that directory.
@@ -1119,6 +1144,39 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(signaller.terminated == [4243])
     }
 
+    /// A promoted scratch space's row is archived, but its folder and sessions
+    /// carry on as a repo's main worktree, so a process started in one of its
+    /// tabs still belongs to live work. 4243, the same shape naming a plainly
+    /// archived row in the same sweep, proves the env route ran. Discriminates
+    /// against the code before the fix, which read the promoted row as
+    /// archived and signalled 4242 too.
+    @Test("a marker naming a promoted scratch space keeps a `/` root the env route would admit")
+    func aMarkerNamingAPromotedScratchSpaceKeeps() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let promoted = try await makePromotedScratchRow(db: db, repo: repo)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242), entry(pid: 4243)],
+            cwdByPID: [4242: "/", 4243: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: promoted), 4243: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(!signaller.killed.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(signaller.terminated == [4243])
+        #expect(result.planned.contains("REAP orphan-process pid=4243 tree=1 via=env \(gone.path)"))
+    }
+
     /// A marker naming no row attests nothing, so the `.deleting/<uuid>` arm —
     /// which exists for worktrees whose rows are gone — still decides.
     /// Discriminates against the old code (no `via=`) and against reading a
@@ -1290,6 +1348,42 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             cwdByPID: [700: dead, 701: dead, 702: dead, 900: dead],
             now: Date().addingTimeInterval(7200),
             markers: [701: marked(worktree: working.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [900], "only the unrelated orphan; the guarded tree is untouched")
+        #expect(result.planned.contains("KEEP live-marker-in-tree pid=700"))
+        #expect(!result.planned.contains { $0.hasPrefix("REAP orphan-process pid=700") })
+    }
+
+    /// The tree guard counts a promoted scratch space as live work too: a host
+    /// born in an archived worktree may serve a session of the scratch space
+    /// that became a repo. Discriminates against the code before the fix,
+    /// which read 701's marker as naming an archived worktree and reclaimed
+    /// all three.
+    @Test("a tree member naming a promoted scratch space keeps the whole tree")
+    func aTreeMemberNamingAPromotedScratchSpaceKeepsTheWholeTree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let promoted = try await makePromotedScratchRow(db: db, repo: repo)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 701, 702, 900] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 700, command: "process-compose up"),
+                entry(pid: 701, ppid: 700, command: "/usr/bin/node server.js"),
+                entry(pid: 702, ppid: 701, command: "/usr/bin/node worker.js"),
+                entry(pid: 900),
+            ],
+            cwdByPID: [700: dead, 701: dead, 702: dead, 900: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [701: marked(worktree: promoted)]
         ).sweep()
 
         #expect(signaller.terminated == [900], "only the unrelated orphan; the guarded tree is untouched")

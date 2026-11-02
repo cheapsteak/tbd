@@ -2275,16 +2275,31 @@ public actor OrphanGC {
     /// `orphanProcessRoots` resolves its dead roots, so an env admission names
     /// the same path in the record that a cwd admission would. A remote row has
     /// no directory on this machine to name, so a marker naming one is neutral.
+    ///
+    /// A promoted scratch space counts as live, though its row is archived.
+    /// Promotion retires the row (`status = archived`, `archivedAt` set,
+    /// `promotedToRepoID` set) while its folder and its sessions carry on as
+    /// the new repo's main worktree, and every process started in one of its
+    /// tabs before the promotion still carries its ID. Read as archived, that
+    /// marker would admit those processes by env, and the tree guard would let
+    /// a tree hosting them go. The cwd route is unchanged: it classifies by
+    /// path, and the folder's new path is the main worktree's.
     private func orphanProcessMarkerRows(
         liveWorktrees: [Worktree], archived: [Worktree], terminals: [TBDShared.Terminal]
     ) -> MarkerRows {
+        var liveWorktreeIDs = Set(liveWorktrees.map(\.id))
         var archivedWorktrees: [UUID: DeadWorktreeRoot] = [:]
-        for row in archived.compactMap(LocalWorktree.init) {
-            archivedWorktrees[row.id] = DeadWorktreeRoot(
-                path: deletionQueueCollector.resolvedPath(row.path), archivedAt: row.archivedAt)
+        for row in archived {
+            if row.promotedToRepoID != nil {
+                liveWorktreeIDs.insert(row.id)
+                continue
+            }
+            guard let local = LocalWorktree(row) else { continue }
+            archivedWorktrees[local.id] = DeadWorktreeRoot(
+                path: deletionQueueCollector.resolvedPath(local.path), archivedAt: local.archivedAt)
         }
         return MarkerRows(
-            liveWorktreeIDs: Set(liveWorktrees.map(\.id)),
+            liveWorktreeIDs: liveWorktreeIDs,
             terminalIDs: Set(terminals.map(\.id)),
             archivedWorktrees: archivedWorktrees)
     }
