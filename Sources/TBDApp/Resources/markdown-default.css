@@ -124,6 +124,25 @@ ol { list-style: decimal; }
 li::marker { color: var(--md-muted); }
 :is(li, td, th) > * + :is(p, ul, ol, blockquote) { margin-top: 6px; }
 input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
+/* Task items: the checkbox takes the bullet's place in the gutter, so task
+   text lines up with plain items. comrak gives the item no class, hence
+   :has. Out of flow, the box also sits on the first line when a loose item
+   puts a <p> after it, which as an inline box it could not. */
+li:has(> input[type="checkbox"]:first-child) { position: relative; }
+ul > li:has(> input[type="checkbox"]:first-child) { list-style: none; }
+li > input[type="checkbox"]:first-child {
+  position: absolute;
+  left: -1.357em;   /* 19px: the marker's slot in the 22px list gutter */
+  top: 0.286em;     /* 4px: centers 13px in the 21px first line */
+  width: 0.929em;
+  height: 0.929em;
+  margin: 0;
+}
+li > input[type="checkbox"]:first-child + p { margin-top: 0; }
+/* An ordered item keeps its number, which carries meaning; the checkbox
+   moves inside, after it. */
+ol > li:has(> input[type="checkbox"]:first-child) { padding-left: 1.357em; }
+ol > li > input[type="checkbox"]:first-child { left: 0; }
 
 blockquote {
   display: flex; flex-direction: column; gap: 10px;
