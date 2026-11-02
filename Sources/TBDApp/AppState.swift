@@ -307,8 +307,8 @@ final class AppState {
     var unreadTerminals: Set<UUID> = []
     var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
-            // If the List selected a repo header tag (not a worktree), treat it
-            // as a repo selection and remove the ID from the worktree set.
+            // A repo ID in the set (not a worktree) is a repo selection:
+            // remove it from the worktree set.
             let repoIDs = Set(repos.map(\.id))
             let selectedRepoIDs = selectedWorktreeIDs.intersection(repoIDs)
             if !selectedRepoIDs.isEmpty {
@@ -317,23 +317,22 @@ final class AppState {
                 return
             }
 
-            // Remote session rows are tagged into this same List (and thus
-            // this same Set) purely so they're List-native keyboard
-            // reachable — arrow-key traversal and the focus ring — the same
-            // reason repo header tags are handled just above. UNLIKE the
-            // repo-header case, a PURE remote selection (the remote tag(s)
-            // were the entire selection) routes the stripped id through
-            // `selectRemoteSession` (not just discard) so keyboard-only
-            // navigation — which never fires `RemoteSessionRowView`'s
-            // `.onTapGesture` — still ends up setting `selectedRemoteSession`
-            // and the row's own highlight engages. Every other consumer of
-            // `selectedWorktreeIDs` in this codebase assumes every member is
-            // a real `Worktree.id` (keyboard shortcuts, the jump menu,
-            // navigation history, persisted restore); stripping here before
-            // any of that runs keeps that invariant exactly as it was.
+            // The sidebar's selection bridge (`SidebarSelectionBridge`)
+            // writes a selected remote session row's ID into this same Set,
+            // whether the row was reached by click or by keyboard. A remote
+            // selection never rests here: every other consumer of
+            // `selectedWorktreeIDs` assumes every member is a real
+            // `Worktree.id` (keyboard shortcuts, the jump menu, navigation
+            // history, persisted restore, `newTerminalTab()` reading `.first`
+            // unguarded, the detail pane's empty-state check), so the remote
+            // ID(s) are stripped here before any of that runs. A PURE remote
+            // selection (the remote ID(s) were the entire selection) then
+            // routes the stripped ID through `selectRemoteSession`, so
+            // `selectedRemoteSession` stays the single source of truth; the
+            // outline reads it back to keep that row selected.
             //
             // A MIXED selection (real worktree ids survive after stripping
-            // the remote tag(s) — e.g. shift+↓ extending from a local
+            // the remote ID(s) — e.g. shift+↓ extending from a local
             // worktree row onto a remote row, or a shift-range crossing a
             // repo section's appended remote rows) must NOT route through
             // `selectRemoteSession`: that call unconditionally sets
@@ -341,31 +340,15 @@ final class AppState {
             // local id this same gesture just selected. The `subtract` call
             // below is itself an assignment to `selectedWorktreeIDs`, so it
             // re-invokes this same `didSet` (nested, synchronously, before
-            // `subtract` returns) with the remote tag(s) already gone — that
+            // `subtract` returns) with the remote ID(s) already gone — that
             // nested invocation runs the ordinary worktree-selection
             // bookkeeping below for whatever local ids survived (or, if
             // none survived, is a no-op, since the bottom bookkeeping is
             // itself gated on `!selectedWorktreeIDs.isEmpty`). This
             // invocation must therefore `return` unconditionally right
-            // after, exactly like the repo-header branch above — falling
-            // through here as well would re-run that bookkeeping a SECOND
-            // time (double `recordNavigation`/`recentWorktreeIDs` entries).
-            //
-            // Known cost of stripping the remote tag back out rather than
-            // letting it live in the set at rest: the AppKit table backing
-            // this List has no selection anchor on a remote row once this
-            // `didSet` returns, since the row's tag no longer appears in the
-            // bound Set. Arrow-key traversal starting FROM a remote row, and
-            // the List-native focus ring, are therefore not guaranteed to
-            // work — only the row's own highlight (driven by
-            // `selectedRemoteSession`/`unreadByRemoteSession`) is guaranteed
-            // to reflect the selection correctly. See the Task 9d fix-pass
-            // report for why letting the tag persist at rest was rejected
-            // (multiple consumers of `selectedWorktreeIDs` — e.g.
-            // `newTerminalTab()` — read `.first` unguarded and would act on
-            // a non-worktree id; `ContentView`'s detail-pane routing checks
-            // `selectedWorktreeIDs.isEmpty` to decide whether to show the
-            // empty state).
+            // after, exactly like the repo branch above — falling through
+            // here as well would re-run that bookkeeping a SECOND time
+            // (double `recordNavigation`/`recentWorktreeIDs` entries).
             let remoteIDs = Set(remoteSessions.map(\.id))
             let selectedRemoteIDs = selectedWorktreeIDs.intersection(remoteIDs)
             if !selectedRemoteIDs.isEmpty {
@@ -488,7 +471,7 @@ final class AppState {
     /// selection, but intentionally stays out of back/forward history for the
     /// first desk slice.
     var selectedRemoteProvider: String?
-    /// Selected — set when a `RemoteSectionView` session row is clicked, shows
+    /// Selected — set when a sidebar remote session row is selected, shows
     /// `RemoteSessionDetailView` (Task 10) in the content pane. Parallel to
     /// `selectedScratchSection` but keyed by the provider/session composite id
     /// rather than a UUID (see `RemoteSessionSelection` in
@@ -1217,7 +1200,7 @@ final class AppState {
     /// reconfirm. A missing key means no attempt is on record.
     var prObservations: [UUID: PRObservation] = [:]
     /// Every live PR bound to each worktree, in bind order — the multi-PR
-    /// surface behind the toolbar dropdown. `prStatuses` remains the single
+    /// surface behind the status-bar chips. `prStatuses` remains the single
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     var prBindings: [UUID: [PRBinding]] = [:]
@@ -1276,8 +1259,8 @@ final class AppState {
     /// put nothing on screen, so it must not silence an earlier call whose
     /// fetch succeeded. Only a publish moves this.
     @ObservationIgnored private var prBindingsPublishedSeq = 0
-    /// What every PR surface — toolbar split button, sidebar row indicator,
-    /// status-bar chips — must read, so they cannot disagree about a worktree.
+    /// What every PR surface — sidebar row indicator, status-bar chips — must
+    /// read, so they cannot disagree about a worktree.
     /// Bindings when there are any; otherwise the legacy single `prStatuses`
     /// entry lifted into one synthetic binding, which is what keeps the control
     /// on screen when `gh` cannot resolve a repo (offline or unauthenticated)
@@ -4727,10 +4710,10 @@ final class AppState {
             // `PRStatus.sameValue(as:)` states for the daemon's persistence
             // decision, and the difference is the point: a write to SQLite is a
             // cost with no reader, while a republication here is how the age
-            // these facts carry reaches the surfaces that render it. Both PR
-            // freshness surfaces (`WorktreeRowView.prUnknownTooltip` and the
-            // toolbar's `prFreshnessClauses`) read `now` in their view body, so
-            // this republication IS their ticker; suppressing it would freeze
+            // these facts carry reaches the surfaces that render it. The PR
+            // freshness surfaces (the sidebar row's PR tooltip and the status
+            // bar's chips) read `now` when they render, so this republication
+            // IS their ticker; suppressing it would freeze
             // "checked 25m ago" at whatever it said when the pull request last
             // actually changed. And it would save nothing either way — the
             // observations below carry a stamp that advances every attempt, so
@@ -5062,7 +5045,7 @@ final class AppState {
         !providers.isEmpty
     }
 
-    /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:
+    /// The scratch-row dimming rule, pure and testable:
     /// a scratch row dims only when its directory is missing AND it was
     /// never promoted. `tbd scratch promote` MOVES the folder to its
     /// destination repo, so a promoted row's directory never exists again —

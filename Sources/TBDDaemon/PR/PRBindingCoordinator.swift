@@ -82,8 +82,7 @@ public actor PRBindingCoordinator {
     /// provenance of a worktree created from a PR row.
     ///
     /// Without this such a worktree owns a number and no binding, so its PR is
-    /// invisible to `tbd pr list`, to the toolbar dropdown and to the status-bar
-    /// chips. Fork PRs are the sharpest case: a fork PR's head ref lives in the
+    /// invisible to `tbd pr list` and to the status-bar chips. Fork PRs are the sharpest case: a fork PR's head ref lives in the
     /// fork, so no query against this repo's head refs can reach it, branch
     /// matching is structurally unable to find them, and the stored number is
     /// the only handle that exists.

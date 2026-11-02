@@ -1,10 +1,9 @@
 import AppKit
 import TBDShared
 
-/// A provider header in the Remote section, drawn from a `ProviderHeaderModel`
-/// as `RemoteProviderHeaderRow` draws it: the provider's name across the free
-/// width, the health glyph at the trailing edge, and the issue line under the
-/// name while the provider is unhealthy. The selected provider's highlight
+/// A provider section's header, drawn from a `ProviderHeaderModel`: the
+/// provider's name across the free width, the health glyph at the trailing
+/// edge, and the issue line under the name while the provider is unhealthy. The selected provider's highlight
 /// is the row view's. While the provider needs authentication the
 /// health glyph is a button that opens the auth popover, and a provider that
 /// can be created against has a `+` that opens the create sheet; both send
@@ -12,7 +11,8 @@ import TBDShared
 final class ProviderHeaderCell: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.providerHeader")
 
-    /// The name alone: `.frame(minHeight: 22)` raised to the `List`'s 26 pt.
+    /// The name alone: a 22 pt line raised to the sidebar's 26 pt minimum row
+    /// height.
     static let singleHeight: CGFloat = 26
     /// The name and the issue line stacked at -1 pt.
     static let subtitleHeight: CGFloat = 28
@@ -35,7 +35,7 @@ final class ProviderHeaderCell: NSTableCellView {
     let issueField = SidebarCellKit.label(font: SidebarCellKit.captionFont, color: .secondaryLabelColor)
     /// The needs-auth key, as a button.
     let authButton = SidebarCellKit.glyphButton()
-    /// `RemoteProviderHeaderRow`'s `+`: a 16 pt square, plain style.
+    /// The create `+`: a 16 pt square, plain style.
     let plusButton = SidebarCellKit.glyphButton()
     let toolTips = SidebarToolTips()
 
@@ -127,7 +127,7 @@ final class ProviderHeaderCell: NSTableCellView {
             issueField.frame = NSRect(
                 x: x, y: top + nameSize.height - 1, width: min(issueSize.width, textWidth), height: issueSize.height)
         }
-        // Name, health glyph, `+`, in `RemoteProviderHeaderRow`'s order.
+        // Name, health glyph, `+`, in that order.
         let trailing = bounds.width - 4
         if !plusButton.isHidden {
             plusButton.frame = NSRect(

@@ -125,7 +125,7 @@ import os
 /// register on the nested one, which commits early — `commitms` would measure
 /// that nested commit and later draws in the display cycle would read no mark
 /// and emit a spurious drop. TBD has one nested transaction, in
-/// `TypingDotsView.layout()`; interleaving it with a terminal draw is
+/// `TypingDotsNSView.layout()`; interleaving it with a terminal draw is
 /// unlikely, and this is recorded rather than defended against.
 ///
 /// An elapsed-time heuristic cannot do this job — AppKit's cadence is ~16.67ms,

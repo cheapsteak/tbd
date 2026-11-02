@@ -122,7 +122,7 @@ struct RemoteAppStateTests {
     /// `unreadByRemoteSession` and `remoteSessionDisplayNames` must be
     /// pruned to whatever the daemon just authoritatively returned — a
     /// dismissed-then-gone session is filtered out of the row list
-    /// (`RemoteSectionView.sessions`) but never deleted from either map on
+    /// (`SidebarSessionPlacement.sessions`) but never deleted from either map on
     /// its own, so without this the maps (the latter persisted to
     /// `UserDefaults`) grow forever.
     @Test func refreshRemote_prunesUnreadAndDisplayNamesForSessionsNoLongerReported() async {

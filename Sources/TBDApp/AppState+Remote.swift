@@ -90,7 +90,7 @@ extension AppState {
     /// `selectedRemoteSession` if the selected session is no longer among
     /// them. Mirrors `unreadByWorktree`'s wholesale-replace-on-refresh
     /// pattern: a remote session that goes `gone` and is then dismissed is
-    /// filtered out of the row list (`RemoteSectionView.sessions`) but never
+    /// filtered out of the row list (`SidebarSessionPlacement.sessions`) but never
     /// deleted from the daemon's mirror the way an archived worktree's DB row
     /// eventually is, so without this call both maps grow forever —
     /// `remoteSessionDisplayNames` in particular is persisted to
@@ -157,7 +157,7 @@ extension AppState {
     /// Note this bookkeeping is edge-triggered (fires once per delta,
     /// cleared on `selectRemoteSession`) — separate from the STEADY-state
     /// `waiting_input` suffix glyph the row renders directly from
-    /// `agentState` on every poll (see `RemoteSessionRowView`). The bold
+    /// `agentState` on every poll (see `RemoteSessionRowPresentation`). The bold
     /// name says "you haven't looked since this happened"; the suffix glyph
     /// says "this is still true right now". They can disagree (bold clears
     /// on select even though the session may still be waiting for input),

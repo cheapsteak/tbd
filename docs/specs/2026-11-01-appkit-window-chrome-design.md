@@ -2,23 +2,25 @@
 
 Status: design, approved for implementation planning
 Date: 2026-11-01
-Rides: the native sidebar's flag ([`2026-10-31-native-sidebar-design.md`](2026-10-31-native-sidebar-design.md))
+Pairs with: the native sidebar ([`2026-10-31-native-sidebar-design.md`](2026-10-31-native-sidebar-design.md))
 
-With the native sidebar on, this spec moves the main window's split and toolbar
-onto AppKit. The sidebar toggle and back/forward sit beside the window buttons,
-the repo filter sits over the list it filters, and the worktree title aligns
-left.
+This spec puts the main window's split and toolbar on AppKit, around the native
+sidebar. The sidebar toggle and back/forward sit beside the window buttons, the
+repo filter sits over the list it filters, and the worktree title aligns left.
 
 ## Problem
+
+A SwiftUI `NavigationSplitView` window with SwiftUI `.toolbar` items places
+them where they do not belong:
 
 - **Back/forward sit in a Liquid Glass capsule after the sidebar's edge,** and
   the sidebar toggle draws in its own glass circle at the sidebar's trailing
   edge, though `.toolbar(removing: .sidebarToggle)` asks for none.
-- **The toggle does nothing, because the sidebar cannot collapse.** Waking from
-  sleep once collapsed it with no way back (#119), so `lockSidebarOpen`
-  (`TBDApp.swift`) sets `canCollapse` and `canCollapseFromWindowResize` to false
-  on SwiftUI's split controller. SwiftUI resets both on every layout pass, so
-  the app re-applies them every 5 seconds.
+- **The toggle cannot do anything, because the sidebar must not collapse.**
+  Waking from sleep once collapsed it with no way back (#119). The guard sets
+  `canCollapse` and `canCollapseFromWindowResize` to false on SwiftUI's split
+  controller, and SwiftUI resets both on every layout pass, so the guard has to
+  re-apply them on a timer, every 5 seconds.
 - **The title is centred** (`.principal`), away from the sidebar it belongs
   beside.
 - **The repo filter sits at the toolbar's far right,** away from the list it
@@ -29,10 +31,10 @@ left.
 SwiftUI cannot place these reliably. Whether toolbar items in the sidebar column
 survive a collapse is undocumented; hiding an item's glass leaves extra padding
 (Apple Developer Forums thread 816001); and `NavigationSplitView` owns the
-window toolbar, so a custom `NSToolbar` cannot sit beside it. The toolbar already
-carries workarounds for SwiftUI's lowering of it (`Sources/TBDApp/CLAUDE.md`):
-capsule fusing rules, and `.id` rebuilds because AppKit materializes a split
-button's menu once.
+window toolbar, so a custom `NSToolbar` cannot sit beside it. A SwiftUI toolbar
+also needs workarounds for how SwiftUI lowers it onto AppKit: capsule fusing
+rules, and `.id` rebuilds because AppKit materializes a split button's menu
+once.
 
 ## Goals
 
@@ -51,32 +53,29 @@ button's menu once.
 - No PR button. A worktree often relates to several PRs, so a toolbar button
   for one PR misreads the worktree; the sidebar rows' PR glyphs and
   `tbd pr list` show them all.
-- No file-panel toggle in the toolbar. The Changes panel's toggle leaves the
-  window toolbar; ⌘⇧E stays as a menu command.
+- No file-panel toggle in the toolbar. The Changes panel's toggle is not a
+  window toolbar item; ⌘⇧E is a menu command.
 
 ## Non-goals
 
 - **Changing what the other toolbar items do.** The Servers split button and
-  the remote session buttons are rebuilt with the behavior they have.
-- **The window with the native sidebar off.** It stays SwiftUI, unchanged.
+  the remote session buttons keep the behavior their own specs give them.
 - **User toolbar customization.**
 
 ## Window structure
 
-With `useAppKitSidebar` on when the main window is created, `ContentView` hosts
-an `NSSplitViewController` through an `NSViewControllerRepresentable` instead
-of the `NavigationSplitView`:
+`ContentView` hosts an `NSSplitViewController`, `MainSplitViewController`,
+through an `NSViewControllerRepresentable`, `MainWindowSplitView`:
 
 - **The sidebar item** is `NSSplitViewItem(sidebarWithViewController:)` hosting
-  `SidebarView`, which still chooses the native outline or the `List` from the
-  key. Its minimum thickness fits every item in the sidebar's part of the
-  toolbar (see "Width").
-- **The content item** hosts the detail area, `DetailSectionHostPager`, as
-  today.
+  `SidebarView`, the native outline and dock with the footer beneath. Its
+  minimum thickness fits every item in the sidebar's part of the toolbar (see
+  "Width").
+- **The content item** hosts the detail area, `DetailSectionHostPager`, in
+  `MainDetailArea`.
 - **Collapse** is the split item's: `canCollapse` is true and
   `canCollapseFromWindowResize` false, the guard against #119. They are set once,
-  because nothing resets them on this path, and `lockSidebarOpen` skips the
-  window.
+  because nothing resets them.
 - **Both items' `titlebarSeparatorStyle` is `.none`.** The running app confirms
   that this is the line's source; if it is the scroll-edge effect instead, that
   effect is turned off for the sidebar's scroll view.
@@ -88,7 +87,7 @@ The banners above the split and the status bar below it stay where they are in
 
 A `MainToolbarController` owns an `NSToolbar`, is its delegate, and installs it
 on the main window when the split appears, with `toolbarStyle = .unified`.
-Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
+Nothing in the window uses SwiftUI's `.toolbar`. Items, left to right:
 
 1. **Leading buttons** – one item holding three compact buttons side by side
    (see "Compact buttons"): the sidebar toggle, whose action is the split
@@ -107,8 +106,8 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    It is not the standard `.sidebarTrackingSeparator`, because AppKit's own
    item for that identifier finds a divider on its own, and re-binding it
    afterwards raises a KVO exception.
-5. **Title cluster** – today's `worktreeTitleItem` content in a hosting view, in
-   a borderless item. Its width does not follow its text: the item fills the
+5. **Title cluster** – `ToolbarTitleCluster` in a hosting view, in a borderless
+   item. Its width does not follow its text: the item fills the
    space between the tracking separator and the right-hand items, within a
    constant minimum and maximum, and the cluster sits at its leading edge. So
    the cluster starts just past the separator and stays put when back,
@@ -116,14 +115,14 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    is cut at the item's trailing edge, and nothing else is cut: the notes
    button's hover label reaches past the cluster's leading and bottom edges.
 6. **Flexible space.**
-7. **The right-hand items,** with today's behavior: the Servers split button
-   and the remote session buttons (Reconnect, Stop with its confirmation, and
+7. **The right-hand items:** the Servers split button and the remote session
+   buttons (Reconnect, Stop with its confirmation, and
    Transcript, shown on the remote spec's terms). The Servers button is an
    `NSMenuToolbarItem` whose menu an `NSMenuDelegate` builds each time it
    opens, and whose image updates in place, so no item is rebuilt to refresh
    it.
 
-The PR split button and the file-panel toggle are not rebuilt (see "Goals").
+There is no PR button and no file-panel toggle (see "Goals").
 
 Which items are present and in what order is a pure function of a small state
 value: whether the sidebar is collapsed, what is selected, the remote session's
@@ -228,7 +227,7 @@ repo's name, so a long name never widens the sidebar's part of the toolbar.
 - **Menu** – a click pops up one menu the toolbar controller keeps, its top
   leading corner 4 pt below the button's bottom leading corner: "All Repos", a
   separator, then each repo, the current choice checked, or none when the
-  filter names a repo that is gone, as the SwiftUI `Picker` shows it. Choosing
+  filter names a repo that is gone. Choosing
   a row sets `AppState.repoFilter`. Each apply keeps the menu in step: it
   rebuilds the rows only when the options change, sets a check, the tint, the
   tool tip and the accessibility value only when they differ, and changes
@@ -286,37 +285,32 @@ section at its narrowest, left to right:
   The filter's own view is 28 pt wide.
 - **Margin** – 20 pt before the tracking separator.
 
-That is 92 + 84 + 2 × 8 + 44 + 20 = 256 pt, below the 400 pt maximum and above
-the SwiftUI sidebar's 220 pt minimum. The spacing is the one estimate in it:
-the running app confirms it, and the thickness grows with it.
+That is 92 + 84 + 2 × 8 + 44 + 20 = 256 pt, below the 400 pt maximum. The
+spacing is the one estimate in it: the running app confirms it, and the
+thickness grows with it.
 
 ### Shortcuts
 
-⌘[, ⌘] and ⌘⇧E move from toolbar buttons to `.commands` menu items on both
-paths, so each works wherever its button is drawn.
+⌘[, ⌘] and ⌘⇧E are `.commands` menu items, not toolbar button shortcuts, so
+each works whether its button is on the toolbar, in the overflow menu or not
+in the toolbar at all.
 
-## Switching
+## Parity
 
-The window structure is chosen when the main window is created. Flipping the
-Settings toggle still swaps the sidebar's contents at once, and the window
-chrome follows at the next launch; the toggle's help text says so. Until then
-the native list can sit in the SwiftUI window or the `List` in the AppKit one,
-and both combinations work.
-
-## Rollout
-
-The chrome rides `useAppKitSidebar` and graduates with it; the native sidebar
-spec's parity checklist carries the chrome's items. With the key off, the
-SwiftUI window runs unchanged. During the soak, a change to a toolbar item's
-behavior lands in both toolbars, and its PR says so.
+The native sidebar spec's parity checklist carries the chrome's items, and a
+change to a toolbar item walks them.
 
 No durable resource is added.
 
 ## Testing
 
-- **The flag both ways:** the key off builds the `NavigationSplitView` with the
-  SwiftUI toolbar; the key on builds the split controller and the AppKit
-  toolbar, with no SwiftUI toolbar.
+- **The mounted window:** `ContentView` hosted offscreen builds the split
+  controller, whose sidebar pane holds the native sidebar, and puts the AppKit
+  toolbar on the window with no item it does not declare. A SwiftUI update of
+  the hierarchy leaves that toolbar on the window, checked against a positive
+  control in which a test-only root that declares a toolbar does get SwiftUI's
+  toolbar bridged onto the same kind of window. The hosted panes read
+  `@AppStorage` from the store the window's root gives them.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
   only while shown, the leading item first and before the separator in both;
   each conditional item against the state that shows it.
@@ -358,7 +352,7 @@ No durable resource is added.
 - **Title width:** the title item keeps its frame as the title goes from short
   to long and back, and starts at or after the divider; a fitting measurement
   of the title view gives its constant ideal width whatever the text.
-- **Shortcuts:** the three commands exist on both paths.
+- **Shortcuts:** the three commands exist, with their shortcuts.
 - **Live, before merge,** on the owner's machine: positions with the sidebar
   shown and collapsed and in full screen, no separator line, the filter hiding,
   nothing overflowing at the minimum width, the leading buttons 28 pt apart
@@ -369,7 +363,6 @@ No durable resource is added.
 
 ## Risks
 
-- **Two toolbars to keep in step** until the SwiftUI path is deleted.
 - **Keeping glass off the compact buttons and the filter relies on
   forwarding.** They have none because their items are unbordered and their
   views forward nothing. If a macOS release gives glass to view items by
@@ -385,17 +378,17 @@ No durable resource is added.
 - **SwiftUI only:** toolbar items in the sidebar column with
   `.sharedBackgroundVisibility(.hidden)` and `columnVisibility`. About 20 lines,
   but whether the items survive a collapse is undocumented, the hidden glass
-  leaves padding, and the 5-second lock stays.
+  leaves padding, and the collapse guard stays on its 5-second timer.
 - **A titlebar accessory beside the window buttons.** It stays outside SwiftUI's
   toolbar, but apps that use one repin AppKit's private title view to stop the
   title overlapping it, and carry fixes for clipping changes across macOS
   releases.
 - **Inserting AppKit items into SwiftUI's toolbar.** SwiftUI is that toolbar's
   delegate and does not know the identifiers.
-- **Shipping without a flag.** This replaces the window's split and toolbar, a
-  load-bearing path.
-- **A flag of its own.** The AppKit split and the native sidebar are one move of
-  the window onto AppKit, and the native sidebar's flag is already soaking.
+- **The native outline inside a SwiftUI window.** The outline mounts in a
+  `NavigationSplitView` as readily as in the AppKit split, but that window keeps
+  every problem above. The AppKit split and the native sidebar are one move of
+  the window onto AppKit.
 
 Prior art: vvterm (a SwiftUI app with an AppKit toolbar and split, and a test
 that the toggle survives a collapse), CodeEdit and NetNewsWire.

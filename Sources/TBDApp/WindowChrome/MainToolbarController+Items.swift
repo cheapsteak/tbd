@@ -755,7 +755,7 @@ extension MainToolbarController {
 
     /// The baked Servers icon for the appearance, copied so the copy can carry
     /// the accessibility label (`NSToolbarItem` has none of its own) without
-    /// touching the image the SwiftUI label shares.
+    /// touching the image `ServersButtonLabel.bakedIcon` caches.
     private func serversImage(_ servers: ServersPresentation, colorScheme: ColorScheme) -> NSImage {
         let key = Self.serversImageKey(servers, colorScheme: colorScheme)
         if let cached = serversImages[key] { return cached }

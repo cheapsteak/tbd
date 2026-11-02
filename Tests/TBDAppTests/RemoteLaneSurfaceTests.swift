@@ -10,8 +10,9 @@ import TestSupport
 /// The bug these cover shipped because it is invisible to a unit test that
 /// does not ask this exact question: adoption moved sessions into the repo
 /// tree (#625) and an adopted session is rendered by its worktree row ALONE —
-/// `RemoteSectionView.sessions` drops it (it resolved to a known repo) and
-/// `RepoSectionView.matchedRemoteSessions` drops it (a row stands for it) — so
+/// `SidebarSessionPlacement.sessions` drops it (it resolved to a known repo)
+/// and `SidebarSessionPlacement.matchedRemoteSessions` drops it (a row stands
+/// for it) — so
 /// the lane row became the only way in, while nothing mapped that row to a
 /// `RemoteSessionSelection`. The row landed on an ordinary worktree pane for a
 /// row with no path, no tmux server and no terminals.
@@ -123,7 +124,7 @@ struct RemoteLaneSurfaceTests {
     }
 
     /// The row stays selected: it is a worktree row in the repo tree, and its
-    /// sidebar highlight comes from the List selection. Clearing it — which is
+    /// sidebar highlight comes from `selectedWorktreeIDs`. Clearing it — which is
     /// what `activateRemoteSession` does for a Remote-section row — would
     /// deselect the very row the user clicked.
     @Test func selectingALaneRowKeepsTheRowSelected() async {

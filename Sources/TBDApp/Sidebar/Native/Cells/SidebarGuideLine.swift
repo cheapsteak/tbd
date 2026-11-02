@@ -48,7 +48,7 @@ enum SidebarGuideLine {
         static let none = Alphas(rest: 0, active: 0, restOnHighlight: 0, activeOnHighlight: 0)
     }
 
-    /// The lines' strengths. Active is close to the SwiftUI row's
+    /// The lines' strengths. Active is close to
     /// `Color.secondary.opacity(0.25)`, and rest about half of it. Set this
     /// to `.none` to see the sidebar without guide lines.
     static let alphas = Alphas(rest: 0.12, active: 0.24, restOnHighlight: 0.30, activeOnHighlight: 0.55)

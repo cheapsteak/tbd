@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// The native sidebar's tooltip bubble: today's `RowTooltipBubble`, hosted, in
-/// a view laid over the whole outline (spec "Hover"). It shows a truncated row
-/// name and a PR glyph's description below the hovered element, at once, as
-/// `SidebarView`'s `RowTooltipPreferenceKey` overlay does, rather than after
-/// AppKit's tooltip delay.
+/// The native sidebar's tooltip bubble: `RowTooltipBubble`, hosted, in a view
+/// laid over the whole outline (spec "Hover"). It shows a truncated row name
+/// and a PR glyph's description below the hovered element at once, rather
+/// than after AppKit's tooltip delay.
 ///
 /// It never takes a click: `hitTest` returns nil for it and everything inside
 /// it, so a press under the bubble reaches the row and can start a drag.

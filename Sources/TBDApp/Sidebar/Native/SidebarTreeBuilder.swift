@@ -5,8 +5,8 @@ import TBDShared
 private let nativeSidebarLogger = Logger(subsystem: "com.tbd.app", category: "native-sidebar")
 
 /// The sidebar settings that shape the tree. Each lives in `UserDefaults`,
-/// bound by `@AppStorage` in the SwiftUI views; the controller reads them with
-/// `init(defaults:)` and rebuilds when they change.
+/// bound by `@AppStorage` in Settings and the sidebar footer; the controller
+/// reads them with `init(defaults:)` and rebuilds when they change.
 struct SidebarBuildOptions: Equatable {
     /// `sidebar.showHiddenRepos`: hidden repos' sections are shown, dimmed.
     var showHiddenRepos: Bool
@@ -21,8 +21,7 @@ struct SidebarBuildOptions: Equatable {
     /// record of its own, so its state is a setting like the others here.
     var scratchExpanded: Bool
 
-    /// The key `SidebarView` and `SidebarFooter` bind for the hidden-repos
-    /// filter.
+    /// The key `SidebarFooter` binds for the hidden-repos filter.
     static let showHiddenReposKey = "sidebar.showHiddenRepos"
 
     init(showHiddenRepos: Bool, showScratchSection: Bool, workflowGroups: Bool,
@@ -34,8 +33,8 @@ struct SidebarBuildOptions: Equatable {
         self.scratchExpanded = scratchExpanded
     }
 
-    /// Reads every option from `defaults` with the default its SwiftUI reader
-    /// uses, so an unset key builds the tree the `List` would show.
+    /// Reads every option from `defaults` with the default its `@AppStorage`
+    /// binding declares, so an unset key builds the tree the toggles show.
     @MainActor
     init(defaults: UserDefaults) {
         self.init(
@@ -48,26 +47,24 @@ struct SidebarBuildOptions: Equatable {
     }
 }
 
-/// Turns `AppState` into the `SidebarTree` the native outline shows: the same
-/// sections, rows, order and depths `SidebarView`, `ScratchSectionView`,
-/// `RepoSectionView`, `WorktreeSubtreeView` and `RemoteSectionView` render
-/// for the same state. It calls the same `AppState` helpers they call
-/// (`sidebarRepositoryLayout`, `sidebarRemoteGroups(parentID:)`,
-/// `children(of:)` and the rest), so the two paths cannot disagree about
-/// membership or order.
+/// Turns `AppState` into the `SidebarTree` the native outline shows: the
+/// Scratch section, the repo sections and the provider sections, with their
+/// rows, order and depths. Membership and order come from `AppState`'s
+/// sidebar helpers (`sidebarRepositoryLayout`, `sidebarRemoteGroups(parentID:)`,
+/// `children(of:)` and the rest), which the reveal pass and the dock read too,
+/// so no two surfaces disagree about which rows a section holds.
 ///
 /// It never writes to `AppState` — the memo caches those helpers fill are
 /// `@ObservationIgnored` — because the controller runs it inside
 /// `withObservationTracking`, and a tracked write would schedule the next
 /// rebuild from inside this one.
 ///
-/// Content under a collapsed header or group is left out, as the `List`
-/// leaves it out: a collapsed node has no children in the tree. A worktree
-/// subtree is always expanded.
+/// Content under a collapsed header or group is left out: a collapsed node
+/// has no children in the tree. A worktree subtree is always expanded.
 @MainActor
 enum SidebarTreeBuilder {
-    /// `WorktreeSubtreeView`'s recursion cap: a row at this ancestry depth is
-    /// built without its children. Defends against a cyclic or runaway
+    /// The recursion cap: a row at this ancestry depth is built without its
+    /// children. Defends against a cyclic or runaway
     /// `parentWorktreeID` chain in the database.
     static let maxSubtreeDepth = 50
 
@@ -118,10 +115,10 @@ enum SidebarTreeBuilder {
     }
 }
 
-/// One build: walks the sections in `List` order, emitting each worktree and
+/// One build: walks the sections in sidebar order, emitting each worktree and
 /// session at most once. A node ID can stand for one outline item only, so a
 /// row a corrupt parent chain reaches a second time is dropped rather than
-/// drawn again, as the `List` would draw it.
+/// drawn again.
 @MainActor
 private struct BuildPass {
     let appState: AppState
@@ -156,7 +153,7 @@ private struct BuildPass {
         return roots
     }
 
-    // MARK: Scratch — `ScratchSectionView`
+    // MARK: Scratch
 
     mutating func scratchSection() -> SidebarNode {
         let expanded = options.scratchExpanded
@@ -186,7 +183,7 @@ private struct BuildPass {
                            children: children, isExpanded: expanded)
     }
 
-    // MARK: Repos — `RepoSectionView`
+    // MARK: Repos
 
     mutating func repoSection(_ repo: Repo) -> SidebarNode? {
         guard emittedRepos.insert(repo.id).inserted else { return nil }
@@ -236,7 +233,7 @@ private struct BuildPass {
                            children: children, isExpanded: repo.expanded)
     }
 
-    // MARK: Remote section — `RemoteSectionView`
+    // MARK: Providers
 
     mutating func providerSections() -> [SidebarNode] {
         var nodes: [SidebarNode] = []
@@ -261,7 +258,7 @@ private struct BuildPass {
         return nodes
     }
 
-    // MARK: Worktree subtrees — `WorktreeSubtreeView`
+    // MARK: Worktree subtrees
 
     /// A row and its descendants. `ancestry` counts worktree ancestors only,
     /// the recursion the depth cap bounds; `depth` is the row's visual depth,
@@ -300,11 +297,9 @@ private struct BuildPass {
     }
 
     /// A Remote disclosure and, while it is expanded, its rows and its Exited
-    /// disclosure. Serves a repo's section (`RepoSectionView.remoteGroupContent`),
-    /// a provider's (`RemoteSectionView.providerSessionGroups`) and a parent
-    /// row's (`WorktreeSubtreeView.groupedChildren`). `depth` is the Remote
-    /// header's own visual depth; its rows sit one deeper, and the Exited
-    /// header's rows two.
+    /// disclosure. Serves a repo's section, a provider's and a parent row's.
+    /// `depth` is the Remote header's own visual depth; its rows sit one
+    /// deeper, and the Exited header's rows two.
     mutating func remoteGroup(_ groups: SidebarRemoteGroups, owner: SidebarGroupID.Owner, rootAncestry: Int,
                               depth: Int, sectionRepoID: UUID?, hidden: Bool) -> SidebarNode {
         let remoteID = SidebarGroupID(owner: owner, kind: .remote)
@@ -377,10 +372,11 @@ private struct BuildPass {
     }
 }
 
-/// Computes each row's model from `AppState`, once per rebuild. Every value is
-/// derived the way the matching SwiftUI row derives it, through the same pure
-/// helpers. Also the entry point for any other native list that draws these
-/// rows, such as the pinned dock.
+/// Computes each row's model from `AppState`, once per rebuild, through the
+/// pure presentation helpers (`WorktreeRowPresentation`,
+/// `RemoteSessionRowPresentation`, `RowStatusIndicator` and the rest). Also the
+/// entry point for any other native list that draws these rows, such as the
+/// pinned dock.
 @MainActor
 struct SidebarRowModelFactory {
     let appState: AppState
@@ -389,8 +385,8 @@ struct SidebarRowModelFactory {
     /// `AppState.repoName(for:)` as a lookup: the first repo with an ID wins,
     /// as `first(where:)` picks it.
     private let repoNames: [UUID: String]
-    /// The first provider registered under each name, as
-    /// `RemoteSessionRowView.providerStatus` picks it.
+    /// The first provider registered under each name: the one whose health a
+    /// session row's staleness note reads.
     private let providersByName: [String: RemoteProviderStatus]
 
     init(appState: AppState, now: Date, directoryExists: @escaping (String) -> Bool) {
@@ -403,7 +399,7 @@ struct SidebarRowModelFactory {
                                           uniquingKeysWith: { first, _ in first })
     }
 
-    // MARK: Worktree rows — `WorktreeRowView`
+    // MARK: Worktree rows
 
     func worktree(_ worktree: Worktree, isMain: Bool, depth: Int, sectionRepoID: UUID?,
                   isInHiddenSection: Bool) -> WorktreeRowModel {
@@ -497,7 +493,7 @@ struct SidebarRowModelFactory {
             isPlaceholder: appState.pendingWorktreeIDs.contains(id))
     }
 
-    // MARK: Remote session rows — `RemoteSessionRowView`
+    // MARK: Remote session rows
 
     func remoteSession(_ session: RemoteSessionInfo, depth: Int, isInHiddenSection: Bool) -> RemoteSessionRowModel {
         let selection = RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)
@@ -526,21 +522,21 @@ struct SidebarRowModelFactory {
 
     // MARK: Headers
 
-    /// `RepoSectionView.headerRow`.
+    /// A repo section's header.
     func repoHeader(_ repo: Repo) -> SectionHeaderModel {
         SectionHeaderModel(
             title: repo.displayName, isExpanded: repo.expanded, isHidden: repo.hidden,
             isMissing: repo.status == .missing, isSelected: appState.selectedRepoID == repo.id)
     }
 
-    /// `ScratchSectionView`'s header.
+    /// The Scratch section's header.
     func scratchHeader(isExpanded: Bool) -> SectionHeaderModel {
         SectionHeaderModel(
             title: AppState.scratchSectionLabel, isExpanded: isExpanded, isHidden: false,
             isMissing: false, isSelected: appState.selectedScratchSection)
     }
 
-    /// `RemoteProviderHeaderRow`.
+    /// A provider section's header.
     func providerHeader(_ provider: RemoteProviderStatus) -> ProviderHeaderModel {
         ProviderHeaderModel(
             name: RemoteProviderIdentityPresentation.headline(provider),

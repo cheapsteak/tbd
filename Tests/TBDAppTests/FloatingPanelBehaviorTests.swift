@@ -38,7 +38,7 @@ struct FloatingPanelBehaviorTests {
     }
 
     @Test func hidesOnDeactivateWhenKeyCapable() {
-        // The variant `FloatingMenuAnchor` actually constructs for the hover menu.
+        // The variant `SidebarPlusMenu` actually constructs for the hover menu.
         #expect(FloatingPanel(content: Text("x"), canBecomeKey: true).hidesOnDeactivate == true)
     }
 

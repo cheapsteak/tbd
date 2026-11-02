@@ -10,14 +10,14 @@ private let createSheetLogger = Logger(subsystem: "com.tbd.app", category: "remo
 /// (matching the contract's own framing) before submitting, and surfaces
 /// whatever message the provider's `create` verb returns on failure.
 ///
-/// Opened from a `+` button in the Remote section's provider header
-/// (`RemoteProviderHeaderRow`, no repo context — `repoPrefill: nil`) or from
-/// a repo's context menu (`RepoSectionView`, `repoPrefill` derived from that
-/// repo's `remoteURL` via `RemoteCreateFormLogic.repoPrefill` — the SAME
+/// Opened from a `+` button in a provider section's header (no repo
+/// context — `repoPrefill: nil`) or from a repo header's menu (`repoPrefill`
+/// derived from that repo's `remoteURL` via
+/// `RemoteCreateFormLogic.repoPrefill` — the SAME
 /// normalization `RemoteRepoMatching` uses to resolve a session back to a
 /// repo, so a session created this way round-trips into the section its `+`
 /// was clicked from instead of landing unmatched), or from a worktree row's
-/// nested `+` (`WorktreeRowView`, which adds `parentWorktreeID`).
+/// nested `+` (which adds `parentWorktreeID`).
 ///
 /// The two `+` menus reach this sheet only when `RemoteCreateFormLogic.launch`
 /// found something it could not answer; when it can answer everything they

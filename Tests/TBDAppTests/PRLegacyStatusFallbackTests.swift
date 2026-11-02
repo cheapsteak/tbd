@@ -78,9 +78,9 @@ struct PRLegacyStatusFallbackTests {
     }
 
     /// The whole value has to compare equal across evaluations, not just the
-    /// id: it feeds `ForEach` identity, the split button's `.id` key, and
-    /// SwiftUI's view-value diffing. The initializer's `UUID()` / `Date()`
-    /// defaults would churn all three on every render.
+    /// id: it feeds `ForEach` identity and SwiftUI's view-value diffing. The
+    /// initializer's `UUID()` / `Date()` defaults would churn both on every
+    /// render.
     @Test("the synthetic binding is value-stable, so ForEach and .id keys do not churn")
     func legacyIDStable() {
         let wt = UUID()

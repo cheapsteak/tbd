@@ -2,11 +2,12 @@ import Foundation
 import TBDShared
 
 /// Typed, ordered action model for a worktree row's action list — the single
-/// source of truth behind the right-click context menu (`SidebarContextMenu`).
+/// source of truth behind the right-click context menu (`SidebarMenus`) and
+/// the title menu (`WorktreeTitleView`).
 ///
 /// Pure composition on top of a small `Context` of live inputs the surface reads
-/// from `AppState`. No AppKit, no SwiftUI: `role` is our own `ActionRole` and the
-/// view maps it to SwiftUI's `.destructive`. `items(context:)` is a pure
+/// from `AppState`. No AppKit, no SwiftUI: `role` is our own `ActionRole` and
+/// each surface maps it to its own destructive styling. `items(context:)` is a pure
 /// function of its inputs, so the ordered structure the menu renders is
 /// directly unit-testable without any `AppState`.
 ///
@@ -120,8 +121,8 @@ enum RowActionMenu {
         var hasArchivableRow: Bool
     }
 
-    /// The small set of live inputs the current `SidebarContextMenu` reads from
-    /// `AppState`, lifted into a value type so `items(...)` is a pure function.
+    /// The small set of live inputs the menu reads from `AppState`, lifted into
+    /// a value type so `items(...)` is a pure function.
     struct Context: Equatable {
         /// Has at least one Claude terminal eligible for a manual "Hibernate
         /// now" right now (idle-at-rest, not running/waiting/hibernated).

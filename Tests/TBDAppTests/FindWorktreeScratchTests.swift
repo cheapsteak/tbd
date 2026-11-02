@@ -260,7 +260,7 @@ struct ArchiveShortcutRouteTests {
 }
 
 /// `renameWorktree` owns the single optimistic local update (scratch-aware,
-/// applied before its RPC) — callers like `WorktreeRowView` must not
+/// applied before its RPC) — callers like the sidebar's rename editor must not
 /// pre-apply. The local-only gate keys on `pendingWorktreeIDs` (client-side
 /// creation placeholders the daemon has never heard of), NOT on `.creating`
 /// status: a two-phase create leaves the daemon row `.creating` for as long

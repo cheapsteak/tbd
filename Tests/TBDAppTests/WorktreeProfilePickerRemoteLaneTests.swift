@@ -46,7 +46,7 @@ struct WorktreeProfilePickerRemoteLaneTests {
     // MARK: - the provider-registered gate
 
     /// No provider registered → the row is omitted, not disabled — mirroring
-    /// `RepoSectionView.newRemoteSessionMenuItem`.
+    /// the repo header menu's item.
     @Test func noRegisteredProviderOffersNothing() {
         let offer = WorktreeProfilePickerView.remoteLaneOffer(providers: [], parentWorktreeID: nil)
         #expect(describeOffer(offer).kind == "hidden")

@@ -6,9 +6,9 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Select
 
 /// Archiving the sidebar selection: the row menu's Archive Selection and the
 /// archive shortcut. The decisions are `SelectionArchive`'s; this wires them
-/// to live state. `selectedWorktreeIDs` is the one selection source: both
-/// native tables sync into it, so it holds rows of both sidebars and both
-/// docks, including rows a collapsed section hides.
+/// to live state. `selectedWorktreeIDs` is the one selection source: the
+/// outline and the dock both sync into it, so it holds rows of both,
+/// including rows a collapsed section hides.
 extension AppState {
     // MARK: - Resolving the selection
 

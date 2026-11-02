@@ -102,7 +102,8 @@ import TBDShared
     @Test func explicitArchivedParentIsRejected() async throws {
         // Spawning a child under an archived parent would produce an invisible
         // row in the sidebar (topLevelWorktrees filters out children;
-        // WorktreeSubtreeView skips archived parents). Reject before creation.
+        // the sidebar's subtree walk skips archived parents). Reject before
+        // creation.
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main")
         let p = try await db.worktrees.create(repoID: repo.id, name: "p", branch: "tbd/p", path: "/tmp/p-\(UUID())", tmuxServer: "srv")

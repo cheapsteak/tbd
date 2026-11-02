@@ -15,7 +15,7 @@ enum SidebarHeaderMetrics {
     /// target, wider than the glyph inside it.
     static let chevronColumnWidth: CGFloat = 18
 
-    /// Spacing between a section header's `HStack` items.
+    /// Spacing between a section header's chevron, title and `+`.
     static let headerSpacing: CGFloat = 4
 
     /// Leading padding on a project row's name while the chevron leads it,
@@ -23,8 +23,8 @@ enum SidebarHeaderMetrics {
     /// name read as one label. Zero while the chevron trails instead.
     static let nameLeadingClawback: CGFloat = -2
 
-    /// The `listRowInsets` leading every section HEADER row carries — the
-    /// left edge of a section's chrome, chevron included.
+    /// The leading inset every section HEADER row carries — the left edge of
+    /// a section's chrome, chevron included.
     static let headerRowLeadingInset: CGFloat = -2
 
     /// How far a child row's content sits past its section's title. Applied
@@ -45,7 +45,7 @@ enum SidebarHeaderMetrics {
             : 0
     }
 
-    /// The `listRowInsets` leading for the rows under a section title —
+    /// The leading inset for the rows under a section title —
     /// worktrees, scratch pads, remote sessions. Derived from the title's own
     /// position so children track it: with the chevron before the project
     /// name the titles sit a chevron column in, and the rows come with them.

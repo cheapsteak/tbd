@@ -2,10 +2,10 @@ import AppKit
 import Testing
 @testable import TBDApp
 
-/// Tests for `WorktreeRowView.loadIcon` — the cached sidebar PR status icon
-/// loader. The cache exists so the NSImage handed to `Image(nsImage:)` is
-/// identity-stable across body evaluations; a fresh instance per render made
-/// every row's icon layer rebuild simultaneously (visible mass blink).
+/// Tests for `WorktreeRowPresentation.loadIcon` — the cached sidebar PR status
+/// icon loader. The cache keeps the `NSImage` a row cell is handed
+/// identity-stable, so setting the same icon again hands the cell the image it
+/// already holds, and the bundle read runs once per icon.
 @MainActor
 @Suite("WorktreeRowIconCache")
 struct WorktreeRowIconCacheTests {

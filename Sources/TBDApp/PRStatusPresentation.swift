@@ -19,11 +19,9 @@ enum PRFreshness {
 
     /// Age buckets, coarsening as they grow.
     ///
-    /// Deliberately not per-second or per-minute. The toolbar's split button is
-    /// materialized once by AppKit and only rebuilt when its `.id` changes, so
-    /// the id must include whatever the help string renders — and a label that
-    /// changed every minute would rebuild the item (and its NSMenu) every
-    /// minute. Five-minute resolution is far finer than the failure this stamp
+    /// Deliberately not per-second or per-minute: a label that changed every
+    /// minute would change every surface that shows it every minute, for no
+    /// gain. Five-minute resolution is far finer than the failure this stamp
     /// exists to expose, which was measured in days.
     static func checkedLabel(observedAt: Date?, now: Date) -> String {
         guard let observedAt else { return "last checked at an unknown time" }
@@ -133,9 +131,8 @@ struct PRStatusPresentation: Equatable {
         }
     }
 
-    /// AppKit equivalent of `color`, for baking a pre-tinted (non-template)
-    /// NSImage — toolbar `Menu`/split-button labels strip color from template
-    /// images, so the icon must carry its own color via `.renderingMode(.original)`.
+    /// AppKit equivalent of `color`, for an AppKit cell that tints a template
+    /// glyph with `contentTintColor`.
     var nsColor: NSColor {
         switch colorSemantic {
         case .pending:
@@ -193,10 +190,9 @@ struct PRStatusPresentation: Equatable {
     }
 
     /// Renders `emoji` to a full-color, non-template `NSImage` of `side`×`side`.
-    /// The ONE shared emoji→NSImage path used by both the sidebar row and the
-    /// toolbar split-button label so their glyphs can't drift. Full-color and
-    /// non-template: callers must render it with `.renderingMode(.original)` and
-    /// must NOT tint it.
+    /// The ONE shared emoji→NSImage path, so every surface that draws a glyph
+    /// draws the same one. Full-color and non-template: callers must draw it
+    /// untinted.
     @MainActor
     static func emojiImage(_ emoji: String, side: CGFloat) -> NSImage {
         if let cached = emojiImageCache[emoji] { return cached }
@@ -216,17 +212,13 @@ struct PRStatusPresentation: Equatable {
     /// bitmaps, and the sidebar row and the status-bar chip would then draw
     /// visibly different busses for one queued PR with every test still green.
     /// One constant is what makes "the same image at the same size" a fact
-    /// rather than a comment. (The toolbar split button is the deliberate
-    /// exception — it composites the bus into a larger flattened label image
-    /// and passes its own `iconSide`.)
+    /// rather than a comment.
     static let busSide: CGFloat = 12
 
     /// The full-color merge-queue bus glyph with its 1-indexed `position` baked
-    /// into a small rounded-rect corner chip. Shared by BOTH render sites (the
-    /// sidebar row and the flattened toolbar split-button label, which can only
-    /// carry one image), so the bus + badge never drift. `position == nil`
-    /// yields the bare bus. Non-template: render with `.renderingMode(.original)`
-    /// and do not tint.
+    /// into a small rounded-rect corner chip. Shared by every render site (the
+    /// sidebar row and the status-bar chip), so the bus + badge never drift.
+    /// `position == nil` yields the bare bus. Non-template: draw it untinted.
     @MainActor
     static func busImage(position: Int?, side: CGFloat) -> NSImage {
         let cacheKey = "bus-\(position.map(String.init) ?? "none")-\(side)"
@@ -243,8 +235,7 @@ struct PRStatusPresentation: Equatable {
 
     /// The one sentence every surface uses to describe a single request's
     /// state: the status-bar chip's headline, tooltip and VoiceOver hint, the
-    /// sidebar row's tooltip, and the rows of both the toolbar dropdown and the
-    /// `+N` overflow menu. It lives beside `busImage` for exactly the reason
+    /// sidebar row's tooltip, and the rows of the `+N` overflow menu. It lives beside `busImage` for exactly the reason
     /// that image is shared — a bar and a sidebar drawing one queued PR must
     /// not describe it differently, and on a multi-PR worktree the chip and the
     /// menu row for the *same* PR can be on screen at once.

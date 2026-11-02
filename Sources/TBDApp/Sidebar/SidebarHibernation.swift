@@ -14,8 +14,9 @@ struct SidebarHibernationPartition {
 }
 
 enum SidebarHibernation {
-    /// Matches WorktreeSubtreeView's maximum rendered nesting depth. Beyond
-    /// this bound the inventory is uncertain, so keep the root in place.
+    /// Matches `SidebarTreeBuilder.maxSubtreeDepth`, the deepest nesting the
+    /// sidebar renders. Beyond this bound the inventory is uncertain, so keep
+    /// the root in place.
     static let maximumDepth = 50
 
     /// Call with the repository's existing ordered top-level rows, or the

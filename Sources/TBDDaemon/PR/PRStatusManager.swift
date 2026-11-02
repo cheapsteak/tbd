@@ -1296,7 +1296,7 @@ public actor PRStatusManager {
             )
             observations[binding.id] = PRBindingObservation(
                 // Stamped, like every other freshly observed status: a binding's
-                // status reaches the sidebar dot and the toolbar help through
+                // status reaches the sidebar dot and the status-bar chips through
                 // `worktree.prStatus`, and a value with no `observedAt` renders
                 // as "last checked at an unknown time" there. The failure paths
                 // above deliberately do NOT re-stamp — they carry a previous

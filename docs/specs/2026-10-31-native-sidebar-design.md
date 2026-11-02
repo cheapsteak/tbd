@@ -55,8 +55,6 @@ never re-nests a lane the user placed. `AppState.moveWorktree` has no caller.
   at any depth; reorder scratch spaces within their section; drag several
   selected rows at once.
 - Everything else looks and behaves as it does today.
-- The new sidebar ships behind a default-off flag, and the SwiftUI path runs
-  unchanged while the flag is off.
 
 ## Non-goals
 
@@ -151,10 +149,10 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
 - **`SidebarSelectionBridge`** – maps outline selection to `AppState` and back,
   and holds the one rule both lists follow for a user's selection.
 - **`SidebarDropPolicy`** – pure; decides what a drag proposal means.
-- **`NativeSidebarView`** – the native path's SwiftUI wrapper: it mounts the
+- **`NativeSidebarView`** – the sidebar's SwiftUI wrapper: it mounts the
   container controller through an `NSViewControllerRepresentable` and presents
   the sidebar's sheets from the presenter. `SidebarView` shows it, with the
-  SwiftUI footer beneath, when the flag is on.
+  SwiftUI footer beneath.
 
 ### Update loop
 
@@ -662,42 +660,26 @@ apply steps of both lists, the outline's and the dock's, also emit
 `os_signpost` intervals under names of their own, so Instruments can attribute
 a slow frame to the list that spent it.
 
-## Flag and rollout
+## The sidebar and the window
 
-- **Key** – the app-only UserDefaults key `useAppKitSidebar`, as
-  `AppState.appKitSidebarKey`, with its shipped default in exactly one constant,
-  `AppState.appKitSidebarDefault = false`. An unset key reads as that constant,
-  so graduating is a one-line change that keeps any explicit opt-out.
-- **Toggle** – Settings → Experimental, "Native sidebar with drag to nest
-  (experimental)". `SidebarView` chooses its path from the key, so the toggle
-  swaps the sidebar without a restart.
-- **Off** – the SwiftUI `List` path runs unchanged.
-- **Window chrome** – the AppKit split and toolbar of
+- **One sidebar** – the AppKit outline and the pinned dock are the sidebar.
+  `SidebarView` mounts `NativeSidebarView` with the SwiftUI footer beneath, and
+  no setting chooses another list.
+- **One window structure** – the AppKit split and toolbar of
   [`2026-11-01-appkit-window-chrome-design.md`](2026-11-01-appkit-window-chrome-design.md)
-  ride this key and graduate with it. They follow the key at the next launch
-  rather than at once.
-- **During the soak** – a change to sidebar behavior lands in both paths, and
-  its PR says so.
-- **Soak** – two weeks with the flag on in daily use, starting when the PR that
-  adds the flag merges. At that merge a reminder is scheduled for 14 days later
-  to open the graduation PR.
-- **Graduation criteria**, checked in the graduation PR:
-  1. The soak ran its two weeks.
-  2. The parity checklist below was walked live and ticked off.
-  3. No hang-stack sample in `~/Library/Logs/TBD/hang-stacks/` from the soak
-     has a frame in `Sidebar/Native/`.
-  4. `SidebarListUpdateBench` shows the native path within every budget in
-     "Responsiveness", and no slower than the `List` path at 800 remote
-     sessions.
-- **Graduation** – flips `appKitSidebarDefault` to true. Deleting the SwiftUI
-  sidebar path is a later, separate PR, once the new default has held.
+  are the main window's split and toolbar, and the sidebar fills the split's
+  sidebar pane.
+- **Checks on a change** – a change to the sidebar walks the parity checklist
+  below for the behaviors it touches, and keeps `SidebarListUpdateBench`
+  within every budget in "Responsiveness". No hang-stack sample in
+  `~/Library/Logs/TBD/hang-stacks/` should have a frame in `Sidebar/Native/`.
 
-No durable resource is added. `moveMany` edits existing rows, and the flag lives
-in UserDefaults, so no reconciler is involved.
+No durable resource is added. `moveMany` edits existing rows, so no reconciler
+is involved.
 
 ### Parity checklist
 
-The behaviors a rewrite most easily loses:
+The behaviors the sidebar keeps that a change to it most easily loses:
 
 1. Selection routing: pure-remote selections go to `selectRemoteSession`, mixed
    selections keep the local rows, and cmd-click order reaches
@@ -725,10 +707,10 @@ The behaviors a rewrite most easily loses:
    only through the click handler.
 10. The window chrome: the toggle, back and forward stay beside the window
     buttons with the sidebar shown and collapsed; the repo filter hides while
-    collapsed; every right-hand toolbar item the AppKit toolbar keeps matches
-    the SwiftUI toolbar's behavior, and it has no PR button and no
-    file-panel toggle; no separator line under the sidebar's toolbar area; waking from
-    sleep never collapses the sidebar.
+    collapsed; the Servers item and the remote session's transcript, reconnect
+    and stop buttons behave as the window chrome spec describes, and there is
+    no PR button and no file-panel toggle; no separator line under the
+    sidebar's toolbar area; waking from sleep never collapses the sidebar.
 
 ## Testing
 
@@ -787,25 +769,31 @@ App:
   rename field appearing when `editingWorktreeID` is set, the scroll anchor
   across inserts, removes, cross-parent moves and height-class changes above
   it, and the scratch re-probe on a test clock.
-- One test per flag branch: off mounts the `List`, on mounts the native sidebar.
-  Flag tests use `TestDefaultsSuite`, never `UserDefaults.standard`.
-- The env-gated `SidebarRenderHarness` renders both paths from one fixture as
-  side-by-side images for review. It is not a CI gate.
+- Observation tests drive the outline through `OutlineHarness`: a write to
+  state a row reads, such as a child added through `AppState`'s memo caches, a
+  reparented scratch space or a provider going stale, must reach the outline's
+  observation, which `flushPendingRebuild()` acts on only when it fired, and
+  change the rows the outline shows.
+- `ContentView` mounted offscreen holds exactly one native sidebar in the
+  split's sidebar pane. Tests that touch defaults use `TestDefaultsSuite`,
+  never `UserDefaults.standard`.
+- The env-gated `SidebarRenderHarness` renders `SidebarView` from fixtures as
+  images for review. It is not a CI gate.
 
 The 80 ms header debounce, the 60 s scratch re-probe and any other new timer
 take an injected clock, per `CLAUDE.md`.
 
 ## Risks
 
-- **Lost behavior.** The SwiftUI sidebar is about 7,400 lines with many small
-  interactions. The parity checklist and per-input builder tests target the
-  likeliest losses, and the flag keeps the old path one toggle away.
+- **Lost behavior.** The SwiftUI sidebar this replaces is about 7,400 lines
+  with many small interactions. The parity checklist and per-input builder
+  tests target the likeliest losses.
 - **A row that stops refreshing.** Native cells redraw only when the controller
   tells them to. The builder is the only reader of `AppState`, so a missed input
   shows up as a builder test that fails, not as a cell that forgot to observe.
 - **Main-thread rebuild cost.** A rebuild walks every row, about 320 on a heavy
   sidebar today. Coalescing bounds the passes, and the budgets in
-  "Responsiveness", enforced at graduation, bound their cost.
+  "Responsiveness", which `SidebarListUpdateBench` measures, bound their cost.
 - **Rows that jump after a drop.** A stale poll or a partial echo could move
   rows back after the user placed them. The pending-move overlay and the
   full-group delta exist to prevent that, and each has a test.
@@ -818,8 +806,6 @@ take an injected clock, per `CLAUDE.md`.
   subtlest code here. Tests cover reversals, cross-parent moves and moves under
   collapsed parents, and the `numberOfRows` check falls back to `reloadData`
   with a `.fault` log if a diff still goes wrong in the field.
-- **Two paths during the soak.** Sidebar changes must land in both. The soak is
-  time-boxed to keep that window short.
 
 ## Rejected alternatives
 
@@ -839,11 +825,11 @@ take an injected clock, per `CLAUDE.md`.
 - **Folding the dock into the outline as a Pinned section.** Simpler structure,
   but it moves pinned items users rely on and loses the dock's height clamp.
 - **The native source-list look.** Less custom drawing, but it changes how the
-  sidebar looks and makes comparing the two paths during the soak harder.
-- **Replacing the `List` without a flag.** Dogfooding and `scripts/restart.sh`
-  give one machine a fast revert, but this repo serves other organizations, and
-  `CLAUDE.md` requires a flag for replacing a load-bearing path and for moving
-  items users rely on.
+  sidebar looks.
+- **Keeping the SwiftUI `List` as a second sidebar.** A setting that chooses
+  between two sidebars makes every sidebar change land twice and every parity
+  item hold for both, and the `List` keeps the failure modes in "Problem". One
+  sidebar carries one set of behaviors.
 - **Dragging only the row under the cursor.** Simpler, but a drag that leaves
   the rest of a selection behind contradicts every macOS list.
 - **Sequential `worktree.move` calls with client-computed sort orders.** A

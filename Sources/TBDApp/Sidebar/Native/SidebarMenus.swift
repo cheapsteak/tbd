@@ -13,20 +13,19 @@ protocol SidebarMenuHost: AnyObject {
     func confirmRemove(_ repo: Repo)
 }
 
-/// The native sidebar's context menus, built from the same models the SwiftUI
-/// rows render (spec "Context menus, popovers and sheets"), so titles, order,
-/// enabled state and actions match:
+/// The native sidebar's context menus, built from the shared menu models
+/// (spec "Context menus, popovers and sheets"), so titles, order, enabled
+/// state and actions match wherever else those models render:
 /// - a worktree row: `RowActionMenu` through `RowActionMenuActions`, then the
-///   "New Cloud Session…" / "New Remote Session…" pair `WorktreeRowView` adds;
-///   for a row in a multi-row selection, Archive Selection alone, as
-///   `SidebarContextMenu` shows it;
-/// - a repo header: `RepoSectionView.repoContextMenu`'s items — Collapse or
-///   Expand, Rename…, Hide or Unhide, the two create items, Remove from List…;
+///   "New Cloud Session…" / "New Remote Session…" pair; for a row in a
+///   multi-row selection, Archive Selection alone;
+/// - a repo header: Collapse or Expand, Rename…, Hide or Unhide, the two
+///   create items, Remove from List…;
 /// - the Scratch header: Collapse or Expand, Edit Scratch Instructions…;
 /// - a remote session row: `RemoteSessionActionMenu` through
 ///   `RemoteSessionActionMenuActions`.
-/// Group headers, provider headers and the scratch prompt have none, as in the
-/// SwiftUI sidebar. Each menu is built when it is asked for, never per rebuild.
+/// Group headers, provider headers and the scratch prompt have none. Each
+/// menu is built when it is asked for, never per rebuild.
 @MainActor
 struct SidebarMenus {
     let appState: AppState
@@ -89,8 +88,8 @@ struct SidebarMenus {
         return items
     }
 
-    /// `WorktreeRowView.remoteCreateMenuItems`: one separator, then the cloud
-    /// item and the generic item, each omitted when there is nothing to offer
+    /// A worktree row's create items: one separator, then the cloud item and
+    /// the generic item, each omitted when there is nothing to offer
     /// and disabled while its provider's snapshot is stale. Both always open
     /// the form, nested under this row.
     private func remoteCreateItems(for worktree: Worktree) -> [NSMenuItem] {

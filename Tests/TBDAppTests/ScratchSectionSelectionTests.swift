@@ -7,7 +7,7 @@ import TestSupport
 /// Tests for `AppState.selectScratchSection()` and its mutual exclusivity with
 /// `selectedRepoID` / `selectedWorktreeIDs`. Selecting the "Scratch" sidebar
 /// section header is a third, parallel selection concept alongside the
-/// existing two (`selectedWorktreeIDs` for `List`'s native selection,
+/// existing two (`selectedWorktreeIDs` for the outline's row selection,
 /// `selectedRepoID` for repo headers) — an inconsistent combination (e.g.
 /// both `selectedRepoID` and `selectedScratchSection` true at once) would
 /// make `ContentView`'s if/else detail-pane chain pick the wrong pane.

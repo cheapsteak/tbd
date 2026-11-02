@@ -1191,7 +1191,7 @@ extension AppState {
     }
 
     /// User-facing label for the repo-less scratch section. Single source for
-    /// the sidebar section header (`ScratchSectionView`) and the jump menu's
+    /// the sidebar section header and the jump menu's
     /// pseudo-repo label (`JumpMenuController.worktreeSnapshots`).
     nonisolated static let scratchSectionLabel = "Scratch"
 
@@ -1199,8 +1199,8 @@ extension AppState {
     /// (Archived/Instructions/Settings tabs) in the content pane. Mirrors
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
-    /// identity for `List`'s native selection or the navigation history's
-    /// worktree/repo entries to key off).
+    /// identity for the navigation history's worktree/repo entries to key
+    /// off).
     func selectScratchSection() {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
@@ -1556,7 +1556,7 @@ extension AppState {
     func setAutoArchive(worktreeID: UUID, enabled: Bool) async {
         do {
             try await daemonClient.setWorktreeAutoArchive(id: worktreeID, enabled: enabled)
-            // Optimistic local update so the toolbar reflects it immediately.
+            // Optimistic local update so local state reflects it immediately.
             for (key, list) in worktrees {
                 if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
                     worktrees[key]?[idx].autoArchiveOnMerge = enabled
@@ -1585,9 +1585,9 @@ extension AppState {
         }
     }
 
-    /// Reorder the sidebar dock's pinned worktrees, triggered by SwiftUI
-    /// `.onMove` whose indices address the dock's PINNED ROOTS (the outer
-    /// ForEach), not the flattened row list.
+    /// Reorder the sidebar dock's pinned worktrees. `source` and
+    /// `destination` address the dock's PINNED ROOTS, not the flattened row
+    /// list (`DockTableController` maps a drop to them).
     ///
     /// Optimistic, unlike `setPinned`: the client knows the entire resulting
     /// order rather than depending on a daemon-assigned timestamp, so the row
@@ -1656,7 +1656,7 @@ extension AppState {
     func setAutoHibernate(worktreeID: UUID, enabled: Bool) async {
         do {
             try await daemonClient.setWorktreeAutoHibernate(id: worktreeID, enabled: enabled)
-            // Optimistic local update so the toolbar reflects it immediately.
+            // Optimistic local update so local state reflects it immediately.
             for (key, list) in worktrees {
                 if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
                     worktrees[key]?[idx].autoHibernateOnMerge = enabled
@@ -1726,7 +1726,7 @@ extension AppState {
     /// children or after them as `order` says. Used by `sidebarWalk` to match
     /// sidebar order, and by `selectionArchiveRunOrder` for the rows that walk
     /// leaves out. Caps recursion at 50 to mirror
-    /// `WorktreeSubtreeView.kMaxSubtreeDepth` in case a cyclic parent chain
+    /// `SidebarTreeBuilder.maxSubtreeDepth` in case a cyclic parent chain
     /// ever makes it into the in-memory state (DB-side cycle guards make this
     /// unlikely, but the keyboard-nav path shouldn't blow the stack while the
     /// renderer gracefully degrades).

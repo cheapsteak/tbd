@@ -13,9 +13,8 @@ private let remoteRowLogger = Logger(subsystem: "com.tbd.app", category: "remote
 /// - `run(_:)` — the one place every side effect lives, keyed by the typed
 ///   `RemoteSessionActionMenu.Kind`.
 ///
-/// Both sidebars render the menu from it — `RemoteSessionRowView`'s SwiftUI
-/// `contextMenu` and the native sidebar's `NSMenu` — so the two cannot offer
-/// different verbs for the same session or act on one differently.
+/// The sidebar's `NSMenu` for a remote session row renders from it, so the
+/// menu's verbs and their effects stay in one place.
 @MainActor
 struct RemoteSessionActionMenuActions {
     let appState: AppState

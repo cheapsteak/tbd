@@ -1,7 +1,6 @@
 import Foundation
 
-/// Pure reveal rules shared by both sidebar paths: the SwiftUI `List` in
-/// `SidebarView` and the native outline.
+/// Pure reveal rules the sidebar outline's reveal pass applies.
 enum SidebarReveal {
     /// The `previous` handed to `revealSidebarGroups` for a selection-reveal
     /// change. Nil — reveal as navigation, expanding a collapsed owning

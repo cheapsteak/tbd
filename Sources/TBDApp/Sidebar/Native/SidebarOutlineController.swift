@@ -27,8 +27,9 @@ import TBDShared
 /// The outline is the only writer of its own structure and expansion: the
 /// delegate refuses every expand and collapse the controller did not ask for,
 /// so the outline never drifts from the tree the next diff starts from.
-/// Expanded state lives where the SwiftUI sidebar keeps it, and chevron clicks
-/// write it there.
+/// Expanded state lives in the model — `Repo.expanded`, the Scratch section's
+/// setting, `AppState.expandedSidebarGroups` — and chevron clicks write it
+/// there.
 ///
 /// The class is split by concern: this file holds its state, the view, the
 /// public surface, the update loop and the scratch-directory cache;

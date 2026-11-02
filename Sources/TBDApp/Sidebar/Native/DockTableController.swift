@@ -61,7 +61,7 @@ struct DockRow: Equatable {
 /// - **Reorder.** Only pinned roots drag, under the dock's own pasteboard
 ///   type, which the outline does not register; the dock registers only that
 ///   type. A drop calls `AppState.reorderPins(fromOffsets:toOffset:)` with
-///   offsets into the roots, as the SwiftUI dock's `.onMove` does.
+///   offsets into the roots.
 /// - **Hover.** A `SidebarHoverTracker` of its own shows the hovered row's
 ///   highlight, gutter pin and nested `+`, as the outline's rows show them.
 ///   The `+` opens the one `SidebarPlusMenu` the whole sidebar shares.
@@ -76,8 +76,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         case rename
     }
 
-    /// Where every dock row's content starts: the SwiftUI dock's fixed 12 pt
-    /// `listRowInsets`, whichever side the section chevrons sit on.
+    /// Where every dock row's content starts: a fixed 12 pt, whichever side
+    /// the section chevrons sit on.
     static var rowInset: CGFloat {
         SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false)
     }
@@ -150,7 +150,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// doing and are not written back.
     private var isApplyingModelSelection = false
     /// The selection the last apply mirrored; a new one scrolls its first row
-    /// into view, as the SwiftUI dock's `onChange` handlers do.
+    /// into view.
     private var lastSelection: SelectionKey?
     /// The pins a drag carries, read from its pasteboard once per drag:
     /// `validateDrop` runs on every pointer move.
@@ -348,7 +348,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         rows.reserveCapacity(pinned.count + remote.count)
         for row in pinned {
             // A dock row sits under no section: nothing is hidden or dimmed
-            // for its repo, as `PinnedDockView` renders it.
+            // for its repo.
             let model = models.worktree(
                 row.worktree, isMain: row.worktree.status == .main, depth: row.depth,
                 sectionRepoID: row.sectionRepoID, isInHiddenSection: false)
@@ -511,8 +511,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         table.scrollRowToVisible(first)
     }
 
-    /// A user's selection: written to `AppState.selectedWorktreeIDs` as the
-    /// SwiftUI dock's tags would write it, then mirrored straight back, since
+    /// A user's selection: written to `AppState.selectedWorktreeIDs` through
+    /// `SidebarSelectionBridge`, then mirrored straight back, since
     /// the `didSet` may route it. A ⌘- or ⇧-click extends the selection, so
     /// selected rows the dock does not show stay selected; a plain click
     /// replaces it. The outline follows the same rule
@@ -592,8 +592,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     // MARK: Cells
 
     /// Hands `cell` its model, its depth's inset and its controls' target.
-    /// A descendant's content moves one indentation step per level, as
-    /// `WorktreeRowView`'s `indentLevel` moves it, and its gutter pin with it.
+    /// A descendant's content moves one indentation step per level, and its
+    /// gutter pin with it.
     private func configureCell(_ cell: NSView, row: DockRow) {
         let id = row.id
         switch (row.kind, cell) {
@@ -903,7 +903,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// Opens the worktree's worst-state pull request, if it has one, as
-    /// `WorktreeRowView.openPR` picks it.
+    /// `PRBindingPresentation.iconBinding` picks it.
     func openPullRequest(_ worktreeID: UUID) -> Bool {
         guard let binding = PRBindingPresentation.iconBinding(appState.effectivePRBindings(worktreeID: worktreeID)),
               let url = URL(string: binding.url) else { return false }
@@ -1037,7 +1037,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// The gap between pinned roots a drop proposed above `proposedRow` lands
     /// in: the table row the line shows above, and how many roots sit above
-    /// it — the destination offset `.onMove` would hand over. A gap inside a
+    /// it — the destination offset `reorderPins` takes. A gap inside a
     /// root's subtree moves down past the subtree, and a gap among the remote
     /// pins up to the end of the worktree pins, since only roots move. Nil
     /// when the dock shows no root.

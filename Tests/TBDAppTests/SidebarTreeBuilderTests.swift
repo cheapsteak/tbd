@@ -8,8 +8,8 @@ import TestSupport
 // scratch-directory probe is injected, so no build touches the filesystem.
 
 /// `SidebarTreeBuilder` against `AppState` fixtures: it must produce the
-/// sections, rows, order and depths the SwiftUI sidebar renders for the same
-/// state, and every input a row draws must reach its model.
+/// sections, rows, order and depths the sidebar shows for the state, and every
+/// input a row draws must reach its model.
 /// Spec: docs/specs/2026-10-31-native-sidebar-design.md, "Testing".
 /// One case per `WorktreeRowModel` input, for
 /// `SidebarTreeBuilderTests.eachRowInputChangesTheTree`. At file scope so the
@@ -93,7 +93,7 @@ struct SidebarTreeBuilderTests {
         state.repoFilter = two.id
         let filtered = Self.build(state)
         #expect(Self.repoHeaders(filtered) == [two.id])
-        // As in `RemoteSectionView.knownRepoIDs`: while filtered, another
+        // As in `SidebarSessionPlacement.knownRepoIDs`: while filtered, another
         // repo's sessions fall through to their provider rather than vanish.
         #expect(filtered.parent(of: .remoteSession(session.id)) == .providerHeader("acme"))
     }
@@ -136,7 +136,7 @@ struct SidebarTreeBuilderTests {
         let feature = Self.row("feature", repo: repo.id, order: 0)
         let main = Self.row("main", repo: repo.id, status: .main)
         // The daemon refuses `main` as a parent, but a row that names it
-        // anyway renders nowhere in the `List`: not under the main row, which
+        // anyway renders nowhere: not under the main row, which
         // has no subtree, and not at the top level, since it has a parent.
         let underMain = Self.row("under-main", repo: repo.id, parent: main.id)
         state.repos = [repo]
@@ -154,7 +154,7 @@ struct SidebarTreeBuilderTests {
         state.repos[0].expanded = false
         let collapsed = Self.build(state)
         #expect(collapsed.node(.repoHeader(repo.id))?.children.isEmpty == true,
-                "A collapsed section has no rows, as the List mounts none")
+                "A collapsed section has no rows")
         #expect(collapsed.node(.repoHeader(repo.id))?.isExpanded == false)
     }
 
@@ -241,7 +241,7 @@ struct SidebarTreeBuilderTests {
         #expect(expectedRemote.contains(.worktree(fleet.running.id)))
         #expect(expectedExited.contains(.worktree(fleet.ended.id)))
 
-        // Depths follow the SwiftUI padding: each disclosure deepens its rows.
+        // Each disclosure deepens its rows.
         #expect(Self.groupModel(open, remoteID)?.depth == 0)
         #expect(Self.groupModel(open, exitedID)?.depth == 1)
         #expect(Self.groupModel(open, hibernatedID)?.count == layout.hibernation?.hibernatedCount)
@@ -333,7 +333,7 @@ struct SidebarTreeBuilderTests {
     }
 
     /// Review Focus 3: a corrupt parent chain stops at depth 50 and never
-    /// loops, as `WorktreeSubtreeView` stops.
+    /// loops.
     @Test(arguments: [false, true])
     func depthCappedAtFiftyOnParentCycle(groups: Bool) throws {
         let suite = TestDefaultsSuite("SidebarTreeBuilderTests.cycle")

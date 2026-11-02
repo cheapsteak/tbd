@@ -16,7 +16,7 @@ enum RemoteLaneOffer {
 
 /// Menu content shown when the user hovers (or ⌥-clicks) the `+` button next to
 /// a repo in the sidebar. Presented in a borderless `FloatingPanel` (see
-/// `FloatingMenuAnchor`), not a SwiftUI popover.
+/// `SidebarPlusMenu`), not a SwiftUI popover.
 ///
 /// Three in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
@@ -64,10 +64,10 @@ struct WorktreeProfilePickerView: View {
     var onClose: () -> Void = {}
     /// Called with the chosen provider after this menu has closed itself, so
     /// the host can present the remote create sheet. The host owns that sheet
-    /// (`RepoSectionView.remoteCreateSheetProvider`,
-    /// `WorktreeRowView.remoteCreateSheetProvider`) because this view lives in
-    /// a `FloatingPanel` that is about to be torn down. Both call sites wire
-    /// it; the default exists only so a preview or a future host can omit it.
+    /// (`NativeSidebarSheetPresenter`, through `SidebarPlusMenu`) because this
+    /// view lives in a `FloatingPanel` that is about to be torn down. The host
+    /// wires it; the default exists only so a preview or a future host can
+    /// omit it.
     ///
     /// The compiled cloud provider reaches the sheet through this same hook.
     /// It has a row of its own rather than a place in the generic
@@ -270,7 +270,7 @@ struct WorktreeProfilePickerView: View {
 
     /// The optional "New remote session…" row. Omitted entirely (never shown
     /// disabled) when there is no provider; a stale provider keeps its row but
-    /// cannot be selected, matching `RepoSectionView.newRemoteSessionMenuItem`.
+    /// cannot be selected, matching the repo header menu's item.
     @ViewBuilder
     private var remoteLaneRow: some View {
         let offer = remoteLaneOffer
@@ -433,9 +433,8 @@ struct WorktreeProfilePickerView: View {
     }
 
     /// Whether selecting this provider's row will create outright — asked with
-    /// the SAME inputs the click itself uses (`RepoSectionView` /
-    /// `WorktreeRowView`'s `startRemoteSession(with:)`), so the label and the
-    /// action cannot disagree.
+    /// the SAME inputs the click itself uses (`SidebarPlusMenu`'s launch
+    /// decision), so the label and the action cannot disagree.
     private func willCreateImmediately(_ provider: RemoteProviderStatus) -> Bool {
         let repo = appState.repos.first(where: { $0.id == repoID })
         return RemoteCreateFormLogic.willCreateImmediately(
@@ -484,7 +483,7 @@ struct WorktreeProfilePickerView: View {
     /// What the `+` menu offers as its remote-lane entry point.
     ///
     /// One gate: **no provider registered → nothing at all.** Omitting rather
-    /// than disabling mirrors `RepoSectionView.newRemoteSessionMenuItem` and
+    /// than disabling mirrors the repo header menu's item and
     /// `RemoteSessionActionMenu`, which omit capability-gated items instead of
     /// graying them out. Exactly one provider goes straight to starting a
     /// session with it (which creates outright or opens the create form,
@@ -498,7 +497,7 @@ struct WorktreeProfilePickerView: View {
     /// adoption), so both `+` buttons offer the row on identical terms.
     ///
     /// `nonisolated` so it's directly testable without an `AppState`/view
-    /// hierarchy, for the same reason as `RepoSectionView`'s pure helpers.
+    /// hierarchy: a `View`'s statics are main-actor isolated otherwise.
     nonisolated static func remoteLaneOffer(
         providers: [RemoteProviderStatus],
         parentWorktreeID: UUID?

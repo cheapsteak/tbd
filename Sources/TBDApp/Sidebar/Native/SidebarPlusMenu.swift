@@ -3,12 +3,11 @@ import Combine
 import SwiftUI
 import TBDShared
 
-/// The native sidebar's `+` menu: the existing `WorktreeProfilePickerView` in
-/// a `FloatingPanel`, opened and closed by a `HoverMenuModel` exactly as
-/// `FloatingMenuAnchor` presents it for the SwiftUI rows — a 400 ms hover
+/// The native sidebar's `+` menu: `WorktreeProfilePickerView` in a
+/// `FloatingPanel`, opened and closed by a `HoverMenuModel` — a 400 ms hover
 /// delay, ⌥-click to open at once, a close grace that bridges the gap into the
-/// panel, and closing when the app deactivates. Here it is anchored to an
-/// AppKit button: a repo header's `+` or a worktree row's nested `+`.
+/// panel, and closing when the app deactivates. It is anchored to an AppKit
+/// button: a repo header's `+` or a worktree row's nested `+`.
 ///
 /// One menu serves the whole sidebar — the outline and the pinned dock —
 /// since only one can be open: it is bound to whichever `+` the pointer
@@ -81,8 +80,8 @@ final class SidebarPlusMenu {
         onOpenChange?(owner, open)
     }
 
-    /// The trigger's hover highlights the default profile row, as
-    /// `highlightDefaultProfile` does in the SwiftUI path.
+    /// The trigger's hover highlights the default profile row
+    /// (`highlightDefaultProfile`).
     private func refreshContent(highlightDefault: Bool) {
         guard let panel, let makeContent else { return }
         panel.updateContent(makeContent(highlightDefault))
@@ -177,9 +176,8 @@ extension SidebarPlusMenu {
     }
 
     /// The picker's remote-lane row: create at once when every answer is
-    /// knowable, else open the form — `RepoSectionView.startRemoteSession`
-    /// and `WorktreeRowView.startRemoteSession`, which differ only in the
-    /// parent.
+    /// knowable, else open the form. A repo header's `+` and a row's nested
+    /// `+` differ only in the parent.
     static func startRemoteSession(_ provider: RemoteProviderStatus, target: SidebarPlusTarget,
                                    appState: AppState, sheets: NativeSidebarSheetPresenter) {
         let repo = appState.repos.first { $0.id == target.repoID }

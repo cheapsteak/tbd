@@ -8,7 +8,7 @@ import TBDShared
 /// per-repo `Repo` row.
 ///
 /// Deliberately NOT built by refactoring `ScratchInstructionsView` (the
-/// existing sheet, still used from `ScratchSectionView`'s context menu) into a
+/// existing sheet, still used from the Scratch header's context menu) into a
 /// shared widget: that view's explicit Cancel/Save-then-dismiss flow and this
 /// tab's debounced-autosave-on-change flow have different save triggers and
 /// lifecycles, so extracting a shared "editing widget" would mostly just move

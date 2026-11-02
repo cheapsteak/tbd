@@ -149,8 +149,7 @@ struct StatusBarView: View {
     /// `nonisolated` throughout — `StatusBarView`'s `View` conformance infers
     /// whole-type `@MainActor` isolation onto even a nested value type, and a
     /// main-actor `init` called from a nonisolated `map` closure traps at
-    /// runtime rather than failing to compile (same reason
-    /// `WorktreeRowView.rowHeight` is `nonisolated`).
+    /// runtime rather than failing to compile.
     nonisolated struct PRChip: Identifiable, Equatable {
         let id: UUID
         /// Which worktree this chip is bound to — what the untrack gesture
@@ -182,8 +181,7 @@ struct StatusBarView: View {
         /// actively misdescribes it as still waiting on its author.
         let mergeQueuePosition: Int?
         /// The status's own words for that state, when it has any — the same
-        /// `reason ?? state.displayReason` the overflow menu and the toolbar
-        /// dropdown start from. Carried rather than re-derived because it is
+        /// `reason ?? state.displayReason` the overflow menu starts from. Carried rather than re-derived because it is
         /// half the input to `PRStatusPresentation.stateDescription`, which is
         /// where the shared sentence is actually composed: a chip that recovered
         /// these words some other way could hand that one function a different
@@ -226,7 +224,7 @@ struct StatusBarView: View {
         let observedAt: Date?
         /// The worktree's last poll attempt, carried whole rather than as a
         /// rendered clause so the overlay composes its warning through the same
-        /// `PRFreshness` the toolbar and sidebar use. A chip that omitted it
+        /// `PRFreshness` the sidebar uses. A chip that omitted it
         /// would render the more confident of two readings of one fact.
         let observation: PRObservation?
     }
@@ -271,7 +269,7 @@ struct StatusBarView: View {
     /// menu lists, and the finished bindings folded into the done chip. Pure:
     /// delegates the cap, the done-chip split and the bind-order guarantee to
     /// `PRBindingPresentation.statusBarGroups` so the status bar cannot
-    /// disagree with the toolbar about which PRs are shown or in what order.
+    /// disagree with its own menus about which PRs are shown or in what order.
     ///
     /// When two or more PRs are finished, the cap and the overflow count cover
     /// the open PRs only; otherwise they cover every binding and `done` is
@@ -279,7 +277,7 @@ struct StatusBarView: View {
     ///
     /// `observation` is the worktree's last poll attempt, carried so the
     /// overlay can say when that attempt did not resolve — the same clause the
-    /// toolbar and sidebar append. Without it a chip would render the more
+    /// sidebar appends. Without it a chip would render the more
     /// confident of two readings of one fact.
     nonisolated static func prChips(
         _ bindings: [PRBinding],
@@ -362,8 +360,8 @@ struct StatusBarView: View {
     /// fresh reading says nothing about its age; a stale, never-observed or
     /// unconfirmed one says so in the caution tint — see
     /// `chipFreshnessWarning`. The wording comes from `PRFreshness`, shared
-    /// with the toolbar and sidebar, so the three cannot describe one
-    /// observation differently.
+    /// with the sidebar, so the two cannot describe one observation
+    /// differently.
     ///
     /// The card says nothing about what a click does. The chip's two targets
     /// show that themselves — the number opens the PR, and the xmark takes on
@@ -432,7 +430,7 @@ struct StatusBarView: View {
     }
 
     /// The status's own words when it has any, composed by the very function
-    /// the overflow menu and the toolbar dropdown compose their rows with —
+    /// the overflow menu composes its rows with —
     /// including the queue clause a queued PR leads with. See
     /// `PRStatusPresentation.stateDescription`.
     private nonisolated static func chipState(_ chip: PRChip) -> String? {
@@ -459,8 +457,7 @@ struct StatusBarView: View {
     /// observed at all, or the worktree's last poll came back undetermined. In
     /// every one of those cases it is the full `PRFreshness.clauses` sentence —
     /// age first, then the undetermined clause — so the caveat always carries
-    /// the age it qualifies and reads exactly as the toolbar and sidebar word
-    /// it.
+    /// the age it qualifies and reads exactly as the sidebar words it.
     nonisolated static func chipFreshnessWarning(_ chip: PRChip, now: Date) -> String? {
         let isStale = chip.observedAt.map { now.timeIntervalSince($0) >= Self.chipStaleAfter } ?? true
         let isUnresolved = PRFreshness.undeterminedClause(chip.observation) != nil
@@ -660,13 +657,13 @@ struct StatusBarView: View {
                 ParkedPromptStatusItem(worktree: selected.worktree)
             }
             // Chips render for a SINGLE selection only — `selection` is nil
-            // for a multi-selection, matching the location cluster and the
-            // toolbar's PR control. Remote rows get chips too.
+            // for a multi-selection, matching the location cluster. Remote
+            // rows get chips too.
             if let selection {
-                // Same accessor as the toolbar control and the sidebar
-                // indicator — bindings when there are any, else the legacy
-                // single status lifted into one synthetic binding — so the
-                // three surfaces cannot show different PRs for one worktree.
+                // Same accessor as the sidebar indicator — bindings when there
+                // are any, else the legacy single status lifted into one
+                // synthetic binding — so the two surfaces cannot show
+                // different PRs for one worktree.
                 let bindings = appState.effectivePRBindings(worktreeID: selection.worktreeID)
                 if !bindings.isEmpty {
                     PRChipCluster(bindings: bindings,
@@ -676,17 +673,15 @@ struct StatusBarView: View {
                         .layoutPriority(-1)
                 }
             }
-            // Arming is otherwise nearly invisible — a badge baked into the
-            // toolbar's PR icon — while what it promises is a worktree that
-            // disappears when its PR merges. The bar is the surface that is
-            // always on screen and already scoped to the selection, so this is
-            // where that promise gets said out loud, with its own way out.
+            // Arming promises a worktree that disappears when its PR merges.
+            // The bar is the surface that is always on screen and already
+            // scoped to the selection, so this is where that promise gets said
+            // out loud, with its own way out.
             //
             // Local worktrees only: a remote row gets location, branch and PR
             // chips in this bar, but no auto-archive chip, parked-prompt item
             // or editor button. The daemon does auto-archive remote lanes, so a
-            // remote worktree's arming is still stated by the toolbar badge and
-            // its help text.
+            // remote worktree's arming is stated nowhere in the window.
             if let selected,
                let chip = Self.autoArchiveChip(
                    armed: appState.effectiveAutoArchive(for: selected.worktree),
@@ -754,7 +749,7 @@ private struct StatusBarHoverAffordance: ViewModifier {
 private struct PRChipCluster: View {
     let bindings: [PRBinding]
     /// The worktree's last poll attempt, so a chip's overlay can say when that
-    /// attempt did not resolve — the clause the toolbar and sidebar append.
+    /// attempt did not resolve — the clause the sidebar appends.
     let observation: PRObservation?
 
     var body: some View {
@@ -844,7 +839,7 @@ private struct PRChipView: View {
     private static let iconTextGap: CGFloat = 3
 
     /// The dot color, taken from the shared PR palette so a chip cannot drift
-    /// from the sidebar glyph or the toolbar icon for the same state. The
+    /// from the sidebar glyph for the same state. The
     /// synthetic `PRStatus` exists only to reach that palette, and passing no
     /// position is faithful rather than lossy: this is reached only on the
     /// non-queued branch, and `make(for:)` reads nothing but `state` once
@@ -878,11 +873,8 @@ private struct PRChipView: View {
                 // what clicking the slot does.
                 // Accessibility is unaffected — the hint below carries the same
                 // sentence.
-                // Opens the DEFAULT BROWSER, not an in-app tab. Intentional,
-                // and the one place the status bar and the toolbar deliberately
-                // differ: the toolbar control and its dropdown open a webview
-                // tab, while the status bar agrees with the sidebar row
-                // indicator and shells out. Not drift — the status bar is an
+                // Opens the DEFAULT BROWSER, not an in-app tab, as the sidebar
+                // row indicator does. Intentional — the status bar is an
                 // at-a-glance strip, and a click there is a "take me to the
                 // forge" gesture rather than a request to park a tab in the
                 // worktree.
@@ -1009,10 +1001,8 @@ private struct PRChipView: View {
 
 /// A menu chip in the PR cluster: the `+N` overflow chip and the `✓ N PRs done`
 /// chip. Clicking it drops down the rows its caller built, in bind order. The
-/// `+N` chip's rows come from the toolbar's multi-PR dropdown's own builder —
-/// `PRBindingPresentation.menuRows` — so the two surfaces cannot describe the
-/// same PR differently: without a done group it lists every binding, exactly
-/// the toolbar's list, and with one it lists the open bindings. The done chip's
+/// `+N` chip's rows come from `PRBindingPresentation.menuRows`: without a done
+/// group it lists every binding, and with one it lists the open bindings. The done chip's
 /// rows come from `PRBindingPresentation.doneMenuRows`, which lead with each
 /// PR's title. Neither chip offers an untrack action; that lives on the
 /// individual chips.
@@ -1038,8 +1028,8 @@ private struct PRChipView: View {
 ///
 /// The `+N` menu renders **no PR title**, and that is a decision rather than
 /// an omission: the PRs it lists are open, their titles reach the chips through
-/// the hover overlay, and sharing `menuRows` with the toolbar is what keeps the
-/// two surfaces from disagreeing. The done chip is the exception because its
+/// the hover overlay, and one builder for those rows keeps a PR's wording the
+/// same wherever a row names it. The done chip is the exception because its
 /// PRs have no chips: there, the title is the one thing that says what each
 /// finished PR was, so its rows lead with it and its hover card lists them.
 private struct PRChipMenu: View {
@@ -1076,8 +1066,7 @@ private struct PRChipMenu: View {
         let target = PRChipMenuTarget()
         for row in rows {
             // The default browser, matching the chips beside it — see
-            // `PRChipView`'s tap handler for why the status bar differs from
-            // the toolbar here.
+            // `PRChipView`'s tap handler for why.
             let item = NSMenuItem(title: row.title,
                                   action: #selector(PRChipMenuTarget.openRow(_:)),
                                   keyEquivalent: "")
@@ -1178,10 +1167,9 @@ private struct ParkedPromptStatusItem: View {
 /// state it is waiting for and cannot drift from the merged-PR glyph beside it
 /// — the same reason `PRChipView.dotColor` reaches for that palette.
 ///
-/// The whole capsule is the way out, so cancelling never requires finding the
-/// toolbar menu and never requires hitting a glyph-sized target. The leading
-/// icon carries that: `archivebox` at rest, the same symbol the toolbar's armed
-/// badge uses so both surfaces name this state alike, swapping to an `xmark`
+/// The whole capsule is the way out, so cancelling never requires hitting a
+/// glyph-sized target. The leading icon carries that: `archivebox` at rest,
+/// the app's symbol for archiving, swapping to an `xmark`
 /// under the pointer to say what a click will do before it lands. The container
 /// carries the accessibility element, so its default action performs the same
 /// cancel for anyone activating the chip rather than clicking it.
@@ -1224,8 +1212,8 @@ private struct AutoArchiveChipView: View {
     private static let iconSlotSide: CGFloat = 11
 
     /// Writes an explicit `false` override even when the arming came from the
-    /// global default — the same thing the toolbar's toggle does, and the only
-    /// reading of the gesture that survives the next default change.
+    /// global default: the only reading of the gesture that survives the next
+    /// default change.
     private func cancel() {
         Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: false) }
     }

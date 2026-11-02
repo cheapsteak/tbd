@@ -132,9 +132,9 @@ struct RemoteCreateParentOverrideTests {
 
     /// The main row has no subtree in the sidebar, so an edge into it would
     /// file a live lane where nobody can see it — the same rule `move()`
-    /// applies. Reachable from the UI: a `WorktreeRowView` rendered outside
-    /// the repo section (the pinned dock) passes no `isMain`, so a pinned main
-    /// row would draw the nested `+` like any other.
+    /// applies. The sidebar withholds the nested `+` from the main row, in the
+    /// outline and the pinned dock alike, so this guards a caller that names
+    /// it anyway.
     @Test func anOverrideNamingTheMainWorktreeYieldsATopLevelRow() async throws {
         let repo = try await makeRepo()
         let mainRow = try await lane("main", repo: repo, status: .main)

@@ -25,8 +25,8 @@ enum NativeSidebarSheet: Identifiable {
     }
 }
 
-/// `RemoteCreateSheet`'s inputs, as `RepoSectionView`, `WorktreeRowView` and
-/// `RemoteProviderHeaderRow` hand them over.
+/// `RemoteCreateSheet`'s inputs, as a repo header, a worktree row or a
+/// provider header hands them over.
 struct NativeSidebarRemoteCreate {
     let provider: RemoteProviderStatus
     var repoPrefill: String?
@@ -59,9 +59,9 @@ final class NativeSidebarSheetPresenter {
         Bindable(self).sheet
     }
 
-    /// The existing SwiftUI content for `sheet`, unchanged. It takes its
-    /// environment — `AppState`, the appearance settings — from the sidebar
-    /// it is presented over, as the SwiftUI sidebar's sheets do.
+    /// The SwiftUI content for `sheet`. It takes its environment —
+    /// `AppState`, the appearance settings — from the sidebar it is presented
+    /// over.
     @ViewBuilder
     static func content(for sheet: NativeSidebarSheet) -> some View {
         switch sheet {

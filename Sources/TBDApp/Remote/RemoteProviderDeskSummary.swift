@@ -39,7 +39,7 @@ struct RemoteProviderDeskSummary: Equatable {
 
     /// "just now" / "2h ago" — the same freshness vocabulary every other
     /// staleness surface in the app already speaks
-    /// (`ProfileUsagePresentation.ageText`, `RemoteSessionRowView.stalenessCaption`),
+    /// (`ProfileUsagePresentation.ageText`, `RemoteSessionRowPresentation.stalenessCaption`),
     /// rather than SwiftUI's `Text(_, style: .relative)`, which renders a
     /// bare magnitude with no direction ("Latest mirror update 2 minutes").
     /// `ageText`'s "just now" is already a complete phrase, so it never

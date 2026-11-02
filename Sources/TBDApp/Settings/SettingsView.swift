@@ -162,13 +162,13 @@ struct GeneralSettingsTab: View {
                     get: { appState.autoArchiveOnMergeDefault },
                     set: { newValue in Task { await appState.setAutoArchiveOnMergeDefault(newValue) } }
                 ))
-                .help("Default for new worktrees. Each worktree can override this from its toolbar toggle.")
+                .help("Default for new worktrees. While a worktree is armed, its status-bar chip turns this off for that worktree.")
 
                 Toggle("Auto-hibernate sessions when their PR merges", isOn: Binding(
                     get: { appState.autoHibernateOnMergeDefault },
                     set: { newValue in Task { await appState.setAutoHibernateOnMergeDefault(newValue) } }
                 ))
-                .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree. Each worktree can override this from its PR toolbar menu.")
+                .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree.")
 
                 prPollScheduleToggle
 

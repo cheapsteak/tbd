@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Typed, ordered action model for a remote-session row's context menu — the
-/// pure composition behind `RemoteSessionRowView.contextMenu`. Mirrors
+/// pure composition behind the sidebar's `NSMenu` for that row. Mirrors
 /// `RowActionMenu`'s split: no AppKit/SwiftUI here, so `items(capabilities:gone:)`
 /// is a pure function directly unit-testable without any `AppState`.
 ///

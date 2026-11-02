@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// The native sidebar's root: the outline's scroll view filling the column,
-/// then a divider and the pinned dock along the bottom edge — the stack the
-/// SwiftUI path's footer group draws, where one divider tops the dock and the
-/// footer beneath it, over one `.bar` backdrop.
+/// then a divider and the pinned dock along the bottom edge. One divider tops
+/// the dock and the footer beneath it (`SidebarView`), over one `.bar`
+/// backdrop.
 ///
 /// The dock's height is `PinnedDockMetrics.height(rowCount:availableHeight:)`:
 /// at most five rows and 40% of the list above the divider. It is recomputed
@@ -50,7 +50,7 @@ final class SidebarContainerController: NSViewController {
         let outlineView = outlineController.view
         let dockView = dockController.view
         // The SwiftUI footer's own backdrop, behind the divider and the dock,
-        // so the three read as one group as they do in the `List` path.
+        // so the three read as one group.
         let backdrop = NSHostingView(rootView: SidebarBarBackdrop())
         backdrop.sizingOptions = []
         // Made wider than tall: a separator box takes its orientation from
@@ -106,8 +106,8 @@ final class SidebarContainerController: NSViewController {
         updateDockHeight()
     }
 
-    /// The list height the clamp's 40% is of: the SwiftUI dock settles where
-    /// it is 40% of the list above the divider. The outline and the dock
+    /// The list height the clamp's 40% is of: the dock settles where it is
+    /// 40% of the list above the divider. The outline and the dock
     /// share the column below the window's top and above the divider's line,
     /// so with `fraction` = 0.4 that list is (outline + dock) / (1 +
     /// fraction), and a dock sized from it lands there in one pass instead

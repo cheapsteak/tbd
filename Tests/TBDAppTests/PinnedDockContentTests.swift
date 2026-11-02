@@ -255,7 +255,7 @@ struct PinnedDockContentTests {
 
     /// The counterpart choice: a session the provider stopped reporting keeps
     /// its slot (it self-heals when the provider lists it again) and renders
-    /// with `RemoteSessionRowView`'s existing dimmed styling.
+    /// with the remote row's existing dimmed styling.
     @Test("a gone remote session keeps its pin and its dock slot")
     func remoteGoneStaysPinned() {
         let rows = PinnedDockContent.remoteRows(
@@ -273,7 +273,7 @@ struct PinnedDockContentTests {
     }
 
     /// Two providers can mint the same session id; the dock rows must still
-    /// be distinct, because `List`/`ForEach` identity is the row `id`.
+    /// be distinct, because the dock's row identity is the row `id`.
     @Test("same session id on two providers yields two distinct dock rows")
     func remoteRowsAreKeyedByProviderAndSession() {
         let rows = PinnedDockContent.remoteRows(allRemoteSessions: [
