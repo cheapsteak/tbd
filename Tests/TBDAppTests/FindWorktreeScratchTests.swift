@@ -6,7 +6,8 @@ import TestSupport
 
 /// Shared row builder for every suite in this file. Pass `repoID: nil` for a
 /// repo-less scratch space.
-private func makeWorktree(id: UUID, repoID: UUID?, status: WorktreeStatus = .active) -> Worktree {
+private func makeWorktree(id: UUID, repoID: UUID?, status: WorktreeStatus = .active,
+                          parent: UUID? = nil, order: Int = 0) -> Worktree {
     Worktree(
         id: id,
         repoID: repoID,
@@ -15,7 +16,9 @@ private func makeWorktree(id: UUID, repoID: UUID?, status: WorktreeStatus = .act
         branch: "main",
         path: "/tmp/test",
         status: status,
-        tmuxServer: "test-server"
+        tmuxServer: "test-server",
+        sortOrder: order,
+        parentWorktreeID: parent
     )
 }
 
@@ -105,47 +108,56 @@ struct FindWorktreeScratchTests {
     }
 }
 
-/// Cmd+Shift+A routing: the route seam only decides refuse-vs-proceed.
-/// `archiveWorktree(id:)` is scratch-aware and self-routes scratch rows to
-/// the `scratch.archive` RPC; the daemon routes them too, so either door
-/// reaches the same body. `archiveShortcutRoute` takes the
-/// caller-resolved selection (`selectedWorktreeIDs.first.flatMap(findWorktree)`),
-/// so a stale/unknown selected ID resolves to nil and routes nowhere.
+/// Cmd+Shift+A routing: the route seam only decides what runs. With one row
+/// selected it keeps the rule it always had: refuse a stale ID, the main
+/// branch and a row still creating, and send anything else to
+/// `archiveWorktree(id:)` for the daemon to judge. With two or more it takes
+/// the whole selection, with the eligibility the row menu's Archive Selection
+/// uses, and refuses, with the beep, when nothing selected can go. A selected
+/// ID that resolves to no row does not count toward two. `archiveWorktree(id:)` is
+/// scratch-aware and self-routes a single scratch row to the `scratch.archive`
+/// RPC; the daemon routes them too, so either door reaches the same body.
 @MainActor
-@Suite("archiveSelectedWorktree refuse-vs-proceed routing")
+@Suite("archiveSelectedWorktree routing")
 struct ArchiveShortcutRouteTests {
 
     @Test func scratchSelectionProceeds() {
         // Scratch rows proceed through this seam: the daemon creates them
-        // `.active`, never `.main`/`.creating`. The one repo-worktree refusal
-        // that DOES apply to them, active children, is enforced daemon-side and
-        // pre-disabled in the row menu rather than here.
-        let scratchID = UUID()
-        let target = AppState.archiveShortcutRoute(
-            selectedWorktree: makeWorktree(id: scratchID, repoID: nil)
-        )
-        #expect(target == scratchID)
+        // `.active`, never `.main`/`.creating`.
+        withState { state in
+            let scratchID = UUID()
+            state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil)]
+            state.selectedWorktreeIDs = [scratchID]
+            #expect(state.archiveShortcutRoute() == .single(scratchID))
+        }
     }
 
     @Test func activeRepoWorktreeSelectionProceeds() {
-        let wtID = UUID()
-        let target = AppState.archiveShortcutRoute(
-            selectedWorktree: makeWorktree(id: wtID, repoID: UUID())
-        )
-        #expect(target == wtID)
+        withState { state in
+            let repoID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID)]]
+            state.selectedWorktreeIDs = [wtID]
+            #expect(state.archiveShortcutRoute() == .single(wtID))
+        }
     }
 
     @Test func mainAndCreatingRepoWorktreesRefuseArchive() {
-        for status: WorktreeStatus in [.main, .creating] {
-            let route = AppState.archiveShortcutRoute(
-                selectedWorktree: makeWorktree(id: UUID(), repoID: UUID(), status: status)
-            )
-            #expect(route == nil)
+        withState { state in
+            for status: WorktreeStatus in [.main, .creating] {
+                let repoID = UUID()
+                let wtID = UUID()
+                state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID, status: status)]]
+                state.selectedWorktreeIDs = [wtID]
+                #expect(state.archiveShortcutRoute() == .nothing)
+            }
         }
     }
 
     @Test func emptySelectionRoutesNowhere() {
-        #expect(AppState.archiveShortcutRoute(selectedWorktree: nil) == nil)
+        withState { state in
+            #expect(state.archiveShortcutRoute() == .nothing)
+        }
     }
 
     @Test func staleSelectedIDRoutesNowhere() {
@@ -155,14 +167,95 @@ struct ArchiveShortcutRouteTests {
             state.scratchWorktrees = [makeWorktree(id: UUID(), repoID: nil)]
             // Selection points at a row that no longer exists anywhere.
             state.selectedWorktreeIDs = [UUID()]
-
-            // Same resolution wiring archiveSelectedWorktree uses.
-            let route = AppState.archiveShortcutRoute(
-                selectedWorktree: state.selectedWorktreeIDs.first
-                    .flatMap { state.findWorktree(id: $0) }
-            )
-            #expect(route == nil)
+            #expect(state.archiveShortcutRoute() == .nothing)
         }
+    }
+
+    /// The shortcut used to archive `selectedWorktreeIDs.first` alone. It now
+    /// takes every selected row, children before their parents.
+    @Test func theWholeSelectionRunsInRunOrderNotJustTheFirstID() {
+        withState { state in
+            let repo = Repo(path: "/tmp/acme", displayName: "acme")
+            let parentID = UUID()
+            let childID = UUID()
+            let otherID = UUID()
+            state.repos = [repo]
+            state.worktrees = [repo.id: [
+                makeWorktree(id: parentID, repoID: repo.id, order: 0),
+                makeWorktree(id: childID, repoID: repo.id, parent: parentID),
+                makeWorktree(id: otherID, repoID: repo.id, order: 1),
+            ]]
+            state.selectedWorktreeIDs = [otherID, parentID, childID]
+            let expected = SelectionArchive.Route.bulk([childID, parentID, otherID])
+            #expect(state.archiveShortcutRoute() == expected)
+        }
+    }
+
+    /// One archivable row among several selected takes the single-row path,
+    /// prompts included.
+    @Test func oneArchivableRowInALargerSelectionRoutesSingle() {
+        withState { state in
+            let repoID = UUID()
+            let mainID = UUID()
+            let wtID = UUID()
+            state.worktrees = [repoID: [
+                makeWorktree(id: mainID, repoID: repoID, status: .main),
+                makeWorktree(id: wtID, repoID: repoID, order: 1),
+            ]]
+            state.selectedWorktreeIDs = [mainID, wtID]
+            #expect(state.archiveShortcutRoute() == .single(wtID))
+        }
+    }
+
+    /// One selected parent with an active child still goes to
+    /// `archiveWorktree(id:)`, as it always has: the daemon refuses it, and
+    /// the refusal comes back as that path's alert.
+    @Test func oneSelectedParentWithAnActiveChildStillRoutesSingle() {
+        withState { state in
+            let repoID = UUID()
+            let parentID = UUID()
+            state.worktrees = [repoID: [
+                makeWorktree(id: parentID, repoID: repoID),
+                makeWorktree(id: UUID(), repoID: repoID, parent: parentID),
+            ]]
+            state.selectedWorktreeIDs = [parentID]
+            #expect(state.archiveShortcutRoute() == .single(parentID))
+        }
+    }
+
+    /// In a selection of two or more, the selection's rules apply: a parent
+    /// whose active child is not selected is held back, and with nothing
+    /// else selected that can go, the shortcut refuses, with the beep.
+    @Test func aSelectionWithNothingArchivableIsRefused() {
+        withState { state in
+            let repoID = UUID()
+            let parentID = UUID()
+            let mainID = UUID()
+            state.worktrees = [repoID: [
+                makeWorktree(id: mainID, repoID: repoID, status: .main),
+                makeWorktree(id: parentID, repoID: repoID, order: 1),
+                makeWorktree(id: UUID(), repoID: repoID, parent: parentID),
+            ]]
+            state.selectedWorktreeIDs = [parentID, mainID]
+            #expect(state.archiveShortcutRoute() == .refuse)
+        }
+    }
+
+    /// The single-row rule, pure, as the shortcut applies it to a selection
+    /// of one.
+    @Test func theSingleRowRuleRefusesOnlyNothingMainAndCreating() {
+        let repoID = UUID()
+        let active = makeWorktree(id: UUID(), repoID: repoID)
+        let failed = makeWorktree(id: UUID(), repoID: repoID, status: .failed)
+        let scratch = makeWorktree(id: UUID(), repoID: nil)
+        let main = makeWorktree(id: UUID(), repoID: repoID, status: .main)
+        let creating = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: active) == active.id)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: failed) == failed.id)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: scratch) == scratch.id)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: main) == nil)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: creating) == nil)
+        #expect(AppState.archiveShortcutTarget(selectedWorktree: nil) == nil)
     }
 }
 

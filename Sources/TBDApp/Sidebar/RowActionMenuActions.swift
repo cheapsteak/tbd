@@ -16,6 +16,23 @@ struct RowActionMenuActions {
     let appState: AppState
     let worktree: Worktree
     let onRename: () -> Void
+    /// Whether this menu acts on the sidebar selection when its row is part
+    /// of a multi-row one (`actsOnSelection`). The row menus of both
+    /// sidebars and both docks set it. The toolbar title's menu, which names
+    /// one worktree, leaves it off and always acts on that worktree.
+    var followsSelection: Bool = false
+
+    /// Whether this menu acts on the selection rather than on its row: it
+    /// follows the selection, the row is selected, and two or more selected
+    /// IDs resolve to a row (`SelectionArchive.actsOnSelection`), so a stale
+    /// ID does not count. The menu is then Archive Selection alone, and a
+    /// surface's own row items are hidden too.
+    var actsOnSelection: Bool {
+        followsSelection
+            && SelectionArchive.actsOnSelection(
+                rowID: worktree.id, selectedIDs: appState.selectedWorktreeIDs,
+                resolves: { appState.findWorktree(id: $0) != nil })
+    }
 
     private var terminals: [Terminal] {
         appState.terminals[worktree.id] ?? []
@@ -113,8 +130,20 @@ struct RowActionMenuActions {
 
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
+    ///
+    /// A menu acting on the selection gets a context carrying the selection
+    /// alone: whether any selected row is archivable, judged over the
+    /// selected rows only (`AppState.selectionHasArchivableRow()`). That menu
+    /// is the one Archive Selection item, which reads nothing else, so none of
+    /// the row's own facts are derived (the hook probe's `fileExists` calls,
+    /// session labels, the hibernation lists, the remote lookups), and the run
+    /// order, which walks every row, waits until the item is picked.
     func context() -> RowActionMenu.Context {
-        RowActionMenu.Context(
+        if actsOnSelection {
+            return RowActionMenu.Context(
+                selection: RowActionMenu.Selection(hasArchivableRow: appState.selectionHasArchivableRow()))
+        }
+        return RowActionMenu.Context(
             hasHibernatableClaude: !manuallyParkableTerminals.isEmpty,
             // "Wake" acts on any PARKED session (authoritative hibernatedAt OR
             // legacy suspendedAt) — the unified park state.
@@ -142,6 +171,24 @@ struct RowActionMenuActions {
             isGone: isGone,
             providerRetired: providerRetired,
             remoteDeleteEnabled: appState.remoteDeleteEnabled
+        )
+    }
+
+    /// This row's facts as Archive Selection's eligibility reads them
+    /// (`SelectionArchive.archivableIDs`), from the same derivations
+    /// `context()` uses, so a row the selection skips on its own facts is one
+    /// whose own Archive is disabled too. Its children are judged apart: a
+    /// selection can take a parent along with its children, and holds one
+    /// back for a selected child that cannot go.
+    func archiveCandidate() -> SelectionArchive.Candidate {
+        SelectionArchive.Candidate(
+            id: worktree.id,
+            status: worktree.status,
+            location: worktree.location,
+            providerCapabilities: providerCapabilities,
+            isGone: isGone,
+            providerRetired: providerRetired,
+            activeChildIDs: Set(appState.children(of: worktree.id).map(\.id))
         )
     }
 
@@ -231,6 +278,10 @@ struct RowActionMenuActions {
         case .archive:
             let wtID = worktree.id
             Task { await appState.archiveWorktree(id: wtID) }
+
+        case .archiveSelection:
+            // Resolved from the live selection now, when the item is picked.
+            appState.archiveSelection()
 
         case .deleteRemoteSession:
             // Only a remote lane composes this item, so a local row cannot

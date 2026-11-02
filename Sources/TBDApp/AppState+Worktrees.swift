@@ -613,9 +613,14 @@ extension AppState {
     /// re-append a ghost row), and terminal teardown. The `.worktreeArchived`
     /// delta repeats the removal for other clients (see
     /// `AppState+ArchiveTombstones.swift`).
+    ///
+    /// A row a selection's bulk run still owns is refused with
+    /// `refusalBeep`, and nothing is sent
+    /// (`refuseArchiveOwnedBySelectionRun`).
     func archiveScratch(id: UUID) async {
+        if refuseArchiveOwnedBySelectionRun(id) { return }
         do {
-            try await daemonClient.archiveScratch(worktreeID: id)
+            try await scratchArchiver(id)
             removeArchivedWorktreeFromState(id: id)
             await refreshArchivedScratch()
         } catch {
@@ -645,9 +650,7 @@ extension AppState {
     /// expected to be low.
     func refreshArchivedScratch() async {
         do {
-            archivedScratchWorktrees = try await daemonClient.listWorktrees(
-                status: .archived, scratchOnly: true
-            )
+            archivedScratchWorktrees = try await archivedScratchFetcher()
         } catch {
             logger.error("Failed to list archived scratch spaces: \(error)")
         }
@@ -703,9 +706,15 @@ extension AppState {
     ///   which resends the archive with `force` set.
     ///
     /// Every other failure gets the plain alert.
+    ///
+    /// A row a selection's bulk run still owns is refused with
+    /// `refusalBeep`, and nothing is sent
+    /// (`refuseArchiveOwnedBySelectionRun`): the run archives it, or says
+    /// why not, in its own turn.
     func archiveWorktree(
         id: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
     ) async {
+        if refuseArchiveOwnedBySelectionRun(id) { return }
         let worktree = findWorktree(id: id)
         if worktree?.isScratch == true {
             await archiveScratch(id: id)
@@ -713,8 +722,7 @@ extension AppState {
         }
         let worktreeName = worktree?.displayName ?? "worktree"
         do {
-            try await daemonClient.archiveWorktree(
-                id: id, force: force, discardUncommittedChanges: discardUncommittedChanges)
+            try await worktreeArchiver(id, force, discardUncommittedChanges)
             removeArchivedWorktreeFromState(id: id)
             logger.info("Archived \(worktreeName)")
         } catch {
@@ -1725,6 +1733,27 @@ extension AppState {
     /// together and put nested children with `sortOrder: 0` ahead of top-level
     /// rows with `sortOrder: 1+`.
     var allWorktreesOrdered: [Worktree] {
+        sidebarWalk(.parentsFirst)
+    }
+
+    /// Where a depth-first walk of the sidebar (`sidebarWalk`,
+    /// `appendSubtree`) lists a row against its nested worktrees.
+    enum SidebarWalkOrder {
+        /// The row, then its nested worktrees: the order the sidebar shows
+        /// (`allWorktreesOrdered`).
+        case parentsFirst
+        /// Its nested worktrees, then the row: the order a selection's
+        /// archive runs in (`selectionArchiveRunOrder`), since a worktree
+        /// cannot be archived while a nested one is active.
+        case childrenFirst
+    }
+
+    /// The sidebar's walk of every repo: each repo's main row (if any), then
+    /// a depth-first walk of its top-level active and creating worktrees in
+    /// sibling order, each with its descendants (`appendSubtree`), in
+    /// `order`. Both orders visit the same rows; only where a row stands
+    /// against its nested worktrees differs.
+    func sidebarWalk(_ order: SidebarWalkOrder) -> [Worktree] {
         var result: [Worktree] = []
         for repo in repos {
             let inRepo = worktrees[repo.id] ?? []
@@ -1737,25 +1766,32 @@ extension AppState {
                 .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
                 .sorted(by: Worktree.precedesSibling)
             for wt in topLevel {
-                appendSubtree(wt, depth: 0, into: &result)
+                appendSubtree(wt, depth: 0, order: order, into: &result)
             }
         }
         return result
     }
 
-    /// Depth-first append: the worktree itself, then its children (across all
-    /// repos, since a child can have a different `repoID` from its parent),
-    /// recursively. Used by `allWorktreesOrdered` to match sidebar order.
-    /// Caps recursion at 50 to mirror `WorktreeSubtreeView.kMaxSubtreeDepth`
-    /// in case a cyclic parent chain ever makes it into the in-memory state
-    /// (DB-side cycle guards make this unlikely, but the keyboard-nav path
-    /// shouldn't blow the stack while the renderer gracefully degrades).
-    private func appendSubtree(_ wt: Worktree, depth: Int, into result: inout [Worktree]) {
-        result.append(wt)
-        guard depth < 50 else { return }
-        for child in children(of: wt.id) {
-            appendSubtree(child, depth: depth + 1, into: &result)
+    /// Depth-first append of the worktree and its active and creating
+    /// children (across all repos, since a child can have a different
+    /// `repoID` from its parent), recursively, with the worktree before its
+    /// children or after them as `order` says. Used by `sidebarWalk` to match
+    /// sidebar order, and by `selectionArchiveRunOrder` for the rows that walk
+    /// leaves out. Caps recursion at 50 to mirror
+    /// `WorktreeSubtreeView.kMaxSubtreeDepth` in case a cyclic parent chain
+    /// ever makes it into the in-memory state (DB-side cycle guards make this
+    /// unlikely, but the keyboard-nav path shouldn't blow the stack while the
+    /// renderer gracefully degrades).
+    func appendSubtree(
+        _ wt: Worktree, depth: Int, order: SidebarWalkOrder, into result: inout [Worktree]
+    ) {
+        if order == .parentsFirst { result.append(wt) }
+        if depth < 50 {
+            for child in children(of: wt.id) {
+                appendSubtree(child, depth: depth + 1, order: order, into: &result)
+            }
         }
+        if order == .childrenFirst { result.append(wt) }
     }
 
     /// The repo ID of the first selected worktree (used as "focused repo").
@@ -1776,19 +1812,21 @@ extension AppState {
         createWorktree(repoID: repoID)
     }
 
-    /// Resolve the archive target for a pre-resolved selection (the caller
-    /// passes `selectedWorktreeIDs.first.flatMap(findWorktree)`). This seam
-    /// only decides refuse-vs-proceed — `archiveWorktree(id:)` is
-    /// scratch-aware and self-routes scratch rows to the `scratch.archive`
-    /// RPC. Pure so the branches are unit-testable without a daemon.
-    /// Returns `nil` when:
+    /// The archive shortcut's rule for a selection of no row or one (the
+    /// caller passes the one selected row, or nil). It only decides
+    /// refuse-vs-proceed — `archiveWorktree(id:)` is scratch-aware and
+    /// self-routes scratch rows to the `scratch.archive` RPC. Pure so the
+    /// branches are unit-testable without a daemon. Returns `nil` when:
     /// - nothing is selected, or
     /// - the selected ID is stale/unknown (`findWorktree` returned nil — no
     ///   doomed RPC + error alert for a row that's already gone), or
     /// - the selected repo worktree is the main branch or still creating
     ///   (those refuse the archive shortcut; scratch rows always proceed —
     ///   the daemon creates them `.active`, never `.main`/`.creating`).
-    nonisolated static func archiveShortcutRoute(
+    ///
+    /// Everything else proceeds, and the daemon judges it: a row with active
+    /// children, say, comes back as `archiveWorktree(id:)`'s alert.
+    nonisolated static func archiveShortcutTarget(
         selectedWorktree: Worktree?
     ) -> UUID? {
         guard let wt = selectedWorktree else { return nil }
@@ -1798,14 +1836,32 @@ extension AppState {
         return wt.id
     }
 
-    /// Archive the first selected worktree (refuses main worktrees). Scratch
-    /// routing happens inside `archiveWorktree(id:)` — same as the row
-    /// context menu's Archive action.
+    /// What the archive shortcut does with the current selection. This seam
+    /// only decides what runs; `archiveSelectedWorktree()` runs it. It counts
+    /// rows as the row menu does (`SelectionArchive.actsOnSelection`): a
+    /// selected ID that resolves to no row (`findWorktree`) is not one.
+    ///
+    /// - **No row or one** – `archiveShortcutTarget`'s rule: `.single` or
+    ///   `.nothing`.
+    /// - **Two or more** – the whole selection, with the eligibility and run
+    ///   order of the row menu's Archive Selection (`selectionArchiveTargets`,
+    ///   `SelectionArchive.route`): one archivable row routes `.single`,
+    ///   several route `.bulk`, and none routes `.refuse`.
+    func archiveShortcutRoute() -> SelectionArchive.Route {
+        let selectedRows = selectedWorktreeRows
+        if selectedRows.count >= 2 {
+            return SelectionArchive.route(selectionArchiveTargets())
+        }
+        guard let id = Self.archiveShortcutTarget(selectedWorktree: selectedRows.first) else { return .nothing }
+        return .single(id)
+    }
+
+    /// Archive the selection (Cmd+Shift+A): one row exactly as the row
+    /// menu's Archive does, several as its Archive Selection does, and a
+    /// selection with nothing archivable in it plays `refusalBeep`
+    /// (`startArchive`).
     func archiveSelectedWorktree() {
-        guard let id = Self.archiveShortcutRoute(
-            selectedWorktree: selectedWorktreeIDs.first.flatMap { findWorktree(id: $0) }
-        ) else { return }
-        Task { await archiveWorktree(id: id) }
+        startArchive(archiveShortcutRoute())
     }
 
     /// Select a worktree by its index in the sidebar order.
