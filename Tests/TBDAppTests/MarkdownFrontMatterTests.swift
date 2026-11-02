@@ -111,16 +111,41 @@ struct MarkdownFrontMatterTests {
         }
     }
 
-    @Test("a --- inside a fenced code block never closes a block")
-    func fencedCloser() {
+    @Test("a block with no key: line is a rule, a banner or a heading, not front matter")
+    func noKeyLines() {
         for source in [
-            "---\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
-            "---\nSetup notes.\n~~~\n---\n~~~\n",
+            "---\n# Intro\n\nSome *text*\n\n---\n\nMore",
+            "---\n**DEPRECATED** — see the new docs.\n---\n\n# Project",
+            "---\n- one\n- two\n---\n",
         ] {
             let (frontMatter, body) = MarkdownFrontMatter.split(source)
             #expect(frontMatter == nil)
             #expect(body == source)
         }
+    }
+
+    @Test("a --- inside a fenced code block never closes a block, even one with a key")
+    func fencedCloser() {
+        for source in [
+            "---\ntitle: Acme\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
+            "---\ntitle: Acme\n~~~\n---\n~~~\n",
+            "---\ntitle: Acme\nSetup notes.\n\n   ```yaml\n---\nname: acme\n   ```\n",
+        ] {
+            let (frontMatter, body) = MarkdownFrontMatter.split(source)
+            #expect(frontMatter == nil)
+            #expect(body == source)
+        }
+    }
+
+    @Test("four spaces of indent is not a fence, so the block still splits")
+    func indentedBackticksAreNotAFence() throws {
+        let (frontMatter, body) = MarkdownFrontMatter.split("---\ntitle: Acme\nnotes: |\n    ```sh\n---\nBody")
+        let block = try #require(frontMatter)
+        #expect(block.entries == [
+            Entry(key: "title", value: "Acme", continuation: nil),
+            Entry(key: "notes", value: "", continuation: "```sh"),
+        ])
+        #expect(body == "Body")
     }
 
     // MARK: - Reading it as keys
@@ -179,12 +204,37 @@ struct MarkdownFrontMatterTests {
         #expect(block.html.contains("<dt>notes</dt><dd></dd>"))
     }
 
+    @Test("a comment after a block scalar indicator is dropped with it; one after a value is kept")
+    func blockScalarIndicatorComment() throws {
+        let source = "---\nnotes: | # free text\n  line one\nsummary: >- #short\ntitle: Acme # draft\n---\n"
+        let block = try #require(MarkdownFrontMatter.split(source).frontMatter)
+        #expect(block.entries == [
+            Entry(key: "notes", value: "", continuation: "line one"),
+            Entry(key: "summary", value: "", continuation: nil),
+            Entry(key: "title", value: "Acme # draft", continuation: nil),
+        ])
+    }
+
+    @Test("a quoted key ends at its closing quote and shows without the quotes")
+    func quotedKeys() throws {
+        let source = "---\n\"a: b\": c\n'it''s': yes\n\"say \\\"hi\\\"\" : there\n---\n"
+        let block = try #require(MarkdownFrontMatter.split(source).frontMatter)
+        #expect(block.entries == [
+            Entry(key: "a: b", value: "c", continuation: nil),
+            Entry(key: "it''s", value: "yes", continuation: nil),
+            Entry(key: #"say \"hi\""#, value: "there", continuation: nil),
+        ])
+        #expect(block.html.contains("<dt>a: b</dt><dd>c</dd>"))
+    }
+
     @Test("a block that is not top-level keys has no entries")
     func unreadableBlock() throws {
         let comment = try #require(MarkdownFrontMatter.split("---\n# note\ntitle: Acme\n---\n").frontMatter)
         #expect(comment.entries == nil)
-        let list = try #require(MarkdownFrontMatter.split("---\n- one\n- two\n---\n").frontMatter)
+        let list = try #require(MarkdownFrontMatter.split("---\ntitle: Acme\n- one\n---\n").frontMatter)
         #expect(list.entries == nil)
+        let unclosedQuote = try #require(MarkdownFrontMatter.split("---\ntitle: Acme\n\"open: v\n---\n").frontMatter)
+        #expect(unclosedQuote.entries == nil)
         let stray = try #require(MarkdownFrontMatter.split("---\ntitle: Acme\njust text\n---\n").frontMatter)
         #expect(stray.entries == nil)
     }
@@ -207,8 +257,8 @@ struct MarkdownFrontMatterTests {
 
     @Test("html shows an unreadable block whole, as raw YAML")
     func htmlFallback() throws {
-        let block = try #require(MarkdownFrontMatter.split("---\n- one\n- two\n---\n").frontMatter)
-        #expect(block.html == #"<pre class="tbd-front-matter">- one"# + "\n" + "- two</pre>")
+        let block = try #require(MarkdownFrontMatter.split("---\n# note\ntitle: Acme\n---\n").frontMatter)
+        #expect(block.html == #"<pre class="tbd-front-matter"># note"# + "\n" + "title: Acme</pre>")
     }
 
     @Test("an empty block renders nothing")
@@ -239,7 +289,8 @@ struct MarkdownFrontMatterTests {
 
     @Test("the raw-YAML fallback is escaped too")
     func htmlFallbackEscapes() throws {
-        let block = try #require(MarkdownFrontMatter.split("---\n# <script>alert(1)</script>\n---\n").frontMatter)
-        #expect(block.html == #"<pre class="tbd-front-matter"># &lt;script&gt;alert(1)&lt;/script&gt;</pre>"#)
+        let block = try #require(MarkdownFrontMatter.split("---\n# <script>alert(1)</script>\ntitle: Acme\n---\n").frontMatter)
+        #expect(block.html == #"<pre class="tbd-front-matter"># &lt;script&gt;alert(1)&lt;/script&gt;"#
+            + "\n" + "title: Acme</pre>")
     }
 }

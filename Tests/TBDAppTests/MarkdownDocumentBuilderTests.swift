@@ -92,7 +92,7 @@ struct MarkdownDocumentBuilderTests {
         ) == nil)
     }
 
-    @Test("a document opening with a thematic break renders as it always did")
+    @Test("a document that opens with a rule but has no front matter renders as it always did")
     func openingThematicBreakRendersUnchanged() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -100,6 +100,8 @@ struct MarkdownDocumentBuilderTests {
         for source in [
             "---\n\n# Intro\n\nSome *text*\n\n---\n\nMore",
             "---\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
+            "---\n# Intro\n\nSome *text*\n\n---\n\nMore",
+            "---\n**DEPRECATED** — see the new docs.\n---\n\n# Project",
         ] {
             let doc = try #require(MarkdownDocumentBuilder.build(
                 markdown: source, documentDirectory: dir, worktreeRoot: dir, css: ""

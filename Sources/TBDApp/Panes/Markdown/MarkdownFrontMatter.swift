@@ -10,10 +10,12 @@ import Foundation
 /// shows it as a properties header above the body (`html`).
 ///
 /// A block is front matter only when the very first line is `---`, the line
-/// after it is not blank, and a later line is `---` or `...` with no column-0
-/// code fence before it. Anything else is left exactly as it was: a document
-/// may open with a thematic break, and a `---` inside a fenced YAML example
-/// must not close a block that never was one.
+/// after it is not blank, a later line is `---` or `...` with no code fence
+/// before it, and at least one line between is a column-0 `key:` line (or
+/// there are no lines at all). Anything else is left exactly as it was: a
+/// document may open with a thematic break, a banner or a heading between two
+/// rules, and a `---` inside a fenced YAML example must not close a block that
+/// never was one.
 struct MarkdownFrontMatter: Equatable, Sendable {
 
     /// One top-level `key: value` line and the indented lines that continue it.
@@ -57,6 +59,13 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         cursor = opening.next
         while let line = nextLine(in: markdown, from: cursor) {
             if isDelimiter(line.content, closing: true) {
+                // Front matter is metadata. A block with no `key:` line is a
+                // rule, a banner or a heading, then a rule. An empty block is
+                // the exception: `---` straight after `---` is the
+                // conventional empty front matter.
+                guard lines.isEmpty || lines.contains(where: { keyValue($0) != nil }) else {
+                    return (nil, markdown)
+                }
                 let frontMatter = MarkdownFrontMatter(
                     yaml: lines.joined(separator: "\n"),
                     entries: readEntries(lines)
@@ -110,31 +119,42 @@ struct MarkdownFrontMatter: Equatable, Sendable {
                 groups.append((key: pair.key, value: pair.value, more: []))
             } else if let lastValue = groups.last?.value, continues(lastValue, with: line) {
                 groups[groups.count - 1].more.append(line)
-            } else if isBlank(line) {
-                continue   // blank lines before the first key
             } else {
                 return nil
             }
         }
         return groups.map { group in
-            let more = dedented(group.more)
-            let isBlockIndicator = group.value.first.map { "|>".contains($0) } == true
-                && group.value.dropFirst().allSatisfy { "+-0123456789".contains($0) }
-            return Entry(
+            Entry(
                 key: group.key,
-                value: isBlockIndicator ? "" : group.value,
-                continuation: more
+                value: isBlockScalarIndicator(group.value) ? "" : group.value,
+                continuation: dedented(group.more)
             )
         }
     }
 
+    /// Whether `value` is a block scalar's header — `|` or `>`, optional
+    /// chomping and indentation indicators, optional ` # comment` — which is
+    /// syntax, not content.
+    private static func isBlockScalarIndicator(_ value: String) -> Bool {
+        let text = Substring(value)
+        let comment = text.indices.first { index in
+            text[index] == "#" && index > text.startIndex
+                && text[text.index(before: index)].isWhitespace
+        }
+        let indicator = trimmed(comment.map { text[..<$0] } ?? text)
+        guard let first = indicator.first, "|>".contains(first) else { return false }
+        return indicator.dropFirst().allSatisfy { "+-0123456789".contains($0) }
+    }
+
     /// A column-0 `key: value` line, split at the first colon that is followed
     /// by whitespace or the end of the line, so a value such as
-    /// `https://example.com` does not split the key.
+    /// `https://example.com` does not split the key. A quoted key (`"a: b": c`)
+    /// ends at its closing quote and is shown without the quotes.
     private static func keyValue(_ line: Substring) -> (key: String, value: String)? {
         guard let first = line.first, !first.isWhitespace, !isSequenceItem(line),
               !"#[{?".contains(first)
         else { return nil }
+        if first == "\"" || first == "'" { return quotedKeyValue(line) }
         var searchFrom = line.startIndex
         while let colon = line[searchFrom...].firstIndex(of: ":") {
             let after = line.index(after: colon)
@@ -148,6 +168,38 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         return nil
     }
 
+    /// `"key": value` or `'key': value`. A backslash escapes the next character
+    /// in a double-quoted key and `''` is a quote in a single-quoted one, as in
+    /// YAML; the key keeps those escapes as written. Nil when the quote never
+    /// closes or no `: ` follows it.
+    private static func quotedKeyValue(_ line: Substring) -> (key: String, value: String)? {
+        guard let quote = line.first else { return nil }
+        var index = line.index(after: line.startIndex)
+        while index < line.endIndex {
+            let character = line[index]
+            if quote == "\"", character == "\\" {
+                index = line.index(index, offsetBy: 2, limitedBy: line.endIndex) ?? line.endIndex
+                continue
+            }
+            if character == quote {
+                let next = line.index(after: index)
+                if quote == "'", next < line.endIndex, line[next] == "'" {
+                    index = line.index(after: next)
+                    continue
+                }
+                let rest = trimmed(line[next...])
+                guard rest.first == ":" else { return nil }
+                let afterColon = rest.dropFirst()
+                guard afterColon.isEmpty || afterColon.first?.isWhitespace == true else { return nil }
+                let key = line[line.index(after: line.startIndex)..<index]
+                guard !key.isEmpty else { return nil }
+                return (String(key), String(trimmed(afterColon)))
+            }
+            index = line.index(after: index)
+        }
+        return nil
+    }
+
     /// Whether `line` continues a key whose own line held `value`: an indented
     /// or blank line always does, and a column-0 `- item` does when the key's
     /// value is empty, which is YAML's compact way to give a key a list.
@@ -156,8 +208,12 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         return first.isWhitespace || (value.isEmpty && isSequenceItem(line))
     }
 
+    /// A CommonMark fence opener or closer: up to three spaces, then ``` or ~~~.
     private static func isFence(_ line: Substring) -> Bool {
-        line.hasPrefix("```") || line.hasPrefix("~~~")
+        let indent = line.prefix { $0 == " " }.count
+        guard indent <= 3 else { return false }
+        let rest = line.dropFirst(indent)
+        return rest.hasPrefix("```") || rest.hasPrefix("~~~")
     }
 
     private static func isSequenceItem(_ line: Substring) -> Bool {
