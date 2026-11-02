@@ -37,9 +37,11 @@ import Foundation
 /// (SE-0417 carries one into child tasks and default actors, not into
 /// `Task {}`), so by default the run lands on the cooperative pool however the
 /// caller was started. `executor` exists for tests and nothing else: a test
-/// that exercises the latch directly injects `GateExecutor` so the run cannot
-/// starve behind a saturated parallel pass. Production constructs every latch
-/// with the default, and the daemon declares no task executor of its own.
+/// that exercises the latch directly, or through a server whose internal init
+/// forwards it (`SocketServer`'s `shutdownExecutor:`), injects `GateExecutor`
+/// so the run cannot starve behind a saturated parallel pass. Production
+/// constructs every latch with the default, and the daemon declares no task
+/// executor of its own.
 final class ShutdownLatch: Sendable {
     private nonisolated(unsafe) var task: Task<Void, Never>?
     private let lock = NSLock()

@@ -238,24 +238,24 @@ struct SocketServerSocketOwnershipTests {
         // `waitForGate`. See Tests/CLAUDE.md, "Thread-blocking gates run off
         // the cooperative pool".
         //
-        // **`gateHoldingTask` cannot reach the shutdown body, though.**
-        // `SocketServer.stop()` hands that body to `ShutdownLatch`, which runs
-        // it in an unstructured `Task` so a cancelled signal handler cannot
-        // abandon a shutdown other callers await — and SE-0417 carries a task
-        // executor preference into child tasks and default actors but *not*
-        // into `Task {}`. So the work that signals the gate below is scheduled
-        // on the cooperative pool however this test starts `stop()`,
-        // competing with a parallel pass that admits all ~5,000 tests at once
-        // against a 3-thread runner.
-        //
-        // That is a scheduling cost, not a wedge, and the gate's bound has to
-        // absorb it. (`ShutdownLatch(executor:)` would pin the run, but the
-        // server builds its own latch with the default; only a test that
-        // holds a latch directly — `ServerShutdownLatchTests` — can inject.)
+        // The shutdown body is the one piece `gateHoldingTask` cannot carry:
+        // `SocketServer.stop()` hands it to `ShutdownLatch`, which runs it in
+        // an unstructured `Task` so a cancelled signal handler cannot abandon
+        // a shutdown other callers await, and SE-0417 carries no task executor
+        // preference into `Task {}`. So the server's latch takes
+        // `GateExecutor.shared` through `shutdownExecutor:`, and the shutdown
+        // body, with the claim window that signals the staging gate, runs on
+        // threads the test owns rather than queueing behind the parallel pass.
+        // The event-loop group's shutdown completion is delivered on the
+        // server's own serial queue rather than `DispatchQueue.global()`, so
+        // the last hop before the reclaim step does not wait on the CPU-wide
+        // global pool either. The claim window records the thread it ran on, so dropping that
+        // argument goes red below instead of quietly returning to the pool.
         let claims = ClaimCounter()
         let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
         let secondCallerHasArrived = DispatchSemaphore(value: 0)
         let holdTheFirstShutdown = FirstArrivalFlag()
+        let claimWindowThread = ClaimWindowThreadBox()
         // The saturated-pass budget the rest of the repo derives its waits
         // from, and the observation below gets a strictly larger one. That
         // ordering is what makes a genuinely lost handshake report itself as a
@@ -269,6 +269,7 @@ struct SocketServerSocketOwnershipTests {
         let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { identity in
             if identity != nil { claims.increment() }
             guard holdTheFirstShutdown.takeFirst() else { return }
+            claimWindowThread.recordCurrentThread()
             firstShutdownIsAtTheReclaimStep.signal()
             secondCallerHasArrived.waitForGate(
                 "the second stop() caller to reach stop()", timeout: stagingDeadline)
@@ -282,7 +283,8 @@ struct SocketServerSocketOwnershipTests {
             router: try makeRouter(),
             socketPath: socketPath,
             beforeAdoptingBoundSocket: nil,
-            duringIdentityClaim: claimWindow
+            duringIdentityClaim: claimWindow,
+            shutdownExecutor: GateExecutor.shared
         )
         try await server.start()
         #expect(inode(of: socketPath) != nil)
@@ -323,6 +325,14 @@ struct SocketServerSocketOwnershipTests {
             "\(claims.count) of the overlapping shutdowns came away owning the socket file; exactly one may"
         )
         #expect(inode(of: socketPath) == nil, "the overlapping shutdowns left the socket file behind")
+        // Self-pinned rather than remembered: only the `shutdownExecutor:`
+        // argument keeps the claim window, and the gate it holds, off the
+        // cooperative pool. Drop it and this is what goes red.
+        let recorded = claimWindowThread.name
+        #expect(
+            recorded == GateExecutor.threadName,
+            "the claim window ran on \(recorded ?? "an unnamed thread"); it must run on a thread the tests own"
+        )
     }
 
     @Test("a second shutdown after a successor took over leaves the successor alone")
@@ -568,6 +578,25 @@ private final class FirstArrivalFlag: @unchecked Sendable {
         if taken { return false }
         taken = true
         return true
+    }
+}
+
+/// Records the thread the first claim window ran on, from inside that window.
+/// The read is synchronous, so it names the thread the shutdown body is on.
+private final class ClaimWindowThreadBox: @unchecked Sendable {
+    private var value: String?
+    private let lock = NSLock()
+
+    func recordCurrentThread() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = Thread.current.name
+    }
+
+    var name: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 
