@@ -420,10 +420,10 @@ struct SidebarGuideLineTests {
 
     /// acme ▸ parent ▸ (first ▸ grandchild, second, Remote ▸ (remoteChild,
     /// session)); leaf; shelved ▸ collapsed group ▸ shelvedChild; outer ▸
-    /// inner ▸ collapsed group ▸ deep.
+    /// inner ▸ collapsed group ▸ deep; lone ▸ open Remote ▸ loneWorker.
     static func ruleTree() -> RuleTree {
         let names = ["parent", "first", "grandchild", "second", "remoteChild", "session", "leaf", "shelved",
-                     "shelvedChild", "outer", "inner", "deep"]
+                     "shelvedChild", "outer", "inner", "deep", "lone", "loneWorker"]
         let uuids = Dictionary(uniqueKeysWithValues: names.enumerated().map { index, name in
             (name, SidebarTreeDiffTests.uuid(index + 1))
         })
@@ -435,6 +435,7 @@ struct SidebarGuideLineTests {
         let remote = SidebarGroupID(owner: .parent(uuid("parent")), kind: .remote)
         let shelf = SidebarGroupID(owner: .parent(uuid("shelved")), kind: .exited)
         let innerShelf = SidebarGroupID(owner: .parent(uuid("inner")), kind: .exited)
+        let loneRemote = SidebarGroupID(owner: .parent(uuid("lone")), kind: .remote)
         let roots = [
             SidebarDropPolicyTests.repo(repoID, [
                 row("parent", [
@@ -447,6 +448,7 @@ struct SidebarGuideLineTests {
                 row("leaf"),
                 row("shelved", [Self.collapsedGroup(shelf, [row("shelvedChild")])]),
                 row("outer", [row("inner", [Self.collapsedGroup(innerShelf, [row("deep")])])]),
+                row("lone", [SidebarDropPolicyTests.group(loneRemote, [row("loneWorker")])]),
             ]),
         ]
         var ids: [String: SidebarNodeID] = [:]
@@ -455,6 +457,7 @@ struct SidebarGuideLineTests {
         }
         ids["repo"] = .repoHeader(repoID)
         ids["remoteGroup"] = .group(remote)
+        ids["loneGroup"] = .group(loneRemote)
         return RuleTree(tree: SidebarTree(roots: roots), ids: ids)
     }
 
@@ -463,55 +466,65 @@ struct SidebarGuideLineTests {
                     isExpanded: false)
     }
 
-    /// Each focus row's active ancestor: a parent showing worktree rows
-    /// lights its own line, any other worktree row its nearest worktree
-    /// ancestor's, and the rest nothing.
+    /// Each focus row's active ancestor: a row that starts a line lights its
+    /// own, a worktree row directly under a worktree its parent's, and every
+    /// other row nothing — a row inside a group, open or closed, and a row
+    /// whose only worktree descendants sit in a group among them.
     @Test func activeAncestorRule() {
         let fixture = Self.ruleTree()
         let tree = fixture.tree
         func id(_ name: String) -> SidebarNodeID { fixture.id(name) }
 
         let focus = ["second", "grandchild", "first", "parent", "remoteChild", "leaf", "shelved", "inner",
-                     "shelvedChild", "deep", "repo", "session", "remoteGroup"]
+                     "shelvedChild", "deep", "lone", "loneWorker", "repo", "session", "remoteGroup", "loneGroup"]
         let lit = focus.map { tree.activeGuideAncestor(of: id($0)) }
         let expected: [SidebarNodeID?] = [
             id("parent"), // a leaf lights its parent's line
             id("first"), // so does a grandchild
             id("first"), // a parent showing a child lights its own
             id("parent"), // ... at the top level too
-            id("parent"), // a row in an expanded group lights its worktree parent's, past the group
+            nil, // a row in an open group: no line crosses the group header
             nil, // a top-level leaf lights nothing
-            nil, // a top-level row whose only child sits in a collapsed group shows none, so nothing
-            id("outer"), // a nested one lights its own parent's
-            id("shelved"), // a hidden row's rule still names its parent; the set skips it
-            id("inner"),
-            nil, nil, nil, // a header, a remote session and a group header light nothing
+            nil, // a top-level row whose only child is a collapsed group starts no line
+            id("outer"), // a nested one lights the line it ends, its parent's
+            nil, // a row in a collapsed group
+            nil,
+            nil, // a top-level row whose only worktree descendant sits in an open group
+            nil, // ... and that descendant
+            nil, nil, nil, nil, // a header, a remote session and group headers light nothing
         ]
         #expect(lit == expected)
         let unknown = tree.activeGuideAncestor(of: .worktree(SidebarTreeDiffTests.uuid(999)))
         #expect(unknown == nil)
 
-        // The owners of each row's lines, outermost first, past groups.
-        let grandchildOwners = tree.worktreeAncestors(of: id("grandchild"))
-        let remoteChildOwners = tree.worktreeAncestors(of: id("remoteChild"))
-        let deepOwners = tree.worktreeAncestors(of: id("deep"))
-        let parentOwners = tree.worktreeAncestors(of: id("parent"))
-        let expectedGrandchildOwners = [id("parent"), id("first")]
-        let expectedRemoteChildOwners = [id("parent")]
-        let expectedDeepOwners = [id("outer"), id("inner")]
-        #expect(grandchildOwners == expectedGrandchildOwners)
-        #expect(remoteChildOwners == expectedRemoteChildOwners)
-        #expect(deepOwners == expectedDeepOwners)
-        #expect(parentOwners.isEmpty)
-
-        // The set skips a focus row the outline does not show.
-        let shown = ["second", "grandchild", "shelvedChild", "deep", "session"].map(id)
+        // The set skips a focus row the outline does not show, and a shown
+        // row that lights nothing adds nothing.
+        let shown = ["second", "grandchild", "shelvedChild", "deep", "session", "remoteChild", "loneWorker"].map(id)
         let active = tree.activeGuideAncestors(of: shown)
         let parentAndFirst: Set<SidebarNodeID> = [id("parent"), id("first")]
         #expect(active == parentAndFirst)
         #expect(tree.isShown(id("remoteChild")))
+        #expect(tree.isShown(id("loneWorker")))
         #expect(!tree.isShown(id("shelvedChild")))
         #expect(!tree.isShown(.worktree(SidebarTreeDiffTests.uuid(999))))
+    }
+
+    /// The focus rule names only a line the row is joined to: its own, when
+    /// it starts one, or the owner of the line it branches off or ends in.
+    @Test func activeAncestorIsALineTheRowDraws() {
+        let fixture = Self.ruleTree()
+        let tree = fixture.tree
+        var mismatches: [String] = []
+        for (name, id) in fixture.ids.sorted(by: { $0.key < $1.key }) {
+            let lit = tree.activeGuideAncestor(of: id)
+            let ownLine: SidebarNodeID? = tree.startsGuide(id) ? id : nil
+            let branchOwner = tree.guideRuns(of: id).last { $0.role == .branch || $0.role == .last }?.owner
+            let joined = ownLine ?? branchOwner
+            if lit != joined {
+                mismatches.append("\(name) lights \(String(describing: lit)), is joined to \(String(describing: joined))")
+            }
+        }
+        #expect(mismatches.isEmpty, "\(mismatches)")
     }
 
     /// Each row's part in each worktree line above it, and whether it starts
@@ -526,7 +539,7 @@ struct SidebarGuideLineTests {
             Run(owner: id(owner), level: 0, role: role, continuesFade: fade)
         }
         let names = ["parent", "first", "grandchild", "second", "remoteGroup", "remoteChild", "session", "leaf",
-                     "shelved", "shelvedChild", "outer", "inner", "deep"]
+                     "shelved", "shelvedChild", "outer", "inner", "deep", "lone", "loneWorker"]
         let runs = names.map { tree.guideRuns(of: id($0)) }
         let expected: [[Run]] = [
             [], // parent: its own line starts here
@@ -540,10 +553,12 @@ struct SidebarGuideLineTests {
             [], // outer: its own line starts here
             [run("outer", .last, fade: true)], // an only child
             [], // under a group, and under outer's last child
+            [], [], // a top-level row, and the row in its open group
         ]
         #expect(runs == expected)
         let starts = names.map { tree.startsGuide(id($0)) }
-        let expectedStarts = [true, true, false, false, false, false, false, false, false, false, true, false, false]
+        let expectedStarts = [true, true, false, false, false, false, false, false, false, false, true, false, false,
+                              false, false]
         #expect(starts == expectedStarts)
 
         // A line from further up passes a group and the rows inside it:
@@ -894,8 +909,9 @@ struct SidebarGuideLineTests {
 
     /// With workflow groups, a worktree's Remote group and the rows in it
     /// draw none of the worktree's line, which ends at its last worktree
-    /// child. Without a worktree child, its only child the group, the row
-    /// starts no line, the group open or closed.
+    /// child, and a row in the group lights none of it. Without a worktree
+    /// child, its only child the group, the row starts no line, the group
+    /// open or closed, and lights none.
     @Test func groupsUnderAWorktreeDrawNoneOfItsLine() throws {
         let h = OutlineHarness("guides.groups")
         defer { h.tearDown() }
@@ -922,6 +938,18 @@ struct SidebarGuideLineTests {
         #expect(guides == expectedGuides, h.evidence(names))
         #expect(stubs == expectedStubs, h.evidence(names))
 
+        // Hover lights only a line the row is joined to: the local child
+        // working's, which it ends; working its own; the worker, behind the
+        // group header, none.
+        let tracker = try #require(h.controller.hoverTracker)
+        let joined: [(row: SidebarNodeID, active: Set<SidebarNodeID>, label: String)] = [
+            (.worktree(fleet.localChild.id), [working], "the local child lights working's line"),
+            (working, [working], "working starts its line and lights it"),
+            (worker, [], "a row in the Remote group lights nothing"),
+        ]
+        try Self.hover(joined, with: tracker, in: h, names)
+        tracker.pointerExited()
+
         // The local child goes: the group is the row's only child.
         h.state.worktrees[fleet.repoID]?.removeAll { $0.id == fleet.localChild.id }
         h.controller.flushPendingRebuild()
@@ -933,11 +961,31 @@ struct SidebarGuideLineTests {
         #expect(openStubs == neither, h.evidence(names))
         #expect(openGuides == noGuides, h.evidence(names))
 
+        // Neither row draws a line, so neither lights one.
+        let unjoined: [(row: SidebarNodeID, active: Set<SidebarNodeID>, label: String)] = [
+            (working, [], "a row whose only worktree descendant sits in a group lights nothing"),
+            (worker, [], "nor does that descendant"),
+        ]
+        try Self.hover(unjoined, with: tracker, in: h, names)
+        tracker.pointerExited()
+
         h.state.expandedSidebarGroups = []
         h.controller.flushPendingRebuild()
         let closedConfigurations = try Self.configurations([working], in: h, names)
         let closed = try #require(closedConfigurations.first)
         #expect(!closed.drawsStub, h.evidence(names))
+    }
+
+    /// Moves the pointer over each step's row in turn and checks the lines
+    /// the outline then draws active.
+    static func hover(_ steps: [(row: SidebarNodeID, active: Set<SidebarNodeID>, label: String)],
+                      with tracker: SidebarHoverTracker, in h: OutlineHarness, _ names: [UUID: String]) throws {
+        for step in steps {
+            let point = try #require(SidebarInteractionTests.windowPoint(of: step.row, in: h), h.evidence(names))
+            tracker.pointerMoved(toWindowPoint: point)
+            try #require(h.controller.hoverState.row == step.row, h.evidence(names))
+            #expect(h.controller.activeGuideAncestors == step.active, "\(step.label): \(h.evidence(names).rawValue)")
+        }
     }
 
     // MARK: The dock

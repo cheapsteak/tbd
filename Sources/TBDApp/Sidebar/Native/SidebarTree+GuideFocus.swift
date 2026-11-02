@@ -1,37 +1,28 @@
 import Foundation
 
-/// Which guide lines draw active: the group a focus row — the hovered row, or
-/// a selected worktree row — is in.
+/// Which guide lines draw active: the line a focus row — the hovered row, or
+/// a selected worktree row — draws a branch of, or starts.
 ///
-/// A guide line belongs to a worktree row and runs down past its children
-/// (`guideRuns(of:)`). A focus row lights the line of its *active ancestor*:
-/// - **A worktree row whose subtree shows a worktree row** — a child, or one
-///   inside an expanded group under it — lights its own line, the one down
-///   its children.
-/// - **Any other worktree row** lights its nearest worktree ancestor's line,
-///   the one down it and its siblings. That covers a leaf, and a row whose
-///   only worktree descendants sit in a collapsed group, which show none.
-/// - **A top-level worktree row with nothing shown under it, a header, a
-///   group header, a remote session or the scratch prompt** lights nothing.
+/// A focus row lights only a line it is joined to by the shape rules
+/// (`guideRuns(of:)`, `startsGuide(_:)`), so what lights is always drawn
+/// through the row:
+/// - **A worktree row that starts a line** — its worktree children show
+///   under it — lights its own, the one down its children.
+/// - **Any other worktree row whose parent is a worktree** lights its
+///   parent's line, the one it branches off or ends in.
+/// - **Every other row** lights nothing: a top-level worktree row that starts
+///   no line, a worktree row whose only worktree descendants sit in a group
+///   under it, a row inside a Remote or Exited group (lines never cross a
+///   group header), a header, a group header, a remote session and the
+///   scratch prompt.
 extension SidebarTree {
-    /// The worktree rows `id` sits under, outermost first. Group headers
-    /// between them are skipped.
-    func worktreeAncestors(of id: SidebarNodeID) -> [SidebarNodeID] {
-        var ancestors: [SidebarNodeID] = []
-        var current = parent(of: id)
-        while let ancestor = current {
-            if case .worktree = ancestor { ancestors.append(ancestor) }
-            current = parent(of: ancestor)
-        }
-        return ancestors.reversed()
-    }
-
     /// The worktree whose guide line `focus` lights, or nil when it lights
     /// none. See the extension's rule.
     func activeGuideAncestor(of focus: SidebarNodeID) -> SidebarNodeID? {
-        guard case .worktree = focus, let node = node(focus) else { return nil }
-        if Self.showsWorktreeDescendant(node) { return focus }
-        return worktreeAncestors(of: focus).last
+        guard case .worktree = focus else { return nil }
+        if startsGuide(focus) { return focus }
+        guard let parent = parent(of: focus), case .worktree = parent else { return nil }
+        return parent
     }
 
     /// The active ancestors of every focus row the outline shows. A focus row
@@ -55,16 +46,5 @@ extension SidebarTree {
             current = parent(of: ancestor)
         }
         return true
-    }
-
-    /// Whether the outline shows a worktree row under `node`: a child, or one
-    /// inside an expanded group.
-    private static func showsWorktreeDescendant(_ node: SidebarNode) -> Bool {
-        guard node.showsChildren else { return false }
-        for child in node.children {
-            if case .worktree = child.kind { return true }
-            if showsWorktreeDescendant(child) { return true }
-        }
-        return false
     }
 }
