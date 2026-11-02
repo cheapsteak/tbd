@@ -110,8 +110,21 @@ enum SidebarGuideLine {
     }
 
     /// The accent colour as `appearance` resolves it, blended toward white by
-    /// the appearance's mix in Display P3.
+    /// the appearance's mix in Display P3: `resolvedHighlightTint(appearance:)`,
+    /// resolved once per appearance and kept until the system colours, the
+    /// accent among them, change.
+    @MainActor
     static func highlightTintColor(appearance: NSAppearance) -> NSColor {
+        HighlightTintCache.observeSystemColors()
+        if let cached = HighlightTintCache.colors[appearance.name] { return cached }
+        let color = resolvedHighlightTint(appearance: appearance)
+        HighlightTintCache.colors[appearance.name] = color
+        return color
+    }
+
+    /// The accent colour as `appearance` resolves it now, blended toward
+    /// white by the appearance's mix in Display P3.
+    static func resolvedHighlightTint(appearance: NSAppearance) -> NSColor {
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fraction = isDark ? highlightWhiteMix.dark : highlightWhiteMix.light
         var result = NSColor.controlAccentColor
@@ -128,6 +141,31 @@ enum SidebarGuideLine {
         return result
     }
 
+    /// The highlight tint per appearance name, resolved once, so a row
+    /// redraw neither resolves the accent nor converts it to Display P3. A
+    /// change to the system colours — the accent among them — empties it.
+    @MainActor
+    enum HighlightTintCache {
+        static var colors: [NSAppearance.Name: NSColor] = [:]
+        private static var observer: (any NSObjectProtocol)?
+
+        /// Empties the cache whenever the system colours change, from the
+        /// first use on. The notification arrives on the main thread; one
+        /// posted anywhere else empties the cache on the next main-loop turn.
+        static func observeSystemColors() {
+            guard observer == nil else { return }
+            observer = NotificationCenter.default.addObserver(
+                forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: nil
+            ) { _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { HighlightTintCache.colors.removeAll() }
+                } else {
+                    DispatchQueue.main.async { MainActor.assumeIsolated { HighlightTintCache.colors.removeAll() } }
+                }
+            }
+        }
+    }
+
     /// The colour a line draws in.
     enum ColorRole: Hashable, Sendable {
         case secondaryLabel
@@ -135,6 +173,7 @@ enum SidebarGuideLine {
         case highlightTint
 
         /// The colour in `appearance`.
+        @MainActor
         func nsColor(appearance: NSAppearance) -> NSColor {
             switch self {
             case .secondaryLabel: .secondaryLabelColor
@@ -143,6 +182,7 @@ enum SidebarGuideLine {
         }
 
         /// The colour resolved in `appearance`, alpha included.
+        @MainActor
         func cgColor(appearance: NSAppearance) -> CGColor {
             var resolved: CGColor?
             appearance.performAsCurrentDrawingAppearance {
@@ -406,8 +446,12 @@ enum SidebarGuideLine {
         }
     }
 
-    /// The fade's mask: grey stops whose alpha follows `fadeStops()`.
-    static func fadeGradient() -> CGGradient? {
+    /// The fade's mask: grey stops whose alpha follows `fadeStops()`. Made
+    /// once, since it never changes; a `CGGradient` is immutable once made.
+    nonisolated(unsafe) static let fadeGradient: CGGradient? = makeFadeGradient()
+
+    /// Builds `fadeGradient`.
+    static func makeFadeGradient() -> CGGradient? {
         let stops = fadeStops()
         let components: [CGFloat] = stops.flatMap { [0, $0.alpha] }
         let locations: [CGFloat] = stops.map(\.location)
@@ -439,7 +483,7 @@ enum SidebarGuideLine {
             context.addPath(turnPath(turn))
             context.strokePath()
         }
-        if let fade = pieces.fade, let gradient = fadeGradient() {
+        if let fade = pieces.fade, let gradient = fadeGradient {
             context.saveGState()
             context.clip(to: fade.rect)
             context.setBlendMode(.destinationIn)

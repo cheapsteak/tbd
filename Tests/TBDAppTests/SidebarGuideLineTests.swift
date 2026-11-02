@@ -281,7 +281,36 @@ struct SidebarGuideLineTests {
         #expect(deviation < 1e-9, "The fade's alphas are \(alphas)")
         #expect(SidebarGuideLine.smoothstep(-1) == 0)
         #expect(SidebarGuideLine.smoothstep(2) == 1)
-        #expect(SidebarGuideLine.fadeGradient() != nil)
+        #expect(SidebarGuideLine.fadeGradient != nil)
+    }
+
+    /// The highlight tint resolves once per appearance and stays cached until
+    /// the system colours change — as they do when the user picks another
+    /// accent — and then resolves afresh.
+    @Test func highlightTintIsCachedUntilTheSystemColorsChange() throws {
+        let aqua = try #require(NSAppearance(named: .aqua))
+        let darkAqua = try #require(NSAppearance(named: .darkAqua))
+        let tint = SidebarGuideLine.highlightTintColor(appearance: aqua)
+        let darkTint = SidebarGuideLine.highlightTintColor(appearance: darkAqua)
+        let cached = SidebarGuideLine.HighlightTintCache.colors[aqua.name]
+        let darkCached = SidebarGuideLine.HighlightTintCache.colors[darkAqua.name]
+        #expect(cached === tint, "The tint was not kept for the next draw")
+        #expect(darkCached === darkTint, "Each appearance keeps a tint of its own")
+        let resolved = SidebarGuideLine.resolvedHighlightTint(appearance: aqua)
+        #expect(Self.p3Components(tint) == Self.p3Components(resolved))
+
+        NotificationCenter.default.post(name: NSColor.systemColorsDidChangeNotification, object: nil)
+        #expect(SidebarGuideLine.HighlightTintCache.colors.isEmpty, "A change to the system colours kept the old tint")
+        let afterChange = SidebarGuideLine.highlightTintColor(appearance: aqua)
+        #expect(Self.p3Components(afterChange) == Self.p3Components(resolved))
+        let recached = SidebarGuideLine.HighlightTintCache.colors[aqua.name]
+        #expect(recached === afterChange)
+    }
+
+    /// `color`'s Display P3 components, red, green, blue and alpha.
+    static func p3Components(_ color: NSColor) -> [CGFloat] {
+        guard let p3 = color.usingColorSpace(.displayP3) else { return [] }
+        return [p3.redComponent, p3.greenComponent, p3.blueComponent, p3.alphaComponent]
     }
 
     /// The turn's stroke runs down the line from its start, turns, and ends
