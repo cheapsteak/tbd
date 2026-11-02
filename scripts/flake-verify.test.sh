@@ -1208,12 +1208,28 @@ test_the_verifier_runs_python_isolated() {
 # `cmd &` is until its exec, aimed at a decoy directory and a decoy process.
 # It runs on every bash. On bash 3.2 a check built on `${BASHPID:-$$}` would
 # fail the forked-child assertion below, which keeps that form from coming back.
+# A check that never deletes anything would pass the child case, so the harness
+# shell runs cleanup first and has to get through.
 test_only_the_harness_shell_runs_the_exit_trap() {
   assert_eq "the EXIT trap is cleanup" "trap -- 'cleanup' EXIT" "$(trap -p EXIT)"
-  local decoy victim state
+  local decoy victim state owner_decoy owner_victim real_scratch="$SCRATCH"
+  # Aim cleanup at a decoy: its own SCRATCH and a SPAWNED holding the victim.
+  # The locals shadow the globals by dynamic scoping, so the real ones survive.
+  cleanup_aimed_at() { local SCRATCH="$1" SPAWNED=("$2"); cleanup; }
+  # Bounded poll, not a fixed sleep: the SIGKILL is delivered asynchronously.
+  wait_dead() {
+    local tries=0
+    while [[ "$(alive "$1")" == yes && $tries -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+  }
+  owner_decoy="$(mktmpd)"; spawn; owner_victim="$LAST"
+  cleanup_aimed_at "$owner_decoy" "$owner_victim"   # plain call: the harness shell
+  assert_eq "the harness shell itself deletes the directory" "no" "$([[ -d "$owner_decoy" ]] && echo yes || echo no)"
+  wait_dead "$owner_victim"
+  assert_eq "and kills the process" "no" "$(alive "$owner_victim")"
+  assert_eq "and leaves the real SCRATCH variable alone" "$real_scratch" "$SCRATCH"
+  assert_eq "and the real scratch directory survives" "yes" "$([[ -d "$SCRATCH" ]] && echo yes || echo no)"
   decoy="$(mktmpd)"; spawn; victim="$LAST"
-  # Aim cleanup at the decoy: its own SCRATCH and a SPAWNED holding the victim.
-  ( local SCRATCH="$decoy" SPAWNED=("$victim"); cleanup )
+  ( cleanup_aimed_at "$decoy" "$victim" )
   assert_eq "a forked child running cleanup leaves the directory alone" "yes" "$([[ -d "$decoy" ]] && echo yes || echo no)"
   assert_eq "and leaves the process alone" "yes" "$(alive "$victim")"
   # MUTATION: cleanup without its first line, run by the same child.
@@ -1221,9 +1237,7 @@ test_only_the_harness_shell_runs_the_exit_trap() {
   ( local SCRATCH="$decoy" SPAWNED=("$victim"); unguarded_cleanup )
   state="$([[ -d "$decoy" ]] && echo yes || echo no)"
   assert_eq "mutation: without the check, a forked child deletes the directory" "no" "$state"
-  # Bounded poll, not a fixed sleep: the SIGKILL is delivered asynchronously.
-  local tries=0
-  while [[ "$(alive "$victim")" == yes && $tries -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+  wait_dead "$victim"
   assert_eq "mutation: without the check, a forked child kills the process" "no" "$(alive "$victim")"
 }
 
