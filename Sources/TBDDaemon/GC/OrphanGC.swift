@@ -140,6 +140,13 @@ public actor OrphanGC {
     /// production. The same closure is handed to `OrphanProcessCollector`,
     /// which re-reads through it immediately before each signal volley.
     private let processSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
+    /// One read of the kernel's process table, taken right after the `ps`
+    /// snapshot: the start times each environment read is checked against.
+    /// Returning `nil` means the table could not be read, which hides every
+    /// environment for that sweep — the cwd rule then decides alone — rather
+    /// than skipping the phase. `ProcessTableSnapshot.read()` in production;
+    /// injected so a test can hand the sweep a scripted table, or none.
+    private let processTableReader: @Sendable () -> ProcessTableSnapshot?
     private let orphanProcessCollector: OrphanProcessCollector
     /// The orphan-process phase's keep-list file,
     /// `TBDConstants.gcKeepProcessesPath` in production (so it follows
@@ -214,6 +221,7 @@ public actor OrphanGC {
         worktreesBase: URL? = nil,
         processEnvironmentReader: (@Sendable (Int32) -> ProcessEnvironmentMarkers)? = nil,
         processStartTimeReader: (@Sendable (Int32) -> Date?)? = nil,
+        processTableReader: (@Sendable () -> ProcessTableSnapshot?)? = nil,
         gcKeepListPath: String? = nil
     ) {
         let resolvedNow = now ?? Date.init
@@ -275,8 +283,12 @@ public actor OrphanGC {
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
         self.processSnapshotProvider = resolvedSnapshotProvider
-        // Both per-pid kernel reads are seams so no test ever reads a real
+        // Both per-pid kernel reads, and the process-table read each start-time
+        // read is checked against, are seams so no test ever reads a real
         // process's environment or start time.
+        let resolvedTableReader: @Sendable () -> ProcessTableSnapshot? =
+            processTableReader ?? { ProcessTableSnapshot.read() }
+        self.processTableReader = resolvedTableReader
         let resolvedEnvironmentReader: @Sendable (Int32) -> ProcessEnvironmentMarkers =
             processEnvironmentReader ?? { ProcessEnvironmentReader.markers(pid: $0) }
         let resolvedStartTimeReader: @Sendable (Int32) -> Date? =
@@ -2010,7 +2022,11 @@ public actor OrphanGC {
     /// keep-favoring direction every other gate in this sweep takes. The
     /// keep-list is no exception to it: falling back to the shipped defaults
     /// would quietly drop every protection the user wrote, so the sweep never
-    /// guesses which list was meant.
+    /// guesses which list was meant. The kernel's process table is the one
+    /// input that does not skip: without it no environment read can be
+    /// verified, so every environment reads as hidden and the cwd rule decides
+    /// alone, as it did before markers, and the plan records
+    /// `KEEP process-table-unavailable env-evidence`.
     ///
     /// The row reads happen HERE rather than being handed down from `sweep`,
     /// and back to back, so the live list, the archived list and the terminal
@@ -2045,13 +2061,37 @@ public actor OrphanGC {
         }
 
         // Stamped BEFORE the reading, so the start instants derived from it
-        // sit no later than the truth — the direction that widens apparent
-        // drift at signal time rather than hiding it.
+        // (`plannedStarts` below) sit no later than the truth. They serve the
+        // signal-time identity alone, which compares them with a fresh `ps`
+        // reading; there that error reads as drift, and drift skips the
+        // signal. An environment read is never checked against them: the same
+        // error, with `etime`'s one-second resolution and a `ps` that may run
+        // seconds after this stamp under load, would read as drift there too,
+        // hide the environment, and drop the vetoes that keep a process alive.
+        // Those reads use the kernel's process table, read next.
         let processesCapturedAt = now()
         guard let processes = await processSnapshot() else {
             logger.error("gc: ps unavailable this sweep — skipping the orphan-process phase")
             planned.append("KEEP ps-unavailable orphan-processes")
             return
+        }
+        // The start times environment reads are checked against, from the
+        // kernel itself and read right after `ps`, so the table and the
+        // snapshot are as close to one instant as two reads get. A failed
+        // read does not skip the phase: every environment then reads as
+        // hidden, which returns each root to the cwd rule — what decided
+        // before markers existed — and the plan says so, because that also
+        // drops the no-marker veto that spares TBD's own tmux servers.
+        let envReadStarts: [Int32: Date]
+        if let table = processTableReader() {
+            envReadStarts = OrphanProcessCollector.envReadStarts(from: table)
+        } else {
+            logger.warning("""
+            gc: process table unreadable this sweep — every environment reads as hidden, \
+            so the cwd rule decides the orphan-process phase alone
+            """)
+            planned.append("KEEP process-table-unavailable env-evidence")
+            envReadStarts = [:]
         }
         guard let liveWorktrees = try? await db.worktrees.list(excludeArchived: true),
               let archived = try? await db.worktrees.list(status: .archived),
@@ -2069,12 +2109,12 @@ public actor OrphanGC {
             repos: repos, archived: archived, liveRows: liveRows)
         let markerRows = orphanProcessMarkerRows(
             liveWorktrees: liveWorktrees, archived: archived, terminals: terminals)
-        // The start instant recorded for every pid the snapshot holds. Taken
-        // before planning because an environment read is trusted only while
-        // the pid's live start still matches it, and kept for `reap`, which
-        // refuses to signal a pid whose live start instant no longer matches —
-        // what keeps a pid the kernel reissued mid-sweep, to a descendant slot
-        // or to a late candidate's root, out of the volley.
+        // The start instant `ps` implies for every pid the snapshot holds,
+        // for `reap` alone, which refuses to signal a pid whose start in a
+        // fresh `ps` reading no longer matches — what keeps a pid the kernel
+        // reissued mid-sweep, to a descendant slot or to a late candidate's
+        // root, out of the volley. Environment reads never use these; they use
+        // `envReadStarts`, from the kernel.
         let plannedStarts = OrphanProcessCollector.startInstants(
             processes, capturedAt: processesCapturedAt)
         let unexempted = orphanProcessCollector.candidates(
@@ -2086,7 +2126,7 @@ public actor OrphanGC {
             ourPID: getpid(),
             graceSeconds: config.gcGraceSeconds,
             markerRows: markerRows,
-            plannedStarts: plannedStarts,
+            envReadStarts: envReadStarts,
             keepList: keepList
         )
         guard !unexempted.isEmpty else { return }
@@ -2126,7 +2166,7 @@ public actor OrphanGC {
             // The tree guard, for every route: one member naming live work
             // keeps the whole tree, root included.
             if orphanProcessCollector.treeNamesSomethingLive(
-                tree, plannedStarts: plannedStarts, rows: markerRows) {
+                tree, envReadStarts: envReadStarts, rows: markerRows) {
                 planned.append("KEEP live-marker-in-tree pid=\(candidate.pid)")
                 logger.info("""
                 gc: orphan-process pid \(candidate.pid, privacy: .public) kept — a member of \

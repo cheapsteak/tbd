@@ -64,9 +64,16 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
     /// `markers` is each pid's environment as the reader would report it. A
     /// pid it does not name reads as hidden — neutral — which leaves every test
     /// written before markers existed on the cwd rule alone, and means no test
-    /// here ever reads a real process's environment. The start-time reader
-    /// answers the start instant the planning snapshot records for each pid,
-    /// so an environment read always verifies unless a test says otherwise.
+    /// here ever reads a real process's environment.
+    ///
+    /// `kernelStarts` is each pid's start as the kernel records it, and the
+    /// fixture answers it twice over: as the `startedAt` of an injected
+    /// process table, and from the start-time reader. The two always agree, so
+    /// an environment read verifies unless a test says otherwise. It defaults
+    /// to the start the `ps` snapshot implies, which is what an unloaded
+    /// machine reports; a test that skews `ps` from the kernel passes its own.
+    /// `processTableAvailable: false` makes the table read fail. Either way no
+    /// test here reads the real kernel table.
     private func makeGC(
         db: TBDDatabase,
         signaller: ProcessSignaller,
@@ -75,9 +82,19 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         now: Date,
         processSnapshotAvailable: Bool = true,
         snapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)? = nil,
-        markers: [Int32: ProcessEnvironmentMarkers] = [:]
+        markers: [Int32: ProcessEnvironmentMarkers] = [:],
+        kernelStarts: [Int32: Date]? = nil,
+        processTableAvailable: Bool = true
     ) -> OrphanGC {
-        let startTimes = OrphanProcessCollector.startInstants(processes, capturedAt: now)
+        let startTimes = kernelStarts
+            ?? OrphanProcessCollector.startInstants(processes, capturedAt: now)
+        var entries: [Int32: ProcessTableSnapshot.Entry] = [:]
+        for process in processes {
+            entries[process.pid] = ProcessTableSnapshot.Entry(
+                parent: process.ppid, startedAt: startTimes[process.pid])
+        }
+        let table: ProcessTableSnapshot? =
+            processTableAvailable ? ProcessTableSnapshot(entries: entries) : nil
         return OrphanGC(
             db: db, git: GitManager(),
             broadcast: { _ in },
@@ -106,6 +123,7 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true),
             processEnvironmentReader: { markers[$0] ?? .hidden },
             processStartTimeReader: { startTimes[$0] },
+            processTableReader: { table },
             gcKeepListPath: keepListPath
         )
     }
@@ -1317,6 +1335,100 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(!signaller.terminated.contains(600))
         #expect(!result.planned.contains { $0.contains("pid=600") })
         #expect(signaller.terminated == [601])
+    }
+
+    // MARK: - Environment markers: the start-time check
+
+    /// Under load `ps` runs well after the sweep stamps its capture time, and
+    /// `etime` is whole seconds, so the start a snapshot implies sits seconds
+    /// before the kernel's. Here it is 5 s off, while the process table and
+    /// the start-time reader — both the kernel — agree. Fails against an
+    /// environment check that compared the kernel's start with the one `ps`
+    /// implies: 5 s is past the 2 s tolerance, the read turns hidden, the
+    /// no-marker veto falls away, and the cwd rule reclaims the server.
+    @Test("TBD's tmux-server shape stays kept when ps's start sits 5 s off the kernel's")
+    func tmuxServerShapeIsKeptWhenPsSkewsFromTheKernel() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+        let now = Date().addingTimeInterval(7200)
+        let processes = [
+            entry(pid: 4242, command: "tmux -L tbd-acme new-session -d -s main"),
+            entry(pid: 4243),
+        ]
+        // `ps` got to run 5 s after the stamp, so the start it implies is 5 s
+        // earlier than the one the kernel recorded.
+        let kernelStarts = OrphanProcessCollector.startInstants(processes, capturedAt: now)
+            .mapValues { $0.addingTimeInterval(5) }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: processes,
+            cwdByPID: [4242: dead, 4243: dead],
+            now: now,
+            markers: [4242: .noMarkers],
+            kernelStarts: kernelStarts
+        ).sweep()
+
+        #expect(
+            !signaller.terminated.contains(4242),
+            "the kernel's start verifies the read, so the no-marker veto holds however late ps ran")
+        #expect(!signaller.killed.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(!result.planned.contains("KEEP process-table-unavailable env-evidence"))
+        // The hidden orphan beside it proves the phase ran, and that the
+        // signal-time identity — `ps` against `ps` — is untouched by the skew.
+        #expect(signaller.terminated == [4243])
+    }
+
+    /// With no process table there is nothing to verify an environment read
+    /// against, so every environment reads as hidden and the cwd rule decides
+    /// alone, as it did before markers. That costs the no-marker veto: a root
+    /// shaped like TBD's tmux server, its cwd in an archived worktree, is
+    /// reclaimed. This is the accepted fallback, and the plan names it.
+    /// Fails against code that does not read the table (no plan line, and
+    /// 4242 kept on a verified no-marker read), and against code that skips
+    /// the phase on a failed read (4243 kept).
+    @Test("a failed process-table read is the accepted fallback: the cwd rule decides alone, no-marker roots included")
+    func aFailedTableReadIsTheAcceptedFallbackToTheCwdRule() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let gc = makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 4242, command: "tmux -L tbd-acme new-session -d -s main"),
+                entry(pid: 4243, command: "/usr/bin/caffeinate -i"),
+            ],
+            cwdByPID: [4242: dead, 4243: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: .noMarkers, 4243: .hidden],
+            processTableAvailable: false
+        )
+
+        let dryRun = await gc.sweep(dryRun: true)
+        #expect(dryRun.planned.contains("KEEP process-table-unavailable env-evidence"))
+        #expect(dryRun.planned.contains("REAP orphan-process pid=4243 tree=1 via=cwd \(dead)"))
+        #expect(
+            dryRun.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"),
+            "the accepted fallback: with every environment hidden, a no-marker root loses its veto")
+        #expect(signaller.terminated.isEmpty, "a dry run touches nothing")
+
+        let result = await gc.sweep()
+        #expect(result.planned.contains("KEEP process-table-unavailable env-evidence"))
+        #expect(Set(signaller.terminated) == [4242, 4243])
+        #expect(result.reaped == 2)
     }
 
     // MARK: - Environment markers: guards on the tree

@@ -80,8 +80,9 @@ struct OrphanProcessCollectorTests {
     }
 
     /// The start instants a plan would have recorded for `processes`, stamped
-    /// at the collector's own `now` so an unchanged process table verifies
-    /// exactly.
+    /// at the collector's own `now` so an unchanged `ps` reading verifies
+    /// exactly — what `reap`'s signal-time identity checks. Environment reads
+    /// are checked against `tableStarts` instead.
     private func plannedStarts(
         _ processes: [ProcessSnapshotEntry],
         at now: Date = Date(timeIntervalSince1970: 1_000_000)
@@ -402,19 +403,31 @@ struct OrphanProcessCollectorTests {
         .markers(worktreeID: worktree, terminalID: terminal)
     }
 
+    /// Each pid's start as the kernel's process table records it: what an
+    /// environment read is checked against. Fixed instants unrelated to any
+    /// `etime`, because that check compares the kernel with the kernel and
+    /// nothing `ps` reports enters it.
+    private func tableStarts(_ pids: [Int32]) -> [Int32: Date] {
+        var starts: [Int32: Date] = [:]
+        for pid in pids {
+            starts[pid] = Date(timeIntervalSince1970: 900_000 + TimeInterval(pid))
+        }
+        return starts
+    }
+
     /// `candidates(…)` for one escaped root, pid 50, at `cwd` with
-    /// `markers`, whose start time verifies.
+    /// `markers`, whose start time verifies against the process table.
     private func judgedRoot(
         cwd: String, markers: ProcessEnvironmentMarkers, elapsed: TimeInterval = 86_400,
         cwdsCapturedAt: Date = Date(timeIntervalSince1970: 1_000_000)
     ) -> [OrphanProcessCandidate] {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let processes = [entry(pid: 50, elapsed: elapsed)]
-        let starts = plannedStarts(processes, at: now)
+        let starts = tableStarts([50])
         return collector(now: now, environment: [50: markers], startTimes: starts).candidates(
             processes: processes, cwdByPID: [50: cwd], cwdsCapturedAt: cwdsCapturedAt,
             roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600,
-            markerRows: markerRows(), plannedStarts: starts)
+            markerRows: markerRows(), envReadStarts: starts)
     }
 
     // Inverted (hidden read as a veto), every Apple platform binary the cwd
@@ -516,48 +529,69 @@ struct OrphanProcessCollectorTests {
 
     // Fails against a reader that skips the start-time re-check; the 1 s
     // control fails against one that demands an exact match.
-    @Test("an environment read whose pid's start moved reads as hidden")
+    @Test("an environment read whose pid's start moved since the process-table read reads as hidden")
     func readMarkersIsHiddenWhenTheStartMoved() {
-        let planned = Date(timeIntervalSince1970: 900_000)
+        let recorded = Date(timeIntervalSince1970: 900_000)
         let markers = marked(archivedWorktree.uuidString)
         let moved = collector(
-            environment: [50: markers], startTimes: [50: planned.addingTimeInterval(3)])
+            environment: [50: markers], startTimes: [50: recorded.addingTimeInterval(3)])
         #expect(
-            moved.readMarkers(pid: 50, plannedStart: planned) == .hidden,
+            moved.readMarkers(pid: 50, tableStart: recorded) == .hidden,
             "3 s is past the 2 s tolerance, so the pid now names another process")
         let jittered = collector(
-            environment: [50: markers], startTimes: [50: planned.addingTimeInterval(1)])
+            environment: [50: markers], startTimes: [50: recorded.addingTimeInterval(1)])
         #expect(
-            jittered.readMarkers(pid: 50, plannedStart: planned) == markers,
-            "etime truncation stays inside the tolerance")
+            jittered.readMarkers(pid: 50, tableStart: recorded) == markers,
+            "a start read back within the tolerance still names the process the table recorded")
     }
 
-    // Fails against a reader that trusts a read it has nothing to verify against.
-    @Test("an environment read for a pid the plan recorded no start for reads as hidden")
-    func readMarkersIsHiddenWhenNoStartWasPlanned() {
+    // Fails against a reader that trusts a read it has nothing to verify
+    // against: one whose pid the table did not hold, as every pid is when the
+    // table read failed.
+    @Test("an environment read for a pid the process table did not hold reads as hidden")
+    func readMarkersIsHiddenWhenTheTableHeldNoStart() {
         let start = Date(timeIntervalSince1970: 900_000)
         let markers = marked(archivedWorktree.uuidString)
         let subject = collector(environment: [50: markers], startTimes: [50: start])
-        #expect(subject.readMarkers(pid: 50, plannedStart: nil) == .hidden)
-        #expect(subject.readMarkers(pid: 50, plannedStart: start) == markers)
+        #expect(subject.readMarkers(pid: 50, tableStart: nil) == .hidden)
+        #expect(subject.readMarkers(pid: 50, tableStart: start) == markers)
     }
 
     // Fails against a reader that treats an unreadable start as a match.
     @Test("an environment read whose pid's start cannot be read now reads as hidden")
     func readMarkersIsHiddenWhenTheStartCannotBeRead() {
         let subject = collector(environment: [50: marked(archivedWorktree.uuidString)])
-        #expect(subject.readMarkers(pid: 50, plannedStart: Date(timeIntervalSince1970: 900_000)) == .hidden)
+        #expect(subject.readMarkers(pid: 50, tableStart: Date(timeIntervalSince1970: 900_000)) == .hidden)
     }
 
-    // The three tests above pin `readMarkers` alone; these two pin that both
+    // Fails against a map that substituted a start for a pid the table holds
+    // without one: 51's marker would then verify, where it must read hidden.
+    @Test("process-table starts carry the kernel's start per pid and leave out a pid with none")
+    func envReadStartsComeFromTheTableAlone() {
+        let recorded = Date(timeIntervalSince1970: 900_000)
+        let table = ProcessTableSnapshot(entries: [
+            50: ProcessTableSnapshot.Entry(parent: 1, startedAt: recorded),
+            51: ProcessTableSnapshot.Entry(parent: 1, startedAt: nil),
+        ])
+        let starts = OrphanProcessCollector.envReadStarts(from: table)
+        #expect(starts == [50: recorded])
+
+        let markers = marked(archivedWorktree.uuidString)
+        let subject = collector(
+            environment: [50: markers, 51: markers], startTimes: [50: recorded, 51: recorded])
+        #expect(subject.readMarkers(pid: 50, tableStart: starts[50]) == markers)
+        #expect(subject.readMarkers(pid: 51, tableStart: starts[51]) == .hidden)
+    }
+
+    // The tests above pin `readMarkers` alone; these two pin that both
     // sweep call sites go through it. Fails against a `candidates` that calls
     // `environmentReader` directly: the archived marker would then admit 50 by
     // env, exactly as the verified control does.
-    @Test("a root whose start moved after the plan is judged by its cwd alone")
+    @Test("a root whose start moved after the process-table read is judged by its cwd alone")
     func candidatesReadsARootsMarkersThroughTheStartTimeCheck() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let processes = [entry(pid: 50)]
-        let starts = plannedStarts(processes, at: now)
+        let starts = tableStarts([50])
         let moved = starts.mapValues { $0.addingTimeInterval(3) }
         let environment = [Int32(50): marked(archivedWorktree.uuidString)]
 
@@ -565,7 +599,7 @@ struct OrphanProcessCollectorTests {
             collector(now: now, environment: environment, startTimes: liveStarts).candidates(
                 processes: processes, cwdByPID: [50: "/"], cwdsCapturedAt: now,
                 roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600,
-                markerRows: markerRows(), plannedStarts: starts)
+                markerRows: markerRows(), envReadStarts: starts)
         }
 
         let verified = found(liveStarts: starts).map(\.route)
@@ -578,11 +612,11 @@ struct OrphanProcessCollectorTests {
     // Fails against a `treeNamesSomethingLive` that calls `environmentReader`
     // directly: 61's live marker would then keep the tree, exactly as the
     // verified control does.
-    @Test("a tree member whose start moved after the plan does not keep the tree")
+    @Test("a tree member whose start moved after the process-table read does not keep the tree")
     func theTreeGuardReadsMarkersThroughTheStartTimeCheck() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let processes = [entry(pid: 60), entry(pid: 61, ppid: 60)]
-        let starts = plannedStarts(processes, at: now)
+        let starts = tableStarts([60, 61])
         let moved = starts.mapValues { $0.addingTimeInterval(3) }
         let environment = [Int32(61): marked(liveWorktree.uuidString)]
         let tree = collector().descendantClosure(of: 60, processes: processes, protected: [])
@@ -590,11 +624,11 @@ struct OrphanProcessCollectorTests {
 
         let verified = collector(now: now, environment: environment, startTimes: starts)
         #expect(
-            verified.treeNamesSomethingLive(tree, plannedStarts: starts, rows: markerRows()),
+            verified.treeNamesSomethingLive(tree, envReadStarts: starts, rows: markerRows()),
             "the control: an unmoved start lets 61's marker keep the tree")
         let reissued = collector(now: now, environment: environment, startTimes: moved)
         #expect(
-            !reissued.treeNamesSomethingLive(tree, plannedStarts: starts, rows: markerRows()),
+            !reissued.treeNamesSomethingLive(tree, envReadStarts: starts, rows: markerRows()),
             "61's pid now names another process, whose marker speaks for nothing")
     }
 

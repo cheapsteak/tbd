@@ -168,6 +168,9 @@ public struct MarkerRows: Sendable, Equatable {
     public var terminalIDs: Set<UUID>
     /// Archived local worktrees, each with its resolved path and its row's
     /// `archivedAt` — what the env route admits against and names in the record.
+    /// A promoted scratch space is never here, though its row is archived: it
+    /// counts as live and sits in `liveWorktreeIDs` instead (see
+    /// `orphanProcessMarkerRows` in `OrphanGC`).
     public var archivedWorktrees: [UUID: DeadWorktreeRoot]
 
     public init(
@@ -266,7 +269,7 @@ public struct OrphanProcessCollector: Sendable {
     let environmentReader: @Sendable (Int32) -> ProcessEnvironmentMarkers
     /// One process's start time from the kernel, read after its environment
     /// so `readMarkers` can tell whether the pid still named the process the
-    /// planning snapshot saw.
+    /// sweep's read of the kernel's process table saw.
     let startTimeReader: @Sendable (Int32) -> Date?
     /// Number of liveness polls between SIGTERM and SIGKILL.
     let graceAttempts: Int
@@ -372,7 +375,8 @@ public struct OrphanProcessCollector: Sendable {
     /// cwd route decides exactly as it would alone — when it is hidden, and
     /// when its markers name no row or do not parse. Hidden covers every Apple
     /// platform binary, which shows its argv but no environment, and a read
-    /// whose pid no longer names the planned process (`readMarkers`); those
+    /// for a pid the kernel's process table did not hold, or whose pid no
+    /// longer names the process that table recorded (`readMarkers`); those
     /// stay reclaimable by cwd, as before. A missing row attests nothing either
     /// way, and neutrality is what keeps the `.deleting/<uuid>` arm working
     /// for worktrees whose rows are gone. The gap this leaves is accepted: a
@@ -381,10 +385,12 @@ public struct OrphanProcessCollector: Sendable {
     /// from its children's markers would kill a single-instance app opened
     /// from a tab along with every window it holds for other projects.
     ///
-    /// `plannedStarts` is the start instant the planning snapshot recorded per
-    /// pid, and `markerRows` the rows markers are judged against. Left at their
-    /// defaults, every environment reads as hidden and this is exactly the cwd
-    /// rule on its own.
+    /// `envReadStarts` is each pid's start time from the kernel's process
+    /// table, read right after the `ps` snapshot (`envReadStarts(from:)`) —
+    /// never the start `ps` implies, which is the signal-time identity's
+    /// (`startInstants`). `markerRows` is the rows markers are judged against.
+    /// Left at their defaults, every environment reads as hidden and this is
+    /// exactly the cwd rule on its own.
     public func candidates(
         processes: [ProcessSnapshotEntry],
         cwdByPID: [Int32: String],
@@ -395,7 +401,7 @@ public struct OrphanProcessCollector: Sendable {
         graceSeconds: Int,
         exempt: Set<Int32> = [],
         markerRows: MarkerRows = .empty,
-        plannedStarts: [Int32: Date] = [:],
+        envReadStarts: [Int32: Date] = [:],
         keepList: GCKeepList = GCKeepList(patterns: [])
     ) -> [OrphanProcessCandidate] {
         let protected = protectedPIDs(
@@ -445,7 +451,7 @@ public struct OrphanProcessCollector: Sendable {
 
             // Read only for a root that got this far, so the sweep reads tens
             // of environments rather than the whole process table.
-            let markers = readMarkers(pid: entry.pid, plannedStart: plannedStarts[entry.pid])
+            let markers = readMarkers(pid: entry.pid, tableStart: envReadStarts[entry.pid])
             let envAdmits: DeadWorktreeRoot?
             switch Self.judge(markers, rows: markerRows) {
             case .keep:
@@ -725,22 +731,32 @@ public struct OrphanProcessCollector: Sendable {
     }
 
     /// `pid`'s markers, trusted only while the pid still names the process
-    /// the planning snapshot recorded.
+    /// the kernel's process table recorded for it.
     ///
-    /// The environment is read after that snapshot, so the kernel may have
+    /// The environment is read after that table, so the kernel may have
     /// reissued the pid in between, and a stranger's markers would then be
     /// judged as the orphan's. So the start time is read from the kernel
     /// **after** the environment — read before it, a reissue between the two
-    /// reads would go unseen — and compared with `plannedStart` under the same
-    /// `identityDriftTolerance` the signal-time re-check uses. A pid the plan
-    /// recorded no start for, one whose start cannot be read now, and one whose
-    /// start moved all read as hidden: neutral, which returns the process to
-    /// the cwd rule rather than letting another process's environment speak
-    /// for it.
-    func readMarkers(pid: Int32, plannedStart: Date?) -> ProcessEnvironmentMarkers {
+    /// reads would go unseen — and compared with `tableStart`, the start the
+    /// table recorded. Both sides are kernel times, read through one
+    /// conversion, so a process that kept its pid reads back the same instant
+    /// however loaded the machine is. A start derived from `ps` would not hold
+    /// that: `etime` has one-second resolution and is measured whenever `ps`
+    /// gets to run, so under load every read would drift past the tolerance,
+    /// read as hidden, and take the vetoes it carries with it.
+    ///
+    /// The comparison still allows `identityDriftTolerance`. Here a false
+    /// mismatch is the costly direction — it hides a no-marker environment and
+    /// hands its process to the cwd rule — while a reissued pid started after
+    /// the table was read, so its start moves by at least the age the process
+    /// it replaced had reached by then. A pid the table did not hold, or held
+    /// with no start, one whose start cannot be read now, and one whose start
+    /// moved all read as hidden: neutral, which returns the process to the cwd
+    /// rule rather than letting another process's environment speak for it.
+    func readMarkers(pid: Int32, tableStart: Date?) -> ProcessEnvironmentMarkers {
         // Nothing to verify against, so nothing read could be trusted; skip
         // the read altogether.
-        guard let plannedStart else { return .hidden }
+        guard let tableStart else { return .hidden }
         let markers = environmentReader(pid)
         guard markers != .hidden else { return .hidden }
         guard let liveStart = startTimeReader(pid) else {
@@ -750,12 +766,12 @@ public struct OrphanProcessCollector: Sendable {
             """)
             return .hidden
         }
-        let drift = abs(liveStart.timeIntervalSince(plannedStart))
+        let drift = abs(liveStart.timeIntervalSince(tableStart))
         guard drift <= Self.identityDriftTolerance else {
             logger.debug("""
             gc: orphan-process pid \(pid, privacy: .public) — start time moved \
-            \(Int(drift), privacy: .public)s since the plan, so the environment read \
-            belongs to another process; treating it as hidden
+            \(Int(drift), privacy: .public)s since the process-table read, so the \
+            environment read belongs to another process; treating it as hidden
             """)
             return .hidden
         }
@@ -769,14 +785,15 @@ public struct OrphanProcessCollector: Sendable {
     /// work for a live one, and killing the host kills that work. Most daemons
     /// pass their own environment to their children, so this rarely fires; it
     /// costs one read per member and errs only toward keeping. Every member is
-    /// read through `readMarkers`, so a reissued descendant pid speaks for
-    /// nothing.
+    /// read through `readMarkers` against `envReadStarts`, the same
+    /// process-table starts `candidates` takes, so a reissued descendant pid
+    /// speaks for nothing.
     func treeNamesSomethingLive(
-        _ tree: [Int32], plannedStarts: [Int32: Date], rows: MarkerRows
+        _ tree: [Int32], envReadStarts: [Int32: Date], rows: MarkerRows
     ) -> Bool {
         tree.contains { pid in
             Self.namesSomethingLive(
-                readMarkers(pid: pid, plannedStart: plannedStarts[pid]), rows: rows)
+                readMarkers(pid: pid, tableStart: envReadStarts[pid]), rows: rows)
         }
     }
 
@@ -905,6 +922,19 @@ public struct OrphanProcessCollector: Sendable {
             result[entry.pid] = capturedAt.addingTimeInterval(-elapsed)
         }
         return result
+    }
+
+    /// Start time per pid from one read of the kernel's process table: what
+    /// `readMarkers` checks each environment read against. A pid the table
+    /// holds with no start time is absent, so a read for it is hidden.
+    ///
+    /// Kept apart from `startInstants` on purpose. Those come from `ps` and
+    /// serve the signal-time identity, which compares them with another `ps`
+    /// reading. These are the kernel's own record, compared after each
+    /// environment read with the kernel's record again, so load cannot pull
+    /// the two apart.
+    public static func envReadStarts(from table: ProcessTableSnapshot) -> [Int32: Date] {
+        table.entries.compactMapValues { $0.startedAt }
     }
 
     /// The members of `tree`, in the plan's leaf-first order, whose identity in
