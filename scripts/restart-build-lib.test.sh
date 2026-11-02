@@ -16,7 +16,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/restart-build-lib.sh"   # pure function defs, no side effects
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tbd-restart-build-test.XXXXXX")"
-trap 'rm -rf "$TEST_TMP"' EXIT
+# Only this shell may delete TEST_TMP. A child bash forks for a background job
+# keeps a copy of this trap until it execs, and runs it if a signal lands first.
+# bash 3.2 has no BASHPID, so there the check always passes; it runs no trap in
+# a pre-exec child anyway.
+TEST_TMP_OWNER="${BASHPID:-$$}"
+trap '[[ "${BASHPID:-$$}" == "$TEST_TMP_OWNER" ]] && rm -rf "$TEST_TMP"' EXIT
 
 # Every nested `bash` below runs the same interpreter as this harness, so
 # `/bin/bash scripts/restart-build-lib.test.sh` exercises macOS's bash 3.2 all
@@ -1185,6 +1190,53 @@ test_guard_applies_only_when_a_build_is_attempted() {
     fi
     assert_eq "guarded build (line ${guard_ln:-?}) sits inside the skip_build branch (line ${skip_ln:-?}) and before the bundle (line ${bundle_ln:-?})" \
         "inside-skip-build-branch" "$order"
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a
+# background job keeps a copy of this harness's EXIT trap until it execs, so a
+# signal that lands first runs the trap in the CHILD, which would delete the
+# directory under the running suite. No case can win that race on demand, so
+# this one runs the trap's own text in a subshell, which is a forked child just
+# as `cmd &` is until its exec, aimed at a decoy so the real directory is safe.
+# On bash 3.2 there is no BASHPID and no pre-exec child runs a trap, so the
+# check always passes there and is not asserted.
+dir_state() { if [ -d "$1" ]; then echo present; else echo gone; fi; }
+
+# Run trap text $1 in this shell with TEST_TMP aimed at directory $2.
+run_trap_aimed_at() {
+    local TEST_TMP="$2"
+    eval "$1"
+}
+
+test_only_the_harness_shell_deletes_the_scratch_dir() {
+    if [ -z "${BASHPID:-}" ]; then
+        pass "bash $BASH_VERSION has no BASHPID, so the trap owner check is not checked here"
+        return 0
+    fi
+    local spec body unguarded decoy
+    spec="$(trap -p EXIT)"
+    eval "set -- $spec"
+    body="${3:-}"
+    # shellcheck disable=SC2016 # the trap's text, not its expansion
+    case "$body" in *'rm -rf "$TEST_TMP"'*) pass "the EXIT trap removes the scratch dir" ;; *) fail "the EXIT trap removes the scratch dir: [$body]" ;; esac
+
+    # A check that never deletes anything would pass the child case, so the
+    # owner has to get through first.
+    decoy="$(mktemp -d "$TEST_TMP/trap-owner.XXXXXX")"
+    run_trap_aimed_at "$body" "$decoy"
+    assert_eq "the harness shell itself deletes it" "gone" "$(dir_state "$decoy")"
+
+    decoy="$(mktemp -d "$TEST_TMP/trap-owner.XXXXXX")"
+    ( run_trap_aimed_at "$body" "$decoy" )
+    assert_eq "a forked child running the trap leaves the directory alone" "present" "$(dir_state "$decoy")"
+
+    # MUTATION: the trap as it was before the check, run by the same child.
+    unguarded="${body#*&& }"
+    # shellcheck disable=SC2016 # the trap's text, not its expansion
+    assert_eq "the mutant really is the bare rm" 'rm -rf "$TEST_TMP"' "$unguarded"
+    ( run_trap_aimed_at "$unguarded" "$decoy" )
+    assert_eq "mutation: without the check, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
+    rm -rf "$decoy"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done

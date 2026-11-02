@@ -37,7 +37,14 @@ assert_eq()       { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAI
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/flake-verify-test.XXXXXX")"
 SPAWNED=()
+# Only this shell may clean up. A child bash forks for `sleep 300 &` or
+# `bash -c … &` keeps a copy of the trap until it execs, and runs it if a signal
+# lands first: it would SIGKILL the sleeps in its copy of SPAWNED and delete
+# SCRATCH. bash 3.2 has no BASHPID, so there the check always passes; it runs no
+# trap in a pre-exec child anyway.
+CLEANUP_OWNER="${BASHPID:-$$}"
 cleanup() {
+  [[ "${BASHPID:-$$}" == "$CLEANUP_OWNER" ]] || return 0
   local pid
   for pid in "${SPAWNED[@]:-}"; do [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null; done
   rm -rf "$SCRATCH"
@@ -1189,6 +1196,36 @@ test_the_verifier_runs_python_isolated() {
   local m; m="$(mutant_of 's/python3 -I -S -B /python3 /' "$VERIFY")"
   out="$(PYTHONPATH="$d/site" bash "$m/flake-verify.sh" plan-iterations --scope pass --baseline-dir "$d" --out "$d/plan2.json" 2>&1)"
   assert_contains "mutation: without -I it does" "$out" "planted json imported"
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for
+# `sleep 300 &` keeps a copy of the EXIT trap until it execs, so a signal that
+# lands first runs `cleanup` in the CHILD. No case can win that race on demand,
+# so this one calls `cleanup` in a subshell, which is a forked child just as
+# `cmd &` is until its exec, aimed at a decoy directory and a decoy process.
+# On bash 3.2 there is no BASHPID and no pre-exec child runs a trap, so the
+# check always passes there and is not asserted.
+test_only_the_harness_shell_runs_the_exit_trap() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap owner check is not checked here"
+    return 0
+  fi
+  assert_eq "the EXIT trap is cleanup" "trap -- 'cleanup' EXIT" "$(trap -p EXIT)"
+  local decoy victim state
+  decoy="$(mktmpd)"; spawn; victim="$LAST"
+  # Aim cleanup at the decoy: its own SCRATCH and a SPAWNED holding the victim.
+  ( local SCRATCH="$decoy" SPAWNED=("$victim"); cleanup )
+  assert_eq "a forked child running cleanup leaves the directory alone" "yes" "$([[ -d "$decoy" ]] && echo yes || echo no)"
+  assert_eq "and leaves the process alone" "yes" "$(alive "$victim")"
+  # MUTATION: cleanup without its first line, run by the same child.
+  eval "$(declare -f cleanup | sed '/CLEANUP_OWNER/d' | sed '1s/cleanup/unguarded_cleanup/')"
+  ( local SCRATCH="$decoy" SPAWNED=("$victim"); unguarded_cleanup )
+  state="$([[ -d "$decoy" ]] && echo yes || echo no)"
+  assert_eq "mutation: without the check, a forked child deletes the directory" "no" "$state"
+  # Bounded poll, not a fixed sleep: the SIGKILL is delivered asynchronously.
+  local tries=0
+  while [[ "$(alive "$victim")" == yes && $tries -lt 50 ]]; do sleep 0.1; tries=$((tries + 1)); done
+  assert_eq "mutation: without the check, a forked child kills the process" "no" "$(alive "$victim")"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
