@@ -363,10 +363,10 @@ struct TableTranscriptView: NSViewRepresentable {
         var lastJumpRelease: JumpRelease?
         #if DEBUG
         /// The last clip origin move the bounds observer counted as the
-        /// reader's while a jump's pin, a jump's hold or a prepend anchor was
-        /// held, and so released: where the origin went and the stack that
+        /// reader's while a jump's pin, a jump's hold, a prepend anchor or a
+        /// realize anchor was held, and so released: where the origin went and the stack that
         /// posted the bounds change. DEBUG builds only, for diagnostics; the
-        /// jump and prepend tests print it when a hold ends early, so the
+        /// jump, prepend and realize tests print it when a hold ends early, so the
         /// failure names what moved the clip. Cleared by each jump.
         var lastHeldReaderMove: HeldReaderMove?
 
@@ -871,7 +871,11 @@ struct TableTranscriptView: NSViewRepresentable {
             // correction, off the height the reader's view was laid out with.
             // Once an anchor is held, nothing here needs reading: it is
             // restored against whatever heights the rows above have by then.
-            if pendingRealizeAnchor == nil, pendingPrependAnchor == nil, pendingJumpAnchor == nil,
+            // Skipped while the coordinator moves the clip itself
+            // (`isRestoringAnchor`): the tail clamp, jump anchor or prepend
+            // anchor owns where it lands.
+            if !isRestoringAnchor, pendingRealizeAnchor == nil, pendingPrependAnchor == nil,
+               pendingJumpAnchor == nil,
                let clip = scrollView?.contentView,
                tableView.rect(ofRow: row).maxY <= clip.bounds.minY,
                let anchor = capturePrependAnchor(acceptingPositionalIDs: true), anchor.id != nil {
@@ -2529,8 +2533,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// anchor back where it says its row belongs. The pass may have moved the
         /// clip to keep a different row in place, or grown the document for rows
         /// that corrected since the last pass, and this lands the anchored row
-        /// before anything is drawn. A realize anchor is never held alongside the
-        /// other two, but goes first so theirs would win.
+        /// before anything is drawn. A realize anchor is captured only when neither of
+        /// the other two is held and never during the coordinator's own scroll,
+        /// but one set later can coexist with it, so it goes first and theirs win.
         func tableLayoutDidEnd() {
             tableLayoutDepth = max(0, tableLayoutDepth - 1)
             guard tableLayoutDepth == 0 else { return }
@@ -2545,6 +2550,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Call before the release, so what was held can still be read.
         private func recordHeldReaderMove(from origin: CGFloat?) {
             var held: [String] = []
+            if pendingRealizeAnchor != nil { held.append("realize anchor") }
             if pendingJumpAnchor != nil { held.append("jump pin") }
             if heldJumpTargetID != nil { held.append("jump hold") }
             if pendingPrependAnchor != nil { held.append("prepend anchor") }
