@@ -156,7 +156,9 @@ the protected set. Each root is judged by these rules, in order:
 2. **A marker names something live: keep.** `TBD_WORKTREE_ID` names a worktree
    row that is not archived, or `TBD_TERMINAL_ID` names a terminal row that
    exists. Archiving a worktree deletes its terminal rows, so an existing
-   terminal row always belongs to a live worktree. When markers disagree, live
+   terminal row always belongs to a live worktree. A scratch space promoted
+   into a repo counts as live: its row is archived, but its folder and its
+   sessions carry on as that repo's main worktree. When markers disagree, live
    wins.
 3. **The environment is readable and holds no marker: keep.** No TBD terminal
    started this process, so it is not this sweep's to kill. This covers every
@@ -323,8 +325,8 @@ The guard gives one of three answers:
     reaches launchd without passing through the job.
 - **Can't tell: accept, and log the reason.** Everything else: no peer pid, a
   failed table read, an ancestry broken by a process that exited mid-walk, a
-  tmux row, a parked row, a job outside the start window, or two rows naming
-  one job.
+  tmux row, a parked row, a Codex tab, a job outside the start window, or two
+  rows naming one job.
 
 For `pr.attach`, the caller is inside when it descends from the job of any row
 in the named worktree. It is proven foreign only when the worktree has at
@@ -336,6 +338,20 @@ A parked row is deliberately "can't tell". A wake starts a new job before the
 row records its pid, so the new session's SessionStart can arrive while the row
 still looks parked. Refusing it would leave the tab on its old session — the
 costliest mistake this guard could make.
+
+A Codex tab is "can't tell" for a different reason. Codex's TUI hosts its
+sessions in a shared background server unless started with `--no-daemon`, and
+that server runs hooks with the environment of whichever tab started it
+(herdrdev/herdr#4649). A hook for the tab's own session can then come from
+outside the tab's tree, and the process table cannot tell it from a stranger's.
+Starting Codex tabs with `--no-daemon` would put their hooks back inside the
+tab, and is a separate decision.
+
+A process whose parent exits is moved under launchd. So a hook that is still
+running after its own agent died reads as proven foreign: the table cannot tell
+it from an escaped process. That costs the one event. Claude Code kills a
+hook's whole process group when it ends one, so the case needs an agent that
+died abruptly.
 
 ### On refusal
 
