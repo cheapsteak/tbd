@@ -42,8 +42,24 @@ extension RPCRouter {
     /// a notification here would be a second banner for one question. The
     /// column half keeps that true after a daemon restart, which empties the
     /// store's memory but not the column.
-    func handleTerminalAskUserQuestionPending(_ paramsData: Data) async throws -> RPCResponse {
+    ///
+    /// A caller proven to run outside the terminal it names stores nothing and
+    /// raises nothing: its question belongs to some other session.
+    func handleTerminalAskUserQuestionPending(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionPendingParams.self, from: paramsData)
+        // The row is read before the store is touched, because the caller
+        // check needs it. If the row is missing (race with terminal teardown,
+        // or a stale CLI relay) there is nothing to check against, and the
+        // question is still stored for the transcript merger below.
+        let terminal = try? await db.terminals.get(id: p.terminalID)
+        if let terminal,
+           await hookCallerRefused(
+               method: RPCMethod.terminalAskUserQuestionPending, terminal: terminal,
+               connection: connection) {
+            return .ok()
+        }
         let pending = PendingAskUserQuestion(
             toolUseID: p.toolUseID,
             inputJSON: p.inputJSON,
@@ -54,11 +70,10 @@ extension RPCRouter {
         let observedAt = now()
         askUserQuestionLog.debug("pending stored terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
-        // Resolve the worktree this terminal belongs to. If the terminal row
-        // is missing (race with terminal teardown, or a stale CLI relay) we
+        // Resolve the worktree this terminal belongs to. Without a row we
         // intentionally skip the notification — the pendingQuestions update
         // above is still useful for the transcript merger.
-        if let terminal = try? await db.terminals.get(id: p.terminalID) {
+        if let terminal {
             // The PR schedule's activity is per worktree, so it needs the row
             // this handler already resolves; a missing row has no worktree.
             await activityLedger.recordAgentEvent(
@@ -104,12 +119,22 @@ extension RPCRouter {
     /// clear here, which avoids the flicker that eager cleanup would
     /// introduce (Claude flushes the JSONL line slightly after PostToolUse
     /// returns).
-    func handleTerminalAskUserQuestionCleared(_ paramsData: Data) async throws -> RPCResponse {
+    ///
+    /// A caller proven to run outside the terminal it names marks nothing
+    /// read.
+    func handleTerminalAskUserQuestionCleared(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionClearedParams.self, from: paramsData)
         let observedAt = now()
         askUserQuestionLog.debug("cleared received terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         if let terminal = try? await db.terminals.get(id: p.terminalID) {
+            if await hookCallerRefused(
+                method: RPCMethod.terminalAskUserQuestionCleared, terminal: terminal,
+                connection: connection) {
+                return .ok()
+            }
             await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
             do {
