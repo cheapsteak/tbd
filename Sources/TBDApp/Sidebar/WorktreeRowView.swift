@@ -793,12 +793,15 @@ struct WorktreeRowView: View {
             remoteCreateSheetContent(for: provider)
         }
         .contextMenu {
-            SidebarContextMenu(worktree: worktree, onRename: startRename)
-            // Added here rather than inside `SidebarContextMenu` because the
-            // sheet they open is this row's state (`remoteCreateSheetProvider`,
-            // `remoteCreateSheetContent(for:)`); pushing the items down would
-            // mean handing that state back up through a closure for no gain.
-            remoteCreateMenuItems
+            SidebarContextMenu(worktree: worktree, onRename: startRename) {
+                // Built here rather than inside `SidebarContextMenu` because
+                // the sheet they open is this row's state
+                // (`remoteCreateSheetProvider`, `remoteCreateSheetContent(for:)`);
+                // pushing the items down would mean handing that state back up
+                // through a closure for no gain. `SidebarContextMenu` hides them
+                // when the menu acts on a multi-row selection.
+                remoteCreateMenuItems
+            }
         }
         .onChange(of: appState.editingWorktreeID) { _, newID in
             if newID == worktree.id {

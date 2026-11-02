@@ -37,6 +37,10 @@ enum RowActionMenu {
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
         case archive
+        /// Archive every archivable row of a multi-row selection. Carries the
+        /// rows in run order, as `SelectionArchive.targets` resolved them when
+        /// the menu was built.
+        case archiveSelection(targetIDs: [UUID])
         /// Destroy the remote session behind this lane
         /// (`docs/remote-provider-contract.md` § `delete <id>`), behind the
         /// default-off `remote_delete_enabled` flag. Local rows never offer it.
@@ -102,6 +106,15 @@ enum RowActionMenu {
         let terminalID: UUID
         let profileID: UUID?
         let label: String
+    }
+
+    /// The multi-row selection a menu acts on instead of its own row: set when
+    /// the row is selected and the selection holds two or more rows
+    /// (`SelectionArchive.actsOnSelection`).
+    struct Selection: Equatable {
+        /// The selection's archivable rows in run order
+        /// (`SelectionArchive.targets`). Empty when none of them is.
+        var archiveTargetIDs: [UUID]
     }
 
     /// The small set of live inputs the current `SidebarContextMenu` reads from
@@ -179,6 +192,10 @@ enum RowActionMenu {
         /// not composed at all, so a destructive action is never offered that
         /// the daemon would refuse. Always irrelevant for a local row.
         var remoteDeleteEnabled: Bool
+        /// The selection this menu acts on, or nil when it acts on this row
+        /// alone. Non-nil overrides every other field: the menu is then the
+        /// one Archive Selection item.
+        var selection: Selection?
 
         init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
@@ -200,7 +217,8 @@ enum RowActionMenu {
              providerCapabilities: Set<String> = [],
              isGone: Bool = false,
              providerRetired: Bool = false,
-             remoteDeleteEnabled: Bool = false) {
+             remoteDeleteEnabled: Bool = false,
+             selection: Selection? = nil) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -222,6 +240,7 @@ enum RowActionMenu {
             self.isGone = isGone
             self.providerRetired = providerRetired
             self.remoteDeleteEnabled = remoteDeleteEnabled
+            self.selection = selection
         }
     }
 
@@ -255,6 +274,10 @@ enum RowActionMenu {
     /// same absence reads the same wherever it shows up.
     static let deleteNeedsProviderCapabilityHelp =
         "This provider hasn't implemented the delete capability yet"
+    /// The one item a menu acting on a multi-row selection offers.
+    static let archiveSelectionLabel = "Archive Selection"
+    /// Disabled-help for Archive Selection when no selected row is archivable.
+    static let archiveSelectionNothingArchivableHelp = "None of the selected worktrees can be archived"
     static let forkSessionLabel = "Fork session"
     static let newWorktreeFromBranchLabel = "New worktree from this branch…"
     static let hibernateNowLabel = "Hibernate now"
@@ -277,8 +300,16 @@ enum RowActionMenu {
     // MARK: - Composition
 
     /// The ordered action list for a worktree row. Pure function of `context`,
-    /// with three branches (scratch / main-or-creating / regular). The regular
-    /// and scratch branches share a sectioned layout, top to bottom:
+    /// with four branches (selection / scratch / main-or-creating / regular).
+    ///
+    /// The selection branch comes first: when `context.selection` is set, the
+    /// menu acts on the whole selection and is exactly one item, Archive
+    /// Selection (destructive), with no dividers or captions. Every row-only
+    /// item is hidden rather than disabled. The item is disabled, with
+    /// `archiveSelectionNothingArchivableHelp`, when no selected row is
+    /// archivable, so the menu is never empty.
+    ///
+    /// The regular and scratch branches share a sectioned layout, top to bottom:
     ///
     /// 1. Identity — Rename, then Archive (destructive; disabled + retitled
     ///    "Archive (has children)" for a regular row with active children, or
@@ -297,13 +328,40 @@ enum RowActionMenu {
     /// Sections are joined with a single divider each; empty sections collapse,
     /// so the list never renders doubled or dangling dividers.
     static func items(context: Context) -> [Item] {
-        if context.isScratch {
+        if let selection = context.selection {
+            return selectionItems(selection)
+        } else if context.isScratch {
             return scratchItems(context: context)
         } else if context.status == .main || context.status == .creating {
             return mainItems(context: context)
         } else {
             return regularItems(context: context)
         }
+    }
+
+    /// The menu for a row in a multi-row selection: Archive Selection alone.
+    private static func selectionItems(_ selection: Selection) -> [Item] {
+        let targets = selection.archiveTargetIDs
+        return [.action(Action(
+            kind: .archiveSelection(targetIDs: targets),
+            title: archiveSelectionLabel,
+            role: .destructive,
+            isEnabled: !targets.isEmpty,
+            disabledHelp: targets.isEmpty ? archiveSelectionNothingArchivableHelp : nil
+        ))]
+    }
+
+    /// Whether a remote lane cannot be archived because its provider has not
+    /// declared the `archive` capability. Always false for a local row. A
+    /// `gone` lane and one whose provider is retired are exempt: the daemon
+    /// files both row-only without invoking any verb (see `regularItems`).
+    /// Shared by the row's own Archive and by `SelectionArchive.isArchivable`,
+    /// so the two cannot disagree about which lanes can go.
+    static func missingArchiveCapability(
+        location: WorktreeLocation, isGone: Bool, providerRetired: Bool,
+        providerCapabilities: Set<String>
+    ) -> Bool {
+        !location.isLocal && !isGone && !providerRetired && !providerCapabilities.contains("archive")
     }
 
     /// Hibernation actions for a worktree row: Wake (if any session is
@@ -475,10 +533,10 @@ enum RowActionMenu {
         // configured) is exempt on the same grounds: the daemon files it
         // row-only too. The exemption is narrow: a lane a configured provider
         // still enumerates stays disabled, and active children still win above it.
-        let missingArchiveCapability = !context.location.isLocal
-            && !context.isGone
-            && !context.providerRetired
-            && !context.providerCapabilities.contains("archive")
+        let missingArchiveCapability = Self.missingArchiveCapability(
+            location: context.location, isGone: context.isGone,
+            providerRetired: context.providerRetired,
+            providerCapabilities: context.providerCapabilities)
         let archiveBlocked = context.hasActiveChildren || missingArchiveCapability
         let archiveTitle: String
         let archiveHelp: String?

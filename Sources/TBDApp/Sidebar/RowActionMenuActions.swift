@@ -16,6 +16,27 @@ struct RowActionMenuActions {
     let appState: AppState
     let worktree: Worktree
     let onRename: () -> Void
+    /// Whether this menu acts on the sidebar selection when its row is part
+    /// of a multi-row one (`actsOnSelection`). The row menus of both
+    /// sidebars and both docks set it. The toolbar title's menu, which names
+    /// one worktree, leaves it off and always acts on that worktree.
+    var followsSelection: Bool = false
+
+    /// Whether this menu acts on the selection rather than on its row: it
+    /// follows the selection, and the row is in a selection of two or more
+    /// (`SelectionArchive.actsOnSelection`). The menu is then Archive
+    /// Selection alone, and a surface's own row items are hidden too.
+    var actsOnSelection: Bool {
+        followsSelection
+            && SelectionArchive.actsOnSelection(rowID: worktree.id, selectedIDs: appState.selectedWorktreeIDs)
+    }
+
+    /// The selection this menu acts on, with its archivable rows resolved in
+    /// run order, or nil when it acts on this row alone.
+    private var selection: RowActionMenu.Selection? {
+        guard actsOnSelection else { return nil }
+        return RowActionMenu.Selection(archiveTargetIDs: appState.selectionArchiveTargets())
+    }
 
     private var terminals: [Terminal] {
         appState.terminals[worktree.id] ?? []
@@ -141,7 +162,25 @@ struct RowActionMenuActions {
             providerCapabilities: providerCapabilities,
             isGone: isGone,
             providerRetired: providerRetired,
-            remoteDeleteEnabled: appState.remoteDeleteEnabled
+            remoteDeleteEnabled: appState.remoteDeleteEnabled,
+            selection: selection
+        )
+    }
+
+    /// This row's facts as Archive Selection's eligibility reads them
+    /// (`SelectionArchive.isArchivable`), from the same derivations
+    /// `context()` uses, so a row the selection skips is one whose own
+    /// Archive is disabled too, apart from children that are selected along
+    /// with it.
+    func archiveCandidate() -> SelectionArchive.Candidate {
+        SelectionArchive.Candidate(
+            id: worktree.id,
+            status: worktree.status,
+            location: worktree.location,
+            providerCapabilities: providerCapabilities,
+            isGone: isGone,
+            providerRetired: providerRetired,
+            activeChildIDs: Set(appState.children(of: worktree.id).map(\.id))
         )
     }
 
@@ -231,6 +270,9 @@ struct RowActionMenuActions {
         case .archive:
             let wtID = worktree.id
             Task { await appState.archiveWorktree(id: wtID) }
+
+        case let .archiveSelection(targetIDs):
+            Task { await appState.archiveSelection(targetIDs) }
 
         case .deleteRemoteSession:
             // Only a remote lane composes this item, so a local row cannot

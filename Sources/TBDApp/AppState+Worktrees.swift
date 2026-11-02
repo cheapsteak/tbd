@@ -1776,36 +1776,33 @@ extension AppState {
         createWorktree(repoID: repoID)
     }
 
-    /// Resolve the archive target for a pre-resolved selection (the caller
-    /// passes `selectedWorktreeIDs.first.flatMap(findWorktree)`). This seam
-    /// only decides refuse-vs-proceed — `archiveWorktree(id:)` is
-    /// scratch-aware and self-routes scratch rows to the `scratch.archive`
-    /// RPC. Pure so the branches are unit-testable without a daemon.
-    /// Returns `nil` when:
+    /// What the archive shortcut does with the current selection: the whole
+    /// selection, through the same eligibility and run as the row menu's
+    /// Archive Selection (`selectionArchiveTargets`, `SelectionArchive.route`).
+    /// This seam only decides what runs; `runArchive(_:)` runs it, and
+    /// `archiveWorktree(id:)` routes a single scratch row to the
+    /// `scratch.archive` RPC. Returns `.nothing` when:
     /// - nothing is selected, or
-    /// - the selected ID is stale/unknown (`findWorktree` returned nil — no
+    /// - every selected ID is stale/unknown (`findWorktree` returns nil — no
     ///   doomed RPC + error alert for a row that's already gone), or
-    /// - the selected repo worktree is the main branch or still creating
-    ///   (those refuse the archive shortcut; scratch rows always proceed —
-    ///   the daemon creates them `.active`, never `.main`/`.creating`).
-    nonisolated static func archiveShortcutRoute(
-        selectedWorktree: Worktree?
-    ) -> UUID? {
-        guard let wt = selectedWorktree else { return nil }
-        if wt.isScratch { return wt.id }
-        // Don't archive the main branch worktree (or one still creating)
-        if wt.status == .main || wt.status == .creating { return nil }
-        return wt.id
+    /// - no selected row is archivable: the main branch, a row still
+    ///   creating, a row with active children outside the selection, or a
+    ///   remote lane whose provider cannot archive it. Scratch rows proceed
+    ///   on the same terms; the daemon creates them `.active`, never
+    ///   `.main`/`.creating`.
+    ///
+    /// One archivable row routes `.single`, the single-row archive with its
+    /// prompts; several route `.bulk`, in run order.
+    func archiveShortcutRoute() -> SelectionArchive.Route {
+        SelectionArchive.route(selectionArchiveTargets())
     }
 
-    /// Archive the first selected worktree (refuses main worktrees). Scratch
-    /// routing happens inside `archiveWorktree(id:)` — same as the row
-    /// context menu's Archive action.
+    /// Archive the selection (Cmd+Shift+A): one archivable row exactly as the
+    /// row menu's Archive does, several as its Archive Selection does.
     func archiveSelectedWorktree() {
-        guard let id = Self.archiveShortcutRoute(
-            selectedWorktree: selectedWorktreeIDs.first.flatMap { findWorktree(id: $0) }
-        ) else { return }
-        Task { await archiveWorktree(id: id) }
+        let route = archiveShortcutRoute()
+        guard route != .nothing else { return }
+        Task { await runArchive(route) }
     }
 
     /// Select a worktree by its index in the sidebar order.

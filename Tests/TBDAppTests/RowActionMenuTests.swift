@@ -757,6 +757,93 @@ struct RowActionMenuPinTests {
     }
 }
 
+// MARK: - Selection mode
+
+/// A row in a multi-row selection gets exactly one item, Archive Selection,
+/// whatever the row is. Every test compares the whole list, so a row item
+/// that leaked back into selection mode fails here rather than passing a
+/// check for the items someone thought to exclude.
+@Suite("RowActionMenu — selection")
+struct RowActionMenuSelectionTests {
+    private static func archiveSelection(
+        _ targetIDs: [UUID], enabled: Bool = true, help: String? = nil
+    ) -> [RowActionMenu.Item] {
+        [.action(.init(
+            kind: .archiveSelection(targetIDs: targetIDs),
+            title: RowActionMenu.archiveSelectionLabel,
+            role: .destructive,
+            isEnabled: enabled,
+            disabledHelp: help
+        ))]
+    }
+
+    @Test("inside a selection with archivable rows: Archive Selection alone, enabled, carrying the targets")
+    func selectionWithTargetsIsOneEnabledItem() {
+        let targets = [UUID(), UUID()]
+        // Every conditional a regular row has is on, so any row item that
+        // reached selection mode would show in the list.
+        let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
+                                        hasHibernatedClaude: true,
+                                        hasUnpinnedClaude: true,
+                                        hasKeepWarmClaude: true,
+                                        hasRepoID: true,
+                                        branch: "tbd/x",
+                                        claudeSessions: [session("Claude 1")],
+                                        hasPreSessionHook: true,
+                                        selection: .init(archiveTargetIDs: targets))
+        let items = RowActionMenu.items(context: ctx)
+        let expected = Self.archiveSelection(targets)
+        #expect(items == expected)
+        #expect(RowActionMenu.archiveSelectionLabel == "Archive Selection")
+    }
+
+    @Test("inside a selection where nothing is archivable: the one item, disabled, with help")
+    func selectionWithNoTargetsIsOneDisabledItem() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", selection: .init(archiveTargetIDs: []))
+        let items = RowActionMenu.items(context: ctx)
+        let expected = Self.archiveSelection(
+            [], enabled: false, help: RowActionMenu.archiveSelectionNothingArchivableHelp)
+        #expect(items == expected)
+        #expect(!RowActionMenu.archiveSelectionNothingArchivableHelp.isEmpty)
+    }
+
+    @Test("selection mode wins over the scratch, main and remote branches")
+    func selectionOverridesEveryRowBranch() {
+        let targets = [UUID(), UUID()]
+        let selection = RowActionMenu.Selection(archiveTargetIDs: targets)
+        let contexts = [
+            RowActionMenu.Context(hasRepoID: false, isScratch: true, selection: selection),
+            RowActionMenu.Context(status: .main, selection: selection),
+            RowActionMenu.Context(status: .creating, selection: selection),
+            RowActionMenu.Context(location: .remote(provider: "acme", sessionID: "s1"),
+                                  provider: "acme",
+                                  providerCapabilities: ["archive", "delete"],
+                                  remoteDeleteEnabled: true,
+                                  selection: selection),
+        ]
+        let expected = Self.archiveSelection(targets)
+        for ctx in contexts {
+            let items = RowActionMenu.items(context: ctx)
+            #expect(items == expected)
+        }
+    }
+
+    @Test("no selection: the row's own list, with a plain Archive")
+    func noSelectionKeepsTheRowList() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b")
+        #expect(ctx.selection == nil)
+        let items = RowActionMenu.items(context: ctx)
+        let expectedKinds: [RowActionMenu.Kind] = [
+            .rename, .archive, .pin, .createNestedWorktree, .newWorktreeFromBranch,
+            .createPreSessionHook, .openInFinder, .copyPath, .copyLink, .copyBranch,
+        ]
+        #expect(kinds(items) == expectedKinds)
+        let archive = items.compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
+        #expect(archive?.isEnabled == true)
+    }
+}
+
 // MARK: - The real call site
 
 /// Every suite above hands `RowActionMenu.items` a hand-built `Context`, which

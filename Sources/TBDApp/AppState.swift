@@ -3631,7 +3631,7 @@ final class AppState {
     /// status alone.
     ///
     /// Pure static helper for testability — every branch is unit-testable
-    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    /// without a daemon or SwiftUI, following the pattern of `archiveFailureSurface`.
     nonisolated static func creationFailureMessage(
         _ worktree: Worktree?, creationFailed: Bool
     ) -> String? {
