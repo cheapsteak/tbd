@@ -818,7 +818,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: SidebarNativeMetrics.rowHeight)
         #expect(fade == -6)
         let expectedLevels = [0, 1, 2, 1, 1, 2, 0, 1, 0]
         let expectedGuides: [[Guide]] = [
@@ -914,7 +914,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: SidebarNativeMetrics.rowHeight)
         let expectedLevels = [0, 1, 1, 2]
         let expectedGuides: [[Guide]] = [[], [Guide(level: 0, role: .last, fadeStart: fade)], [], []]
         let expectedStubs = [true, false, false, false]
@@ -1093,7 +1093,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: SidebarNativeMetrics.rowHeight)
         let expectedLevels = [0, 1, 2, 1, 0]
         let expectedGuides: [[Guide]] = [
             [],

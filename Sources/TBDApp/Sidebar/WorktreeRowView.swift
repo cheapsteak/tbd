@@ -3,14 +3,6 @@ import SwiftUI
 import TBDShared
 
 struct WorktreeRowView: View {
-    /// Fixed height of one worktree row. Shared with `PinnedDockMetrics` so the
-    /// dock's height arithmetic cannot silently drift from the row it measures.
-    /// `nonisolated` because it is a plain constant, not UI state — without it,
-    /// `WorktreeRowView`'s `View` conformance infers whole-type `@MainActor`
-    /// isolation onto even this static constant, which a pure/testable
-    /// `PinnedDockMetrics` cannot reference from a nonisolated context.
-    nonisolated static let rowHeight: CGFloat = 28
-
     /// How far LEFT of the row's own leading edge the hover pin button is
     /// pushed, so it lands in the gutter rather than on the row's content.
     /// Matches the button's 20x20 hit target (`SectionHeaderPlusButton`): a
@@ -99,7 +91,7 @@ struct WorktreeRowView: View {
             if let resolution = resolutions[terminal.id] {
                 return resolution.value == .working
             }
-            return Self.isForegroundWorking(terminal)
+            return WorktreeRowPresentation.isForegroundWorking(terminal)
         }
     }
 
@@ -164,28 +156,6 @@ struct WorktreeRowView: View {
             }
             return terminal.hasPromptOnScreen
         }
-    }
-
-    /// The collection form of `Terminal.hasPromptOnScreen`, used by pure
-    /// presentation tests. The row composes per terminal instead, so an
-    /// OSC-authoritative terminal can speak for itself.
-    nonisolated static func hasPromptOnScreen(in terminals: [Terminal]) -> Bool {
-        terminals.contains { $0.hasPromptOnScreen }
-    }
-
-    /// Whether one terminal has foreground work to animate in the sidebar: its
-    /// activity column reads `.working`. The column is the agent's own report,
-    /// written from the OSC 7501 state Claude Code or Codex emits, so the row
-    /// animates exactly while the agent says it is working.
-    nonisolated static func isForegroundWorking(_ terminal: Terminal) -> Bool {
-        terminal.activityState == .working
-    }
-
-    /// The collection form used by pure presentation tests. The row composes
-    /// per terminal instead, so an OSC-authoritative terminal can speak for
-    /// itself.
-    nonisolated static func hasForegroundWork(in terminals: [Terminal]) -> Bool {
-        terminals.contains(where: isForegroundWorking)
     }
 
     @ViewBuilder
@@ -276,39 +246,6 @@ struct WorktreeRowView: View {
 
     // MARK: - Context menu: "New Cloud Session…" / "New Remote Session…"
 
-    /// The providers this row's generic context-menu item lists — the pure,
-    /// view-free form of the decision `newRemoteSessionMenuItem` renders, so a
-    /// test can call it rather than re-deriving it. A thin, named forward to
-    /// `CloudCreateEntryPresentation.registryProviders` (the same enumeration
-    /// `RepoSectionView.remoteSessionMenuProviders` forwards to), plus this
-    /// row's own `isMain` gate.
-    ///
-    /// `isMain` is a gate here and not on the repo header because the main
-    /// worktree is the repo's checkout, not a parent to nest under: the nested
-    /// `+` is withheld from that row for the same reason, and this item is that
-    /// button's always-opens-the-form twin. The two gates are independent —
-    /// the registry filter answers "which providers", `isMain` answers "does
-    /// this row offer nesting at all".
-    nonisolated static func remoteSessionMenuProviders(
-        providers: [RemoteProviderStatus], isMain: Bool
-    ) -> [RemoteProviderStatus] {
-        guard !isMain else { return [] }
-        return CloudCreateEntryPresentation.registryProviders(providers)
-    }
-
-    /// The compiled cloud provider this row's own context-menu item offers, or
-    /// nil when there is none — the same pure, view-free treatment its generic
-    /// sibling gets, so `CloudCreateEntryPresentationTests`'s cross-surface
-    /// parity suite can call the decision this row renders. `isMain` gates it
-    /// exactly as it gates the sibling: the main row offers neither.
-    nonisolated static func cloudSessionMenuEntry(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool, isMain: Bool
-    ) -> RemoteProviderStatus? {
-        guard !isMain else { return nil }
-        return CloudCreateEntryPresentation.cloudEntry(
-            providers, claudeCloudEnabled: claudeCloudEnabled)
-    }
-
     /// The pair of worktree-scoped entry points into the create sheet, nested
     /// under this row — the always-opens-the-form twins of the nested `+`'s
     /// two lane rows, and the exact counterparts of `RepoSectionView`'s pair
@@ -327,10 +264,10 @@ struct WorktreeRowView: View {
     @ViewBuilder
     private var remoteCreateMenuItems: some View {
         let claudeCloudEnabled = appState.daemonCapabilities?.claudeCloudEnabled ?? false
-        let cloud = WorktreeRowView.cloudSessionMenuEntry(
+        let cloud = CloudCreateEntryPresentation.worktreeRowCloudEntry(
             providers: appState.remoteProviders,
             claudeCloudEnabled: claudeCloudEnabled, isMain: isMain)
-        let providers = WorktreeRowView.remoteSessionMenuProviders(
+        let providers = CloudCreateEntryPresentation.worktreeRowProviders(
             providers: appState.remoteProviders, isMain: isMain)
         if cloud != nil || !providers.isEmpty {
             Divider()
@@ -424,31 +361,9 @@ struct WorktreeRowView: View {
         }
     }
 
-    /// The leading-slot indicator for one row. Pure and `nonisolated` so the
-    /// rule — in particular that a remote row still yields its PR badge when
-    /// it has one — is unit-testable without an `AppState` or a view
-    /// hierarchy, in the same spirit as `creatingSubtitle`.
-    ///
-    /// A `.remote` row is one whose `location` is not `.local`; that is the
-    /// only thing read here, and nothing about this makes a remote row look
-    /// local — `localPath` is never consulted.
-    nonisolated static func leadingIndicator(
-        worktree: Worktree,
-        isPending: Bool,
-        hasPRStatus: Bool,
-        hasUndeterminedPR: Bool = false
-    ) -> LeadingRowIndicator? {
-        RowStatusIndicator.leading(
-            isPending: isPending,
-            hasPRStatus: hasPRStatus,
-            isRemote: !worktree.location.isLocal,
-            hasUndeterminedPR: hasUndeterminedPR
-        )
-    }
-
     @ViewBuilder
     private func leadingIcon() -> some View {
-        switch Self.leadingIndicator(
+        switch WorktreeRowPresentation.leadingIndicator(
             worktree: worktree,
             isPending: isPending && !isEditing,
             hasPRStatus: prPresentation != nil,
@@ -539,7 +454,7 @@ struct WorktreeRowView: View {
     private func prGlyph(_ presentation: PRStatusPresentation) -> some View {
         switch presentation.glyph {
         case .asset(let name):
-            if let nsImage = Self.loadIcon(name) {
+            if let nsImage = WorktreeRowPresentation.loadIcon(name) {
                 Image(nsImage: nsImage)
                     .renderingMode(.template)
                     .resizable()
@@ -553,13 +468,6 @@ struct WorktreeRowView: View {
                 .resizable()
                 .scaledToFit()
         }
-    }
-
-    /// A green dot when any of this worktree's dev servers runs by a live
-    /// running file or a live TBD server tab. Never runs `status` commands;
-    /// stopped and exited servers show nothing.
-    nonisolated static func showsServerDot(worktreeID: UUID, running: Set<UUID>) -> Bool {
-        running.contains(worktreeID)
     }
 
     @ViewBuilder
@@ -653,7 +561,7 @@ struct WorktreeRowView: View {
                                 : nil
                         }
                     if isPending {
-                        Text(Self.creatingSubtitle(
+                        Text(WorktreeRowPresentation.creatingSubtitle(
                             hasPreSessionTerminal: appState.hasPreSessionTerminal(worktreeID: worktree.id)
                         ))
                             .font(.caption)
@@ -667,7 +575,7 @@ struct WorktreeRowView: View {
                 }
             }
             suffixIcon(resolutions: resolutions)
-            if Self.showsServerDot(worktreeID: worktree.id, running: appState.devServerRunningWorktreeIDs) {
+            if WorktreeRowPresentation.showsServerDot(worktreeID: worktree.id, running: appState.devServerRunningWorktreeIDs) {
                 Circle()
                     .fill(Color.green)
                     .frame(width: 6, height: 6)
@@ -687,7 +595,7 @@ struct WorktreeRowView: View {
         }
         .padding(.leading, CGFloat(indentLevel) * 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: Self.rowHeight)
+        .frame(height: SidebarNativeMetrics.rowHeight)
         // Scratch spaces have no repo-level `.missing` status to inherit, so a
         // missing directory is surfaced client-side with a per-row FS stat
         // (mirrors RepoSectionView dimming a `.missing` repo). The stat is an
@@ -792,37 +700,9 @@ struct WorktreeRowView: View {
         }
     }
 
-    /// Subtitle under the name while the worktree is `.creating`. A visible
-    /// pre-session hook terminal means the git checkout is done and the
-    /// blocking pre-session hook is what the user is waiting on.
-    static func creatingSubtitle(hasPreSessionTerminal: Bool) -> String {
-        hasPreSessionTerminal ? "Running setup…" : "Creating worktree…"
-    }
-
     func startRename() {
         guard !isMain else { return }
         isEditing = true
-    }
-
-    /// Cache for sidebar PR status icons, keyed by icon name. The returned
-    /// NSImage must be identity-stable across body evaluations:
-    /// `Image(nsImage:)` diffs by object identity, so a fresh instance per
-    /// render made every row's icon layer rebuild at once whenever a write to
-    /// an `AppState` property the rows read re-evaluated all of them (visible
-    /// mass flicker). Also skips the disk I/O (`Bundle.module.url` +
-    /// `NSImage(contentsOf:)`) per evaluation. MainActor confinement
-    /// (SwiftUI body runs on main) makes this safe without locks.
-    @MainActor
-    private static var iconCache: [String: NSImage] = [:]
-
-    @MainActor
-    static func loadIcon(_ name: String) -> NSImage? {
-        if let cached = iconCache[name] { return cached }
-        guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        image.isTemplate = true
-        iconCache[name] = image
-        return image
     }
 
     /// Opens the PR the indicator is showing — the worst-state binding, so the

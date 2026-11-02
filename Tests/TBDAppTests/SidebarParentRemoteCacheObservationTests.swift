@@ -116,7 +116,7 @@ struct SidebarParentRemoteCacheObservationTests {
         // must remove exactly its row, independently of the model assertion.
         state.toggleSidebarGroup(.init(owner: .parent(fixture.parent.id), kind: .remote))
         let collapsed = await host.settle {
-            abs(expandedHeight - geometry.height - WorktreeRowView.rowHeight) < 0.5
+            abs(expandedHeight - geometry.height - SidebarNativeMetrics.rowHeight) < 0.5
         }
         #expect(collapsed, "Remote must retain the worker row after its Exited subgroup disappears")
     }
@@ -158,7 +158,7 @@ struct SidebarParentRemoteCacheObservationTests {
         // hidden it behind a header.
         fixture.mutate(.worktrees)
         let moved = await host.settle {
-            abs(inlineHeight - geometry.height - WorktreeRowView.rowHeight) < 0.5
+            abs(inlineHeight - geometry.height - SidebarNativeMetrics.rowHeight) < 0.5
         }
         #expect(moved, "The remote worker must render inline while groups are off")
         #expect(state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil)

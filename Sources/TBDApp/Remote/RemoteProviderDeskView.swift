@@ -477,7 +477,7 @@ private struct ProviderSessionLedgerRow: View {
     /// conforming provider may legally emit, which silently dropped the
     /// "Created …" line for those rows — see `parsedCreatedAt`'s own comment.
     private var createdDate: Date? {
-        RepoSectionView.parsedCreatedAt(session.payload.createdAt)
+        SidebarSessionPlacement.parsedCreatedAt(session.payload.createdAt)
     }
 
     var body: some View {

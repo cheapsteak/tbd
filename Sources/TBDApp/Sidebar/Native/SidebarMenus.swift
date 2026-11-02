@@ -95,10 +95,11 @@ struct SidebarMenus {
     /// the form, nested under this row.
     private func remoteCreateItems(for worktree: Worktree) -> [NSMenuItem] {
         let isMain = worktree.status == .main
-        let cloud = WorktreeRowView.cloudSessionMenuEntry(
+        let cloud = CloudCreateEntryPresentation.worktreeRowCloudEntry(
             providers: appState.remoteProviders,
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false, isMain: isMain)
-        let providers = WorktreeRowView.remoteSessionMenuProviders(providers: appState.remoteProviders, isMain: isMain)
+        let providers = CloudCreateEntryPresentation.worktreeRowProviders(
+            providers: appState.remoteProviders, isMain: isMain)
         guard cloud != nil || !providers.isEmpty else { return [] }
         let present = { (provider: RemoteProviderStatus) in self.presentCreateSheet(provider, nestedUnder: worktree) }
         return [NSMenuItem.separator()] + createItems(cloud: cloud, providers: providers, present: present)
@@ -130,10 +131,10 @@ struct SidebarMenus {
                 Task { await state.setRepoHidden(id: id, hidden: hidden) }
             },
         ]
-        let cloud = RepoSectionView.cloudSessionMenuEntry(
-            providers: appState.remoteProviders,
+        let cloud = CloudCreateEntryPresentation.cloudEntry(
+            appState.remoteProviders,
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false)
-        let providers = RepoSectionView.remoteSessionMenuProviders(providers: appState.remoteProviders)
+        let providers = CloudCreateEntryPresentation.registryProviders(appState.remoteProviders)
         items += createItems(cloud: cloud, providers: providers) { provider in
             host?.present(.remoteCreate(NativeSidebarRemoteCreate(
                 provider: provider,

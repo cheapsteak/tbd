@@ -390,7 +390,7 @@ struct SidebarDragDropTests {
         #expect(before.y == expectedBefore.y)
 
         // Two rows scroll under the still pointer, and no proposal arrives.
-        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 2 * WorktreeRowView.rowHeight))
+        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 2 * SidebarNativeMetrics.rowHeight))
         h.controller.scrollView.reflectScrolledClipView(h.clip)
         try #require(h.clip.bounds.minY > 0, "The clip view did not scroll")
 

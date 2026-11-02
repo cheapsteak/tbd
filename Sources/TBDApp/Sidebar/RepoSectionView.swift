@@ -84,7 +84,7 @@ struct RepoSectionView: View {
     /// Remote sessions resolved to this repo (`RemoteSessionInfo.resolvedRepoID
     /// == repo.id`) that do NOT already own a worktree row in this section,
     /// rendered after every local worktree. See
-    /// `RepoSectionView.matchedRemoteSessions` for the filter/sort rule.
+    /// `SidebarSessionPlacement.matchedRemoteSessions` for the filter/sort rule.
     ///
     /// Served from the memo on `AppState` (`sidebarMatchedRemoteSessions`),
     /// which every sidebar caller shares. The memo is keyed on the fields the
@@ -464,169 +464,6 @@ struct RepoSectionView: View {
         }
     }
 
-    /// Sessions resolved to `repoID`, dismissed tombstones excluded, sorted
-    /// oldest-first by reported creation time. Pure — split out from the
-    /// computed `matchedRemoteSessions` property so it's directly testable
-    /// without an `AppState`/view hierarchy. `nonisolated` for the same
-    /// reason as `RemoteSectionView`'s pure helpers (see its doc comment).
-    ///
-    /// `worktrees` is the section's own worktree list, and a session that one
-    /// of those rows already stands for is dropped here: a remote lane that
-    /// has been adopted into a `Worktree` row renders as that row, and would
-    /// otherwise appear a second time as a session row under the same repo.
-    /// The join is on the `(provider, sessionID)` pair both sides carry —
-    /// `Worktree.location` for the row, `provider`/`payload.id` for the
-    /// session — never on display name or branch, which adoption seeds once
-    /// and the user is then free to change. The parameter is required rather
-    /// than defaulted so a new call site cannot silently reintroduce the
-    /// duplicate.
-    ///
-    /// A currently remote adopted lane therefore has exactly one sidebar row.
-    /// A local row's retained `origin` is provenance, not evidence that it
-    /// replaces the remote session: landing may fork independent local work.
-    /// Keep the mirror visible unless a currently remote row represents it.
-    ///
-    /// A session the provider reports as `archived` gets NO surface here: it is
-    /// filtered out outright. The contract requires a provider to keep archived
-    /// sessions in `list` (`docs/remote-provider-contract.md` § "Archived
-    /// sessions stay in the inventory") and assigns the CALLER the display
-    /// policy for them — showing active sessions and hiding archived ones is a
-    /// decision applied to a complete inventory, and this filter is where TBD
-    /// makes it. Without it, archiving an adopted lane creates a row nothing
-    /// can remove: `AppState.visibleWorktrees` drops the archived worktree row,
-    /// the session falls back to rendering as a plain session row underneath
-    /// it, and no gesture retires that row while the provider keeps reporting
-    /// the session. Archived sessions stay reachable in the repo's Archived tab
-    /// (for an adopted lane) and in the Provider Desk's session ledger, which
-    /// lists every non-dismissed session the provider reports.
-    nonisolated static func matchedRemoteSessions(
-        _ all: [RemoteSessionInfo],
-        repoID: UUID,
-        worktrees: [Worktree]
-    ) -> [RemoteSessionInfo] {
-        matchedRemoteSessionIndices(all, repoID: repoID, adopted: adoptedLocations(worktrees))
-            .map { all[$0] }
-    }
-
-    /// The remote locations a section's worktree rows already stand for. The
-    /// adopted-lane half of the filter in `matchedRemoteSessionIndices`, split
-    /// out so a caller can compare it across renders without re-deriving it.
-    nonisolated static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
-        Set(worktrees.map(\.location).filter { !$0.isLocal })
-    }
-
-    /// The positions in `all` of the sessions `matchedRemoteSessions` returns,
-    /// in the same order. Each surviving session's `created_at` is parsed
-    /// exactly once, here, and the sort runs over those pre-parsed keys: the
-    /// comparator runs O(n log n) times, and parsing inside it was the
-    /// measured main-thread stall while typing. `parse` is the test seam for
-    /// counting those parses; production always takes the default.
-    nonisolated static func matchedRemoteSessionIndices(
-        _ all: [RemoteSessionInfo],
-        repoID: UUID,
-        adopted: Set<WorktreeLocation>,
-        parse: (String?) -> Date? = RepoSectionView.parsedCreatedAt
-    ) -> [Int] {
-        var keyed: [(index: Int, key: CreationKey)] = []
-        for (index, session) in all.enumerated()
-        where session.resolvedRepoID == repoID && !session.dismissed && !session.payload.isArchived
-            && !adopted.contains(.remote(provider: session.provider, sessionID: session.payload.id)) {
-            keyed.append((index, CreationKey(
-                createdAt: parse(session.payload.createdAt),
-                uuid: session.id.uuidString)))
-        }
-        keyed.sort { isOrderedByCreation($0.key, $1.key) }
-        return keyed.map(\.index)
-    }
-
-    /// The pre-parsed sort key for one session: its `created_at` (nil when
-    /// absent or unparseable) and its `id.uuidString`, the tie-break.
-    nonisolated struct CreationKey {
-        let createdAt: Date?
-        let uuid: String
-    }
-
-    /// Ascending creation-time ordering on pre-parsed keys. A session
-    /// with a missing/unparseable `created_at` (allowed by the contract —
-    /// `docs/remote-provider-contract.md` doesn't require it) sorts after
-    /// every dated session; any remaining tie (including two undated
-    /// sessions) breaks on the row's own stable `id` so ordering is fully
-    /// deterministic across renders regardless of source-array order.
-    /// Keys are parsed once before sorting because this comparator runs
-    /// O(n log n) times.
-    nonisolated static func isOrderedByCreation(_ a: CreationKey, _ b: CreationKey) -> Bool {
-        switch (a.createdAt, b.createdAt) {
-        case let (x?, y?) where x != y: return x < y
-        case (nil, .some): return false
-        case (.some, nil): return true
-        default: return a.uuid < b.uuid
-        }
-    }
-
-    /// Whether two mirror rows agree on every field `matchedRemoteSessionIndices`
-    /// reads: the provider and `payload.id` (which fix `id`, the tie-break
-    /// key), `payload.createdAt` (the sort key), and the three filter gates.
-    /// `AppState` clears its match memo only when this is false for some
-    /// position, so this list must equal what the filter and the sort read;
-    /// the sync-fence test in `RepoSectionMatchedSessionsTests` pins it. Fields
-    /// that change on every sighting or drive row state (`lastSeen`, `gone`,
-    /// `payload.state`, `agentState`) are deliberately absent, so a sighting
-    /// that changes only those does not force a re-sort.
-    nonisolated static func sameMatchInputs(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
-        a.provider == b.provider
-            && a.payload.id == b.payload.id
-            && a.payload.createdAt == b.payload.createdAt
-            && a.payload.isArchived == b.payload.isArchived
-            && a.dismissed == b.dismissed
-            && a.resolvedRepoID == b.resolvedRepoID
-    }
-
-    /// A session's `created_at`, in either ISO 8601 profile a conforming
-    /// provider may legally emit. `docs/remote-provider-contract.md` shows a
-    /// whole-second example but never pins a profile, and a default-options
-    /// formatter rejects the fractional form outright — which sorted every
-    /// such row as undated.
-    ///
-    /// The parsing (and the shared, lock-guarded formatters that make it
-    /// cheap enough to call from a sort comparator) lives in
-    /// `RemoteTimestamp`, alongside the ordering rule that reads the
-    /// contract's other timestamp. Two parsers for one wire format is one
-    /// too many.
-    nonisolated static func parsedCreatedAt(_ raw: String?) -> Date? {
-        RemoteTimestamp.parse(raw)
-    }
-
-    // MARK: - The create gates — pure, view-free forms of what this section's
-    // two context-menu items render, so a test can call the exact decision
-    // each one makes rather than re-deriving it. See
-    // `CloudCreateEntryPresentationTests`'s cross-surface parity suite, which
-    // checks `cloudSessionMenuEntry` against the `+` picker's cloud row
-    // (`WorktreeProfilePickerView.cloudLaneEntry`), the worktree row's item
-    // (`WorktreeRowView.cloudSessionMenuEntry`) and the Remote section header
-    // (`RemoteProviderHeaderRow.canCreate`) for agreement.
-
-    /// The providers `newRemoteSessionMenuItem`'s context menu lists — the
-    /// ones the user configured themselves. A thin, named forward to
-    /// `CloudCreateEntryPresentation.registryProviders` so the view has no
-    /// inline gate logic of its own to drift from what that function (and its
-    /// test coverage) pins. The compiled cloud provider is never a member: it
-    /// gets `newCloudSessionMenuItem` instead.
-    nonisolated static func remoteSessionMenuProviders(
-        providers: [RemoteProviderStatus]
-    ) -> [RemoteProviderStatus] {
-        CloudCreateEntryPresentation.registryProviders(providers)
-    }
-
-    /// The compiled cloud provider `newCloudSessionMenuItem` offers, or nil
-    /// when there is none. The same thin, named forward, for the same reason.
-    nonisolated static func cloudSessionMenuEntry(
-        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
-    ) -> RemoteProviderStatus? {
-        CloudCreateEntryPresentation.cloudEntry(
-            providers, claudeCloudEnabled: claudeCloudEnabled)
-    }
-
-
     // MARK: - Context menu
 
     /// Extracted out of the row's `.contextMenu` — the nested conditionals
@@ -668,8 +505,8 @@ struct RepoSectionView: View {
     /// rows are the one-click path.
     @ViewBuilder
     private var newCloudSessionMenuItem: some View {
-        if let entry = RepoSectionView.cloudSessionMenuEntry(
-            providers: appState.remoteProviders,
+        if let entry = CloudCreateEntryPresentation.cloudEntry(
+            appState.remoteProviders,
             claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false) {
             Button("New Cloud Session…") { openRemoteCreateSheet(for: entry) }
                 .disabled(entry.hasStaleSnapshot)
@@ -692,8 +529,8 @@ struct RepoSectionView: View {
     /// whether this item is a button or a submenu.
     @ViewBuilder
     private var newRemoteSessionMenuItem: some View {
-        let providers = RepoSectionView.remoteSessionMenuProviders(
-            providers: appState.remoteProviders)
+        let providers = CloudCreateEntryPresentation.registryProviders(
+            appState.remoteProviders)
         if !providers.isEmpty {
             if providers.count == 1, let only = providers.first {
                 Button("New Remote Session…") { openRemoteCreateSheet(for: only) }

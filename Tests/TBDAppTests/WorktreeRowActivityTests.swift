@@ -3,7 +3,7 @@ import Testing
 import TBDShared
 @testable import TBDApp
 
-@Suite("WorktreeRowView — foreground activity")
+@Suite("Worktree row — foreground activity")
 struct WorktreeRowActivityTests {
     private func terminal(
         kind: TerminalKind,
@@ -21,15 +21,15 @@ struct WorktreeRowActivityTests {
     @Test func claudeUsesRawWorkingActivity() {
         let claude = terminal(kind: .claude, activityState: .working)
 
-        #expect(WorktreeRowView.isForegroundWorking(claude))
+        #expect(WorktreeRowPresentation.isForegroundWorking(claude))
     }
 
     @Test func claudeRawNonworkingActivityDoesNotAnimate() {
         let idle = terminal(kind: .claude, activityState: .idle)
         let waiting = terminal(kind: .claude, activityState: .waitingForUser)
 
-        #expect(!WorktreeRowView.isForegroundWorking(idle))
-        #expect(!WorktreeRowView.isForegroundWorking(waiting))
+        #expect(!WorktreeRowPresentation.isForegroundWorking(idle))
+        #expect(!WorktreeRowPresentation.isForegroundWorking(waiting))
     }
 
     /// Codex reads its column the same way Claude does: the column is the
@@ -37,31 +37,22 @@ struct WorktreeRowActivityTests {
     @Test func codexWorkingColumnAnimates() {
         let codex = terminal(kind: .codex, activityState: .working)
 
-        #expect(WorktreeRowView.isForegroundWorking(codex))
+        #expect(WorktreeRowPresentation.isForegroundWorking(codex))
     }
 
     @Test func codexNonworkingColumnDoesNotAnimate() {
         let idle = terminal(kind: .codex, activityState: .idle)
         let waiting = terminal(kind: .codex, activityState: .waitingForUser)
 
-        #expect(!WorktreeRowView.isForegroundWorking(idle))
-        #expect(!WorktreeRowView.isForegroundWorking(waiting))
-    }
-
-    @Test func terminalCollectionReportsAnyForegroundWork() {
-        let idleCodex = terminal(kind: .codex, activityState: .idle)
-        let workingClaude = terminal(kind: .claude, activityState: .working)
-
-        #expect(WorktreeRowView.hasForegroundWork(in: [idleCodex, workingClaude]))
-        #expect(!WorktreeRowView.hasForegroundWork(in: [idleCodex]))
-        #expect(!WorktreeRowView.hasForegroundWork(in: []))
+        #expect(!WorktreeRowPresentation.isForegroundWorking(idle))
+        #expect(!WorktreeRowPresentation.isForegroundWorking(waiting))
     }
 }
 
-@Suite("WorktreeRowView — prompt on screen")
+@Suite("Worktree row — prompt on screen")
 struct WorktreeRowPromptOnScreenTests {
-    private func terminal(notificationType: String?) -> Terminal {
-        var terminal = Terminal(
+    private func terminal(notificationType: String?) -> TBDShared.Terminal {
+        var terminal = TBDShared.Terminal(
             worktreeID: UUID(),
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
@@ -82,7 +73,7 @@ struct WorktreeRowPromptOnScreenTests {
     }
 
     @Test func noReasonIsNoSignal() {
-        let working = Terminal(
+        let working = TBDShared.Terminal(
             worktreeID: UUID(),
             tmuxWindowID: "@1",
             tmuxPaneID: "%1",
@@ -118,15 +109,5 @@ struct WorktreeRowPromptOnScreenTests {
 
         #expect(parked.isParked)
         #expect(!parked.hasPromptOnScreen)
-        #expect(!WorktreeRowView.hasPromptOnScreen(in: [parked]))
-    }
-
-    @Test func collectionReportsAnyPromptOnScreen() {
-        let prompt = terminal(notificationType: "permission_prompt")
-        let idlePrompt = terminal(notificationType: "idle_prompt")
-
-        #expect(WorktreeRowView.hasPromptOnScreen(in: [idlePrompt, prompt]))
-        #expect(!WorktreeRowView.hasPromptOnScreen(in: [idlePrompt]))
-        #expect(!WorktreeRowView.hasPromptOnScreen(in: []))
     }
 }

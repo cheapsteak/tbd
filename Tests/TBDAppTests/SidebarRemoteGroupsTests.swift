@@ -117,7 +117,7 @@ struct SidebarRemoteGroupsTests {
         var local = SidebarGroupFixtures.row("local copy", repoID: repo)
         local.origin = WorktreeOrigin(provider: "acme", sessionID: "origin")
         let mirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
-        let remainder = RepoSectionView.matchedRemoteSessions([mirror], repoID: repo, worktrees: [local])
+        let remainder = SidebarSessionPlacement.matchedRemoteSessions([mirror], repoID: repo, worktrees: [local])
         let groups = SidebarGroupFixtures.groups(
             roots: [local], remainder: remainder, rows: [local], sessions: [mirror])
         #expect(groups.localRoots == [local])
@@ -139,7 +139,7 @@ struct SidebarRemoteGroupsTests {
         let originMirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
         let inventory = [parentMirror, originMirror]
         let rows = [parent, local]
-        let remainder = RepoSectionView.matchedRemoteSessions(inventory, repoID: repo, worktrees: rows)
+        let remainder = SidebarSessionPlacement.matchedRemoteSessions(inventory, repoID: repo, worktrees: rows)
         #expect(remainder.map(\.id) == [originMirror.id])
         let groups = SidebarGroupFixtures.groups(
             roots: [parent], remainder: remainder, rows: rows, sessions: inventory)

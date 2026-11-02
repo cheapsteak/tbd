@@ -107,7 +107,7 @@ struct SidebarScratchChildRenderingTests {
         let child = SidebarGroupFixtures.row("local child", repoID: fixture.parent.repoID!, parent: fixture.parent.id)
         state.worktrees[fixture.parent.repoID!]?.append(child)
         let added = await host.settle {
-            abs(geometry.height - flatHeight - WorktreeRowView.rowHeight) < 0.5
+            abs(geometry.height - flatHeight - SidebarNativeMetrics.rowHeight) < 0.5
         }
         #expect(added, "A real local child must still add exactly one rendered row")
         #expect(state.sidebarScratchHibernation.workingRoots.map(\.id) == [fixture.scratch.id])

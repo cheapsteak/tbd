@@ -42,7 +42,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
 
     static func height(for model: WorktreeRowModel) -> CGFloat {
         switch model.heightClass {
-        case .single: WorktreeRowView.rowHeight
+        case .single: SidebarNativeMetrics.rowHeight
         case .withSubtitle: subtitleRowHeight
         }
     }
@@ -286,7 +286,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         case .prStatus(let presentation)?:
             switch presentation.glyph {
             case .asset(let name):
-                leadingImageView.image = WorktreeRowView.loadIcon(name)
+                leadingImageView.image = WorktreeRowPresentation.loadIcon(name)
                 leadingImageView.contentTintColor = presentation.nsColor
             case .emoji:
                 // Full colour, never tinted.

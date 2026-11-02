@@ -35,7 +35,7 @@ struct SidebarCellTests {
         #expect(cell.nameField.stringValue == "alpha")
         #expect(cell.nameField.font == SidebarCellKit.boldNameFont)
         #expect(!cell.leadingImageView.isHidden)
-        #expect(cell.leadingImageView.image === WorktreeRowView.loadIcon(iconName))
+        #expect(cell.leadingImageView.image === WorktreeRowPresentation.loadIcon(iconName))
         #expect(cell.subtitleFields.filter { !$0.isHidden }.map(\.stringValue) == ["Creating worktree…"])
         #expect(cell.suffix.indicator == .attention)
         #expect(!cell.suffix.imageView.isHidden)
@@ -206,16 +206,16 @@ struct SidebarCellTests {
     }
 
     @Test func heightMatchesClass() throws {
-        #expect(WorktreeRowCell.height(for: Self.worktree(name: "a")) == WorktreeRowView.rowHeight)
+        #expect(WorktreeRowCell.height(for: Self.worktree(name: "a")) == SidebarNativeMetrics.rowHeight)
         let subtitled = Self.worktree(name: "a", subtitles: ["Creating worktree…"])
         #expect(subtitled.heightClass == .withSubtitle)
         let measured = try Self.measuredSwiftUIRowHeight()
         #expect(abs(WorktreeRowCell.height(for: subtitled) - measured) < 0.5,
                 "The SwiftUI row with a subtitle measured \(measured) pt")
 
-        #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane")) == WorktreeRowView.rowHeight)
+        #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane")) == SidebarNativeMetrics.rowHeight)
         #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane", caption: "running"))
-                == WorktreeRowView.rowHeight)
+                == SidebarNativeMetrics.rowHeight)
         #expect(GroupHeaderCell.height(for: Self.group()) == GroupHeaderCell.singleHeight)
         #expect(GroupHeaderCell.height(for: Self.group(summary: "1 running")) == GroupHeaderCell.summaryHeight)
         #expect(GroupHeaderCell.singleHeight < GroupHeaderCell.summaryHeight)

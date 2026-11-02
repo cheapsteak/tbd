@@ -135,7 +135,7 @@ struct SidebarInteractionTests {
 
         // Five rows scroll under the still pointer: no tracking-area event
         // arrives, yet the row under it is the hovered one.
-        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 5 * WorktreeRowView.rowHeight))
+        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 5 * SidebarNativeMetrics.rowHeight))
         h.controller.scrollView.reflectScrolledClipView(h.clip)
         let scrolledTo = try #require(Self.rowID(at: point, in: h))
         #expect(scrolledTo != first)

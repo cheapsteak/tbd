@@ -11,7 +11,7 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
     /// `RemoteSessionRowView` pins `.frame(height: 28)` with or without its
     /// caption, as the worktree row does.
     static func height(for model: RemoteSessionRowModel) -> CGFloat {
-        WorktreeRowView.rowHeight
+        SidebarNativeMetrics.rowHeight
     }
 
     var leadingInset: CGFloat = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false) {

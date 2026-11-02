@@ -3,12 +3,12 @@ import Foundation
 @testable import TBDApp
 import TBDShared
 
-/// Task 9d (remote worktrees inside repo sections). Covers
-/// `RepoSectionView.matchedRemoteSessions(_:repoID:worktrees:)` — the filter
+/// Remote worktrees inside repo sections. Covers
+/// `SidebarSessionPlacement.matchedRemoteSessions(_:repoID:worktrees:)` — the filter
 /// that picks a repo's resolved remote sessions out of the full mirror, drops
 /// the ones a worktree row already stands for, and orders the rest by
 /// creation time.
-@Suite("RepoSectionView — matched remote sessions")
+@Suite("SidebarSessionPlacement — matched remote sessions")
 struct RepoSectionRemoteSessionsTests {
 
     private func session(
@@ -50,7 +50,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "s2", resolvedRepoID: repoB),
             session(id: "s3", resolvedRepoID: nil),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoA, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoA, worktrees: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -60,13 +60,13 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "s1", resolvedRepoID: repoID, dismissed: true),
             session(id: "s2", resolvedRepoID: repoID, dismissed: false),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
     @Test func emptyWhenNoSessionResolvesToTheRepo() {
         let sessions = [session(id: "s1", resolvedRepoID: UUID())]
-        #expect(RepoSectionView.matchedRemoteSessions(sessions, repoID: UUID(), worktrees: []).isEmpty)
+        #expect(SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: UUID(), worktrees: []).isEmpty)
     }
 
     // MARK: - archived sessions are display policy, applied here
@@ -100,7 +100,7 @@ struct RepoSectionRemoteSessionsTests {
             try decodedSession(id: "archived", resolvedRepoID: repoID, archivedJSON: "true"),
             try decodedSession(id: "active", resolvedRepoID: repoID),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["active"])
     }
 
@@ -113,7 +113,7 @@ struct RepoSectionRemoteSessionsTests {
             try decodedSession(id: "explicit-false", resolvedRepoID: repoID, archivedJSON: "false"),
             try decodedSession(id: "absent", resolvedRepoID: repoID),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(Set(result.map(\.payload.id)) == ["explicit-false", "absent"])
     }
 
@@ -128,7 +128,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "adopted", resolvedRepoID: repoID),
             session(id: "unadopted", resolvedRepoID: repoID),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(
+        let result = SidebarSessionPlacement.matchedRemoteSessions(
             sessions, repoID: repoID, worktrees: [remoteWorktree(sessionID: "adopted")])
         #expect(result.map(\.payload.id) == ["unadopted"])
     }
@@ -139,7 +139,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func keepsSessionsWithNoWorktreeRowEvenWhenOtherLanesAreAdopted() {
         let repoID = UUID()
         let sessions = [session(id: "unadopted", resolvedRepoID: repoID)]
-        let result = RepoSectionView.matchedRemoteSessions(
+        let result = SidebarSessionPlacement.matchedRemoteSessions(
             sessions,
             repoID: repoID,
             worktrees: [remoteWorktree(sessionID: "other"), localWorktree()])
@@ -152,7 +152,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func excludesOnlyTheMatchingProvidersSession() {
         let repoID = UUID()
         let sessions = [session(id: "s1", resolvedRepoID: repoID)]
-        let result = RepoSectionView.matchedRemoteSessions(
+        let result = SidebarSessionPlacement.matchedRemoteSessions(
             sessions,
             repoID: repoID,
             worktrees: [remoteWorktree(provider: "other-provider", sessionID: "s1")])
@@ -165,7 +165,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func localWorktreeRowsNeverExcludeASession() {
         let repoID = UUID()
         let sessions = [session(id: "s1", resolvedRepoID: repoID)]
-        let result = RepoSectionView.matchedRemoteSessions(
+        let result = SidebarSessionPlacement.matchedRemoteSessions(
             sessions, repoID: repoID, worktrees: [localWorktree(displayName: "s1")])
         #expect(result.map(\.payload.id) == ["s1"])
     }
@@ -175,13 +175,13 @@ struct RepoSectionRemoteSessionsTests {
         let mirror = session(id: "worker", resolvedRepoID: repoID)
         var local = localWorktree()
         local.origin = WorktreeOrigin(provider: "acme", sessionID: "worker")
-        #expect(RepoSectionView.matchedRemoteSessions(
+        #expect(SidebarSessionPlacement.matchedRemoteSessions(
             [mirror], repoID: repoID, worktrees: [local]).map(\.id) == [mirror.id])
 
         // A current remote row still suppresses its mirror even when a local
         // row also retains the same provenance.
         let remote = remoteWorktree(sessionID: "worker")
-        #expect(RepoSectionView.matchedRemoteSessions(
+        #expect(SidebarSessionPlacement.matchedRemoteSessions(
             [mirror], repoID: repoID, worktrees: [local, remote]).isEmpty)
     }
 
@@ -193,7 +193,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "newer", resolvedRepoID: repoID, createdAt: "2026-07-24T18:10:00Z"),
             session(id: "older", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["older", "newer"])
     }
 
@@ -203,7 +203,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "undated", resolvedRepoID: repoID, createdAt: nil),
             session(id: "dated", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["dated", "undated"])
     }
 
@@ -213,7 +213,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "garbage", resolvedRepoID: repoID, createdAt: "not-a-date"),
             session(id: "dated", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["dated", "garbage"])
     }
 
@@ -224,30 +224,30 @@ struct RepoSectionRemoteSessionsTests {
         let repoID = UUID()
         let a = session(id: "s1", resolvedRepoID: repoID, createdAt: nil)
         let b = session(id: "s2", resolvedRepoID: repoID, createdAt: nil)
-        let forward = RepoSectionView.matchedRemoteSessions([a, b], repoID: repoID, worktrees: [])
-        let backward = RepoSectionView.matchedRemoteSessions([b, a], repoID: repoID, worktrees: [])
+        let forward = SidebarSessionPlacement.matchedRemoteSessions([a, b], repoID: repoID, worktrees: [])
+        let backward = SidebarSessionPlacement.matchedRemoteSessions([b, a], repoID: repoID, worktrees: [])
         #expect(forward.map(\.id) == backward.map(\.id))
     }
 
     // MARK: - parsedCreatedAt
 
     @Test func parsedCreatedAt_nilIsNil() {
-        #expect(RepoSectionView.parsedCreatedAt(nil) == nil)
+        #expect(SidebarSessionPlacement.parsedCreatedAt(nil) == nil)
     }
 
     @Test func parsedCreatedAt_unparseableIsNil() {
-        #expect(RepoSectionView.parsedCreatedAt("not-a-date") == nil)
+        #expect(SidebarSessionPlacement.parsedCreatedAt("not-a-date") == nil)
     }
 
     @Test func parsedCreatedAt_validISO8601Parses() {
-        #expect(RepoSectionView.parsedCreatedAt("2026-07-24T18:00:00Z") != nil)
+        #expect(SidebarSessionPlacement.parsedCreatedAt("2026-07-24T18:00:00Z") != nil)
     }
 
     /// The contract's example is whole-second, but doesn't pin a profile — a
     /// conforming provider may emit fractional seconds. A default-options
     /// `ISO8601DateFormatter` rejects this shape outright.
     @Test func parsedCreatedAt_fractionalSecondsParses() {
-        #expect(RepoSectionView.parsedCreatedAt("2026-07-24T18:02:11.123Z") != nil)
+        #expect(SidebarSessionPlacement.parsedCreatedAt("2026-07-24T18:02:11.123Z") != nil)
     }
 
     /// Both shapes must parse to sensible, comparable dates — a
@@ -259,19 +259,19 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "fractional", resolvedRepoID: repoID, createdAt: "2026-07-24T18:10:00.500Z"),
             session(id: "whole", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["whole", "fractional"])
     }
 }
 
-/// Covers the two gates behind the repo context menu's create items —
-/// `RepoSectionView.remoteSessionMenuProviders(providers:)` for the generic
+/// Covers the two gates behind the repo header menu's create items —
+/// `CloudCreateEntryPresentation.registryProviders(_:)` for the generic
 /// "New Remote Session…" item, and
-/// `cloudSessionMenuEntry(providers:claudeCloudEnabled:)` for the compiled
-/// provider's "New Cloud Session…" item beside it. Both are pure, view-free
-/// forms of what the menu renders, so every branch is decided somewhere a
-/// test can reach without an `AppState` or a view hierarchy.
-@Suite("RepoSectionView — remote create menu items")
+/// `cloudEntry(_:claudeCloudEnabled:)` for the compiled provider's
+/// "New Cloud Session…" item beside it. `SidebarMenus` calls both directly,
+/// so every branch is decided somewhere a test can reach without an
+/// `AppState` or a view hierarchy.
+@Suite("Repo header — remote create menu items")
 struct RepoSectionRemoteCreateMenuTests {
 
     private func provider(
@@ -289,14 +289,14 @@ struct RepoSectionRemoteCreateMenuTests {
     }
 
     private func names(_ providers: [RemoteProviderStatus]) -> [String] {
-        RepoSectionView.remoteSessionMenuProviders(providers: providers).map(\.config.name)
+        CloudCreateEntryPresentation.registryProviders(providers).map(\.config.name)
     }
 
     private func cloudName(
         _ providers: [RemoteProviderStatus], claudeCloudEnabled: Bool
     ) -> String? {
-        RepoSectionView.cloudSessionMenuEntry(
-            providers: providers, claudeCloudEnabled: claudeCloudEnabled)?.config.name
+        CloudCreateEntryPresentation.cloudEntry(
+            providers, claudeCloudEnabled: claudeCloudEnabled)?.config.name
     }
 
     // MARK: - the generic item enumerates registry providers only

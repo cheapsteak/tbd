@@ -5,11 +5,11 @@ import Testing
 import TBDShared
 
 /// Task 9 (Remote sidebar section). Covers the pure, view-independent parts:
-/// - `RemoteSectionView.sessions(in:forProvider:)` — per-provider filtering
+/// - `SidebarSessionPlacement.sessions(in:forProvider:)` — per-provider filtering
 ///   with dismissed tombstones excluded.
 /// - `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)` — the
 ///   new `.remote` case and its precedence under the existing leading slot.
-/// - `RemoteSessionRowView.caption(state:agentState:gone:exitCode:)` — the
+/// - `RemoteSessionRowPresentation.caption(state:agentState:gone:exitCode:)` — the
 ///   starting/exited/gone/unavailable captions and their precedence.
 /// - `AppState.remoteUnreadType(kind:exitCode:)` — the pure kind→
 ///   `NotificationType` mapping feeding `unreadByRemoteSession`.
@@ -39,7 +39,7 @@ struct RemoteSectionViewTests {
             session(provider: "acme", id: "s1"),
             session(provider: "other", id: "s2"),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -48,7 +48,7 @@ struct RemoteSectionViewTests {
             session(provider: "acme", id: "s1", dismissed: true),
             session(provider: "acme", id: "s2", dismissed: false),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
@@ -56,13 +56,13 @@ struct RemoteSectionViewTests {
         // `gone` sessions still render (dimmed, with a Dismiss action) —
         // only `dismissed` (the user's tombstone action) removes a row.
         let sessions = [session(provider: "acme", id: "s1", gone: true, dismissed: false)]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
     @Test func emptyWhenNoSessionsMatchProvider() {
         let sessions = [session(provider: "other", id: "s1")]
-        #expect(RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: []).isEmpty)
+        #expect(SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: []).isEmpty)
     }
 
     /// Task 9d: a session resolved to a local repo renders inside that
@@ -76,7 +76,7 @@ struct RemoteSectionViewTests {
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s2", state: .running),
                               gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: nil),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [repoID])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [repoID])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
@@ -93,7 +93,7 @@ struct RemoteSectionViewTests {
         ]
         // knownRepoIDs deliberately does NOT contain removedRepoID — the
         // repo was removed after the row was pinned.
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -134,7 +134,7 @@ struct RemoteSectionViewTests {
             try decodedSession(id: "archived", archivedJSON: "true"),
             try decodedSession(id: "active"),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(result.map(\.payload.id) == ["active"])
     }
 
@@ -144,7 +144,7 @@ struct RemoteSectionViewTests {
             try decodedSession(id: "explicit-false", archivedJSON: "false"),
             try decodedSession(id: "absent"),
         ]
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
         #expect(Set(result.map(\.payload.id)) == ["explicit-false", "absent"])
     }
 
@@ -158,7 +158,7 @@ struct RemoteSectionViewTests {
     /// behavior for the common case.
     @Test func knownRepoIDs_noFilterIncludesAllRepos() {
         let visible = repo()
-        let known = RemoteSectionView.knownRepoIDs(repos: [visible], repoFilter: nil)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: [visible], repoFilter: nil)
         #expect(known == [visible.id])
     }
 
@@ -171,7 +171,7 @@ struct RemoteSectionViewTests {
     /// repo hides its remote sessions along with it.
     @Test func knownRepoIDs_hiddenRepoStillCountsAsKnown() {
         let hiddenRepo = repo(hidden: true)
-        let known = RemoteSectionView.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
         #expect(known == [hiddenRepo.id], "a hidden repo must still count as known, not fall through to Remote")
     }
 
@@ -184,7 +184,7 @@ struct RemoteSectionViewTests {
     @Test func knownRepoIDs_activeFilterExcludesEveryOtherRepo() {
         let filtered = repo()
         let other = repo()
-        let known = RemoteSectionView.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
         #expect(known == [filtered.id])
         #expect(!known.contains(other.id), "an unfiltered-out repo must not count as known while a filter is active")
     }
@@ -199,8 +199,8 @@ struct RemoteSectionViewTests {
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
                               gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: other.id),
         ]
-        let known = RemoteSectionView.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: [filtered, other], repoFilter: filtered.id)
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -213,8 +213,8 @@ struct RemoteSectionViewTests {
             RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
                               gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: hiddenRepo.id),
         ]
-        let known = RemoteSectionView.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
-        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: [hiddenRepo], repoFilter: nil)
+        let result = SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: known)
         #expect(result.isEmpty)
     }
 
@@ -295,72 +295,72 @@ struct RemoteSectionViewTests {
         #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: false) == nil)
     }
 
-    // MARK: - RemoteSessionRowView.caption(state:agentState:gone:exitCode:)
+    // MARK: - RemoteSessionRowPresentation.caption(state:agentState:gone:exitCode:)
 
     @Test func caption_startingIsStartingEllipsis() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .starting, agentState: .unknown, gone: false, exitCode: nil
         ) == "Starting…")
     }
 
     @Test func caption_runningIsNil() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .idle, gone: false, exitCode: nil
         ) == nil)
     }
 
     @Test func caption_runningUnknownSurfacesUnavailableAgentState() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .unknown, gone: false, exitCode: nil
         ) == "agent state unavailable")
     }
 
     @Test func caption_runningKnownAgentStatesRemainQuiet() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .working, gone: false, exitCode: nil
         ) == nil)
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .idle, gone: false, exitCode: nil
         ) == nil)
     }
 
     @Test func caption_unknownSurfacesUnavailableTerminalState() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .unknown, agentState: .unknown, gone: false, exitCode: nil
         ) == "terminal state unavailable")
     }
 
     @Test func caption_exitedWithKnownCodeIncludesCode() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .exited, agentState: .exited, gone: false, exitCode: 1
         ) == "exited (code 1)")
     }
 
     @Test func caption_exitedWithoutKnownCodeOmitsCode() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .exited, agentState: .exited, gone: false, exitCode: nil
         ) == "exited")
     }
 
     @Test func caption_goneWinsOverExitedCode() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .exited, agentState: .exited, gone: true, exitCode: 1
         ) == "no longer reported")
     }
 
     @Test func caption_goneWinsOverStarting() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .starting, agentState: .unknown, gone: true, exitCode: nil
         ) == "no longer reported")
     }
 
     @Test func caption_goneWinsOverRunningUnknownAgentState() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .unknown, gone: true, exitCode: nil
         ) == "no longer reported")
     }
 
-    // MARK: - RemoteSessionRowView.caption(staleness:) combining
+    // MARK: - RemoteSessionRowPresentation.caption(staleness:) combining
 
     @Test func caption_stalenessAloneRendersWhenThereIsNoOtherCaption() {
         // The maintainer's exact scenario: a plain running session (no other
@@ -368,7 +368,7 @@ struct RemoteSectionViewTests {
         // the only signal a grouped row (no visible provider header nearby)
         // gets that its data might be hours old.
         #expect(
-            RemoteSessionRowView.caption(
+            RemoteSessionRowPresentation.caption(
                 state: .running, agentState: .idle, gone: false,
                 exitCode: nil, staleness: "as of 2h ago"
             )
@@ -377,7 +377,7 @@ struct RemoteSectionViewTests {
     }
 
     @Test func caption_stalenessCombinesWithUnavailableAgentState() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running,
             agentState: .unknown,
             gone: false,
@@ -387,7 +387,7 @@ struct RemoteSectionViewTests {
     }
 
     @Test func caption_stalenessCombinesWithUnavailableTerminalState() {
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .unknown,
             agentState: .unknown,
             gone: false,
@@ -398,7 +398,7 @@ struct RemoteSectionViewTests {
 
     @Test func caption_stalenessCombinesWithAnExistingCaption() {
         #expect(
-            RemoteSessionRowView.caption(
+            RemoteSessionRowPresentation.caption(
                 state: .exited, agentState: .exited, gone: false,
                 exitCode: 1, staleness: "as of 2h ago"
             )
@@ -408,7 +408,7 @@ struct RemoteSectionViewTests {
 
     @Test func caption_stalenessCombinesWithGone() {
         #expect(
-            RemoteSessionRowView.caption(
+            RemoteSessionRowPresentation.caption(
                 state: .exited, agentState: .exited, gone: true,
                 exitCode: 1, staleness: "as of 2h ago"
             )
@@ -419,39 +419,39 @@ struct RemoteSectionViewTests {
     @Test func caption_nilStalenessLeavesExistingCaptionsUnchanged() {
         // Every pre-existing call site (no `staleness` argument) must render
         // exactly as before this task.
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .running, agentState: .idle, gone: false, exitCode: nil
         ) == nil)
-        #expect(RemoteSessionRowView.caption(
+        #expect(RemoteSessionRowPresentation.caption(
             state: .starting, agentState: .unknown, gone: false, exitCode: nil
         ) == "Starting…")
     }
 
-    // MARK: - RemoteSessionRowView.stalenessCaption(health:lastSeen:now:)
+    // MARK: - RemoteSessionRowPresentation.stalenessCaption(health:lastSeen:now:)
 
     @Test func stalenessCaption_nilWhenProviderIsHealthy() {
-        #expect(RemoteSessionRowView.stalenessCaption(
+        #expect(RemoteSessionRowPresentation.stalenessCaption(
             health: .ok, lastSuccessfulSnapshotAt: Date(), now: Date()) == nil)
     }
 
     @Test func stalenessCaption_reflectsRelativeAgeWhenStale() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-2 * 3600)
-        #expect(RemoteSessionRowView.stalenessCaption(
+        #expect(RemoteSessionRowPresentation.stalenessCaption(
             health: .stale, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of 2h ago")
     }
 
     @Test func stalenessCaption_justNowOmitsTheTrailingAgo() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-5)
-        #expect(RemoteSessionRowView.stalenessCaption(
+        #expect(RemoteSessionRowPresentation.stalenessCaption(
             health: .error, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of just now")
     }
 
     @Test func stalenessCaption_rendersForNeedsAuthHealthToo() {
         let now = Date(timeIntervalSince1970: 10_000)
         let lastSeen = now.addingTimeInterval(-5 * 60)
-        #expect(RemoteSessionRowView.stalenessCaption(
+        #expect(RemoteSessionRowPresentation.stalenessCaption(
             health: .needsAuth, lastSuccessfulSnapshotAt: lastSeen, now: now) == "as of 5m ago")
     }
 
@@ -496,10 +496,10 @@ struct RemoteSectionViewTests {
         #expect(AppState.remoteUnreadType(kind: "idle", exitCode: nil) == nil)
     }
 
-    // MARK: - RemoteSessionRowView.suffixIndicator(agentState:unreadType:) — steady-state mapping + severity merge
+    // MARK: - RemoteSessionRowPresentation.suffixIndicator(agentState:unreadType:) — steady-state mapping + severity merge
 
     @Test func suffixIndicator_workingIsWorking() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .working, unreadType: nil) == .working)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .working, unreadType: nil) == .working)
     }
 
     /// The steady-state divergence: `waitingInput` maps to `.attention` on
@@ -508,23 +508,23 @@ struct RemoteSectionViewTests {
     /// triggered and clears on select). Calling this twice in a row for the
     /// same still-waiting session must keep returning `.attention`.
     @Test func suffixIndicator_waitingInputIsAttentionSteadily() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: nil) == .attention)
     }
 
     @Test func suffixIndicator_idleIsNil() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .idle, unreadType: nil) == nil)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .idle, unreadType: nil) == nil)
     }
 
     @Test func suffixIndicator_unknownIsNil() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .unknown, unreadType: nil) == nil)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .unknown, unreadType: nil) == nil)
     }
 
     @Test func suffixIndicator_exitedWithNoUnreadIsNil() {
         // `.exited` agentState alone produces no suffix glyph — the exited/gone
         // presentation is secondary-toned text + a caption, not a suffix icon —
         // UNLESS the unread entry says otherwise (see the nonzero-exit test below).
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .exited, unreadType: nil) == nil)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .exited, unreadType: nil) == nil)
     }
 
     // MARK: - severity merge (unread entry vs. steady agentState)
@@ -534,38 +534,38 @@ struct RemoteSectionViewTests {
     /// mapping) — without folding the unread entry in, the suffix would be
     /// nil and the loudest case would render as the quietest row.
     @Test func suffixIndicator_erroredUnreadShowsErrorEvenWithNoSteadySignal() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .exited, unreadType: .error) == .error)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .exited, unreadType: .error) == .error)
     }
 
     /// Error (severity 4) beats the steady attention mapping (severity 3) —
     /// `RowStatusIndicator.suffix`'s existing precedence, not a new ladder.
     @Test func suffixIndicator_erroredUnreadBeatsSteadyWaitingInput() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: .error) == .error)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: .error) == .error)
     }
 
     /// A lower-severity unread entry (`.responseComplete`, severity 1) must
     /// not mask a still-waiting steady state (severity 3 via `.attentionNeeded`).
     @Test func suffixIndicator_steadyWaitingInputBeatsLowerSeverityUnread() {
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: .responseComplete) == .attention)
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: .responseComplete) == .attention)
     }
 
-    // MARK: - RemoteSessionRowView.higherSeverity(_:_:)
+    // MARK: - RemoteSessionRowPresentation.higherSeverity(_:_:)
 
     @Test func higherSeverity_bothNilIsNil() {
-        #expect(RemoteSessionRowView.higherSeverity(nil, nil) == nil)
+        #expect(RemoteSessionRowPresentation.higherSeverity(nil, nil) == nil)
     }
 
     @Test func higherSeverity_onlyFirstIsFirst() {
-        #expect(RemoteSessionRowView.higherSeverity(.error, nil) == .error)
+        #expect(RemoteSessionRowPresentation.higherSeverity(.error, nil) == .error)
     }
 
     @Test func higherSeverity_onlySecondIsSecond() {
-        #expect(RemoteSessionRowView.higherSeverity(nil, .attentionNeeded) == .attentionNeeded)
+        #expect(RemoteSessionRowPresentation.higherSeverity(nil, .attentionNeeded) == .attentionNeeded)
     }
 
     @Test func higherSeverity_picksHigherOfTwo() {
-        #expect(RemoteSessionRowView.higherSeverity(.responseComplete, .error) == .error)
-        #expect(RemoteSessionRowView.higherSeverity(.error, .responseComplete) == .error)
+        #expect(RemoteSessionRowPresentation.higherSeverity(.responseComplete, .error) == .error)
+        #expect(RemoteSessionRowPresentation.higherSeverity(.error, .responseComplete) == .error)
     }
 
     // MARK: - AppState.remoteSectionVisible(providers:)

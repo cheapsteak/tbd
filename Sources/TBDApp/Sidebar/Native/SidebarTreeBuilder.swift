@@ -239,13 +239,10 @@ private struct BuildPass {
     // MARK: Remote section — `RemoteSectionView`
 
     mutating func providerSections() -> [SidebarNode] {
-        let knownRepoIDs = RemoteSectionView.knownRepoIDs(repos: appState.repos, repoFilter: appState.repoFilter)
         var nodes: [SidebarNode] = []
         for provider in appState.remoteProviders {
             let name = provider.config.name
-            guard RemoteSectionView.shouldShowHeader(
-                    provider: provider, sessions: appState.remoteSessions, knownRepoIDs: knownRepoIDs),
-                  emittedProviders.insert(name).inserted else { continue }
+            guard emittedProviders.insert(name).inserted else { continue }
             let layout = appState.sidebarProviderLayout(
                 provider: name, grouped: options.workflowGroups, collapseEnded: options.collapseEnded)
             var children = sessionRows(layout.inlineSessions, depth: 0, hidden: false)
@@ -431,7 +428,7 @@ struct SidebarRowModelFactory {
             if let resolution = resolutions[terminal.id] {
                 return resolution.value == .working
             }
-            return WorktreeRowView.isForegroundWorking(terminal)
+            return WorktreeRowPresentation.isForegroundWorking(terminal)
         }
         let suffix = RowStatusIndicator.suffix(
             notification: notification,
@@ -449,7 +446,7 @@ struct SidebarRowModelFactory {
         let hasUndeterminedPR = !isMain && indicatorStatus == nil
             && PRFreshness.unknownIndicatorTooltip(appState.prObservations[id], now: now) != nil
         let leading: WorktreeLeadingSlot?
-        switch WorktreeRowView.leadingIndicator(
+        switch WorktreeRowPresentation.leadingIndicator(
             worktree: worktree, isPending: isPending,
             hasPRStatus: prPresentation != nil, hasUndeterminedPR: hasUndeterminedPR) {
         case .prStatus: leading = prPresentation.map(WorktreeLeadingSlot.prStatus)
@@ -461,7 +458,7 @@ struct SidebarRowModelFactory {
 
         var subtitles: [String] = []
         if isPending {
-            subtitles.append(WorktreeRowView.creatingSubtitle(
+            subtitles.append(WorktreeRowPresentation.creatingSubtitle(
                 hasPreSessionTerminal: appState.hasPreSessionTerminal(worktreeID: id)))
         }
         if let promotedID = worktree.promotedToRepoID, let name = repoNames[promotedID] {
@@ -486,7 +483,7 @@ struct SidebarRowModelFactory {
             isNameBold: RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreen),
             subtitles: subtitles,
             suffix: suffix,
-            showsDevServerDot: WorktreeRowView.showsServerDot(
+            showsDevServerDot: WorktreeRowPresentation.showsServerDot(
                 worktreeID: id, running: appState.devServerRunningWorktreeIDs),
             crossRepoLabel: crossRepoLabel,
             homeRepoID: worktree.repoID,
@@ -506,10 +503,10 @@ struct SidebarRowModelFactory {
         let selection = RemoteSessionSelection(provider: session.provider, sessionID: session.payload.id)
         let unread = appState.unreadByRemoteSession[selection]?.type
         let provider = providersByName[session.provider]
-        let caption = RemoteSessionRowView.caption(
+        let caption = RemoteSessionRowPresentation.caption(
             state: session.payload.state, agentState: session.payload.agentState,
             gone: session.gone, exitCode: session.payload.exitCode,
-            staleness: RemoteSessionRowView.stalenessCaption(
+            staleness: RemoteSessionRowPresentation.stalenessCaption(
                 health: provider?.health ?? .ok,
                 lastSuccessfulSnapshotAt: provider?.lastSuccessfulSnapshotAt ?? session.lastSeen,
                 now: now))
@@ -520,7 +517,7 @@ struct SidebarRowModelFactory {
             isNameBold: RowStatusIndicator.shouldBoldName(unread),
             isExited: session.payload.state == .exited,
             caption: caption,
-            suffix: RemoteSessionRowView.suffixIndicator(agentState: session.payload.agentState, unreadType: unread),
+            suffix: RemoteSessionRowPresentation.suffixIndicator(agentState: session.payload.agentState, unreadType: unread),
             isGone: session.gone,
             isSelected: appState.selectedRemoteSession == selection,
             depth: depth,
@@ -550,7 +547,7 @@ struct SidebarRowModelFactory {
             health: provider.health,
             issueSummary: RemoteProviderStatusPresentation.issueSummary(provider, now: now),
             isSelected: appState.selectedRemoteProvider == provider.config.name,
-            canCreate: RemoteProviderHeaderRow.canCreate(
+            canCreate: CloudCreateEntryPresentation.offersCreate(
                 provider: provider,
                 claudeCloudEnabled: appState.daemonCapabilities?.claudeCloudEnabled ?? false),
             isCreateEnabled: !provider.hasStaleSnapshot)

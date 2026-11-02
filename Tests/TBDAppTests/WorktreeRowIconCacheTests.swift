@@ -14,21 +14,21 @@ struct WorktreeRowIconCacheTests {
     func loadsKnownIcon() {
         // "git-pull-request" is a real resource in Sources/TBDApp/Resources/Icons
         // and the name PRStatusPresentation uses for open PRs.
-        let image = WorktreeRowView.loadIcon("git-pull-request")
+        let image = WorktreeRowPresentation.loadIcon("git-pull-request")
         #expect(image != nil)
         #expect(image?.isTemplate == true)
     }
 
     @Test("loadIcon returns the identical instance on repeated calls")
     func returnsSameInstance() {
-        let first = WorktreeRowView.loadIcon("git-merge")
-        let second = WorktreeRowView.loadIcon("git-merge")
+        let first = WorktreeRowPresentation.loadIcon("git-merge")
+        let second = WorktreeRowPresentation.loadIcon("git-merge")
         #expect(first != nil)
         #expect(first === second)
     }
 
     @Test("loadIcon returns nil for an unknown icon name")
     func unknownIconIsNil() {
-        #expect(WorktreeRowView.loadIcon("no-such-icon") == nil)
+        #expect(WorktreeRowPresentation.loadIcon("no-such-icon") == nil)
     }
 }

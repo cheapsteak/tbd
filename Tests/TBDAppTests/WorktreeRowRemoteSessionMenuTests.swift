@@ -4,16 +4,16 @@ import Foundation
 import TBDShared
 
 /// Covers the two gates behind the worktree row's create context-menu items —
-/// `WorktreeRowView.remoteSessionMenuProviders(providers:isMain:)` for the
-/// generic "New Remote Session…" item and
-/// `cloudSessionMenuEntry(providers:claudeCloudEnabled:isMain:)` for the
+/// `CloudCreateEntryPresentation.worktreeRowProviders(providers:isMain:)` for
+/// the generic "New Remote Session…" item and
+/// `worktreeRowCloudEntry(providers:claudeCloudEnabled:isMain:)` for the
 /// compiled provider's "New Cloud Session…" item beside it. The two are the
 /// always-opens-the-form twins of the nested `+`'s two lane rows. Every branch
 /// they have (no provider / one / several, the cloud flag, the main-row gate,
 /// staleness) is decided here, so it is decided somewhere a test can reach
-/// without an `AppState` or a view hierarchy — the same treatment
-/// `RepoSectionView`'s copies of the two items get.
-@Suite("WorktreeRowView — remote create menu items")
+/// without an `AppState` or a view hierarchy — the same treatment the repo
+/// header's copies of the two items get.
+@Suite("Worktree row — remote create menu items")
 struct WorktreeRowRemoteSessionMenuTests {
 
     private func provider(
@@ -37,14 +37,14 @@ struct WorktreeRowRemoteSessionMenuTests {
     private func names(
         _ providers: [RemoteProviderStatus], isMain: Bool = false
     ) -> [String] {
-        WorktreeRowView.remoteSessionMenuProviders(providers: providers, isMain: isMain)
+        CloudCreateEntryPresentation.worktreeRowProviders(providers: providers, isMain: isMain)
             .map(\.config.name)
     }
 
     private func cloudName(
         _ providers: [RemoteProviderStatus], claudeCloudEnabled: Bool = true, isMain: Bool = false
     ) -> String? {
-        WorktreeRowView.cloudSessionMenuEntry(
+        CloudCreateEntryPresentation.worktreeRowCloudEntry(
             providers: providers, claudeCloudEnabled: claudeCloudEnabled, isMain: isMain)?
             .config.name
     }
@@ -52,7 +52,7 @@ struct WorktreeRowRemoteSessionMenuTests {
     // MARK: - the provider-registered gate
 
     /// No provider registered → the item is omitted whole, not shown disabled,
-    /// matching `RepoSectionView.newRemoteSessionMenuItem`.
+    /// matching the repo header's item.
     @Test func noRegisteredProviderLeavesNothingToOffer() {
         #expect(names([]).isEmpty)
     }

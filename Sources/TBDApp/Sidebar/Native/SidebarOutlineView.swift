@@ -12,6 +12,11 @@ import AppKit
 /// short of the row's trailing edge (`trailingCellInset(highlightInset:)`);
 /// edge to edge, neither moves anything.
 enum SidebarNativeMetrics {
+    /// Fixed height of one worktree or remote-session row, in the outline and
+    /// in the pinned dock. `PinnedDockMetrics` reads it, so the dock's height
+    /// arithmetic cannot drift from the rows it holds.
+    static let rowHeight: CGFloat = 28
+
     /// Each nesting level adds this much, as `WorktreeRowView`'s
     /// `indentLevel * 16` does.
     static let indentation: CGFloat = 16

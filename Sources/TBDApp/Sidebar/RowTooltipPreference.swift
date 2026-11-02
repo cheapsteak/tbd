@@ -18,17 +18,3 @@ struct RowTooltipPreferenceKey: PreferenceKey {
         if let next = nextValue() { value = next }
     }
 }
-
-struct RowTooltipBubble: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.caption)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
-            .fixedSize()
-    }
-}

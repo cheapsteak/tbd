@@ -609,7 +609,7 @@ final class AppState {
             sidebarParentRemoteGroupsCache.removeAll()
             // A sighting that moves only `lastSeen`, `gone` or row state keeps
             // the match memo: its indices still name the same sessions.
-            if !remoteSessions.elementsEqual(oldValue, by: RepoSectionView.sameMatchInputs) {
+            if !remoteSessions.elementsEqual(oldValue, by: SidebarSessionPlacement.sameMatchInputs) {
                 sidebarMatchedSessionsCache.removeAll()
             }
         }
