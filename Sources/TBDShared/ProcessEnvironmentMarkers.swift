@@ -123,11 +123,17 @@ public enum ProcessEnvironmentReader {
     /// The non-empty value of the entry in `range` when it starts with
     /// `prefix` (`KEY=`), else nil. Compares bytes; builds a `String` only for
     /// a matching entry's value.
+    ///
+    /// A value that is not valid UTF-8 is nil, the same as an absent one.
+    /// TBD writes these markers as UUID strings, so such a value was never
+    /// TBD's, and repairing it into replacement characters would hand the
+    /// judge a marker that names nothing. Absent is the side that keeps: a
+    /// readable environment whose markers are all absent reads `.noMarkers`.
     private static func value(in raw: [UInt8], _ range: Range<Int>, after prefix: [UInt8]) -> String? {
         guard range.count > prefix.count else { return nil }
         for (offset, byte) in prefix.enumerated() where raw[range.lowerBound + offset] != byte {
             return nil
         }
-        return String(decoding: raw[(range.lowerBound + prefix.count)..<range.upperBound], as: UTF8.self)
+        return String(bytes: raw[(range.lowerBound + prefix.count)..<range.upperBound], encoding: .utf8)
     }
 }

@@ -57,6 +57,14 @@ struct ProcessEnvironmentMarkersTests {
         #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .noMarkers)
     }
 
+    /// Fails against a lossy decode, which repairs the value into replacement
+    /// characters and reports a marker TBD never wrote.
+    @Test func aValueThatIsNotUTF8IsAbsent() {
+        var raw = Self.bytes(env: ["PATH=/bin"])
+        raw.append(contentsOf: Array("TBD_WORKTREE_ID=".utf8) + [0xFF, 0xFE, 0])
+        #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .noMarkers)
+    }
+
     @Test func theWholeKeyMustMatch() {
         let raw = Self.bytes(env: ["XTBD_WORKTREE_ID=W", "TBD_WORKTREE_ID_OLD=W", "PATH=/bin"])
         #expect(ProcessEnvironmentReader.parse(procArgs: raw) == .noMarkers)
