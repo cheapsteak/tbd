@@ -61,26 +61,74 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/lintmig-test.XXXXXX"; }
 # Mutants land in one directory removed on exit, so a case that dies early does
 # not leave a weakened copy of the lint behind.
 MUTANT_DIR="$(mktmpd)"
-FIXTURES=()
-# `${FIXTURES[@]+"${FIXTURES[@]}"}` rather than a bare `"${FIXTURES[@]}"`: this
-# file runs under `set -u`, and macOS's bash 3.2 treats an EMPTY array as an
-# unbound variable. A case that died before the first `mkrepo` would then make
-# the trap itself error out, leaving the mutant directory on disk — cleanup
-# failing exactly in the situation cleanup exists for.
-trap 'rm -rf "$MUTANT_DIR" ${FIXTURES[@]+"${FIXTURES[@]}"}' EXIT
+# Fixture repositories land under one directory too. `mkrepo` is called as
+# `d="$(mkrepo)"`, so anything it recorded in a shell variable would die with
+# that subshell and the trap could never remove the repository.
+FIXTURE_ROOT="$(mktmpd)"
+trap 'rm -rf "$MUTANT_DIR" "$FIXTURE_ROOT"' EXIT
 
+# mutant_of NAME SED_EXPR: write a copy of the lint with one guard deliberately
+# disabled by SED_EXPR, and set NAME to its path. Call it bare, as
+# `mutant_of mutant '…' || return`, never inside `$(...)`: a command
+# substitution runs in a subshell, so the FAIL=1 below would die with it and a
+# sed expression that had drifted and matched nothing could not fail the run.
+# `printf -v` hands the path back without one, and works on macOS's bash 3.2.
+#
+# Each copy gets a file of its own from mktemp. A copy that fails a check fails
+# the run with a line naming why, leaves NAME empty, and returns 1; the caller
+# returns too, since a case with no mutant has nothing left to prove.
 mutant_of() {
-  local sed_expr="$1" out
-  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
-  # reaches the next call, so every mutant would share one file.
-  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
-  sed -E "$sed_expr" "$SCRIPT" > "$out"
-  # A mutation that changes nothing is a mutation that proves nothing.
-  if cmp -s "$SCRIPT" "$out"; then
-    echo "FAIL - mutation [$sed_expr] did not change the script" >&2
-    FAIL=1
+  local _name="$1" _expr="$2" _out _why=""
+  printf -v "$_name" '%s' ""
+  if ! _out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX" 2>/dev/null)"; then
+    _why="cannot create a file in MUTANT_DIR ($MUTANT_DIR)"
+  elif ! sed -E "$_expr" "$SCRIPT" > "$_out"; then
+    _why="sed failed"
+  elif cmp -s "$SCRIPT" "$_out"; then
+    # A mutation that changes nothing is a mutation that proves nothing.
+    _why="the expression changed nothing"
   fi
-  echo "$out"
+  if [[ -n "$_why" ]]; then
+    echo "FAIL - mutant_of: $_why [sed: $_expr]" >&2
+    FAIL=1
+    return 1
+  fi
+  printf -v "$_name" '%s' "$_out"
+}
+
+# ---------------------------------------------------------------------------
+# The mutant scaffolding — it can come out wrong without saying so
+# ---------------------------------------------------------------------------
+
+# A mutation that changes nothing must fail the RUN, from the caller's shell. It
+# did not when `mutant_of` was called inside `$(...)`: the FAIL line printed and
+# the assignment behind it died with the subshell. This calls the real helper
+# the way every case does, with this run's FAIL saved and restored around it so
+# the refusal it provokes does not fail the run itself.
+test_mutant_of_noop_mutation_fails_the_run() {
+  local saved_fail="$FAIL" mutant=/previous rc=0 err got_fail got_mutant
+  FAIL=0
+  mutant_of mutant 's/THIS TEXT IS IN NO LINE OF THE SCRIPT//' 2>/dev/null || rc=$?
+  got_fail="$FAIL" got_mutant="$mutant"
+  # The message is read from a second call, because the substitution that
+  # captures it cannot carry FAIL back.
+  err="$(mutant_of mutant 's/THIS TEXT IS IN NO LINE OF THE SCRIPT//' 2>&1)"
+  FAIL="$saved_fail"
+  assert_eq "a no-op mutation sets FAIL in the calling shell" "$got_fail" "1"
+  assert_eq "and returns non-zero" "$rc" "1"
+  assert_eq "and leaves NAME empty, not stale" "[$got_mutant]" "[]"
+  assert_contains "and names the expression" "$err" "FAIL - mutant_of: the expression changed nothing [sed: s/THIS TEXT"
+}
+
+test_mutant_of_gives_each_mutant_its_own_file() {
+  local a b
+  mutant_of a 's/^(MIGRATIONS_DIR = .*)$/\1 # mutant A/' || return
+  mutant_of b 's/^(MIGRATIONS_DIR = .*)$/\1 # mutant B/' || return
+  assert_eq "two calls get two paths" "different" \
+    "$([[ -n "$a" && "$a" != "$b" ]] && echo different || echo "the same [$a]")"
+  assert_eq "the first holds its own mutation and not the second's" "1 0" \
+    "$(grep -c 'mutant A' "$a") $(grep -c 'mutant B' "$a")"
+  assert_eq "and the second its own" "0 1" "$(grep -c 'mutant A' "$b") $(grep -c 'mutant B' "$b")"
 }
 
 # ---------------------------------------------------------------------------
@@ -98,8 +146,7 @@ commit_fixture() {
 # A throwaway repository holding exactly the four paths the lint reads, with
 # `origin/main` at its one commit. Echoes the fixture root.
 mkrepo() {
-  local d; d="$(mktmpd)"
-  FIXTURES+=("$d")
+  local d; d="$(mktemp -d "$FIXTURE_ROOT/repo.XXXXXX")"
   mkdir -p "$d/$MIGRATIONS_REL" "$d/Tests/TBDDaemonTests/Fixtures"
   cp "$ROOT/Sources/TBDDaemon/Database/Database.swift" "$d/Sources/TBDDaemon/Database/"
   cp "$ROOT/Sources/TBDDaemon/Database/SQLMigrationLoader.swift" "$d/Sources/TBDDaemon/Database/"
@@ -186,7 +233,7 @@ test_splitter_matches_the_shared_fixture() {
 # non-whitespace text is a statement".
 test_comment_only_trailer_rule_is_live() {
   local mutant got want
-  mutant="$(mutant_of 's/if strip_leading_noise\(current\):/if current.strip():/')"
+  mutant_of mutant 's/if strip_leading_noise\(current\):/if current.strip():/' || return
   got="$(python3 "$mutant" --emit-split "$SPLITTER_FIXTURES/comment_trailer.sql" 2>&1)"
   want="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), indent=2))' "$SPLITTER_FIXTURES/comment_trailer.expected.json")"
   if [[ "$got" != "$want" ]]; then
@@ -222,7 +269,7 @@ test_crlf_line_endings_are_rejected() {
   assert_contains "names the byte" "$RUN_OUT" "contains a carriage return (CR, 0x0D) on line 1"
   assert_contains "says how to fix it" "$RUN_OUT" "tr -d"
 
-  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  mutant_of mutant "$MUTANT_ENCODING" || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the encoding guard, CRLF sails through" "$RUN_RC" "$RUN_OUT"
 }
@@ -249,7 +296,7 @@ test_a_nul_byte_is_reported_rather_than_thrown() {
   # function instead of telling the author which file is wrong.
   assert_lacks "and does not die with a traceback" "$RUN_OUT" "Traceback"
 
-  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  mutant_of mutant "$MUTANT_ENCODING" || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the encoding guard, the NUL file is not even read" "$RUN_RC" "$RUN_OUT"
 }
@@ -267,7 +314,7 @@ test_a_utf8_bom_is_rejected() {
   # form, which is true and useless.
   assert_lacks "rather than blaming the statement" "$RUN_OUT" "not one of the permitted forms"
 
-  mutant="$(mutant_of "$MUTANT_ENCODING")"
+  mutant_of mutant "$MUTANT_ENCODING" || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the encoding guard, the BOM file is not even read" "$RUN_RC" "$RUN_OUT"
 }
@@ -284,7 +331,7 @@ test_filename_shape() {
   assert_nonzero "an un-timestamped filename fails" "$RUN_RC"
   assert_contains "names the offending file" "$RUN_OUT" "add_thing.sql: not a migration filename"
 
-  mutant="$(mutant_of '/\("filename-shape", check_filename_shape\),/d')"
+  mutant_of mutant '/\("filename-shape", check_filename_shape\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the filename guard, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -319,7 +366,7 @@ test_identifier_uniqueness() {
   assert_contains "names the identifier" "$RUN_OUT" "\`20260303000000_dup\` is claimed more than once"
   assert_contains "names both claimants" "$RUN_OUT" "inlineTimestampMigrations"
 
-  mutant="$(mutant_of '/\("identifier-uniqueness", check_identifier_uniqueness\),/d')"
+  mutant_of mutant '/\("identifier-uniqueness", check_identifier_uniqueness\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the uniqueness guard, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -339,7 +386,7 @@ test_statement_allowlist() {
   assert_contains "says it is not permitted" "$RUN_OUT" "not one of the permitted forms"
   assert_contains "quotes the statement" "$RUN_OUT" "CREATE VIEW lint_view AS SELECT 1;"
 
-  mutant="$(mutant_of '/\("statement-allowlist", check_statement_allowlist\),/d')"
+  mutant_of mutant '/\("statement-allowlist", check_statement_allowlist\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the allowlist, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -360,7 +407,7 @@ test_alter_table_rename_is_not_permitted() {
   assert_contains "and does not offer RENAME as an alternative" "$RUN_OUT" "ALTER TABLE ... ADD [COLUMN]"
   assert_lacks "the permitted list no longer names RENAME" "$RUN_OUT" "ALTER TABLE ... RENAME"
 
-  mutant="$(mutant_of '/\("statement-allowlist", check_statement_allowlist\),/d')"
+  mutant_of mutant '/\("statement-allowlist", check_statement_allowlist\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the allowlist, RENAME sails through" "$RUN_RC" "$RUN_OUT"
 }
@@ -393,7 +440,7 @@ test_idempotent_ddl_create() {
   assert_nonzero "CREATE TABLE without IF NOT EXISTS fails" "$RUN_RC"
   assert_contains "names the missing clause" "$RUN_OUT" '`CREATE TABLE` must carry `IF NOT EXISTS`'
 
-  mutant="$(mutant_of '/\("idempotent-ddl", check_idempotent_ddl\),/d')"
+  mutant_of mutant '/\("idempotent-ddl", check_idempotent_ddl\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the idempotency guard, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -434,7 +481,7 @@ test_history_frozen() {
   assert_contains "says history is frozen" "$RUN_OUT" "migration history is frozen"
   assert_contains "reports the git status letter" "$RUN_OUT" 'git reports `M`'
 
-  mutant="$(mutant_of '/\("history-frozen", check_history_frozen\),/d')"
+  mutant_of mutant '/\("history-frozen", check_history_frozen\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the frozen-history guard, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -503,7 +550,7 @@ test_renaming_a_shipped_migration_fails_and_names_both_paths() {
 
   # The blob leg is silent here — it only speaks about a path HEAD still holds
   # — so disabling the merge-base leg alone must flip the verdict.
-  mutant="$(mutant_of 's/problems = merge_base_edits\(facts\)/problems = []/')"
+  mutant_of mutant 's/problems = merge_base_edits\(facts\)/problems = []/' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the merge-base leg, the rename sails through" "$RUN_RC" "$RUN_OUT"
 }
@@ -525,7 +572,7 @@ test_migration_landing_on_main_after_the_branch_point_is_not_flagged() {
   run_lint "$SCRIPT" "$d"
   assert_ok "a branch cut before a main-side migration lints clean" "$RUN_RC" "$RUN_OUT"
 
-  mutant="$(mutant_of 's/base\.strip\(\), "HEAD"/facts.base_ref, "HEAD"/')"
+  mutant_of mutant 's/base\.strip\(\), "HEAD"/facts.base_ref, "HEAD"/' || return
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: a two-dot diff flags the same branch" "$RUN_RC"
   assert_contains "mutation: and blames the main-side migration" "$RUN_OUT" "20260310000000_on_main.sql"
@@ -557,7 +604,7 @@ test_editing_a_migration_that_is_on_main_but_not_at_the_merge_base() {
   assert_contains "says history is frozen" "$RUN_OUT" "migration history is frozen"
   assert_contains "names the base branch" "$RUN_OUT" "already on \`origin/main\`"
 
-  mutant="$(mutant_of '/problems\.extend\(frozen_blob_edits\(facts\)\)/d')"
+  mutant_of mutant '/problems\.extend\(frozen_blob_edits\(facts\)\)/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: with only the merge-base leg, the stale base lets the edit through" "$RUN_RC" "$RUN_OUT"
 }
@@ -599,7 +646,7 @@ test_chain_applies() {
   assert_nonzero "a migration that cannot apply fails" "$RUN_RC"
   assert_contains "reports SQLite's complaint" "$RUN_OUT" "no such table: no_such_table"
 
-  mutant="$(mutant_of '/\("chain-applies", check_chain_applies\),/d')"
+  mutant_of mutant '/\("chain-applies", check_chain_applies\),/d' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: without the chain replay, the same tree passes" "$RUN_RC" "$RUN_OUT"
 }
@@ -622,7 +669,7 @@ INSERT OR IGNORE INTO lint_child (id, parent) VALUES ('"'"'c'"'"', '"'"'nope'"'"
   assert_nonzero "a migration violating a foreign key fails" "$RUN_RC"
   assert_contains "reports SQLite's complaint" "$RUN_OUT" "FOREIGN KEY constraint failed"
 
-  mutant="$(mutant_of 's/PRAGMA foreign_keys=ON/PRAGMA foreign_keys=OFF/')"
+  mutant_of mutant 's/PRAGMA foreign_keys=ON/PRAGMA foreign_keys=OFF/' || return
   run_lint "$mutant" "$d"
   assert_ok "mutation: with foreign keys off, the same migration replays green" "$RUN_RC" "$RUN_OUT"
 }
@@ -642,7 +689,7 @@ INSERT OR REPLACE INTO lint_dparent (id) VALUES ('"'"'p'"'"');'
   run_lint "$SCRIPT" "$d"
   assert_ok "a migration legal only inside a transaction replays clean" "$RUN_RC" "$RUN_OUT"
 
-  mutant="$(mutant_of 's/"(BEGIN IMMEDIATE|COMMIT|ROLLBACK)"/"SELECT 1"/g')"
+  mutant_of mutant 's/"(BEGIN IMMEDIATE|COMMIT|ROLLBACK)"/"SELECT 1"/g' || return
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: replayed in autocommit, the same migration fails" "$RUN_RC"
   assert_contains "mutation: and SQLite says why" "$RUN_OUT" "FOREIGN KEY constraint failed"
@@ -659,7 +706,7 @@ test_add_column_skip_is_live() {
   run_lint "$SCRIPT" "$d"
   assert_ok "re-adding an existing column replays clean" "$RUN_RC" "$RUN_OUT"
 
-  mutant="$(mutant_of 's/if target and column_exists\(/if False and column_exists(/')"
+  mutant_of mutant 's/if target and column_exists\(/if False and column_exists(/' || return
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: without the ADD COLUMN skip, the same tree fails" "$RUN_RC"
   assert_contains "mutation: and SQLite says why" "$RUN_OUT" "duplicate column name"
@@ -694,7 +741,7 @@ test_untyped_add_column_skip_is_live() {
   run_lint "$SCRIPT" "$d"
   assert_ok "re-adding an existing column untyped replays clean" "$RUN_RC" "$RUN_OUT"
 
-  mutant="$(mutant_of 's/^COLUMN_TERMINATOR = .*$/COLUMN_TERMINATOR = r"(?=\\s|$)"/')"
+  mutant_of mutant 's/^COLUMN_TERMINATOR = .*$/COLUMN_TERMINATOR = r"(?=\\s|$)"/' || return
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: with whitespace-or-end the only terminator, the same tree fails" "$RUN_RC"
   assert_contains "mutation: and SQLite says why" "$RUN_OUT" "duplicate column name"
@@ -717,7 +764,7 @@ CREATE INDEX IF NOT EXISTS keyword_probe_foo ON keyword_probe (foo);'
   run_lint "$SCRIPT" "$d"
   assert_ok "a backtracked keyword capture does not skip the statement" "$RUN_RC" "$RUN_OUT"
 
-  mutant="$(mutant_of 's/if raw_column\.lower\(\) in KEYWORDS_NEVER_COLUMN_NAMES:/if False:/')"
+  mutant_of mutant 's/if raw_column\.lower\(\) in KEYWORDS_NEVER_COLUMN_NAMES:/if False:/' || return
   run_lint "$mutant" "$d"
   assert_nonzero "mutation: believing the keyword capture, the same tree fails" "$RUN_RC"
   assert_contains "mutation: and SQLite says why" "$RUN_OUT" "no such column: foo"

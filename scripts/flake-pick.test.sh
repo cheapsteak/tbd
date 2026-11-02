@@ -47,8 +47,10 @@ mutant_of() {
   name="$(basename "$file")"
   sed -E "$expr" "$file" > "$dir/$name"
   if cmp -s "$file" "$dir/$name"; then
+    # A file, not FAIL=1: callers run this in a command substitution, where
+    # an assignment dies with the subshell. The runner reads the file at the end.
     echo "FAIL - mutation [$expr] did not change $name" >&2
-    FAIL=1
+    echo "$expr" >> "$SCRATCH/unchanged"
   fi
   printf '%s' "$dir"
 }
@@ -572,5 +574,6 @@ for t in $(declare -F | awk '{print $3}' | grep '^test_' | sort); do
   echo "== $t"
   "$t"
 done
+if [[ -s "$SCRATCH/unchanged" ]]; then echo "FAIL - a mutation did not change its target"; FAIL=1; fi
 if [[ $FAIL -eq 0 ]]; then echo "ALL PASS"; else echo "FAILURES"; fi
 exit $FAIL
