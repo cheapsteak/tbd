@@ -118,6 +118,14 @@ struct SidebarRowHighlightTests {
         #expect(hoveredBesideSelection == .both)
     }
 
+    /// Only a rounded highlight reads its neighbours' selection, so only it
+    /// redraws when a neighbour's changes; the shipped square one does not.
+    @Test func onlyARoundedHighlightFollowsItsNeighbours() {
+        #expect(!SidebarRowHighlight.followsNeighbours(cornerRadius: 0))
+        #expect(SidebarRowHighlight.followsNeighbours(cornerRadius: 6))
+        #expect(!SidebarRowHighlight.followsNeighbours(), "The shipped radius is 0")
+    }
+
     /// The path rounds exactly the ends it is asked to, with the top at
     /// `minY` in a flipped row view; at radius 0 it is the plain rectangle.
     @Test func pathRoundsOnlyTheNamedEnds() {

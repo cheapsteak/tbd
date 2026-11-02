@@ -79,14 +79,21 @@ final class SidebarRowView: NSTableRowView {
     /// white as it would on the emphasized system selection.
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
-    /// A selected row's highlight joins its selected neighbours', and the
-    /// table does not redraw a row view when they change.
+    /// A rounded selection joins its selected neighbours', and the table
+    /// does not redraw a row view when they change, so the row redraws
+    /// itself. A square highlight is the same shape beside any row
+    /// (`SidebarRowHighlight.followsNeighbours(cornerRadius:)`), so it does
+    /// not.
     override var isPreviousRowSelected: Bool {
-        didSet { if isPreviousRowSelected != oldValue { needsDisplay = true } }
+        didSet {
+            if isPreviousRowSelected != oldValue, SidebarRowHighlight.followsNeighbours() { needsDisplay = true }
+        }
     }
 
     override var isNextRowSelected: Bool {
-        didSet { if isNextRowSelected != oldValue { needsDisplay = true } }
+        didSet {
+            if isNextRowSelected != oldValue, SidebarRowHighlight.followsNeighbours() { needsDisplay = true }
+        }
     }
 
     /// The light and dark appearances draw at different alphas.

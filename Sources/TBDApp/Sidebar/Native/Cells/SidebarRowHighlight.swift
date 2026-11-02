@@ -79,6 +79,15 @@ enum SidebarRowHighlight {
         static let both: RoundedEnds = [.top, .bottom]
     }
 
+    /// Whether a row's highlight shape reads its neighbours' selection: only
+    /// a rounded one does, rounding just the ends no selected neighbour
+    /// adjoins (`roundedEnds(isSelected:isPreviousRowSelected:isNextRowSelected:)`).
+    /// A square highlight is the same shape beside any row, so a change to a
+    /// neighbour's selection need not redraw it.
+    static func followsNeighbours(cornerRadius: CGFloat = SidebarRowHighlight.cornerRadius) -> Bool {
+        cornerRadius > 0
+    }
+
     /// Which ends of a row's highlight round. A selected row merges with its
     /// selected neighbours, as a source list's selection does: it rounds only
     /// the ends no selected row adjoins, so a run of selected rows is one band
