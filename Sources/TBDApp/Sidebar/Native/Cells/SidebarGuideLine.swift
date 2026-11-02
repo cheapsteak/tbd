@@ -5,8 +5,8 @@ import AppKit
 /// it is a quiet hairline. The lines of the group the pointer or the
 /// selection is in — the *active* lines — draw at full strength, so the group
 /// you are in stands out. On a row that draws a highlight, every line takes
-/// the highlight's accent colour instead of grey, so a neutral line never
-/// muddies the tint.
+/// the highlight's accent colour, blended toward white, instead of grey, so a
+/// neutral line never muddies the tint.
 ///
 /// Which lines are active is the tree's to say
 /// (`SidebarTree.activeGuideAncestor(of:)`); how each one draws is here,
@@ -17,25 +17,25 @@ enum SidebarGuideLine {
 
     /// The alpha a line draws at in each state. It multiplies the colour's
     /// own alpha: the secondary label colour is translucent already, the
-    /// accent colour opaque.
+    /// highlight tint opaque.
     struct Alphas: Equatable, Sendable {
         /// A line at rest, in the secondary label colour.
         var rest: CGFloat
         /// An active line, in the secondary label colour.
         var active: CGFloat
-        /// A line at rest on a highlighted row, in the accent colour.
+        /// A line at rest on a highlighted row, in the highlight tint.
         var restOnHighlight: CGFloat
-        /// An active line on a highlighted row, in the accent colour.
+        /// An active line on a highlighted row, in the highlight tint.
         var activeOnHighlight: CGFloat
 
         /// No lines: a row draws no line whose alpha is 0.
         static let none = Alphas(rest: 0, active: 0, restOnHighlight: 0, activeOnHighlight: 0)
     }
 
-    /// The lines' strengths. Active is the SwiftUI row's
+    /// The lines' strengths. Active is close to the SwiftUI row's
     /// `Color.secondary.opacity(0.25)`, and rest about half of it. Set this
     /// to `.none` to see the sidebar without guide lines.
-    static let alphas = Alphas(rest: 0.12, active: 0.25, restOnHighlight: 0.30, activeOnHighlight: 0.55)
+    static let alphas = Alphas(rest: 0.12, active: 0.24, restOnHighlight: 0.30, activeOnHighlight: 0.55)
 
     // MARK: Width
 
@@ -52,15 +52,52 @@ enum SidebarGuideLine {
 
     // MARK: Style
 
+    /// How far a highlighted row's line is blended toward white, per
+    /// appearance. On a highlighted row the line is the accent colour blended
+    /// toward white, so it reads as a pale stripe of the highlight's own hue
+    /// rather than a saturated accent line. 0 is the plain accent colour, 1
+    /// is white.
+    static let highlightWhiteMix: (light: CGFloat, dark: CGFloat) = (light: 0.53, dark: 0.53)
+
+    /// `components` mixed `fraction` of the way toward white, per gamma-encoded
+    /// component: `c * (1 - fraction) + fraction`.
+    static func mixedTowardWhite(_ components: (r: CGFloat, g: CGFloat, b: CGFloat),
+                                 fraction: CGFloat) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+        (r: components.r * (1 - fraction) + fraction,
+         g: components.g * (1 - fraction) + fraction,
+         b: components.b * (1 - fraction) + fraction)
+    }
+
+    /// The accent colour as `appearance` resolves it, blended toward white by
+    /// the appearance's mix in Display P3.
+    static func highlightTintColor(appearance: NSAppearance) -> NSColor {
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let fraction = isDark ? highlightWhiteMix.dark : highlightWhiteMix.light
+        var result = NSColor.controlAccentColor
+        appearance.performAsCurrentDrawingAppearance {
+            let accent = NSColor.controlAccentColor
+            if let p3 = accent.usingColorSpace(.displayP3) {
+                let mixed = mixedTowardWhite((r: p3.redComponent, g: p3.greenComponent, b: p3.blueComponent),
+                                             fraction: fraction)
+                result = NSColor(displayP3Red: mixed.r, green: mixed.g, blue: mixed.b, alpha: p3.alphaComponent)
+            } else {
+                result = accent.blended(withFraction: fraction, of: .white) ?? accent
+            }
+        }
+        return result
+    }
+
     /// The colour a line draws in.
     enum ColorRole: Equatable, Sendable {
         case secondaryLabel
-        case accent
+        /// The accent colour blended toward white (`highlightWhiteMix`).
+        case highlightTint
 
-        var nsColor: NSColor {
+        /// The colour in `appearance`.
+        func nsColor(appearance: NSAppearance) -> NSColor {
             switch self {
             case .secondaryLabel: .secondaryLabelColor
-            case .accent: .controlAccentColor
+            case .highlightTint: SidebarGuideLine.highlightTintColor(appearance: appearance)
             }
         }
     }
@@ -83,8 +120,8 @@ enum SidebarGuideLine {
         switch (isActive, isOnHighlight) {
         case (false, false): return Style(color: .secondaryLabel, alpha: alphas.rest, width: width)
         case (true, false): return Style(color: .secondaryLabel, alpha: alphas.active, width: width)
-        case (false, true): return Style(color: .accent, alpha: alphas.restOnHighlight, width: width)
-        case (true, true): return Style(color: .accent, alpha: alphas.activeOnHighlight, width: width)
+        case (false, true): return Style(color: .highlightTint, alpha: alphas.restOnHighlight, width: width)
+        case (true, true): return Style(color: .highlightTint, alpha: alphas.activeOnHighlight, width: width)
         }
     }
 

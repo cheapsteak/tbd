@@ -12,7 +12,7 @@ import TestSupport
 // `AppState` and through the outline's `selectRowIndexes`, as a click lands.
 
 /// The native sidebar's guide lines: hairlines at rest, the focused group's
-/// line at full strength, and the accent colour over a highlight.
+/// line at full strength, and the highlight tint over a highlight.
 @MainActor
 @Suite("Sidebar guide lines")
 struct SidebarGuideLineTests {
@@ -25,16 +25,18 @@ struct SidebarGuideLineTests {
 
     /// Every strength and width the lines draw with.
     @Test func shippedValues() {
-        let expected = SidebarGuideLine.Alphas(rest: 0.12, active: 0.25, restOnHighlight: 0.30,
+        let expected = SidebarGuideLine.Alphas(rest: 0.12, active: 0.24, restOnHighlight: 0.30,
                                                activeOnHighlight: 0.55)
         #expect(SidebarGuideLine.alphas == expected)
+        #expect(SidebarGuideLine.highlightWhiteMix.light == 0.53)
+        #expect(SidebarGuideLine.highlightWhiteMix.dark == 0.53)
         #expect(SidebarGuideLine.restPixelWidth == 1)
         #expect(SidebarGuideLine.activeWidth == 1)
         #expect(SidebarGuideLine.defaultBackingScale == 2)
     }
 
     /// Rest and active, on a plain row and on a highlighted one: grey, then
-    /// the accent colour, each at its own alpha; a hairline at rest, a point
+    /// the highlight tint, each at its own alpha; a hairline at rest, a point
     /// when active.
     @Test func styleForEachState() {
         let states: [(active: Bool, highlight: Bool)] = [(false, false), (true, false), (false, true), (true, true)]
@@ -43,9 +45,9 @@ struct SidebarGuideLineTests {
         }
         let expectedRetina = [
             Style(color: .secondaryLabel, alpha: 0.12, width: 0.5),
-            Style(color: .secondaryLabel, alpha: 0.25, width: 1),
-            Style(color: .accent, alpha: 0.30, width: 0.5),
-            Style(color: .accent, alpha: 0.55, width: 1),
+            Style(color: .secondaryLabel, alpha: 0.24, width: 1),
+            Style(color: .highlightTint, alpha: 0.30, width: 0.5),
+            Style(color: .highlightTint, alpha: 0.55, width: 1),
         ]
         #expect(retina == expectedRetina)
 
@@ -55,11 +57,33 @@ struct SidebarGuideLineTests {
         }
         let expectedStandard = [
             Style(color: .secondaryLabel, alpha: 0.12, width: 1),
-            Style(color: .secondaryLabel, alpha: 0.25, width: 1),
-            Style(color: .accent, alpha: 0.30, width: 1),
-            Style(color: .accent, alpha: 0.55, width: 1),
+            Style(color: .secondaryLabel, alpha: 0.24, width: 1),
+            Style(color: .highlightTint, alpha: 0.30, width: 1),
+            Style(color: .highlightTint, alpha: 0.55, width: 1),
         ]
         #expect(standard == expectedStandard)
+    }
+
+    /// The white mix is `c * (1 - f) + f` per component: 0 keeps the input,
+    /// 1 is white.
+    @Test func mixTowardWhite() {
+        let input = (r: CGFloat(37) / 255, g: CGFloat(127) / 255, b: CGFloat(1))
+        let mixed = SidebarGuideLine.mixedTowardWhite(input, fraction: 0.53)
+        let expectedR = CGFloat(37) / 255 * 0.47 + 0.53
+        let expectedG = CGFloat(127) / 255 * 0.47 + 0.53
+        #expect(abs(mixed.r - expectedR) < 1e-9)
+        #expect(abs(mixed.g - expectedG) < 1e-9)
+        #expect(abs(mixed.b - 1) < 1e-9)
+
+        let none = SidebarGuideLine.mixedTowardWhite(input, fraction: 0)
+        #expect(abs(none.r - input.r) < 1e-9)
+        #expect(abs(none.g - input.g) < 1e-9)
+        #expect(abs(none.b - input.b) < 1e-9)
+
+        let white = SidebarGuideLine.mixedTowardWhite(input, fraction: 1)
+        #expect(abs(white.r - 1) < 1e-9)
+        #expect(abs(white.g - 1) < 1e-9)
+        #expect(abs(white.b - 1) < 1e-9)
     }
 
     /// A resting line is one device pixel wide at each scale, and a scale no
@@ -152,15 +176,15 @@ struct SidebarGuideLineTests {
         #expect(Self.styles(rowView) == grey, "A plain row draws grey lines")
 
         rowView.configuration.isHovered = true
-        #expect(Self.styles(rowView) == accent, "A hovered row draws accent lines")
+        #expect(Self.styles(rowView) == accent, "A hovered row draws tinted lines")
 
         rowView.configuration.isHovered = false
         rowView.configuration.isSelectedByModel = true
-        #expect(Self.styles(rowView) == accent, "A row its model selects draws accent lines")
+        #expect(Self.styles(rowView) == accent, "A row its model selects draws tinted lines")
 
         rowView.configuration.isSelectedByModel = false
         rowView.isSelected = true
-        #expect(Self.styles(rowView) == accent, "A row the list selects draws accent lines")
+        #expect(Self.styles(rowView) == accent, "A row the list selects draws tinted lines")
 
         rowView.isSelected = false
         rowView.configuration.isNestTarget = true
@@ -408,13 +432,13 @@ struct SidebarGuideLineTests {
         let parentGroup: Set<SidebarNodeID> = [.worktree(f.parent.id)]
         #expect(h.controller.activeGuideAncestors == parentGroup, h.evidence(names))
 
-        // The selected row draws its line in the accent colour; its sibling
+        // The selected row draws its line in the highlight tint; its sibling
         // keeps grey.
         let secondView = try #require(h.rowView(.worktree(f.second.id), make: true) as? SidebarRowView)
         let firstView = try #require(h.rowView(.worktree(f.first.id), make: true) as? SidebarRowView)
         let secondColors = secondView.guideSegments(backingScale: 2).map(\.style.color)
         let firstColors = firstView.guideSegments(backingScale: 2).map(\.style.color)
-        let accent: [SidebarGuideLine.ColorRole] = [.accent]
+        let accent: [SidebarGuideLine.ColorRole] = [.highlightTint]
         let grey: [SidebarGuideLine.ColorRole] = [.secondaryLabel]
         #expect(secondColors == accent, h.rowViewEvidence(.worktree(f.second.id), captured: secondView, names))
         #expect(firstColors == grey, h.rowViewEvidence(.worktree(f.first.id), captured: firstView, names))

@@ -208,7 +208,7 @@ final class SidebarRowView: NSTableRowView {
         for segment in segments {
             context.saveGState()
             context.setAlpha(segment.style.alpha)
-            segment.style.color.nsColor.setFill()
+            segment.style.color.nsColor(appearance: effectiveAppearance).setFill()
             segment.rect.fill()
             context.restoreGState()
         }
