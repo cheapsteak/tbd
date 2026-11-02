@@ -291,11 +291,16 @@ public actor ProgramStatusStore {
 
         // 5. Re-read state after the await (actor reentrancy).
         var current: Held
+        // Whether this report starts what the store holds for the incarnation:
+        // nothing was held for it, so if it installs state it is that
+        // incarnation's first held report.
+        let startsHolding: Bool
         if let existing = held[terminalID], existing.incarnationID == incarnationID {
             if inbound.observedAt < existing.lastObservedAt {
                 return reject(terminalID, "stale")
             }
             current = existing
+            startsHolding = false
         } else {
             // Nothing held for this incarnation, as after a daemon restart or
             // a bare `clear`, so there is no held report to be stale against.
@@ -318,6 +323,7 @@ public actor ProgramStatusStore {
             current = Held(
                 incarnationID: incarnationID, main: nil, tasks: [],
                 lastObservedAt: inbound.observedAt)
+            startsHolding = true
         }
 
         // 6. Apply.
@@ -349,6 +355,17 @@ public actor ProgramStatusStore {
         } else {
             held[terminalID] = current
             publishCurrent(terminalID: terminalID)
+            // The first report that leaves the store holding something for
+            // this incarnation: proof its startup handshake turned reporting
+            // on. A `clear` holds nothing, so it never records this. Kept at
+            // `.notice`, which macOS persists, unlike the `.debug` lines
+            // around it. It fires again only once the store holds nothing for
+            // the incarnation: after a daemon restart, or after a `clear`
+            // emptied what was held.
+            if startsHolding {
+                programStatusLog.notice(
+                    "program-status first report terminal=\(terminalID.uuidString, privacy: .public) incarnation=\(incarnationID?.uuidString ?? "none", privacy: .public)")
+            }
         }
 
         // 7. The activity columns. A bare `clear` ends the agent's reporting:

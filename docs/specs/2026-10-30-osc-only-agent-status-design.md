@@ -237,12 +237,43 @@ The mark's tooltip names the cause from the terminal's transport:
 
 - tmux – "The tmux transport doesn't carry agent status. Status needs the
   pty-holder transport."
-- holder – "This session isn't reporting status. Status needs Claude Code
-  2.1.295 or later, or Codex 0.163.0 or later. A session started before this
-  version of TBD reports after it is relaunched."
+- holder – "This session hasn't sent its status yet. An idle session sends
+  it on its next turn. If the mark stays after a turn, relaunch the session:
+  an agent turns status on only when it starts, and needs Claude Code 2.1.295
+  or later, or Codex 0.163.0 or later."
+
+The holder tooltip covers two causes the column cannot tell apart: an idle
+agent, which reports only on change and so says nothing until its next turn,
+and an agent whose startup handshake left reporting off, which stays silent
+until it is relaunched.
 
 The mark clears on the first accepted report. Shell terminals never show it.
 It is new UI beside the existing badges and needs no flag.
+
+An agent decides once, at startup, whether to report: it sends the probe and
+turns reporting on only if the answer arrives before its DA1 reply. A failed
+handshake leaves the session silent for its whole life, so TBD records the
+handshake and its outcome at `.notice`, all in the `programStatus` category:
+
+- **daemon** (subsystem `com.tbd.daemon`) – the holder emulator records each
+  probe it answers, with whether it saw the child from the start and how long
+  after it was adopted the probe came, and each probe it skips because it
+  arrived inside a handback preamble.
+- **app** (subsystem `com.tbd.app`) – the terminal view records each probe it
+  answers, and each it skips because its gate is off or a snapshot replay is
+  in progress.
+- **store** (subsystem `com.tbd.daemon`) – the store records the first report
+  that leaves it holding state for an incarnation. A `clear` holds nothing, so
+  it is never recorded. Once the store holds nothing for a session, that
+  session's next such report is recorded again: so it records every reporting
+  session after a daemon restart, which `tbd update` causes, and a session
+  whose `clear` emptied what it held.
+
+The probe records come about once per session start. They are notices because
+macOS keeps `.notice` by default and discards debug lines, and without a kept
+record a failed handshake leaves nothing to read: sessions woken together by
+`tbd update`, running an agent new enough to report under a TBD that answered
+the probe, stayed silent through two days of turns and left no trace of why.
 
 Every other consumer of the column sees the same `.unknown`. The delivery
 verifier reports a send to such a session as undetermined rather than

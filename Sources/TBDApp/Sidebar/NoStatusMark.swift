@@ -20,7 +20,7 @@ struct NoStatusSighting: Equatable, Sendable {
 /// report moves the column off `.unknown` and clears it. A terminal the app no
 /// longer lists is gone, and an exit-stamped row is parked, so neither shows
 /// it. Nor does a `.unknown` that came after this incarnation's agent
-/// reported, which the version tooltip would misexplain: one stamped
+/// reported, which the holder tooltip would misexplain: one stamped
 /// `.programStatus` is the agent's own bare `clear` (Claude Code restoring
 /// terminal modes around an external editor, or a clean Codex exit), and one
 /// stamped `.processLiveness` is a child exit, an agent whose process is gone.
@@ -39,11 +39,14 @@ enum NoStatusMark {
     /// The tooltip for a session on the tmux transport, which never reports.
     static let tmuxHelp =
         "The tmux transport doesn't carry agent status. Status needs the pty-holder transport."
-    /// The tooltip for a holder session that has not reported.
+    /// The tooltip for a holder session that has not reported. Two causes
+    /// look alike here: an idle agent, which reports only on change and so
+    /// sends nothing until its next turn, and an agent whose startup handshake
+    /// left status off, which stays silent until it is relaunched.
     static let holderHelp =
-        "This session isn't reporting status. Status needs Claude Code 2.1.295 or later, "
-        + "or Codex 0.163.0 or later. A session started before this version of TBD reports "
-        + "after it is relaunched."
+        "This session hasn't sent its status yet. An idle session sends it on its next turn. "
+        + "If the mark stays after a turn, relaunch the session: an agent turns status on "
+        + "only when it starts, and needs Claude Code 2.1.295 or later, or Codex 0.163.0 or later."
 
     /// Whether `terminal` is the kind of row the mark is for: an agent that
     /// reports (Claude or Codex), not parked, with no state in its column
@@ -57,7 +60,7 @@ enum NoStatusMark {
     }
 
     /// The `.unknown` provenances that explain themselves, and that the
-    /// version tooltip would misexplain: the agent's own bare `clear`, and
+    /// holder tooltip would misexplain: the agent's own bare `clear`, and
     /// its process's exit.
     private static let explainedSources: Set<FactSource?> = [.programStatus, .processLiveness]
 
