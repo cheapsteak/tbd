@@ -19,6 +19,7 @@ struct GCKeepListRowTests {
         #expect(text.contains("your file"))
         #expect(text.contains("2 pattern"))
         #expect(!text.contains("shipped"))
+        #expect(!text.contains("Customize"))
     }
 
     // Discriminates: the reason is shown and the skip consequence is stated.
@@ -26,6 +27,7 @@ struct GCKeepListRowTests {
         let text = GCKeepListRow.caption(for: .unreadable(reason: "Permission denied"))
         #expect(text.contains("Permission denied"))
         #expect(text.contains("skipped"))
+        #expect(!text.contains("Customize"))
     }
 
     // Discriminates: true only for the absent-file state; inverting or always-true fails.
