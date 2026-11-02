@@ -22,8 +22,4 @@ struct MainWindowCommandTests {
         #expect(MainWindowCommand.toggleChanges.key.character == "e")
         #expect(MainWindowCommand.toggleChanges.modifiers == changesModifiers)
     }
-
-    @Test func settingsHelpNamesTheNextLaunch() {
-        #expect(GeneralSettingsTab.appKitSidebarHelp.contains("next launch"))
-    }
 }

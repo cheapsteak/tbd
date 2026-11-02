@@ -48,8 +48,6 @@ struct GeneralSettingsTab: View {
     private var sidebarWorkflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
     @AppStorage(AppState.sidebarCollapseEndedSessionsKey)
     private var sidebarCollapseEndedSessions: Bool = AppState.sidebarCollapseEndedSessionsDefault
-    @AppStorage(AppState.appKitSidebarKey)
-    private var useAppKitSidebar: Bool = AppState.appKitSidebarDefault
     @AppStorage(QueuedPromptComposer.sendImmediatelyKey)
     private var sendFirstMessageImmediately: Bool = QueuedPromptComposer.sendImmediatelyDefault
     @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
@@ -283,7 +281,6 @@ struct GeneralSettingsTab: View {
                 sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
-                appKitSidebarToggle
                 updateModePicker
             }
         }
@@ -359,20 +356,6 @@ struct GeneralSettingsTab: View {
 
     static let holderClaimReconcileHelp = "Lets the daemon take back a session the app has stopped showing "
         + "when the handback to the daemon was lost, and is off by default while it soaks."
-
-    /// Native sidebar opt-in. App-side `UserDefaults` through `@AppStorage`,
-    /// the same key `SidebarView` reads, so flipping it swaps the sidebar
-    /// without a restart. Off by default (soaking). See
-    /// `AppState.appKitSidebarKey`.
-    private var appKitSidebarToggle: some View {
-        Toggle("Native sidebar with drag to nest (experimental)", isOn: $useAppKitSidebar)
-            .help(Self.appKitSidebarHelp)
-    }
-
-    static let appKitSidebarHelp = "Draws the sidebar's list with native AppKit rows instead of SwiftUI, "
-        + "the foundation for dragging worktrees to nest, un-nest and reorder them. "
-        + "Off by default while it soaks. "
-        + "The window's sidebar split and toolbar follow this setting at the next launch."
 
     /// Moves the sessions that already exist onto the holder. Sits beside the
     /// toggle because that is where someone who just turned it on looks for what
