@@ -374,9 +374,7 @@ user's work.
 Terminals that are not OSC-authoritative are drawn from the activity column,
 with the working, idle and awaiting-input badges. A Claude or Codex terminal
 whose column reads `unknown` — one on the tmux transport, or one whose agent
-has not reported from its current incarnation — shows a "no status" mark
-beside the badges once the app has seen it that way for 15 seconds, with a
-tooltip naming the cause; see
+has not reported from its current incarnation — draws none of them; see
 [`2026-10-30-osc-only-agent-status-design.md`](2026-10-30-osc-only-agent-status-design.md),
 "Sessions that cannot report".
 

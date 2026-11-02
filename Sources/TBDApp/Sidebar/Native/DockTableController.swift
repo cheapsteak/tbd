@@ -837,17 +837,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         return SidebarPlusTarget(repoID: repoID, parent: worktreeID)
     }
 
-    /// The text AppKit asks for when the pointer rests on a cell's badge,
-    /// no-status mark or cross-repo suffix: the outline's own words.
+    /// The text AppKit asks for when the pointer rests on a cell's badge or
+    /// cross-repo suffix: the outline's own words.
     private func helpText(_ target: SidebarToolTips.Target, for id: SidebarNodeID) -> String? {
         let kind = rows.first { $0.id == id }?.kind
         switch (target, id, kind) {
         case (.suffix, .worktree(let worktreeID), .worktree(let model)?):
             guard let indicator = model.suffix else { return nil }
             return SidebarOutlineController.worktreeSuffixHelp(worktreeID, indicator: indicator, appState: appState)
-        case (.noStatusMark, .worktree(let worktreeID), _):
-            return NoStatusMark.rowHelp(
-                terminals: appState.terminals[worktreeID] ?? [], sightings: appState.noStatusSightings)
         case (.crossRepo, .worktree(let worktreeID), _):
             return appState.findWorktree(id: worktreeID)?.repoID.flatMap { appState.repoName(for: $0) }
         case (.suffix, .remoteSession(let sessionID), .remoteSession(let model)?):

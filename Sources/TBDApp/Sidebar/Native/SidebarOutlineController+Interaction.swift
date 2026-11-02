@@ -186,9 +186,6 @@ extension SidebarOutlineController: SidebarMenuHost {
         case (.suffix, .worktree(let worktreeID)):
             guard case .worktree(let model)? = tree.node(id)?.kind, let indicator = model.suffix else { return nil }
             return Self.worktreeSuffixHelp(worktreeID, indicator: indicator, appState: appState)
-        case (.noStatusMark, .worktree(let worktreeID)):
-            return NoStatusMark.rowHelp(
-                terminals: appState.terminals[worktreeID] ?? [], sightings: appState.noStatusSightings)
         case (.crossRepo, .worktree(let worktreeID)):
             return appState.findWorktree(id: worktreeID)?.repoID.flatMap { appState.repoName(for: $0) }
         case (.suffix, .remoteSession(let sessionID)):

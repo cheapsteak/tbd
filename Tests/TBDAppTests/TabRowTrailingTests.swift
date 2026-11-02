@@ -52,8 +52,7 @@ struct TabRowTrailingTests {
     }
 
     /// A Claude terminal: Claude by kind, with a session to resume, so its tab
-    /// has a transcript (`Terminal.isClaudeResumable`). Idle, so the no-status
-    /// mark starts no grace timer for it.
+    /// has a transcript (`Terminal.isClaudeResumable`).
     private static func claudeTerminal(worktreeID: UUID) -> TBDShared.Terminal {
         TBDShared.Terminal(
             id: UUID(), worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",

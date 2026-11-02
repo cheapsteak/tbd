@@ -718,7 +718,7 @@ The behaviors a rewrite most easily loses:
    while the app runs dims within 60 s, or when the app is activated), provider
    health suffixes, the selected provider's background.
 8. Every input a row draws refreshes it: status suffix, typing dots, PR glyph,
-   unread bold, subtitles, the dev-server dot, the no-status mark.
+   unread bold, subtitles, the dev-server dot.
 9. Rows that take no selection, on a live `NSOutlineView`: ↓ and ↑ cross a
    section header without stopping at it, and a real click on a header runs
    its action through the outline's `action`, which the offscreen tests drive

@@ -563,6 +563,34 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityStateOrderObservedAt == exitedAt)
 }
 
+/// The same fact pushed as a delta: a newer `terminalActivityUpdated` that
+/// repeats the cached `.unknown` under another source — a child exit over a
+/// never-reported session — is applied whole, source and stamps included.
+@MainActor
+@Test func appState_newerDeltaChangingOnlyTheSourceReplacesTheProvenance() throws {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    let resetAt = Date(timeIntervalSinceReferenceDate: 20)
+    let exitedAt = Date(timeIntervalSinceReferenceDate: 30)
+    state.terminals = [worktreeID: [TBDShared.Terminal(
+        id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+        kind: .claude, activityState: .unknown, activityStateSource: .derived,
+        activityStateObservedAt: resetAt, activityStateOrderObservedAt: resetAt,
+        transport: .holder)]]
+
+    state.handleDelta(.terminalActivityUpdated(TerminalActivityDelta(
+        terminalID: terminalID, worktreeID: worktreeID, activityState: .unknown,
+        activityStateSource: .processLiveness,
+        activityStateObservedAt: exitedAt, activityStateOrderObservedAt: exitedAt)))
+
+    let terminal = try #require(state.terminals[worktreeID]?.first)
+    #expect(terminal.activityState == .unknown)
+    #expect(terminal.activityStateSource == .processLiveness)
+    #expect(terminal.activityStateObservedAt == exitedAt)
+    #expect(terminal.activityStateOrderObservedAt == exitedAt)
+}
+
 @MainActor
 @Test func appState_activityDeltaUsesOrderingWatermarkInsteadOfTransitionTime() throws {
     let state = AppState()

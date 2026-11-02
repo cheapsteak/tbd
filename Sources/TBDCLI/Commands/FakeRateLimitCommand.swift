@@ -8,6 +8,12 @@ import TBDShared
 /// Run inside a TBD-managed Claude pane (TBD_TERMINAL_ID set) with the
 /// Settings toggle ON, then watch the pane get `continue` typed into it
 /// ~1-2 minutes after the fake reset.
+///
+/// It must run inside the tab it targets. The daemon treats both reports as
+/// hook events and ignores one from a process it can prove runs outside the
+/// tab it names (`RPCRouter+HookCallerGuard.swift`), so pointing `--terminal`
+/// at another tab does not work: a usage limit is acknowledged and does
+/// nothing, and a transient API error reports `handled=false`.
 struct FakeRateLimitCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fake-rate-limit",
@@ -18,7 +24,9 @@ struct FakeRateLimitCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Seconds until the fake reset (default 60)")
     var resetsIn: Int = 60
 
-    @Option(name: .long, help: "Terminal ID (defaults to TBD_TERMINAL_ID)")
+    @Option(
+        name: .long,
+        help: "Terminal ID (defaults to TBD_TERMINAL_ID); must be the tab this runs inside, or the daemon ignores the report")
     var terminal: String?
 
     @Flag(

@@ -206,6 +206,8 @@ struct GeneralSettingsTab: View {
                 ForEach(GCCollector.allCases, id: \.self) { collector in
                     gcCollectorToggle(collector)
                 }
+
+                GCKeepListRow()
             }
 
             Section("Claude") {

@@ -686,7 +686,7 @@ struct SidebarDropPolicyTests {
                     label: String? = nil, placeholder: Bool = false) -> SidebarNode {
         var model = WorktreeRowModel(
             name: "row", leading: nil, isNameBold: false, subtitles: [], suffix: nil,
-            showsNoStatusMark: false, showsDevServerDot: false, crossRepoLabel: label, homeRepoID: home,
+            showsDevServerDot: false, crossRepoLabel: label, homeRepoID: home,
             isPinned: false, depth: 0, isDimmed: false, isInHiddenSection: false, isMain: main,
             heightClass: .single)
         model.isPlaceholder = placeholder

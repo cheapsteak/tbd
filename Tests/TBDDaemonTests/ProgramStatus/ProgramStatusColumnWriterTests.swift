@@ -259,8 +259,8 @@ import TestSupport
 
     /// A session whose agent never reported already reads `.unknown`, with a
     /// wake's `.derived`. Its child exit changes only the source, and that is
-    /// still written and announced: the app hides the no-status mark for an
-    /// agent whose process is gone, and it learns that from the delta.
+    /// still written and announced: the source records that the agent's
+    /// process is gone, and the app's cached row learns it from the delta.
     @Test func childExitOverANeverReportedRowWritesAndAnnouncesTheSource() async throws {
         let h = try await Harness.make()
         let terminal = try await h.terminal()

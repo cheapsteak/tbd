@@ -21,43 +21,6 @@ struct PromptRailJumpTests {
     /// probe band of the 600pt viewport.
     nonisolated private static func tallReplies(_ index: Int) -> Int { 12 + (index * 5) % 9 }
 
-    /// The scene over `items` with the bounds observer running, primed parked
-    /// at the end, as a pane opens on a long session.
-    ///
-    /// `prime(nodes:)` settles with the clip at the top, which realizes and
-    /// measures the first screen of rows. Here every round scrolls to the end
-    /// before it settles instead. The autohiding scroller's arrival after the
-    /// first round changes the column width, and the next round's width change
-    /// drops every height measured before it, so afterwards only the bottom
-    /// window and the rows realized at the end are exact; rows far above carry
-    /// estimates, which is what a jump has to pin against.
-    ///
-    /// Throws first if AppKit's own row-height estimation is on in this
-    /// process: AppKit would then move the clip itself, and every pin and
-    /// hold assertion here would fail for that reason instead of their own.
-    private static func primedAtEnd(items: [TranscriptItem], appState: AppState) throws -> TableTranscriptScene {
-        let scene = TableTranscriptScene(items: items, appState: appState)
-        scene.coordinator.startObservingScroll()
-        let nodes = transcriptRenderNodes(from: items)
-        for _ in 0..<4 {
-            let widthAtUpdate = scene.tableView.bounds.width
-            // Keep the clip at the end while the update reloads the table, so
-            // whatever realizes is at the end.
-            scene.coordinator.scrollToEnd(animated: false)
-            scene.coordinator.update(
-                nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
-            scene.tableView.tile()
-            scene.coordinator.scrollToEnd(animated: false)
-            scene.settle()
-            if scene.tableView.bounds.width == widthAtUpdate {
-                try scene.requireDelegateRowHeights()
-                return scene
-            }
-        }
-        Issue.record("the table's column width never settled: \(scene.tableView.bounds.width)")
-        return scene
-    }
-
     /// Lets a jump settle as it does in a live pane: AppKit lays out and
     /// realizes the rows the jump brought on screen, correcting their heights,
     /// the jump's deferred re-pin runs, and the table reaches a fixed point.
@@ -102,7 +65,7 @@ struct PromptRailJumpTests {
             result: ToolResult(text: "A", truncatedTo: nil, isError: false),
             subagent: nil,
             timestamp: nil), at: replyIndex + 1)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -156,7 +119,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -191,7 +154,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -223,7 +186,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let coordinator = scene.coordinator
         let entries = coordinator.promptEntries
@@ -298,7 +261,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -397,7 +360,7 @@ struct PromptRailJumpTests {
     /// to prompt 58, so the clip sits at the end with 58 held.
     private static func jumpedToPrompt58(appState: AppState) async throws -> (TableTranscriptScene, [TranscriptItem]) {
         let items = PromptRailFixtures.conversation(prompts: promptCount, replySentences: shortLastReplies)
-        let scene = try primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == promptCount)
         scene.park(row: entries[40].rowIndex, below: 40)
@@ -494,7 +457,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -537,7 +500,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -599,7 +562,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -632,7 +595,7 @@ struct PromptRailJumpTests {
 
         let items = PromptRailFixtures.conversation(
             prompts: Self.promptCount, replySentences: Self.shortLastReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
@@ -667,7 +630,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let coordinator = scene.coordinator
         let entries = coordinator.promptEntries
@@ -735,7 +698,7 @@ struct PromptRailJumpTests {
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == 30)
@@ -769,7 +732,7 @@ struct PromptRailJumpTests {
                 timestamp: nil,
                 usage: nil)
         }
-        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         try #require(scene.coordinator.promptEntries.isEmpty)
         let clip = scene.scrollView.contentView

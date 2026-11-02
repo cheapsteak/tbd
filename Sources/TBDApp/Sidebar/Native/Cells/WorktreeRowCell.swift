@@ -3,8 +3,8 @@ import AppKit
 /// A worktree row, drawn from a `WorktreeRowModel` as `WorktreeRowView` draws
 /// it: the leading slot (PR glyph, PR-unknown mark, pending glyph or remote
 /// globe), the name with its subtitles, then the status suffix or typing dots,
-/// the no-status mark, the dev-server dot and the cross-repo suffix, packed
-/// against the name as the SwiftUI `HStack` packs them.
+/// the dev-server dot and the cross-repo suffix, packed against the name as
+/// the SwiftUI `HStack` packs them.
 ///
 /// The cell never reads `AppState`. Its frame starts at the row's depth (the
 /// outline's `frameOfCell` places it); `leadingInset` is the row inset every
@@ -56,7 +56,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     let nameField = SidebarCellKit.label(font: SidebarCellKit.nameFont)
     private(set) var subtitleFields: [NSTextField] = []
     private(set) lazy var suffix = SuffixSlot(in: self)
-    let noStatusImageView = SidebarCellKit.imageView()
     let devServerDot = StatusDotView(color: .systemGreen, diameter: 6)
     let crossRepoField = SidebarCellKit.label(font: SidebarCellKit.captionFont, color: .secondaryLabelColor)
 
@@ -87,12 +86,10 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         super.init(frame: .zero)
         identifier = Self.reuseIdentifier
         textField = nameField
-        for view in [leadingImageView, nameField, noStatusImageView, devServerDot, crossRepoField] as [NSView] {
+        for view in [leadingImageView, nameField, devServerDot, crossRepoField] as [NSView] {
             addSubview(view)
         }
         _ = suffix
-        noStatusImageView.image = SidebarCellKit.symbol(NoStatusMark.systemImage, size: 10)
-        noStatusImageView.contentTintColor = .tertiaryLabelColor
         devServerDot.toolTip = "A dev server is running"
         devServerDot.setAccessibilityLabel("Dev server running")
         // No tooltip on the nested `+`: hovering it opens the profile picker,
@@ -130,8 +127,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         }
 
         suffix.show(model.suffix)
-        noStatusImageView.isHidden = !model.showsNoStatusMark
-        noStatusImageView.setAccessibilityLabel(NoStatusMark.accessibilityLabel)
         devServerDot.isHidden = !model.showsDevServerDot
         crossRepoField.stringValue = model.crossRepoLabel ?? ""
         crossRepoField.isHidden = model.crossRepoLabel == nil
@@ -322,7 +317,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     static func accessibilityLabel(for model: WorktreeRowModel) -> String {
         var parts = [model.name] + model.subtitles
         if let suffix = model.suffix { parts.append(SidebarCellKit.spokenStatus(suffix)) }
-        if model.showsNoStatusMark { parts.append(NoStatusMark.accessibilityLabel) }
         if model.showsDevServerDot { parts.append("Dev server running") }
         return parts.joined(separator: ", ")
     }
@@ -341,7 +335,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         let crossRepoSize = SidebarCellKit.size(of: crossRepoField)
         var trailingWidth: CGFloat = 0
         if suffix.isShown { trailingWidth += spacing + suffix.layoutWidth }
-        if !noStatusImageView.isHidden { trailingWidth += spacing + 12 }
         if !devServerDot.isHidden { trailingWidth += spacing + 6 }
         if !crossRepoField.isHidden { trailingWidth += spacing + crossRepoSize.width }
 
@@ -371,11 +364,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
             suffix.place(atX: x, midY: midY)
             x += suffix.layoutWidth
         }
-        if !noStatusImageView.isHidden {
-            x += spacing
-            noStatusImageView.frame = NSRect(x: x, y: midY - 6, width: 12, height: 12)
-            x += 12
-        }
         if !devServerDot.isHidden {
             x += spacing
             devServerDot.frame = NSRect(x: x, y: midY - 3, width: 6, height: 6)
@@ -396,7 +384,6 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
 
         toolTips.update(on: self, [
             (rect: suffix.shownFrame, target: .suffix),
-            (rect: noStatusImageView.isHidden ? .zero : noStatusImageView.frame, target: .noStatusMark),
             (rect: crossRepoField.isHidden ? .zero : crossRepoField.frame, target: .crossRepo),
         ])
     }

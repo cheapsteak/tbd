@@ -1695,8 +1695,8 @@ public struct TerminalStore: Sendable {
     /// wait-reason stamp are written together, so the stored reason always
     /// describes the state beside it and the source names who wrote both. A
     /// write that changes only the source still counts as a change: a child
-    /// exit over a never-reported `.unknown` tells the app the process is
-    /// gone, which the sidebar's no-status mark reads.
+    /// exit over a never-reported `.unknown` records that the process is
+    /// gone, and the app's cached row carries the new source.
     ///
     /// A `.working` report cancels a pending scheduled resume — the session is
     /// already running a turn — and `working -> idle` notifies
