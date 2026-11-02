@@ -46,6 +46,13 @@ struct MainWindowChromeMountTests {
         let split = try #require(mount.mountedSplit)
         #expect(split.splitView.autosaveName == nil)
 
+        // The sidebar pane holds exactly one native sidebar.
+        let sidebarPane = split.sidebarItem.viewController.view
+        let nativeSidebar = try await waitForMainActorCondition("the hosted sidebar to mount the native outline") {
+            ChromeMount.nativeSidebarRoots(in: sidebarPane).count == 1
+        }
+        #expect(nativeSidebar)
+
         // The detail starts below the toolbar. Asserted on that outcome, the
         // detail's top edge against the window's content layout rect, rather
         // than on `safeAreaInsets.top > 0`: it holds however AppKit and
@@ -78,34 +85,36 @@ struct MainWindowChromeMountTests {
 
     // MARK: - Hosted panes' storage
 
-    /// The hosted panes read `@AppStorage` from the store `ContentView` was
-    /// given for them, which here mirrors the root's `.defaultAppStorage`,
-    /// not from `.standard`: a hosted tree starts from a fresh environment.
-    /// Observed through the sidebar, whose `@AppStorage(appKitSidebarKey)`
-    /// picks the native outline or the `List`. The suite is flipped both
-    /// ways, so the test discriminates whatever `.standard` holds for that
-    /// key on the machine running it.
-    @Test func hostedPanesReadTheRootsStore() async throws {
-        let mount = ChromeMount(label: "hostedStore")
-        defer { mount.tearDown() }
-        _ = try await mount.appKitReady()
-        let split = try #require(mount.mountedSplit)
-        let sidebarPane = split.sidebarItem.viewController.view
+    /// A hosted tree reads `@AppStorage` from the store `MainWindowSplitView`
+    /// was given for it, not from `.standard`: a hosted tree starts from a
+    /// fresh environment, and the split wraps each pane and the title in
+    /// `hostedRoot`. Observed through a probe wrapped the same way, on a key
+    /// `.standard` never holds, written two different values in turn, so the
+    /// probe can only follow the writes by reading the suite.
+    @Test func hostedTreesReadTheGivenStore() async throws {
+        let suite = TestDefaultsSuite("MainWindowChromeMountTests.hostedStore")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let appearance = AppearanceSettings(
+            defaults: suite.defaults,
+            userThemesDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("TBDAppTests.MainWindowChromeMount.\(UUID().uuidString)"))
+        let record = StoreProbeRecord()
+        let root = MainWindowSplitView.hostedRoot(
+            StoreProbe(record: record), appState: state, appearance: appearance,
+            overlayCoordinator: TranscriptOverlayCoordinator(), appStorage: suite.defaults)
+        let host = OffscreenHost(root: root, size: NSSize(width: 200, height: 100))
+        defer { host.tearDown() }
+        let mounted = await host.settle { record.value != nil }
+        try #require(mounted, "The probe never evaluated; the reads below would be vacuous")
 
-        mount.suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
-        let native = try await waitForMainActorCondition(
-            "the hosted sidebar to mount the native outline from the suite"
-        ) {
-            !ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
-        }
-        #expect(native)
+        suite.defaults.set("acme-one", forKey: storeProbeKey)
+        let sawFirst = await host.settle { record.value == "acme-one" }
+        #expect(sawFirst, "The hosted probe read \(record.value ?? "nothing"), not the suite's value")
 
-        mount.suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
-        let list = try await waitForMainActorCondition("the hosted sidebar to mount the List from the suite") {
-            ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
-                && !OffscreenHost<AnyView>.descendants(NSTableView.self, of: sidebarPane).isEmpty
-        }
-        #expect(list)
+        suite.defaults.set("acme-two", forKey: storeProbeKey)
+        let sawSecond = await host.settle { record.value == "acme-two" }
+        #expect(sawSecond, "The hosted probe read \(record.value ?? "nothing"), not the suite's value")
     }
 
     /// The app builds `ContentView` without the seam, so its hosted panes get
@@ -554,6 +563,30 @@ private final class ChromeMount {
 @MainActor
 private final class ServerFetchLog {
     var worktreeIDs: [UUID] = []
+}
+
+/// What `StoreProbe` last read.
+@MainActor
+private final class StoreProbeRecord {
+    private(set) var value: String?
+
+    func note(_ value: String) {
+        self.value = value
+    }
+}
+
+/// A key no real store holds, so `.standard` reads `StoreProbe`'s default.
+private let storeProbeKey = "MainWindowChromeMountTests.storeProbe"
+
+/// Reads one `@AppStorage` key and records what it read on every evaluation.
+private struct StoreProbe: View {
+    let record: StoreProbeRecord
+    @AppStorage(storeProbeKey) private var value: String = "unset"
+
+    var body: some View {
+        let _ = record.note(value)
+        Text(value)
+    }
 }
 
 /// A root that declares one toolbar item and nothing else, standing in for a

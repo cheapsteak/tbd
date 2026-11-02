@@ -4,7 +4,7 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-/// Task 9 (Remote sidebar section). Covers the pure, view-independent parts:
+/// The sidebar's remote sessions and providers. Covers the pure, view-independent parts:
 /// - `SidebarSessionPlacement.sessions(in:forProvider:)` — per-provider filtering
 ///   with dismissed tombstones excluded.
 /// - `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)` — the
@@ -15,7 +15,7 @@ import TBDShared
 ///   `NotificationType` mapping feeding `unreadByRemoteSession`.
 /// - `AppState.remoteSectionVisible(providers:)` — section-hidden-when-no-
 ///   providers.
-@Suite("Remote section view — pure helpers")
+@Suite("Remote sidebar — pure helpers")
 struct RemoteSectionViewTests {
 
     private func session(
@@ -66,7 +66,7 @@ struct RemoteSectionViewTests {
     }
 
     /// Task 9d: a session resolved to a local repo renders inside that
-    /// repo's section instead (`RepoSectionView.matchedRemoteSessions`) — it
+    /// repo's section instead (`SidebarSessionPlacement.matchedRemoteSessions`) — it
     /// must NOT also appear in the provider-named Remote section.
     @Test func excludesSessionsResolvedToARepo() {
         let repoID = UUID()
@@ -97,18 +97,6 @@ struct RemoteSectionViewTests {
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
-    /// The same repo-removed scenario must not silently hide a provider's
-    /// header either — a provider whose only session is pinned to a
-    /// now-missing repo still has something to say here.
-    @Test func shouldShowHeader_trueWhenOnlySessionIsResolvedToARemovedRepo() {
-        let removedRepoID = UUID()
-        let sessions = [
-            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: removedRepoID),
-        ]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
-    }
-
     // MARK: - archived sessions are display policy, applied here
 
     /// Built through the PRODUCTION decode path — the payload is decoded from
@@ -126,7 +114,7 @@ struct RemoteSectionViewTests {
             gone: false, dismissed: false, lastSeen: Date())
     }
 
-    /// Same display policy as `RepoSectionView.matchedRemoteSessions`: the
+    /// Same display policy as `SidebarSessionPlacement.matchedRemoteSessions`: the
     /// provider keeps archived sessions in `list`, and the caller decides
     /// which of them a human sees.
     @Test func providerSectionExcludesArchivedSessions() throws {
@@ -163,7 +151,7 @@ struct RemoteSectionViewTests {
     }
 
     /// The hidden-repo half of the decision: a hidden repo's id counts as
-    /// "known" even though `SidebarView.filteredRepos` doesn't render a
+    /// "known" even though `SidebarTreeBuilder.filteredRepos` doesn't render a
     /// section for it (when "show hidden repos" is off) — so a session
     /// matched to it is excluded from THIS section too, by analogy with a
     /// hidden repo's local worktrees vanishing from the sidebar entirely.
@@ -218,7 +206,7 @@ struct RemoteSectionViewTests {
         #expect(result.isEmpty)
     }
 
-    // MARK: - shouldShowHeader(provider:sessions:knownRepoIDs:)
+    // MARK: - Provider status presentation
 
     private func status(
         name: String = "acme", health: ProviderHealth,
@@ -229,42 +217,6 @@ struct RemoteSectionViewTests {
             describe: nil, health: health,
             errorMessage: errorMessage, remediationLabel: nil, remediationCommand: nil,
             lastSuccessfulSnapshotAt: lastSuccess)
-    }
-
-    @Test func shouldShowHeader_trueWhenHealthyWithUnmatchedSessions() {
-        let sessions = [session(provider: "acme", id: "s1")]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
-    }
-
-    /// A fully matched provider remains the stable entry point to its desk.
-    @Test func shouldShowHeader_trueWhenHealthyAndFullyMatched() {
-        let repoID = UUID()
-        let sessions = [
-            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
-        ]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: [repoID]))
-    }
-
-    /// The health-visibility guarantee: even with every session matched, an
-    /// UNHEALTHY provider still shows its bare header so the health glyph
-    /// (auth expired, stale, error) never goes dark just because grouping
-    /// absorbed every row.
-    @Test func shouldShowHeader_trueWhenUnhealthyEvenIfFullyMatched() {
-        let repoID = UUID()
-        let sessions = [
-            RemoteSessionInfo(provider: "acme", payload: RemoteSessionPayload(id: "s1", state: .running),
-                              gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: repoID),
-        ]
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .needsAuth), sessions: sessions, knownRepoIDs: [repoID]))
-    }
-
-    @Test func shouldShowHeader_trueWhenUnhealthyWithNoSessionsAtAll() {
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .error), sessions: [], knownRepoIDs: []))
-    }
-
-    @Test func shouldShowHeader_trueWhenHealthyWithNoSessionsAtAll() {
-        #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: [], knownRepoIDs: []))
     }
 
     // MARK: - RowStatusIndicator.leading — `.remote` case + precedence

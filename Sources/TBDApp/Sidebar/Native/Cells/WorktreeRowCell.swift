@@ -23,12 +23,9 @@ import AppKit
 final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamableCell {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.worktreeRow")
 
-    /// The row with a subtitle line. `WorktreeRowView` pins
-    /// `.frame(height: rowHeight)` for every variant — the dock's height
-    /// arithmetic counts on it — so the subtitle row is the same 28 pt, with
-    /// the name and subtitle stacked at -2 pt spacing inside it.
-    /// `SidebarCellTests.heightMatchesClass` measures the SwiftUI row against
-    /// this value.
+    /// The row with a subtitle line: the same 28 pt as every other row — the
+    /// dock's height arithmetic counts on one row height — with the name and
+    /// subtitle stacked at -2 pt spacing inside it.
     static let subtitleRowHeight: CGFloat = 28
 
     /// `WorktreeRowView.pinButtonGutter`: the pin's 20 pt square sits that far

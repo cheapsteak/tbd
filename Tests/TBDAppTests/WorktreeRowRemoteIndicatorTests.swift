@@ -7,7 +7,7 @@ import TBDShared
 /// — the leading-slot rule for a worktree row now that adopted remote lanes
 /// render as ordinary worktree rows. Tier 1: pure, no `AppState`, no view
 /// hierarchy, no clock.
-@Suite("WorktreeRowView — remote leading indicator")
+@Suite("WorktreeRowPresentation — remote leading indicator")
 struct WorktreeRowRemoteIndicatorTests {
 
     private func worktree(location: WorktreeLocation) -> Worktree {

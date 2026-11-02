@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Layer-backed dancing-dots ("typing…") indicator. The pulse is driven by
 /// `CAKeyframeAnimation`s committed once to the render server, so it costs no
@@ -142,18 +141,5 @@ final class TypingDotsNSView: NSView {
             let timeSincePause = layer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
             layer.beginTime = timeSincePause
         }
-    }
-}
-
-/// SwiftUI wrapper for `TypingDotsNSView`.
-struct TypingDotsView: NSViewRepresentable {
-    let color: Color
-
-    func makeNSView(context: Context) -> TypingDotsNSView {
-        TypingDotsNSView(dotColor: NSColor(color))
-    }
-
-    func updateNSView(_ nsView: TypingDotsNSView, context: Context) {
-        nsView.updateColor(NSColor(color))
     }
 }

@@ -21,10 +21,8 @@ import TestSupport
 /// spec's "Responsiveness" budget with wall-clock time: rebuild + diff + apply
 /// + the layout pass that makes cell views, at 320 rows (8 ms) and at 800
 /// remote sessions (16 ms); `validateDrop` per call (1 ms); and a drop,
-/// `acceptDrop` through the end-of-drag flush and layout together. The last
-/// case compares the native path with the `List` path at 800 sessions on one
-/// metric (graduation criterion 4). Each prints `BENCH native-...` lines with
-/// p50, p95 and a `PASS`/`OVER` verdict. The `rebuild` and `apply` signpost
+/// `acceptDrop` through the end-of-drag flush and layout together. Each
+/// prints `BENCH native-...` lines with p50, p95 and a `PASS`/`OVER` verdict. The `rebuild` and `apply` signpost
 /// intervals on `com.tbd.app` / `native-sidebar` show the same split in
 /// Instruments.
 ///
@@ -189,64 +187,6 @@ extension SidebarListUpdateBench {
             Self.report("native-rebuild sessions=800 rows=\(rows) collapse_ended=\(collapse ? "on" : "off")",
                         samples, budget: NativeBudget.sessionsRebuild)
         }
-    }
-
-    /// Graduation criterion 4: the native path no slower than the `List` path
-    /// at 800 sessions. Both are measured as main-thread CPU per refresh with
-    /// an idle baseline subtracted, which is what `runCase` measures, and
-    /// both include the layout pass that makes the rows. A sample can come
-    /// out below the baseline; both sides clamp such a sample to zero the same
-    /// way, so the comparison favours neither.
-    @Test("native versus List at 800 remote sessions (gated by TBD_PERF_BENCH=1)")
-    func nativeVersusList() async {
-        guard ProcessInfo.processInfo.environment["TBD_PERF_BENCH"] == "1" else { return }
-        for collapse in [false, true] {
-            let listSamples = await runCase(n: 800, collapse: collapse)
-            let list = Self.clampedToZero(listSamples)
-            let native = Self.clampedToZero(nativeCPUDeltas(collapse: collapse))
-            let listSorted = list.sorted(), nativeSorted = native.sorted()
-            let listP50 = Self.percentile(listSorted, 0.5), nativeP50 = Self.percentile(nativeSorted, 0.5)
-            let nativeP95 = Self.percentile(nativeSorted, 0.95), listP95 = Self.percentile(listSorted, 0.95)
-            let verdict = nativeSorted.isEmpty || listSorted.isEmpty ? "NO-DATA" : (nativeP50 <= listP50 ? "PASS" : "OVER")
-            let line = String(
-                format: "BENCH native-vs-list sessions=800 collapse_ended=%@ metric=main_thread_cpu_ms list_p50=%.3f list_p95=%.3f native_p50=%.3f native_p95=%.3f verdict=%@",
-                collapse ? "on" : "off", listP50, listP95, nativeP50, nativeP95, verdict)
-            FileHandle.standardOutput.write(Data((line + "\n").utf8))
-        }
-    }
-
-    /// A baseline-subtracted sample below zero is noise in the baseline, not
-    /// a refresh that cost less than nothing: it counts as zero.
-    static func clampedToZero(_ samples: [Double]) -> [Double] {
-        samples.map { max(0, $0) }
-    }
-
-    /// Main-thread CPU per refresh of the native sidebar at 800 sessions
-    /// (mutation, rebuild + apply, layout), idle baseline subtracted, raw:
-    /// `nativeVersusList` clamps it as it clamps the `List`'s.
-    private func nativeCPUDeltas(collapse: Bool) -> [Double] {
-        let h = OutlineHarness("bench.vs")
-        defer { h.tearDown() }
-        let (_, live) = installSessions(in: h, collapse: collapse)
-        h.mount(size: NSSize(width: 320, height: 780))
-        var idle: [Double] = []
-        for _ in 0..<15 {
-            let start = cpuNanos()
-            h.controller.flushPendingRebuild()
-            h.host?.layout()
-            idle.append(Double(cpuNanos() - start) / 1_000_000)
-        }
-        let baseline = median(idle)
-        var deltas: [Double] = []
-        for step in 0..<(NativeBudget.warmUp + NativeBudget.iterations) {
-            Self.flipSession(in: h, live: live, step: step)
-            let start = cpuNanos()
-            h.controller.flushPendingRebuild()
-            h.host?.layout()
-            let elapsed = Double(cpuNanos() - start) / 1_000_000 - baseline
-            if step >= NativeBudget.warmUp { deltas.append(elapsed) }
-        }
-        return deltas
     }
 
     @Test("native validateDrop per call (gated by TBD_PERF_BENCH=1)")

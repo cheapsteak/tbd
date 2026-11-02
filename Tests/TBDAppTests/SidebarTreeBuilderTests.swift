@@ -98,6 +98,34 @@ struct SidebarTreeBuilderTests {
         #expect(filtered.parent(of: .remoteSession(session.id)) == .providerHeader("acme"))
     }
 
+    /// Providers are first-class selectable places: a registered provider keeps
+    /// its header whatever its health and wherever its sessions render — with
+    /// unmatched sessions, with every session matched to a repo, with a session
+    /// pinned to a repo TBD no longer has, and with none at all. An unhealthy
+    /// provider keeping its header is what keeps its health glyph visible when
+    /// grouping absorbed every row.
+    @Test(arguments: [ProviderHealth.ok, .needsAuth, .error])
+    func everyRegisteredProviderKeepsItsHeader(health: ProviderHealth) {
+        let suite = TestDefaultsSuite("SidebarTreeBuilderTests.providerHeader")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        state.repos = [repo]
+        state.remoteProviders = [SidebarGroupFixtures.provider(health: health)]
+        let inventories: [[RemoteSessionInfo]] = [
+            [SidebarGroupFixtures.session("unmatched")],
+            [SidebarGroupFixtures.session("matched", repoID: repo.id)],
+            [SidebarGroupFixtures.session("removed-repo", repoID: UUID())],
+            [],
+        ]
+        for sessions in inventories {
+            state.remoteSessions = sessions
+            let tree = Self.build(state)
+            let labels = sessions.map(\.payload.id)
+            #expect(tree.contains(.providerHeader("acme")), "no provider header for \(labels) at \(health)")
+        }
+    }
+
     // MARK: Rows and depths
 
     @Test func mainRowFirstAndChildless() throws {

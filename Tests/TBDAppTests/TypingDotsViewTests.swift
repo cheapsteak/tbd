@@ -3,7 +3,7 @@ import Testing
 
 @testable import TBDApp
 
-@Suite("TypingDotsView")
+@Suite("TypingDotsNSView")
 struct TypingDotsViewTests {
     @MainActor
     @Test func nsViewIsLayerBackedWithThreeAnimatedDots() {

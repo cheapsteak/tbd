@@ -133,7 +133,10 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     /// store is set only when `appStorage` names one; otherwise the tree
     /// keeps `.standard`, as the window's root does.
     @ViewBuilder
-    private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
+    static func hostedRoot<Root: View>(
+        _ root: Root, appState: AppState, appearance: AppearanceSettings,
+        overlayCoordinator: TranscriptOverlayCoordinator, appStorage: UserDefaults?
+    ) -> some View {
         let hosted = root
             .environment(appState)
             .environmentObject(appearance)
@@ -143,6 +146,13 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         } else {
             hosted
         }
+    }
+
+    /// `hostedRoot` with this view's environment and store.
+    private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
+        Self.hostedRoot(
+            root, appState: appState, appearance: appearance,
+            overlayCoordinator: overlayCoordinator, appStorage: appStorage)
     }
 
     private func hostingController<Root: View>(_ root: Root) -> NSViewController {

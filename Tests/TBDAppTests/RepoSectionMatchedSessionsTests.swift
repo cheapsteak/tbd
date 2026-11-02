@@ -42,7 +42,7 @@ private struct SplitMix64: RandomNumberGenerator {
     }
 }
 
-@Suite("RepoSectionView — matched sessions: order, parse-once")
+@Suite("SidebarSessionPlacement — matched sessions: order, parse-once")
 struct RepoSectionMatchedSessionsTests {
     static let repoID = UUID()
 

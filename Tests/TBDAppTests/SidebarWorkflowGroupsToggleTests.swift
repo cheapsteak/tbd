@@ -172,6 +172,25 @@ struct SidebarWorkflowGroupsToggleTests {
         }
     }
 
+    /// `SidebarReveal.baseline`, the rule the outline's reveal pass hands
+    /// `revealSidebarGroups` as `previous`.
+    @Test func revealBaselineUnchanged() {
+        let repoID = UUID()
+        let reveal = SidebarGroupReveal(
+            generation: 2, worktreeIDs: [UUID()], remoteID: nil,
+            groups: [SidebarGroupID(owner: .repository(repoID), kind: .remote)])
+        let previous = SidebarGroupReveal(
+            generation: 1, worktreeIDs: [UUID()], remoteID: nil, groups: [])
+
+        // The initial mount reveals as navigation, whatever came before.
+        #expect(SidebarReveal.baseline(previous: nil, reveal: reveal, hasRevealed: false) == nil)
+        #expect(SidebarReveal.baseline(previous: previous, reveal: reveal, hasRevealed: false) == nil)
+        // After it, a missing previous compares the reveal against itself…
+        #expect(SidebarReveal.baseline(previous: nil, reveal: reveal, hasRevealed: true) == reveal)
+        // …and a real previous is handed through unchanged.
+        #expect(SidebarReveal.baseline(previous: previous, reveal: reveal, hasRevealed: true) == previous)
+    }
+
     // MARK: On — the grouped layout
 
     @Test func onFilesRemoteExitedAndHibernatedRowsUnderHeaders() {
