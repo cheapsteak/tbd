@@ -704,11 +704,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// Each of `rows`' guide lines, by index, by the shared rules
-    /// (`GuideHierarchy.rowGuides(of:)`). Only worktree rows draw lines.
+    /// (`GuideHierarchy.rowGuides(of:)`). Only worktree rows draw lines, and
+    /// a row repeating an ID above it draws none: the hierarchy's lookups
+    /// answer for the ID's first row.
     private static func rowGuides(of rows: [DockRow],
                                   in hierarchy: DockGuideHierarchy) -> [SidebarGuideLine.RowGuides] {
-        rows.map { row in
-            row.isWorktree ? hierarchy.rowGuides(of: row.id) : SidebarGuideLine.RowGuides()
+        rows.enumerated().map { index, row in
+            guard row.isWorktree, hierarchy.indices[row.id] == index else { return SidebarGuideLine.RowGuides() }
+            return hierarchy.rowGuides(of: row.id)
         }
     }
 

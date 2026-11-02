@@ -1189,6 +1189,61 @@ struct SidebarGuideLineTests {
         #expect(treeLit == lit)
     }
 
+    /// A dock worktree row at `depth`.
+    static func dockRow(_ id: SidebarNodeID, _ depth: Int) -> DockRow {
+        DockRow(id: id, kind: .worktree(SidebarCellTests.worktree(name: "row")), depth: depth)
+    }
+
+    /// A row more than a level deeper than the row above it sits directly
+    /// under that row, and the rows after it read it there: depths 0, 2, 1,
+    /// 2 put the second and third rows under the first and the fourth under
+    /// the third. Each row's level stays its depth.
+    @Test func dockHierarchyReadsAGapInTheDepths() {
+        let ids = (1...4).map { SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(300 + $0)) }
+        let depths = [0, 2, 1, 2]
+        let rows = zip(ids, depths).map { id, depth in Self.dockRow(id, depth) }
+        let dock = DockGuideHierarchy(rows: rows)
+
+        let parents = ids.map { dock.parent(of: $0) }
+        let expectedParents: [SidebarNodeID?] = [nil, ids[0], ids[0], ids[2]]
+        #expect(parents == expectedParents)
+        let children = ids.map { dock.shownChildren(of: $0) }
+        let expectedChildren: [[SidebarNodeID]] = [[ids[1], ids[2]], [], [ids[3]], []]
+        #expect(children == expectedChildren)
+        let levels = ids.map { dock.level(of: $0) }
+        #expect(levels == depths)
+    }
+
+    /// An ID that repeats answers every lookup for its first row. The later
+    /// row holds its level on the way down but names no parent, so the rows
+    /// under it sit under none — neither the ID's first row nor the row
+    /// above — and the rows after them find their parents as before: a ▸ b;
+    /// c ▸ (b again ▸ (d, f), e).
+    @Test func dockHierarchyKeepsARepeatedIDOutOfThePath() {
+        let names = ["a", "b", "c", "d", "f", "e"]
+        let id = Dictionary(uniqueKeysWithValues: names.enumerated().map { index, name in
+            (name, SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(400 + index)))
+        })
+        func node(_ name: String) -> SidebarNodeID { id[name] ?? .scratchPrompt }
+        let order: [(name: String, depth: Int)] = [("a", 0), ("b", 1), ("c", 0), ("b", 1), ("d", 2), ("f", 2),
+                                                   ("e", 1)]
+        let rows = order.map { Self.dockRow(node($0.name), $0.depth) }
+        let dock = DockGuideHierarchy(rows: rows)
+
+        let parents = names.map { dock.parent(of: node($0)) }
+        let expectedParents: [SidebarNodeID?] = [nil, node("a"), nil, nil, nil, node("c")]
+        #expect(parents == expectedParents)
+        let children = names.map { dock.shownChildren(of: node($0)) }
+        let expectedChildren: [[SidebarNodeID]] = [[node("b")], [], [node("e")], [], [], []]
+        #expect(children == expectedChildren)
+        let levels = names.map { dock.level(of: node($0)) }
+        let expectedLevels = [0, 1, 0, 2, 2, 1]
+        #expect(levels == expectedLevels)
+        let bIndex = dock.indices[node("b")]
+        #expect(bIndex == 1, "A repeated ID answers for its first row")
+        #expect(!dock.startsGuide(node("b")), "The rows under b's repeat are not b's children")
+    }
+
     /// A worktree row at `depth`, for a tree whose levels matter.
     static func worktreeNode(_ id: UUID, depth: Int, _ children: [SidebarNode] = []) -> SidebarNode {
         var node = SidebarDropPolicyTests.row(id, home: nil, children)
