@@ -339,24 +339,34 @@ struct SidebarGuideLineTests {
 
     /// The highlight tint resolves once per appearance and stays cached until
     /// the system colours change — as they do when the user picks another
-    /// accent — and then resolves afresh.
+    /// accent — and then resolves afresh. The cache under test listens on a
+    /// centre of its own, so the change posted reaches no other suite, and a
+    /// cache on another centre keeps its tint.
     @Test func highlightTintIsCachedUntilTheSystemColorsChange() throws {
         let aqua = try #require(NSAppearance(named: .aqua))
         let darkAqua = try #require(NSAppearance(named: .darkAqua))
-        let tint = SidebarGuideLine.highlightTintColor(appearance: aqua)
-        let darkTint = SidebarGuideLine.highlightTintColor(appearance: darkAqua)
-        let cached = SidebarGuideLine.HighlightTintCache.colors[aqua.name]
-        let darkCached = SidebarGuideLine.HighlightTintCache.colors[darkAqua.name]
+        let center = NotificationCenter()
+        let tints = SidebarGuideLine.HighlightTintCache(center: center)
+        let elsewhere = SidebarGuideLine.HighlightTintCache(center: NotificationCenter())
+        let tint = tints.color(for: aqua)
+        let darkTint = tints.color(for: darkAqua)
+        let elsewhereTint = elsewhere.color(for: aqua)
+        let again = tints.color(for: aqua)
+        let cached = tints.colors[aqua.name]
+        let darkCached = tints.colors[darkAqua.name]
+        #expect(again === tint, "The tint was resolved again instead of kept for the next draw")
         #expect(cached === tint, "The tint was not kept for the next draw")
         #expect(darkCached === darkTint, "Each appearance keeps a tint of its own")
         let resolved = SidebarGuideLine.resolvedHighlightTint(appearance: aqua)
         #expect(Self.p3Components(tint) == Self.p3Components(resolved))
 
-        NotificationCenter.default.post(name: NSColor.systemColorsDidChangeNotification, object: nil)
-        #expect(SidebarGuideLine.HighlightTintCache.colors.isEmpty, "A change to the system colours kept the old tint")
-        let afterChange = SidebarGuideLine.highlightTintColor(appearance: aqua)
+        center.post(name: NSColor.systemColorsDidChangeNotification, object: nil)
+        #expect(tints.colors.isEmpty, "A change to the system colours kept the old tint")
+        let elsewhereKept = elsewhere.colors[aqua.name]
+        #expect(elsewhereKept === elsewhereTint, "A change posted on one centre emptied a cache on another")
+        let afterChange = tints.color(for: aqua)
         #expect(Self.p3Components(afterChange) == Self.p3Components(resolved))
-        let recached = SidebarGuideLine.HighlightTintCache.colors[aqua.name]
+        let recached = tints.colors[aqua.name]
         #expect(recached === afterChange)
     }
 

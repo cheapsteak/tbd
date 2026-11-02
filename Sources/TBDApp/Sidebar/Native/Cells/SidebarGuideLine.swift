@@ -116,19 +116,6 @@ enum SidebarGuideLine {
          b: components.b * (1 - fraction) + fraction)
     }
 
-    /// The accent colour as `appearance` resolves it, blended toward white by
-    /// the appearance's mix in Display P3: `resolvedHighlightTint(appearance:)`,
-    /// resolved once per appearance and kept until the system colours, the
-    /// accent among them, change.
-    @MainActor
-    static func highlightTintColor(appearance: NSAppearance) -> NSColor {
-        HighlightTintCache.observeSystemColors()
-        if let cached = HighlightTintCache.colors[appearance.name] { return cached }
-        let color = resolvedHighlightTint(appearance: appearance)
-        HighlightTintCache.colors[appearance.name] = color
-        return color
-    }
-
     /// The accent colour as `appearance` resolves it now, blended toward
     /// white by the appearance's mix in Display P3.
     static func resolvedHighlightTint(appearance: NSAppearance) -> NSColor {
@@ -151,24 +138,58 @@ enum SidebarGuideLine {
     /// The highlight tint per appearance name, resolved once, so a row
     /// redraw neither resolves the accent nor converts it to Display P3. A
     /// change to the system colours — the accent among them — empties it.
+    /// Every row view draws with `shared`; a test makes one of its own, on a
+    /// notification centre of its own.
     @MainActor
-    enum HighlightTintCache {
-        static var colors: [NSAppearance.Name: NSColor] = [:]
-        private static var observer: (any NSObjectProtocol)?
+    final class HighlightTintCache {
+        /// The cache the row views draw with, listening on the default
+        /// notification centre.
+        static let shared = HighlightTintCache()
 
-        /// Empties the cache whenever the system colours change, from the
-        /// first use on. The notification arrives on the main thread; one
-        /// posted anywhere else empties the cache on the next main-loop turn.
-        static func observeSystemColors() {
-            guard observer == nil else { return }
-            observer = NotificationCenter.default.addObserver(
+        /// Where the cache hears that the system colours changed.
+        nonisolated let center: NotificationCenter
+        /// The tints resolved so far, by appearance name.
+        private(set) var colors: [NSAppearance.Name: NSColor] = [:]
+        nonisolated(unsafe) private var observer: (any NSObjectProtocol)?
+
+        /// - Parameter center: where `NSColor.systemColorsDidChangeNotification`
+        ///   arrives. It arrives on the main thread, and empties the cache at
+        ///   once; one posted anywhere else empties it on the next main-loop
+        ///   turn.
+        init(center: NotificationCenter = .default) {
+            self.center = center
+            observer = center.addObserver(
                 forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: nil
-            ) { _ in
-                if Thread.isMainThread {
-                    MainActor.assumeIsolated { HighlightTintCache.colors.removeAll() }
-                } else {
-                    DispatchQueue.main.async { MainActor.assumeIsolated { HighlightTintCache.colors.removeAll() } }
-                }
+            ) { [weak self] _ in
+                HighlightTintCache.performOnMain { self?.invalidate() }
+            }
+        }
+
+        deinit {
+            if let observer { center.removeObserver(observer) }
+        }
+
+        /// The tint in `appearance`: the one resolved before, or
+        /// `resolvedHighlightTint(appearance:)` now, kept for the next draw.
+        func color(for appearance: NSAppearance) -> NSColor {
+            if let cached = colors[appearance.name] { return cached }
+            let color = SidebarGuideLine.resolvedHighlightTint(appearance: appearance)
+            colors[appearance.name] = color
+            return color
+        }
+
+        /// Empties the cache, so each tint resolves afresh on its next use.
+        func invalidate() {
+            colors.removeAll()
+        }
+
+        /// Runs `body` on the main actor: at once when already on the main
+        /// thread, otherwise on the next main-loop turn.
+        nonisolated private static func performOnMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { body() }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
             }
         }
     }
@@ -176,24 +197,25 @@ enum SidebarGuideLine {
     /// The colour a line draws in.
     enum ColorRole: Hashable, Sendable {
         case secondaryLabel
-        /// The accent colour blended toward white (`highlightWhiteMix`).
+        /// The accent colour blended toward white (`highlightWhiteMix`), as
+        /// `tints` keeps it.
         case highlightTint
 
         /// The colour in `appearance`.
         @MainActor
-        func nsColor(appearance: NSAppearance) -> NSColor {
+        func nsColor(appearance: NSAppearance, tints: HighlightTintCache) -> NSColor {
             switch self {
             case .secondaryLabel: .secondaryLabelColor
-            case .highlightTint: SidebarGuideLine.highlightTintColor(appearance: appearance)
+            case .highlightTint: tints.color(for: appearance)
             }
         }
 
         /// The colour resolved in `appearance`, alpha included.
         @MainActor
-        func cgColor(appearance: NSAppearance) -> CGColor {
+        func cgColor(appearance: NSAppearance, tints: HighlightTintCache) -> CGColor {
             var resolved: CGColor?
             appearance.performAsCurrentDrawingAppearance {
-                resolved = nsColor(appearance: appearance).cgColor
+                resolved = nsColor(appearance: appearance, tints: tints).cgColor
             }
             return resolved ?? NSColor.secondaryLabelColor.cgColor
         }

@@ -257,7 +257,7 @@ final class SidebarRowView: NSTableRowView {
         var colors: [SidebarGuideLine.ColorRole: CGColor] = [:]
         for piece in pieces {
             let role = piece.style.color
-            let color = colors[role] ?? role.cgColor(appearance: effectiveAppearance)
+            let color = colors[role] ?? role.cgColor(appearance: effectiveAppearance, tints: .shared)
             colors[role] = color
             SidebarGuideLine.draw(piece, color: color, in: context)
         }
