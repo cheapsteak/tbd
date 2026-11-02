@@ -106,6 +106,10 @@ struct MarkdownDocumentBuilderTests {
             "---\n> Note: this page moved to docs/new.md\n---\n# Title",
             "---\n*Status*: draft\n---\n# Title",
             "---\n| Owner: | me |\n---\n# Title",
+            "---\n1. Install: run make\n2. Test: run make test\n---\n# Title",
+            "---\n+ Owner: me\n---\n# Title",
+            "---\n1) Step: x\n---\n# Title",
+            "---\n...\nBody",
         ] {
             let doc = try #require(MarkdownDocumentBuilder.build(
                 markdown: source, documentDirectory: dir, worktreeRoot: dir, css: ""

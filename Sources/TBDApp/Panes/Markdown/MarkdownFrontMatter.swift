@@ -13,8 +13,8 @@ import Foundation
 /// - the very first line is `---` and the line after it is not blank;
 /// - the first line that is not a column-0 `#` comment is a `key:` line, or
 ///   the block is empty;
-/// - a later line closes it: `---`, or `...` when the block reads cleanly as
-///   keys;
+/// - a later line closes it: `---`, or the first `...` when the block before
+///   it is not empty and reads cleanly as keys;
 /// - no code fence comes before the closer, except indented inside a `|` or
 ///   `>` block scalar.
 ///
@@ -64,17 +64,26 @@ struct MarkdownFrontMatter: Equatable, Sendable {
 
         var lines: [Substring] = []
         var inBlockScalar = false
+        var triedDots = false
         cursor = opening.next
         while let line = nextLine(in: markdown, from: cursor) {
             let content = line.content
             let marker = delimiter(content)
             // `...` also ends a YAML document, but a markdown line can be just
-            // `...` too, so it closes only a block that reads cleanly as keys.
-            if marker == "---" || (marker == "..." && readEntries(lines) != nil) {
+            // `...` too, so it closes only a non-empty block that reads cleanly
+            // as keys. Only the first one is tried: a block that fails to read
+            // keeps failing as it grows, and retrying at every later `...`
+            // would make the scan quadratic.
+            var dotsEntries: [Entry]?
+            if marker == "...", !triedDots {
+                triedDots = true
+                if !lines.isEmpty { dotsEntries = readEntries(lines) }
+            }
+            if marker == "---" || dotsEntries != nil {
                 guard opensWithKey(lines) else { return (nil, markdown) }
                 let frontMatter = MarkdownFrontMatter(
                     yaml: lines.joined(separator: "\n"),
-                    entries: readEntries(lines)
+                    entries: dotsEntries ?? readEntries(lines)
                 )
                 return (frontMatter, String(markdown[line.next...]))
             }
@@ -105,11 +114,14 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         return keyValue(first) != nil
     }
 
-    /// The header shown above the rendered body: a `<dl>` of the entries, the
-    /// raw YAML in a `<pre>` when there are no readable entries, and nothing at
-    /// all for an empty block. Every piece of file text in it is HTML-escaped:
-    /// this markup is TBD's own and bypasses comrak's safe mode, so nothing
-    /// from the file may reach it raw.
+    /// The header shown above the rendered body, and nothing at all for an empty
+    /// block. With entries it is a `<dl>`: a `<dt>` per key and a `<dd>` for its
+    /// value, where a folded value of several paragraphs gets a `<p>` per
+    /// paragraph (a run of blank lines is one paragraph break) and a nested or
+    /// block-scalar value its lines in a `<pre>`. Without entries it is the raw
+    /// YAML in a `<pre>`. Every piece of file text in it is HTML-escaped: this
+    /// markup is TBD's own and bypasses comrak's safe mode, so nothing from the
+    /// file may reach it raw.
     var html: String {
         guard let entries else {
             return #"<pre class="tbd-front-matter">"# + Self.escape(yaml) + "</pre>"
@@ -211,9 +223,9 @@ struct MarkdownFrontMatter: Equatable, Sendable {
     /// ends at its closing quote and is shown without the quotes.
     private static func keyValue(_ line: Substring) -> (key: String, value: String)? {
         // A YAML indicator, or markdown syntax (`> quote`, `*emphasis*`,
-        // `| table |`), cannot start a plain key.
+        // `| table |`, `+ item`, `1. item`), cannot start a plain key.
         guard let first = line.first, !first.isWhitespace, !isSequenceItem(line),
-              !"#[]{}?>|*!&%@`,".contains(first)
+              !isListItem(line), !"#[]{}?>|*!&%@`,".contains(first)
         else { return nil }
         if first == "\"" || first == "'" { return quotedKeyValue(line) }
         var searchFrom = line.startIndex
@@ -275,6 +287,23 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         guard indent <= 3 else { return false }
         let rest = line.dropFirst(indent)
         return rest.hasPrefix("```") || rest.hasPrefix("~~~")
+    }
+
+    /// A markdown `+ item`, or an ordered `1. item` / `1) item` with up to nine
+    /// digits, as CommonMark allows. `- item` is `isSequenceItem`, and `*` is
+    /// refused as a YAML indicator.
+    private static func isListItem(_ line: Substring) -> Bool {
+        var rest = line
+        if line.first == "+" {
+            rest = line.dropFirst()
+        } else {
+            let digits = line.prefix { "0123456789".contains($0) }.count
+            guard (1...9).contains(digits) else { return false }
+            rest = line.dropFirst(digits)
+            guard rest.first == "." || rest.first == ")" else { return false }
+            rest = rest.dropFirst()
+        }
+        return rest.isEmpty || rest.first?.isWhitespace == true
     }
 
     private static func isSequenceItem(_ line: Substring) -> Bool {

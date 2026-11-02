@@ -60,6 +60,33 @@ struct MarkdownFrontMatterTests {
         #expect(body == source)
     }
 
+    @Test("after a first ... fails, later ... lines never close the block")
+    func onlyTheFirstDotsIsTried() throws {
+        // The first `...` fails (`x` is not a key), so every later one must
+        // be skipped rather than re-read the whole block each time.
+        let dots = Array(repeating: "...", count: 5000).joined(separator: "\n")
+        let unclosed = "---\ntitle: Acme\nx\n" + dots + "\nBody"
+        let (none, unchanged) = MarkdownFrontMatter.split(unclosed)
+        #expect(none == nil)
+        #expect(unchanged == unclosed)
+
+        // A `---` after them still closes it, as raw YAML that keeps every line.
+        let closed = "---\ntitle: Acme\nx\n" + dots + "\n---\nBody"
+        let (frontMatter, body) = MarkdownFrontMatter.split(closed)
+        let block = try #require(frontMatter)
+        #expect(block.entries == nil)
+        #expect(block.yaml == "title: Acme\nx\n" + dots)
+        #expect(body == "Body")
+    }
+
+    @Test("... does not close an empty block, so the rule and the dots stay")
+    func dotsDoNotCloseAnEmptyBlock() {
+        let source = "---\n...\nBody"
+        let (frontMatter, body) = MarkdownFrontMatter.split(source)
+        #expect(frontMatter == nil)
+        #expect(body == source)
+    }
+
     @Test("... does not open a block")
     func dotsDoNotOpen() {
         let source = "...\nlayer: example\n...\nBody text."
@@ -154,11 +181,23 @@ struct MarkdownFrontMatterTests {
             "---\n*Status*: draft\n---\n# Title",
             "---\n| Owner: | me |\n---\n# Title",
             "---\n`code`: x\n---\n# Title",
+            "---\n1. Install: run make\n2. Test: run make test\n---\n# Title",
+            "---\n+ Owner: me\n---\n# Title",
+            "---\n1) Step: x\n---\n# Title",
         ] {
             let (frontMatter, body) = MarkdownFrontMatter.split(source)
             #expect(frontMatter == nil)
             #expect(body == source)
         }
+    }
+
+    @Test("keys that only look like list markers are still keys")
+    func listMarkerLookalikesAreKeys() throws {
+        let block = try #require(
+            MarkdownFrontMatter.split("---\n_build: list\n2026: year\n1.5: ratio\n+x: plus\n---\n").frontMatter
+        )
+        let keys = block.entries?.map(\.key)
+        #expect(keys == ["_build", "2026", "1.5", "+x"])
     }
 
     @Test("an indented fence inside a block scalar is the scalar's text, not markdown")
