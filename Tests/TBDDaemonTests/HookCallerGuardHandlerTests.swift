@@ -45,11 +45,12 @@ struct HookCallerGuardHandlerTests {
         let terminal: TBDShared.Terminal
     }
 
-    /// A worktree with one holder-backed Claude row whose job anchors a walk,
-    /// and a router that reads the literal table. The PR seams answer for a
-    /// github.com repo without spawning `gh`, and the limit-resume scheduler
-    /// is installed but never started.
-    private func makeFixture() async throws -> Fixture {
+    /// A worktree with one holder-backed agent row — Claude unless `kind` says
+    /// otherwise — whose job anchors a walk, and a router that reads the
+    /// literal table. The PR seams answer for a github.com repo without
+    /// spawning `gh`, and the limit-resume scheduler is installed but never
+    /// started.
+    private func makeFixture(kind: TerminalKind = .claude) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let processes = Self.table()
         let router = RPCRouter(
@@ -77,7 +78,8 @@ struct HookCallerGuardHandlerTests {
             path: "/tmp/hook-caller-wt-\(UUID().uuidString)", tmuxServer: "tbd-hook-caller")
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
-            label: TerminalLabel.claudeCode, kind: .claude, transport: .holder,
+            label: kind == .codex ? TerminalLabel.codex : TerminalLabel.claudeCode,
+            kind: kind, transport: .holder,
             holderPID: Self.holderPID, childPID: Self.jobPID, holderChildStartedAt: born)
         return Fixture(db: db, router: router, worktreeID: worktree.id, terminal: terminal)
     }
@@ -115,6 +117,19 @@ struct HookCallerGuardHandlerTests {
         #expect(response.success)
         #expect(try await f.db.terminals.get(id: f.terminal.id)?.claudeSessionID == "other-session")
         #expect(await f.router.activityLedger.snapshot().hooks[f.terminal.id] != nil)
+    }
+
+    /// Codex's shared server can run a Codex tab's own hooks outside the tab's
+    /// tree, so a caller the table puts outside it is "can't tell", and its
+    /// SessionStart binds. Discriminates against the code before the fix,
+    /// which refused it as proven foreign and left the session unbound.
+    @Test func aForeignSessionStartForACodexTabBindsTheSession() async throws {
+        let f = try await makeFixture(kind: .codex)
+
+        let response = await f.router.handle(try sessionStart(f), connection: Self.foreign)
+
+        #expect(response.success)
+        #expect(try await f.db.terminals.get(id: f.terminal.id)?.claudeSessionID == "other-session")
     }
 
     /// A request that reached the router without a socket has no peer pid,

@@ -23,11 +23,11 @@ struct HookCallerDescentTests {
 
     private static func holderRow(
         transport: TerminalTransport = .holder, worktreeID: UUID = UUID(),
-        holderPID: Int32, childPID: Int32, parked: Bool = false
+        holderPID: Int32, childPID: Int32, parked: Bool = false, kind: TerminalKind = .shell
     ) -> TBDShared.Terminal {
         TBDShared.Terminal(
             worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "", createdAt: born,
-            kind: .shell, hibernatedAt: parked ? born : nil,
+            kind: kind, hibernatedAt: parked ? born : nil,
             transport: transport, holderPID: holderPID, childPID: childPID)
     }
 
@@ -184,6 +184,46 @@ struct HookCallerDescentTests {
         #expect(Self.verdict(
             peer: 41, row: row, processes: Self.table([20: 1, 21: 20, 40: 41, 41: 40]))
             == .cannotTell(.ancestryIncomplete))
+    }
+
+    // MARK: - Codex tabs
+
+    /// The anchoring row and complete foreign chain that prove foreign for a
+    /// shell, on a Codex tab. Codex's shared server runs the tab's own hooks
+    /// outside its tree, so the table cannot tell that session from a
+    /// stranger. Fails against the code before the fix, which answered
+    /// `.provenForeign`.
+    @Test func aCodexTabCannotProveACallerForeign() {
+        let row = Self.holderRow(holderPID: 20, childPID: 21, kind: .codex)
+        #expect(Self.verdict(peer: 41, row: row, processes: Self.table(Self.tab))
+            == .cannotTell(.codexTab))
+    }
+
+    /// Inside still comes first: a hook below a Codex tab's job is inside.
+    /// Passes before the fix too; it fails against a Codex check placed
+    /// ahead of the walk.
+    @Test func aHookBelowACodexTabsJobIsInside() {
+        let row = Self.holderRow(holderPID: 20, childPID: 21, kind: .codex)
+        var parents = Self.tab
+        parents[22] = 21
+        #expect(Self.verdict(peer: 22, row: row, processes: Self.table(parents))
+            == .inside(terminalID: row.id, depth: 1))
+    }
+
+    /// Both rows anchor and the chain misses both jobs, which proves foreign
+    /// with the Claude row alone. Fails against the code before the fix,
+    /// which answered `.provenForeign` with the Codex row beside it too.
+    @Test func aWorktreeWithACodexTabCannotProveACallerForeign() {
+        let worktree = UUID()
+        let claude = Self.holderRow(worktreeID: worktree, holderPID: 20, childPID: 21, kind: .claude)
+        let codex = Self.holderRow(worktreeID: worktree, holderPID: 30, childPID: 31, kind: .codex)
+        let processes = Self.table([20: 1, 21: 20, 30: 1, 31: 30, 40: 1, 41: 40])
+        #expect(Self.verdict(
+            peer: 41, worktree: worktree, rows: [claude], processes: processes)
+            == .provenForeign, "the control: the Claude row alone proves")
+        #expect(Self.verdict(
+            peer: 41, worktree: worktree, rows: [claude, codex], processes: processes)
+            == .cannotTell(.codexTab))
     }
 
     // MARK: - A worktree

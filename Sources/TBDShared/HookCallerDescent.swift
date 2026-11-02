@@ -20,6 +20,13 @@ public enum HookCallerUncertainty: String, Sendable, Equatable {
     /// is missing from the table, the walk met a repeat, or it reached
     /// `ProcessTableSnapshot.maximumDepth`.
     case ancestryIncomplete
+    /// A row the answer rests on is a Codex tab, and the caller is not inside
+    /// it. Codex's TUI hosts its sessions in a shared background server
+    /// unless started with `--no-daemon`, and that server runs hooks with the
+    /// environment of whichever tab started it (herdrdev/herdr#4649). So a
+    /// hook for the tab's own session can come from outside the tab's tree,
+    /// and the process table cannot tell it from a stranger's.
+    case codexTab
 }
 
 /// What the process tree says about a hook's caller and the tab it names.
@@ -29,8 +36,8 @@ public enum HookCallerVerdict: Sendable, Equatable {
     /// the job itself.
     case inside(terminalID: UUID, depth: Int)
     /// The caller's whole ancestry reaches launchd without passing through any
-    /// job the question names, and every row it rests on could anchor a walk.
-    /// The only answer that refuses.
+    /// job the question names, and every row it rests on could anchor a walk
+    /// and is not a Codex tab. The only answer that refuses.
     case provenForeign
     /// Anything short of proof either way.
     case cannotTell(HookCallerUncertainty)
@@ -68,10 +75,19 @@ public enum HookCallerVerdict: Sendable, Equatable {
 /// however incomplete the rest of the picture is: the job was seen, and seeing
 /// it is all that accepting needs.
 ///
+/// **A Codex tab never proves foreign.** Codex's TUI hosts its sessions in a
+/// shared background server unless started with `--no-daemon`, and that
+/// server runs hooks with the environment of whichever tab started it
+/// (herdrdev/herdr#4649). A hook for the tab's own session can then come from
+/// outside the tab's tree, so where the table would prove a caller foreign to
+/// a Codex tab, the answer is `.codexTab` instead. A caller inside one is
+/// still inside.
+///
 /// A view, like the index: it reads the rows and the table it was given and
 /// writes nothing.
 public enum HookCallerDescent {
-    /// Whether `peerPID` is `terminal`'s live job or descends from it.
+    /// Whether `peerPID` is `terminal`'s live job or descends from it. A
+    /// caller outside a Codex row is never `.provenForeign`.
     ///
     /// `allTerminals` is every row the daemon holds, and is read only to find
     /// another row naming `terminal`'s job. `terminal` may be among them or
@@ -95,6 +111,9 @@ public enum HookCallerDescent {
             if let depth = ancestry.firstIndex(of: job) {
                 return .inside(terminalID: terminal.id, depth: depth)
             }
+            // Its own session's hooks may run in Codex's shared server,
+            // outside this tree.
+            if terminal.isCodexTerminal { return .cannotTell(.codexTab) }
             return foreignWhenComplete(ancestry, in: processes)
         }
     }
@@ -105,10 +124,10 @@ public enum HookCallerDescent {
     /// Inside when the caller descends from any of the worktree's jobs; the
     /// nearest one on the walk up is the one reported. Proven foreign only when
     /// the worktree has at least one row that is not parked, every such row can
-    /// anchor a walk, and the caller's complete ancestry meets none of their
-    /// jobs. Parked rows name no process and are left out; a worktree with no
-    /// other row is `.noUnparkedRow`, for the same reason a parked row cannot
-    /// anchor.
+    /// anchor a walk, none of them is a Codex tab, and the caller's complete
+    /// ancestry meets none of their jobs. Parked rows name no process and are
+    /// left out; a worktree with no other row is `.noUnparkedRow`, for the
+    /// same reason a parked row cannot anchor.
     public static func verdict(
         peerPID: pid_t?, worktreeID: UUID, allTerminals: [Terminal],
         processes: ProcessTableSnapshot?,
@@ -118,9 +137,8 @@ public enum HookCallerDescent {
         guard let processes else { return .cannotTell(.tableUnreadable) }
         let claims = HookCallerJobClaims(
             rows: allTerminals, processes: processes, startWindow: startWindow)
-        let anchors = allTerminals
-            .filter { $0.worktreeID == worktreeID && !$0.isParked }
-            .map { (terminalID: $0.id, anchor: claims.anchor(of: $0)) }
+        let unparked = allTerminals.filter { $0.worktreeID == worktreeID && !$0.isParked }
+        let anchors = unparked.map { (terminalID: $0.id, anchor: claims.anchor(of: $0)) }
         var rowByJob: [pid_t: UUID] = [:]
         for row in anchors {
             if case .job(let job) = row.anchor { rowByJob[job] = row.terminalID }
@@ -137,6 +155,11 @@ public enum HookCallerDescent {
         }
         if anchors.contains(where: { $0.anchor == .contested }) {
             return .cannotTell(.contestedJob)
+        }
+        // A Codex tab's own hooks may run in Codex's shared server, outside
+        // every tab's tree, so the caller could be that tab's session.
+        if unparked.contains(where: \.isCodexTerminal) {
+            return .cannotTell(.codexTab)
         }
         return foreignWhenComplete(ancestry, in: processes)
     }
