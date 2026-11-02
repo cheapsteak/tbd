@@ -52,6 +52,12 @@ final class ToolbarIconButton: NSButton {
         super.init(coder: coder)
     }
 
+    /// No alignment insets. A borderless button still reports some, so
+    /// without this Auto Layout places the square layout on the alignment
+    /// rect and the button's frame, bounds and hit area come out taller than
+    /// the square (measured on CI: 28 x 33 and 28 x 29 for a 28 x 28 layout).
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
     /// The square's colour for a state: none while disabled, the pressed
     /// colour while pressed, the hover colour while the pointer is over the
     /// button, and none otherwise.

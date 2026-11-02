@@ -27,6 +27,20 @@ struct ToolbarIconButtonTests {
         #expect(wide == wideExpected)
     }
 
+    /// A new button has no alignment insets, so its frame is the square
+    /// layout gives it.
+    @Test func alignmentRectInsetsAreZero() {
+        let insets = ToolbarIconButton(frame: .zero).alignmentRectInsets
+        let top = insets.top
+        let left = insets.left
+        let bottom = insets.bottom
+        let right = insets.right
+        #expect(top == 0)
+        #expect(left == 0)
+        #expect(bottom == 0)
+        #expect(right == 0)
+    }
+
     @Test func highlightFillFollowsTheState() {
         let hover = NSColor.quaternaryLabelColor
         let pressed = ToolbarIconButton.pressedFill

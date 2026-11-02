@@ -2654,7 +2654,7 @@ private final class ToolbarFixture {
                 ? pinned(button, .leading, to: host, .leading, in: host)
                 : pinned(button, .leading, to: buttons[index - 1], .trailing, in: host)
             if !leadingPinned { missing.append("\(index).leading") }
-            if !pinned(button, .height, to: button, .width, in: host) { missing.append("\(index).square") }
+            if !pinned(button, .height, to: button, .width, in: button) { missing.append("\(index).square") }
             if !pinned(button, .centerY, to: host, .centerY, in: host) { missing.append("\(index).centerY") }
         }
         if let last = buttons.last, !pinned(last, .trailing, to: host, .trailing, in: host) {
@@ -2663,13 +2663,15 @@ private final class ToolbarFixture {
         return missing
     }
 
-    /// Whether one of `host`'s constraints holds `first`'s `firstAttribute`
+    /// Whether one of `owner`'s constraints holds `first`'s `firstAttribute`
     /// to `second`'s `secondAttribute`: required, equal, with no offset.
+    /// A constraint between two attributes of one view is installed on that
+    /// view, so the square pin is searched in the button's own constraints.
     private static func pinned(
         _ first: NSView, _ firstAttribute: NSLayoutConstraint.Attribute,
-        to second: NSView, _ secondAttribute: NSLayoutConstraint.Attribute, in host: NSView
+        to second: NSView, _ secondAttribute: NSLayoutConstraint.Attribute, in owner: NSView
     ) -> Bool {
-        host.constraints.contains { constraint in
+        owner.constraints.contains { constraint in
             constraint.firstItem === first && constraint.secondItem === second
                 && constraint.firstAttribute == firstAttribute && constraint.secondAttribute == secondAttribute
                 && constraint.relation == .equal && constraint.priority == .required
