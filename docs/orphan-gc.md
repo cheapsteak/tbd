@@ -445,9 +445,7 @@ than the preceding dry run predicted.
   after that the file replaces them. TBD never rewrites it. A file that cannot
   be read skips the orphan-process phase rather than falling back to defaults.
 - **`gcRetainedTranscriptsEnabled`** – default `false`;
-  `tbd gc keep-list                       # print the keep-list in effect: its path, whether it is the shipped defaults or your file, and each pattern
-tbd gc keep-list customize             # write the shipped defaults to ~/tbd/gc-keep-processes for editing (never overwrites)
-tbd gc retained-transcripts [on|off]`, the Settings → Cleanup toggle "Reclaim
+  `tbd gc retained-transcripts [on|off]`, the Settings → Cleanup toggle "Reclaim
   unreferenced retained transcripts", and the `config.setGCRetainedTranscriptsEnabled`
   RPC.
 - **`gcHangStacksEnabled`** – default `false`; `tbd gc hang-stacks [on|off]`, the
@@ -489,6 +487,8 @@ tbd gc profile-dirs [on|off]           # gate the profile-config-dir collector (
 tbd gc orphan-processes [on|off]       # gate the orphaned-process collector (ships off); no argument prints the current value
 tbd gc retained-transcripts [on|off]   # gate the retained-transcript collector (ships off); no argument prints the current value
 tbd gc hang-stacks [on|off]            # gate the hang-stack reclaimer (ships off); no argument prints the current value
+tbd gc keep-list                       # print the orphan-process keep-list in effect: its path, shipped defaults or your file, and each pattern
+tbd gc keep-list customize             # write the shipped defaults to ~/tbd/gc-keep-processes for editing (never overwrites)
 ```
 
 ## Non-goals (from the design spec)
