@@ -90,8 +90,8 @@ group, which no marker can reach.
 
 ### Hook events trust an inherited identity
 
-Each Claude Code hook in TBD's `--settings` overlay runs a `tbd` subcommand.
-The subcommand reads `TBD_TERMINAL_ID` (or `TBD_WORKTREE_ID`) from its own
+Each hook TBD installs, for Claude Code through its `--settings` overlay and for
+Codex through its plugin, runs a `tbd` subcommand. The subcommand reads `TBD_TERMINAL_ID` (or `TBD_WORKTREE_ID`) from its own
 environment and sends an RPC naming that terminal or worktree. Today the daemon
 checks only that the row exists and that the hook's reported cwd resolves to
 the row's worktree (`hookCWDBelongsToTerminal`). The incarnation check
@@ -112,15 +112,16 @@ shape exists. What one wrong event does to the tab it names:
 - **`pr bind --from-hook`** binds a PR to the worktree in `TBD_WORKTREE_ID`. A
   wrong bind ties the PR to the wrong worktree, and if auto-archive-on-merge is
   on there, the merge archives it.
-- **`session-end`** clears the tab's pending AskUserQuestion dialogs and its
-  background-subagent claim, and on a tmux row can mark a running Claude as
-  exited.
-- **`terminal-activity`** flips working, idle or waiting. A wrong "working" on
-  an idle tab lasts until that tab's next event.
+- **`session-end`** clears the tab's pending AskUserQuestion dialogs, and on a
+  tmux row can mark a running Claude as exited.
 - **`ask-user-question`** shows a question as pending on the wrong tab, or
   clears the right tab's question.
-- **`notification`** and **`stop-failure`** put an attention badge, a banner or
-  an error on the wrong tab, and none on the tab that needed it.
+- **`hooks stop-failure`** posts a usage-limit or API-error notification on the
+  wrong tab. With auto-resume on, it also schedules a resume that later types
+  "continue" into that tab.
+- **`hooks session-title`** claims the tab's title for the other session, so the
+  tab's own session can miss it, and marks the tab's worktree active for the
+  PR schedule.
 
 ## Part 1: env evidence in the orphan-process sweep
 
@@ -285,11 +286,9 @@ only real garbage on both routes. No migration is needed.
 
 Every RPC that only a hook sends is checked:
 
-- `terminal.sessionEvent` (`session-event`)
+- `terminal.sessionEvent` (`session-event`, from Claude Code and Codex)
 - `terminal.sessionEnded` (`session-end`)
-- `terminal.activityEvent`, except calls with `origin` set — the app sends
-  those for a user interrupt
-- `terminal.notificationEvent` (`hooks notification`)
+- `terminal.sessionTitle` (`hooks session-title`)
 - `terminal.askUserQuestionPending` and `terminal.askUserQuestionCleared`
 - `claude.rateLimitDetected` and `claude.transientApiErrorDetected`
   (`hooks stop-failure`)
@@ -297,6 +296,8 @@ Every RPC that only a hook sends is checked:
 
 Three paths stay out. `tbd notify` is also run by hand with an explicit
 `--terminal`, so the daemon cannot tell an inherited target from a chosen one.
+That includes the `tbd notify --type error` a `stop-failure` hook falls back to
+when the daemon does not handle the failure.
 `terminal.askUserQuestionSatisfied` comes from the app. The session mod
 authenticates with its own token on its own socket. The hidden debug command
 `tbd fake-rate-limit` now has to run from inside the tab it targets.
@@ -336,9 +337,11 @@ costliest mistake this guard could make.
 
 ### On refusal
 
-The handler replies OK, as the cwd guard does, because hooks are
-fire-and-forget and an error would surface inside the agent's session. It
-changes nothing. It logs at `.info` the method, the terminal or worktree ID,
+The handler replies as it does when the named row does not exist, because
+hooks are fire-and-forget and an error would surface inside the agent's
+session. For most calls that reply is OK; `transientApiErrorDetected` answers
+"not handled"; `pr.attach`, which names no row, replies OK. It changes
+nothing. It logs at `.info` the method, the terminal or worktree ID,
 the peer pid, the caller's executable basename and the reason, all `.public`.
 It never logs argv or the hook's cwd; checkout paths routinely carry employer
 and client names.
@@ -401,8 +404,8 @@ spawns a real process to be killed.
 - **The guard alone**, over an injected table and rows: inside at depth 0 and
   deeper; proven foreign; each can't-tell reason; two rows naming one job.
 - **Each checked method.** A proven-foreign caller changes no state and gets
-  OK; an inside caller behaves as today. App-originated activity skips the
-  guard. `pr.attach` is checked only for `source == hook`.
+  the handler's no-row reply; an inside caller behaves as today. `pr.attach` is
+  checked only for `source == hook`.
 
 ## Rejected alternatives
 
