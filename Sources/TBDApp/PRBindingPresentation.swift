@@ -88,17 +88,6 @@ enum PRBindingPresentation {
         )]
     }
 
-    /// The toolbar split-button's label text. `nil` when there is nothing to
-    /// show, `"#412"` for exactly one binding (matching the pre-multi-PR
-    /// single-PR label), `"3 PRs"` for more.
-    static func buttonLabel(_ bindings: [PRBinding]) -> String? {
-        switch bindings.count {
-        case 0: return nil
-        case 1: return "#\(bindings[0].number)"
-        default: return "\(bindings.count) PRs"
-        }
-    }
-
     /// The binding whose state the toolbar icon should reflect — the one
     /// needing the most attention. Delegates entirely to
     /// `PRBinding.worst(of:)` in TBDShared; this file must not reimplement

@@ -68,13 +68,9 @@ struct PRBindingPresentationTests {
     /// and a GitLab MR at once, and no single vocabulary is true of both.
     @Test("a worktree spanning both forges keeps neutral aggregate wording")
     func mixedForgeAggregateStaysNeutral() {
-        // The count label.
-        #expect(PRBindingPresentation.buttonLabel(
-            [binding(412, .mergeable), gitLabBinding(7)]) == "2 PRs")
-
-        // The `+N` chip counts a set too, so its wording keeps the neutral noun
-        // for the same reason — it has no single binding to take a forge from,
-        // and its signature carries none.
+        // The `+N` chip counts a set, so its wording keeps the neutral noun —
+        // it has no single binding to take a forge from, and its signature
+        // carries none.
         let tooltip = PRBindingPresentation.overflowChipTooltip(total: 2, overflow: 1)
         let announced = PRBindingPresentation.overflowChipAccessibilityLabel(
             total: 2, overflow: 1)
@@ -112,22 +108,9 @@ struct PRBindingPresentationTests {
         #expect(chips.map(\.label) == ["#412", "#7"])
     }
 
-    @Test("no bindings renders no control")
+    @Test("no bindings has no icon binding")
     func zero() {
-        #expect(PRBindingPresentation.buttonLabel([]) == nil)
         #expect(PRBindingPresentation.iconBinding([]) == nil)
-    }
-
-    @Test("one binding shows its number, as today")
-    func one() {
-        #expect(PRBindingPresentation.buttonLabel([binding(412, .mergeable)]) == "#412")
-    }
-
-    @Test("several bindings show a count")
-    func many() {
-        let label = PRBindingPresentation.buttonLabel(
-            [binding(412, .mergeable), binding(413, .checksFailed), binding(414, .draft)])
-        #expect(label == "3 PRs")
     }
 
     @Test("the icon follows the worst state at any count")

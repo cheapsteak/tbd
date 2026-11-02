@@ -59,7 +59,6 @@ struct PRLegacyStatusFallbackTests {
         let effective = PRBindingPresentation.effectiveBindings(
             [binding(412, .checksFailed, worktreeID: wt)], legacyStatus: nil, worktreeID: wt)
         #expect(effective.map(\.number) == [412])
-        #expect(PRBindingPresentation.buttonLabel(effective) == "#412")
         #expect(PRBindingPresentation.iconBinding(effective)?.status?.state == .checksFailed)
     }
 
@@ -73,9 +72,8 @@ struct PRLegacyStatusFallbackTests {
         #expect(effective[0].url == "https://github.com/acme/acme-prod/pull/99")
         #expect(effective[0].status?.state == .changesRequested)
         #expect(effective[0].detached == false)
-        // The label, the icon selection and the click target are all the
-        // pre-multi-PR ones — nothing about the fallback is a different shape.
-        #expect(PRBindingPresentation.buttonLabel(effective) == "#99")
+        // The icon selection is the one a real binding gets — nothing about
+        // the fallback is a different shape.
         #expect(PRBindingPresentation.iconBinding(effective)?.number == 99)
     }
 
@@ -101,7 +99,6 @@ struct PRLegacyStatusFallbackTests {
             worktreeID: wt
         )
         #expect(effective.map(\.number) == [412, 413])
-        #expect(PRBindingPresentation.buttonLabel(effective) == "2 PRs")
     }
 
     // MARK: - Tombstones outrank the fallback
@@ -125,7 +122,6 @@ struct PRLegacyStatusFallbackTests {
         let effective = PRBindingPresentation.effectiveBindings(
             [], legacyStatus: status(412), worktreeID: wt, detachedCount: 1)
         #expect(effective.isEmpty)
-        #expect(PRBindingPresentation.buttonLabel(effective) == nil)
         #expect(PRBindingPresentation.iconBinding(effective) == nil)
     }
 
@@ -175,7 +171,6 @@ struct PRLegacyStatusFallbackTests {
     func neither() {
         let effective = PRBindingPresentation.effectiveBindings([], legacyStatus: nil, worktreeID: UUID())
         #expect(effective.isEmpty)
-        #expect(PRBindingPresentation.buttonLabel(effective) == nil)
         #expect(PRBindingPresentation.iconBinding(effective) == nil)
     }
 

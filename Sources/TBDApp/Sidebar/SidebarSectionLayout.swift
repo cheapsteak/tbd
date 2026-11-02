@@ -51,14 +51,6 @@ struct SidebarSectionLayout {
         return (partition.live, partition.hasEnded ? partition : nil)
     }
 
-    /// The subset handed to a drag reorder of `inlineRoots`. Ungrouped, the
-    /// inline rows are the whole top level, so nil asks for a plain index
-    /// move; grouped, they are a subset that `SidebarSubsetOrder` moves in
-    /// place, even when no header happens to render.
-    var reorderVisibleIDs: [UUID]? {
-        grouped ? inlineRoots.map(\.id) : nil
-    }
-
     /// A repository section. Inputs are autoclosures so each mode computes
     /// only what it renders; the ungrouped default never partitions.
     /// `collapseEnded` applies only while ungrouped; grouped output ignores it.

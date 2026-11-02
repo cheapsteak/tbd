@@ -200,24 +200,3 @@ struct SidebarRemoteGroups {
         return result
     }
 }
-
-enum SidebarSubsetOrder {
-    /// Reorder the displayed subset in its original slots; reject stale identities.
-    static func moved(all: [UUID], visible: [UUID], source: IndexSet, destination: Int) -> [UUID]? {
-        let visibleSet = Set(visible)
-        guard Set(all).count == all.count, visibleSet.count == visible.count,
-              !visible.isEmpty, !source.isEmpty, destination >= 0, destination <= visible.count,
-              source.allSatisfy({ $0 >= 0 && $0 < visible.count }),
-              all.filter(visibleSet.contains) == visible else { return nil }
-        let moved = source.map { visible[$0] }
-        var reordered = visible.enumerated().filter { !source.contains($0.offset) }.map(\.element)
-        let insertion = destination - source.filter { $0 < destination }.count
-        reordered.insert(contentsOf: moved, at: insertion)
-        var index = 0
-        return all.map { id in
-            guard visibleSet.contains(id) else { return id }
-            defer { index += 1 }
-            return reordered[index]
-        }
-    }
-}

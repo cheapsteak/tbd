@@ -221,26 +221,3 @@ struct SidebarRemoteGroupsTests {
         #expect(groups.revealGroups(owner: owner, worktreeIDs: [UUID()], remoteID: nil).isEmpty)
     }
 }
-
-@Suite("Sidebar visible subset reorder")
-struct SidebarSubsetOrderTests {
-    @Test func reordersOnlyTheVisibleSlots() {
-        let ids = (0..<5).map { _ in UUID() }
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: [ids[0], ids[2], ids[4]],
-            source: [0], destination: 3) == [ids[2], ids[1], ids[4], ids[3], ids[0]])
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: [ids[0], ids[2], ids[4]],
-            source: [0, 2], destination: 1) == [ids[0], ids[1], ids[4], ids[3], ids[2]])
-    }
-
-    @Test func rejectsStaleDuplicateAndMissingIdentitiesAndBadIndices() {
-        let ids = (0..<3).map { _ in UUID() }
-        let invalid = [[ids[0], ids[0]], [UUID()], [ids[2], ids[0]], []]
-        for visible in invalid {
-            #expect(SidebarSubsetOrder.moved(all: ids, visible: visible, source: [0], destination: 1) == nil)
-        }
-        #expect(SidebarSubsetOrder.moved(all: [ids[0], ids[0]], visible: [ids[0]], source: [0], destination: 1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [3], destination: 1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [0], destination: -1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [0], destination: 4) == nil)
-    }
-}

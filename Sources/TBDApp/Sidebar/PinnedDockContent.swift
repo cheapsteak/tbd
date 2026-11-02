@@ -161,23 +161,6 @@ enum PinnedDockContent {
             }
             .map(PinnedDockRemoteRow.init)
     }
-
-    /// The contiguous run of rows belonging to one pinned root: the root itself
-    /// plus any expanded descendants beneath it.
-    ///
-    /// `PinnedDockView` renders a nested `ForEach` — outer over pinned roots,
-    /// inner over each root's rows — so that `.onMove`'s indices address ROOTS
-    /// rather than the flattened row list. Attaching `.onMove` to a flat
-    /// `ForEach` over `rows(...)` would move the wrong worktree whenever a
-    /// subtree was expanded.
-    static func subtree(of rootID: UUID, in rows: [PinnedDockRow]) -> [PinnedDockRow] {
-        guard let start = rows.firstIndex(where: { $0.worktree.id == rootID }) else { return [] }
-        var end = rows.index(after: start)
-        while end < rows.endIndex, rows[end].depth > rows[start].depth {
-            end = rows.index(after: end)
-        }
-        return Array(rows[start..<end])
-    }
 }
 
 /// Index maths for a dock drag, split out from `AppState` so the stale-index

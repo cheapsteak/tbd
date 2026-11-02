@@ -112,7 +112,6 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(layout.inlineRoots.map(\.id) == [fleet.working.id, fleet.running.id, fleet.parked.id, fleet.ended.id])
             #expect(Set(layout.inlineSessions.map(\.payload.id)) == ["loose-running", "loose-ended"])
             #expect(layout.inlineSessions.map(\.id) == matched(state, fleet.repoID).map(\.id))
-            #expect(layout.reorderVisibleIDs == nil)
         }
     }
 
@@ -202,7 +201,6 @@ struct SidebarWorkflowGroupsToggleTests {
             #expect(layout.groupKinds == [.remote, .exited, .hibernated])
             #expect(layout.inlineRoots.map(\.id) == [fleet.working.id])
             #expect(layout.inlineSessions.isEmpty)
-            #expect(layout.reorderVisibleIDs == [fleet.working.id])
             #expect(layout.remoteGroups?.remoteRoots.map(\.id) == [fleet.running.id])
             #expect(layout.remoteGroups?.exitedRoots.map(\.id) == [fleet.ended.id])
             #expect(layout.remoteGroups?.sessions.map(\.payload.id) == ["loose-running"])
