@@ -326,9 +326,10 @@ The guard gives one of three answers:
   one job.
 
 For `pr.attach`, the caller is inside when it descends from the job of any row
-in the named worktree. It is proven foreign only when every row in that
-worktree that is not parked can anchor a walk, and the complete ancestry passes
-through none of their jobs.
+in the named worktree. It is proven foreign only when the worktree has at
+least one row that is not parked, every such row can anchor a walk, and the
+complete ancestry passes through none of their jobs. A worktree with no
+unparked row is "can't tell", for the same reason a parked row is.
 
 A parked row is deliberately "can't tell". A wake starts a new job before the
 row records its pid, so the new session's SessionStart can arrive while the row
