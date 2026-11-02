@@ -177,16 +177,14 @@ final class SidebarHoverButton: NSButton {
 }
 
 /// Help text a cell asks for only when AppKit is about to show it, so a row's
-/// tooltip — a status badge's OSC detail, the no-status reason, a provider's
-/// summary — is computed when the pointer arrives rather than on every
-/// rebuild (spec "Units": text needed only on hover).
+/// tooltip — a status badge's OSC detail, a provider's summary — is computed
+/// when the pointer arrives rather than on every rebuild (spec "Units": text
+/// needed only on hover).
 @MainActor
 final class SidebarToolTips: NSObject, NSViewToolTipOwner {
     enum Target: Equatable {
         /// A row's status badge or typing dots.
         case suffix
-        /// A worktree row's no-status mark.
-        case noStatusMark
         /// A worktree row's shortened "(repo)" suffix: the full repo name.
         case crossRepo
         /// A provider header's name: the provider's compact summary.

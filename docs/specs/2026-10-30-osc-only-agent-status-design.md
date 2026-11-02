@@ -22,7 +22,7 @@ session's activity state:
 
 Sessions that cannot report — any agent on the tmux transport, Claude Code
 before 2.1.295, Codex before 0.163.0 — still run. Their state is `unknown`,
-the sidebar says why, and the idle sweep leaves them alone.
+never `idle`, and the idle sweep leaves them alone.
 
 The protocol, the parser, the store's trust and liveness rules, and the
 roll-up of task entries are specified in
@@ -55,8 +55,9 @@ This document covers what changes around them.
   every existing consumer.
 - Codex sessions keep a working, idle and blocked badge, and gain done and
   error.
-- A session that cannot report is visibly a session without status, never a
-  session that looks idle.
+- A session that cannot report is never taken for an idle one: its state is
+  `.unknown`, never `.idle`, to every component that acts on the column: the
+  idle sweep, merge-park and the delivery verifier.
 - No auto-park of a session whose state TBD does not know.
 
 ## Non-goals
@@ -219,36 +220,15 @@ its existing checks and is unaffected.
 
 ### Sessions that cannot report
 
-The sidebar row draws a small "no status" mark for a session that has not
-reported since it started: a Claude or Codex terminal whose `activityState` is
-`.unknown`, that is neither parked nor gone, once the app has seen its current
-incarnation in that state for 15 seconds. A `.unknown` that came after the
-agent reported draws no mark, because the tooltip below would misexplain it:
-one the agent's own bare `clear` wrote (`.programStatus`) — Claude Code
-restoring terminal modes around an external editor, or a clean Codex exit —
-and one a child exit wrote (`.processLiveness`), whose process is gone. The
-upgrade reset, which records no source, and a wake's, respawn's or un-park's
-reset (`.derived`) do draw it. The grace period keeps a starting session from
-flashing the mark before its first report. The app keeps the first-seen time
-in memory per incarnation; a new incarnation restarts it. The wait uses an
-injected clock.
-
-The mark's tooltip names the cause from the terminal's transport:
-
-- tmux – "The tmux transport doesn't carry agent status. Status needs the
-  pty-holder transport."
-- holder – "This session hasn't sent its status yet. An idle session sends
-  it on its next turn. If the mark stays after a turn, relaunch the session:
-  an agent turns status on only when it starts, and needs Claude Code 2.1.295
-  or later, or Codex 0.163.0 or later."
-
-The holder tooltip covers two causes the column cannot tell apart: an idle
-agent, which reports only on change and so says nothing until its next turn,
-and an agent whose startup handshake left reporting off, which stays silent
-until it is relaunched.
-
-The mark clears on the first accepted report. Shell terminals never show it.
-It is new UI beside the existing badges and needs no flag.
+A session that has not reported since it started reads `.unknown`, and
+`session.states` reports it as `.unknown(why:)`, naming the cause from its
+transport. The sidebar shows such a session the same as an idle one, with no
+badge, and draws no mark of its own for the missing state. The column cannot
+tell an idle agent, which reports only on change and so says nothing until its
+next turn, from one whose startup handshake left reporting off, which stays
+silent until it is relaunched, so a mark on every `.unknown` row would sit
+mostly on healthy idle sessions, a false alarm. The handshake records below
+diagnose a silent session instead.
 
 An agent decides once, at startup, whether to report: it sends the probe and
 turns reporting on only if the answer arrives before its DA1 reply. A failed
@@ -316,8 +296,12 @@ columns (`awaitingInputReason`, `awaitingInputObservedAt`), on every terminal
 row that is neither parked nor suspended (`hibernatedAt IS NULL AND
 suspendedAt IS NULL`) and whose `activityStateSource` — the JSON encoding of a
 `FactSource` — is not `programStatus`. Rows the store wrote, and parked or
-suspended rows, keep their value. The reset sessions show the no-status mark
-until they are relaunched or woken.
+suspended rows, keep their value. The reset sessions read `.unknown` until
+their agent reports. On the holder transport, a Codex session whose agent can
+report does so on its next change, because only TBD's refusal kept its reports
+out; a Claude session reports only from a new process, once it is relaunched
+or woken, because Claude Code sends the probe only at startup. A session on
+tmux never reports.
 
 ### Hooks that stay
 
@@ -364,9 +348,7 @@ stop-failure` makes instead runs the sync.
 
 Reading the pty stream and writing the columns compile: they are per-event work
 inside the emulators, and the columns are the record every compiled consumer
-gates on. The no-status mark is display and lives in the app as a pure
-function of the terminal's kind, transport, activity state and first-seen
-time.
+gates on.
 
 ## Flag
 
@@ -396,10 +378,9 @@ Three stacked pull requests, each safe to merge alone:
 2. **Accept Codex reports.** The trust rule above, and a tooltip that handles a
    terminal with no task entries. Hooks still write the columns.
 3. **OSC becomes the only state source.** The column writer, the attention
-   banner, the ledger stamp, the hibernation rule, the no-status mark, the
-   upgrade migration, and every removal. Both overlays change here, in the
-   same pull request as the writer that replaces them, so no build ships with
-   neither.
+   banner, the ledger stamp, the hibernation rule, the upgrade migration, and
+   every removal. Both overlays change here, in the same pull request as the
+   writer that replaces them, so no build ships with neither.
 
 ## Testing
 
@@ -430,12 +411,9 @@ Each branch of each new conditional gets a test.
 - **Resolution** – the snapshot rung over the column; the column after the
   store is emptied (a daemon restart); `.unknown(why:)` naming tmux and naming
   no report.
-- **No-status mark** – absent before 15 seconds and present after; tooltip text
-  by transport; cleared by a report; restarted by a new incarnation; never on a
-  shell terminal; absent for a `.unknown` the agent's `clear` or a child exit
-  wrote, and present for the upgrade and wake resets; hidden when a child exit
-  lands on a row that never reported, and armed when a wake's reset lands on a
-  row the agent's `clear` wrote.
+- **App provenance** – a newer `terminal.list` row or activity delta that
+  changes only the source, such as a child exit over a never-reported
+  `.unknown`, replaces the cached source and its stamps.
 - **Upgrade migration** – a hook-written live row becomes `unknown` with no
   wait reason; a store-written row, a parked row and a suspended row keep
   their values.
@@ -448,7 +426,8 @@ Each branch of each new conditional gets a test.
 
 Before the third pull request merges, run Claude Code and Codex 0.164.0 or
 later on holder sessions and watch each badge move through working, blocked
-and idle; then run a tmux session and confirm the no-status mark.
+and idle; then run a tmux session and confirm `session.states` reports it
+`unknown`, naming the tmux transport.
 
 ## Rejected alternatives
 
@@ -465,7 +444,12 @@ and idle; then run a tmux session and confirm the no-status mark.
   already rejected — and keeps every rule that existed to referee it.
 - **Refusing to launch old agents or tmux sessions.** A session without status
   is still useful, and TBD does not know Claude Code's version without running
-  it. A visible mark costs nothing and tells the user what to change.
+  it.
+- **A sidebar mark on every session whose state is `.unknown`.** The column
+  cannot tell an idle agent that will report on its next turn from one whose
+  handshake left reporting off, so the mark would sit mostly on healthy idle
+  sessions. The handshake records in "Sessions that cannot report" diagnose a
+  silent session without a standing false alarm.
 - **Reading state off the rendered screen.** Forbidden by the repository's
   rule against TUI screen-scraping, and unnecessary now that both agents
   report through a machine interface.

@@ -130,7 +130,7 @@ struct TerminalHibernationDeltaAppStateTests {
     /// incarnation it mints, and nothing but the wake's own delta announces
     /// it: a Claude row cached as working must read `.unknown`, with the
     /// reset's source and stamps, once that delta lands — so an agent that
-    /// cannot report gets the no-status mark rather than a stale badge.
+    /// cannot report reads `.unknown` rather than a stale badge.
     @Test func wakeDelta_appliesTheResetActivityColumns() {
         withState { state in
             let worktreeID = UUID()

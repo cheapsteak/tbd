@@ -228,9 +228,9 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// resets the column to `.unknown` for the incarnation it mints, and no
     /// `terminalActivityUpdated` announces either, so without this the cached
     /// row keeps whatever it read before — a woken agent that cannot report
-    /// would keep a stale working or waiting state, and never get the
-    /// no-status mark. The app applies it under the activity ordering stamp,
-    /// as it applies `terminalActivityUpdated`. Nil on a keep-warm
+    /// would keep a stale working or waiting state instead of `.unknown`.
+    /// The app applies it under the activity ordering stamp, as it applies
+    /// `terminalActivityUpdated`. Nil on a keep-warm
     /// re-broadcast, when the daemon could not read the row back, and from
     /// daemons that predate this field: the app then keeps its cached values.
     /// Optional with a nil default so payloads from older daemons still

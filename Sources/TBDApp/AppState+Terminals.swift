@@ -862,10 +862,10 @@ extension Terminal {
     /// with both halves cleared. A newer fact repeating the current state and
     /// source advances only the order watermark, keeping the observation
     /// stamp of the transition that began it; one that changes only the
-    /// source is a new fact, and replaces both — a child exit over a
-    /// never-reported `.unknown` is what hides the no-status mark. When
-    /// timestamps tie, a wait for the user is preserved, and an ambiguous
-    /// working/non-working tie resolves toward non-working.
+    /// source is a new fact, and replaces both, as a child exit over a
+    /// never-reported `.unknown` does. When timestamps tie, a wait for the
+    /// user is preserved, and an ambiguous working/non-working tie resolves
+    /// toward non-working.
     mutating func reconcileActivityObservation(against current: Terminal?) {
         let incomingIsComplete = activityStateSource != nil && activityStateObservedAt != nil
         guard let current else {

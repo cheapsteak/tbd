@@ -15,7 +15,7 @@ import TestSupport
 /// `SidebarTreeBuilderTests.eachRowInputChangesTheTree`. At file scope so the
 /// test's arguments are not main-actor isolated.
 enum SidebarRowInput: CaseIterable, Sendable {
-    case leading, name, bold, subtitles, suffix, noStatusMark, devServerDot
+    case leading, name, bold, subtitles, suffix, devServerDot
     case crossRepoLabel, homeRepo, pinned, depth, dimmed, hiddenSection, isMain, heightClass
 }
 
@@ -519,7 +519,6 @@ struct SidebarTreeBuilderTests {
         let parent: Worktree
         let child: Worktree
         let scratch: Worktree
-        let quietTerminalID: UUID
     }
 
     static func makeRowFixture(in state: AppState) -> RowFixture {
@@ -531,15 +530,11 @@ struct SidebarTreeBuilderTests {
         let child = row("child", repo: repo.id, parent: parent.id)
         let scratch = Worktree(repoID: nil, name: "pad", displayName: "Pad", branch: "",
                                path: "/tmp/acme-pad", tmuxServer: "acme")
-        // An agent session that has not reported: the no-status mark shows
-        // once the app records a sighting past the grace period.
-        let quiet = TBDShared.Terminal(worktreeID: subject.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
         state.repos = [repo, other]
         state.worktrees = [repo.id: [main, subject, parent, child]]
         state.scratchWorktrees = [scratch]
-        state.terminals[subject.id] = [quiet]
         return RowFixture(repo: repo.id, otherRepo: other.id, main: main, subject: subject, parent: parent,
-                          child: child, scratch: scratch, quietTerminalID: quiet.id)
+                          child: child, scratch: scratch)
     }
 
     static func subject(of input: SidebarRowInput, in fixture: RowFixture) -> UUID {
@@ -567,8 +562,6 @@ struct SidebarTreeBuilderTests {
         case .suffix:
             state.terminals[subject] = [TBDShared.Terminal(
                 worktreeID: subject, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .claude, activityState: .working)]
-        case .noStatusMark:
-            state.noStatusSightings[fixture.quietTerminalID] = NoStatusSighting(incarnationID: nil, graceElapsed: true)
         case .devServerDot:
             state.devServerRunningWorktreeIDs = [subject]
         case .crossRepoLabel, .homeRepo:
@@ -595,7 +588,6 @@ struct SidebarTreeBuilderTests {
         case .bold: a.isNameBold != b.isNameBold
         case .subtitles: a.subtitles != b.subtitles
         case .suffix: a.suffix != b.suffix
-        case .noStatusMark: a.showsNoStatusMark != b.showsNoStatusMark
         case .devServerDot: a.showsDevServerDot != b.showsDevServerDot
         case .crossRepoLabel: a.crossRepoLabel != b.crossRepoLabel
         case .homeRepo: a.homeRepoID != b.homeRepoID

@@ -230,10 +230,7 @@ final class AppState {
         return index
     }
     var terminals: [UUID: [Terminal]] = [:] {
-        didSet {
-            sidebarHibernationCache.removeAll()
-            terminalsDidChangeForNoStatus()
-        }
+        didSet { sidebarHibernationCache.removeAll() }
     }
     /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
     /// ID to the limit hit information. Cleared when the terminal starts working,
@@ -2078,19 +2075,6 @@ final class AppState {
     ) async -> Void = { [daemonClient] onConnected, onDelta in
         await daemonClient.subscribe(onDelta: onDelta, onConnected: onConnected)
     }
-    /// Agent terminals seen sitting at `.unknown`, by terminal id, for the
-    /// sidebar's no-status mark. App memory only, kept in line with
-    /// `terminals` by `reconcileNoStatusSightings()`; see `NoStatusMark`.
-    var noStatusSightings: [UUID: NoStatusSighting] = [:]
-    /// The grace timer of each sighting still waiting out
-    /// `NoStatusMark.grace`. Bookkeeping, not UI state.
-    @ObservationIgnored var noStatusGraceTasks: [UUID: Task<Void, Never>] = [:]
-    /// Clock for the no-status grace period.
-    @ObservationIgnored var noStatusClock: any Clock<Duration> = ContinuousClock()
-    /// How many `coalescingNoStatusReconcile` calls are running, and whether
-    /// `terminals` changed during them — see that method.
-    @ObservationIgnored var noStatusReconcileDepth = 0
-    @ObservationIgnored var noStatusReconcilePending = false
     /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
     /// prompts) by terminal, mirrored from the daemon's store over
     /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
@@ -3385,15 +3369,7 @@ final class AppState {
         subscriptionTask = nil
     }
 
-    /// Apply one delta from the daemon. A delta can write `terminals` several
-    /// times — a wake's flips the parked flag, then the incarnation, then the
-    /// activity columns — so the no-status sightings are reconciled once, after
-    /// the whole delta has applied.
     func handleDelta(_ delta: StateDelta) {
-        coalescingNoStatusReconcile { applyDelta(delta) }
-    }
-
-    private func applyDelta(_ delta: StateDelta) {
         switch delta {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
@@ -3767,8 +3743,8 @@ final class AppState {
             terminalSessionOrderObservedAt.removeValue(forKey: delta.terminalID)
         }
         // A dropped delta left the row as it was. Writing it back would still
-        // notify every reader of `terminals` and rescan the no-status
-        // sightings, for each stale delta the two ingest paths deliver.
+        // notify every reader of `terminals`, for each stale delta the two
+        // ingest paths deliver.
         guard applied else { return }
         terminals[delta.worktreeID]?[idx] = terminal
     }
@@ -4604,15 +4580,12 @@ final class AppState {
             let allTerminals = try await terminalsListFetcher()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
-            // One no-status reconcile for the whole poll, not one per worktree.
-            coalescingNoStatusReconcile {
-                for wtID in visibleWorktreeIDs {
-                    adoptTerminalSnapshot(
-                        terminalsByWorktree[wtID] ?? [],
-                        worktreeID: wtID,
-                        startedAtReplacementGeneration: terminalSnapshotGeneration
-                    )
-                }
+            for wtID in visibleWorktreeIDs {
+                adoptTerminalSnapshot(
+                    terminalsByWorktree[wtID] ?? [],
+                    worktreeID: wtID,
+                    startedAtReplacementGeneration: terminalSnapshotGeneration
+                )
             }
 
             // Fetch all notes, group client-side
