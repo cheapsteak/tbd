@@ -147,8 +147,9 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   required constraints. It holds three `ToolbarIconButton`s, borderless
   `NSButton`s, toggle, back and forward, each 28 pt wide by a required
   constraint. Required constraints chain them from the host's leading edge to
-  its trailing edge and pin each to its top and bottom, which wins over each
-  button's own intrinsic size. AppKit centres items vertically, which puts the
+  its trailing edge, hold each button square (height equal to width) and
+  centre it vertically in the host, which wins over each button's own
+  intrinsic size. AppKit centres items vertically, which puts the
   glyphs on the window buttons' line.
 - **Pitch** – 28 pt: each button is one pitch wide and the buttons touch, so
   none of AppKit's spacing between items falls between them.
@@ -160,7 +161,9 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   At medium scale they draw 15 × 12 pt and 6 × 11 pt, against the reference's
   16 × 13 pt and 6 × 11 pt. Back and forward draw grey while disabled.
 - **Hover and hit area** – each button draws a rounded square, corner radius
-  6 pt, over its whole 28 × 28 pt frame: the quaternary label colour while the
+  6 pt, the size of the button's shorter side, centred and aligned to whole
+  device pixels so no blurred edge row makes it read taller than wide. Each
+  button is square, so the square fills its 28 × 28 pt frame: the quaternary label colour while the
   pointer is over it, the label colour at 16 % opacity while it is pressed, and
   nothing at rest or while disabled. Both colours are semantic, so they follow
   the light and dark appearance. This matches the Claude desktop app's

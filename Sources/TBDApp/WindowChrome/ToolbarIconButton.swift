@@ -62,6 +62,15 @@ final class ToolbarIconButton: NSButton {
         return nil
     }
 
+    /// The square the highlight fills: the side of the button's shorter
+    /// side, centred in `bounds`. `draw(_:)` pixel-aligns it, so no blurred
+    /// edge row makes it read taller than it is wide.
+    static func highlightRect(in bounds: NSRect) -> NSRect {
+        let side = min(bounds.width, bounds.height)
+        return NSRect(
+            x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+    }
+
     override var isEnabled: Bool {
         didSet {
             if !isEnabled {
@@ -112,7 +121,8 @@ final class ToolbarIconButton: NSButton {
         if let fill = Self.highlightFill(isHovered: isHovered, isPressed: isHighlighted, isEnabled: isEnabled) {
             let radius = MainToolbarMetrics.iconButtonCornerRadius
             fill.setFill()
-            NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+            let square = backingAlignedRect(Self.highlightRect(in: bounds), options: .alignAllEdgesNearest)
+            NSBezierPath(roundedRect: square, xRadius: radius, yRadius: radius).fill()
         }
         super.draw(dirtyRect)
     }

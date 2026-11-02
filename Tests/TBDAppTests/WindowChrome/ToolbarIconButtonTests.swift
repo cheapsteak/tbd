@@ -15,6 +15,18 @@ struct ToolbarIconButtonTests {
     /// else holds; none at rest; the hover colour while hovered; the pressed
     /// colour while pressed, which wins over hovered. The two colours differ,
     /// so pressed reads darker than hovered.
+    @Test func highlightRectIsTheShorterSideCentred() {
+        let square = ToolbarIconButton.highlightRect(in: NSRect(x: 0, y: 0, width: 28, height: 28))
+        let squareExpected = NSRect(x: 0, y: 0, width: 28, height: 28)
+        #expect(square == squareExpected)
+        let tall = ToolbarIconButton.highlightRect(in: NSRect(x: 0, y: 0, width: 28, height: 30))
+        let tallExpected = NSRect(x: 0, y: 1, width: 28, height: 28)
+        #expect(tall == tallExpected)
+        let wide = ToolbarIconButton.highlightRect(in: NSRect(x: 0, y: 0, width: 30, height: 28))
+        let wideExpected = NSRect(x: 1, y: 0, width: 28, height: 28)
+        #expect(wide == wideExpected)
+    }
+
     @Test func highlightFillFollowsTheState() {
         let hover = NSColor.quaternaryLabelColor
         let pressed = ToolbarIconButton.pressedFill

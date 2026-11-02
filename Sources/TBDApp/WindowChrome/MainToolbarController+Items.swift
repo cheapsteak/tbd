@@ -46,8 +46,8 @@ struct ToolbarImageKey {
 /// AppKit measures the host, which holds the item's size by required
 /// constraints, three pitches by one button's height. Each button holds one
 /// pitch by a required width constraint, and required constraints chain them
-/// leading to trailing and pin each to the host's top and bottom, so they
-/// tile the host (`ToolbarButtonTiling`). The host is not an accessibility
+/// leading to trailing, make each square and centre it vertically in the
+/// host, so they tile the host (`ToolbarButtonTiling`). The host is not an accessibility
 /// element, so VoiceOver lands on each button.
 ///
 /// The host keeps no stored property: its buttons are its subviews, found by
@@ -135,8 +135,8 @@ final class FilterToolbarButtonHost: NSView {
 enum ToolbarButtonTiling {
     /// Holds `host` at the buttons' pitches by one button's height, adds each
     /// button with its identifier, one pitch wide, chained leading to
-    /// trailing and pinned to the host's top and bottom, so the buttons tile
-    /// the host over their own intrinsic size. Every constraint is required,
+    /// trailing, square (height equal to width) and centred vertically in the
+    /// host, so the buttons tile the host over their own intrinsic size. Every constraint is required,
     /// carries `widthID`, `heightID` or `buttonWidthID` where it holds a
     /// size, and is archived with the host, so a copied item keeps its size
     /// and layout.
@@ -160,8 +160,8 @@ enum ToolbarButtonTiling {
             buttonWidth.identifier = buttonWidthID
             layout += [
                 button.leadingAnchor.constraint(equalTo: previousEdge),
-                button.topAnchor.constraint(equalTo: host.topAnchor),
-                button.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                button.heightAnchor.constraint(equalTo: button.widthAnchor),
+                button.centerYAnchor.constraint(equalTo: host.centerYAnchor),
                 buttonWidth,
             ]
             previousEdge = button.trailingAnchor

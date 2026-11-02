@@ -2644,7 +2644,7 @@ private final class ToolbarFixture {
     /// The pins that tile `buttons` across `host` which `host`'s constraints
     /// lack, named by button index and edge: each button's leading edge to
     /// the host's leading edge for the first and to the trailing edge of the
-    /// one before for the rest, each button's top and bottom to the host's,
+    /// one before for the rest, each button's height to its width and its vertical centre to the host's,
     /// and the last one's trailing edge to the host's. Empty when all are
     /// there, required, equal and with no offset.
     static func missingTilePins(of buttons: [NSView], in host: NSView) -> [String] {
@@ -2654,8 +2654,8 @@ private final class ToolbarFixture {
                 ? pinned(button, .leading, to: host, .leading, in: host)
                 : pinned(button, .leading, to: buttons[index - 1], .trailing, in: host)
             if !leadingPinned { missing.append("\(index).leading") }
-            if !pinned(button, .top, to: host, .top, in: host) { missing.append("\(index).top") }
-            if !pinned(button, .bottom, to: host, .bottom, in: host) { missing.append("\(index).bottom") }
+            if !pinned(button, .height, to: button, .width, in: host) { missing.append("\(index).square") }
+            if !pinned(button, .centerY, to: host, .centerY, in: host) { missing.append("\(index).centerY") }
         }
         if let last = buttons.last, !pinned(last, .trailing, to: host, .trailing, in: host) {
             missing.append("\(buttons.count - 1).trailing")
