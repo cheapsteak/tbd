@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDKernel
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
@@ -113,23 +114,85 @@ public enum CWDOwnership: Sendable, Equatable {
     case dead(DeadWorktreeRoot)
 }
 
+/// Which evidence admitted an orphan root, written into the reap record and the
+/// dry-run plan line as `via=<rawValue>` so a soak can compare what each route
+/// catches.
+public enum OrphanAdmissionRoute: String, Sendable, Equatable {
+    /// Its cwd lies under a TBD-managed root positively known to be dead.
+    case cwd
+    /// Its `TBD_WORKTREE_ID` names an archived worktree, and the grace has
+    /// passed since that row's `archivedAt`.
+    case env
+    /// Both, for the same root.
+    case cwdAndEnv = "cwd+env"
+}
+
 /// One process that outlived the worktree it was rooted in.
 public struct OrphanProcessCandidate: Sendable, Equatable {
     public var pid: Int32
     /// Resolved cwd, from the sweep's single `lsof -d cwd -Fn` pass.
     public var cwd: String
-    /// The dead TBD-managed root the cwd fell under — what the reap record's
-    /// `worktreePath` carries.
+    /// The dead worktree the process belonged to — what the reap record's
+    /// `worktreePath` carries. The dead root its cwd fell under whenever the cwd
+    /// route admitted it; the archived worktree its marker names when only the
+    /// env route did, because the cwd then names no worktree at all.
     public var rootPath: String
     /// Full argv, truncated into the reap record's `processDescription`.
     public var command: String
+    /// The evidence that admitted it.
+    public var route: OrphanAdmissionRoute
 
-    public init(pid: Int32, cwd: String, rootPath: String, command: String) {
+    public init(
+        pid: Int32, cwd: String, rootPath: String, command: String,
+        route: OrphanAdmissionRoute = .cwd
+    ) {
         self.pid = pid
         self.cwd = cwd
         self.rootPath = rootPath
         self.command = command
+        self.route = route
     }
+}
+
+/// The rows a process's environment markers are judged against, read back to
+/// back with the rows the cwd classification is built from.
+public struct MarkerRows: Sendable, Equatable {
+    /// Every worktree row that is not archived, local or not. A marker naming
+    /// one keeps its process, so a row this sweep cannot place on disk — a
+    /// remote or still-creating worktree — still protects.
+    public var liveWorktreeIDs: Set<UUID>
+    /// Every terminal row. Archiving a worktree removes its tabs, so a
+    /// terminal row that exists belongs to work that is still going on.
+    public var terminalIDs: Set<UUID>
+    /// Archived local worktrees, each with its resolved path and its row's
+    /// `archivedAt` — what the env route admits against and names in the record.
+    public var archivedWorktrees: [UUID: DeadWorktreeRoot]
+
+    public init(
+        liveWorktreeIDs: Set<UUID> = [], terminalIDs: Set<UUID> = [],
+        archivedWorktrees: [UUID: DeadWorktreeRoot] = [:]
+    ) {
+        self.liveWorktreeIDs = liveWorktreeIDs
+        self.terminalIDs = terminalIDs
+        self.archivedWorktrees = archivedWorktrees
+    }
+
+    /// No rows: every marker is neutral, so only a readable environment with
+    /// no marker at all keeps.
+    public static let empty = MarkerRows()
+}
+
+/// What one process's environment says about reclaiming it.
+public enum MarkerJudgement: Sendable, Equatable {
+    /// A marker names live work, or the environment is readable and carries no
+    /// marker. The process is not this sweep's to kill, whatever its cwd says.
+    case keep
+    /// `TBD_WORKTREE_ID` names this archived worktree. Whether that admits
+    /// the process still depends on the grace since its `archivedAt`.
+    case admit(DeadWorktreeRoot)
+    /// The environment is hidden, or its markers name no row or do not parse.
+    /// It neither keeps nor admits; the cwd route decides alone.
+    case neutral
 }
 
 /// One holder-transport session row whose worktree is not archived, reduced to
@@ -170,19 +233,25 @@ public struct LiveHolderSession: Sendable, Equatable {
 /// design.
 ///
 /// Classification and reclamation never read the database and never spawn
-/// anything: the caller supplies the `ps` snapshot, the pid-to-cwd map and the
-/// root classification, the same division of labor `ProfileDirCollector` and
-/// `DeletionQueueCollector` keep with `OrphanGC`. The one exception is
-/// `realProcessSnapshot()`, the production `/bin/ps` reader — a static factory
-/// for that injected input, deliberately outside the classifying surface so
-/// every gate below stays a pure function of its arguments.
+/// anything: the caller supplies the `ps` snapshot, the pid-to-cwd map, the
+/// root classification and the rows markers are judged against, the same
+/// division of labor `ProfileDirCollector` and `DeletionQueueCollector` keep
+/// with `OrphanGC`. The exceptions are `realProcessSnapshot()`, the production
+/// `/bin/ps` reader — a static factory for that injected input, deliberately
+/// outside the classifying surface — and the two per-pid kernel reads, a
+/// process's environment markers and its start time, which arrive as injected
+/// closures like the snapshot provider. So every gate below stays a function of
+/// what it was handed, and tests never read a real process.
 ///
 /// Every failure direction is toward KEEPING: an unreadable cwd, an unparseable
 /// start time, a uid that is not ours, an identity that cannot be re-read at
 /// signal time, and any ambiguity about whether the owning directory is dead
 /// all leave the process running. Reclamation runs on positive evidence of
 /// death — an archived row, or a `.deleting/<uuid>` entry TBD renamed there
-/// itself — never on the mere absence of one.
+/// itself — never on the mere absence of one. A process's environment can add
+/// a route to that evidence and can veto it, but an environment that cannot be
+/// read, or names nothing TBD knows, changes nothing
+/// (`docs/specs/2026-11-01-env-marker-attribution-design.md`).
 public struct OrphanProcessCollector: Sendable {
     let signaller: any ProcessSignaller
     /// One fresh `/bin/ps` reading, taken immediately before each volley so a
@@ -190,6 +259,13 @@ public struct OrphanProcessCollector: Sendable {
     /// and left alone. Injected so tests never spawn a subprocess.
     let snapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
     let now: @Sendable () -> Date
+    /// One process's `TBD_WORKTREE_ID` and `TBD_TERMINAL_ID`, through
+    /// `KERN_PROCARGS2`. Nothing else from the environment ever leaves it.
+    let environmentReader: @Sendable (Int32) -> ProcessEnvironmentMarkers
+    /// One process's start time from the kernel, read after its environment
+    /// so `readMarkers` can tell whether the pid still named the process the
+    /// planning snapshot saw.
+    let startTimeReader: @Sendable (Int32) -> Date?
     /// Number of liveness polls between SIGTERM and SIGKILL.
     let graceAttempts: Int
     /// Delay between liveness polls.
@@ -205,6 +281,12 @@ public struct OrphanProcessCollector: Sendable {
             await OrphanProcessCollector.realProcessSnapshot()
         },
         now: @escaping @Sendable () -> Date = Date.init,
+        environmentReader: @escaping @Sendable (Int32) -> ProcessEnvironmentMarkers = {
+            ProcessEnvironmentReader.markers(pid: $0)
+        },
+        startTimeReader: @escaping @Sendable (Int32) -> Date? = {
+            ProcessStartTime.startTime(pid: $0)
+        },
         graceAttempts: Int = 30,
         pollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock()
@@ -212,6 +294,8 @@ public struct OrphanProcessCollector: Sendable {
         self.signaller = signaller
         self.snapshotProvider = snapshotProvider
         self.now = now
+        self.environmentReader = environmentReader
+        self.startTimeReader = startTimeReader
         self.graceAttempts = graceAttempts
         self.pollInterval = pollInterval
         self.clock = clock
@@ -219,10 +303,11 @@ public struct OrphanProcessCollector: Sendable {
 
     // MARK: - Identification
 
-    /// Every process the sweep may reclaim, in pid order.
+    /// Every process the sweep may reclaim, in pid order, each carrying the
+    /// route that admitted it.
     ///
-    /// A process qualifies only when ALL of these hold, and each of them fails
-    /// toward keeping:
+    /// A process is a root worth judging only when ALL of these hold, and each
+    /// of them fails toward keeping:
     /// - `ppid == 1` — reparented to launchd, i.e. actually escaped.
     /// - owned by `ourUID`. Enforced through the protected set, so the same
     ///   exclusion holds for every process the reap volley reaches and not only
@@ -233,16 +318,70 @@ public struct OrphanProcessCollector: Sendable {
     ///   TBD tree — when `scripts/restart.sh` is run from a worktree, that
     ///   worktree — so archiving it would otherwise have the sweep SIGKILL the
     ///   live daemon running the sweep.
-    /// - its cwd is readable, and resolves under a TBD-managed root positively
-    ///   known to be dead — an archived worktree (or its scratchpad), or a
-    ///   `.deleting/<uuid>` queue entry. A directory nobody can attest is dead,
-    ///   including an unrecognized child of a worktree pool, keeps.
+    /// - its command line matches no `keepList` pattern. The list names
+    ///   user-wide daemons — GnuPG's, Claude Code's background host, Codex's
+    ///   app-server — that inherit the markers and the cwd of whichever tab
+    ///   happened to start them, and go on serving every worktree after that
+    ///   one is archived. Like the TBD binaries it works through the protected
+    ///   set, so it binds both routes and every tree member alike.
+    /// - its cwd is readable. **Both routes need this**, not only the cwd one:
+    ///   the env route cannot rule out a live worktree without it, and a
+    ///   process whose cwd sits in live work is never this sweep's to kill.
     /// - it is at least as old as the cwd reading it was joined to, so a pid
     ///   the kernel reissued between the two readings cannot inherit a dead
-    ///   process's cwd. An unreadable age fails this, i.e. keeps.
-    /// - the grace window has passed: from `archivedAt` where an archived row
-    ///   established the death, and from process start time for a `.deleting/`
-    ///   entry, which carries no such instant.
+    ///   process's cwd. An unreadable age fails this, i.e. keeps. Because both
+    ///   routes read the cwd, this gate guards both.
+    /// - its cwd is not under a live worktree. That keeps whatever the
+    ///   environment says.
+    /// - its environment does not veto it (`judge`). A `TBD_WORKTREE_ID` naming
+    ///   a worktree that is not archived, or a `TBD_TERMINAL_ID` naming a
+    ///   terminal row that exists, keeps it — and when markers disagree, live
+    ///   wins. So does a **readable environment with no marker at all**: no TBD
+    ///   terminal started that process, so it is not this sweep's to kill.
+    ///   That second veto is what spares every process the daemon spawns —
+    ///   the per-repo tmux server, `-CC attach` clients, holders, the model
+    ///   proxy, none of which carries a marker — whatever cwd it inherited. (A
+    ///   holder whose session row is gone stays reclaimable: that is the
+    ///   row-less holder phase's job, which identifies holders by their own
+    ///   handshake rather than by cwd.)
+    ///   The measured case is a repo's tmux server whose cwd was one worktree's
+    ///   directory while it served every worktree of the repo: archive that
+    ///   one, and the cwd rule alone would kill the server and every pane in it.
+    ///
+    /// A root that passes all of that is a candidate when **either** route
+    /// admits it:
+    /// - **cwd** — its cwd resolves under a TBD-managed root positively known
+    ///   to be dead — an archived worktree (or its scratchpad), or a
+    ///   `.deleting/<uuid>` queue entry — and the grace window has passed: from
+    ///   `archivedAt` where an archived row established the death, and from
+    ///   process start time for a `.deleting/` entry, which carries no such
+    ///   instant. A directory nobody can attest is dead, including an
+    ///   unrecognized child of a worktree pool, admits nothing.
+    /// - **env** — its `TBD_WORKTREE_ID` names an archived worktree, and
+    ///   `graceSeconds` have passed since that row's `archivedAt`. This is the
+    ///   route for what left the directory: a job that changed directory, one
+    ///   that daemonized to `/`, one started with its cwd elsewhere. A row with
+    ///   no `archivedAt` admits nothing here — there is no instant to measure
+    ///   the grace from, and process start would be the wrong one, since a
+    ///   process can be days old on the day its worktree is archived.
+    ///
+    /// The environment is **neutral** — it neither keeps nor admits, and the
+    /// cwd route decides exactly as it would alone — when it is hidden, and
+    /// when its markers name no row or do not parse. Hidden covers every Apple
+    /// platform binary, which shows its argv but no environment, and a read
+    /// whose pid no longer names the planned process (`readMarkers`); those
+    /// stay reclaimable by cwd, as before. A missing row attests nothing either
+    /// way, and neutrality is what keeps the `.deleting/<uuid>` arm working
+    /// for worktrees whose rows are gone. The gap this leaves is accepted: a
+    /// hidden root whose cwd also left the worktree is kept, even when a child
+    /// of it carries an archived worktree's marker, because inferring a root
+    /// from its children's markers would kill a single-instance app opened
+    /// from a tab along with every window it holds for other projects.
+    ///
+    /// `plannedStarts` is the start instant the planning snapshot recorded per
+    /// pid, and `markerRows` the rows markers are judged against. Left at their
+    /// defaults, every environment reads as hidden and this is exactly the cwd
+    /// rule on its own.
     public func candidates(
         processes: [ProcessSnapshotEntry],
         cwdByPID: [Int32: String],
@@ -251,23 +390,30 @@ public struct OrphanProcessCollector: Sendable {
         ourUID: uid_t,
         ourPID: Int32,
         graceSeconds: Int,
-        exempt: Set<Int32> = []
+        exempt: Set<Int32> = [],
+        markerRows: MarkerRows = .empty,
+        plannedStarts: [Int32: Date] = [:],
+        keepList: GCKeepList = GCKeepList(patterns: [])
     ) -> [OrphanProcessCandidate] {
         let protected = protectedPIDs(
-            processes: processes, ourPID: ourPID, ourUID: ourUID, exempt: exempt)
+            processes: processes, ourPID: ourPID, ourUID: ourUID, exempt: exempt,
+            keepList: keepList)
         // How stale the cwd map is by the time this snapshot was read. Never
         // negative, so a clock that went backwards cannot weaken the gate.
         let cwdAge = max(0, now().timeIntervalSince(cwdsCapturedAt))
         var result: [OrphanProcessCandidate] = []
         for entry in processes.sorted(by: { $0.pid < $1.pid }) {
             guard entry.pid > 1, entry.ppid == 1 else { continue }
-            // Covers the uid exclusion too: `protectedPIDs` holds every process
-            // owned by someone else, so there is one enforcement point rather
-            // than a root-only gate here and nothing at all on descendants.
+            // Covers the uid exclusion and the keep-list too: `protectedPIDs`
+            // holds every process owned by someone else and every one whose
+            // command line the list names, so there is one enforcement point
+            // rather than a root-only gate here and nothing at all on
+            // descendants.
             guard !protected.contains(entry.pid) else { continue }
             // Absence of evidence is not evidence of an orphan. A process whose
-            // cwd could not be read is skipped, never reclaimed — the direction
-            // that matters most here, because the whole rule is keyed on cwd.
+            // cwd could not be read is skipped, never reclaimed — on the env
+            // route as much as the cwd one, because without a cwd nothing can
+            // say the process is not sitting in live work.
             guard let cwd = cwdByPID[entry.pid] else {
                 logger.debug("""
                 gc: orphan-process skip pid \(entry.pid, privacy: .public) — cwd unreadable
@@ -289,10 +435,62 @@ public struct OrphanProcessCollector: Sendable {
                 """)
                 continue
             }
-            guard case .dead(let root) = ownership(ofCWD: cwd, roots: roots) else { continue }
-            guard graceElapsed(root: root, entry: entry, graceSeconds: graceSeconds) else { continue }
+            let owner = ownership(ofCWD: cwd, roots: roots)
+            // Live work keeps whatever the environment says, and is checked
+            // before the environment is read at all.
+            if case .live = owner { continue }
+
+            // Read only for a root that got this far, so the sweep reads tens
+            // of environments rather than the whole process table.
+            let markers = readMarkers(pid: entry.pid, plannedStart: plannedStarts[entry.pid])
+            let envAdmits: DeadWorktreeRoot?
+            switch Self.judge(markers, rows: markerRows) {
+            case .keep:
+                // The reason only — never a marker's value, and never anything
+                // else from an environment, which routinely holds secrets.
+                let reason = markers == .noMarkers
+                    ? "its environment carries no TBD marker, so no TBD terminal started it"
+                    : "a marker in its environment names live TBD work"
+                logger.debug("""
+                gc: orphan-process skip pid \(entry.pid, privacy: .public) — \(reason, privacy: .public)
+                """)
+                continue
+            case .admit(let archived):
+                envAdmits = envGraceElapsed(root: archived, graceSeconds: graceSeconds)
+                    ? archived : nil
+            case .neutral:
+                envAdmits = nil
+            }
+
+            // The cwd route, exactly as it decides on its own.
+            var cwdAdmits: DeadWorktreeRoot?
+            if case .dead(let dead) = owner,
+               graceElapsed(root: dead, entry: entry, graceSeconds: graceSeconds) {
+                cwdAdmits = dead
+            }
+
+            // Either route admits. The record names the cwd's dead root
+            // whenever the cwd route admitted, and the archived worktree the
+            // marker names only when the cwd route did not: an env-only root's
+            // cwd names no worktree at all.
+            let route: OrphanAdmissionRoute
+            let rootPath: String
+            switch (cwdAdmits, envAdmits) {
+            case (let dead?, .some):
+                route = .cwdAndEnv
+                rootPath = dead.path
+            case (let dead?, nil):
+                route = .cwd
+                rootPath = dead.path
+            case (nil, let archived?):
+                route = .env
+                rootPath = archived.path
+            case (nil, nil):
+                continue
+            }
             result.append(OrphanProcessCandidate(
-                pid: entry.pid, cwd: cwd, rootPath: root.path, command: entry.command))
+                pid: entry.pid, cwd: cwd, rootPath: rootPath, command: entry.command,
+                route: route))
         }
         return result
     }
@@ -359,8 +557,20 @@ public struct OrphanProcessCollector: Sendable {
         return elapsed >= Double(graceSeconds)
     }
 
+    /// The env route's grace: `gcGraceSeconds` since the archived row's
+    /// `archivedAt`, and nothing else. Unlike `graceElapsed` it has no
+    /// process-start fallback. That fallback exists for a `.deleting/` entry,
+    /// whose process was necessarily started before TBD renamed the directory
+    /// away; a marker carries no such tie, so a row without `archivedAt`
+    /// admits nothing by this route.
+    func envGraceElapsed(root: DeadWorktreeRoot, graceSeconds: Int) -> Bool {
+        guard let archivedAt = root.archivedAt else { return false }
+        return now().timeIntervalSince(archivedAt) >= Double(graceSeconds)
+    }
+
     /// `ourPID`, its ancestors, every `isTBDBinary` process in the
-    /// snapshot, and every process owned by a uid other than `ourUID`. Never
+    /// snapshot, every process whose command line `keepList` matches, and
+    /// every process owned by a uid other than `ourUID`. Never
     /// signalled, and never descended into when computing a descendant closure.
     ///
     /// The uid exclusion lives here rather than only at the orphan root because
@@ -380,9 +590,15 @@ public struct OrphanProcessCollector: Sendable {
     ///
     /// `exempt` is protected the same way — the caller's list of processes it
     /// can attest belong to something live, today `liveHolderSessionPIDs`.
+    ///
+    /// A `keepList` match sits beside `isTBDBinary`, so it protects on both
+    /// routes and stops the descendant walk the way a foreign uid does: a
+    /// `gpg-agent` some escaped job happened to start is left running, and so
+    /// is everything beneath it. Matching is a substring of the `ps -ww`
+    /// command line, which over-matches, and over-matching keeps.
     func protectedPIDs(
         processes: [ProcessSnapshotEntry], ourPID: Int32, ourUID: uid_t,
-        exempt: Set<Int32> = []
+        exempt: Set<Int32> = [], keepList: GCKeepList = GCKeepList(patterns: [])
     ) -> Set<Int32> {
         var byPID: [Int32: ProcessSnapshotEntry] = [:]
         for entry in processes { byPID[entry.pid] = entry }
@@ -396,7 +612,7 @@ public struct OrphanProcessCollector: Sendable {
             protected.insert(entry.ppid)
             cursor = entry.ppid
         }
-        for entry in processes where Self.isTBDBinary(entry.command) {
+        for entry in processes where Self.isTBDBinary(entry.command) || keepList.matches(entry.command) {
             protected.insert(entry.pid)
         }
         for entry in processes where entry.uid != ourUID {
@@ -437,6 +653,127 @@ public struct OrphanProcessCollector: Sendable {
             if Self.protectedBinaryBasenames.contains(basename) { return true }
         }
         return false
+    }
+
+    // MARK: - Environment markers
+
+    /// What `markers` says about reclaiming its process, by the spec's rules
+    /// in order (`docs/specs/2026-11-01-env-marker-attribution-design.md`,
+    /// "Deciding on one escaped root"):
+    /// - **hidden** is neutral. Apple's platform binaries show no environment
+    ///   at all, and they are a real share of what the cwd route reclaims.
+    /// - **no markers** keeps. The environment is readable and no TBD terminal
+    ///   started the process.
+    /// - **a marker naming something live** keeps — checked before any admit,
+    ///   so when two markers disagree, live wins. The marker records where a
+    ///   process came from, not who owns it now, and a process that may host
+    ///   live work is never worth the risk.
+    /// - **`TBD_WORKTREE_ID` naming an archived worktree** admits, pending the
+    ///   grace the caller measures from that row's `archivedAt`.
+    /// - **anything else** — a marker naming no row, or one that does not
+    ///   parse as a UUID — is neutral. The absence of a row attests nothing.
+    ///
+    /// IDs are parsed with `UUID(uuidString:)`, which ignores case, so a
+    /// lowercase marker names the same row as the uppercase one TBD writes.
+    ///
+    /// A marker can be forged, and that is acceptable here in a way it is not
+    /// for tab identity: a process can set markers only for itself and its
+    /// children, so forging an archived ID gets the forger's own tree killed
+    /// and forging a live one keeps it alive. No identity changes hands.
+    static func judge(_ markers: ProcessEnvironmentMarkers, rows: MarkerRows) -> MarkerJudgement {
+        switch markers {
+        case .hidden:
+            return .neutral
+        case .noMarkers:
+            return .keep
+        case .markers(let worktreeID, _):
+            if namesSomethingLive(markers, rows: rows) { return .keep }
+            if let id = Self.markerID(worktreeID),
+               let root = rows.archivedWorktrees[id] {
+                return .admit(root)
+            }
+            return .neutral
+        }
+    }
+
+    /// True when `TBD_TERMINAL_ID` names a terminal row that exists, or
+    /// `TBD_WORKTREE_ID` names a worktree that is not archived — the two
+    /// clauses of `judge` that keep on a marker, and the whole of the tree
+    /// guard. A terminal ID naming a row that is gone is not one of them: a
+    /// closed tab in a worktree still in use is not a death certificate, and a
+    /// server deliberately left behind there is the developer's business until
+    /// they archive the worktree.
+    static func namesSomethingLive(_ markers: ProcessEnvironmentMarkers, rows: MarkerRows) -> Bool {
+        guard case .markers(let worktreeID, let terminalID) = markers else { return false }
+        if let id = Self.markerID(terminalID), rows.terminalIDs.contains(id) {
+            return true
+        }
+        if let id = Self.markerID(worktreeID), rows.liveWorktreeIDs.contains(id) {
+            return true
+        }
+        return false
+    }
+
+    /// A marker's value as a row ID, or nil when it is absent or not a UUID.
+    private static func markerID(_ value: String?) -> UUID? {
+        guard let value else { return nil }
+        return UUID(uuidString: value)
+    }
+
+    /// `pid`'s markers, trusted only while the pid still names the process
+    /// the planning snapshot recorded.
+    ///
+    /// The environment is read after that snapshot, so the kernel may have
+    /// reissued the pid in between, and a stranger's markers would then be
+    /// judged as the orphan's. So the start time is read from the kernel
+    /// **after** the environment — read before it, a reissue between the two
+    /// reads would go unseen — and compared with `plannedStart` under the same
+    /// `identityDriftTolerance` the signal-time re-check uses. A pid the plan
+    /// recorded no start for, one whose start cannot be read now, and one whose
+    /// start moved all read as hidden: neutral, which returns the process to
+    /// the cwd rule rather than letting another process's environment speak
+    /// for it.
+    func readMarkers(pid: Int32, plannedStart: Date?) -> ProcessEnvironmentMarkers {
+        // Nothing to verify against, so nothing read could be trusted; skip
+        // the read altogether.
+        guard let plannedStart else { return .hidden }
+        let markers = environmentReader(pid)
+        guard markers != .hidden else { return .hidden }
+        guard let liveStart = startTimeReader(pid) else {
+            logger.debug("""
+            gc: orphan-process pid \(pid, privacy: .public) — start time unreadable after \
+            the environment read; treating the environment as hidden
+            """)
+            return .hidden
+        }
+        let drift = abs(liveStart.timeIntervalSince(plannedStart))
+        guard drift <= Self.identityDriftTolerance else {
+            logger.debug("""
+            gc: orphan-process pid \(pid, privacy: .public) — start time moved \
+            \(Int(drift), privacy: .public)s since the plan, so the environment read \
+            belongs to another process; treating it as hidden
+            """)
+            return .hidden
+        }
+        return markers
+    }
+
+    /// The tree guard: true when any member of `tree` carries a marker naming
+    /// something live, which keeps the whole tree.
+    ///
+    /// A process born in a worktree that was later archived may by now host
+    /// work for a live one, and killing the host kills that work. Most daemons
+    /// pass their own environment to their children, so this rarely fires; it
+    /// costs one read per member and errs only toward keeping. Every member is
+    /// read through `readMarkers`, so a reissued descendant pid speaks for
+    /// nothing.
+    func treeNamesSomethingLive(
+        _ tree: [Int32], plannedStarts: [Int32: Date], rows: MarkerRows
+    ) -> Bool {
+        tree.contains { pid in
+            Self.namesSomethingLive(
+                readMarkers(pid: pid, plannedStart: plannedStarts[pid]), rows: rows)
+        }
     }
 
     // MARK: - Live holder sessions
@@ -736,7 +1073,8 @@ public struct OrphanProcessCollector: Sendable {
 
         logger.info("""
         gc: reclaimed orphan process pid \(candidate.pid, privacy: .public) \
-        (subtree of \(targets.count, privacy: .public)) rooted in \
+        (subtree of \(targets.count, privacy: .public), \
+        via=\(candidate.route.rawValue, privacy: .public)) rooted in \
         \(candidate.rootPath, privacy: .public)
         """)
         return ReapRecord(
@@ -754,11 +1092,13 @@ public struct OrphanProcessCollector: Sendable {
         )
     }
 
-    /// `pid=<pid> tree=<n> <argv truncated>` — what was killed, not merely
-    /// where it lived.
+    /// `pid=<pid> tree=<n> via=<cwd|env|cwd+env> <argv truncated>` — what was
+    /// killed, not merely where it lived, and which evidence admitted it, so a
+    /// soak can compare what each route catches. Argv only, as before: nothing
+    /// from the environment is ever recorded.
     static func describe(candidate: OrphanProcessCandidate, tree: [Int32]) -> String {
         let argv = candidate.command.prefix(200)
-        return "pid=\(candidate.pid) tree=\(tree.count) \(argv)"
+        return "pid=\(candidate.pid) tree=\(tree.count) via=\(candidate.route.rawValue) \(argv)"
     }
 
     // MARK: - Path helpers

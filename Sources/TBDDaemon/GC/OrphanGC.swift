@@ -141,6 +141,11 @@ public actor OrphanGC {
     /// which re-reads through it immediately before each signal volley.
     private let processSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]?
     private let orphanProcessCollector: OrphanProcessCollector
+    /// The orphan-process phase's keep-list file,
+    /// `TBDConstants.gcKeepProcessesPath` in production (so it follows
+    /// `TBD_HOME`); tests pass a path inside their sandbox. Read once per
+    /// phase, so an edit takes effect on the next sweep.
+    private let gcKeepListPath: String
 
     /// Production seam: an injected `lsofProvider` returns a non-optional
     /// `[String]` — by definition authoritative, it can't signal
@@ -206,7 +211,10 @@ public actor OrphanGC {
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil,
         retainedTranscriptsBase: URL? = nil,
         scratchSpacesBase: URL? = nil,
-        worktreesBase: URL? = nil
+        worktreesBase: URL? = nil,
+        processEnvironmentReader: (@Sendable (Int32) -> ProcessEnvironmentMarkers)? = nil,
+        processStartTimeReader: (@Sendable (Int32) -> Date?)? = nil,
+        gcKeepListPath: String? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -267,11 +275,20 @@ public actor OrphanGC {
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
         self.processSnapshotProvider = resolvedSnapshotProvider
+        // Both per-pid kernel reads are seams so no test ever reads a real
+        // process's environment or start time.
+        let resolvedEnvironmentReader: @Sendable (Int32) -> ProcessEnvironmentMarkers =
+            processEnvironmentReader ?? { ProcessEnvironmentReader.markers(pid: $0) }
+        let resolvedStartTimeReader: @Sendable (Int32) -> Date? =
+            processStartTimeReader ?? { ProcessStartTime.startTime(pid: $0) }
         self.orphanProcessCollector = OrphanProcessCollector(
             signaller: signaller, snapshotProvider: resolvedSnapshotProvider, now: resolvedNow,
+            environmentReader: resolvedEnvironmentReader,
+            startTimeReader: resolvedStartTimeReader,
             graceAttempts: orphanProcessGraceAttempts,
             pollInterval: orphanProcessPollInterval,
             clock: clock)
+        self.gcKeepListPath = gcKeepListPath ?? TBDConstants.gcKeepProcessesPath
     }
 
     // MARK: - Sweep
@@ -1957,20 +1974,55 @@ public actor OrphanGC {
     /// a default-off flag needs to see what enabling it would reclaim first —
     /// and touches nothing either way.
     ///
-    /// Every input skips the phase rather than proceeding on a partial
-    /// picture: a `ps` snapshot that could not be taken, and either of the two
-    /// row reads. That is the keep-favoring direction every other gate in this
-    /// sweep takes.
+    /// Each escaped root is judged on two kinds of evidence, both under that
+    /// one flag, so the env route's kills soak behind the same default-off
+    /// switch as the cwd route's
+    /// (`docs/specs/2026-11-01-env-marker-attribution-design.md`; the per-root
+    /// rules, in order, are on `OrphanProcessCollector.candidates`). Its cwd is
+    /// one, as it always was. The other is the `TBD_WORKTREE_ID` and
+    /// `TBD_TERMINAL_ID` its environment inherited from the TBD terminal that
+    /// started it — which records where the process came from, not who owns it
+    /// now, so it is used only behind guards:
+    /// - **as a veto**: a marker naming a live worktree or an existing tab, or
+    ///   a readable environment carrying no marker at all, keeps a root the cwd
+    ///   rule would have killed. The second is what spares a repo's tmux server
+    ///   when the worktree whose directory it happens to sit in is archived.
+    /// - **as a second route**: a marker naming an archived worktree admits a
+    ///   root whose cwd left it, once `gcGraceSeconds` have passed since that
+    ///   row's `archivedAt`. The cwd rule cannot see a job that changed
+    ///   directory or daemonized to `/`.
+    /// - **under the cwd's own gates**: an unreadable cwd, a root younger than
+    ///   the cwd reading, and a cwd in live work all keep on both routes.
     ///
-    /// Both row reads happen HERE rather than being handed down from `sweep`,
-    /// and back to back, so the live list and the archived list are one view of
-    /// one instant. The sweep's own `archived` list is taken before the
-    /// deletion-queue, scratchpad and profile-dir phases have run — `du` shells
-    /// and Keychain calls, so a wide window — and a worktree archived inside
-    /// that window would be missing from the old `archived` list while already
-    /// excluded from the fresh live list, leaving the phase to judge it on two
-    /// readings that disagree. Reading both together closes that. A failure on
-    /// either read skips the phase and says so, where `sweep`'s `try? … ?? []`
+    /// Two guards then apply to every planned tree, whichever route admitted
+    /// its root. The **keep-list** joins the protected set beside the TBD
+    /// binaries, so a user-wide daemon that inherited some tab's markers —
+    /// GnuPG's, Claude Code's background host, Codex's app-server — is never a
+    /// root and never a tree member, and the descendant walk stops beneath it.
+    /// The **tree guard** reads every member's markers and keeps the whole tree
+    /// when any of them names live work, because killing a host kills what it
+    /// hosts. Both err only toward keeping. The record and the plan line say
+    /// which route admitted each root (`via=`), so a soak can compare them.
+    ///
+    /// Every input skips the phase rather than proceeding on a partial
+    /// picture: a keep-list file that exists but cannot be read, a `ps`
+    /// snapshot that could not be taken, and any of the row reads. That is the
+    /// keep-favoring direction every other gate in this sweep takes. The
+    /// keep-list is no exception to it: falling back to the shipped defaults
+    /// would quietly drop every protection the user wrote, so the sweep never
+    /// guesses which list was meant.
+    ///
+    /// The row reads happen HERE rather than being handed down from `sweep`,
+    /// and back to back, so the live list, the archived list and the terminal
+    /// rows are one view of one instant. The sweep's own `archived` list is
+    /// taken before the deletion-queue, scratchpad and profile-dir phases have
+    /// run — `du` shells and Keychain calls, so a wide window — and a worktree
+    /// archived inside that window would be missing from the old `archived`
+    /// list while already excluded from the fresh live list, leaving the phase
+    /// to judge it on two readings that disagree. Reading them together closes
+    /// that, and reading the live list first means a worktree archived between
+    /// the two reads appears in both, where a marker naming it keeps. A failure
+    /// on any read skips the phase and says so, where `sweep`'s `try? … ?? []`
     /// would have read "no archived worktrees" and reported a clean sweep of a
     /// phase that never ran.
     private func reclaimOrphanProcesses(
@@ -1978,6 +2030,19 @@ public actor OrphanGC {
         dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
         guard config.gcOrphanProcessesEnabled || dryRun else { return }
+
+        let keepList: GCKeepList
+        switch GCKeepList.load(path: gcKeepListPath) {
+        case .list(let list, _):
+            keepList = list
+        case .unreadable(let reason):
+            logger.warning("""
+            gc: keep-list \(self.gcKeepListPath, privacy: .public) cannot be read \
+            (\(reason, privacy: .public)) — skipping the orphan-process phase
+            """)
+            planned.append("KEEP keep-list-unreadable orphan-processes")
+            return
+        }
 
         // Stamped BEFORE the reading, so the start instants derived from it
         // sit no later than the truth — the direction that widens apparent
@@ -1988,16 +2053,30 @@ public actor OrphanGC {
             planned.append("KEEP ps-unavailable orphan-processes")
             return
         }
-        guard let liveRows = try? await db.worktrees.listLocal(excludeArchived: true),
+        guard let liveWorktrees = try? await db.worktrees.list(excludeArchived: true),
               let archived = try? await db.worktrees.list(status: .archived),
               let terminals = try? await db.terminals.list() else {
             logger.warning("gc: orphan-process phase skipped — DB read failed")
             planned.append("KEEP db-unavailable orphan-processes")
             return
         }
+        // The local rows are the ones with a directory to classify cwds
+        // against; every live row, remote or still creating, counts for
+        // markers, so a marker naming one keeps.
+        let liveRows = liveWorktrees.compactMap(LocalWorktree.init)
 
         let (roots, repoPathByPool) = orphanProcessRoots(
             repos: repos, archived: archived, liveRows: liveRows)
+        let markerRows = orphanProcessMarkerRows(
+            liveWorktrees: liveWorktrees, archived: archived, terminals: terminals)
+        // The start instant recorded for every pid the snapshot holds. Taken
+        // before planning because an environment read is trusted only while
+        // the pid's live start still matches it, and kept for `reap`, which
+        // refuses to signal a pid whose live start instant no longer matches —
+        // what keeps a pid the kernel reissued mid-sweep, to a descendant slot
+        // or to a late candidate's root, out of the volley.
+        let plannedStarts = OrphanProcessCollector.startInstants(
+            processes, capturedAt: processesCapturedAt)
         let unexempted = orphanProcessCollector.candidates(
             processes: processes,
             cwdByPID: live.cwdByPID,
@@ -2005,7 +2084,10 @@ public actor OrphanGC {
             roots: roots,
             ourUID: getuid(),
             ourPID: getpid(),
-            graceSeconds: config.gcGraceSeconds
+            graceSeconds: config.gcGraceSeconds,
+            markerRows: markerRows,
+            plannedStarts: plannedStarts,
+            keepList: keepList
         )
         guard !unexempted.isEmpty else { return }
 
@@ -2028,7 +2110,8 @@ public actor OrphanGC {
         guard !candidates.isEmpty else { return }
 
         let protected = orphanProcessCollector.protectedPIDs(
-            processes: processes, ourPID: getpid(), ourUID: getuid(), exempt: exempt)
+            processes: processes, ourPID: getpid(), ourUID: getuid(), exempt: exempt,
+            keepList: keepList)
         // Every tree is planned from the ONE snapshot before anything is
         // signalled, so the plan is a single consistent reading of the process
         // graph rather than one that interleaves with its own destruction.
@@ -2036,19 +2119,27 @@ public actor OrphanGC {
         // signalled — each reap below blocks for up to
         // `graceAttempts × pollInterval` before the next one starts — which is
         // why `reap` re-reads identities immediately before each volley.
-        let plan = candidates.map { candidate in
-            (candidate, orphanProcessCollector.descendantClosure(
-                of: candidate.pid, processes: processes, protected: protected))
+        var plan: [(candidate: OrphanProcessCandidate, tree: [Int32])] = []
+        for candidate in candidates {
+            let tree = orphanProcessCollector.descendantClosure(
+                of: candidate.pid, processes: processes, protected: protected)
+            // The tree guard, for every route: one member naming live work
+            // keeps the whole tree, root included.
+            if orphanProcessCollector.treeNamesSomethingLive(
+                tree, plannedStarts: plannedStarts, rows: markerRows) {
+                planned.append("KEEP live-marker-in-tree pid=\(candidate.pid)")
+                logger.info("""
+                gc: orphan-process pid \(candidate.pid, privacy: .public) kept — a member of \
+                its tree carries a marker naming live TBD work
+                """)
+                continue
+            }
+            plan.append((candidate, tree))
         }
-        // The start instant recorded for every pid in the plan. `reap` refuses
-        // to signal a pid whose live start instant no longer matches, which is
-        // what keeps a pid the kernel reissued mid-sweep — to a descendant slot
-        // or to a late candidate's root — out of the volley.
-        let plannedStarts = OrphanProcessCollector.startInstants(
-            processes, capturedAt: processesCapturedAt)
         for (candidate, tree) in plan {
+            let route = candidate.route.rawValue
             planned.append(
-                "REAP orphan-process pid=\(candidate.pid) tree=\(tree.count) \(candidate.rootPath)")
+                "REAP orphan-process pid=\(candidate.pid) tree=\(tree.count) via=\(route) \(candidate.rootPath)")
         }
         // This phase's guard is `gcOrphanProcessesEnabled || dryRun`, so every
         // line below runs only with the flag actually on.
@@ -2172,6 +2263,30 @@ public actor OrphanGC {
                 pools: pools, sharedRoots: sharedRoots, live: livePaths, dead: deadRoots),
             repoPathByPool
         )
+    }
+
+    /// The rows a process's environment markers are judged against, from the
+    /// same back-to-back reads `orphanProcessRoots` classifies cwds with.
+    ///
+    /// Live IDs come from every row that is not archived, remote and creating
+    /// rows included, because a marker naming one keeps and keeping needs no
+    /// directory. Archived worktrees come from local rows only, each resolved
+    /// through `DeletionQueueCollector.resolvedPath` exactly as
+    /// `orphanProcessRoots` resolves its dead roots, so an env admission names
+    /// the same path in the record that a cwd admission would. A remote row has
+    /// no directory on this machine to name, so a marker naming one is neutral.
+    private func orphanProcessMarkerRows(
+        liveWorktrees: [Worktree], archived: [Worktree], terminals: [TBDShared.Terminal]
+    ) -> MarkerRows {
+        var archivedWorktrees: [UUID: DeadWorktreeRoot] = [:]
+        for row in archived.compactMap(LocalWorktree.init) {
+            archivedWorktrees[row.id] = DeadWorktreeRoot(
+                path: deletionQueueCollector.resolvedPath(row.path), archivedAt: row.archivedAt)
+        }
+        return MarkerRows(
+            liveWorktreeIDs: Set(liveWorktrees.map(\.id)),
+            terminalIDs: Set(terminals.map(\.id)),
+            archivedWorktrees: archivedWorktrees)
     }
 
     /// The repo whose pool owns `root`, or `""` when none does (a scratch

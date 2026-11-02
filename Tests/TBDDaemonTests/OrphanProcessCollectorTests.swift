@@ -37,15 +37,24 @@ struct OrphanProcessCollectorTests {
             elapsedSeconds: elapsed, command: command)
     }
 
+    /// `environment` is each pid's markers as the reader would report them,
+    /// hidden for any pid it does not name; `startTimes` is each pid's start
+    /// time as the kernel would report it after that read, unreadable for any
+    /// pid it does not name. Both are always injected, so no test here reads a
+    /// real process.
     private func collector(
         signaller: ProcessSignaller = FakeProcessSignaller(),
         now: Date = Date(timeIntervalSince1970: 1_000_000),
-        snapshots: ScriptedSnapshots = ScriptedSnapshots([])
+        snapshots: ScriptedSnapshots = ScriptedSnapshots([]),
+        environment: [Int32: ProcessEnvironmentMarkers] = [:],
+        startTimes: [Int32: Date] = [:]
     ) -> OrphanProcessCollector {
         OrphanProcessCollector(
             signaller: signaller,
             snapshotProvider: { await snapshots.next() },
             now: { now },
+            environmentReader: { environment[$0] ?? .hidden },
+            startTimeReader: { startTimes[$0] },
             graceAttempts: 2, pollInterval: .milliseconds(1))
     }
 
@@ -368,6 +377,268 @@ struct OrphanProcessCollectorTests {
             "the foreign-uid child and the grandchild below it are both left alone")
     }
 
+    // MARK: - Environment markers
+
+    private let liveWorktree = UUID(uuidString: "A1000000-0000-4000-8000-000000000001")!
+    private let archivedWorktree = UUID(uuidString: "A2000000-0000-4000-8000-000000000002")!
+    private let liveTerminal = UUID(uuidString: "A3000000-0000-4000-8000-000000000003")!
+    /// Where the archived worktree a marker names lived. Deliberately not
+    /// `dead`, so a test can tell which root a candidate was named for.
+    private let leftBehind = "/pool/left"
+    private let archivedAt = Date(timeIntervalSince1970: 0)
+
+    private var leftBehindRoot: DeadWorktreeRoot {
+        DeadWorktreeRoot(path: leftBehind, archivedAt: archivedAt)
+    }
+
+    private func markerRows() -> MarkerRows {
+        MarkerRows(
+            liveWorktreeIDs: [liveWorktree],
+            terminalIDs: [liveTerminal],
+            archivedWorktrees: [archivedWorktree: leftBehindRoot])
+    }
+
+    private func marked(_ worktree: String? = nil, terminal: String? = nil) -> ProcessEnvironmentMarkers {
+        .markers(worktreeID: worktree, terminalID: terminal)
+    }
+
+    /// `candidates(…)` for one escaped root, pid 50, at `cwd` with
+    /// `markers`, whose start time verifies.
+    private func judgedRoot(
+        cwd: String, markers: ProcessEnvironmentMarkers, elapsed: TimeInterval = 86_400,
+        cwdsCapturedAt: Date = Date(timeIntervalSince1970: 1_000_000)
+    ) -> [OrphanProcessCandidate] {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let processes = [entry(pid: 50, elapsed: elapsed)]
+        let starts = plannedStarts(processes, at: now)
+        return collector(now: now, environment: [50: markers], startTimes: starts).candidates(
+            processes: processes, cwdByPID: [50: cwd], cwdsCapturedAt: cwdsCapturedAt,
+            roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600,
+            markerRows: markerRows(), plannedStarts: starts)
+    }
+
+    // Inverted (hidden read as a veto), every Apple platform binary the cwd
+    // route reclaims today would be kept.
+    @Test("a hidden environment is neutral")
+    func hiddenIsNeutral() {
+        #expect(OrphanProcessCollector.judge(.hidden, rows: markerRows()) == .neutral)
+    }
+
+    // Inverted (no markers read as neutral), TBD's own tmux servers fall back
+    // to the cwd rule that kills them.
+    @Test("a readable environment with no marker keeps: no TBD terminal started it")
+    func noMarkersKeeps() {
+        #expect(OrphanProcessCollector.judge(.noMarkers, rows: markerRows()) == .keep)
+    }
+
+    // Inverted, a process started in live work would fall to its cwd.
+    @Test("a worktree marker naming a worktree that is not archived keeps")
+    func aLiveWorktreeMarkerKeeps() {
+        #expect(OrphanProcessCollector.judge(marked(liveWorktree.uuidString), rows: markerRows()) == .keep)
+    }
+
+    // Inverted, a tab's process with a stale worktree view would fall to its cwd.
+    @Test("a terminal marker naming an existing row keeps")
+    func anExistingTerminalMarkerKeeps() {
+        #expect(OrphanProcessCollector.judge(
+            marked(terminal: liveTerminal.uuidString), rows: markerRows()) == .keep)
+    }
+
+    // Fails against any judge that does not hand back the named row's root.
+    @Test("a worktree marker naming an archived worktree admits, with that row's root")
+    func anArchivedWorktreeMarkerAdmits() {
+        #expect(OrphanProcessCollector.judge(
+            marked(archivedWorktree.uuidString), rows: markerRows()) == .admit(leftBehindRoot))
+    }
+
+    // Inverted (a missing row read as death), every process in a worktree TBD
+    // forgot, or with a closed tab, becomes killable.
+    @Test("a marker naming no row is neutral, a closed tab's included")
+    func aMarkerNamingNoRowIsNeutral() {
+        #expect(OrphanProcessCollector.judge(marked(UUID().uuidString), rows: markerRows()) == .neutral)
+        #expect(
+            OrphanProcessCollector.judge(marked(terminal: UUID().uuidString), rows: markerRows())
+                == .neutral,
+            "a tab closed in a worktree still in use is not a death certificate")
+    }
+
+    // Fails if the archived worktree's admit were checked before the live clauses.
+    @Test("when markers disagree, live wins")
+    func liveWinsWhenMarkersDisagree() {
+        #expect(OrphanProcessCollector.judge(
+            marked(archivedWorktree.uuidString, terminal: liveTerminal.uuidString),
+            rows: markerRows()) == .keep)
+        // A worktree archived between the live read and the archived read sits
+        // in both; reading live first is what makes it keep.
+        var raced = markerRows()
+        raced.liveWorktreeIDs.insert(archivedWorktree)
+        #expect(OrphanProcessCollector.judge(marked(archivedWorktree.uuidString), rows: raced) == .keep)
+    }
+
+    // Fails against a case-sensitive comparison of strings, which would make
+    // each of these neutral.
+    @Test("a lowercase ID names the same row as the uppercase one TBD writes")
+    func aLowercaseIDNamesTheSameRow() {
+        let rows = markerRows()
+        #expect(OrphanProcessCollector.judge(
+            marked(liveWorktree.uuidString.lowercased()), rows: rows) == .keep)
+        #expect(OrphanProcessCollector.judge(
+            marked(terminal: liveTerminal.uuidString.lowercased()), rows: rows) == .keep)
+        #expect(OrphanProcessCollector.judge(
+            marked(archivedWorktree.uuidString.lowercased()), rows: rows) == .admit(leftBehindRoot))
+    }
+
+    // Inverted either way — garbage as a keep or as an admit — one of these fails.
+    @Test("a marker that is not a UUID is neutral: never a keep, never an admit")
+    func garbageIsNeutral() {
+        let rows = markerRows()
+        #expect(OrphanProcessCollector.judge(marked("not-a-uuid"), rows: rows) == .neutral)
+        #expect(OrphanProcessCollector.judge(marked(""), rows: rows) == .neutral)
+        #expect(OrphanProcessCollector.judge(marked("x", terminal: "y"), rows: rows) == .neutral)
+        // It contributes nothing either way, so it neither keeps on its own nor
+        // blocks the other marker's admit.
+        #expect(OrphanProcessCollector.judge(
+            marked(archivedWorktree.uuidString, terminal: "garbage"), rows: rows) == .admit(leftBehindRoot))
+    }
+
+    // Fails if the tree guard counted a member TBD did not start: most daemons
+    // spawn helpers with no marker, and those must not keep a dead tree.
+    @Test("only a marker naming live work counts for the tree guard")
+    func namesSomethingLiveIsOnlyTheTwoKeepClauses() {
+        let rows = markerRows()
+        #expect(OrphanProcessCollector.namesSomethingLive(marked(liveWorktree.uuidString), rows: rows))
+        #expect(OrphanProcessCollector.namesSomethingLive(
+            marked(terminal: liveTerminal.uuidString), rows: rows))
+        #expect(!OrphanProcessCollector.namesSomethingLive(.noMarkers, rows: rows))
+        #expect(!OrphanProcessCollector.namesSomethingLive(.hidden, rows: rows))
+        #expect(!OrphanProcessCollector.namesSomethingLive(marked(archivedWorktree.uuidString), rows: rows))
+    }
+
+    // Fails against a reader that skips the start-time re-check; the 1 s
+    // control fails against one that demands an exact match.
+    @Test("an environment read whose pid's start moved reads as hidden")
+    func readMarkersIsHiddenWhenTheStartMoved() {
+        let planned = Date(timeIntervalSince1970: 900_000)
+        let markers = marked(archivedWorktree.uuidString)
+        let moved = collector(
+            environment: [50: markers], startTimes: [50: planned.addingTimeInterval(3)])
+        #expect(
+            moved.readMarkers(pid: 50, plannedStart: planned) == .hidden,
+            "3 s is past the 2 s tolerance, so the pid now names another process")
+        let jittered = collector(
+            environment: [50: markers], startTimes: [50: planned.addingTimeInterval(1)])
+        #expect(
+            jittered.readMarkers(pid: 50, plannedStart: planned) == markers,
+            "etime truncation stays inside the tolerance")
+    }
+
+    // Fails against a reader that trusts a read it has nothing to verify against.
+    @Test("an environment read for a pid the plan recorded no start for reads as hidden")
+    func readMarkersIsHiddenWhenNoStartWasPlanned() {
+        let start = Date(timeIntervalSince1970: 900_000)
+        let markers = marked(archivedWorktree.uuidString)
+        let subject = collector(environment: [50: markers], startTimes: [50: start])
+        #expect(subject.readMarkers(pid: 50, plannedStart: nil) == .hidden)
+        #expect(subject.readMarkers(pid: 50, plannedStart: start) == markers)
+    }
+
+    // Fails against a reader that treats an unreadable start as a match.
+    @Test("an environment read whose pid's start cannot be read now reads as hidden")
+    func readMarkersIsHiddenWhenTheStartCannotBeRead() {
+        let subject = collector(environment: [50: marked(archivedWorktree.uuidString)])
+        #expect(subject.readMarkers(pid: 50, plannedStart: Date(timeIntervalSince1970: 900_000)) == .hidden)
+    }
+
+    // The old code had no env route: a root at `/` was never a candidate.
+    @Test("the env route admits a root whose cwd left the worktree, naming the archived worktree")
+    func theEnvRouteAdmitsARootWhoseCwdLeft() {
+        let found = judgedRoot(cwd: "/", markers: marked(archivedWorktree.uuidString))
+        #expect(found == [OrphanProcessCandidate(
+            pid: 50, cwd: "/", rootPath: leftBehind, command: "/usr/bin/node server.js", route: .env)])
+    }
+
+    // Inverted (the gate only on the cwd route), the 300 s root is admitted.
+    @Test("the age gate binds the env route too: a root younger than the cwd reading is skipped")
+    func theAgeGateBindsTheEnvRoute() {
+        let readAt = Date(timeIntervalSince1970: 1_000_000 - 600)
+        let markers = marked(archivedWorktree.uuidString)
+        #expect(judgedRoot(cwd: "/", markers: markers, elapsed: 300, cwdsCapturedAt: readAt).isEmpty)
+        let old = judgedRoot(cwd: "/", markers: markers, elapsed: 900, cwdsCapturedAt: readAt)
+        #expect(old.count == 1, "old enough to have existed when lsof ran")
+    }
+
+    // Inverted (env checked before the live cwd), the root is admitted by env.
+    @Test("a cwd in a live worktree keeps whatever the environment says")
+    func aLiveCwdKeepsWhateverTheEnvSays() {
+        #expect(judgedRoot(cwd: alive + "/src", markers: marked(archivedWorktree.uuidString)).isEmpty)
+    }
+
+    // The old code had no veto: both of these were cwd candidates.
+    @Test("a veto beats the cwd route; a hidden environment leaves it to the cwd")
+    func aVetoBeatsTheCwdRoute() {
+        #expect(judgedRoot(cwd: dead, markers: .noMarkers).isEmpty)
+        #expect(judgedRoot(cwd: dead, markers: marked(liveWorktree.uuidString)).isEmpty)
+        let routes = judgedRoot(cwd: dead, markers: .hidden).map(\.route)
+        #expect(routes == [OrphanAdmissionRoute.cwd])
+    }
+
+    // Fails against naming the marker's worktree when the cwd route admitted too.
+    @Test("both routes admitting name the cwd's dead root")
+    func bothRoutesNameTheCwdRoot() {
+        let found = judgedRoot(cwd: dead + "/a", markers: marked(archivedWorktree.uuidString))
+        #expect(found == [OrphanProcessCandidate(
+            pid: 50, cwd: dead + "/a", rootPath: dead, command: "/usr/bin/node server.js",
+            route: .cwdAndEnv)])
+    }
+
+    // The old code protected neither 700 nor 703, and walked into 704.
+    @Test("a keep-list match joins the protected set and stops the walk beneath it")
+    func aKeepListMatchJoinsTheProtectedSet() {
+        let processes = [
+            entry(pid: 700, command: "/opt/acme/bin/claude --bg-pty-host --session x"),
+            entry(pid: 701, ppid: 700),
+            entry(pid: 702, command: "/usr/bin/make dev"),
+            entry(pid: 703, ppid: 702, command: "/opt/homebrew/bin/gpg-agent --daemon"),
+            entry(pid: 704, ppid: 703),
+        ]
+        let subject = collector()
+        let unlisted = subject.protectedPIDs(processes: processes, ourPID: 99_999, ourUID: getuid())
+        let listed = subject.protectedPIDs(
+            processes: processes, ourPID: 99_999, ourUID: getuid(), keepList: .shipped)
+
+        #expect(!unlisted.contains(700))
+        #expect(!unlisted.contains(703))
+        #expect(listed.contains(700))
+        #expect(listed.contains(703))
+        #expect(!listed.contains(702))
+        #expect(!listed.contains(701), "only the match itself; it is the walk that stops beneath it")
+        #expect(subject.descendantClosure(of: 702, processes: processes, protected: unlisted) == [704, 703, 702])
+        #expect(subject.descendantClosure(of: 702, processes: processes, protected: listed) == [702])
+
+        let cwds: [Int32: String] = [700: dead, 702: dead]
+        let found = subject.candidates(
+            processes: processes, cwdByPID: cwds,
+            cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000), roots: roots(),
+            ourUID: getuid(), ourPID: 99_999, graceSeconds: 3600, keepList: .shipped)
+        let pids = found.map(\.pid)
+        #expect(pids == [702])
+    }
+
+    // Fails against the old format, which carried no route.
+    @Test("the record names the route that admitted the root")
+    func describeCarriesTheRoute() {
+        let cases: [(OrphanAdmissionRoute, String)] = [
+            (.cwd, "via=cwd"), (.env, "via=env"), (.cwdAndEnv, "via=cwd+env"),
+        ]
+        for (route, via) in cases {
+            let candidate = OrphanProcessCandidate(
+                pid: 700, cwd: "/", rootPath: dead, command: "/usr/bin/nix print-dev-env",
+                route: route)
+            let description = OrphanProcessCollector.describe(candidate: candidate, tree: [701, 700])
+            #expect(description == "pid=700 tree=2 \(via) /usr/bin/nix print-dev-env")
+        }
+    }
+
     // MARK: - Live holder sessions
 
     private let session = UUID(uuidString: "0B7A0000-0000-4000-8000-000000000001")!
@@ -512,7 +783,7 @@ struct OrphanProcessCollectorTests {
         #expect(unwrapped.kind == .orphanProcess)
         #expect(unwrapped.worktreePath == dead)
         #expect(unwrapped.repoPath == "/repo")
-        #expect(unwrapped.processDescription == "pid=700 tree=2 /usr/bin/node server.js --port 3000")
+        #expect(unwrapped.processDescription == "pid=700 tree=2 via=cwd /usr/bin/node server.js --port 3000")
         #expect(unwrapped.quarantinePath == nil)
     }
 
@@ -551,7 +822,7 @@ struct OrphanProcessCollectorTests {
             "a reissued pid names an unrelated live process and must never be signalled")
         #expect(signaller.terminated == [702, 700], "the rest of the tree is still reclaimed")
         #expect(signaller.killed.isEmpty)
-        #expect(try #require(record).processDescription == "pid=700 tree=2 process-compose up")
+        #expect(try #require(record).processDescription == "pid=700 tree=2 via=cwd process-compose up")
     }
 
     /// The escalation is a second volley, separated from the first by
