@@ -56,7 +56,8 @@ This document covers what changes around them.
 - Codex sessions keep a working, idle and blocked badge, and gain done and
   error.
 - A session that cannot report is never taken for an idle one: its state is
-  `.unknown`, never `.idle`, to every consumer.
+  `.unknown`, never `.idle`, to every component that acts on the column: the
+  idle sweep, merge-park and the delivery verifier.
 - No auto-park of a session whose state TBD does not know.
 
 ## Non-goals
@@ -221,13 +222,13 @@ its existing checks and is unaffected.
 
 A session that has not reported since it started reads `.unknown`, and
 `session.states` reports it as `.unknown(why:)`, naming the cause from its
-transport. The sidebar draws no badge for it, as it draws none for an idle
-session, and no mark of its own: the column cannot tell an idle agent, which
-reports only on change and so says nothing until its next turn, from one whose
-startup handshake left reporting off, which stays silent until it is
-relaunched. A mark on every `.unknown` row would sit mostly on healthy idle
-sessions, a false alarm. The handshake records below diagnose a silent session
-instead.
+transport. The sidebar shows such a session the same as an idle one, with no
+badge, and draws no mark of its own for the missing state. The column cannot
+tell an idle agent, which reports only on change and so says nothing until its
+next turn, from one whose startup handshake left reporting off, which stays
+silent until it is relaunched, so a mark on every `.unknown` row would sit
+mostly on healthy idle sessions, a false alarm. The handshake records below
+diagnose a silent session instead.
 
 An agent decides once, at startup, whether to report: it sends the probe and
 turns reporting on only if the answer arrives before its DA1 reply. A failed
@@ -296,7 +297,11 @@ row that is neither parked nor suspended (`hibernatedAt IS NULL AND
 suspendedAt IS NULL`) and whose `activityStateSource` — the JSON encoding of a
 `FactSource` — is not `programStatus`. Rows the store wrote, and parked or
 suspended rows, keep their value. The reset sessions read `.unknown` until
-their agent next reports, or until they are relaunched or woken.
+their agent reports. On the holder transport, a Codex session whose agent can
+report does so on its next change, because only TBD's refusal kept its reports
+out; a Claude session reports only from a new process, once it is relaunched
+or woken, because Claude Code sends the probe only at startup. A session on
+tmux never reports.
 
 ### Hooks that stay
 
