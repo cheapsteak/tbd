@@ -46,19 +46,17 @@ import TBDKernel
 /// `.serialized` because each test spawns children and drives a clock, and the
 /// real-time waits here are sized for a quiet pass.
 ///
+/// Every stub exits while the supervisor may still be writing `hello` or a
+/// keepalive into its stdin. The daemon ignores SIGPIPE (`main.swift`), so that
+/// write returns EPIPE there; here the test host's SIGPIPE handler
+/// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE. The
+/// suite does not set the disposition itself: it is process-wide, shared with
+/// every suite in the run.
+///
 /// Contract under test: `docs/remote-provider-contract.md` § `messages`, and
 /// `docs/specs/2026-08-29-remote-peer-messaging-design.md`.
 @Suite("PeerLinkSupervisor (live)", .timeLimit(.minutes(5)), .serialized)
 struct PeerLinkSupervisorTests {
-
-    /// Mirrors the daemon's process-wide SIGPIPE stance (`Sources/TBDDaemon/main.swift`),
-    /// which `PeerLinkSupervisor` depends on: every one of these stubs exits
-    /// while the supervisor may still be writing `hello` or a keepalive into its
-    /// stdin, and a raw SIGPIPE would kill the whole test process rather than
-    /// returning EPIPE to the write. Same precedent as `BoundedProcessRunnerTests`.
-    init() {
-        signal(SIGPIPE, SIG_IGN)
-    }
 
     // MARK: - hello
 

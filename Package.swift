@@ -310,7 +310,13 @@ let package = Package(
         // whenever another suite built a table first. A second constructor
         // installs the main run loop guard (`MainRunLoopGuard.m`): Swift's
         // async test `main` exits 0 when the main run loop is stopped, and the
-        // guard resumes it as `NSApplication.run()` would. Test-only.
+        // guard resumes it as `NSApplication.run()` would. A third installs a
+        // SIGPIPE handler (`SIGPIPEHandler.c`), so a write to a closed pipe or
+        // socket fails with EPIPE and a line on stderr instead of ending the
+        // pass, while children still start with SIGPIPE at its default.
+        // SwiftPM links the test bundle from every target's object files, not
+        // archives, so each constructor is always in it; nothing has to call
+        // into this target to keep one. Test-only.
         .target(
             name: "TestProcessDefaults",
             path: "Tests/TestProcessDefaults",
@@ -340,6 +346,11 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // The test host's SIGPIPE handler is in the bundle either way;
+                // the dependency lets these suites mark a SIGPIPE they provoke
+                // on purpose (`TBDTestHostExpectSIGPIPE()`) and check the
+                // handler in their own pass. See the target.
+                "TestProcessDefaults",
                 // Declared because these tests use SwiftTerm directly, not
                 // only through the daemon library: the replay round-trip suite
                 // and the screen tests feed bytes through a headless `Terminal`.
@@ -380,6 +391,9 @@ let package = Package(
                 // again, through the same writer the app uses, so the round
                 // trip is the production code in both directions.
                 "TBDTerminalSerialization",
+                // Checks the test host's SIGPIPE handler in the quiet pass's
+                // own process, as `TBDDaemonTests` does in its two passes.
+                "TestProcessDefaults",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
@@ -391,8 +405,11 @@ let package = Package(
                 "TBDKernel",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
-                // test process before any table exists, and keeps the process
-                // running through a stopped main run loop; see the target.
+                // test process before any table exists, keeps the process
+                // running through a stopped main run loop, and catches SIGPIPE;
+                // see the target. Its object files are linked into the one test
+                // bundle every test target shares, so it covers every pass, not
+                // just this target.
                 "TestProcessDefaults",
                 "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),
