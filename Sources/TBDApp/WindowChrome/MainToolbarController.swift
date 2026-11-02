@@ -16,8 +16,8 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   split appears in it, wires the split's collapse report, and watches the
 ///   window's appearance and its `toolbar`. Installed on one window, an
 ///   install on another uninstalls from the first. It sets nothing on the
-///   toolbar beyond `window.toolbar`; every item change goes through
-///   `scheduleApply()`.
+///   toolbar beyond `window.toolbar`; every item change goes through an
+///   apply.
 ///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off,
 ///   unhooks the split's collapse report and lets go of the window.
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
@@ -25,8 +25,10 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
 ///   registration acts on a change (see `observedChange(generation:)`). The
 ///   snapshot reads more than it shows, such as every worktree's dev-server
-///   list, so an apply only an observed change asked for does nothing when
-///   the snapshot, the collapse and the appearance are what the last apply
+///   list, and the window's appearance can change without its color scheme,
+///   as Increase Contrast changes it. So an apply only observed changes and
+///   the appearance watch asked for compares first: it does nothing when the
+///   snapshot, the collapse and the color scheme are what the last apply
 ///   showed and it would not put the toolbar back on the window, as during a
 ///   cooldown it would not. Every other apply runs in full.
 /// - **Apply.** Re-installs the toolbar if something replaced it on the
@@ -114,11 +116,12 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// Applies run so far, for the debug log and for tests. An apply that
     /// found nothing to do is not counted.
     private(set) var applyCount = 0
-    /// Applies run that only observed changes asked for, for tests. Every
-    /// other source asks through `scheduleApply()`, which makes the apply
-    /// run in full, so only an observed change moves this count. An apply
-    /// that found nothing to do is not counted.
-    private(set) var observedOnlyApplyCount = 0
+    /// Applies run that compared first, for tests: those only observed
+    /// changes and the appearance watch asked for. Every other source asks
+    /// through `scheduleApply()`, which makes the apply run in full, so only
+    /// those two move this count. An apply that compared and found nothing
+    /// to do is not counted.
+    private(set) var comparedApplyCount = 0
     /// Observed `AppState` changes that scheduled an apply, for the debug log
     /// and for tests: a stale registration's change is not counted.
     private(set) var observedChangeCount = 0
@@ -127,10 +130,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// apply; `applyNow()` clears it.
     private(set) var applyScheduled = false
     /// Whether the queued apply runs in full. `scheduleApply()` sets it; an
-    /// apply only an observed change asked for leaves it clear.
-    private var queuedApplyRunsInFull = false
-    /// What the last apply whose layout landed showed. An apply an observed
-    /// change asked for, finding all of it as it was, has nothing to do.
+    /// apply only observed changes and the appearance watch asked for leaves
+    /// it clear. Readable for tests.
+    private(set) var queuedApplyRunsInFull = false
+    /// What the last apply whose layout landed showed. An apply that compares
+    /// first, finding all of it as it was, has nothing to do.
     private var appliedInputs: AppliedInputs?
 
     /// What an apply shows: the snapshot, the collapse its layout is for and
@@ -264,7 +268,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         // change object. The toolbar's is registered after `attach`, so the
         // install's own set is not reported to it.
         appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
-            MainToolbarController.performOnMain { self?.scheduleApply() }
+            MainToolbarController.performOnMain { self?.appearanceChanged() }
         }
         toolbarObservation = window.observe(\.toolbar) { [weak self] _, _ in
             MainToolbarController.performOnMain { self?.windowToolbarChanged() }
@@ -310,6 +314,16 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     func sidebarCollapsedChanged(_ collapsed: Bool) {
         sidebarCollapsed = collapsed
         scheduleApply()
+    }
+
+    /// The window's `effectiveAppearance` changed, or was reported as changed.
+    /// Queues the apply that compares first, as an observed change does: the
+    /// color scheme the Servers icon is baked for is among what it compares,
+    /// so a light↔dark change applies, and a report that leaves the scheme as
+    /// it was does nothing.
+    private func appearanceChanged() {
+        guard isInstalled else { return }
+        enqueueApply()
     }
 
     /// The window's `toolbar` changed. On a visible window, a change from ours
@@ -389,10 +403,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
 
     /// Schedules one apply on the next main-loop turn, which runs in full
     /// whatever it finds; further calls before it runs are covered by it.
-    /// Install, a replaced toolbar, the cooldown's end, an appearance or
-    /// collapse change and the filter menu's close all come through here,
-    /// since each asks for something the snapshot does not hold. Does
-    /// nothing while the toolbar is not installed, such as after `uninstall`.
+    /// Install, a replaced toolbar, the cooldown's end, a collapse change and
+    /// the filter menu's close all come through here, since each asks for
+    /// something the snapshot does not hold. The appearance watch does not
+    /// (see `appearanceChanged()`). Does nothing while the toolbar is not
+    /// installed, such as after `uninstall`.
     func scheduleApply() {
         guard isInstalled else { return }
         queuedApplyRunsInFull = true
@@ -440,7 +455,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
             return
         }
         if !runsInFull {
-            observedOnlyApplyCount += 1
+            comparedApplyCount += 1
         }
         apply(snapshot)
     }
