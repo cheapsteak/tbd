@@ -158,7 +158,7 @@ A model profile is a named credential container routing a spawned Claude session
 
 ## SSH Agent Resolver
 
-Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH agent socket. Probes candidates from `/private/tmp/com.apple.launchd.*/Listeners` with `ssh-add -l`, updates the symlink atomically. Worktrees use `SSH_AUTH_SOCK=~/.ssh/tbd-agent.sock`.
+Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH agent socket. When the symlink is stale, probes candidates with `ssh-add -l` in this order: launchd's own answer (`launchctl getenv SSH_AUTH_SOCK`), then the `SSH_AUTH_SOCK` the daemon was started with (skipped when it is the symlink or leads to it), then `com.apple.launchd.*/Listeners` sockets under `/private/tmp` and `/private/var/run` (macOS 27 uses the latter), newest first. A socket named by more than one source is probed once. Updates the symlink atomically. Worktrees use `SSH_AUTH_SOCK=~/.ssh/tbd-agent.sock`.
 
 ## RPC Protocol
 

@@ -903,7 +903,9 @@ public final class Daemon: Sendable {
         // daemon was last restarted from).
         Daemon.scrubInheritedTBDEnv()
 
-        // 4b. Resolve SSH agent symlink and update daemon's own environment
+        // 4b. Resolve SSH agent symlink and update daemon's own environment.
+        // Construct the resolver before the setenv below: it captures the
+        // inherited SSH_AUTH_SOCK as a fallback candidate.
         let sshResolver = SSHAgentResolver()
         if await sshResolver.resolve() {
             setenv("SSH_AUTH_SOCK", sshResolver.symlinkPath, 1)
