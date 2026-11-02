@@ -152,47 +152,47 @@ its renderer must agree or heights drift. The header's height therefore enters
 `rowHeight` and the measure path together with the render path, in one change,
 for peer rows only.
 
-### Peer bubbles are amber
+### Peer bubbles are lavender
 
 A user prompt tints its bubble with the system accent color at 15% alpha. A peer
-message takes the same treatment in amber: the accent tint says *you*, and amber
-says *not you*, which is exactly the distinction a reader needs to make at a
-glance.
+message takes the same treatment in lavender: the accent tint says *you*, and
+lavender says *not you*, which is exactly the distinction a reader needs to make
+at a glance.
 
-The amber is the pair already established for the sidebar's `attention`
-semantic — `#B7791F` on light, GitHub's `attention.fg` `#D29922` on dark —
-resolved per appearance through `adaptiveColor(light:dark:)`, at the same 15%
-alpha the accent tint uses. Reusing it keeps one amber in the product rather
-than two that nearly match.
+The colour is `PeerLavender` — `#9C73D0` on light, `#B496DC` on dark — resolved
+per appearance, at the same 15% alpha the accent tint uses. Each matches the WCAG
+relative luminance of the sidebar's attention amber (light 0.2388 vs 0.2384, dark
+0.3668 vs 0.3660), so the peer colour sits at the brightness that amber was tuned
+to on each ground.
 
-The PR-status `pending` swatch shares only the dark half of that pair; its light
-value is a distinct olive, `#936921`. So the amber has one home, not two, and
-whether the olive should converge on it is a question about PR status colors
-rather than about this feature.
+The attention amber is not reused, for two reasons. A peer message is not a call
+for attention, so borrowing the attention colour would lend it a meaning it does
+not carry. And at the 15% to 50% alpha the transcript uses on a light ground, that
+amber reads as a muddy tan.
 
 Legibility is a requirement rather than an intention, and a tint at 15% alpha
 composites against whatever sits behind it, so it is checked against the
 composited result rather than the swatch. Composited over the pane background,
-the bubble resolves to `#F4EBDD` on light and `#39301F` on dark. Measured WCAG
+the bubble resolves to `#F0EAF8` on light and `#34303A` on dark. Measured WCAG
 contrast on those:
 
 - **Body text** — around 13:1 light and 10:1 dark. Clears AA for normal text
   with room to spare, in both appearances. The exact figure moves with
   `labelColor`'s system-defined alpha, so the floor is the requirement and the
   number is an indication.
-- **Inline code**, the existing `chatBubbleInlineCode` pair — 5.8:1 light, 6.3:1
+- **Inline code**, the existing `chatBubbleInlineCode` pair — 5.8:1 light, 6.2:1
   dark. Clears AA.
 - **Link and secondary text** — 3.3:1 to 3.6:1, below the 4.5:1 floor.
 
-That last shortfall is not created by the amber. The same two colors measure
+That last shortfall is not created by the lavender. The same two colors measure
 3.3:1 to 3.9:1 on today's accent-tinted user bubble, so link text is already
-below AA on every bubble in the transcript, and amber lands within a tenth of
+below AA on every bubble in the transcript, and lavender lands within a tenth of
 the existing figure. The tint is therefore not the thing to change: raising link
 contrast means moving the link color across all bubbles, which is a separate
 piece of work on a pre-existing condition and is out of scope here.
 
 So the requirement this design takes on is that body text and inline code clear
-AA on amber, and that link and secondary text are no worse on a peer bubble than
+AA on lavender, and that link and secondary text are no worse on a peer bubble than
 on a user bubble. Both are asserted on computed ratios in a test rather than
 eyeballed, because a later change to the tint or to a foreground color would
 otherwise degrade contrast silently.
@@ -273,7 +273,7 @@ placeholders before landing: substitute values, never shape.
   last message is a peer message no longer surfaces envelope text.
 - An ordinary typed user prompt still parses as `.userPrompt`, and a row with no
   `origin` is untouched.
-- The amber tint composited over the pane background clears WCAG AA 4.5:1 for
+- The lavender tint composited over the pane background clears WCAG AA 4.5:1 for
   body text and for inline code, in both light and dark appearance.
 - Link and secondary text on a peer bubble are no worse than on a user bubble,
   compared as computed ratios so the comparison survives a change to either
