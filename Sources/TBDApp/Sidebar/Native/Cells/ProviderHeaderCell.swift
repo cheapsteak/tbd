@@ -4,8 +4,8 @@ import TBDShared
 /// A provider header in the Remote section, drawn from a `ProviderHeaderModel`
 /// as `RemoteProviderHeaderRow` draws it: the provider's name across the free
 /// width, the health glyph at the trailing edge, and the issue line under the
-/// name while the provider is unhealthy. The selected provider's tinted
-/// background is the row view's. While the provider needs authentication the
+/// name while the provider is unhealthy. The selected provider's highlight
+/// is the row view's. While the provider needs authentication the
 /// health glyph is a button that opens the auth popover, and a provider that
 /// can be created against has a `+` that opens the create sheet; both send
 /// their actions to whatever target the controller wires.

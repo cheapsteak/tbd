@@ -361,11 +361,11 @@ extension SidebarOutlineController {
         let previous = nestTargetID
         nestTargetID = id
         for changed in [previous, id].compactMap({ $0 }) {
-            guard let item = items.existing(changed), let node = tree.node(changed) else { continue }
+            guard let item = items.existing(changed) else { continue }
             let row = outline.row(forItem: item)
             guard row >= 0, let rowView = outline.rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView
             else { continue }
-            configure(rowView, node: node)
+            configure(rowView, id: changed)
         }
     }
 
@@ -388,9 +388,10 @@ extension SidebarOutlineController {
             guard let rect = rowRect(above.id) else { return nil }
             y = rect.maxY
         }
-        // The children's visual depth is the parent's outline level.
-        let x = dropDepthInset + CGFloat(entry.level) * SidebarNativeMetrics.indentation
-            - SidebarNativeMetrics.guideLineOffset
+        // The children's visual depth is the parent's outline level, and the
+        // parent's line runs one indentation step left of their content.
+        let x = dropDepthInset + CGFloat(entry.level - 1) * SidebarNativeMetrics.indentation
+            + SidebarNativeMetrics.guideLineOffset
         let point = dropIndicator.convert(NSPoint(x: x, y: y), from: outline)
         return SidebarDropIndicatorView.Line(x: point.x, y: point.y, endX: dropLineEndX)
     }

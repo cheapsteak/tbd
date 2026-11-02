@@ -82,10 +82,32 @@ enum SidebarCellKit {
         return button
     }
 
-    /// The label's single-line size, padding included.
+    /// The label's single-line size, padding included: a frame this size draws
+    /// the whole string.
+    ///
+    /// It is the cell's own measure, not `intrinsicContentSize`. A label's
+    /// intrinsic size is its alignment rect, which leaves out the 2 pt the
+    /// cell keeps clear on each side of the text (`alignmentRectInsets`), so a
+    /// frame that wide falls 3.5–4 pt short and the cell cuts a name that
+    /// fits: "main" at 13 pt measures 29 pt intrinsic against the cell's
+    /// 32.98, and draws as "m…".
     static func size(of field: NSTextField) -> NSSize {
-        let size = field.intrinsicContentSize
+        let size = drawnSize(of: field)
         return NSSize(width: ceil(max(size.width, 0)), height: ceil(max(size.height, 0)))
+    }
+
+    /// Whether the label cuts its string at its current frame. AppKit draws
+    /// the string whole from the cell's own width up and cuts it below that
+    /// width (measured to 0.01 pt, in every font the cells use), so the
+    /// comparison is exact and needs no tolerance.
+    static func truncates(_ field: NSTextField) -> Bool {
+        field.frame.width < drawnSize(of: field).width
+    }
+
+    /// The unrounded size the label's cell draws its whole string in.
+    private static func drawnSize(of field: NSTextField) -> NSSize {
+        field.cell?.cellSize
+            ?? field.frame(forAlignmentRect: NSRect(origin: .zero, size: field.intrinsicContentSize)).size
     }
 
     // MARK: Symbols

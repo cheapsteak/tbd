@@ -105,14 +105,17 @@ struct DockTableControllerTests {
         #expect(rootSelected == open, h.evidence(names))
         let depths = h.depths
         #expect(depths == [0, 1, 2, 0])
-        // A descendant's content moves one indentation step per level, and
-        // its row view draws one guide line per level.
+        // A descendant's content moves one indentation step per level. Its
+        // row view draws its parent's line, which ends in its turn, and none
+        // of the root's, which ended at its last child, a1.
         let deepCell = h.cell(.worktree(a1x.id)) as? WorktreeRowCell
         let deepInset = deepCell?.leadingInset
         #expect(deepInset == DockTableController.rowInset + 2 * SidebarNativeMetrics.indentation)
         let deepRowView = h.rowView(.worktree(a1x.id))
-        let deepGuides = deepRowView?.configuration.guideCount
-        #expect(deepGuides == 2)
+        let deepGuides = deepRowView?.configuration.guides
+        let fade = SidebarGuideLine.continuedFadeStart
+        let parentLine = [SidebarGuideLine.Guide(level: 1, role: .last, fadeStart: fade)]
+        #expect(deepGuides == parentLine)
 
         // Selecting a descendant keeps the subtree open: clicking a child in
         // the dock must not make it vanish.
@@ -165,6 +168,9 @@ struct DockTableControllerTests {
         #expect(root.plusButton.isHidden)
         let restingGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(restingGap == false)
+        let restingHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let neitherHovered: [Bool?] = [false, false]
+        #expect(restingHover == neitherHovered, "A row draws the hover highlight with no pointer over it")
 
         // Over the descendant: its pin shows, and its guide line breaks there.
         tracker.pointerMoved(toWindowPoint: childPoint)
@@ -172,12 +178,19 @@ struct DockTableControllerTests {
         #expect(!child.pinButton.isHidden, h.hoverEvidence(at: childPoint))
         let hoveredGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(hoveredGap == true, h.hoverEvidence(at: childPoint))
+        // Only the hovered row draws the hover highlight.
+        let childHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let childOnly: [Bool?] = [false, true]
+        #expect(childHover == childOnly, h.hoverEvidence(at: childPoint))
 
         // Over the root: its nested `+` shows, and the descendant's pin goes.
         tracker.pointerMoved(toWindowPoint: rootPoint)
         #expect(h.dock.hoverState.row == .worktree(a.id), h.hoverEvidence(at: rootPoint))
         #expect(!root.plusButton.isHidden, h.hoverEvidence(at: rootPoint))
         #expect(child.pinButton.isHidden)
+        let rootHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let rootOnly: [Bool?] = [true, false]
+        #expect(rootHover == rootOnly, h.hoverEvidence(at: rootPoint))
 
         // The pointer leaves: both go.
         tracker.pointerExited()
@@ -186,6 +199,8 @@ struct DockTableControllerTests {
         #expect(child.pinButton.isHidden)
         let exitedGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(exitedGap == false)
+        let exitedHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        #expect(exitedHover == neitherHovered, "A row kept the hover highlight after the pointer left")
 
         // A drag clears the hover.
         tracker.pointerMoved(toWindowPoint: rootPoint)

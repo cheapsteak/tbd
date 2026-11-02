@@ -16,15 +16,19 @@ extension SidebarOutlineController {
         let interval = Self.signposter.beginInterval("apply")
         defer { Self.signposter.endInterval("apply", interval) }
         isApplyingModelSelection = true
+        var rowViewsNeedRefresh = false
         if hasLoaded {
-            applyUpdate(to: latest)
+            rowViewsNeedRefresh = applyUpdate(to: latest)
         } else {
             loadFully(latest)
         }
         // The drop index is built again on first use: once per applied tree,
         // and never for a rebuild no drag asks about.
         dropIndexCache = nil
-        applyModelSelection()
+        // Re-derives the row views the structure changed under once, with
+        // the lines the selection lights, rather than once for the structure
+        // and again for the selection.
+        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
         reconcileVanishedSelection()
@@ -47,7 +51,12 @@ extension SidebarOutlineController {
     /// Nothing here asks the outline which item sits at an index while the
     /// update runs: `child(_:ofItem:)` answers through the data source, which
     /// already serves the new tree, so it names the wrong item mid-update.
-    private func applyUpdate(to latest: SidebarTree) {
+    /// - Returns: whether every row view the outline holds needs its
+    ///   configuration re-derived: rows came, went or moved, and a move
+    ///   changes a row's ancestors even when its own model stays the same,
+    ///   while a row's part in its parent's line follows its siblings. A
+    ///   fallback reload configures every row view afresh, so needs none.
+    private func applyUpdate(to latest: SidebarTree) -> Bool {
         let target = isHoldingStructure ? Self.content(of: latest, inStructureOf: tree) : latest
         let update = diffForTesting?(tree, target) ?? SidebarTreeDiff.update(from: tree, to: target)
         lastAppliedUpdate = update
@@ -68,6 +77,7 @@ extension SidebarOutlineController {
 
         let shownRows = outline.numberOfRows
         let expectedRows = tree.visibleRowCount
+        var rowViewsNeedRefresh = false
         if shownRows != expectedRows {
             fallbackReloadCount += 1
             outlineLogger.fault(
@@ -80,13 +90,12 @@ extension SidebarOutlineController {
             // The outline has let go of every removed item.
             items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
-            // A move changes a row's ancestors even when its own model stays
-            // the same, and the row view's tint and guide lines follow them.
-            if !update.steps.isEmpty { refreshRowViewConfigurations() }
             noteHeights(update.heightChanged)
+            rowViewsNeedRefresh = !update.steps.isEmpty
         }
         isApplyingStructure = false
         restoreScrollAnchor(anchor)
+        return rowViewsNeedRefresh
     }
 
     private func loadFully(_ latest: SidebarTree) {
@@ -179,7 +188,7 @@ extension SidebarOutlineController {
                   ids?.contains(item.id) ?? true,
                   let node = self.tree.node(item.id) else { return }
             if let rowView = rowView as? SidebarRowView {
-                self.configure(rowView, node: node)
+                self.configure(rowView, id: node.id)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.configure(cell, kind: node.kind, id: node.id)
@@ -187,16 +196,17 @@ extension SidebarOutlineController {
         }
     }
 
-    /// Re-derives every row view's tint and guide lines from the current
-    /// tree, after `endUpdates`, by the row each view now shows. Cheap — only
-    /// the views the outline holds, each an ancestor walk — and a view whose
-    /// configuration is unchanged does not redraw.
-    private func refreshRowViewConfigurations() {
+    /// Re-derives every row view's configuration from the current tree,
+    /// by the row each view shows: after an apply that changed the
+    /// structure, and when the active guide lines change. Cheap — only the
+    /// views the outline holds, each reading what the tree gave its row
+    /// (`RowViewBase`) — and a view whose configuration is unchanged does
+    /// not redraw.
+    func refreshRowViewConfigurations() {
         outline.enumerateAvailableRowViews { rowView, row in
             guard let sidebarRow = rowView as? SidebarRowView,
-                  let item = self.outline.item(atRow: row) as? SidebarItem,
-                  let node = self.tree.node(item.id) else { return }
-            self.configure(sidebarRow, node: node)
+                  let item = self.outline.item(atRow: row) as? SidebarItem else { return }
+            self.configure(sidebarRow, id: item.id)
         }
     }
 

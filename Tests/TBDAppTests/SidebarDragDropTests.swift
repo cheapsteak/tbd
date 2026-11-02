@@ -237,7 +237,7 @@ struct SidebarDragDropTests {
         let top = try Self.validate(info, parent: repo, childIndex: belowMain, depth: 0, in: h)
         #expect(top == .move)
         let aTop = h.outline.rect(ofRow: h.row(a)).minY
-        #expect(Self.lineStart(in: h) == Self.point(x: inset - guide, y: aTop, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset - step + guide, y: aTop, in: h))
         #expect(h.controller.nestTargetID == nil)
 
         // The line stops short of the clip view's edge, and of a vertical
@@ -256,12 +256,12 @@ struct SidebarDragDropTests {
         let a1Bottom = h.outline.rect(ofRow: h.row(.worktree(f.a1.id))).maxY
         let nested = try Self.validate(info, parent: a, childIndex: 1, depth: 1, in: h)
         #expect(nested == .move)
-        #expect(Self.lineStart(in: h) == Self.point(x: inset + step - guide, y: a1Bottom, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset + guide, y: a1Bottom, in: h))
         // …and at depth 0 they land at the top level, between `a`'s subtree
         // and `b`.
         let shallow = try Self.validate(info, parent: a, childIndex: 1, depth: 0, in: h)
         #expect(shallow == .move)
-        #expect(Self.lineStart(in: h) == Self.point(x: inset - guide, y: a1Bottom, in: h))
+        #expect(Self.lineStart(in: h) == Self.point(x: inset - step + guide, y: a1Bottom, in: h))
         Self.endSession(in: h)
         #expect(h.controller.dropIndicator.line == nil)
     }

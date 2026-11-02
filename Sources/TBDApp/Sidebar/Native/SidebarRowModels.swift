@@ -135,8 +135,8 @@ struct ProviderHeaderModel: Equatable {
     var health: ProviderHealth
     /// The caption line under the name while the provider is unhealthy.
     var issueSummary: String?
-    /// `selectedRemoteProvider` names this provider: the row's background
-    /// tints.
+    /// `selectedRemoteProvider` names this provider: the row draws the
+    /// selected highlight.
     var isSelected: Bool
     /// Whether the `+` shows at all.
     var canCreate: Bool

@@ -63,8 +63,8 @@ struct DockRow: Equatable {
 ///   type. A drop calls `AppState.reorderPins(fromOffsets:toOffset:)` with
 ///   offsets into the roots, as the SwiftUI dock's `.onMove` does.
 /// - **Hover.** A `SidebarHoverTracker` of its own shows the hovered row's
-///   gutter pin and nested `+`, as the outline's rows show them. The `+` opens
-///   the one `SidebarPlusMenu` the whole sidebar shares.
+///   highlight, gutter pin and nested `+`, as the outline's rows show them.
+///   The `+` opens the one `SidebarPlusMenu` the whole sidebar shares.
 ///
 /// Every dock row is `PinnedDockMetrics.rowHeight` tall, which the container's
 /// height clamp counts on.
@@ -91,8 +91,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     let scrollView = NSScrollView(frame: .zero)
 
     /// The rows the table shows, top to bottom. While the rows are held, the
-    /// held rows carrying the latest models. Written only by the apply.
+    /// held rows carrying the latest models. Written only by the apply,
+    /// through `setRows(_:)`.
     private(set) var rows: [DockRow] = []
+    /// `rows` as the guide-line rules read them.
+    private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
+    /// Each row's guide lines, by index into `rows`, worked out when the
+    /// rows' IDs or depths last changed, so a hover or a selection only
+    /// looks them up.
+    private var rowGuides: [SidebarGuideLine.RowGuides] = []
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
@@ -114,6 +121,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private(set) var hoverTracker: SidebarHoverTracker?
     /// What the pointer was last reported over.
     private(set) var hoverState = SidebarHoverTracker.State()
+    /// The dock rows whose guide lines draw active: the active ancestors of
+    /// the hovered row and of each selected worktree row the dock shows, by
+    /// the outline's rule (`GuideHierarchy.activeGuideAncestors(of:)`).
+    /// Recomputed once per hover change, selection change and apply.
+    private(set) var activeGuideAncestors: Set<SidebarNodeID> = []
 
     // MARK: Test seams
 
@@ -124,6 +136,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private(set) var appStateSelectionWriteCount = 0
     /// Selection notifications the guard kept from being written back.
     private(set) var suppressedSelectionNotificationCount = 0
+    /// Times the rows' guide lines were worked out: once per change to the
+    /// rows' IDs or depths, and never for an apply that changed only models.
+    private(set) var guideRebuildCount = 0
     /// Stands in for `AppState.reorderPins(fromOffsets:toOffset:)`, whose RPC
     /// a test cannot reach.
     var reorderPinsForTesting: ((IndexSet, Int) -> Void)?
@@ -199,7 +214,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         column.isEditable = false
         table.addTableColumn(column)
         table.headerView = nil
-        // Custom drawing, as in the outline: `SidebarRowView` draws the tint.
+        // Custom drawing, as in the outline: `SidebarRowView` draws the
+        // highlight.
         table.style = .plain
         table.selectionHighlightStyle = .regular
         table.rowSizeStyle = .custom
@@ -374,14 +390,19 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         defer { SidebarOutlineController.signposter.endInterval("dockApply", interval) }
         let previousCount = rows.count
         isApplyingModelSelection = true
+        var rowViewsNeedRefresh = false
         if hasLoaded {
-            applyUpdate(to: isHoldingStructure ? Self.content(of: latest, inStructureOf: rows) : latest)
+            rowViewsNeedRefresh = applyUpdate(
+                to: isHoldingStructure ? Self.content(of: latest, inStructureOf: rows) : latest)
         } else {
-            rows = latest
+            setRows(latest)
             table.reloadData()
             hasLoaded = true
         }
-        applyModelSelection()
+        // Re-derives the row views the rows changed under once, with the
+        // lines the selection lights, rather than once for the rows and
+        // again for the selection.
+        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
         isApplyingModelSelection = false
         // The dock takes its new height before a new selection scrolls into
         // it, so the scroll reads the height the rows will have.
@@ -396,30 +417,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// Inserts and removes rows by ID, so a row that stays keeps its row view
     /// and its cell, then reconfigures rows whose model changed in place.
-    private func applyUpdate(to target: [DockRow]) {
+    /// - Returns: whether every row view the table holds needs its
+    ///   configuration re-derived: the rows or their depths changed, and a
+    ///   row's part in its parent's line follows its siblings. A fallback
+    ///   reload configures every row view afresh, so needs none.
+    private func applyUpdate(to target: [DockRow]) -> Bool {
         let previous = rows
-        rows = target
-        let oldIDs = previous.map(\.id)
-        let newIDs = target.map(\.id)
-        if oldIDs != newIDs {
-            // Removals index the old rows, insertions the new ones: the order
-            // `removeRows` then `insertRows` read them in.
-            var removed = IndexSet()
-            var inserted = IndexSet()
-            for change in newIDs.difference(from: oldIDs) {
-                switch change {
-                case .remove(let offset, _, _): removed.insert(offset)
-                case .insert(let offset, _, _): inserted.insert(offset)
-                }
-            }
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.current.duration = 0
-            NSAnimationContext.current.allowsImplicitAnimation = false
-            table.beginUpdates()
-            if !removed.isEmpty { table.removeRows(at: removed, withAnimation: []) }
-            if !inserted.isEmpty { table.insertRows(at: inserted, withAnimation: []) }
-            table.endUpdates()
-            NSAnimationContext.endGrouping()
+        let structureChanged = setRows(target)
+        if structureChanged {
+            insertAndRemoveRows(from: previous.map(\.id), to: target.map(\.id))
         }
 
         let shownRows = table.numberOfRows
@@ -429,7 +435,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             dockLogger.fault(
                 "Native dock update left \(shownRows, privacy: .public) rows for \(expectedRows, privacy: .public); reloading")
             table.reloadData()
-            return
+            return false
         }
         let before = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var changed: Set<SidebarNodeID> = []
@@ -437,6 +443,56 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             if let old = before[row.id], old != row { changed.insert(row.id) }
         }
         reconfigure(changed)
+        return structureChanged
+    }
+
+    /// Inserts and removes the table's rows between `oldIDs` and `newIDs`; a
+    /// change of depths alone moves none.
+    private func insertAndRemoveRows(from oldIDs: [SidebarNodeID], to newIDs: [SidebarNodeID]) {
+        guard oldIDs != newIDs else { return }
+        // Removals index the old rows, insertions the new ones: the order
+        // `removeRows` then `insertRows` read them in.
+        var removed = IndexSet()
+        var inserted = IndexSet()
+        for change in newIDs.difference(from: oldIDs) {
+            switch change {
+            case .remove(let offset, _, _): removed.insert(offset)
+            case .insert(let offset, _, _): inserted.insert(offset)
+            }
+        }
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        table.beginUpdates()
+        if !removed.isEmpty { table.removeRows(at: removed, withAnimation: []) }
+        if !inserted.isEmpty { table.insertRows(at: inserted, withAnimation: []) }
+        table.endUpdates()
+        NSAnimationContext.endGrouping()
+    }
+
+    /// Shows `newRows`, and works out every row's guide lines again only when
+    /// the rows' IDs or depths changed, which is all the lines read: an apply
+    /// that changed only models — a status tick, a rename — keeps them.
+    /// - Returns: whether the IDs or depths changed.
+    @discardableResult
+    private func setRows(_ newRows: [DockRow]) -> Bool {
+        let structureChanged = !Self.haveSameStructure(rows, newRows)
+        rows = newRows
+        guard structureChanged else { return false }
+        guideHierarchy = DockGuideHierarchy(rows: newRows)
+        rowGuides = Self.rowGuides(of: newRows, in: guideHierarchy)
+        guideRebuildCount += 1
+        return true
+    }
+
+    /// Whether `lhs` and `rhs` are the same rows at the same depths, in the
+    /// same order, whatever their models.
+    private static func haveSameStructure(_ lhs: [DockRow], _ rhs: [DockRow]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) where left.id != right.id || left.depth != right.depth {
+            return false
+        }
+        return true
     }
 
     /// `shown`'s rows carrying `latest`'s models: what a held apply shows, so a
@@ -460,7 +516,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             guard self.rows.indices.contains(index), ids.contains(self.rows[index].id) else { return }
             let row = self.rows[index]
             if let rowView = rowView as? SidebarRowView {
-                self.configureRowView(rowView, row: row)
+                self.configureRowView(rowView, at: index)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.configureCell(cell, row: row)
@@ -472,7 +528,13 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// Selects the rows `AppState` names: its selected worktrees and its
     /// selected remote session. A row the dock does not show is skipped.
-    private func applyModelSelection() {
+    /// The selected rows light their groups' guide lines, so the row views
+    /// take the active lines here: at the end of every apply, and after a
+    /// user's selection.
+    /// - Parameter refreshingRowViews: true after an apply that changed the
+    ///   rows' structure, so every row view takes its configuration afresh
+    ///   here even when the active lines stay the same.
+    private func applyModelSelection(refreshingRowViews: Bool = false) {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
         }
@@ -485,6 +547,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         if indexes != table.selectedRowIndexes {
             table.selectRowIndexes(indexes, byExtendingSelection: false)
         }
+        refreshActiveGuides(refreshingRowViews: refreshingRowViews)
     }
 
     /// A selection that changed since the last apply scrolls its first dock
@@ -550,24 +613,27 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let rowView = (tableView.makeView(withIdentifier: SidebarRowView.reuseIdentifier, owner: self)
             as? SidebarRowView) ?? SidebarRowView(frame: .zero)
-        if rows.indices.contains(row) {
-            configureRowView(rowView, row: rows[row])
-        }
+        configureRowView(rowView, at: row)
         return rowView
     }
 
     /// Every row view the table adds — fresh, reused, or shifted to a new
     /// row — takes its guide lines from the row it now shows.
     func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
-        guard let rowView = rowView as? SidebarRowView, rows.indices.contains(row) else { return }
-        configureRowView(rowView, row: rows[row])
+        guard let rowView = rowView as? SidebarRowView else { return }
+        configureRowView(rowView, at: row)
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard rows.indices.contains(row) else { return PinnedDockMetrics.rowHeight }
-        switch rows[row].kind {
-        case .worktree(let model): return WorktreeRowCell.height(for: model)
-        case .remoteSession(let model): return RemoteSessionRowCell.height(for: model)
+        return Self.height(of: rows[row])
+    }
+
+    /// The fixed height of `row`: its cell's for its model.
+    static func height(of row: DockRow) -> CGFloat {
+        switch row.kind {
+        case .worktree(let model): WorktreeRowCell.height(for: model)
+        case .remoteSession(let model): RemoteSessionRowCell.height(for: model)
         }
     }
 
@@ -600,17 +666,74 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         applyHover(to: cell, id: id)
     }
 
-    /// The row view's tint origin and guide lines: one line per level of a
-    /// descendant's depth, as `WorktreeRowView` draws them, broken where the
-    /// gutter pin shows — on hover, and always once pinned.
-    private func configureRowView(_ rowView: SidebarRowView, row: DockRow) {
+    /// The row view's guide lines — its part in each line above it, by the
+    /// outline's shape (`GuideHierarchy.guideRuns(of:)`), and its own line's
+    /// start when its children show under it — active where their owner is
+    /// in `activeGuideAncestors`, broken where the gutter pin shows: on
+    /// hover, and always once pinned — and its hover highlight.
+    private func configureRowView(_ rowView: SidebarRowView, at index: Int) {
+        guard rows.indices.contains(index) else { return }
+        let row = rows[index]
+        let isHovered = hoverState.row == row.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
-            configuration.guideCount = row.depth
-            configuration.showsPinGap = (model.isPinned || hoverState.row == row.id) && !model.isMain
+            configuration.level = row.depth
+            let lines = rowGuides.indices.contains(index) ? rowGuides[index] : SidebarGuideLine.RowGuides()
+            configuration.guides = lines.guides
+            if !activeGuideAncestors.isEmpty {
+                configuration.activeGuides = SidebarGuideLine.activeIndices(
+                    of: lines.owners, active: activeGuideAncestors)
+            }
+            configuration.drawsStub = lines.startsGuide
+            configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(row.id)
+            configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
+        configuration.isHovered = isHovered
         rowView.configuration = configuration
+    }
+
+    /// Re-derives every row view's configuration from the rows each view
+    /// shows: after the rows' structure changes, and when the active guide
+    /// lines change. A view whose configuration is unchanged does not redraw.
+    private func refreshRowViewConfigurations() {
+        table.enumerateAvailableRowViews { rowView, index in
+            guard let rowView = rowView as? SidebarRowView else { return }
+            self.configureRowView(rowView, at: index)
+        }
+    }
+
+    /// Each of `rows`' guide lines, by index, by the shared rules
+    /// (`GuideHierarchy.rowGuides(of:)`). Only worktree rows draw lines, and
+    /// a row repeating an ID above it draws none: the hierarchy's lookups
+    /// answer for the ID's first row.
+    private static func rowGuides(of rows: [DockRow],
+                                  in hierarchy: DockGuideHierarchy) -> [SidebarGuideLine.RowGuides] {
+        rows.enumerated().map { index, row in
+            guard row.isWorktree, hierarchy.indices[row.id] == index else { return SidebarGuideLine.RowGuides() }
+            return hierarchy.rowGuides(of: row.id)
+        }
+    }
+
+    // MARK: Active guide lines
+
+    /// The active ancestors of the hovered row and of each selected worktree
+    /// row the dock shows.
+    private func focusedGuideAncestors() -> Set<SidebarNodeID> {
+        var focus = appState.selectedWorktreeIDs.map { SidebarNodeID.worktree($0) }
+        if let hovered = hoverState.row { focus.append(hovered) }
+        return guideHierarchy.activeGuideAncestors(of: focus)
+    }
+
+    /// Recomputes the active guide lines after the selection or the rows
+    /// changed. When they differ, or `refreshingRowViews` asks, every row
+    /// view the table holds takes its configuration afresh; a view whose
+    /// configuration comes out the same does not redraw.
+    private func refreshActiveGuides(refreshingRowViews: Bool = false) {
+        let active = focusedGuideAncestors()
+        guard refreshingRowViews || active != activeGuideAncestors else { return }
+        activeGuideAncestors = active
+        refreshRowViewConfigurations()
     }
 
     // MARK: Hover
@@ -622,8 +745,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The tracker's report: the `+` under the pointer arms the shared menu,
-    /// and every row the table has takes the new hover. A recompute that finds
-    /// nothing changed leaves the rows as they are.
+    /// the hovered row lights the guide line it is joined to, and every row
+    /// the table has takes the new hover. A recompute that finds nothing
+    /// changed leaves the rows as they are. The row views and the active
+    /// lines follow only the hovered row, so a move between parts of one row
+    /// reaches only the cells.
     func hoverChanged(_ state: SidebarHoverTracker.State) {
         let previous = hoverState
         hoverState = state
@@ -632,17 +758,23 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             from: previous.part == .plus ? previous.row : nil, to: state.part == .plus ? state.row : nil,
             in: table, anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
             appState: appState, sheets: sheets)
-        applyHoverToAvailableRows()
+        let rowChanged = state.row != previous.row
+        if rowChanged {
+            activeGuideAncestors = focusedGuideAncestors()
+        }
+        applyHoverToAvailableRows(includingRowViews: rowChanged)
     }
 
-    /// Hands every row view the table has its pin gap, and every cell its
-    /// hover.
-    func applyHoverToAvailableRows() {
+    /// Hands every row view the table has its hover highlight, active guide
+    /// lines and pin gap, and every cell its hover.
+    /// - Parameter includingRowViews: false when only the cells' hover
+    ///   changed, so the row views keep their configurations.
+    func applyHoverToAvailableRows(includingRowViews: Bool = true) {
         table.enumerateAvailableRowViews { rowView, index in
             guard self.rows.indices.contains(index) else { return }
             let row = self.rows[index]
-            if let rowView = rowView as? SidebarRowView {
-                self.configureRowView(rowView, row: row)
+            if includingRowViews, let rowView = rowView as? SidebarRowView {
+                self.configureRowView(rowView, at: index)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.applyHover(to: cell, id: row.id)
@@ -995,6 +1127,14 @@ final class DockTableView: NSTableView {
     /// is an override.
     override func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
         true
+    }
+
+    /// Every cell ends `SidebarNativeMetrics.trailingCellInset` short of the
+    /// row's trailing edge, as the outline's cells do.
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        var frame = super.frameOfCell(atColumn: column, row: row)
+        frame.size.width = max(frame.width - SidebarNativeMetrics.trailingCellInset(), 0)
+        return frame
     }
 
     /// Whether `point`, in the table's coordinates, lands on a button inside
