@@ -2343,6 +2343,9 @@ struct TableTranscriptView: NSViewRepresentable {
                 tableView.tile()
                 restorePrependAnchor(prependAnchor)
                 pendingPrependAnchor = prependAnchor
+                // The reload above may have captured a realize anchor; the
+                // prepend anchor now owns where the clip lands.
+                pendingRealizeAnchor = nil
                 DispatchQueue.main.async { [weak self] in
                     guard let self, let held = self.pendingPrependAnchor else { return }
                     self.restorePrependAnchor(held)
@@ -2533,9 +2536,10 @@ struct TableTranscriptView: NSViewRepresentable {
         /// anchor back where it says its row belongs. The pass may have moved the
         /// clip to keep a different row in place, or grown the document for rows
         /// that corrected since the last pass, and this lands the anchored row
-        /// before anything is drawn. A realize anchor is captured only when neither of
-        /// the other two is held and never during the coordinator's own scroll,
-        /// but one set later can coexist with it, so it goes first and theirs win.
+        /// before anything is drawn. A realize anchor is never held alongside the
+        /// prepend or jump anchor: both clear it when they are set, and its
+        /// capture refuses while either is held or while the coordinator is
+        /// moving the clip.
         func tableLayoutDidEnd() {
             tableLayoutDepth = max(0, tableLayoutDepth - 1)
             guard tableLayoutDepth == 0 else { return }
