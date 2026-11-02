@@ -419,10 +419,10 @@ extension AppState {
     /// What it fixes: adoption moved remote sessions into the repo tree as
     /// worktree rows, and an adopted session is deliberately rendered by that
     /// row alone — `SidebarSessionPlacement.sessions` drops it (it resolved to
-    /// a known repo) and `SidebarSessionPlacement.matchedRemoteSessions` drops
-    /// it (a row already stands for it). So the lane row became the ONLY way in, while
-    /// the surface behind it stayed reachable only from a session row that no
-    /// longer exists. Selecting the lane landed on an ordinary worktree pane
+    /// a known repo) and `SidebarSessionPlacement.matchedRemoteSessionIndices`
+    /// drops it (a row already stands for it). So the lane row became the ONLY
+    /// way in, while the surface behind it stayed reachable only from a session
+    /// row that no longer exists. Selecting the lane landed on an ordinary worktree pane
     /// for a row with no path, no tmux server and no terminals — an empty
     /// pane. The binding was on the row the whole time (`Worktree.location`);
     /// nothing performed the mapping.

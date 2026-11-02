@@ -65,9 +65,9 @@ struct RemoteSectionViewTests {
         #expect(SidebarSessionPlacement.sessions(in: sessions, forProvider: "acme", knownRepoIDs: []).isEmpty)
     }
 
-    /// Task 9d: a session resolved to a local repo renders inside that
-    /// repo's section instead (`SidebarSessionPlacement.matchedRemoteSessions`) — it
-    /// must NOT also appear in the provider-named Remote section.
+    /// A session resolved to a local repo renders inside that repo's section
+    /// instead (`SidebarSessionPlacement.matchedRemoteSessionIndices`) — it must
+    /// NOT also appear under its provider.
     @Test func excludesSessionsResolvedToARepo() {
         let repoID = UUID()
         let sessions = [
@@ -114,7 +114,7 @@ struct RemoteSectionViewTests {
             gone: false, dismissed: false, lastSeen: Date())
     }
 
-    /// Same display policy as `SidebarSessionPlacement.matchedRemoteSessions`: the
+    /// Same display policy as `SidebarSessionPlacement.matchedRemoteSessionIndices`: the
     /// provider keeps archived sessions in `list`, and the caller decides
     /// which of them a human sees.
     @Test func providerSectionExcludesArchivedSessions() throws {

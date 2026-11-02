@@ -10,19 +10,28 @@ import TBDShared
 enum SidebarSessionPlacement {
     // MARK: Sessions under a repository
 
-    /// Sessions resolved to `repoID`, dismissed tombstones excluded, sorted
-    /// oldest-first by reported creation time.
+    /// The remote locations a section's worktree rows already stand for. The
+    /// adopted-lane half of the filter in `matchedRemoteSessionIndices`, split
+    /// out so a caller can compare it across renders without re-deriving it.
+    static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
+        Set(worktrees.map(\.location).filter { !$0.isLocal })
+    }
+
+    /// The positions in `all` of the sessions a repo section shows: sessions
+    /// resolved to `repoID`, dismissed tombstones excluded, sorted oldest-first
+    /// by reported creation time. `AppState.sidebarMatchedRemoteSessions(repoID:)`
+    /// maps them back to sessions and memoizes the result.
     ///
-    /// `worktrees` is the section's own worktree list, and a session that one
-    /// of those rows already stands for is dropped here: a remote lane that
-    /// has been adopted into a `Worktree` row renders as that row, and would
-    /// otherwise appear a second time as a session row under the same repo.
-    /// The join is on the `(provider, sessionID)` pair both sides carry —
-    /// `Worktree.location` for the row, `provider`/`payload.id` for the
-    /// session — never on display name or branch, which adoption seeds once
-    /// and the user is then free to change. The parameter is required rather
-    /// than defaulted so a new call site cannot silently reintroduce the
-    /// duplicate.
+    /// `adopted` is `adoptedLocations` of the section's own worktree rows, and
+    /// a session that one of those rows already stands for is dropped here: a
+    /// remote lane that has been adopted into a `Worktree` row renders as that
+    /// row, and would otherwise appear a second time as a session row under
+    /// the same repo. The join is on the `(provider, sessionID)` pair both
+    /// sides carry — `Worktree.location` for the row, `provider`/`payload.id`
+    /// for the session — never on display name or branch, which adoption
+    /// seeds once and the user is then free to change. The parameter is
+    /// required rather than defaulted so a new call site cannot silently
+    /// reintroduce the duplicate.
     ///
     /// A currently remote adopted lane therefore has exactly one sidebar row.
     /// A local row's retained `origin` is provenance, not evidence that it
@@ -42,28 +51,12 @@ enum SidebarSessionPlacement {
     /// the session. Archived sessions stay reachable in the repo's Archived tab
     /// (for an adopted lane) and in the Provider Desk's session ledger, which
     /// lists every non-dismissed session the provider reports.
-    static func matchedRemoteSessions(
-        _ all: [RemoteSessionInfo],
-        repoID: UUID,
-        worktrees: [Worktree]
-    ) -> [RemoteSessionInfo] {
-        matchedRemoteSessionIndices(all, repoID: repoID, adopted: adoptedLocations(worktrees))
-            .map { all[$0] }
-    }
-
-    /// The remote locations a section's worktree rows already stand for. The
-    /// adopted-lane half of the filter in `matchedRemoteSessionIndices`, split
-    /// out so a caller can compare it across renders without re-deriving it.
-    static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
-        Set(worktrees.map(\.location).filter { !$0.isLocal })
-    }
-
-    /// The positions in `all` of the sessions `matchedRemoteSessions` returns,
-    /// in the same order. Each surviving session's `created_at` is parsed
-    /// exactly once, here, and the sort runs over those pre-parsed keys: the
-    /// comparator runs O(n log n) times, and parsing inside it was the
-    /// measured main-thread stall while typing. `parse` is the test seam for
-    /// counting those parses; production always takes the default.
+    ///
+    /// Each surviving session's `created_at` is parsed exactly once, here, and
+    /// the sort runs over those pre-parsed keys: the comparator runs
+    /// O(n log n) times, and parsing inside it was the measured main-thread
+    /// stall while typing. `parse` is the test seam for counting those parses;
+    /// production always takes the default.
     static func matchedRemoteSessionIndices(
         _ all: [RemoteSessionInfo],
         repoID: UUID,
@@ -190,10 +183,10 @@ enum SidebarSessionPlacement {
     /// the stored value) also means this self-heals for free the moment the
     /// repo reappears in `knownRepoIDs` — no new pinning event required.
     /// Resolved (matched-to-a-known-repo) sessions render inside their repo's
-    /// section instead (`matchedRemoteSessions`).
+    /// section instead (`matchedRemoteSessionIndices`).
     ///
     /// Sessions the provider reports as `archived` are excluded too, for the
-    /// same reason `matchedRemoteSessions` excludes them: the contract keeps
+    /// same reason `matchedRemoteSessionIndices` excludes them: the contract keeps
     /// archived sessions in `list` and assigns the caller the display policy
     /// for them, and these two filters are where TBD applies it. They stay
     /// reachable in the Provider Desk's session ledger.

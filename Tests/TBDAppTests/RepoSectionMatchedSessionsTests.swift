@@ -26,6 +26,18 @@ enum MatchedSessionFixtures {
             gone: gone, dismissed: dismissed, lastSeen: lastSeen,
             resolvedRepoID: repo, pinnedAt: pinnedAt)
     }
+
+    /// The sessions a repo section shows, in order: the production
+    /// composition `AppState.sidebarMatchedRemoteSessions(repoID:)` memoizes —
+    /// `matchedRemoteSessionIndices` over the section's adopted locations,
+    /// mapped back to the sessions.
+    static func matched(
+        _ all: [RemoteSessionInfo], repoID: UUID, worktrees: [Worktree]
+    ) -> [RemoteSessionInfo] {
+        SidebarSessionPlacement.matchedRemoteSessionIndices(
+            all, repoID: repoID, adopted: SidebarSessionPlacement.adoptedLocations(worktrees))
+            .map { all[$0] }
+    }
 }
 
 /// A fixed-seed generator, so the corpus is the same on every run and every
@@ -120,7 +132,7 @@ struct RepoSectionMatchedSessionsTests {
         let (all, adopted) = Self.corpus()
         let expected = Self.referenceIDs(
             all, repoID: Self.repoID, adopted: SidebarSessionPlacement.adoptedLocations(adopted))
-        let actual = SidebarSessionPlacement.matchedRemoteSessions(
+        let actual = MatchedSessionFixtures.matched(
             all, repoID: Self.repoID, worktrees: adopted).map(\.id)
         #expect(actual == expected)
         #expect(expected.count > 500, "the corpus should leave most of the 800 sessions in play")
@@ -130,9 +142,9 @@ struct RepoSectionMatchedSessionsTests {
         let (all, adopted) = Self.corpus()
         var rng = SplitMix64(state: 0xABCD_1234)
         let shuffled = all.shuffled(using: &rng)
-        let forward = SidebarSessionPlacement.matchedRemoteSessions(
+        let forward = MatchedSessionFixtures.matched(
             all, repoID: Self.repoID, worktrees: adopted).map(\.id)
-        let backward = SidebarSessionPlacement.matchedRemoteSessions(
+        let backward = MatchedSessionFixtures.matched(
             shuffled, repoID: Self.repoID, worktrees: adopted).map(\.id)
         #expect(forward == backward)
     }

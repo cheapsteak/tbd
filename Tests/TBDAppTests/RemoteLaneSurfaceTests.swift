@@ -11,9 +11,8 @@ import TestSupport
 /// does not ask this exact question: adoption moved sessions into the repo
 /// tree (#625) and an adopted session is rendered by its worktree row ALONE —
 /// `SidebarSessionPlacement.sessions` drops it (it resolved to a known repo)
-/// and `SidebarSessionPlacement.matchedRemoteSessions` drops it (a row stands
-/// for it) — so
-/// the lane row became the only way in, while nothing mapped that row to a
+/// and `SidebarSessionPlacement.matchedRemoteSessionIndices` drops it (a row
+/// stands for it) — so the lane row became the only way in, while nothing mapped that row to a
 /// `RemoteSessionSelection`. The row landed on an ordinary worktree pane for a
 /// row with no path, no tmux server and no terminals.
 ///

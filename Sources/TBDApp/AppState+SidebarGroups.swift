@@ -207,8 +207,8 @@ extension AppState {
     }
 
     /// The repository section's rows under the current grouping setting.
-    /// `matchedSessions` is the view's memoized
-    /// `SidebarSessionPlacement.matchedRemoteSessions`, evaluated only when ungrouped.
+    /// `matchedSessions` is `sidebarMatchedRemoteSessions(repoID:)`, evaluated
+    /// only when ungrouped.
     func sidebarRepositoryLayout(
         repoID: UUID, grouped: Bool, collapseEnded: Bool,
         matchedSessions: @autoclosure () -> [RemoteSessionInfo]

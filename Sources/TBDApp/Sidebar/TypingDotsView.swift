@@ -9,7 +9,7 @@ final class TypingDotsNSView: NSView {
     private static let dotSpacing: CGFloat = 2
     private static let pulseKey = "typingPulse"
     private let dotLayers: [CALayer]
-    private var dotColor: NSColor
+    private let dotColor: NSColor
     // nonisolated(unsafe): Swift 6 deinit is nonisolated; NSView deinit
     // always runs on the main thread in practice, so this is safe.
     nonisolated(unsafe) private var occlusionObserver: (any NSObjectProtocol)?
@@ -73,11 +73,6 @@ final class TypingDotsNSView: NSView {
         let width = CGFloat(dotLayers.count) * Self.dotDiameter
             + CGFloat(dotLayers.count - 1) * Self.dotSpacing
         return NSSize(width: width, height: Self.dotDiameter)
-    }
-
-    func updateColor(_ color: NSColor) {
-        dotColor = color
-        applyDotColor()
     }
 
     private func applyDotColor() {

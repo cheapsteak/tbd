@@ -4,10 +4,11 @@ import Foundation
 import TBDShared
 
 /// Remote worktrees inside repo sections. Covers
-/// `SidebarSessionPlacement.matchedRemoteSessions(_:repoID:worktrees:)` — the filter
-/// that picks a repo's resolved remote sessions out of the full mirror, drops
-/// the ones a worktree row already stands for, and orders the rest by
-/// creation time.
+/// `SidebarSessionPlacement.matchedRemoteSessionIndices`, through
+/// `MatchedSessionFixtures.matched(_:repoID:worktrees:)` — the filter that
+/// picks a repo's resolved remote sessions out of the full mirror, drops the
+/// ones a worktree row already stands for, and orders the rest by creation
+/// time.
 @Suite("SidebarSessionPlacement — matched remote sessions")
 struct RepoSectionRemoteSessionsTests {
 
@@ -40,7 +41,7 @@ struct RepoSectionRemoteSessionsTests {
             branch: "feature", path: "/tmp/x", tmuxServer: "tbd-x")
     }
 
-    // MARK: - matchedRemoteSessions(_:repoID:) — filtering
+    // MARK: - matchedRemoteSessionIndices — filtering
 
     @Test func includesOnlySessionsResolvedToTheGivenRepo() {
         let repoA = UUID()
@@ -50,7 +51,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "s2", resolvedRepoID: repoB),
             session(id: "s3", resolvedRepoID: nil),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoA, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoA, worktrees: [])
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
@@ -60,13 +61,13 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "s1", resolvedRepoID: repoID, dismissed: true),
             session(id: "s2", resolvedRepoID: repoID, dismissed: false),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["s2"])
     }
 
     @Test func emptyWhenNoSessionResolvesToTheRepo() {
         let sessions = [session(id: "s1", resolvedRepoID: UUID())]
-        #expect(SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: UUID(), worktrees: []).isEmpty)
+        #expect(MatchedSessionFixtures.matched(sessions, repoID: UUID(), worktrees: []).isEmpty)
     }
 
     // MARK: - archived sessions are display policy, applied here
@@ -100,7 +101,7 @@ struct RepoSectionRemoteSessionsTests {
             try decodedSession(id: "archived", resolvedRepoID: repoID, archivedJSON: "true"),
             try decodedSession(id: "active", resolvedRepoID: repoID),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["active"])
     }
 
@@ -113,7 +114,7 @@ struct RepoSectionRemoteSessionsTests {
             try decodedSession(id: "explicit-false", resolvedRepoID: repoID, archivedJSON: "false"),
             try decodedSession(id: "absent", resolvedRepoID: repoID),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(Set(result.map(\.payload.id)) == ["explicit-false", "absent"])
     }
 
@@ -128,7 +129,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "adopted", resolvedRepoID: repoID),
             session(id: "unadopted", resolvedRepoID: repoID),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(
+        let result = MatchedSessionFixtures.matched(
             sessions, repoID: repoID, worktrees: [remoteWorktree(sessionID: "adopted")])
         #expect(result.map(\.payload.id) == ["unadopted"])
     }
@@ -139,7 +140,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func keepsSessionsWithNoWorktreeRowEvenWhenOtherLanesAreAdopted() {
         let repoID = UUID()
         let sessions = [session(id: "unadopted", resolvedRepoID: repoID)]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(
+        let result = MatchedSessionFixtures.matched(
             sessions,
             repoID: repoID,
             worktrees: [remoteWorktree(sessionID: "other"), localWorktree()])
@@ -152,7 +153,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func excludesOnlyTheMatchingProvidersSession() {
         let repoID = UUID()
         let sessions = [session(id: "s1", resolvedRepoID: repoID)]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(
+        let result = MatchedSessionFixtures.matched(
             sessions,
             repoID: repoID,
             worktrees: [remoteWorktree(provider: "other-provider", sessionID: "s1")])
@@ -165,7 +166,7 @@ struct RepoSectionRemoteSessionsTests {
     @Test func localWorktreeRowsNeverExcludeASession() {
         let repoID = UUID()
         let sessions = [session(id: "s1", resolvedRepoID: repoID)]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(
+        let result = MatchedSessionFixtures.matched(
             sessions, repoID: repoID, worktrees: [localWorktree(displayName: "s1")])
         #expect(result.map(\.payload.id) == ["s1"])
     }
@@ -175,13 +176,13 @@ struct RepoSectionRemoteSessionsTests {
         let mirror = session(id: "worker", resolvedRepoID: repoID)
         var local = localWorktree()
         local.origin = WorktreeOrigin(provider: "acme", sessionID: "worker")
-        #expect(SidebarSessionPlacement.matchedRemoteSessions(
+        #expect(MatchedSessionFixtures.matched(
             [mirror], repoID: repoID, worktrees: [local]).map(\.id) == [mirror.id])
 
         // A current remote row still suppresses its mirror even when a local
         // row also retains the same provenance.
         let remote = remoteWorktree(sessionID: "worker")
-        #expect(SidebarSessionPlacement.matchedRemoteSessions(
+        #expect(MatchedSessionFixtures.matched(
             [mirror], repoID: repoID, worktrees: [local, remote]).isEmpty)
     }
 
@@ -193,7 +194,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "newer", resolvedRepoID: repoID, createdAt: "2026-07-24T18:10:00Z"),
             session(id: "older", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["older", "newer"])
     }
 
@@ -203,7 +204,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "undated", resolvedRepoID: repoID, createdAt: nil),
             session(id: "dated", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["dated", "undated"])
     }
 
@@ -213,7 +214,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "garbage", resolvedRepoID: repoID, createdAt: "not-a-date"),
             session(id: "dated", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["dated", "garbage"])
     }
 
@@ -224,8 +225,8 @@ struct RepoSectionRemoteSessionsTests {
         let repoID = UUID()
         let a = session(id: "s1", resolvedRepoID: repoID, createdAt: nil)
         let b = session(id: "s2", resolvedRepoID: repoID, createdAt: nil)
-        let forward = SidebarSessionPlacement.matchedRemoteSessions([a, b], repoID: repoID, worktrees: [])
-        let backward = SidebarSessionPlacement.matchedRemoteSessions([b, a], repoID: repoID, worktrees: [])
+        let forward = MatchedSessionFixtures.matched([a, b], repoID: repoID, worktrees: [])
+        let backward = MatchedSessionFixtures.matched([b, a], repoID: repoID, worktrees: [])
         #expect(forward.map(\.id) == backward.map(\.id))
     }
 
@@ -259,7 +260,7 @@ struct RepoSectionRemoteSessionsTests {
             session(id: "fractional", resolvedRepoID: repoID, createdAt: "2026-07-24T18:10:00.500Z"),
             session(id: "whole", resolvedRepoID: repoID, createdAt: "2026-07-24T18:00:00Z"),
         ]
-        let result = SidebarSessionPlacement.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        let result = MatchedSessionFixtures.matched(sessions, repoID: repoID, worktrees: [])
         #expect(result.map(\.payload.id) == ["whole", "fractional"])
     }
 }

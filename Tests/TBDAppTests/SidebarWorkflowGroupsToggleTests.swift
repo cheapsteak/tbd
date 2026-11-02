@@ -67,7 +67,7 @@ struct SidebarWorkflowGroupsToggleTests {
     }
 
     private func matched(_ state: AppState, _ repoID: UUID) -> [RemoteSessionInfo] {
-        SidebarSessionPlacement.matchedRemoteSessions(
+        MatchedSessionFixtures.matched(
             state.remoteSessions, repoID: repoID, worktrees: state.worktrees[repoID] ?? [])
     }
 
