@@ -270,6 +270,19 @@ final class AppState {
     /// (`toggleNotesPanel`). A press while that create is in flight sends
     /// nothing, so a double click makes one note, not two.
     @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
+    /// Whether a selection's bulk archive is running (`archiveInBulk`). Set
+    /// for the whole run; another bulk trigger meanwhile, from the row menu
+    /// or the archive shortcut, archives nothing and plays `refusalBeep`. No
+    /// view reads it.
+    @ObservationIgnored var selectionArchiveInFlight = false
+    /// The rows a running bulk archive still owns (`archiveInBulk`): all of
+    /// its targets at the start, each removed once its turn is over, whether
+    /// it was archived, failed, held back or already gone, and any left
+    /// removed when the run ends. `archiveWorktree(id:)` and
+    /// `archiveScratch(id:)` refuse an ID in it with `refusalBeep` and send
+    /// nothing, so no other path archives a row the run has yet to finish.
+    /// No view reads it.
+    @ObservationIgnored var selectionArchivePendingIDs: Set<UUID> = []
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
@@ -2646,6 +2659,29 @@ final class AppState {
         { [daemonClient] params in
             try await daemonClient.moveWorktrees(params)
         }
+    /// How `archiveWorktree(id:)` and a selection's bulk run send
+    /// `worktree.archive` — injectable for the same reason as
+    /// `worktreeMoveManySender`, so tests can count archive calls and script
+    /// refusals without a daemon.
+    @ObservationIgnored
+    lazy var worktreeArchiver: @MainActor (
+        _ id: UUID, _ force: Bool, _ discardUncommittedChanges: Bool
+    ) async throws -> Void =
+        { [daemonClient] id, force, discardUncommittedChanges in
+            try await daemonClient.archiveWorktree(
+                id: id, force: force, discardUncommittedChanges: discardUncommittedChanges)
+        }
+    /// How `archiveScratch(id:)` sends `scratch.archive` — injectable for the
+    /// same reason as `worktreeArchiver`.
+    @ObservationIgnored lazy var scratchArchiver: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] id in try await daemonClient.archiveScratch(worktreeID: id) }
+    /// How `refreshArchivedScratch()` lists the archived scratch spaces —
+    /// injectable for the same reason as `worktreesFetcher`, so a test can
+    /// tell whether an archive asked for the refresh.
+    @ObservationIgnored lazy var archivedScratchFetcher: @MainActor () async throws -> [Worktree] =
+        { [daemonClient] in
+            try await daemonClient.listWorktrees(status: .archived, scratchOnly: true)
+        }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -3631,7 +3667,7 @@ final class AppState {
     /// status alone.
     ///
     /// Pure static helper for testability — every branch is unit-testable
-    /// without a daemon or SwiftUI, following the pattern of `archiveShortcutRoute`.
+    /// without a daemon or SwiftUI, following the pattern of `archiveFailureSurface`.
     nonisolated static func creationFailureMessage(
         _ worktree: Worktree?, creationFailed: Bool
     ) -> String? {

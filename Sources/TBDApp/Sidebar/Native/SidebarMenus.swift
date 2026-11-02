@@ -18,6 +18,8 @@ protocol SidebarMenuHost: AnyObject {
 /// enabled state and actions match:
 /// - a worktree row: `RowActionMenu` through `RowActionMenuActions`, then the
 ///   "New Cloud Session…" / "New Remote Session…" pair `WorktreeRowView` adds;
+///   for a row in a multi-row selection, Archive Selection alone, as
+///   `SidebarContextMenu` shows it;
 /// - a repo header: `RepoSectionView.repoContextMenu`'s items — Collapse or
 ///   Expand, Rename…, Hide or Unhide, the two create items, Remove from List…;
 /// - the Scratch header: Collapse or Expand, Edit Scratch Instructions…;
@@ -60,8 +62,12 @@ struct SidebarMenus {
     private func worktreeItems(_ worktree: Worktree) -> [NSMenuItem] {
         let host = self.host
         let id = worktree.id
+        // The menu is built at right-click time, so whether it acts on the
+        // selection is read from `selectedWorktreeIDs`, which the outline and
+        // the dock both sync into; no clicked-row bookkeeping is needed.
         let actions = RowActionMenuActions(
-            appState: appState, worktree: worktree, onRename: { host?.beginRename(.worktree(id)) })
+            appState: appState, worktree: worktree, onRename: { host?.beginRename(.worktree(id)) },
+            followsSelection: true)
         var items = actions.items().map { item -> NSMenuItem in
             switch item {
             case .action(let action):
@@ -75,7 +81,11 @@ struct SidebarMenus {
                 return Self.caption(text)
             }
         }
-        items += remoteCreateItems(for: worktree)
+        // The create items nest a lane under this one row, so a menu acting on
+        // the selection hides them.
+        if !actions.actsOnSelection {
+            items += remoteCreateItems(for: worktree)
+        }
         return items
     }
 
