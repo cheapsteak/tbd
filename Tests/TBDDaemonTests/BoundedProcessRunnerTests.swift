@@ -3,7 +3,6 @@ import Darwin
 import Dispatch
 import Testing
 import Foundation
-import TestProcessDefaults
 import TestSupport
 @testable import TBDDaemonLib
 
@@ -129,11 +128,19 @@ struct BoundedProcessRunnerTests {
     /// child exits near-instantly and a >64KB write cannot complete without
     /// the reader (the child) draining it, so the write is guaranteed to
     /// observe the closed read end — no timing race with the child's exit.
-    /// The daemon ignores SIGPIPE (`main.swift`), so there the write returns
-    /// EPIPE; here the test host's SIGPIPE handler
-    /// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE.
-    /// The test must not set the disposition itself: that is process-wide, and
-    /// would replace the handler for every suite running alongside it.
+    ///
+    /// **That write fails with EPIPE and raises no SIGPIPE**, because the
+    /// runner marks the stdin pipe's write end `F_SETNOSIGPIPE` when it creates
+    /// the pipe (`PipeSIGPIPE`). The kernel reads that flag on every write and
+    /// raises SIGPIPE only when it is clear, so the flag on this write end is
+    /// the proof: `didCreateProcess` reads it back just before `run()`, after
+    /// which the runner's only write to that end is the one that fails. The
+    /// test host's SIGPIPE count is not asserted here. Its window would have to
+    /// span the whole spawn and the child's life, in the parallel pass, and
+    /// `TBDTestHostSIGPIPECount` says why a count over a window that wide
+    /// proves nothing about this write. The test must not set the disposition
+    /// itself: that is process-wide, and would replace the handler for every
+    /// suite running alongside it.
     ///
     /// Before the fix, `stdinPipe.fileHandleForWriting.write(stdin)` (the
     /// non-throwing overload) raised an uncatchable
@@ -142,22 +149,28 @@ struct BoundedProcessRunnerTests {
     /// assertion — so a green run of this test is itself part of the proof.
     @Test func childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess() async throws {
         let oversizedPayload = Data(repeating: 0x41, count: 200_000)
-        // The stdin write raises SIGPIPE on purpose, exactly once (the
-        // throwing write stops at the first EPIPE), so the handler's stderr
-        // line says so.
-        TBDTestHostExpectSIGPIPE()
+        let probe = StdinWriteEndProbe()
         let outcome = try await runBoundedProcess(
             executable: "/bin/sh",
             arguments: ["-c", "exit 7"],
             currentDirectory: nil,
             stdin: oversizedPayload,
-            timeout: .seconds(10)
+            timeout: .seconds(10),
+            didCreateProcess: probe.record
         )
         guard case .completed(let status, _, _) = outcome else {
             Issue.record("expected .completed with the child's exit status, got \(outcome)")
             return
         }
         #expect(status == 7)
+        let noSIGPIPE = try #require(probe.noSIGPIPE, "didCreateProcess never ran, so nothing read the stdin pipe")
+        #expect(
+            noSIGPIPE == 1,
+            """
+            the runner must mark the stdin pipe's write end F_SETNOSIGPIPE before the child starts, \
+            so the write that fails with EPIPE raises no SIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE) \
+            (-1: the process had no stdin pipe)
+            """)
     }
 
     /// Every other `.pseudoTerminal` test in this file drives a child that
@@ -812,6 +825,31 @@ struct BoundedProcessRunnerTests {
             Issue.record(
                 "failed spawn outlived the call: process alive=\(alive), still-open descriptors=\(held)",
                 sourceLocation: sourceLocation)
+        }
+    }
+}
+
+/// What `didCreateProcess` saw of the stdin pipe's write end: its
+/// `F_GETNOSIGPIPE`, read while the runner still holds that end open and before
+/// its one write to it. `-1` when the `Process` had no stdin pipe.
+private final class StdinWriteEndProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: Int32?
+
+    /// `nil` until `record` has run.
+    var noSIGPIPE: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return seen
+    }
+
+    var record: @Sendable (Process) -> Void {
+        { [self] process in
+            let stdinPipe = process.standardInput as? Pipe
+            let flag = stdinPipe.map { fcntl($0.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE) } ?? -1
+            lock.lock()
+            seen = flag
+            lock.unlock()
         }
     }
 }

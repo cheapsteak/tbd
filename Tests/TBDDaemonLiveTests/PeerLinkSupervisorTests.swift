@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import TestProcessDefaults
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -47,11 +49,11 @@ import TBDKernel
 /// real-time waits here are sized for a quiet pass.
 ///
 /// Every stub exits while the supervisor may still be writing `hello` or a
-/// keepalive into its stdin. The daemon ignores SIGPIPE (`main.swift`), so that
-/// write returns EPIPE there; here the test host's SIGPIPE handler
-/// (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) gives the same EPIPE. The
-/// suite does not set the disposition itself: it is process-wide, shared with
-/// every suite in the run.
+/// keepalive into its stdin. That write fails with EPIPE and raises no
+/// SIGPIPE, because `runOnce` marks the pipe's write end `F_SETNOSIGPIPE`;
+/// `aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE`
+/// pins that without the race. The suite does not set the disposition itself:
+/// it is process-wide, shared with every suite in the run.
 ///
 /// Contract under test: `docs/remote-provider-contract.md` § `messages`, and
 /// `docs/specs/2026-08-29-remote-peer-messaging-design.md`.
@@ -1257,6 +1259,92 @@ struct PeerLinkSupervisorTests {
         #expect(dropped == 1, "the lost frame is counted as loss exactly once")
     }
 
+    // MARK: - SIGPIPE
+
+    /// **A frame written after the provider has closed its stdin fails with
+    /// EPIPE and raises no SIGPIPE.** A provider can exit or close its stdin
+    /// under any write this link makes, `hello` and keepalives included. The
+    /// kernel raises such a write's SIGPIPE at the process, where it can
+    /// interrupt another thread's blocked call, so `runOnce` marks the pipe's
+    /// write end `F_SETNOSIGPIPE` (`PipeSIGPIPE`) and the writer sees only the
+    /// EPIPE that `writeFailed` reports, whatever this process does with the
+    /// signal.
+    ///
+    /// Every other test here meets that write only by racing a stub's exit, so
+    /// this one fixes the order. The stub takes `hello`, answers it, takes one
+    /// more line, closes its stdin and stays alive with its stdout open, so the
+    /// link stays up across the failed write instead of going down on EOF.
+    ///
+    /// The supervisor keeps the write end to itself. The test reaches it as the
+    /// pipe peer of the stub's standard input while that is still open, and
+    /// reads the flag back: that is the proof, since the kernel raises SIGPIPE
+    /// only for a write to a file without it. The test host's catch count is
+    /// compared across the one `send` that fails, as the cross-check
+    /// `TBDTestHostSIGPIPECount` describes. That window holds the write and
+    /// little else: the suite is `.serialized`, the clock that would fire a
+    /// keepalive is left alone, and on CI this target runs one suite at a time.
+    @Test func aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE() async throws {
+        let stub = try Stub("closed-stdin", body: """
+            IFS= read -r line
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            IFS= read -r line
+            exec 0<&-
+            sleep 300 &
+            child=$!
+            trap 'kill "$child" 2>/dev/null; exit 143' TERM INT
+            wait "$child"
+            """)
+        defer { stub.remove() }
+        let clock = EventDrivenTestClock()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: LinkRecorder(), healthyResetUptime: 3600, clock: clock,
+            now: TestDateSource().provider)
+        await supervisor.start()
+        _ = try await waitFor(
+            "the link to come up",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
+        let pid = try #require(stub.pids().first)
+
+        guard let writeEnd = pipeWriteEnd(peerOf: STDIN_FILENO, inProcess: pid) else {
+            Issue.record("no descriptor in this process is the write end of the stub's stdin pipe")
+            try await stopDriven(supervisor, clock)
+            return
+        }
+        let noSIGPIPE = fcntl(writeEnd, F_GETNOSIGPIPE)
+        #expect(
+            noSIGPIPE == 1,
+            "runOnce must mark the stdin pipe's write end F_SETNOSIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE)")
+
+        @Sendable func peerFrame(_ handle: String) -> PeerBridgeFrame {
+            .peer(PeerBridgePeer(
+                handle: handle, name: "acme-laptop:\(handle) %1", status: "working",
+                peerProtocol: PeerBridgeFrameCodec.peerProtocol))
+        }
+        // The line the stub waits for before it closes its stdin.
+        try await supervisor.send(peerFrame("h-before-close"))
+        _ = try await waitFor(
+            "the stub to close its stdin",
+            observed: { "the pipe behind write end \(writeEnd) still has a reader" }
+        ) { pipeHasNoReader(writeEnd: writeEnd) }
+
+        let caughtBefore = TBDTestHostSIGPIPECount()
+        await #expect(throws: PeerLinkSendFailure.writeFailed(errno: EPIPE)) {
+            try await supervisor.send(peerFrame("h-after-close"))
+        }
+        let caughtAfter = TBDTestHostSIGPIPECount()
+        try await stopDriven(supervisor, clock)
+
+        #expect(
+            caughtAfter == caughtBefore,
+            """
+            the stdin pipe's write end should have suppressed SIGPIPE, but the test host caught \
+            \(caughtAfter - caughtBefore) across the failed send. If the F_GETNOSIGPIPE check \
+            above passed, this descriptor cannot have raised it: another write in the process did \
+            (Tests/CLAUDE.md, the SIGPIPE entry)
+            """)
+    }
+
     // MARK: - Teardown
 
     /// `stop()` is deterministic: when it returns the child tree is dead, the
@@ -1316,6 +1404,14 @@ struct PeerLinkSupervisorTests {
 }
 
 // MARK: - Support
+
+/// Whether every reader of the pipe behind `writeEnd` has gone, as the kernel
+/// reports it: `POLLHUP` on the write end. A zero-timeout `poll`, so it never
+/// blocks.
+private func pipeHasNoReader(writeEnd: Int32) -> Bool {
+    var probe = pollfd(fd: writeEnd, events: Int16(POLLOUT), revents: 0)
+    return poll(&probe, 1, 0) == 1 && (probe.revents & Int16(POLLHUP)) != 0
+}
 
 /// Records what the supervisor publishes, in order.
 private actor LinkRecorder: PeerLinkHandler {

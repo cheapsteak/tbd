@@ -347,9 +347,9 @@ let package = Package(
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
                 // The test host's SIGPIPE handler is in the bundle either way;
-                // the dependency lets these suites mark a SIGPIPE they provoke
-                // on purpose (`TBDTestHostExpectSIGPIPE()`) and check the
-                // handler in their own pass. See the target.
+                // the dependency lets these suites read its catch count
+                // (`TBDTestHostSIGPIPECount()`) across a write into a closed
+                // pipe and check the handler in their own pass. See the target.
                 "TestProcessDefaults",
                 // Declared because these tests use SwiftTerm directly, not
                 // only through the daemon library: the replay round-trip suite
@@ -392,7 +392,8 @@ let package = Package(
                 // trip is the production code in both directions.
                 "TBDTerminalSerialization",
                 // Checks the test host's SIGPIPE handler in the quiet pass's
-                // own process, as `TBDDaemonTests` does in its two passes.
+                // own process, as `TBDDaemonTests` does in its two passes, and
+                // reads its catch count across the peer link's failed write.
                 "TestProcessDefaults",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),

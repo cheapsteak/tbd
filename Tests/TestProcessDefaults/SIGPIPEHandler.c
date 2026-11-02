@@ -66,23 +66,24 @@
 /// loads, stores and read-modify-writes, `write(2)` of a fixed line, and
 /// saving and restoring `errno`, so the interrupted code sees what it would
 /// have seen. No formatting, no allocation, no stdio, no locks, and no
-/// `os.Logger`: any reporting beyond the line belongs outside the handler.
-/// The counters are lock-free atomics rather than `volatile sig_atomic_t`:
-/// SIGPIPE is blocked only on the thread running the handler, so two threads
-/// can run it at once, and `++` on a volatile can lose a count where an atomic
-/// read-modify-write cannot (a lock-free one is async-signal-safe, which the
-/// `_Static_assert` below holds). It counts catches, not writes: signals do
-/// not queue, so SIGPIPEs raised while one is still pending merge into one
-/// delivery (measured: 120 such writes from two threads at once were caught 3
-/// times in one run and 62 in another). The first `TBD_MAX_LOGGED_SIGPIPES`
-/// catches are logged and the rest only counted, which also bounds the one
-/// loop the line could start: a write to a closed stderr raises SIGPIPE again.
+/// `os.Logger`: any reporting beyond the line belongs outside the handler,
+/// reading `TBDTestHostSIGPIPECount()`. The counter is a lock-free atomic
+/// rather than a `volatile sig_atomic_t`: SIGPIPE is blocked only on the thread
+/// running the handler, so two threads can run it at once, and `++` on a
+/// volatile can lose a count where an atomic read-modify-write cannot (a
+/// lock-free one is async-signal-safe, which the `_Static_assert` below holds).
+/// It counts catches, not writes: signals do not queue, so SIGPIPEs raised
+/// while one is still pending merge into one delivery (measured: 120 such
+/// writes from two threads at once were caught 3 times in one run and 62 in
+/// another). The first `TBD_MAX_LOGGED_SIGPIPES` catches are logged and the
+/// rest only counted, which also bounds the one loop the line could start: a
+/// write to a closed stderr raises SIGPIPE again.
 ///
-/// **A test that provokes a SIGPIPE on purpose says so first**, with
-/// `TBDTestHostExpectSIGPIPE()`, and the handler logs that catch with a line of
-/// its own, so a stray one stays easy to find in a CI log (the same convention
-/// as `MainRunLoopGuard.m`'s expected stop). The mark goes to whichever SIGPIPE
-/// arrives next, so a stray one racing a test's own can swap their lines.
+/// **No test raises a SIGPIPE on purpose, so every line is a finding.** A test
+/// that drives a write into a closed pipe or socket does it through a
+/// descriptor that suppresses the signal, as the production code it exercises
+/// does, reads that flag back, and compares `TBDTestHostSIGPIPECount()` across
+/// the write.
 ///
 /// **It replaces only the default and `SIG_IGN`.** `sa_handler` and
 /// `sa_sigaction` share a union, so the disposition is read through it first:
@@ -110,7 +111,8 @@
 ///
 /// This is a net under the per-descriptor guards, not a replacement for them.
 /// The app leaves SIGPIPE at its default, so its sockets and pipes still need
-/// `SO_NOSIGPIPE` or `F_SETNOSIGPIPE` (see `Sources/TBDApp/SocketSIGPIPE.swift`).
+/// `SO_NOSIGPIPE` or `F_SETNOSIGPIPE` (see `Sources/TBDApp/SocketSIGPIPE.swift`
+/// and `Sources/TBDShared/PipeSIGPIPE.swift`).
 /// And a test must not set SIGPIPE's disposition itself: that would replace
 /// this handler process-wide, for every suite running alongside it. The
 /// SwiftLint rule `no_sigpipe_disposition_in_tests` holds that.
@@ -118,16 +120,13 @@
 #define TBD_STRINGIFY(x) #x
 #define TBD_EXPAND_AND_STRINGIFY(x) TBD_STRINGIFY(x)
 
-_Static_assert(ATOMIC_LONG_LOCK_FREE == 2, "the SIGPIPE handler's counters must be lock-free to be async-signal-safe");
+_Static_assert(ATOMIC_LONG_LOCK_FREE == 2, "the SIGPIPE handler's counter must be lock-free to be async-signal-safe");
 
 static atomic_long caughtSIGPIPEs = 0;
-static atomic_long expectedSIGPIPEs = 0;
 
 static const char strayLine[] =
     "TBD test host: caught SIGPIPE: a write to a closed pipe or socket got EPIPE instead of ending the pass. "
     "See the SIGPIPE entry in Tests/CLAUDE.md.\n";
-static const char expectedLine[] =
-    "TBD test host: caught SIGPIPE that a test provoked on purpose (TBDTestHostExpectSIGPIPE); not a finding.\n";
 static const char silencedLine[] =
     "TBD test host: caught " TBD_EXPAND_AND_STRINGIFY(TBD_MAX_LOGGED_SIGPIPES) " SIGPIPEs; any more are counted "
     "but not logged.\n";
@@ -137,29 +136,12 @@ static void TBDWriteLineToStderr(const char *line, size_t length) {
     (void)written;
 }
 
-/// Takes one mark left by `TBDTestHostExpectSIGPIPE()`, if there is one.
-static bool TBDTakeExpectedSIGPIPE(void) {
-    long expected = atomic_load_explicit(&expectedSIGPIPEs, memory_order_relaxed);
-    while (expected > 0) {
-        if (atomic_compare_exchange_weak_explicit(&expectedSIGPIPEs, &expected, expected - 1, memory_order_relaxed,
-                                                  memory_order_relaxed)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void TBDTestHostSIGPIPEHandler(int signal) {
     (void)signal;
     int savedErrno = errno;
     long caught = atomic_fetch_add_explicit(&caughtSIGPIPEs, 1, memory_order_relaxed) + 1;
-    bool expected = TBDTakeExpectedSIGPIPE();
     if (caught <= TBD_MAX_LOGGED_SIGPIPES) {
-        if (expected) {
-            TBDWriteLineToStderr(expectedLine, sizeof expectedLine - 1);
-        } else {
-            TBDWriteLineToStderr(strayLine, sizeof strayLine - 1);
-        }
+        TBDWriteLineToStderr(strayLine, sizeof strayLine - 1);
     } else if (caught == TBD_MAX_LOGGED_SIGPIPES + 1) {
         TBDWriteLineToStderr(silencedLine, sizeof silencedLine - 1);
     }
@@ -229,6 +211,6 @@ const char *TBDTestHostSIGPIPEDisposition(void) {
     return "another handler";
 }
 
-void TBDTestHostExpectSIGPIPE(void) {
-    atomic_fetch_add_explicit(&expectedSIGPIPEs, 1, memory_order_relaxed);
+long TBDTestHostSIGPIPECount(void) {
+    return atomic_load_explicit(&caughtSIGPIPEs, memory_order_relaxed);
 }

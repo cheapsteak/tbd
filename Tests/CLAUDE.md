@@ -245,10 +245,16 @@ firehose). Full taxonomy: `docs/specs/2026-07-24-test-hardening-design.md` §3.
 
 Tier 3 suites live in `Tests/TBDDaemonLiveTests/`. A suite belongs there if
 and only if its runtime depends on an external process it does not fully
-control: it spawns a real tmux server, shells out to `ps`, spawns a child
-racing a deadline, or drives the replay firehose. CI runs that target
-serially on an otherwise-idle machine, in a separate step from the fast
-parallel pass.
+control — it spawns a real tmux server, shells out to `ps`, spawns a child
+racing a deadline, or drives the replay firehose — or it checks the quiet
+pass's own process. CI runs that target serially on an otherwise-idle
+machine, in a separate step from the fast parallel pass.
+
+One suite qualifies by the second clause:
+`Tests/TBDDaemonLiveTests/HostSIGPIPECheckLiveTests.swift`. It is tier 1 (it
+reads one signal disposition and spawns nothing), and it sits in this target
+because the quiet pass runs this target alone, in a process of its own: a
+check of that process's SIGPIPE handler can run nowhere else. Leave it here.
 
 That step passes `--no-parallel` explicitly. Omitting `--parallel` is **not**
 equivalent: SwiftPM's `--parallel` governs XCTest's process-level sharding,
@@ -1019,36 +1025,39 @@ front.
   `sigaction(SIGPIPE, …)` that sets one, `sigaddset(…, SIGPIPE)`, and a
   `pthread_sigmask` or `sigprocmask` line that names SIGPIPE. Reading the
   disposition with `sigaction(SIGPIPE, nil, &current)` is fine.
-- **`TBD test host: caught SIGPIPE: …` in a CI log means a write lacks
-  `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`.** It reached a closed pipe or socket, and
-  only the handler kept the pass alive; if the write is the app's, the app has
-  no such handler and dies of it. XNU raises the signal at the process, so the
-  line names neither the test nor the thread: the suspects are the tests
-  started and not yet finished around it in the log. Find the write and
-  protect its descriptor where it is created: an app socket through
-  `SocketSIGPIPE.suppress(on:)`, a fixture's socket with `SO_NOSIGPIPE`, a
-  pipe's write end with `F_SETNOSIGPIPE`.
+- **`TBD test host: caught SIGPIPE: …` in a CI log is always a finding: a
+  write lacks `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`.** It reached a closed pipe or
+  socket, and only the handler kept the pass alive; if the write is the app's,
+  the app has no such handler and dies of it. XNU raises the signal at the
+  process, not the writing thread, so it can also interrupt another suite's
+  blocked call with `EINTR`, and the line names neither the test nor the
+  thread: the suspects are the tests started and not yet finished around it in
+  the log. Find the write and protect its descriptor where it is created: an
+  app socket through `SocketSIGPIPE.suppress(on:)`, a pipe's write end in
+  production code through `PipeSIGPIPE.suppress(on:)` (`TBDShared`), a
+  fixture's socket with `SO_NOSIGPIPE`, a fixture's pipe write end with
+  `F_SETNOSIGPIPE`.
 
-  Some lines are not findings. A few daemon suites write into a closed pipe
-  on purpose, because the daemon ignores SIGPIPE in `main.swift` instead of
-  guarding each descriptor and they exercise that code. No other test should
-  raise a live SIGPIPE in the test process: it is delivered to the process,
-  not the writing thread, so it can interrupt another suite's blocked call.
-  - **Marked** – a test that provokes a SIGPIPE on purpose calls
-    `TBDTestHostExpectSIGPIPE()` just before the write, so its line says the
-    SIGPIPE was provoked on purpose instead:
-    `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder` and
-    `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
-    The fanout test writes twice on one mark, since its two SIGPIPEs often
-    merge into one catch, so a second, unmarked line can come from it.
-  - **Unmarked** – `PeerLinkSupervisorTests` (quiet pass): its stubs exit
-    while the supervisor may still be writing `hello` or a keepalive, so
-    whether a SIGPIPE happens at all depends on timing, and a mark that went
-    unused would label the next stray one.
-
-  A mark is a hint, not proof. Suites share the process, so a stray SIGPIPE
-  from another suite landing between a mark and its write takes the mark, and
-  the two lines swap labels.
+  No test raises a SIGPIPE on purpose. The suites that drive a write into a
+  closed pipe — the bounded runner's stdin
+  (`BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`),
+  the pane fanout's write end
+  (`PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder`) and the
+  peer link's stdin pipe (`PeerLinkSupervisorTests`) — do it through a
+  descriptor the production code marks `F_SETNOSIGPIPE`, and read the flag back
+  on that descriptor. A test that writes into a closed pipe or socket does the
+  same:
+  - **The flag is the proof.** Read it on the descriptor the write uses:
+    `fcntl(fd, F_GETNOSIGPIPE)` for a pipe, `getsockopt(… SO_NOSIGPIPE …)` for
+    a socket. When the code under test keeps the write end to itself and hands
+    out the read end, `pipeWriteEnd(peerOf:inProcess:)` (`TestSupport`) finds
+    the write end from it.
+  - **The count is a cross-check.** `TBDTestHostSIGPIPECount()` before and
+    after the write should match, but it counts the whole process, so another
+    suite's write can raise it in the same window, and it can lag, since the
+    handler runs on whichever thread the kernel picks. Assert it only across a
+    window that holds the write and little else, and say in the message that a
+    passing flag check puts the signal on someone else's write.
 - **An `NSDraggingInfo` stub must not declare
   `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
   category already declares it, so the stub's own version fails with

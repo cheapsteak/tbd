@@ -159,13 +159,10 @@ struct ReplayLiveIntegrationMatrixTests {
     /// throws only after tearing the supervisor down. That is not ceremony: on
     /// expiry the pane is still blasting into the vended pipe, so unwinding
     /// straight past the test's `defer { Darwin.close(readFD) }` leaves every
-    /// later fanout write raising SIGPIPE into a closed pipe. The test host's
-    /// handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`) turns each into
-    /// EPIPE, but logs it as an unguarded write, so the log of a failing run
-    /// would point at a stray write instead of at the diagnostic. Without the
-    /// handler the first one ends the whole test process (measured: an early
-    /// throw reported `error: Exited with unexpected signal code 13` and no
-    /// diagnostic at all). An error is only worth composing if it is what a
+    /// later fanout write failing with EPIPE into a closed pipe for as long as
+    /// the pane runs, and the fanout logging those failures around the
+    /// diagnostic. (They raise no SIGPIPE: `attach` marks the fanout's write
+    /// end `F_SETNOSIGPIPE`.) An error is only worth composing if it is what a
     /// reader finds.
     ///
     /// It is an error rather than an `#expect` for the other half of the same
@@ -798,13 +795,10 @@ struct ReplayLiveIntegrationMatrixTests {
         // Stop the supervisor BEFORE the assertions, not after: the pane is
         // still blasting, and a `try #require` that fails below would unwind
         // past the `defer` that closes the read end of the pipe it writes to —
-        // every later fanout write then raises SIGPIPE into a closed pipe. The
-        // test host's handler returns EPIPE and logs a caught-SIGPIPE line for
-        // each, which reads as an unguarded write; without the handler the
-        // first one kills the whole test process (measured: `Exited with
-        // unexpected signal code 13`, with no diagnostic at all). The counters
-        // are snapshotted above so tearing the supervisor down first costs
-        // nothing.
+        // every later fanout write then fails with EPIPE into a closed pipe
+        // for as long as the pane runs (raising no SIGPIPE: `attach` marks the
+        // write end `F_SETNOSIGPIPE`). The counters are snapshotted above so
+        // tearing the supervisor down first costs nothing.
         await supervisor.stopAll()
 
         // (a) A repair completed DURING the overflow window — both in the

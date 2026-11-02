@@ -35,18 +35,26 @@ bool TBDTestHostSIGPIPEHandlerIsCurrent(void);
 /// check each test pass runs.
 const char *TBDTestHostSIGPIPEDisposition(void);
 
-/// Marks the next SIGPIPE the handler catches as one a test provoked on
-/// purpose, so its stderr line says so and a stray one stays easy to find in
-/// a CI log. Call it immediately before the write that will raise it, and only
-/// when that write certainly will: an unused mark would go to the next stray
-/// SIGPIPE instead. Any thread.
+/// How many SIGPIPEs SIGPIPEHandler.c's handler has caught in this process.
+/// Catches, not writes: SIGPIPEs raised while one is pending merge into one.
+/// Any thread.
 ///
-/// The mark belongs to no test. Suites run concurrently in one process, and
-/// the handler hands the mark to whichever catch comes next, so a stray
-/// SIGPIPE from another suite landing between this call and the write takes
-/// it: the stray one is then labelled deliberate and the deliberate one stray.
-/// And SIGPIPEs raised while one is pending merge into one catch, which takes
-/// one mark. A label is a hint, not proof.
-void TBDTestHostExpectSIGPIPE(void);
+/// A test that drives a write into a closed pipe or socket reads this before
+/// and after the write, to check that the write raised no SIGPIPE. That check
+/// is a cross-check, not the proof, for two reasons:
+///
+///   - The count is the whole process's. Suites run concurrently in it, so
+///     another suite's unprotected write can raise it inside the window.
+///   - The count can lag the write. XNU raises the signal at the process, and
+///     the thread it picks runs the handler when that thread next returns to
+///     user space, which can be after the write has returned.
+///
+/// So the proof is the flag on the test's own descriptor
+/// (`fcntl(fd, F_GETNOSIGPIPE)` for a pipe, `SO_NOSIGPIPE` for a socket),
+/// which no other suite can change and which the kernel reads on every write.
+/// Assert the count unchanged only across a window that holds the write and
+/// little else, and say in the message that a flag check that passed puts the
+/// signal on another suite's write.
+long TBDTestHostSIGPIPECount(void);
 
 #endif

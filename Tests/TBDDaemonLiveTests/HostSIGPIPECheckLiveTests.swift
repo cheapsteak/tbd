@@ -5,7 +5,8 @@ import TestProcessDefaults
 /// in the quiet pass, which runs this target in a process of its own. The
 /// handler is installed by a constructor when the test bundle loads, so each
 /// pass's process needs its own check. Tier 1: it reads one disposition and
-/// spawns nothing; it lives here only because this target is a pass.
+/// spawns nothing; it lives here only because this target is a pass, which the
+/// tier rule in `Tests/CLAUDE.md` ("Test tiers") allows by name.
 @Suite("Test host SIGPIPE handler, TBDDaemonLiveTests")
 struct HostSIGPIPECheckLiveTests {
     @Test("SIGPIPE is caught by the test host's handler in this pass's process")
