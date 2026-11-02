@@ -292,4 +292,58 @@ struct SnapshotCompletenessTests {
 
         #expect(await m.freshnessUnreadableForTests(provider: "fake") == true)
     }
+
+    // MARK: - Archive horizon wiring
+
+    /// Describes `fake` with the given extra describe JSON, then drives two
+    /// complete snapshots through `apply` after one that sights an archived
+    /// session. Returns the mirror row.
+    private func rowAfterAbsences(
+        describeExtra: String, describe: Bool = true, archived: Bool = true
+    ) async throws -> RemoteSessionRow {
+        let db = try TBDDatabase(inMemory: true)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-complete-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let registryURL = dir.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "fake", "exec": "/nonexistent/fake"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let invoker = FakeProviderInvoker(script: [
+            providerOK(#"{"contract_versions": [1], "name": "fake"\#(describeExtra)}"#)
+        ])
+        let m = RemoteProviderManager(
+            db: db, subscriptions: StateSubscriptionManager(), runner: invoker,
+            registryURL: registryURL)
+        if describe { await m.describeAllForTests() }
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .exited, agentState: .idle, archived: archived)],
+            provider: "fake")
+        try await m.apply(snapshot: [], provider: "fake")
+        try await m.apply(snapshot: [], provider: "fake")
+        return try #require(try await db.remoteSessions.list().first)
+    }
+
+    @Test func aDeclaredHorizonKeepsAnArchivedRowThroughAbsentSnapshots() async throws {
+        let row = try await rowAfterAbsences(describeExtra: #", "archive_horizon_seconds": 172800"#)
+        #expect(row.gone == false)
+        #expect(row.missingCount == 0)
+    }
+
+    @Test func noDeclaredHorizonRetiresTheSameRow() async throws {
+        #expect(try await rowAfterAbsences(describeExtra: "").gone)
+    }
+
+    @Test func noDescribeOnFileHoldsAnArchivedRow() async throws {
+        let row = try await rowAfterAbsences(describeExtra: "", describe: false)
+        #expect(row.gone == false)
+        #expect(row.missingCount == 0)
+    }
+
+    @Test func noDescribeOnFileStillRetiresAnUnarchivedRow() async throws {
+        #expect(try await rowAfterAbsences(describeExtra: "", describe: false, archived: false).gone)
+    }
+
+    @Test func aMalformedHorizonIsReadAsAbsentSoTheRowRetires() async throws {
+        #expect(try await rowAfterAbsences(describeExtra: #", "archive_horizon_seconds": 60"#).gone)
+    }
 }

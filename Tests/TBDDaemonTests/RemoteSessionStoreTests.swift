@@ -304,4 +304,71 @@ struct RemoteSessionStoreTests {
         let rows = try await db.remoteSessions.list()
         #expect(rows.first?.resolvedRepoIDUUID == repo.id)
     }
+
+    // MARK: - Archive horizon
+
+    private func archived(_ id: String, _ flag: Bool = true) -> RemoteSessionPayload {
+        RemoteSessionPayload(id: id, state: .exited, agentState: .idle, archived: flag)
+    }
+
+    private func absences(_ n: Int, honoring: Bool, complete: Bool = true) async throws {
+        for _ in 0..<n {
+            _ = try await db.remoteSessions.applySnapshot(
+                provider: "p", sessions: [], complete: complete,
+                honorsArchiveHorizon: honoring, now: Date())
+        }
+    }
+
+    @Test func horizonHonoredKeepsARowLastSeenArchived() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a")], now: Date())
+        try await absences(3, honoring: true)
+        let row = try await db.remoteSessions.list()[0]
+        #expect(row.gone == false)
+        #expect(row.missingCount == 0)
+    }
+
+    @Test func horizonNotHonoredRetiresAnArchivedRowAsBefore() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a")], now: Date())
+        try await absences(2, honoring: false)
+        #expect(try await db.remoteSessions.list()[0].gone)
+    }
+
+    @Test func horizonHonoredStillRetiresARowLastSeenUnarchived() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a", false)], now: Date())
+        try await absences(2, honoring: true)
+        #expect(try await db.remoteSessions.list()[0].gone)
+    }
+
+    @Test func horizonRuleFollowsTheLatestSighting() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a")], now: Date())
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a", false)], now: Date())
+        try await absences(2, honoring: true)
+        #expect(try await db.remoteSessions.list()[0].gone)
+    }
+
+    @Test func anIncompleteSnapshotAdvancesNothingWithOrWithoutTheHorizon() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a"), payload("b")], now: Date())
+        try await absences(3, honoring: true, complete: false)
+        try await absences(3, honoring: false, complete: false)
+        for row in try await db.remoteSessions.list() {
+            #expect(row.missingCount == 0)
+            #expect(row.gone == false)
+        }
+    }
+
+    @Test func anUndecodablePayloadIsNotKnownArchivedAndAdvances() async throws {
+        _ = try await db.remoteSessions.applySnapshot(
+            provider: "p", sessions: [archived("a")], now: Date())
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "UPDATE remote_session SET payload = 'not json'")
+        }
+        try await absences(2, honoring: true)
+        #expect(try await db.remoteSessions.list()[0].gone)
+    }
 }

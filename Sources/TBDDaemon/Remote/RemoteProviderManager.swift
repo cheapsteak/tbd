@@ -657,7 +657,16 @@ public actor RemoteProviderManager {
         // keeps the full sightings.
         let outcome = try await db.remoteSessions.applySnapshot(
             provider: provider, sessions: sightings.map(\.withoutTranscriptHint),
-            complete: complete, now: now)
+            complete: complete,
+            // No describe on file (one in flight, or one that failed) cannot
+            // rule out a horizon. Only the out-of-band probes
+            // (`refreshAfterCreate`, `recordAttachExit`) reach here without
+            // one, since the poll loop and the events supervisor start only
+            // for a described provider; so rows last seen archived are held
+            // until a describe is on file, and every other row follows the
+            // drift rule as before.
+            honorsArchiveHorizon: describes[provider].map { $0.archiveHorizonSeconds != nil } ?? true,
+            now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
