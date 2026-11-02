@@ -91,8 +91,13 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     let scrollView = NSScrollView(frame: .zero)
 
     /// The rows the table shows, top to bottom. While the rows are held, the
-    /// held rows carrying the latest models. Written only by the apply.
-    private(set) var rows: [DockRow] = []
+    /// held rows carrying the latest models. Written only by the apply, which
+    /// reads the guide lines' hierarchy off them once.
+    private(set) var rows: [DockRow] = [] {
+        didSet { guideHierarchy = DockGuideHierarchy(rows: rows) }
+    }
+    /// `rows` as the guide-line rules read them.
+    private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
@@ -115,9 +120,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// What the pointer was last reported over.
     private(set) var hoverState = SidebarHoverTracker.State()
     /// The dock rows whose guide lines draw active: the active ancestors of
-    /// the hovered row and of each selected worktree row the dock shows
-    /// (`activeGuideAncestors(in:hovered:selected:)`). Recomputed once per
-    /// hover change, selection change and apply.
+    /// the hovered row and of each selected worktree row the dock shows, by
+    /// the outline's rule (`GuideHierarchy.activeGuideAncestors(of:)`).
+    /// Recomputed once per hover change, selection change and apply.
     private(set) var activeGuideAncestors: Set<SidebarNodeID> = []
 
     // MARK: Test seams
@@ -619,10 +624,10 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The row view's guide lines — its part in each line above it, by the
-    /// outline's shape (`guideRuns(ofRow:in:)`), and its own line's start
-    /// when its children show under it — active where their owner is in
-    /// `activeGuideAncestors`, broken where the gutter pin shows: on hover,
-    /// and always once pinned — and its hover highlight.
+    /// outline's shape (`GuideHierarchy.guideRuns(of:)`), and its own line's
+    /// start when its children show under it — active where their owner is
+    /// in `activeGuideAncestors`, broken where the gutter pin shows: on
+    /// hover, and always once pinned — and its hover highlight.
     private func configureRowView(_ rowView: SidebarRowView, at index: Int) {
         guard rows.indices.contains(index) else { return }
         let row = rows[index]
@@ -631,15 +636,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.level = row.depth
-            let runs = Self.guideRuns(ofRow: index, in: rows)
+            let runs = guideHierarchy.guideRuns(of: row.id)
             configuration.guides = SidebarGuideLine.guides(for: runs) { owner in
-                self.rows.first(where: { $0.id == owner }).map { Self.height(of: $0) }
+                self.guideHierarchy.indices[owner].map { Self.height(of: self.rows[$0]) }
             }
             if !activeGuideAncestors.isEmpty {
                 configuration.activeGuides = SidebarGuideLine.activeIndices(
                     of: runs.map(\.owner), active: activeGuideAncestors)
             }
-            configuration.drawsStub = Self.startsGuide(ofRow: index, in: rows)
+            configuration.drawsStub = guideHierarchy.startsGuide(row.id)
             configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(row.id)
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
@@ -657,102 +662,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
     }
 
-    // MARK: Guide line shape
-
-    /// The lines the row at `index` draws a part of, outermost owner first,
-    /// by the outline's shape (`SidebarTree.guideRuns(of:)`): a branch off its
-    /// parent's line, `.last` on the parent's last child; the line of an
-    /// ancestor whose child on the way down has a later sibling, passing; no
-    /// part of a line below where it ended. The rows are a preorder walk, so
-    /// an owner's level is its depth, and a later sibling of the row's
-    /// ancestor at a depth is the next row at that depth before the walk
-    /// climbs above it.
-    static func guideRuns(ofRow index: Int, in rows: [DockRow]) -> [SidebarGuideLine.Run] {
-        guard rows.indices.contains(index), rows[index].isWorktree else { return [] }
-        let depth = rows[index].depth
-        var runs: [SidebarGuideLine.Run] = []
-        for (level, owner) in guideAncestors(ofRow: index, in: rows).enumerated() {
-            let hasLaterSibling = hasLaterRow(atDepth: level + 1, after: index, in: rows)
-            if depth == level + 1 {
-                runs.append(SidebarGuideLine.Run(
-                    owner: owner, level: level, role: hasLaterSibling ? .branch : .last,
-                    continuesFade: index > 0 && rows[index - 1].id == owner))
-            } else if hasLaterSibling {
-                runs.append(SidebarGuideLine.Run(owner: owner, level: level, role: .passing, continuesFade: false))
-            }
-        }
-        return runs
-    }
-
-    /// Whether a worktree row at `depth` follows `index` before the walk
-    /// climbs above `depth`.
-    static func hasLaterRow(atDepth depth: Int, after index: Int, in rows: [DockRow]) -> Bool {
-        var cursor = index + 1
-        while cursor < rows.count, rows[cursor].isWorktree {
-            let next = rows[cursor].depth
-            if next < depth { return false }
-            if next == depth { return true }
-            cursor += 1
-        }
-        return false
-    }
-
-    /// Whether the row at `index` starts a line of its own: a worktree row
-    /// with its children shown under it.
-    static func startsGuide(ofRow index: Int, in rows: [DockRow]) -> Bool {
-        let next = index + 1
-        guard rows.indices.contains(index), rows[index].isWorktree, rows.indices.contains(next) else { return false }
-        return rows[next].isWorktree && rows[next].depth == rows[index].depth + 1
-    }
-
     // MARK: Active guide lines
-
-    /// The rows the row at `index` sits under, outermost first, one per level
-    /// of its depth. The rows are a preorder walk of each pinned subtree, so
-    /// a row's parent is the nearest row above it one level up.
-    static func guideAncestors(ofRow index: Int, in rows: [DockRow]) -> [SidebarNodeID] {
-        guard rows.indices.contains(index) else { return [] }
-        var ancestors: [SidebarNodeID] = []
-        var level = rows[index].depth
-        var cursor = index - 1
-        while level > 0, cursor >= 0 {
-            if rows[cursor].depth == level - 1 {
-                ancestors.append(rows[cursor].id)
-                level -= 1
-            }
-            cursor -= 1
-        }
-        return ancestors.reversed()
-    }
-
-    /// The row whose guide line the row at `index` lights, by the outline's
-    /// rule (`SidebarTree.activeGuideAncestor(of:)`): a worktree row with its
-    /// subtree open under it lights its own line; any other worktree row its
-    /// parent's; a pinned root with no subtree open, and a remote session,
-    /// none.
-    static func activeGuideAncestor(ofRow index: Int, in rows: [DockRow]) -> SidebarNodeID? {
-        guard rows.indices.contains(index), rows[index].isWorktree else { return nil }
-        if startsGuide(ofRow: index, in: rows) { return rows[index].id }
-        return guideAncestors(ofRow: index, in: rows).last
-    }
-
-    /// The active ancestors of the `hovered` row and of each `selected`
-    /// worktree row among `rows`.
-    static func activeGuideAncestors(in rows: [DockRow], hovered: SidebarNodeID?,
-                                     selected: Set<UUID>) -> Set<SidebarNodeID> {
-        var focus = Set(selected.map { SidebarNodeID.worktree($0) })
-        if let hovered { focus.insert(hovered) }
-        var active: Set<SidebarNodeID> = []
-        for (index, row) in rows.enumerated() where focus.contains(row.id) {
-            if let ancestor = activeGuideAncestor(ofRow: index, in: rows) { active.insert(ancestor) }
-        }
-        return active
-    }
 
     /// The active ancestors of the hovered row and of each selected worktree
     /// row the dock shows.
     private func focusedGuideAncestors() -> Set<SidebarNodeID> {
-        Self.activeGuideAncestors(in: rows, hovered: hoverState.row, selected: appState.selectedWorktreeIDs)
+        var focus = appState.selectedWorktreeIDs.map { SidebarNodeID.worktree($0) }
+        if let hovered = hoverState.row { focus.append(hovered) }
+        return guideHierarchy.activeGuideAncestors(of: focus)
     }
 
     /// Recomputes the active guide lines after the selection or the rows

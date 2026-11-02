@@ -164,7 +164,7 @@ extension SidebarOutlineController {
     /// nest highlight. A header draws selected while `AppState` selects what
     /// it stands for — its repo, the Scratch section, its provider — which a
     /// rebuild carries to it as a changed model. A row's guide lines are its
-    /// part in each worktree line above it (`SidebarTree.guideRuns(of:)`),
+    /// part in each worktree line above it (`GuideHierarchy.guideRuns(of:)`),
     /// with the fade a parent's first child carries on from the parent's row,
     /// and a worktree row whose worktree children show starts its own; the
     /// lines whose owner is in `activeGuideAncestors` draw active.

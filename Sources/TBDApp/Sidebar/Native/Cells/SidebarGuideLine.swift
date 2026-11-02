@@ -15,17 +15,19 @@ import AppKit
 /// `Role` names a row's part in one line, and `pieces(role:x:tickEnd:...)`
 /// turns that part into the rectangle, curve and fade the row draws.
 ///
-/// **Strength.** At rest a line is a quiet hairline. The lines of the group
-/// the pointer or the selection is in — the *active* lines — draw at full
-/// strength, so the group you are in stands out. On a row that draws a
+/// **Strength.** At rest a line is a quiet hairline. The line the hovered
+/// row and each selected row is joined to — the one it starts, or the one it
+/// branches off — is *active* and draws at full strength, so the group you
+/// are in stands out. On a row that draws a
 /// highlight, every line takes the highlight's accent colour, blended toward
 /// white, instead of grey, so a neutral line never muddies the tint. Each
 /// line draws as one shape at its alpha, so where its turn leaves the
 /// vertical the colour does not double.
 ///
-/// Which lines are active is the tree's to say
-/// (`SidebarTree.activeGuideAncestor(of:)`), and which part of which line a
-/// row draws too (`SidebarTree.guideRuns(of:)`); how each one draws is here,
+/// Which lines are active is the list's hierarchy's to say
+/// (`GuideHierarchy.activeGuideAncestor(of:)`), and which part of which line
+/// a row draws too (`GuideHierarchy.guideRuns(of:)`), by one set of rules for
+/// the outline and the dock; how each one draws is here,
 /// beside `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
 /// `SidebarGuideLineTests` pins every value.
 enum SidebarGuideLine {

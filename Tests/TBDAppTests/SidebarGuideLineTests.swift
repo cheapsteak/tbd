@@ -6,8 +6,8 @@ import TBDShared
 import TestSupport
 
 // Tier 1 for the pure parts — the style, the line geometry and its fade, and
-// the outline's and the dock's rules for each row's part in each line and for
-// the active lines — checked directly. The outline's and the dock's wiring
+// the shared rules for each row's part in each line and for the active lines,
+// read through the outline's tree and the dock's rows — checked directly. The outline's and the dock's wiring
 // runs through controllers mounted offscreen: the pointer is driven through
 // the hover tracker's own entry points, the selection through `AppState` and
 // through the outline's `selectRowIndexes`, as a click lands.
@@ -990,40 +990,88 @@ struct SidebarGuideLineTests {
 
     // MARK: The dock
 
-    /// The dock's rows are a preorder walk with depths: a row's owners are
-    /// the nearest rows above it a level up, and the outline's rule applies
-    /// to them.
-    @Test func dockRule() {
-        let ids = (1...6).map { SidebarTreeDiffTests.uuid($0) }
+    /// The dock reads its preorder rows as a hierarchy — a row's parent is
+    /// the nearest row above it a level up, its level its depth — and the
+    /// shared rules read through it give what they give through the same rows
+    /// as an outline tree: a branch with the fade on the first child, a line
+    /// passing, a line ending in the last child, nothing of a line below it,
+    /// and the lines each row lights.
+    @Test func dockHierarchyFollowsTheSharedRules() {
+        let ids = (1...7).map { SidebarTreeDiffTests.uuid($0) }
         let a = SidebarNodeID.worktree(ids[0])
         let a1 = SidebarNodeID.worktree(ids[1])
         let a1x = SidebarNodeID.worktree(ids[2])
         let a2 = SidebarNodeID.worktree(ids[3])
-        let b = SidebarNodeID.worktree(ids[4])
-        let lane = SidebarNodeID.remoteSession(ids[5])
+        let a2x = SidebarNodeID.worktree(ids[4])
+        let b = SidebarNodeID.worktree(ids[5])
+        let lane = SidebarNodeID.remoteSession(ids[6])
         func row(_ id: SidebarNodeID, _ depth: Int) -> DockRow {
             DockRow(id: id, kind: .worktree(SidebarCellTests.worktree(name: "row")), depth: depth)
         }
-        let rows = [row(a, 0), row(a1, 1), row(a1x, 2), row(a2, 1), row(b, 0),
+        let rows = [row(a, 0), row(a1, 1), row(a1x, 2), row(a2, 1), row(a2x, 2), row(b, 0),
                     DockRow(id: lane, kind: .remoteSession(SidebarCellTests.session(title: "lane")), depth: 0)]
+        let dock = DockGuideHierarchy(rows: rows)
+        let order = rows.map(\.id)
 
-        let owners = rows.indices.map { DockTableController.guideAncestors(ofRow: $0, in: rows) }
-        let expectedOwners: [[SidebarNodeID]] = [[], [a], [a, a1], [a], [], []]
-        #expect(owners == expectedOwners)
+        let parents = order.map { dock.parent(of: $0) }
+        let expectedParents: [SidebarNodeID?] = [nil, a, a1, a, a2, nil, nil]
+        #expect(parents == expectedParents)
+        let aChildren = dock.shownChildren(of: a)
+        let expectedAChildren = [a1, a2]
+        #expect(aChildren == expectedAChildren)
+        let levels = order.map { dock.level(of: $0) }
+        let expectedLevels = [0, 1, 2, 1, 2, 0, 0]
+        #expect(levels == expectedLevels)
+        #expect(dock.isShown(lane))
+        #expect(!dock.isShown(.worktree(SidebarTreeDiffTests.uuid(999))))
 
-        let lit = rows.indices.map { DockTableController.activeGuideAncestor(ofRow: $0, in: rows) }
-        // A root with its subtree open, a child with its own, a leaf and its
-        // sibling, a closed root, a remote pin.
-        let expectedLit: [SidebarNodeID?] = [a, a1, a1, a, nil, nil]
+        let runs = order.map { dock.guideRuns(of: $0) }
+        let expectedRuns: [[Run]] = [
+            [],
+            [Run(owner: a, level: 0, role: .branch, continuesFade: true)],
+            [Run(owner: a, level: 0, role: .passing, continuesFade: false),
+             Run(owner: a1, level: 1, role: .last, continuesFade: true)],
+            [Run(owner: a, level: 0, role: .last, continuesFade: false)],
+            [Run(owner: a2, level: 1, role: .last, continuesFade: true)], // none of a's line, which ended
+            [],
+            [],
+        ]
+        #expect(runs == expectedRuns)
+        let starts = order.map { dock.startsGuide($0) }
+        let expectedStarts = [true, true, false, true, false, false, false]
+        #expect(starts == expectedStarts)
+        let lit = order.map { dock.activeGuideAncestor(of: $0) }
+        let expectedLit: [SidebarNodeID?] = [a, a1, a1, a2, a2, nil, nil]
         #expect(lit == expectedLit)
+        let focused = dock.activeGuideAncestors(of: [a1x, a2x, lane, b])
+        let a1AndA2: Set<SidebarNodeID> = [a1, a2]
+        #expect(focused == a1AndA2)
 
-        let focused = DockTableController.activeGuideAncestors(in: rows, hovered: a2, selected: [ids[2]])
-        let aAndA1: Set<SidebarNodeID> = [a, a1]
-        #expect(focused == aAndA1)
-        let unfocused = DockTableController.activeGuideAncestors(in: rows, hovered: nil, selected: [])
-        #expect(unfocused.isEmpty)
-        let remoteHovered = DockTableController.activeGuideAncestors(in: rows, hovered: lane, selected: [ids[4]])
-        #expect(remoteHovered.isEmpty)
+        // The same rows as an outline tree answer the same.
+        let tree = SidebarTree(roots: [
+            Self.worktreeNode(ids[0], depth: 0, [
+                Self.worktreeNode(ids[1], depth: 1, [Self.worktreeNode(ids[2], depth: 2)]),
+                Self.worktreeNode(ids[3], depth: 1, [Self.worktreeNode(ids[4], depth: 2)]),
+            ]),
+            Self.worktreeNode(ids[5], depth: 0),
+            SidebarDropPolicyTests.session(ids[6]),
+        ])
+        let treeRuns = order.map { tree.guideRuns(of: $0) }
+        let treeStarts = order.map { tree.startsGuide($0) }
+        let treeLit = order.map { tree.activeGuideAncestor(of: $0) }
+        #expect(treeRuns == runs)
+        #expect(treeStarts == starts)
+        #expect(treeLit == lit)
+    }
+
+    /// A worktree row at `depth`, for a tree whose levels matter.
+    static func worktreeNode(_ id: UUID, depth: Int, _ children: [SidebarNode] = []) -> SidebarNode {
+        var node = SidebarDropPolicyTests.row(id, home: nil, children)
+        if case .worktree(var model) = node.kind {
+            model.depth = depth
+            node.kind = .worktree(model)
+        }
+        return node
     }
 
     /// The dock lights the selected row's group and the hovered row's, and
@@ -1051,12 +1099,16 @@ struct SidebarGuideLineTests {
         let rootGroup: [IndexSet] = [[], [0], [0], [0]]
         #expect(rootSelected == rootGroup)
 
-        // A selected grandchild lights its parent's.
+        // A selected grandchild lights its parent's, and the outline, which
+        // shows the same rows, lights the same line.
         h.state.selectedWorktreeIDs = [a1x.id]
         h.flush()
         let grandchildSelected = try h.activeGuides(rows)
         let childGroup: [IndexSet] = [[], [], [1], []]
         #expect(grandchildSelected == childGroup)
+        let a1Line: Set<SidebarNodeID> = [.worktree(a1.id)]
+        #expect(h.dock.activeGuideAncestors == a1Line)
+        #expect(h.container.outlineController.activeGuideAncestors == a1Line)
 
         // Hovering the root's other child lights the root's line too.
         let tracker = try #require(h.dock.hoverTracker)
@@ -1070,45 +1122,6 @@ struct SidebarGuideLineTests {
         tracker.pointerExited()
         let exited = try h.activeGuides(rows)
         #expect(exited == childGroup)
-    }
-
-    /// The dock's shape from its preorder rows: the outline's roles, levels
-    /// from depths, the fade on a parent's first child, and nothing of a
-    /// line below its last child.
-    @Test func dockShapeRule() {
-        let ids = (1...7).map { SidebarTreeDiffTests.uuid($0) }
-        let a = SidebarNodeID.worktree(ids[0])
-        let a1 = SidebarNodeID.worktree(ids[1])
-        let a1x = SidebarNodeID.worktree(ids[2])
-        let a2 = SidebarNodeID.worktree(ids[3])
-        let b = SidebarNodeID.worktree(ids[4])
-        let lane = SidebarNodeID.remoteSession(ids[5])
-        let a2x = SidebarNodeID.worktree(ids[6])
-        func row(_ id: SidebarNodeID, _ depth: Int) -> DockRow {
-            DockRow(id: id, kind: .worktree(SidebarCellTests.worktree(name: "row")), depth: depth)
-        }
-        let rows = [row(a, 0), row(a1, 1), row(a1x, 2), row(a2, 1), row(b, 0),
-                    DockRow(id: lane, kind: .remoteSession(SidebarCellTests.session(title: "lane")), depth: 0)]
-        let runs = rows.indices.map { DockTableController.guideRuns(ofRow: $0, in: rows) }
-        let expected: [[Run]] = [
-            [],
-            [Run(owner: a, level: 0, role: .branch, continuesFade: true)],
-            [Run(owner: a, level: 0, role: .passing, continuesFade: false),
-             Run(owner: a1, level: 1, role: .last, continuesFade: true)],
-            [Run(owner: a, level: 0, role: .last, continuesFade: false)],
-            [],
-            [],
-        ]
-        #expect(runs == expected)
-        let starts = rows.indices.map { DockTableController.startsGuide(ofRow: $0, in: rows) }
-        let expectedStarts = [true, true, false, false, false, false]
-        #expect(starts == expectedStarts)
-
-        // The last child's own child draws nothing of the root's line.
-        let tail = [row(a, 0), row(a1, 1), row(a2, 1), row(a2x, 2)]
-        let tailRuns = DockTableController.guideRuns(ofRow: 3, in: tail)
-        let expectedTail = [Run(owner: a2, level: 1, role: .last, continuesFade: true)]
-        #expect(tailRuns == expectedTail)
     }
 
     /// The dock's row views draw their parts: the open root starts its line,

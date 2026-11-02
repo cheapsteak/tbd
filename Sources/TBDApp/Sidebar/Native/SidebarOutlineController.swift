@@ -166,7 +166,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     var hoverState = SidebarHoverTracker.State()
     /// The worktree rows whose guide lines draw active: the active ancestors
     /// of the hovered row and of each selected worktree row the outline
-    /// shows (`SidebarTree.activeGuideAncestors(of:)`). Recomputed once per
+    /// shows (`GuideHierarchy.activeGuideAncestors(of:)`). Recomputed once per
     /// hover change, selection change and apply, and read by every row view
     /// configuration.
     var activeGuideAncestors: Set<SidebarNodeID> = []
