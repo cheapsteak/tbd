@@ -92,12 +92,18 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// The rows the table shows, top to bottom. While the rows are held, the
     /// held rows carrying the latest models. Written only by the apply, which
-    /// reads the guide lines' hierarchy off them once.
+    /// works out every row's guide lines from them once, so a hover or a
+    /// selection only looks them up.
     private(set) var rows: [DockRow] = [] {
-        didSet { guideHierarchy = DockGuideHierarchy(rows: rows) }
+        didSet {
+            guideHierarchy = DockGuideHierarchy(rows: rows)
+            rowGuides = Self.rowGuides(of: rows, in: guideHierarchy)
+        }
     }
     /// `rows` as the guide-line rules read them.
     private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
+    /// Each row's guide lines, by index into `rows`.
+    private var rowGuides: [RowGuides] = []
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
@@ -166,6 +172,16 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private struct SelectionKey: Equatable {
         let worktrees: Set<UUID>
         let remote: RemoteSessionSelection?
+    }
+
+    /// One row's guide lines, by the shared rules (`GuideHierarchy`): its
+    /// part in each line above it, and whether it starts its own.
+    private struct RowGuides {
+        var guides: [SidebarGuideLine.Guide] = []
+        /// Each guide's owner, in `guides`' order: what the active lines
+        /// index.
+        var owners: [SidebarNodeID] = []
+        var startsGuide = false
     }
 
     var isHoldingStructure: Bool { !holds.isEmpty }
@@ -636,15 +652,13 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.level = row.depth
-            let runs = guideHierarchy.guideRuns(of: row.id)
-            configuration.guides = SidebarGuideLine.guides(for: runs) { owner in
-                self.guideHierarchy.indices[owner].map { Self.height(of: self.rows[$0]) }
-            }
+            let lines = rowGuides.indices.contains(index) ? rowGuides[index] : RowGuides()
+            configuration.guides = lines.guides
             if !activeGuideAncestors.isEmpty {
                 configuration.activeGuides = SidebarGuideLine.activeIndices(
-                    of: runs.map(\.owner), active: activeGuideAncestors)
+                    of: lines.owners, active: activeGuideAncestors)
             }
-            configuration.drawsStub = guideHierarchy.startsGuide(row.id)
+            configuration.drawsStub = lines.startsGuide
             configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(row.id)
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
@@ -659,6 +673,21 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         table.enumerateAvailableRowViews { rowView, index in
             guard let rowView = rowView as? SidebarRowView else { return }
             self.configureRowView(rowView, at: index)
+        }
+    }
+
+    /// Each of `rows`' guide lines, by index: the runs the shared rules give
+    /// it, with the owner's fade carried into its first child from the
+    /// owner's height. Only worktree rows draw lines.
+    private static func rowGuides(of rows: [DockRow], in hierarchy: DockGuideHierarchy) -> [RowGuides] {
+        let heights = rows.map { Self.height(of: $0) }
+        return rows.map { row -> RowGuides in
+            guard row.isWorktree else { return RowGuides() }
+            let runs = hierarchy.guideRuns(of: row.id)
+            let guides = SidebarGuideLine.guides(for: runs) { owner in
+                hierarchy.indices[owner].map { heights[$0] }
+            }
+            return RowGuides(guides: guides, owners: runs.map(\.owner), startsGuide: hierarchy.startsGuide(row.id))
         }
     }
 
@@ -691,9 +720,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The tracker's report: the `+` under the pointer arms the shared menu,
-    /// the hovered row lights its group's guide line, and every row the table
-    /// has takes the new hover. A recompute that finds nothing changed leaves
-    /// the rows as they are.
+    /// the hovered row lights the guide line it is joined to, and every row
+    /// the table has takes the new hover. A recompute that finds nothing
+    /// changed leaves the rows as they are. The row views and the active
+    /// lines follow only the hovered row, so a move between parts of one row
+    /// reaches only the cells.
     func hoverChanged(_ state: SidebarHoverTracker.State) {
         let previous = hoverState
         hoverState = state
@@ -702,17 +733,22 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             from: previous.part == .plus ? previous.row : nil, to: state.part == .plus ? state.row : nil,
             in: table, anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
             appState: appState, sheets: sheets)
-        activeGuideAncestors = focusedGuideAncestors()
-        applyHoverToAvailableRows()
+        let rowChanged = state.row != previous.row
+        if rowChanged {
+            activeGuideAncestors = focusedGuideAncestors()
+        }
+        applyHoverToAvailableRows(includingRowViews: rowChanged)
     }
 
     /// Hands every row view the table has its hover highlight, active guide
     /// lines and pin gap, and every cell its hover.
-    func applyHoverToAvailableRows() {
+    /// - Parameter includingRowViews: false when only the cells' hover
+    ///   changed, so the row views keep their configurations.
+    func applyHoverToAvailableRows(includingRowViews: Bool = true) {
         table.enumerateAvailableRowViews { rowView, index in
             guard self.rows.indices.contains(index) else { return }
             let row = self.rows[index]
-            if let rowView = rowView as? SidebarRowView {
+            if includingRowViews, let rowView = rowView as? SidebarRowView {
                 self.configureRowView(rowView, at: index)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
