@@ -264,16 +264,18 @@ struct SidebarGuideLineTests {
         #expect(odd.verticals == expectedOdd)
     }
 
-    /// The fade runs 12 pt from clear where the stub starts. A 28 pt
-    /// parent's stub holds the first 6 pt and its first child's top the
-    /// other 6; a 36 pt parent's stub holds 10, leaving 2. An only child
-    /// carries the fade into the line that ends in its turn. A later child, a
-    /// fade spent above the row, and a fade of length 0 draw no fade.
+    /// The fade runs 12 pt from clear where the stub starts. Every parent's
+    /// row is 28 pt, so its stub holds the first 6 pt and its first child's
+    /// top the other 6, from a fade that starts 6 pt above the child. The
+    /// pieces follow the bounds and the fade start they are given: a 36 pt
+    /// row's stub would hold 10, leaving 2. An only child carries the fade
+    /// into the line that ends in its turn. A later child, a fade spent
+    /// above the row, and a fade of length 0 draw no fade.
     @Test func fadeRunsFromTheStubIntoTheFirstChild() throws {
+        #expect(SidebarGuideLine.ownerRowHeight == 28)
         #expect(SidebarGuideLine.stubStart(rowHeight: 28) == 22)
-        #expect(SidebarGuideLine.continuedFadeStart(ownerHeight: 28) == -6)
+        #expect(SidebarGuideLine.continuedFadeStart == -6)
         #expect(SidebarGuideLine.stubStart(rowHeight: 36) == 26)
-        #expect(SidebarGuideLine.continuedFadeStart(ownerHeight: 36) == -10)
 
         let stubFade = try #require(Self.pieces(.stub)?.fade)
         #expect(stubFade.startFraction == 0)
@@ -400,16 +402,25 @@ struct SidebarGuideLineTests {
         #expect(empty.isEmpty)
     }
 
-    /// A run on the owner's first child carries the fade from the owner's
-    /// row height; every other run carries none.
+    /// A run on the owner's first child carries the fade on from the
+    /// owner's row; every other run carries none. Only worktree rows own
+    /// lines, and a worktree row is `ownerRowHeight` tall in both its height
+    /// classes, which is what lets the fade's start be one constant.
     @Test func guidesCarryTheFadeOnTheFirstChild() {
         let owner = SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(1))
         let other = SidebarNodeID.worktree(SidebarTreeDiffTests.uuid(2))
         let runs = [Run(owner: other, level: 0, role: .passing, continuesFade: false),
                     Run(owner: owner, level: 1, role: .last, continuesFade: true)]
-        let guides = SidebarGuideLine.guides(for: runs) { $0 == owner ? 36 : nil }
-        let expected = [Guide(level: 0, role: .passing), Guide(level: 1, role: .last, fadeStart: -10)]
+        let guides = SidebarGuideLine.guides(for: runs)
+        let expected = [Guide(level: 0, role: .passing), Guide(level: 1, role: .last, fadeStart: -6)]
         #expect(guides == expected)
+
+        let single = SidebarCellTests.worktree(name: "owner")
+        let subtitled = SidebarCellTests.worktree(name: "owner", subtitles: ["Running setup…"])
+        #expect(subtitled.heightClass == .withSubtitle)
+        let heights = [WorktreeRowCell.height(for: single), WorktreeRowCell.height(for: subtitled)]
+        let ownerHeights = [SidebarGuideLine.ownerRowHeight, SidebarGuideLine.ownerRowHeight]
+        #expect(heights == ownerHeights, "A worktree row's height left the one its fade start assumes")
     }
 
     /// The row view draws grey on a plain row and the nest target, accent on
@@ -921,7 +932,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart
         #expect(fade == -6)
         let expectedLevels = [0, 1, 2, 1, 1, 2, 0, 1, 0]
         let expectedGuides: [[Guide]] = [
@@ -1044,7 +1055,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart
         let expectedLevels = [0, 1, 1, 2]
         let expectedGuides: [[Guide]] = [[], [Guide(level: 0, role: .last, fadeStart: fade)], [], []]
         let expectedStubs = [true, false, false, false]
@@ -1268,7 +1279,7 @@ struct SidebarGuideLineTests {
         let levels = configurations.map(\.level)
         let guides = configurations.map(\.guides)
         let stubs = configurations.map(\.drawsStub)
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart
         let expectedLevels = [0, 1, 2, 1, 0]
         let expectedGuides: [[Guide]] = [
             [],

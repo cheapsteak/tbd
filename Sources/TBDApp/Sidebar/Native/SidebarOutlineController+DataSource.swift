@@ -165,17 +165,16 @@ extension SidebarOutlineController {
     /// it stands for — its repo, the Scratch section, its provider — which a
     /// rebuild carries to it as a changed model. A row's guide lines are its
     /// part in each worktree line above it (`GuideHierarchy.guideRuns(of:)`),
-    /// with the fade a parent's first child carries on from the parent's row,
-    /// and a worktree row whose worktree children show starts its own; the
+    /// with the fade a parent's first child carries on from the parent's row
+    /// (`SidebarGuideLine.continuedFadeStart`), and a worktree row whose
+    /// worktree children show starts its own; the
     /// lines whose owner is in `activeGuideAncestors` draw active.
     func configure(_ rowView: SidebarRowView, node: SidebarNode) {
         let isHovered = hoverState.row == node.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
         let runs = tree.guideRuns(of: node.id)
-        configuration.guides = SidebarGuideLine.guides(for: runs) { owner in
-            self.tree.node(owner).map { self.rowHeight(for: $0.kind) }
-        }
+        configuration.guides = SidebarGuideLine.guides(for: runs)
         configuration.activeGuides = SidebarGuideLine.activeIndices(
             of: runs.map(\.owner), active: activeGuideAncestors)
         switch node.kind {
@@ -226,11 +225,12 @@ extension SidebarOutlineController {
     }
 
     /// Recomputes the active guide lines after the selection or the tree
-    /// changed. When they differ, every row view the outline holds takes
-    /// them; a view whose configuration comes out the same does not redraw.
-    func refreshActiveGuides() {
+    /// changed. When they differ, or `refreshingRowViews` asks, every row
+    /// view the outline holds takes its configuration afresh; a view whose
+    /// configuration comes out the same does not redraw.
+    func refreshActiveGuides(refreshingRowViews: Bool = false) {
         let active = focusedGuideAncestors()
-        guard active != activeGuideAncestors else { return }
+        guard refreshingRowViews || active != activeGuideAncestors else { return }
         activeGuideAncestors = active
         refreshRowViewConfigurations()
     }

@@ -113,7 +113,7 @@ struct DockTableControllerTests {
         #expect(deepInset == DockTableController.rowInset + 2 * SidebarNativeMetrics.indentation)
         let deepRowView = h.rowView(.worktree(a1x.id))
         let deepGuides = deepRowView?.configuration.guides
-        let fade = SidebarGuideLine.continuedFadeStart(ownerHeight: WorktreeRowView.rowHeight)
+        let fade = SidebarGuideLine.continuedFadeStart
         let parentLine = [SidebarGuideLine.Guide(level: 1, role: .last, fadeStart: fade)]
         #expect(deepGuides == parentLine)
 

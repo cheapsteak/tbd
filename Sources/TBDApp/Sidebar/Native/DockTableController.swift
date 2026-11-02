@@ -401,14 +401,19 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         defer { SidebarOutlineController.signposter.endInterval("dockApply", interval) }
         let previousCount = rows.count
         isApplyingModelSelection = true
+        var rowViewsNeedRefresh = false
         if hasLoaded {
-            applyUpdate(to: isHoldingStructure ? Self.content(of: latest, inStructureOf: rows) : latest)
+            rowViewsNeedRefresh = applyUpdate(
+                to: isHoldingStructure ? Self.content(of: latest, inStructureOf: rows) : latest)
         } else {
             rows = latest
             table.reloadData()
             hasLoaded = true
         }
-        applyModelSelection()
+        // Re-derives the row views the rows changed under once, with the
+        // lines the selection lights, rather than once for the rows and
+        // again for the selection.
+        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
         isApplyingModelSelection = false
         // The dock takes its new height before a new selection scrolls into
         // it, so the scroll reads the height the rows will have.
@@ -423,7 +428,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// Inserts and removes rows by ID, so a row that stays keeps its row view
     /// and its cell, then reconfigures rows whose model changed in place.
-    private func applyUpdate(to target: [DockRow]) {
+    /// - Returns: whether every row view the table holds needs its
+    ///   configuration re-derived: the rows or their depths changed, and a
+    ///   row's part in its parent's line follows its siblings. A fallback
+    ///   reload configures every row view afresh, so needs none.
+    private func applyUpdate(to target: [DockRow]) -> Bool {
         let previous = rows
         rows = target
         let oldIDs = previous.map(\.id)
@@ -456,7 +465,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             dockLogger.fault(
                 "Native dock update left \(shownRows, privacy: .public) rows for \(expectedRows, privacy: .public); reloading")
             table.reloadData()
-            return
+            return false
         }
         let before = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var changed: Set<SidebarNodeID> = []
@@ -464,11 +473,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             if let old = before[row.id], old != row { changed.insert(row.id) }
         }
         reconfigure(changed)
-        // A row's part in its parent's line follows its siblings, so a
-        // change to the rows or their depths redraws every row's lines.
-        if oldIDs != newIDs || previous.map(\.depth) != target.map(\.depth) {
-            refreshRowViewConfigurations()
-        }
+        return oldIDs != newIDs || previous.map(\.depth) != target.map(\.depth)
     }
 
     /// `shown`'s rows carrying `latest`'s models: what a held apply shows, so a
@@ -507,7 +512,10 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// The selected rows light their groups' guide lines, so the row views
     /// take the active lines here: at the end of every apply, and after a
     /// user's selection.
-    private func applyModelSelection() {
+    /// - Parameter refreshingRowViews: true after an apply that changed the
+    ///   rows' structure, so every row view takes its configuration afresh
+    ///   here even when the active lines stay the same.
+    private func applyModelSelection(refreshingRowViews: Bool = false) {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
         }
@@ -520,7 +528,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         if indexes != table.selectedRowIndexes {
             table.selectRowIndexes(indexes, byExtendingSelection: false)
         }
-        refreshActiveGuides()
+        refreshActiveGuides(refreshingRowViews: refreshingRowViews)
     }
 
     /// A selection that changed since the last apply scrolls its first dock
@@ -677,17 +685,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// Each of `rows`' guide lines, by index: the runs the shared rules give
-    /// it, with the owner's fade carried into its first child from the
-    /// owner's height. Only worktree rows draw lines.
+    /// it, with the owner's fade carried into its first child
+    /// (`SidebarGuideLine.continuedFadeStart`). Only worktree rows draw
+    /// lines.
     private static func rowGuides(of rows: [DockRow], in hierarchy: DockGuideHierarchy) -> [RowGuides] {
-        let heights = rows.map { Self.height(of: $0) }
-        return rows.map { row -> RowGuides in
+        rows.map { row -> RowGuides in
             guard row.isWorktree else { return RowGuides() }
             let runs = hierarchy.guideRuns(of: row.id)
-            let guides = SidebarGuideLine.guides(for: runs) { owner in
-                hierarchy.indices[owner].map { heights[$0] }
-            }
-            return RowGuides(guides: guides, owners: runs.map(\.owner), startsGuide: hierarchy.startsGuide(row.id))
+            return RowGuides(guides: SidebarGuideLine.guides(for: runs), owners: runs.map(\.owner),
+                             startsGuide: hierarchy.startsGuide(row.id))
         }
     }
 
@@ -702,11 +708,12 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// Recomputes the active guide lines after the selection or the rows
-    /// changed. When they differ, every row view the table holds takes them;
-    /// a view whose configuration comes out the same does not redraw.
-    private func refreshActiveGuides() {
+    /// changed. When they differ, or `refreshingRowViews` asks, every row
+    /// view the table holds takes its configuration afresh; a view whose
+    /// configuration comes out the same does not redraw.
+    private func refreshActiveGuides(refreshingRowViews: Bool = false) {
         let active = focusedGuideAncestors()
-        guard active != activeGuideAncestors else { return }
+        guard refreshingRowViews || active != activeGuideAncestors else { return }
         activeGuideAncestors = active
         refreshRowViewConfigurations()
     }

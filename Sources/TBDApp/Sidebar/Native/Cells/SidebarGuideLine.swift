@@ -265,11 +265,10 @@ enum SidebarGuideLine {
 
     /// The guides a row draws for `runs`, outermost first: each run's level
     /// and role, and on the owner's first child where the owner's fade-in
-    /// started, from the owner's row height.
-    static func guides(for runs: [Run], ownerHeight: (SidebarNodeID) -> CGFloat?) -> [Guide] {
+    /// started (`continuedFadeStart`).
+    static func guides(for runs: [Run]) -> [Guide] {
         runs.map { run in
-            let fadeStart = run.continuesFade ? ownerHeight(run.owner).map(continuedFadeStart(ownerHeight:)) : nil
-            return Guide(level: run.level, role: run.role, fadeStart: fadeStart)
+            Guide(level: run.level, role: run.role, fadeStart: run.continuesFade ? continuedFadeStart : nil)
         }
     }
 
@@ -279,12 +278,19 @@ enum SidebarGuideLine {
         rowHeight / 2 + iconHalfHeight + stubGap
     }
 
+    /// The height of every row that owns a line. Only worktree rows own
+    /// lines, and a worktree row is `WorktreeRowView.rowHeight` tall in both
+    /// its height classes: the SwiftUI row pins that height for every
+    /// variant, so the subtitle variant stacks its two lines inside it
+    /// (`WorktreeRowCell.subtitleRowHeight`). How far an owner's fade
+    /// carries into its first child is therefore one constant, not a lookup
+    /// of the owner's row.
+    static let ownerRowHeight: CGFloat = WorktreeRowView.rowHeight
+
     /// Where a parent's fade-in starts, down from the top of its first
     /// child's row: above it, by the length of the stub the parent's own row
     /// holds.
-    static func continuedFadeStart(ownerHeight: CGFloat) -> CGFloat {
-        stubStart(rowHeight: ownerHeight) - ownerHeight
-    }
+    static let continuedFadeStart: CGFloat = stubStart(rowHeight: ownerRowHeight) - ownerRowHeight
 
     /// The indices of `ancestors` — a row's line owners, outermost first —
     /// whose lines are active.
