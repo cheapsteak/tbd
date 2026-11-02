@@ -48,7 +48,8 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   the toolbar back if the window is visible and shows another or none.
 /// - **Overflow.** An item that does not fit goes to the toolbar's overflow
 ///   menu as its menu form. Every view item has an explicit one that acts as
-///   the item does, or for the title shows it inertly, and every action the
+///   the item does, or for the title shows it inertly; the leading item's is
+///   a submenu with a row for each of its buttons, and every action the
 ///   toolbar wires takes `Any?`, so a row sending it from an `NSMenuItem`
 ///   never meets a method typed for another sender. The remote buttons have
 ///   explicit rows too; only the Servers item keeps AppKit's default, its
@@ -113,6 +114,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// Applies run so far, for the debug log and for tests. An apply that
     /// found nothing to do is not counted.
     private(set) var applyCount = 0
+    /// Applies run that only observed changes asked for, for tests. Every
+    /// other source asks through `scheduleApply()`, which makes the apply
+    /// run in full, so only an observed change moves this count. An apply
+    /// that found nothing to do is not counted.
+    private(set) var observedOnlyApplyCount = 0
     /// Observed `AppState` changes that scheduled an apply, for the debug log
     /// and for tests: a stale registration's change is not counted.
     private(set) var observedChangeCount = 0
@@ -422,6 +428,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         if !runsInFull, !reattachIsDue, appliedInputs == inputs(for: snapshot) {
             toolbarLogger.debug("Main toolbar apply skipped: nothing it shows changed")
             return
+        }
+        if !runsInFull {
+            observedOnlyApplyCount += 1
         }
         apply(snapshot)
     }
