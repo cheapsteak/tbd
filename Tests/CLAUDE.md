@@ -1006,6 +1006,49 @@ front.
   loop…` to stderr, so search a CI log for that line before suspecting a
   crash. What stops the loop is unidentified: nothing in the repo calls
   `CFRunLoopStop` or `NSApp.stop`.
+- **Never set SIGPIPE's disposition in a test.** The test host catches
+  SIGPIPE with a handler (`Tests/TestProcessDefaults/SIGPIPEHandler.c`), so a
+  write to a closed pipe or socket fails with `EPIPE` instead of killing the
+  pass, as one did on CI with "unexpected signal code 13". A
+  `signal(SIGPIPE, SIG_IGN)` in a test replaces that handler for every suite in
+  the process, and `SIG_IGN`, unlike a handler, survives `exec` into every
+  child a plain `posix_spawn` or `forkpty` starts afterwards. Blocking it in
+  a signal mask is the same mistake: the mask is inherited across `exec` too.
+  The SwiftLint rule `no_sigpipe_disposition_in_tests` rejects
+  `signal(SIGPIPE, …)` (also spelled with `13` or `Int32(SIGPIPE)`), a
+  `sigaction(SIGPIPE, …)` that sets one, `sigaddset(…, SIGPIPE)`, and a
+  `pthread_sigmask` or `sigprocmask` line that names SIGPIPE. Reading the
+  disposition with `sigaction(SIGPIPE, nil, &current)` is fine.
+- **`TBD test host: caught SIGPIPE: …` in a CI log means a write lacks
+  `SO_NOSIGPIPE` or `F_SETNOSIGPIPE`.** It reached a closed pipe or socket, and
+  only the handler kept the pass alive; if the write is the app's, the app has
+  no such handler and dies of it. XNU raises the signal at the process, so the
+  line names neither the test nor the thread: the suspects are the tests
+  started and not yet finished around it in the log. Find the write and
+  protect its descriptor where it is created: an app socket through
+  `SocketSIGPIPE.suppress(on:)`, a fixture's socket with `SO_NOSIGPIPE`, a
+  pipe's write end with `F_SETNOSIGPIPE`.
+
+  Some lines are not findings. A few daemon suites write into a closed pipe
+  on purpose, because the daemon ignores SIGPIPE in `main.swift` instead of
+  guarding each descriptor and they exercise that code. No other test should
+  raise a live SIGPIPE in the test process: it is delivered to the process,
+  not the writing thread, so it can interrupt another suite's blocked call.
+  - **Marked** – a test that provokes a SIGPIPE on purpose calls
+    `TBDTestHostExpectSIGPIPE()` just before the write, so its line says the
+    SIGPIPE was provoked on purpose instead:
+    `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder` and
+    `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
+    The fanout test writes twice on one mark, since its two SIGPIPEs often
+    merge into one catch, so a second, unmarked line can come from it.
+  - **Unmarked** – `PeerLinkSupervisorTests` (quiet pass): its stubs exit
+    while the supervisor may still be writing `hello` or a keepalive, so
+    whether a SIGPIPE happens at all depends on timing, and a mark that went
+    unused would label the next stray one.
+
+  A mark is a hint, not proof. Suites share the process, so a stray SIGPIPE
+  from another suite landing between a mark and its write takes the mark, and
+  the two lines swap labels.
 - **An `NSDraggingInfo` stub must not declare
   `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
   category already declares it, so the stub's own version fails with

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestProcessDefaults
 import TestSupport
 
 @testable import TBDDaemonLib
@@ -533,10 +534,11 @@ struct PaneFanoutFlowControlTests {
 
     @Test("route hard error (EPIPE): the unwritten remainder is counted dropped, mirroring the drain's accounting")
     func routeHardErrorCountsDroppedRemainder() throws {
-        // Mirror the daemon's process-wide SIGPIPE stance (main.swift): a
-        // write into a pipe whose read end is closed must return EPIPE, not
-        // kill the test process.
-        signal(SIGPIPE, SIG_IGN)
+        // A write into a pipe whose read end is closed returns EPIPE here, as
+        // it does in the daemon (which ignores SIGPIPE in main.swift), because
+        // the test host catches SIGPIPE with a handler
+        // (Tests/TestProcessDefaults/SIGPIPEHandler.c). Not set here: the
+        // disposition is process-wide, shared with every concurrent suite.
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%14")
         let (readFD, gen) = try fanout.attach(key: key)
@@ -546,6 +548,12 @@ struct PaneFanoutFlowControlTests {
         Darwin.close(readFD)
 
         let chunk = patterned(count: 1024)
+        // This write raises SIGPIPE on purpose, so the handler's stderr line
+        // says so. One mark for the two routes below: their two SIGPIPEs often
+        // merge into one catch, and a mark left unused would label the next
+        // stray SIGPIPE in the process as deliberate. When they do not merge,
+        // the second catch logs as stray; Tests/CLAUDE.md lists this test.
+        TBDTestHostExpectSIGPIPE()
         fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.droppedEvents == 1, "a hard write error must count a dropped event")
