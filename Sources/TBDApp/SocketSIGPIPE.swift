@@ -26,7 +26,9 @@ import os
 ///
 /// Precedent and identical call shape: `HolderClient.connect`
 /// (`Sources/TBDDaemon/Holder/HolderClient.swift`), which protects the daemon's
-/// holder socket the same way.
+/// holder socket the same way. The pipe sibling is the daemon's `PipeSIGPIPE`
+/// (`Sources/TBDDaemon/Base/PipeSIGPIPE.swift`), which sets `F_SETNOSIGPIPE`
+/// on a pipe's write end in the same shape.
 enum SocketSIGPIPE {
     private static let logger = Logger(subsystem: "com.tbd.app", category: "socketSIGPIPE")
 

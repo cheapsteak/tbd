@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import Testing
-import TestProcessDefaults
 import TestSupport
 
 @testable import TBDDaemonLib
@@ -534,26 +533,31 @@ struct PaneFanoutFlowControlTests {
 
     @Test("route hard error (EPIPE): the unwritten remainder is counted dropped, mirroring the drain's accounting")
     func routeHardErrorCountsDroppedRemainder() throws {
-        // A write into a pipe whose read end is closed returns EPIPE here, as
-        // it does in the daemon (which ignores SIGPIPE in main.swift), because
-        // the test host catches SIGPIPE with a handler
-        // (Tests/TestProcessDefaults/SIGPIPEHandler.c). Not set here: the
-        // disposition is process-wide, shared with every concurrent suite.
+        // A write into a pipe whose read end is closed fails with EPIPE. It
+        // raises no SIGPIPE, because `attach` marks the write end
+        // F_SETNOSIGPIPE (`PipeSIGPIPE`). The fanout keeps that end to itself,
+        // so the test reaches it as the pipe peer of the read end `attach`
+        // returned, and reads the flag back while both ends are open. That
+        // flag is the proof; the test host's SIGPIPE count is not compared
+        // here, because this pass runs suites in parallel and another suite's
+        // signal, or one delivered late, would fail this test for someone
+        // else's write. The test must not set the disposition itself: it is
+        // process-wide, shared with every concurrent suite.
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%14")
         let (readFD, gen) = try fanout.attach(key: key)
         setNonblocking(readFD)
         #expect(fanout.markReady(key: key, generation: gen))
+        let found = pipeWriteEnd(peerOf: readFD)
+        let writeFD = try #require(found, "no descriptor in this process is the write end of the fanout's pipe")
+        let noSIGPIPE = fcntl(writeFD, F_GETNOSIGPIPE)
+        #expect(
+            noSIGPIPE == 1,
+            "attach must mark the pipe's write end F_SETNOSIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE)")
         // The viewer dies: the read end closes while the sink stays attached.
         Darwin.close(readFD)
 
         let chunk = patterned(count: 1024)
-        // This write raises SIGPIPE on purpose, so the handler's stderr line
-        // says so. One mark for the two routes below: their two SIGPIPEs often
-        // merge into one catch, and a mark left unused would label the next
-        // stray SIGPIPE in the process as deliberate. When they do not merge,
-        // the second catch logs as stray; Tests/CLAUDE.md lists this test.
-        TBDTestHostExpectSIGPIPE()
         fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.droppedEvents == 1, "a hard write error must count a dropped event")

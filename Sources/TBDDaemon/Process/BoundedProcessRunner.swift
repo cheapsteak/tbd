@@ -557,6 +557,10 @@ func runBoundedProcess(
                 continuation.resume(throwing: POSIXError(.EMFILE))
                 return
             }
+            // The write below fails with EPIPE whenever the child exits before
+            // reading all of `stdin`. Marking the write end here, before that
+            // write, keeps it from raising SIGPIPE in whatever process runs this.
+            PipeSIGPIPE.suppress(on: stdinPipe.fileHandleForWriting.fileDescriptor)
             process.standardInput = stdinPipe
         }
 
@@ -786,9 +790,9 @@ func runBoundedProcess(
             // any time a child exits (or simply never reads stdin) before
             // we finish writing — e.g. a bad verb, a missing interpreter, a
             // `set -e` trip in a provider script — which turns into EPIPE
-            // because `main.swift` sets `signal(SIGPIPE, SIG_IGN)` (so a
-            // broken pipe becomes a write error instead of killing the
-            // process outright, which would be worse). A child that exited
+            // rather than a process-ending SIGPIPE, because the write end is
+            // marked `F_SETNOSIGPIPE` where the pipe is created (the daemon
+            // also ignores SIGPIPE in `main.swift`). A child that exited
             // before reading its stdin is a normal condition, not an error
             // worth propagating: the exit code and stderr already tell the
             // real story, so a failed write here is swallowed (after being
@@ -810,27 +814,6 @@ func runBoundedProcess(
         // continuation closure.
         cancellationRelay.requestCancel()
     })
-}
-
-/// Whether `fd` is an open descriptor that refers to a pipe.
-func isPipeDescriptor(_ fd: Int32) -> Bool {
-    var info = stat()
-    guard fstat(fd, &info) == 0 else { return false }
-    return (info.st_mode & S_IFMT) == S_IFIFO
-}
-
-/// Whether both ends of `pipe` are real, distinct pipe descriptors.
-///
-/// When pipe(2) fails — in practice only when the descriptor table is full —
-/// Foundation's `Pipe()` does not throw: it returns an object whose handles
-/// report descriptor 0. Spawning with it makes `run()` fail with a misleading
-/// EBADF, and draining or closing it would operate on whatever descriptor 0
-/// really is. Requiring two distinct FIFOs rejects that object even when the
-/// process's own descriptor 0 happens to be a pipe.
-private func isUsablePipe(_ pipe: Pipe) -> Bool {
-    let readFD = pipe.fileHandleForReading.fileDescriptor
-    let writeFD = pipe.fileHandleForWriting.fileDescriptor
-    return readFD != writeFD && isPipeDescriptor(readFD) && isPipeDescriptor(writeFD)
 }
 
 extension Duration {

@@ -483,6 +483,14 @@ final class ProcessCodexAppServerConnection: CodexAppServerConnection,
     ) throws -> ProcessCodexAppServerConnection {
         let process = Process()
         let stdinPipe = Pipe()
+        // A failed pipe(2) hands back descriptor 0 (see `isUsablePipe`), which
+        // is not this connection's to mark or write to.
+        guard isUsablePipe(stdinPipe) else { throw POSIXError(.EMFILE) }
+        // `send` writes requests into this end, and the app-server can exit
+        // under any of them, which fails the write with EPIPE. Marking it
+        // before the first write keeps that failure from raising SIGPIPE in
+        // whatever process runs this.
+        PipeSIGPIPE.suppress(on: stdinPipe.fileHandleForWriting.fileDescriptor)
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let connection = ProcessCodexAppServerConnection(

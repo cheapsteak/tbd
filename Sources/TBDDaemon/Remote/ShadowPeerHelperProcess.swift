@@ -240,6 +240,20 @@ public struct ShadowPeerHelperProcessSpawner: ShadowPeerHelperSpawning {
             throw ShadowPeerHelperError.spawnFailed(
                 handle: invocation.handle, detail: String(describing: error))
         }
+        // A failed pipe(2) hands back descriptor 0 (see `isUsablePipe`), this
+        // process's own stdin, which the spawner must not hand to the helper,
+        // mark or write to.
+        guard isUsablePipe(stdinPipe) else {
+            throw ShadowPeerHelperError.spawnFailed(
+                handle: invocation.handle, detail: "could not create the helper's stdin pipe")
+        }
+        // `send` writes frames into this end, and the helper can exit under
+        // any of them, which fails the write with EPIPE. Marking it before the
+        // first write keeps that failure from raising SIGPIPE in whatever
+        // process runs this. It is marked here, on the stdin pipe alone, and
+        // not in `Pipe.closeOnExec()`, which also made the stdout pipe the
+        // helper writes to (`PipeSIGPIPE` says why).
+        PipeSIGPIPE.suppress(on: stdinPipe.fileHandleForWriting.fileDescriptor)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice

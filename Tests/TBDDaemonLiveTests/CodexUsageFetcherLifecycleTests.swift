@@ -49,12 +49,56 @@ struct CodexUsageFetcherLifecycleTests {
         #expect(result.unavailableReason == "Usage unavailable")
         try await fixture.waitUntilDead(pid)
     }
+
+    /// The session writes JSON-RPC requests into the child's stdin, and a CLI
+    /// that exits under a write fails it with EPIPE. `start` marks the write
+    /// end `F_SETNOSIGPIPE` so that failure raises no SIGPIPE. The session
+    /// keeps the write end to itself until it is cancelled, so the test reaches
+    /// it as the pipe peer of the fake's copy of its stdin
+    /// (`pipeWriteEnd(peerOf:inProcess:)`) and reads the flag back before
+    /// cancelling.
+    ///
+    /// The copy, not fd 0: the fake blocks in the builtin `read <&3`, and for
+    /// as long as that runs the shell has moved the FIFO onto fd 0 and parked
+    /// the stdin pipe on a descriptor of its own choosing, so fd 0 is no pipe
+    /// at all when the test looks. The fake therefore keeps its stdin on
+    /// `ProcessFixture.stdinCopyDescriptor` from before it records its pid, and
+    /// both ends stay open across the lookup: the session's until the cancel,
+    /// the fake's until it is killed.
+    @Test func stdinWriteEndIsMarkedNoSIGPIPE() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        let fetch = Task {
+            await fixture.fetcher(clock: EventDrivenTestClock()).fetch()
+        }
+        defer { fetch.cancel() }
+        let pid = try await fixture.waitForPID()
+        defer { fixture.killIfStillAlive(pid) }
+
+        let writeEnd = pipeWriteEnd(peerOf: ProcessFixture.stdinCopyDescriptor, inProcess: pid)
+        let noSIGPIPE = writeEnd.map { fcntl($0, F_GETNOSIGPIPE) }
+
+        fetch.cancel()
+        _ = await fetch.value
+        try await fixture.waitUntilDead(pid)
+
+        let readBack = noSIGPIPE.map { "F_GETNOSIGPIPE read \($0)" }
+            ?? "no descriptor in this process was the pipe peer of the fake's copy of its stdin"
+        #expect(
+            noSIGPIPE == 1,
+            "start must mark the stdin pipe's write end F_SETNOSIGPIPE; \(readBack)")
+    }
 }
 
 private struct ProcessFixture {
     private struct PollingFailure: Error, CustomStringConvertible {
         let description: String
     }
+
+    /// Where the fake keeps a copy of its stdin, the read end of the session's
+    /// stdin pipe. `read <&3` takes fd 0 over while it blocks, so this is the
+    /// descriptor `stdinWriteEndIsMarkedNoSIGPIPE` looks up.
+    static let stdinCopyDescriptor: Int32 = 4
 
     let directory: URL
     let pidMarker: URL
@@ -77,6 +121,7 @@ private struct ProcessFixture {
             arguments: [
                 "-c",
                 """
+                exec \(Self.stdinCopyDescriptor)<&0
                 printf '%s' "$$" > "$1"
                 trap '' TERM
                 exec 3<> "$2"

@@ -208,6 +208,11 @@ final class PaneFanout: @unchecked Sendable {
         let ok = fds.withUnsafeMutableBufferPointer { buf in pipe(buf.baseAddress) == 0 }
         if !ok { throw PaneFanoutError.pipeAllocationFailed(errno) }
         let (readFD, writeFD) = (fds[0], fds[1])
+        // The viewer holding the read end can go at any moment, and every
+        // write after that fails with EPIPE. Marking the write end before the
+        // first write keeps those failures from raising SIGPIPE in whatever
+        // process runs this.
+        PipeSIGPIPE.suppress(on: writeFD)
         // Nonblocking write end: a slow app-side reader must never stall the
         // reader thread. EAGAIN → queue-and-drain (Phase B M1): the unwritten
         // remainder is queued per pane (cap `queueCap`) and a GCD drain

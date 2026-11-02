@@ -393,6 +393,54 @@ struct CodexSessionImporterTests {
         #expect(!message.contains("Codex reported:"))
     }
 
+    /// `send` writes into the child's stdin, and an app-server that exits
+    /// under a write fails it with EPIPE. `start` marks the write end
+    /// `F_SETNOSIGPIPE` so that failure raises no SIGPIPE. The connection keeps
+    /// the write end to itself, so the test reaches it as the pipe peer of the
+    /// child's stdin (`pipeWriteEnd(peerOf:inProcess:)`), while the child holds
+    /// that stdin open in a blocked `cat`, and reads the flag back.
+    ///
+    /// Tier 2: it spawns one real child, which `close()` ends.
+    @Test("the app-server connection marks its stdin write end F_SETNOSIGPIPE")
+    func connectionMarksItsStdinWriteEndNoSIGPIPE() async throws {
+        let dir = try makeScratchDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidFile = dir.appendingPathComponent("child.pid")
+        // `exec` keeps the pid the child recorded, and `cat` keeps fd 0, the
+        // pipe's read end, open until close() closes the write end.
+        let script = try makeFakeCodex(in: dir, body: """
+            echo $$ > '\(pidFile.path)'
+            exec cat > /dev/null
+            """)
+        let connection = try ProcessCodexAppServerConnection.start(
+            executablePath: script.path,
+            codexHome: dir,
+            workingDirectory: dir,
+            clock: EventDrivenTestClock())
+        defer { connection.close() }
+
+        guard await pollUntilTrue(timeout: TestDeadlines.saturatedPass, {
+            Self.recordedPID(at: pidFile) != nil
+        }) == .satisfied, let pid = Self.recordedPID(at: pidFile) else {
+            throw PollTimedOut(description: "the fake app-server never recorded its pid")
+        }
+        let found = pipeWriteEnd(peerOf: STDIN_FILENO, inProcess: pid)
+        let writeEnd = try #require(
+            found, "no descriptor in this process is the write end of the app-server's stdin pipe")
+        let noSIGPIPE = fcntl(writeEnd, F_GETNOSIGPIPE)
+        #expect(
+            noSIGPIPE == 1,
+            "start must mark the stdin pipe's write end F_SETNOSIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE)")
+    }
+
+    private static func recordedPID(at url: URL) -> pid_t? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        guard let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
     @Test("stderr tail keeps the last lines within the cap")
     func stderrTailKeepsRecentLinesWithinCap() {
         let tail = CodexSessionImportError.stderrTail(

@@ -167,6 +167,18 @@ private final class CodexUsageSession: @unchecked Sendable {
     }
 
     func start() {
+        // A failed pipe(2) hands back descriptor 0 (see `isUsablePipe`), which
+        // is not this session's to mark or write to, so the session finishes
+        // with the result a missing CLI gives.
+        guard isUsablePipe(stdinPipe) else {
+            finish(CodexUsageResult(unavailableReason: "Codex CLI unavailable"))
+            return
+        }
+        // `send` writes requests into this end, and the CLI can exit under any
+        // of them, which fails the write with EPIPE. Marking it before the
+        // first write keeps that failure from raising SIGPIPE in whatever
+        // process runs this.
+        PipeSIGPIPE.suppress(on: stdinPipe.fileHandleForWriting.fileDescriptor)
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardInput = stdinPipe
