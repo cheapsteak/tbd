@@ -52,8 +52,8 @@ extension SidebarOutlineController {
     }
 
     /// Every row view AppKit adds — fresh, reused, or moved to a new row —
-    /// takes its tint and guide lines from the current tree, so no view shows
-    /// a configuration from the row it held before.
+    /// takes its highlight and guide lines from the current tree, so no view
+    /// shows a configuration from the row it held before.
     func outlineView(_ outlineView: NSOutlineView, didAdd rowView: NSTableRowView, forRow row: Int) {
         guard let sidebarRow = rowView as? SidebarRowView,
               let item = outlineView.item(atRow: row) as? SidebarItem,
@@ -160,27 +160,47 @@ extension SidebarOutlineController {
         applyHover(to: cell, id: id)
     }
 
-    /// The row view's tint origin, guide lines and provider highlight.
+    /// The row view's indentation, guide lines, model selection, hover and
+    /// nest highlight. A header draws selected while `AppState` selects what
+    /// it stands for — its repo, the Scratch section, its provider — which a
+    /// rebuild carries to it as a changed model.
     func configure(_ rowView: SidebarRowView, node: SidebarNode) {
+        let isHovered = hoverState.row == node.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
         switch node.kind {
         case .worktree(let model):
             let ancestry = worktreeAncestorCount(of: node.id)
             configuration.guideCount = ancestry
-            configuration.tintLevel = max(model.depth - ancestry, 0)
+            configuration.indentLevel = max(model.depth - ancestry, 0)
             // The pin shows on hover, and always once pinned.
-            configuration.showsPinGap = (model.isPinned || hoverState.row == node.id) && !model.isMain
+            configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         case .remoteSession(let model):
-            configuration.tintLevel = model.depth
+            configuration.indentLevel = model.depth
+        case .scratchHeader(let model), .repoHeader(let model):
+            configuration.isSelectedByModel = model.isSelected
         case .providerHeader(let model):
-            configuration.highlightsSelectedProvider = model.isSelected
-        case .scratchHeader, .repoHeader, .groupHeader, .scratchPrompt:
+            configuration.isSelectedByModel = model.isSelected
+        case .groupHeader, .scratchPrompt:
             break
         }
+        configuration.isHovered = isHovered && Self.showsHoverHighlight(node.kind)
         configuration.isNestTarget = nestTargetID == node.id
         rowView.configuration = configuration
         configuredRowViews[ObjectIdentifier(rowView)] = node.id
+    }
+
+    /// Whether a row of `kind` draws the hover highlight: every row whose
+    /// click selects something — the row itself, a header's repo, section or
+    /// provider, or the scratch space the prompt creates and selects. A group
+    /// header's click only opens or closes the group, so it draws none.
+    static func showsHoverHighlight(_ kind: SidebarNodeKind) -> Bool {
+        switch kind {
+        case .worktree, .remoteSession, .scratchHeader, .repoHeader, .providerHeader, .scratchPrompt:
+            true
+        case .groupHeader:
+            false
+        }
     }
 
     /// How many worktree rows `id` sits under: `WorktreeRowView`'s

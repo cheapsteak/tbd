@@ -63,8 +63,8 @@ struct DockRow: Equatable {
 ///   type. A drop calls `AppState.reorderPins(fromOffsets:toOffset:)` with
 ///   offsets into the roots, as the SwiftUI dock's `.onMove` does.
 /// - **Hover.** A `SidebarHoverTracker` of its own shows the hovered row's
-///   gutter pin and nested `+`, as the outline's rows show them. The `+` opens
-///   the one `SidebarPlusMenu` the whole sidebar shares.
+///   highlight, gutter pin and nested `+`, as the outline's rows show them.
+///   The `+` opens the one `SidebarPlusMenu` the whole sidebar shares.
 ///
 /// Every dock row is `PinnedDockMetrics.rowHeight` tall, which the container's
 /// height clamp counts on.
@@ -199,7 +199,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         column.isEditable = false
         table.addTableColumn(column)
         table.headerView = nil
-        // Custom drawing, as in the outline: `SidebarRowView` draws the tint.
+        // Custom drawing, as in the outline: `SidebarRowView` draws the
+        // highlight.
         table.style = .plain
         table.selectionHighlightStyle = .regular
         table.rowSizeStyle = .custom
@@ -600,16 +601,18 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         applyHover(to: cell, id: id)
     }
 
-    /// The row view's tint origin and guide lines: one line per level of a
-    /// descendant's depth, as `WorktreeRowView` draws them, broken where the
-    /// gutter pin shows — on hover, and always once pinned.
+    /// The row view's guide lines — one per level of a descendant's depth,
+    /// as `WorktreeRowView` draws them, broken where the gutter pin shows: on
+    /// hover, and always once pinned — and its hover highlight.
     private func configureRowView(_ rowView: SidebarRowView, row: DockRow) {
+        let isHovered = hoverState.row == row.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.guideCount = row.depth
-            configuration.showsPinGap = (model.isPinned || hoverState.row == row.id) && !model.isMain
+            configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
+        configuration.isHovered = isHovered
         rowView.configuration = configuration
     }
 
@@ -635,8 +638,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         applyHoverToAvailableRows()
     }
 
-    /// Hands every row view the table has its pin gap, and every cell its
-    /// hover.
+    /// Hands every row view the table has its hover highlight and pin gap,
+    /// and every cell its hover.
     func applyHoverToAvailableRows() {
         table.enumerateAvailableRowViews { rowView, index in
             guard self.rows.indices.contains(index) else { return }
@@ -998,6 +1001,14 @@ final class DockTableView: NSTableView {
     /// is an override.
     override func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
         true
+    }
+
+    /// Every cell ends `SidebarNativeMetrics.trailingCellInset` short of the
+    /// row's trailing edge, as the outline's cells do.
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        var frame = super.frameOfCell(atColumn: column, row: row)
+        frame.size.width = max(frame.width - SidebarNativeMetrics.trailingCellInset(), 0)
+        return frame
     }
 
     /// Whether `point`, in the table's coordinates, lands on a button inside

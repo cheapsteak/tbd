@@ -81,7 +81,8 @@ extension SidebarOutlineController {
             items.retain(only: tree)
             reconfigure(Set(update.reconfigure))
             // A move changes a row's ancestors even when its own model stays
-            // the same, and the row view's tint and guide lines follow them.
+            // the same, and the row view's indentation and guide lines follow
+            // them.
             if !update.steps.isEmpty { refreshRowViewConfigurations() }
             noteHeights(update.heightChanged)
         }
@@ -187,8 +188,8 @@ extension SidebarOutlineController {
         }
     }
 
-    /// Re-derives every row view's tint and guide lines from the current
-    /// tree, after `endUpdates`, by the row each view now shows. Cheap — only
+    /// Re-derives every row view's configuration from the current tree,
+    /// after `endUpdates`, by the row each view now shows. Cheap — only
     /// the views the outline holds, each an ancestor walk — and a view whose
     /// configuration is unchanged does not redraw.
     private func refreshRowViewConfigurations() {

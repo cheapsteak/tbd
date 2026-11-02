@@ -165,6 +165,9 @@ struct DockTableControllerTests {
         #expect(root.plusButton.isHidden)
         let restingGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(restingGap == false)
+        let restingHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let neitherHovered: [Bool?] = [false, false]
+        #expect(restingHover == neitherHovered, "A row draws the hover highlight with no pointer over it")
 
         // Over the descendant: its pin shows, and its guide line breaks there.
         tracker.pointerMoved(toWindowPoint: childPoint)
@@ -172,12 +175,19 @@ struct DockTableControllerTests {
         #expect(!child.pinButton.isHidden, h.hoverEvidence(at: childPoint))
         let hoveredGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(hoveredGap == true, h.hoverEvidence(at: childPoint))
+        // Only the hovered row draws the hover highlight.
+        let childHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let childOnly: [Bool?] = [false, true]
+        #expect(childHover == childOnly, h.hoverEvidence(at: childPoint))
 
         // Over the root: its nested `+` shows, and the descendant's pin goes.
         tracker.pointerMoved(toWindowPoint: rootPoint)
         #expect(h.dock.hoverState.row == .worktree(a.id), h.hoverEvidence(at: rootPoint))
         #expect(!root.plusButton.isHidden, h.hoverEvidence(at: rootPoint))
         #expect(child.pinButton.isHidden)
+        let rootHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        let rootOnly: [Bool?] = [true, false]
+        #expect(rootHover == rootOnly, h.hoverEvidence(at: rootPoint))
 
         // The pointer leaves: both go.
         tracker.pointerExited()
@@ -186,6 +196,8 @@ struct DockTableControllerTests {
         #expect(child.pinButton.isHidden)
         let exitedGap = h.rowView(.worktree(a1.id))?.configuration.showsPinGap
         #expect(exitedGap == false)
+        let exitedHover = [a.id, a1.id].map { h.rowView(.worktree($0))?.configuration.isHovered }
+        #expect(exitedHover == neitherHovered, "A row kept the hover highlight after the pointer left")
 
         // A drag clears the hover.
         tracker.pointerMoved(toWindowPoint: rootPoint)

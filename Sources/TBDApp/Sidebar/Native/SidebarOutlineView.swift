@@ -6,7 +6,11 @@ import AppKit
 /// The insets are `SidebarHeaderMetrics`' values — the `listRowInsets` the
 /// SwiftUI rows carry — measured from `listEdgeInset`, which stands in for the
 /// SwiftUI `List`'s own leading margin. That margin is an estimate; the render
-/// harness that draws both paths side by side is where it gets tuned.
+/// harness that draws both paths side by side is where it gets tuned. When the
+/// row highlight is inset from the row's edges, every column moves right
+/// together to clear it (`leadingShift(highlightInset:)`), and every cell ends
+/// short of the row's trailing edge (`trailingCellInset(highlightInset:)`);
+/// edge to edge, neither moves anything.
 enum SidebarNativeMetrics {
     /// Each nesting level adds this much, as `WorktreeRowView`'s
     /// `indentLevel * 16` does.
@@ -19,15 +23,48 @@ enum SidebarNativeMetrics {
     /// down the gutter under that level's leading icon.
     static let guideLineOffset: CGFloat = 8
 
-    /// Where a section header's chrome starts: `headerRowLeadingInset`.
+    /// Where a section header's chrome starts: `headerRowLeadingInset`, moved
+    /// clear of the row highlight's leading edge.
     static var headerContentInset: CGFloat {
-        listEdgeInset + SidebarHeaderMetrics.headerRowLeadingInset
+        headerInset(highlightInset: SidebarRowHighlight.horizontalInset)
     }
 
-    /// Where a depth-0 row's content starts: `childRowLeadingInset`. Rows,
-    /// group headers and the scratch prompt all hang from it.
-    static func rowContentInset(chevronBeforeTitle: Bool) -> CGFloat {
+    /// `headerContentInset` beside a highlight `highlightInset` in from the
+    /// row's edges.
+    static func headerInset(highlightInset: CGFloat) -> CGFloat {
+        unshiftedHeaderInset + leadingShift(highlightInset: highlightInset)
+    }
+
+    /// Where a depth-0 row's content starts: `childRowLeadingInset`, moved
+    /// with the headers. Rows, group headers and the scratch prompt all hang
+    /// from it.
+    static func rowContentInset(chevronBeforeTitle: Bool,
+                                highlightInset: CGFloat = SidebarRowHighlight.horizontalInset) -> CGFloat {
         listEdgeInset + SidebarHeaderMetrics.childRowLeadingInset(chevronBeforeProjectName: chevronBeforeTitle)
+            + leadingShift(highlightInset: highlightInset)
+    }
+
+    /// How far every column moves right beside a highlight `highlightInset`
+    /// in from the row's edges: enough for a header's chrome, the leftmost
+    /// content, to clear the highlight's leading edge by
+    /// `SidebarRowHighlight.minimumContentGap`. Headers and rows move
+    /// together, so a row's content keeps its place under its section's
+    /// title, and the gutter pin keeps its place beside the row's content.
+    static func leadingShift(highlightInset: CGFloat) -> CGFloat {
+        SidebarRowHighlight.contentShift(inset: highlightInset, margin: unshiftedHeaderInset)
+    }
+
+    /// How far every cell's trailing edge sits in from the row's: enough for
+    /// the trailing controls and marks, which can reach the cell's edge, to
+    /// clear the highlight's trailing edge by the same gap.
+    static func trailingCellInset(highlightInset: CGFloat = SidebarRowHighlight.horizontalInset) -> CGFloat {
+        SidebarRowHighlight.contentShift(inset: highlightInset, margin: 0)
+    }
+
+    /// Where a section header's chrome starts before any move:
+    /// `headerRowLeadingInset` from the list's edge.
+    private static var unshiftedHeaderInset: CGFloat {
+        listEdgeInset + SidebarHeaderMetrics.headerRowLeadingInset
     }
 }
 
@@ -39,8 +76,9 @@ enum SidebarNativeMetrics {
 /// from 1 down one indentation step to the left of where `NSOutlineView` would
 /// put it — level `L` at `(L - 1) * 16`, level 0 at the column's edge — and
 /// each cell then insets its own content the way the SwiftUI row's
-/// `listRowInsets` do. The native disclosure triangle is hidden; headers draw
-/// the SwiftUI path's chevrons themselves.
+/// `listRowInsets` do. Every cell ends `SidebarNativeMetrics.trailingCellInset`
+/// short of the row's trailing edge. The native disclosure triangle is hidden;
+/// headers draw the SwiftUI path's chevrons themselves.
 final class SidebarOutlineView: NSOutlineView {
     /// Kept alive as long as the outline: the tracker owns the outline's one
     /// tracking area, and a tracking area does not retain its owner.
@@ -187,6 +225,7 @@ final class SidebarOutlineView: NSOutlineView {
         let depth = max(level(forRow: row) - 1, 0)
         let columnRect = rect(ofColumn: column)
         let x = columnRect.minX + CGFloat(depth) * indentationPerLevel
-        return NSRect(x: x, y: frame.minY, width: max(columnRect.maxX - x, 0), height: frame.height)
+        let maxX = columnRect.maxX - SidebarNativeMetrics.trailingCellInset()
+        return NSRect(x: x, y: frame.minY, width: max(maxX - x, 0), height: frame.height)
     }
 }

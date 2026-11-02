@@ -12,7 +12,7 @@ import TestSupport
 
 /// The native sidebar's cells and row view: every model input reaches the
 /// cell, reuse cannot leak opacity, each cell reuses by identifier, the row
-/// view draws the selection tint, and heights map from height classes.
+/// view draws each highlight state, and heights map from height classes.
 /// Spec: docs/specs/2026-10-31-native-sidebar-design.md, "Units".
 @MainActor
 @Suite("Sidebar cells")
@@ -162,18 +162,34 @@ struct SidebarCellTests {
         }
     }
 
-    @Test func rowViewDrawsTintWhenSelected() throws {
-        let plain = try Self.capture(selected: false)
-        let selected = try Self.capture(selected: true)
-        // Inside the tint, clear of any guide line.
-        let unselectedInside = try #require(plain.colorAt(x: 200, y: 14))
-        let selectedInside = try #require(selected.colorAt(x: 200, y: 14))
-        #expect(unselectedInside.alphaComponent < 0.05, "An unselected row paints nothing there")
-        #expect(selectedInside.alphaComponent > 0.1, "A selected row paints the tint")
-        // The tint starts at the row's content origin, as the SwiftUI row's
-        // background does, not at the row view's edge.
-        let selectedOutside = try #require(selected.colorAt(x: 4, y: 14))
-        #expect(selectedOutside.alphaComponent < 0.05)
+    /// Each state paints its own alpha, once, across the whole row: past the
+    /// content, and at the leading and trailing edges, which the highlight
+    /// reaches whatever the row's content origin.
+    @Test func rowViewDrawsHighlightForEachState() throws {
+        let light = SidebarRowHighlight.light
+        let cases: [(label: String, rep: NSBitmapImageRep, alpha: CGFloat)] = try [
+            ("plain", Self.capture(selected: false), 0),
+            ("hovered", Self.capture(selected: false, hovered: true), light.hovered),
+            ("selected", Self.capture(selected: true), light.selected),
+            ("selected and hovered", Self.capture(selected: true, hovered: true), light.selectedHovered),
+            // A header its model selects draws as a selected row does.
+            ("selected by its model", Self.capture(selected: false, selectedByModel: true), light.selected),
+            // Selected both ways, it still fills once: twice would read 0.36.
+            ("selected both ways", Self.capture(selected: true, selectedByModel: true), light.selected),
+        ]
+        for (label, rep, alpha) in cases {
+            // Past the content, clear of any guide line; at the leading edge,
+            // left of the content origin; at the trailing edge.
+            for x in [rep.pixelsWide * 2 / 3, 1, rep.pixelsWide - 2] {
+                let painted = try #require(rep.colorAt(x: x, y: rep.pixelsHigh / 2)).alphaComponent
+                #expect(abs(painted - alpha) < 0.02, "A \(label) row paints \(painted) at x \(x), not \(alpha)")
+            }
+        }
+
+        // The dark appearance has its own hover alpha.
+        let darkHovered = try Self.capture(selected: false, hovered: true, appearance: .darkAqua)
+        let darkPainted = try #require(darkHovered.colorAt(x: 1, y: darkHovered.pixelsHigh / 2)).alphaComponent
+        #expect(abs(darkPainted - SidebarRowHighlight.dark.hovered) < 0.02, "A dark hovered row paints \(darkPainted)")
     }
 
     @Test func accessibilityLabelIncludesStatus() throws {
@@ -253,12 +269,15 @@ struct SidebarCellTests {
             canCreate: false, isCreateEnabled: true)
     }
 
-    /// One row view, drawn into a bitmap off any window.
-    static func capture(selected: Bool) throws -> NSBitmapImageRep {
+    /// One row view, drawn into a bitmap off any window. `selected` is the
+    /// list's selection; `selectedByModel` is a header's.
+    static func capture(selected: Bool, hovered: Bool = false, selectedByModel: Bool = false,
+                        appearance: NSAppearance.Name = .aqua) throws -> NSBitmapImageRep {
         let rowView = SidebarRowView(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
-        rowView.appearance = NSAppearance(named: .aqua)
+        rowView.appearance = NSAppearance(named: appearance)
         rowView.backgroundColor = .clear
-        rowView.configuration = SidebarRowView.Configuration(contentOrigin: 20)
+        rowView.configuration = SidebarRowView.Configuration(
+            contentOrigin: 20, isSelectedByModel: selectedByModel, isHovered: hovered)
         rowView.isSelected = selected
         let rep = try #require(rowView.bitmapImageRepForCachingDisplay(in: rowView.bounds))
         rowView.cacheDisplay(in: rowView.bounds, to: rep)
