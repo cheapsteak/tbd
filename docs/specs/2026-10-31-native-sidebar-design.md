@@ -4,19 +4,17 @@ Status: design, approved for implementation planning
 Date: 2026-10-31
 Tracks: #142 (drag to nest)
 
-This spec moves the app's sidebar from a SwiftUI `List` onto AppKit: an
-`NSOutlineView` for the main list and an `NSTableView` for the pinned dock, both
-drawn with native AppKit cells. On that foundation it adds the first feature the
-`List` could not carry: dragging worktrees to nest, un-nest and reorder them at
-any depth.
+This spec puts the app's sidebar on AppKit: an `NSOutlineView` for the main
+list and an `NSTableView` for the pinned dock, both drawn with native AppKit
+cells. On that foundation it adds a feature a SwiftUI `List` cannot carry:
+dragging worktrees to nest, un-nest and reorder them at any depth.
 
 ## Problem
 
-The sidebar is one SwiftUI `List(selection:)` in
-`Sources/TBDApp/Sidebar/SidebarView.swift`, with nesting drawn as leading
-padding, plus a second `List` for the pinned dock. On macOS a `List` is backed by
-an AppKit table, but SwiftUI exposes only part of that table, and the sidebar has
-spent its life working around the gap:
+A sidebar built as one SwiftUI `List(selection:)`, with nesting drawn as leading
+padding and a second `List` for the pinned dock, cannot carry that feature. On
+macOS a `List` is backed by an AppKit table, but SwiftUI exposes only part of
+that table, and TBD's `List` sidebar worked around the gap throughout:
 
 - **Drag to nest cannot be built on it.** Issue #142 records eight failed
   attempts. On a `List` row, `.onMove` and `.draggable`/`.dropDestination` cannot
@@ -25,16 +23,16 @@ spent its life working around the gap:
   rows" cannot be told apart.
 - **Reorder indices go stale.** `.onMove` hands back indices captured against an
   earlier snapshot. A daemon push between the capture and the callback crashed
-  the app (#175), and every reorder site now carries a stale-index guard.
+  the app (#175), and every reorder site had to carry a stale-index guard.
 - **Silent failure modes.** Wrapping a root row in a bare `ForEach` stops AppKit
   from ever starting a drag session (#518). A tap gesture on a row swallows the
   mouse-down the table needs to start one (#83, #142).
-- **Selection gaps.** The backing table has no selection anchor on a remote
-  session row, so arrow-key traversal from one is not guaranteed.
-- **Hover and hit-testing workarounds.** Rows carry near-transparent backgrounds
-  to be hit-testable, `onHover(false)` can fail to arrive after a view is torn
-  down, and scrolling to a newly expanded row must wait a run-loop turn for its
-  rows to mount.
+- **Selection gaps.** The backing table had no selection anchor on a remote
+  session row, so arrow-key traversal from one was not guaranteed.
+- **Hover and hit-testing workarounds.** Rows carried near-transparent
+  backgrounds to be hit-testable, `onHover(false)` could fail to arrive after a
+  view was torn down, and scrolling to a newly expanded row had to wait a
+  run-loop turn for its rows to mount.
 - **Render cost.** Field measurement on a sidebar of about 320 rows put 15% of
   stall samples in the `List`'s own diff (`OutlineListCoordinator.recursivelyDiffRows`).
 
@@ -54,7 +52,8 @@ never re-nests a lane the user placed. `AppState.moveWorktree` has no caller.
 - Drag to nest a worktree under another, to un-nest it, and to reorder siblings
   at any depth; reorder scratch spaces within their section; drag several
   selected rows at once.
-- Everything else looks and behaves as it does today.
+- Everything else keeps the behaviors in the parity checklist ("The sidebar
+  and the window").
 
 ## Non-goals
 
@@ -63,12 +62,13 @@ never re-nests a lane the user placed. `AppState.moveWorktree` has no caller.
 - Dragging unadopted remote sessions or any header.
 - Reordering repos. `Repo` has no stored order.
 - Collapsible worktree subtrees. They stay always expanded.
-- Changing the footer (Add Repository, the filter menu), the profile picker
-  panel, the emoji panel, popovers or sheets. None is a list; all stay SwiftUI.
+- AppKit versions of the footer (Add Repository, the filter menu), the profile
+  picker panel, the emoji panel, popovers or sheets. None is a list; all are
+  SwiftUI.
 
 ## Scope
 
-The native sidebar renders every row the SwiftUI sidebar renders:
+The native sidebar renders every kind of sidebar row:
 
 - **Scratch section** – its header, scratch space rows, the "Click to create
   scratch space" prompt when there are none, and its Hibernated group.
@@ -82,7 +82,7 @@ The native sidebar renders every row the SwiftUI sidebar renders:
   height clamp (at most five rows and 40% of the list's height), and pin reorder.
 
 `SidebarSectionLayout` and its flags (`sidebarWorkflowGroupsKey`,
-`sidebarCollapseEndedSessionsKey`) decide which rows appear, exactly as today.
+`sidebarCollapseEndedSessionsKey`) decide which rows appear.
 
 ## Architecture
 
@@ -99,17 +99,18 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
 - **`SidebarTreeBuilder`** – reads `AppState` and returns a `SidebarTree`. It
   reuses the existing pure types: `SidebarSectionLayout`, `RowStatusIndicator`,
   `PRBindingPresentation`, `PinnedDockContent` and the remote grouping in
-  `SidebarRemoteGroups`. Work that SwiftUI row bodies repeat on every evaluation
-  today runs here once per rebuild. Text needed only on hover, such as PR
-  freshness tooltips, is computed when the pointer arrives, not per rebuild.
+  `SidebarRemoteGroups`. Row work runs here, once per rebuild, never in a cell.
+  Text needed only on hover, such as PR freshness tooltips, is computed when
+  the pointer arrives, not per rebuild.
 - **`SidebarRowModelFactory`** – computes each worktree and remote session row's
-  model from `AppState`, once per rebuild, through the same pure helpers the
-  matching SwiftUI row uses. The builder takes its row models from it, and so
-  does the dock, which builds no tree.
+  model from `AppState`, once per rebuild, through the pure presentation
+  helpers (`WorktreeRowPresentation`, `RemoteSessionRowPresentation` and the
+  rest). The builder takes its row models from it, and so does the dock, which
+  builds no tree.
 - **`SidebarContainerController`** – the native sidebar's root: the outline's
   scroll view filling the column, then a divider and the dock along the bottom
-  edge, the stack the SwiftUI footer group draws. It sets the dock's height in
-  closed form, `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
+  edge, above the SwiftUI footer. It sets the dock's height in closed form,
+  `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
   five rows and 40% of the list above the divider — on every layout and
   whenever the dock's row count changes. It hands the outline and the dock one
   sheet presenter and one `+` menu, and gives the dock the outline's answers
@@ -127,8 +128,8 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   including opacity, because `prepareForReuse` resets a reused view's alpha. A
   `SidebarRowView` (`NSTableRowView`) draws the row's highlight and the
   hierarchy guide lines over it ("Row highlight and guide lines" below). The
-  existing AppKit views `TypingDotsView` and `InlineTextField` are reused
-  inside the cells.
+  working dots are a `TypingDotsNSView`, and an inline rename hosts
+  `RenameableLabel` with its `InlineTextField`.
 - **`DockTableController`** – an `NSTableView` over `PinnedDockContent.rows`,
   with row models from `SidebarRowModelFactory`, the worktree and remote
   session cells, and the same update loop.
@@ -136,12 +137,12 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   tracking area that reports the hovered row, the part of it under the pointer,
   and the sections whose headers it reveals, with the repo header's 80 ms
   debounce on the injected clock (see "Hover").
-- **`SidebarPlusMenu`** – the one `+` menu both lists share: the existing
+- **`SidebarPlusMenu`** – the one `+` menu both lists share:
   `WorktreeProfilePickerView` in `FloatingPanel`, opened and closed by
   `HoverMenuModel` and anchored to whichever AppKit `+` the pointer reached.
   Only one can be open, so binding it to another `+` closes the first.
 - **`SidebarMenus`** – builds a row's or header's context menu from the
-  existing models when it is asked for, never per rebuild (see "Context menus,
+  shared menu models when it is asked for, never per rebuild (see "Context menus,
   popovers and sheets").
 - **`NativeSidebarSheetPresenter`** – the native sidebar's one sheet slot. The
   controllers set it from menus and buttons; `NativeSidebarView` presents it. A
@@ -234,23 +235,21 @@ tracking in `layout` and `draw` is not used either: on macOS 15 it needs an
 ### Row heights and indentation
 
 Heights are fixed per kind and variant. They come from the row model, so nothing
-measures. A worktree row is `WorktreeRowView.rowHeight`, 28 pt (the value the
-dock already uses), whether or not it shows a subtitle ("Creating worktree…",
-"Running setup…", "→ promoted to …"): `WorktreeRowView` pins
-`.frame(height: 28)` and stacks the subtitle under the name inside it. A remote
-session row is 28 pt with or without its caption, for the same reason. The rows
-that do grow are headers with a second line — a group header's summary, a
-provider header's issue line — and the row model's height class picks their
-taller variant. Implementation takes each value from the SwiftUI path's
-rendered rows.
+measures. A worktree row is `SidebarNativeMetrics.rowHeight`, 28 pt (the value
+the dock's height arithmetic uses too), whether or not it shows a subtitle
+("Creating worktree…", "Running setup…", "→ promoted to …"): the subtitle
+stacks under the name inside that height. A remote session row is 28 pt with
+or without its caption, for the same reason. The rows that do grow are headers
+with a second line — a group header's summary, a provider header's issue line
+— and the row model's height class picks their taller variant.
 
-Today a section header and the top-level rows beneath it share a leading edge,
-and each nesting level adds 16 pt. In outline terms, a row's visual depth is its
+A section header and the top-level rows beneath it share a leading edge, and
+each nesting level adds 16 pt. In outline terms, a row's visual depth is its
 outline level minus one. The outline uses `indentationPerLevel = 16` and
 overrides `frameOfCell(atColumn:row:)` to apply that offset, and
 `SidebarRowView` draws the guide lines from the same depths. The native
 disclosure triangle is hidden by overriding `frameOfOutlineCell(atRow:)` to
-return `.zero`; headers draw today's chevrons.
+return `.zero`; headers draw their own chevrons.
 
 The outline is configured for custom drawing: `style = .plain`,
 `selectionHighlightStyle = .regular` (`drawSelection(in:)` never runs with
@@ -353,15 +352,14 @@ lines up and marks which of them are active.
 
 - The outline allows multiple selection with native cmd-click and shift-click.
   Worktree, scratch and remote session rows are selectable; headers are not.
-- Clicking a header runs its action through the outline's `action`, calling what
-  the SwiftUI headers call today: `selectRepo(id:)`, `selectScratchSection()`,
-  `selectRemoteProvider(_:)`, or `toggleSidebarGroup(_:)`. A header whose
+- Clicking a header runs its action through the outline's `action`:
+  `selectRepo(id:)`, `selectScratchSection()`, `selectRemoteProvider(_:)`, or
+  `toggleSidebarGroup(_:)`. A header whose
   selection is active (`selectedRepoID`, `selectedScratchSection`,
   `selectedRemoteProvider`) draws as a selected row.
-- **Outline to `AppState`.** `SidebarSelectionBridge` writes the same set of IDs
-  the `List` tags produce today into `appState.selectedWorktreeIDs`: worktree IDs
-  and remote session IDs. That property's `didSet` stays the only place selection
-  is routed, covering pure-remote versus mixed selections, `selectionOrder`,
+- **Outline to `AppState`.** `SidebarSelectionBridge` writes worktree IDs and
+  remote session IDs into `appState.selectedWorktreeIDs`. That property's
+  `didSet` is the only place selection is routed, covering pure-remote versus mixed selections, `selectionOrder`,
   navigation history and unread clearing.
 - **`AppState` to outline.** An `isApplyingModelSelection` guard covers the
   whole apply, through `endUpdates`, so the selection changes `NSOutlineView`
@@ -378,7 +376,7 @@ lines up and marks which of them are active.
 
 ### Expansion and reveal
 
-- Expanded state stays where it lives: `Repo.expanded` in the database, the
+- Expanded state lives in the model: `Repo.expanded` in the database, the
   scratch section's `@AppStorage` key, and `AppState.expandedSidebarGroups`.
 - The setters (`setRepoExpanded(id:expanded:)`, the scratch key,
   `toggleSidebarGroup`) run only from user gestures: chevron clicks and the
@@ -386,16 +384,15 @@ lines up and marks which of them are active.
   outline's own expansion notifications are ignored, since they also fire for
   expansions the controller makes while applying a tree.
 - Worktree subtrees are always expanded; the delegate refuses to collapse them.
-- Reveal calls the same `AppState` methods as the SwiftUI path:
+- The reveals run at the top of every rebuild, through `AppState`:
   `revealSidebarGroups`, the Ended reveal, and the selection reveal with its
-  baseline rule. `SidebarView.revealBaseline` moves to a shared pure function
-  both paths call.
+  baseline rule, the pure `SidebarReveal.baseline`.
 - The controller takes `pendingScrollToWorktreeID` at the top of the rebuild,
   with the reveals, and clears it there, before the tracking is installed. The
   apply that follows scrolls the target row to the center, in the same pass
   that expanded its section; while structure is held, the apply that ends the
-  hold does. A target with no row by then is dropped, as the `List` drops it.
-  No run-loop hop is needed because the controller owns the rows.
+  hold does. A target with no row by then is dropped. No run-loop hop is needed
+  because the controller owns the rows.
 
 ### Hover
 
@@ -412,22 +409,22 @@ lines up and marks which of them are active.
   session), not on its row view, so the highlight and the guide lines keep
   theirs.
 - A worktree row's nested `+` keeps `HoverMenuModel`'s 400 ms hover delay,
-  ⌥-click, and close on app deactivation. It opens the existing SwiftUI
+  ⌥-click, and close on app deactivation. It opens the SwiftUI
   `WorktreeProfilePickerView` in `FloatingPanel`, anchored to the AppKit button.
 - The pin toggle is an AppKit button in the leading gutter, shown on hover and
   always once pinned. It sits on the row's parent's guide line, which breaks
   across it ("Row highlight and guide lines").
-- Tooltips for a truncated name and for the PR glyph use a replica of today's
-  bubble, drawn in an overlay view below the row. Other help text uses
+- Tooltips for a truncated name and for the PR glyph use `RowTooltipBubble`,
+  hosted in an overlay view below the row. Other help text uses
   `toolTip`.
 
 ### Rename
 
-Setting `editingWorktreeID` makes the cell replace its name label with the
-existing `InlineTextField`, with the emoji autocomplete panel anchored to the
-field. New-worktree flows set it to start a rename, as today; a request for a
-row that is not shown yet stays pending until the row appears. The focus-race
-handling in `RenameableLabel` carries over.
+Setting `editingWorktreeID` makes the cell replace its name label with
+`RenameableLabel`'s `InlineTextField`, with the emoji autocomplete panel
+anchored to the field. New-worktree flows set it to start a rename; a request
+for a row that is not shown yet stays pending until the row appears.
+`RenameableLabel` handles the focus race with the terminal views.
 
 A new worktree's creating placeholder is replaced by the daemon's row while its
 rename may still be open, and that is the one case the edit is handed over:
@@ -438,19 +435,18 @@ which a commit then applies to the real row.
 
 ### Context menus, popovers and sheets
 
-- `menu(for:)` builds an `NSMenu` from the existing models: worktree rows from
+- `menu(for:)` builds an `NSMenu` from the shared models: worktree rows from
   `RowActionMenu`, dispatched through `RowActionMenuActions.run`, plus the New
   Cloud/Remote Session items; the repo header's six items, with its confirmation
   as an `NSAlert` sheet; the scratch header's two items; and the remote session
-  row's actions, extracted into a model where they are view-only today. The
-  Collapse and Expand items that keyboard users rely on stay.
-- The provider needs-auth popover presents its existing SwiftUI content through
+  row's actions from `RemoteSessionActionMenu`. The Collapse and Expand items
+  are there for keyboard users.
+- The provider needs-auth popover presents its SwiftUI content through
   `NSPopover`. Sheets present through SwiftUI's `.sheet(item:)`, attached to the
   native sidebar's SwiftUI wrapper and driven by a presenter the controller
   sets from its menus and buttons. They cannot be AppKit sheets:
   `@Environment(\.dismiss)`, which every one of these sheets closes itself
-  with, has no effect on an `NSHostingController` presented from AppKit. The
-  sheet content is unchanged, and so is the SwiftUI path.
+  with, has no effect on an `NSHostingController` presented from AppKit.
 
 ### Keyboard and accessibility
 
@@ -496,8 +492,7 @@ which a commit then applies to the real row.
   click action, which checks whether the click landed on the glyph, and a press
   on it can start a drag like any other point in the row. Because the press
   reaches the outline like any other, the click also selects the row, as a
-  click anywhere else on it does; the SwiftUI glyph, a button, leaves the
-  selection alone. The outline selects on the press, before it can tell a
+  click anywhere else on it does. The outline selects on the press, before it can tell a
   click from the start of a drag, and a drag must be able to start there.
 
 ### Where it can go
@@ -651,7 +646,7 @@ did not have, and a parent the user re-armed stays armed.
   group: `sortOrder`, then `createdAt`, then ID. Rows that tie on `sortOrder`,
   such as a creating placeholder, which starts at 0, then show where the first
   move into their group leaves them, so that move never visibly swaps two rows
-  the user did not touch. The SwiftUI path sorts the same way.
+  the user did not touch.
 - **A pending-move overlay.** The app re-fetches worktrees every 2 s, and other
   paths call `refreshWorktrees` too. Fetches are not serialized: each RPC opens
   its own socket, so a fetch that read the database before the commit can be
@@ -736,16 +731,16 @@ the main thread has a budget:
   size; each call takes under 1 ms on the trees above.
 - **No blocking work** – the rebuild, the drop path and the cells do no IPC, no
   disk access and no Launch Services queries on the main thread, with one
-  exception: the PR glyph is a bundled SVG, which `WorktreeRowView.loadIcon`
-  reads once per icon and caches, as the SwiftUI row does. Whether a scratch
-  space's directory exists, which dims its row, is probed off the main thread:
-  when the set of scratch paths changes, on app activation, and every 60 s on
-  the injected clock, so a folder deleted or restored while the app runs dims
-  or brightens its row. A rebuild follows only when an answer changed.
+  exception: the PR glyph is a bundled SVG, which
+  `WorktreeRowPresentation.loadIcon` reads once per icon and caches. Whether a
+  scratch space's directory exists, which dims its row, is probed off the main
+  thread: when the set of scratch paths changes, on app activation, and every
+  60 s on the injected clock, so a folder deleted or restored while the app runs
+  dims or brightens its row. A rebuild follows only when an answer changed.
 
 `SidebarListUpdateBench` (env-gated, not a CI timing test, since timing on a
-shared runner flakes) is extended to measure a full rebuild and apply, a drop
-and a `validateDrop` call on 320-row and 800-session trees. The rebuild and
+shared runner flakes) measures a full rebuild and apply, a drop and a
+`validateDrop` call on 320-row and 800-session trees. The rebuild and
 apply steps of both lists, the outline's and the dock's, also emit
 `os_signpost` intervals under names of their own, so Instruments can attribute
 a slow frame to the list that spent it.
@@ -879,15 +874,15 @@ take an injected clock, per `CLAUDE.md`.
 
 ## Risks
 
-- **Lost behavior.** The SwiftUI sidebar this replaces is about 7,400 lines
-  with many small interactions. The parity checklist and per-input builder
-  tests target the likeliest losses.
+- **Lost behavior.** A sidebar carries many small interactions; the SwiftUI
+  sidebar the "Problem" section describes ran to about 7,400 lines. The parity
+  checklist and per-input builder tests target the likeliest losses.
 - **A row that stops refreshing.** Native cells redraw only when the controller
   tells them to. The builder is the only reader of `AppState`, so a missed input
   shows up as a builder test that fails, not as a cell that forgot to observe.
 - **Main-thread rebuild cost.** A rebuild walks every row, about 320 on a heavy
-  sidebar today. Coalescing bounds the passes, and the budgets in
-  "Responsiveness", which `SidebarListUpdateBench` measures, bound their cost.
+  install. Coalescing bounds the passes, and the budgets in "Responsiveness",
+  which `SidebarListUpdateBench` measures, bound their cost.
 - **Rows that jump after a drop.** A stale poll or a partial echo could move
   rows back after the user placed them. The pending-move overlay and the
   full-group delta exist to prevent that, and each has a test.
@@ -909,7 +904,7 @@ take an injected clock, per `CLAUDE.md`.
   Issue #142's eight attempts are the evidence.
 - **Hosted SwiftUI row content in AppKit cells.** Fixed-height rows with no
   selectable text avoid the height and text-selection failures that sank hosted
-  rows in the transcript, and hosting would reuse today's row views. It still
+  rows in the transcript, and hosting would reuse SwiftUI row views. It still
   keeps SwiftUI's gesture handling inside every row, the source of the
   mouse-down conflicts in #83 and #142, and SwiftUI body re-evaluation, where
   expensive row work has repeatedly hidden. It also contradicts `CLAUDE.md`'s
