@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDShared
 import TestProcessDefaults
 
 /// Driving helpers for `TableTranscriptScene`, shared by `TableTranscriptPaneTests`
@@ -9,6 +10,43 @@ import TestProcessDefaults
 /// update does, move the clip, and read row geometry back.
 @MainActor
 extension TableTranscriptScene {
+    /// The scene over `items` with the bounds observer running, primed parked
+    /// at the end, as a pane opens on a long session.
+    ///
+    /// `prime(nodes:)` settles with the clip at the top, which realizes and
+    /// measures the first screen of rows. Here every round scrolls to the end
+    /// before it settles instead. The autohiding scroller's arrival after the
+    /// first round changes the column width, and the next round's width change
+    /// drops every height measured before it, so afterwards only the bottom
+    /// window and the rows realized at the end are exact; rows far above carry
+    /// estimates.
+    ///
+    /// Throws first if AppKit's own row-height estimation is on in this
+    /// process: AppKit would then move the clip itself, and every pin and
+    /// hold assertion would fail for that reason instead of its own.
+    static func primedAtEnd(items: [TranscriptItem], appState: AppState) throws -> TableTranscriptScene {
+        let scene = TableTranscriptScene(items: items, appState: appState)
+        scene.coordinator.startObservingScroll()
+        let nodes = transcriptRenderNodes(from: items)
+        for _ in 0..<4 {
+            let widthAtUpdate = scene.tableView.bounds.width
+            // Keep the clip at the end while the update reloads the table, so
+            // whatever realizes is at the end.
+            scene.coordinator.scrollToEnd(animated: false)
+            scene.coordinator.update(
+                nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
+            scene.tableView.tile()
+            scene.coordinator.scrollToEnd(animated: false)
+            scene.settle()
+            if scene.tableView.bounds.width == widthAtUpdate {
+                try scene.requireDelegateRowHeights()
+                return scene
+            }
+        }
+        Issue.record("the table's column width never settled: \(scene.tableView.bounds.width)")
+        return scene
+    }
+
     /// Throws `AppKitRowHeightEstimationIsOn` when the table holds a row
     /// height its delegate does not give for that row.
     ///
