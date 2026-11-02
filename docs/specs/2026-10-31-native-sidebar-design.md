@@ -340,8 +340,11 @@ One set of rules gives every row's part in every line and the lines each focus
 row lights, for both lists: they read a small `GuideHierarchy` protocol — the
 row a row sits under, the rows shown under it, its level, and whether the list
 shows it. `SidebarTree` conforms directly, and the dock reads its preorder rows
-into a `DockGuideHierarchy` once per apply, so a hover only looks its rows'
-lines up.
+into a `DockGuideHierarchy` once per apply. Each list keeps every row's lines
+once it has worked them out: the outline by row ID, from a row's first
+configuration after each apply, with the rest of what the tree gives the row's
+view, and the dock by row. A hover or a selection only looks a row's lines up
+and marks which of them are active.
 
 ## Interaction
 

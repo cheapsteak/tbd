@@ -50,10 +50,9 @@ extension SidebarOutlineController: SidebarMenuHost {
     ///   changed, so the row views keep their configurations.
     func applyHoverToAvailableRows(includingRowViews: Bool = true) {
         outline.enumerateAvailableRowViews { rowView, row in
-            guard let item = self.outline.item(atRow: row) as? SidebarItem,
-                  let node = self.tree.node(item.id) else { return }
+            guard let item = self.outline.item(atRow: row) as? SidebarItem, self.tree.contains(item.id) else { return }
             if includingRowViews, let rowView = rowView as? SidebarRowView {
-                self.configure(rowView, node: node)
+                self.configure(rowView, id: item.id)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.applyHover(to: cell, id: item.id)

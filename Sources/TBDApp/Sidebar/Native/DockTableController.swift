@@ -103,7 +103,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// `rows` as the guide-line rules read them.
     private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
     /// Each row's guide lines, by index into `rows`.
-    private var rowGuides: [RowGuides] = []
+    private var rowGuides: [SidebarGuideLine.RowGuides] = []
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
     var onRowCountChange: (() -> Void)?
@@ -172,16 +172,6 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private struct SelectionKey: Equatable {
         let worktrees: Set<UUID>
         let remote: RemoteSessionSelection?
-    }
-
-    /// One row's guide lines, by the shared rules (`GuideHierarchy`): its
-    /// part in each line above it, and whether it starts its own.
-    private struct RowGuides {
-        var guides: [SidebarGuideLine.Guide] = []
-        /// Each guide's owner, in `guides`' order: what the active lines
-        /// index.
-        var owners: [SidebarNodeID] = []
-        var startsGuide = false
     }
 
     var isHoldingStructure: Bool { !holds.isEmpty }
@@ -660,7 +650,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.level = row.depth
-            let lines = rowGuides.indices.contains(index) ? rowGuides[index] : RowGuides()
+            let lines = rowGuides.indices.contains(index) ? rowGuides[index] : SidebarGuideLine.RowGuides()
             configuration.guides = lines.guides
             if !activeGuideAncestors.isEmpty {
                 configuration.activeGuides = SidebarGuideLine.activeIndices(
@@ -684,16 +674,12 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
     }
 
-    /// Each of `rows`' guide lines, by index: the runs the shared rules give
-    /// it, with the owner's fade carried into its first child
-    /// (`SidebarGuideLine.continuedFadeStart`). Only worktree rows draw
-    /// lines.
-    private static func rowGuides(of rows: [DockRow], in hierarchy: DockGuideHierarchy) -> [RowGuides] {
-        rows.map { row -> RowGuides in
-            guard row.isWorktree else { return RowGuides() }
-            let runs = hierarchy.guideRuns(of: row.id)
-            return RowGuides(guides: SidebarGuideLine.guides(for: runs), owners: runs.map(\.owner),
-                             startsGuide: hierarchy.startsGuide(row.id))
+    /// Each of `rows`' guide lines, by index, by the shared rules
+    /// (`GuideHierarchy.rowGuides(of:)`). Only worktree rows draw lines.
+    private static func rowGuides(of rows: [DockRow],
+                                  in hierarchy: DockGuideHierarchy) -> [SidebarGuideLine.RowGuides] {
+        rows.map { row in
+            row.isWorktree ? hierarchy.rowGuides(of: row.id) : SidebarGuideLine.RowGuides()
         }
     }
 

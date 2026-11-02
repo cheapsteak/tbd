@@ -188,7 +188,7 @@ extension SidebarOutlineController {
                   ids?.contains(item.id) ?? true,
                   let node = self.tree.node(item.id) else { return }
             if let rowView = rowView as? SidebarRowView {
-                self.configure(rowView, node: node)
+                self.configure(rowView, id: node.id)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.configure(cell, kind: node.kind, id: node.id)
@@ -199,14 +199,14 @@ extension SidebarOutlineController {
     /// Re-derives every row view's configuration from the current tree,
     /// by the row each view shows: after an apply that changed the
     /// structure, and when the active guide lines change. Cheap — only the
-    /// views the outline holds, each an ancestor walk — and a view whose
-    /// configuration is unchanged does not redraw.
+    /// views the outline holds, each reading what the tree gave its row
+    /// (`RowViewBase`) — and a view whose configuration is unchanged does
+    /// not redraw.
     func refreshRowViewConfigurations() {
         outline.enumerateAvailableRowViews { rowView, row in
             guard let sidebarRow = rowView as? SidebarRowView,
-                  let item = self.outline.item(atRow: row) as? SidebarItem,
-                  let node = self.tree.node(item.id) else { return }
-            self.configure(sidebarRow, node: node)
+                  let item = self.outline.item(atRow: row) as? SidebarItem else { return }
+            self.configure(sidebarRow, id: item.id)
         }
     }
 

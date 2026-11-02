@@ -72,6 +72,14 @@ extension GuideHierarchy {
         id.isWorktree && shownChildren(of: id).contains { $0.isWorktree }
     }
 
+    /// `id`'s row's lines, as a list keeps them: the guides of its runs
+    /// (`guideRuns(of:)`), each one's owner, and whether it starts its own.
+    func rowGuides(of id: SidebarNodeID) -> SidebarGuideLine.RowGuides {
+        let runs = guideRuns(of: id)
+        return SidebarGuideLine.RowGuides(guides: SidebarGuideLine.guides(for: runs), owners: runs.map(\.owner),
+                                          startsGuide: startsGuide(id))
+    }
+
     /// `owner`'s line as `row` draws it, when `child` — the owner's child on
     /// the way down to `row`, or `row` itself — is one of the owner's
     /// worktree children; nil when the row draws none of it. The fade carries

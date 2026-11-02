@@ -263,6 +263,19 @@ enum SidebarGuideLine {
         var fadeStart: CGFloat?
     }
 
+    /// A row's guide lines as a list keeps them, worked out once for its
+    /// rows (`GuideHierarchy.rowGuides(of:)`), so a hover or a selection only
+    /// looks them up.
+    struct RowGuides: Equatable {
+        /// The row's part in each line above it, outermost first.
+        var guides: [Guide] = []
+        /// Each guide's owner, in `guides`' order: what the active lines
+        /// index.
+        var owners: [SidebarNodeID] = []
+        /// The row starts a line of its own.
+        var startsGuide = false
+    }
+
     /// The guides a row draws for `runs`, outermost first: each run's level
     /// and role, and on the owner's first child where the owner's fade-in
     /// started (`continuedFadeStart`).
