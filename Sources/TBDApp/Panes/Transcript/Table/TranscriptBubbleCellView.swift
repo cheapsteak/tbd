@@ -278,13 +278,13 @@ enum TranscriptBubbleGeometry {
 
     /// Bubble background color for a role (matches ChatBubbleView).
     ///
-    /// The accent tint says *you*; the amber says *not you*. Same 15% alpha on
+    /// The accent tint says *you*; the lavender says *not you*. Same 15% alpha on
     /// both, so the two bubbles differ in hue alone and a reader tells them apart
     /// at a glance without reading a word.
     static func backgroundColor(for role: Role) -> NSColor {
         switch role {
         case .user: return NSColor.controlAccentColor.withAlphaComponent(0.15)
-        case .peer: return AttentionAmber.bubbleTint
+        case .peer: return PeerLavender.bubbleTint
         case .assistant: return .clear
         }
     }
@@ -549,7 +549,7 @@ private final class PeerSenderHeaderView: NSView {
 
         let glyph = NSTextField(labelWithString: PeerHeaderChrome.glyph)
         glyph.font = font
-        glyph.textColor = AttentionAmber.nsColor(alpha: 1)
+        glyph.textColor = PeerLavender.nsColor(alpha: 1)
         glyph.setAccessibilityHidden(true)
 
         let name: NSView

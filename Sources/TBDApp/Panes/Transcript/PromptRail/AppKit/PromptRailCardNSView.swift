@@ -761,7 +761,7 @@ private final class PromptRailCardListView: NSView {
         let title = NSMutableAttributedString()
         if case .peer(let sender) = entry.kind {
             title.append(NSAttributedString(string: sender, attributes: [
-                .font: font, .foregroundColor: AttentionAmber.nsColor(alpha: 1), .paragraphStyle: truncating,
+                .font: font, .foregroundColor: PeerLavender.nsColor(alpha: 1), .paragraphStyle: truncating,
             ]))
             title.append(NSAttributedString(string: ": ", attributes: [
                 .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: truncating,
@@ -841,7 +841,7 @@ private final class PromptRailCardListView: NSView {
         let text = NSMutableAttributedString()
         if case .peer(let sender) = entry.kind {
             text.append(NSAttributedString(string: sender, attributes: [
-                .font: font, .foregroundColor: AttentionAmber.nsColor(alpha: 1),
+                .font: font, .foregroundColor: PeerLavender.nsColor(alpha: 1),
             ]))
             text.append(NSAttributedString(string: ": ", attributes: [
                 .font: font, .foregroundColor: NSColor.labelColor,

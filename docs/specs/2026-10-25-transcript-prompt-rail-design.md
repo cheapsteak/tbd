@@ -46,7 +46,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 
 **Time.** Today's prompts each show their short local time (`14:02`). An earlier day's prompts are listed in order, so only the first of each day shows its abbreviated date (`Oct 24`) and the rest of that day's rows leave the column blank — the date would only repeat. Both use the user's locale. A node without a timestamp shows nothing and does not start a new day; the next prompt with a timestamp is compared with the last one that had one. VoiceOver labels keep each prompt's own date or time, since a listener hears one row at a time.
 
-**Peers.** A peer notch is drawn in `AttentionAmber`, the tint the peer bubble already uses. Its card row reads "*sender*: first line" with the sender in amber.
+**Peers.** A peer notch is drawn in `PeerLavender`, the tint the peer bubble already uses. Its card row reads "*sender*: first line" with the sender in lavender.
 
 ## The rail
 
@@ -73,7 +73,7 @@ The count reads node data only, like the rest of the outline.
   - Every notch starts 2pt from the rail's leading edge and is as long as its turn's work (4–16pt).
   - An inactive notch is 2pt tall in the tertiary label color.
   - The active notch keeps its length and is marked by thickness and color instead: 3pt tall in the accent color.
-  - A peer notch is amber at reduced opacity, and full amber at 3pt tall when active.
+  - A peer notch is lavender at reduced opacity, and full lavender at 3pt tall when active.
 - **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the card is where the whole list is browsed.
 
 ### The active prompt
@@ -95,7 +95,7 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
 - **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt, which keeps the pane's bottom-corner jump-to-bottom button clear of it. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the card's height and the list's ends allow.
 - **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits — today's time, or an earlier day's date on its first row only (see **Time** above). A row whose time cell is blank gives that width to its first line.
   - Each row's dash is as long as its notch, so the card's dash column repeats the rail's profile.
-  - The active row is medium weight, with its accent or amber dash.
+  - The active row is medium weight, with its accent or lavender dash.
   - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
 - **Expansion** – a row whose prompt is longer than the row shows (its first line is cut off, or the prompt runs past it) appears to expand in place when the pointer rests on it, so the reader can read more of a prompt without leaving the card.
   - It responds to the row's text, not its dash: the pointer has to be within the row's text column, from the first line's leading edge to the end of the time, short of the row's trailing padding. The gap between the dash column and the first line belongs to the dash; the space between the first line and the time does not interrupt the text column, so moving from one to the other never hides and re-arms the overlay. A pointer arriving from the rail rests over the dash column, which the card lays over the rail's notches, so opening the card never expands a row by itself. Over the dash column the row still highlights and a click still jumps, but nothing expands.

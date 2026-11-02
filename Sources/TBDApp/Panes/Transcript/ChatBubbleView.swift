@@ -66,7 +66,7 @@ private struct PeerSenderHeaderRow: View {
     var body: some View {
         HStack(spacing: PeerHeaderChrome.itemSpacing) {
             Text(PeerHeaderChrome.glyph)
-                .foregroundStyle(AttentionAmber.color)
+                .foregroundStyle(PeerLavender.color)
                 .accessibilityHidden(true)
             attribution
         }
@@ -163,13 +163,13 @@ struct ChatBubbleView: View {
         }
     }
 
-    /// Bubble fill. The accent tint says *you*, the amber says *not you*, both at
+    /// Bubble fill. The accent tint says *you*, the lavender says *not you*, both at
     /// the same 15% alpha so the two differ in hue alone. Mirrors
     /// `TranscriptBubbleGeometry.backgroundColor(for:)`.
     private var bubbleTint: Color {
         switch bubbleRole {
         case .user: return Color.accentColor.opacity(0.15)
-        case .peer: return AttentionAmber.bubbleTintColor
+        case .peer: return PeerLavender.bubbleTintColor
         case .assistant: return Color.clear
         }
     }

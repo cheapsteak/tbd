@@ -3,12 +3,12 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 
-/// WCAG contrast for the amber tint a peer-message bubble carries.
+/// WCAG contrast for the lavender tint a peer-message bubble carries.
 ///
 /// A 15%-alpha tint has no contrast of its own — it composites against whatever
 /// sits behind it — so every figure here is computed from the COMPOSITED bubble
 /// colour rather than from the swatch, and every assertion is on a computed ratio
-/// rather than on a hex string. A later change to the amber, to the pane
+/// rather than on a hex string. A later change to the lavender, to the pane
 /// background, or to a foreground colour therefore reddens this suite instead of
 /// degrading legibility quietly.
 ///
@@ -19,7 +19,7 @@ import Testing
 /// - **Link and secondary text are no worse on a peer bubble than on the
 ///   accent-tinted user bubble.** Those two foregrounds sit below AA on *every*
 ///   bubble in the transcript — a pre-existing condition of the link colour, not
-///   something the amber introduces — so the amber is held to parity with what
+///   something the lavender introduces — so the lavender is held to parity with what
 ///   ships today rather than to a floor it cannot reach alone. Comparing computed
 ///   ratios (rather than pinning a number) keeps the comparison meaningful if
 ///   either tint changes.
@@ -144,11 +144,11 @@ struct PeerBubbleContrastTests {
         ]
     }
 
-    /// The amber tint the peer bubble actually paints, composited over the pane.
+    /// The lavender tint the peer bubble actually paints, composited over the pane.
     private func peerBubble(_ appearanceCase: AppearanceCase) throws -> RGB {
         let tint = try #require(
-            srgb(AttentionAmber.bubbleTint, in: appearanceCase.appearance),
-            "amber tint did not resolve in \(appearanceCase.name)"
+            srgb(PeerLavender.bubbleTint, in: appearanceCase.appearance),
+            "lavender tint did not resolve in \(appearanceCase.name)"
         )
         return over(tint, appearanceCase.pane)
     }
@@ -162,7 +162,7 @@ struct PeerBubbleContrastTests {
             srgb(.controlAccentColor, in: appearanceCase.appearance),
             "accent colour did not resolve in \(appearanceCase.name)"
         )
-        tint.a = Double(AttentionAmber.bubbleTintAlpha)
+        tint.a = Double(PeerLavender.bubbleTintAlpha)
         return over(tint, appearanceCase.pane)
     }
 
@@ -186,26 +186,26 @@ struct PeerBubbleContrastTests {
 
     // MARK: - Tests
 
-    @Test("the peer tint is the amber pair at the same 15% alpha the accent tint uses")
+    @Test("the peer tint is the lavender pair at the same 15% alpha the accent tint uses")
     func tintAlphaMatchesTheAccentTint() throws {
         for appearanceCase in try appearanceCases() {
-            let tint = try #require(srgb(AttentionAmber.bubbleTint, in: appearanceCase.appearance))
+            let tint = try #require(srgb(PeerLavender.bubbleTint, in: appearanceCase.appearance))
             #expect(
-                abs(tint.a - Double(AttentionAmber.bubbleTintAlpha)) < 0.005,
-                "\(appearanceCase.name): tint alpha \(tint.a), expected \(AttentionAmber.bubbleTintAlpha)"
+                abs(tint.a - Double(PeerLavender.bubbleTintAlpha)) < 0.005,
+                "\(appearanceCase.name): tint alpha \(tint.a), expected \(PeerLavender.bubbleTintAlpha)"
             )
         }
     }
 
-    @Test("the amber resolves to a different colour in each appearance")
-    func amberIsAppearanceDependent() throws {
+    @Test("the lavender resolves to a different colour in each appearance")
+    func lavenderIsAppearanceDependent() throws {
         let cases = try appearanceCases()
-        let light = try #require(srgb(AttentionAmber.bubbleTint, in: cases[0].appearance))
-        let dark = try #require(srgb(AttentionAmber.bubbleTint, in: cases[1].appearance))
+        let light = try #require(srgb(PeerLavender.bubbleTint, in: cases[0].appearance))
+        let dark = try #require(srgb(PeerLavender.bubbleTint, in: cases[1].appearance))
         let distance = abs(light.r - dark.r) + abs(light.g - dark.g) + abs(light.b - dark.b)
         // A collapsed dynamic colour would measure the SAME swatch twice and make
         // every ratio below meaningless while still passing.
-        #expect(distance > 0.02, "amber resolved identically in both appearances (distance \(distance))")
+        #expect(distance > 0.02, "lavender resolved identically in both appearances (distance \(distance))")
     }
 
     @Test("the inline-code foreground resolves to a different colour in each appearance")
