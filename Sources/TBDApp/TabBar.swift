@@ -1392,7 +1392,7 @@ private struct TabBarItem: View {
                     guard let terminalID = terminal?.id else { return }
                     Task { await appState.hibernateTerminal(terminalID: terminalID, worktreeID: worktreeID) }
                 } label: {
-                    Label("Hibernate", systemImage: "moon.zzz")
+                    Label("Hibernate", systemImage: "moon")
                 }
             case .wake:
                 Button {
@@ -1464,7 +1464,7 @@ private struct TabBarItem: View {
                 .font(.system(size: 10))
                 .foregroundStyle(style)
         } else if isParked {
-            Image(systemName: "moon.zzz")
+            Image(systemName: "moon")
                 .font(.system(size: 10))
                 .foregroundStyle(style)
         } else if isClaudeTerminal {
