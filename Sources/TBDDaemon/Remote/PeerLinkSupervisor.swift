@@ -422,6 +422,11 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
         let outPipe = Pipe()
         let inPipe = Pipe()
+        // A provider can exit or close its stdin under any write this link
+        // makes, `hello` and keepalives included, and every such write fails
+        // with EPIPE. Marking the write end before the first write keeps those
+        // failures from raising SIGPIPE in whatever process runs this.
+        PipeSIGPIPE.suppress(on: inPipe.fileHandleForWriting.fileDescriptor)
         process.standardOutput = outPipe
         process.standardInput = inPipe
         process.standardError = FileHandle.nullDevice
