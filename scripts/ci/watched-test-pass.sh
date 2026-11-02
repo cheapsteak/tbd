@@ -289,8 +289,8 @@ if [ "$stall_sampler_wanted" -eq 1 ]; then
   stall_diag_dir=/tmp/stall-diag
   if mkdir -p "$stall_diag_dir" 2>/dev/null; then
     python3 -I "$here/stall-sampler.py" --log "$log_file" --pipeline-pid "$pipeline" \
-      --out-dir "$stall_diag_dir" --name "$name" --quiet-seconds 1.0 \
-      --sample-seconds 2 --max-captures 12 \
+      --out-dir "$stall_diag_dir" --name "$name" --quiet-seconds 20 \
+      --sample-seconds 3 --max-captures 4 \
       < /dev/null > "$stall_diag_dir/$name-sampler.out" 2>&1 &
     stall_sampler_pid=$!
   fi
