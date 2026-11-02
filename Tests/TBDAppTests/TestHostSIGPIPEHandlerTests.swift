@@ -10,11 +10,19 @@ import TestSupport
 /// pass on CI ("unexpected signal code 13"): every test still to run went
 /// unreported, with no summary line and a truncated xUnit file. The handler
 /// turns such a write into an `EPIPE` for the code that made it, and counts and
-/// logs the catch. These tests pin what that has to mean: SIGPIPE is caught,
-/// neither left at its default nor ignored; a child still starts with SIGPIPE
-/// at its default, because exec resets a caught signal where it would keep an
-/// ignored one; and an unguarded write really does come back as `EPIPE`, with
-/// the catch count rising alongside it.
+/// logs the catch. These tests pin two consequences: SIGPIPE is caught,
+/// neither left at its default nor ignored; and a child still starts with
+/// SIGPIPE at its default, because exec resets a caught signal where it would
+/// keep an ignored one.
+///
+/// **No test here raises a live SIGPIPE in the test process.** XNU raises a
+/// write's SIGPIPE at the process, not at the writing thread, so the handler
+/// runs on whichever thread does not block it and can interrupt another
+/// suite's blocked syscall in the middle of its test (measured on CI: a pass
+/// wedged for 118 s, 10 s after a deliberate write here). So the
+/// write-to-EPIPE conversion is verified by a standalone probe outside the
+/// test process, and the child in the second test sends SIGPIPE to itself,
+/// never to this process.
 ///
 /// They read SIGPIPE's disposition and never set it: it is process-wide, and
 /// every suite in the run shares it. This suite's type name starts with T, so
@@ -103,70 +111,12 @@ struct TestHostSIGPIPEHandlerTests {
             "the probe shell \(observed); exit 3 means it started with SIGPIPE ignored")
     }
 
-    /// What the handler is for. A write to a socket without `SO_NOSIGPIPE` whose
-    /// peer has closed raises SIGPIPE; with the handler the write fails with
-    /// `EPIPE` and the process carries on. That `EPIPE` is the assertion this
-    /// test stands on. The first `#require` is load-bearing: were SIGPIPE at
-    /// its default, the write would end the whole run instead of failing this
-    /// test, so it is not attempted unless the handler is in place.
-    ///
-    /// The catch count is checked only for what it can show. Suites share the
-    /// process, so a SIGPIPE from any of them can raise the count, and this
-    /// write's own SIGPIPE can merge with one already pending. So "the count
-    /// rose by at least one during this test" is consistent with this write
-    /// being caught and proves no more than that. It is polled rather than read
-    /// once, because XNU raises the signal at the process and the handler may
-    /// run on another thread after the write has returned. The mark makes the
-    /// stderr line say the SIGPIPE was provoked on purpose, which is a hint for
-    /// the same reason: a concurrent stray catch can take it.
-    @Test("a write to an unguarded socket whose peer closed fails with EPIPE, and the catch count rises")
-    func anUnguardedWriteToAClosedPeerFailsWithEPIPE() async throws {
-        try #require(
-            TBDTestHostSIGPIPEHandlerIsCurrent(),
-            "SIGPIPE is not caught by the host's handler, so the write is not attempted")
-
-        var pair: [Int32] = [-1, -1]
-        let made = pair.withUnsafeMutableBufferPointer { socketpair(AF_UNIX, SOCK_STREAM, 0, $0.baseAddress) }
-        try #require(made == 0, "socketpair failed (errno \(errno))")
-        let writer = pair[0]
-        defer { Darwin.close(writer) }
-        Darwin.close(pair[1])
-        try #require(
-            !Self.suppressesSIGPIPE(on: writer),
-            "a fresh socket already has SO_NOSIGPIPE, so this write would not raise SIGPIPE at all")
-
-        let before = TBDTestHostSIGPIPECount()
-        TBDTestHostExpectSIGPIPE()
-        var byte: UInt8 = 0x2A
-        let written = Darwin.write(writer, &byte, 1)
-        let writeErrno = errno
-        #expect(written == -1)
-        #expect(writeErrno == EPIPE, "the write failed with errno \(writeErrno), not EPIPE")
-
-        let budget = TestDeadlines.saturatedPass
-        let outcome = await pollUntilTrue(timeout: budget, pollInterval: .milliseconds(20)) {
-            TBDTestHostSIGPIPECount() > before
-        }
-        if outcome == .timedOut {
-            Issue.record(BoundedWaitTimeout(
-                what: "the SIGPIPE catch count to rise after a write that raises SIGPIPE",
-                observed: "count still \(TBDTestHostSIGPIPECount()), \(before) before the write", deadline: budget))
-        }
-    }
-
     // MARK: - Helpers
 
     /// A handler's address, so dispositions compare as numbers: Swift cannot
     /// compare C function pointers. `SIG_DFL` is 0 and `SIG_IGN` is 1.
     private static func address(of handler: sig_t?) -> Int {
         unsafeBitCast(handler, to: Int.self)
-    }
-
-    private static func suppressesSIGPIPE(on fd: Int32) -> Bool {
-        var value: Int32 = 0
-        var length = socklen_t(MemoryLayout<Int32>.size)
-        guard getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, &length) == 0 else { return false }
-        return value != 0
     }
 
     /// Starts `/bin/sh -c script` with a bare `posix_spawn`: no

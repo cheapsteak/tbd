@@ -35,11 +35,6 @@ bool TBDTestHostSIGPIPEHandlerIsCurrent(void);
 /// check each test pass runs.
 const char *TBDTestHostSIGPIPEDisposition(void);
 
-/// How many SIGPIPEs SIGPIPEHandler.c's handler has caught in this process,
-/// expected or not. Catches, not writes: SIGPIPEs raised while one is pending
-/// merge into one. Any thread.
-long TBDTestHostSIGPIPECount(void);
-
 /// Marks the next SIGPIPE the handler catches as one a test provoked on
 /// purpose, so its stderr line says so and a stray one stays easy to find in
 /// a CI log. Call it immediately before the write that will raise it, and only

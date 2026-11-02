@@ -66,19 +66,17 @@
 /// loads, stores and read-modify-writes, `write(2)` of a fixed line, and
 /// saving and restoring `errno`, so the interrupted code sees what it would
 /// have seen. No formatting, no allocation, no stdio, no locks, and no
-/// `os.Logger`: any reporting beyond the line belongs outside the handler,
-/// reading `TBDTestHostSIGPIPECount()`. The counters are lock-free atomics
-/// rather than `volatile sig_atomic_t`: SIGPIPE is blocked only on the thread
-/// running the handler, so two threads can run it at once, and `++` on a
-/// volatile can lose a count where an atomic read-modify-write cannot (a
-/// lock-free one is async-signal-safe, which the `_Static_assert` below
-/// holds). It counts catches, not writes: signals do not queue, so SIGPIPEs
-/// raised while one is still pending merge into one delivery (measured: 120
-/// such writes from two threads at once were caught 3 times in one run and
-/// 62 in another). The first
-/// `TBD_MAX_LOGGED_SIGPIPES` catches are logged and the rest only counted,
-/// which also bounds the one loop the line could start: a write to a closed
-/// stderr raises SIGPIPE again.
+/// `os.Logger`: any reporting beyond the line belongs outside the handler.
+/// The counters are lock-free atomics rather than `volatile sig_atomic_t`:
+/// SIGPIPE is blocked only on the thread running the handler, so two threads
+/// can run it at once, and `++` on a volatile can lose a count where an atomic
+/// read-modify-write cannot (a lock-free one is async-signal-safe, which the
+/// `_Static_assert` below holds). It counts catches, not writes: signals do
+/// not queue, so SIGPIPEs raised while one is still pending merge into one
+/// delivery (measured: 120 such writes from two threads at once were caught 3
+/// times in one run and 62 in another). The first `TBD_MAX_LOGGED_SIGPIPES`
+/// catches are logged and the rest only counted, which also bounds the one
+/// loop the line could start: a write to a closed stderr raises SIGPIPE again.
 ///
 /// **A test that provokes a SIGPIPE on purpose says so first**, with
 /// `TBDTestHostExpectSIGPIPE()`, and the handler logs that catch with a line of
@@ -103,9 +101,10 @@
 /// bundle with `--filter`/`--skip`, and the constructor runs when the runner
 /// loads it, before any test: in `swiftpm-testing-helper` for Swift Testing and
 /// in `xctest` for XCTest. `TestHostSIGPIPEHandlerTests` (in `TBDAppTests`)
-/// pins the disposition, the exec reset, the EPIPE and the count, and a
-/// one-test suite in every other pass checks the disposition in that pass's
-/// own process: `HostSIGPIPECheckAToPTests` (`TBDAppTests` A–P),
+/// pins the disposition and the exec reset without raising a live SIGPIPE in
+/// the test process (its doc says why), and a one-test suite in every other
+/// pass checks the disposition in that pass's own process:
+/// `HostSIGPIPECheckAToPTests` (`TBDAppTests` A–P),
 /// `HostSIGPIPECheckAToOTests` and `SIGPIPECheckPToZTests` (the two
 /// `TBDDaemonTests` halves) and `HostSIGPIPECheckLiveTests` (the quiet pass).
 ///
@@ -228,10 +227,6 @@ const char *TBDTestHostSIGPIPEDisposition(void) {
         return "test host handler";
     }
     return "another handler";
-}
-
-long TBDTestHostSIGPIPECount(void) {
-    return atomic_load_explicit(&caughtSIGPIPEs, memory_order_relaxed);
 }
 
 void TBDTestHostExpectSIGPIPE(void) {

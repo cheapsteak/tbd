@@ -1029,12 +1029,14 @@ front.
   `SocketSIGPIPE.suppress(on:)`, a fixture's socket with `SO_NOSIGPIPE`, a
   pipe's write end with `F_SETNOSIGPIPE`.
 
-  Some lines are not findings. A few suites write into a closed pipe on
-  purpose, most because the daemon ignores SIGPIPE in `main.swift` instead of
-  guarding each descriptor and they exercise that code:
+  Some lines are not findings. A few daemon suites write into a closed pipe
+  on purpose, because the daemon ignores SIGPIPE in `main.swift` instead of
+  guarding each descriptor and they exercise that code. No other test should
+  raise a live SIGPIPE in the test process: it is delivered to the process,
+  not the writing thread, so it can interrupt another suite's blocked call.
   - **Marked** – a test that provokes a SIGPIPE on purpose calls
     `TBDTestHostExpectSIGPIPE()` just before the write, so its line says the
-    SIGPIPE was provoked on purpose instead: `TestHostSIGPIPEHandlerTests`,
+    SIGPIPE was provoked on purpose instead:
     `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder` and
     `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
     The fanout test writes twice on one mark, since its two SIGPIPEs often
