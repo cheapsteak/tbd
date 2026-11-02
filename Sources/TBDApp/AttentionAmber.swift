@@ -26,7 +26,7 @@ enum AttentionAmber {
 
     /// The pair resolved per appearance, fully opaque — the form a glyph or a
     /// label wants. `RowStatusIndicator`'s `.attention` case draws it;
-    /// only `PRStatusPresentation`'s dark swatch still spells the numbers out
-    /// inline.
+    /// `PRStatusPresentation`'s pending state still spells the dark value out
+    /// inline, in both its `color` and its `nsColor`.
     static var color: Color { adaptiveColor(light: light, dark: dark) }
 }

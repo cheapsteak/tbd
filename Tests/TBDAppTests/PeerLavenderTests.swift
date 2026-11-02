@@ -4,8 +4,8 @@ import Testing
 @testable import TBDApp
 
 /// The transcript's peer colour is lavender at the brightness the amber had,
-/// every reachable peer surface draws it, and the sidebar's attention amber is
-/// untouched.
+/// the rail's peer notches and the table bubble's peer tint draw it, and the
+/// sidebar's attention amber is untouched.
 @MainActor
 @Suite("PeerLavender")
 struct PeerLavenderTests {
@@ -95,8 +95,10 @@ struct PeerLavenderTests {
         #expect(matches(dark, (180, 150, 220)))
     }
 
-    @Test("every reachable peer surface draws PeerLavender, not the amber")
-    func peerSurfacesResolveToLavender() throws {
+    // The SwiftUI bubble, the glyphs and the card's sender text keep their colour
+    // inside view code, so they are not reachable from here.
+    @Test("the rail's peer notches and the table bubble's peer tint draw PeerLavender, not the amber")
+    func railNotchesAndTableTintResolveToLavender() throws {
         let inactiveAlpha = Double(PromptRailNotchStyle.inactivePeerAlpha)
         let tintAlpha = Double(PeerLavender.bubbleTintAlpha)
         let kind = PromptOutlineEntry.Kind.peer(sender: "acme")
