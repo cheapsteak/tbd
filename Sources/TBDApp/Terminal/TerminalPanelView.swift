@@ -468,7 +468,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             font: appearance.font,
-            appearance: appearance
+            appearance: appearance,
+            terminalID: terminalID
         )
 
         // Experimental GPU draw path (default off — Settings → Terminal →

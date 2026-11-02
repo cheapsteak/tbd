@@ -210,6 +210,7 @@ actor HolderReader {
         // child is a hang in that child, not a cosmetic loss — the program
         // asked the terminal a question and is waiting for the answer.
         self.emulator = HolderEmulator(
+            sessionID: sessionID,
             columns: columns,
             rows: rows,
             scrollback: scrollbackLines,
@@ -1331,7 +1332,16 @@ private final class PTYDescriptor: @unchecked Sendable {
 /// here takes the lock. Getting it wrong garbles output rather than crashing,
 /// which is why it must be structural instead of remembered.
 private final class HolderEmulator: @unchecked Sendable {
+    /// Where the Program Status Protocol handshake records go — `.notice`, the
+    /// one level macOS keeps, because an agent decides once at startup whether
+    /// to report, and a session that missed the answer stays silent for its
+    /// whole life. One line per probe, so about one per session start.
+    private static let programStatusLog = Logger(subsystem: "com.tbd.daemon", category: "programStatus")
+
     private let terminal: Terminal
+    /// The session this emulator belongs to, which is the terminal's ID. Read
+    /// only to name the session in the handshake records.
+    private let sessionID: UUID
     /// Held strongly: `Terminal.tdel` is `weak`, so a delegate nobody else
     /// retains is deallocated and the child's terminal queries go unanswered.
     private let delegate: ReplyForwardingDelegate
@@ -1387,6 +1397,7 @@ private final class HolderEmulator: @unchecked Sendable {
     private var ingestingPreamble = false
 
     init(
+        sessionID: UUID,
         columns: Int, rows: Int, scrollback: Int,
         observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
@@ -1395,6 +1406,7 @@ private final class HolderEmulator: @unchecked Sendable {
     ) {
         let delegate = ReplyForwardingDelegate(reply: reply)
         self.delegate = delegate
+        self.sessionID = sessionID
         self.observedChildFromStart = observedChildFromStart
         self.monotonicNow = monotonicNow
         self.adoptedAt = monotonicNow()
@@ -1413,20 +1425,51 @@ private final class HolderEmulator: @unchecked Sendable {
         // `terminalLock`, so it must not block or re-enter the emulator: the
         // reply is one best-effort pty write through the delegate, the same
         // path DA1's reply takes, and a report is copied out of the borrowed
-        // slice and handed to the tap, whose `deliver` only enqueues.
+        // slice and handed to the tap, whose `deliver` only enqueues. Each
+        // probe, answered or not, is recorded with one log call.
+        //
+        // During a handback preamble nothing is answered and nothing is
+        // delivered; a probe there is recorded all the same, because a replay
+        // that carried one would otherwise leave no trace of why it went
+        // unanswered.
         //
         // Weak `self`: the terminal owns the handler and `self` owns the
         // terminal, so a strong capture would be a cycle.
         if let programStatus {
             terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak self] data in
-                guard let self, !self.ingestingPreamble else { return }
-                if ProgramStatusParser.isProbe(data) {
+                guard let self else { return }
+                let isProbe = ProgramStatusParser.isProbe(data)
+                if self.ingestingPreamble {
+                    if isProbe { self.recordProbeIgnoredInPreamble() }
+                    return
+                }
+                if isProbe {
                     self.terminal.sendResponse(text: ProgramStatusProtocol.probeReply)
+                    self.recordProbeAnswered()
                     return
                 }
                 programStatus.deliver([UInt8](data))
             }
         }
+    }
+
+    /// Records a probe this emulator answered: whether it was there when the
+    /// child started, and how long after it began existing the probe came.
+    /// Runs inside the parse, under `terminalLock`; it only logs.
+    private func recordProbeAnswered() {
+        Self.programStatusLog.notice(
+            """
+            program-status probe answered terminal=\(self.sessionID.uuidString, privacy: .public) \
+            observedChildFromStart=\(self.observedChildFromStart, privacy: .public) \
+            sinceAdoptMs=\(self.milliseconds(since: self.adoptedAt), privacy: .public)
+            """)
+    }
+
+    /// Records a probe left unanswered because it arrived inside a handback
+    /// preamble. Runs inside the parse, under `terminalLock`; it only logs.
+    private func recordProbeIgnoredInPreamble() {
+        Self.programStatusLog.notice(
+            "program-status probe ignored terminal=\(self.sessionID.uuidString, privacy: .public) reason=preamble")
     }
 
     /// Bytes from outside — the drain loop's reads, the quiesce remainder, a
@@ -1539,17 +1582,21 @@ private final class HolderEmulator: @unchecked Sendable {
 
     /// How long ago this emulator last consumed a byte, in milliseconds, never
     /// negative. Caller holds `terminalLock`.
+    private func ageMilliseconds() -> Int {
+        milliseconds(since: lastByteAt ?? adoptedAt)
+    }
+
+    /// Milliseconds from `instant` to now on `monotonicNow`, never negative.
     ///
     /// Clamped at zero rather than trusted: the clock is injected, and a seam
     /// that ever moved backwards would otherwise produce an age the screen type
     /// refuses — turning a test double's mistake into a failed machine read.
-    private func ageMilliseconds() -> Int {
-        let since = lastByteAt ?? adoptedAt
-        let elapsed = since.duration(to: monotonicNow())
-        let milliseconds =
+    private func milliseconds(since instant: ContinuousClock.Instant) -> Int {
+        let elapsed = instant.duration(to: monotonicNow())
+        let total =
             elapsed.components.seconds * 1_000
             + elapsed.components.attoseconds / 1_000_000_000_000_000
-        return Int(max(0, milliseconds))
+        return Int(max(0, total))
     }
 
     /// Serializes the whole terminal — modes, scrollback, viewport, cursor —

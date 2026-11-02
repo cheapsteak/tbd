@@ -318,6 +318,14 @@ public actor ProgramStatusStore {
             current = Held(
                 incarnationID: incarnationID, main: nil, tasks: [],
                 lastObservedAt: inbound.observedAt)
+            // Nothing below refuses the report, so this is the incarnation's
+            // first accepted one: proof its startup handshake turned reporting
+            // on. Kept at `.notice`, which macOS persists, unlike the `.debug`
+            // lines around it. Once per incarnation, and again only when the
+            // store held nothing for it: after a daemon restart, or once a
+            // `clear` emptied what it held.
+            programStatusLog.notice(
+                "program-status first report terminal=\(terminalID.uuidString, privacy: .public) incarnation=\(incarnationID?.uuidString ?? "none", privacy: .public)")
         }
 
         // 6. Apply.

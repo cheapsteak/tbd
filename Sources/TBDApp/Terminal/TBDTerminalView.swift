@@ -9,6 +9,10 @@ import os
 
 private let terminalViewLogger = Logger(subsystem: "com.tbd.app", category: "terminalRenderer")
 private let clickLogger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
+/// The Program Status Protocol handshake records, at `.notice` so macOS keeps
+/// them: an agent decides once at startup whether to report, so a probe this
+/// view skipped leaves its session silent for life.
+private let programStatusLogger = Logger(subsystem: "com.tbd.app", category: "programStatus")
 
 private extension CharacterSet {
     /// Characters that require shell quoting when they appear in a file path.
@@ -88,7 +92,11 @@ class TBDTerminalView: TerminalView {
     /// a probe, for replayed snapshot bytes, or while `programStatusGate` is off.
     var onProgramStatusReport: (([UInt8], Date) -> Void)?
 
-    init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
+    /// - Parameter terminalID: the TBD terminal this view shows, used only to
+    ///   name it in the Program Status Protocol handshake records. nil for a
+    ///   view with no terminal row, such as a remote attach, whose records say
+    ///   `terminal=unknown`.
+    init(frame: CGRect, font: NSFont, appearance: AppearanceSettings, terminalID: UUID? = nil) {
         self.appearanceSettings = appearance
         super.init(frame: frame, font: font)
 
@@ -107,7 +115,7 @@ class TBDTerminalView: TerminalView {
         installNotificationObserver()
 
         // Answer the OSC 7501 probe synchronously, inside the parse.
-        installProgramStatusProbeAnswerer()
+        installProgramStatusProbeAnswerer(terminalID: terminalID)
 
         // Reapply on any AppearanceSettings change. `objectWillChange` fires
         // *before* the property mutation lands on the published value, so we
@@ -1150,27 +1158,46 @@ class TBDTerminalView: TerminalView {
     /// sequence is dropped exactly as SwiftTerm drops an unhandled OSC. Reports
     /// are not handled here — they ride the OSC observer, which snapshot replay
     /// suspends.
-    private func installProgramStatusProbeAnswerer() {
+    ///
+    /// Every probe it sees is recorded at `.notice`, answered or skipped with
+    /// the reason, under the `programStatus` category.
+    private func installProgramStatusProbeAnswerer(terminalID: UUID?) {
         let gate = programStatusGate
         let mute = oscReplayMute
         withTerminal { terminal in
-            Self.registerProgramStatusProbeAnswerer(on: terminal, gate: gate, mute: mute)
+            Self.registerProgramStatusProbeAnswerer(
+                on: terminal, gate: gate, mute: mute, terminalID: terminalID)
         }
     }
 
     /// The handler itself, built in a `nonisolated` context on purpose: it runs
     /// on SwiftTerm's parse thread with `terminalLock` held, so it must not
     /// inherit this view's main-actor isolation, and it captures only the two
-    /// Sendable boxes and a weak `Terminal` — never the view. The weak capture
-    /// is the one sanctioned exception to `withTerminal`'s "never store the
-    /// `Terminal`" rule: the handler is owned by that same `Terminal`'s parser
-    /// and runs only inside its parse, under the lock already held.
+    /// Sendable boxes, the terminal's ID as a string, and a weak `Terminal` —
+    /// never the view. The weak capture is the one sanctioned exception to
+    /// `withTerminal`'s "never store the `Terminal`" rule: the handler is owned
+    /// by that same `Terminal`'s parser and runs only inside its parse, under
+    /// the lock already held. Its only other work is one log call per probe.
     nonisolated private static func registerProgramStatusProbeAnswerer(
-        on terminal: SwiftTerm.Terminal, gate: ProgramStatusGate, mute: OscReplayMute
+        on terminal: SwiftTerm.Terminal, gate: ProgramStatusGate, mute: OscReplayMute,
+        terminalID: UUID?
     ) {
+        let label = terminalID?.uuidString ?? "unknown"
         terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak terminal] data in
-            guard gate.isEnabled, !mute.isRaised, ProgramStatusParser.isProbe(data) else { return }
+            guard ProgramStatusParser.isProbe(data) else { return }
+            guard gate.isEnabled else {
+                programStatusLogger.notice(
+                    "program-status probe ignored by app terminal=\(label, privacy: .public) reason=gateOff")
+                return
+            }
+            guard !mute.isRaised else {
+                programStatusLogger.notice(
+                    "program-status probe ignored by app terminal=\(label, privacy: .public) reason=replayMute")
+                return
+            }
             terminal?.sendResponse(text: ProgramStatusProtocol.probeReply)
+            programStatusLogger.notice(
+                "program-status probe answered by app terminal=\(label, privacy: .public)")
         }
     }
 }

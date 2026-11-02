@@ -53,7 +53,7 @@ struct NoStatusMarkTests {
         #expect(NoStatusMark.tmuxHelp
             == "The tmux transport doesn't carry agent status. Status needs the pty-holder transport.")
         #expect(NoStatusMark.holderHelp
-            == "This session isn't reporting status. Status needs Claude Code 2.1.295 or later, or Codex 0.163.0 or later. A session started before this version of TBD reports after it is relaunched.")
+            == "This session hasn't sent its status yet. An idle session sends it on its next turn. If the mark stays after a turn, relaunch the session: an agent turns status on only when it starts, and needs Claude Code 2.1.295 or later, or Codex 0.163.0 or later.")
         #expect(NoStatusMark.grace == .seconds(15))
     }
 
@@ -76,8 +76,8 @@ struct NoStatusMarkTests {
     }
 
     /// The mark is for a session that has not reported since it started, so
-    /// a `.unknown` that came after its agent reported shows none — "needs a
-    /// newer version" would misexplain it: a child exit (`.processLiveness`),
+    /// a `.unknown` that came after its agent reported shows none — "hasn't
+    /// sent its status yet" would misexplain it: a child exit (`.processLiveness`),
     /// whose process is gone, and the agent's own bare clear
     /// (`.programStatus`), as when Claude Code restores terminal modes around
     /// an external editor or Codex exits cleanly.
