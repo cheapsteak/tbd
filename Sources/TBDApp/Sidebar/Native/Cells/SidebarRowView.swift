@@ -16,6 +16,10 @@ import AppKit
 /// `indentLevel`. One guide line runs per worktree ancestor, at
 /// `depth * 16 + 8` from where the group padding ends, where the SwiftUI row
 /// draws its lines.
+///
+/// How each line draws is `SidebarGuideLine`'s: a hairline at rest, full
+/// strength for the lines the controller marks active (`activeGuides`), and
+/// the accent colour over the row's hover or selection highlight.
 final class SidebarRowView: NSTableRowView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.row")
 
@@ -27,6 +31,10 @@ final class SidebarRowView: NSTableRowView {
         var indentLevel = 0
         /// One guide line per worktree ancestor.
         var guideCount = 0
+        /// The guide lines of the focused group, which draw at full
+        /// strength: indices into `guideLineXs`, 0 for the outermost
+        /// ancestor's line. The rest draw at rest.
+        var activeGuides = IndexSet()
         /// The gutter pin is showing, so the line it would sit on breaks.
         var showsPinGap = false
         /// The row's model names it selected though the list does not select
@@ -76,17 +84,45 @@ final class SidebarRowView: NSTableRowView {
         needsDisplay = true
     }
 
+    /// A resting guide line is one device pixel wide, so a move to a screen
+    /// of another scale redraws it.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+    }
+
     /// Where the row's own indentation starts, past its group padding: the
     /// guide lines are measured from here.
     var indentOrigin: CGFloat {
         configuration.contentOrigin + CGFloat(configuration.indentLevel) * SidebarNativeMetrics.indentation
     }
 
-    /// The x of each guide line, nearest ancestor last.
+    /// The x of each guide line, nearest ancestor last. Whole points, since
+    /// the content origin, the indentation and the offset all are.
     var guideLineXs: [CGFloat] {
         (0..<configuration.guideCount).map {
             indentOrigin + CGFloat($0) * SidebarNativeMetrics.indentation + SidebarNativeMetrics.guideLineOffset
         }
+    }
+
+    /// Device pixels per point where the row draws: its window's, else the
+    /// main screen's, else `SidebarGuideLine.defaultBackingScale`.
+    var backingScale: CGFloat {
+        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? SidebarGuideLine.defaultBackingScale
+    }
+
+    /// The guide lines the row draws, outermost first, each in its style:
+    /// active or at rest, and in the accent colour while the row draws a
+    /// highlight — hovered or selected, not the nest target's wash. The pin
+    /// lands in the row's own gutter, on the nearest ancestor's line, so that
+    /// one segment breaks rather than strike the glyph.
+    func guideSegments(backingScale: CGFloat,
+                       alphas: SidebarGuideLine.Alphas = SidebarGuideLine.alphas) -> [SidebarGuideLine.Segment] {
+        let xs = guideLineXs
+        guard !xs.isEmpty else { return [] }
+        return SidebarGuideLine.segments(
+            xs: xs, active: configuration.activeGuides, gap: configuration.showsPinGap ? xs.count - 1 : nil,
+            isOnHighlight: highlightAlpha != nil, in: bounds, backingScale: backingScale, alphas: alphas)
     }
 
     /// The highlight's area: the same on every row.
@@ -163,22 +199,18 @@ final class SidebarRowView: NSTableRowView {
     }
 
     /// The guide lines go over the highlight, as the SwiftUI row overlays
-    /// them on its tint.
+    /// them on its tint. Each style's alpha multiplies its colour's own, as
+    /// `Color.secondary.opacity(_:)` does.
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let xs = guideLineXs
-        guard !xs.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
-        context.saveGState()
-        // `Color.secondary.opacity(0.25)`: the secondary label colour with its
-        // own alpha, then a quarter of that.
-        context.setAlpha(0.25)
-        NSColor.secondaryLabelColor.setFill()
-        for (index, x) in xs.enumerated() {
-            // The pin lands in the row's own gutter, on the nearest ancestor's
-            // line: that one segment breaks rather than strike the glyph.
-            if configuration.showsPinGap && index == xs.count - 1 { continue }
-            NSRect(x: x, y: 0, width: 1, height: bounds.height).fill()
+        let segments = guideSegments(backingScale: backingScale)
+        guard !segments.isEmpty, let context = NSGraphicsContext.current?.cgContext else { return }
+        for segment in segments {
+            context.saveGState()
+            context.setAlpha(segment.style.alpha)
+            segment.style.color.nsColor.setFill()
+            segment.rect.fill()
+            context.restoreGState()
         }
-        context.restoreGState()
     }
 }

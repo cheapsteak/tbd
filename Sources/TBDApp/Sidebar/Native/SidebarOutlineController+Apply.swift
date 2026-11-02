@@ -189,10 +189,11 @@ extension SidebarOutlineController {
     }
 
     /// Re-derives every row view's configuration from the current tree,
-    /// after `endUpdates`, by the row each view now shows. Cheap — only
-    /// the views the outline holds, each an ancestor walk — and a view whose
-    /// configuration is unchanged does not redraw.
-    private func refreshRowViewConfigurations() {
+    /// by the row each view shows: after `endUpdates`, and when the
+    /// active guide lines change. Cheap — only the views the outline holds,
+    /// each an ancestor walk — and a view whose configuration is unchanged
+    /// does not redraw.
+    func refreshRowViewConfigurations() {
         outline.enumerateAvailableRowViews { rowView, row in
             guard let sidebarRow = rowView as? SidebarRowView,
                   let item = self.outline.item(atRow: row) as? SidebarItem,

@@ -163,16 +163,21 @@ extension SidebarOutlineController {
     /// The row view's indentation, guide lines, model selection, hover and
     /// nest highlight. A header draws selected while `AppState` selects what
     /// it stands for — its repo, the Scratch section, its provider — which a
-    /// rebuild carries to it as a changed model.
+    /// rebuild carries to it as a changed model. A worktree row's guide
+    /// lines are its worktree ancestors', and the ones whose owner is in
+    /// `activeGuideAncestors` draw active.
     func configure(_ rowView: SidebarRowView, node: SidebarNode) {
         let isHovered = hoverState.row == node.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
         switch node.kind {
         case .worktree(let model):
-            let ancestry = worktreeAncestorCount(of: node.id)
-            configuration.guideCount = ancestry
-            configuration.indentLevel = max(model.depth - ancestry, 0)
+            // `WorktreeRowView`'s `indentLevel`: how many worktree rows the
+            // row sits under.
+            let ancestors = tree.worktreeAncestors(of: node.id)
+            configuration.guideCount = ancestors.count
+            configuration.activeGuides = SidebarGuideLine.activeIndices(of: ancestors, active: activeGuideAncestors)
+            configuration.indentLevel = max(model.depth - ancestors.count, 0)
             // The pin shows on hover, and always once pinned.
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         case .remoteSession(let model):
@@ -203,15 +208,23 @@ extension SidebarOutlineController {
         }
     }
 
-    /// How many worktree rows `id` sits under: `WorktreeRowView`'s
-    /// `indentLevel`. Group headers between them add padding, not lines.
-    private func worktreeAncestorCount(of id: SidebarNodeID) -> Int {
-        var count = 0
-        var ancestor = tree.parent(of: id)
-        while let current = ancestor {
-            if case .worktree = current { count += 1 }
-            ancestor = tree.parent(of: current)
-        }
-        return count
+    // MARK: Active guide lines
+
+    /// The active ancestors of the hovered row and of each selected worktree
+    /// row the outline shows.
+    func focusedGuideAncestors() -> Set<SidebarNodeID> {
+        var focus = appState.selectedWorktreeIDs.map { SidebarNodeID.worktree($0) }
+        if let hovered = hoverState.row { focus.append(hovered) }
+        return tree.activeGuideAncestors(of: focus)
+    }
+
+    /// Recomputes the active guide lines after the selection or the tree
+    /// changed. When they differ, every row view the outline holds takes
+    /// them; a view whose configuration comes out the same does not redraw.
+    func refreshActiveGuides() {
+        let active = focusedGuideAncestors()
+        guard active != activeGuideAncestors else { return }
+        activeGuideAncestors = active
+        refreshRowViewConfigurations()
     }
 }

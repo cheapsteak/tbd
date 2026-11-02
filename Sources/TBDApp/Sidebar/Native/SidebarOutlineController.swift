@@ -164,6 +164,12 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     var hoverTracker: SidebarHoverTracker?
     /// What the pointer was last reported over.
     var hoverState = SidebarHoverTracker.State()
+    /// The worktree rows whose guide lines draw active: the active ancestors
+    /// of the hovered row and of each selected worktree row the outline
+    /// shows (`SidebarTree.activeGuideAncestors(of:)`). Recomputed once per
+    /// hover change, selection change and apply, and read by every row view
+    /// configuration.
+    var activeGuideAncestors: Set<SidebarNodeID> = []
     /// Laid over the scroll view, above every row.
     let tooltipOverlay = RowTooltipOverlay(frame: .zero)
     /// The `+` menu every repo header and worktree row shares.

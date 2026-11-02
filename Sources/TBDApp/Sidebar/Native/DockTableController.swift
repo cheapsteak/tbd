@@ -114,6 +114,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private(set) var hoverTracker: SidebarHoverTracker?
     /// What the pointer was last reported over.
     private(set) var hoverState = SidebarHoverTracker.State()
+    /// The dock rows whose guide lines draw active: the active ancestors of
+    /// the hovered row and of each selected worktree row the dock shows
+    /// (`activeGuideAncestors(in:hovered:selected:)`). Recomputed once per
+    /// hover change, selection change and apply.
+    private(set) var activeGuideAncestors: Set<SidebarNodeID> = []
 
     // MARK: Test seams
 
@@ -461,7 +466,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             guard self.rows.indices.contains(index), ids.contains(self.rows[index].id) else { return }
             let row = self.rows[index]
             if let rowView = rowView as? SidebarRowView {
-                self.configureRowView(rowView, row: row)
+                self.configureRowView(rowView, at: index)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.configureCell(cell, row: row)
@@ -473,6 +478,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// Selects the rows `AppState` names: its selected worktrees and its
     /// selected remote session. A row the dock does not show is skipped.
+    /// The selected rows light their groups' guide lines, so the row views
+    /// take the active lines here: at the end of every apply, and after a
+    /// user's selection.
     private func applyModelSelection() {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
@@ -486,6 +494,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         if indexes != table.selectedRowIndexes {
             table.selectRowIndexes(indexes, byExtendingSelection: false)
         }
+        refreshActiveGuides()
     }
 
     /// A selection that changed since the last apply scrolls its first dock
@@ -551,17 +560,15 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let rowView = (tableView.makeView(withIdentifier: SidebarRowView.reuseIdentifier, owner: self)
             as? SidebarRowView) ?? SidebarRowView(frame: .zero)
-        if rows.indices.contains(row) {
-            configureRowView(rowView, row: rows[row])
-        }
+        configureRowView(rowView, at: row)
         return rowView
     }
 
     /// Every row view the table adds — fresh, reused, or shifted to a new
     /// row — takes its guide lines from the row it now shows.
     func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
-        guard let rowView = rowView as? SidebarRowView, rows.indices.contains(row) else { return }
-        configureRowView(rowView, row: rows[row])
+        guard let rowView = rowView as? SidebarRowView else { return }
+        configureRowView(rowView, at: row)
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -602,18 +609,92 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The row view's guide lines — one per level of a descendant's depth,
-    /// as `WorktreeRowView` draws them, broken where the gutter pin shows: on
-    /// hover, and always once pinned — and its hover highlight.
-    private func configureRowView(_ rowView: SidebarRowView, row: DockRow) {
+    /// as `WorktreeRowView` draws them, active where their owner is in
+    /// `activeGuideAncestors`, broken where the gutter pin shows: on hover,
+    /// and always once pinned — and its hover highlight.
+    private func configureRowView(_ rowView: SidebarRowView, at index: Int) {
+        guard rows.indices.contains(index) else { return }
+        let row = rows[index]
         let isHovered = hoverState.row == row.id
         var configuration = SidebarRowView.Configuration()
         configuration.contentOrigin = Self.rowInset
         if case .worktree(let model) = row.kind {
             configuration.guideCount = row.depth
+            if !activeGuideAncestors.isEmpty {
+                configuration.activeGuides = SidebarGuideLine.activeIndices(
+                    of: Self.guideAncestors(ofRow: index, in: rows), active: activeGuideAncestors)
+            }
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
         configuration.isHovered = isHovered
         rowView.configuration = configuration
+    }
+
+    // MARK: Active guide lines
+
+    /// The rows the row at `index` sits under, outermost first: the owners of
+    /// its guide lines, one per level of its depth. The rows are a preorder
+    /// walk of each pinned subtree, so a row's parent is the nearest row
+    /// above it one level up.
+    static func guideAncestors(ofRow index: Int, in rows: [DockRow]) -> [SidebarNodeID] {
+        guard rows.indices.contains(index) else { return [] }
+        var ancestors: [SidebarNodeID] = []
+        var level = rows[index].depth
+        var cursor = index - 1
+        while level > 0, cursor >= 0 {
+            if rows[cursor].depth == level - 1 {
+                ancestors.append(rows[cursor].id)
+                level -= 1
+            }
+            cursor -= 1
+        }
+        return ancestors.reversed()
+    }
+
+    /// The row whose guide line the row at `index` lights, by the outline's
+    /// rule (`SidebarTree.activeGuideAncestor(of:)`): a worktree row with its
+    /// subtree open under it lights its own line; any other worktree row its
+    /// parent's; a pinned root with no subtree open, and a remote session,
+    /// none.
+    static func activeGuideAncestor(ofRow index: Int, in rows: [DockRow]) -> SidebarNodeID? {
+        guard rows.indices.contains(index), rows[index].isWorktree else { return nil }
+        let next = index + 1
+        if rows.indices.contains(next), rows[next].isWorktree, rows[next].depth == rows[index].depth + 1 {
+            return rows[index].id
+        }
+        return guideAncestors(ofRow: index, in: rows).last
+    }
+
+    /// The active ancestors of the `hovered` row and of each `selected`
+    /// worktree row among `rows`.
+    static func activeGuideAncestors(in rows: [DockRow], hovered: SidebarNodeID?,
+                                     selected: Set<UUID>) -> Set<SidebarNodeID> {
+        var focus = Set(selected.map { SidebarNodeID.worktree($0) })
+        if let hovered { focus.insert(hovered) }
+        var active: Set<SidebarNodeID> = []
+        for (index, row) in rows.enumerated() where focus.contains(row.id) {
+            if let ancestor = activeGuideAncestor(ofRow: index, in: rows) { active.insert(ancestor) }
+        }
+        return active
+    }
+
+    /// The active ancestors of the hovered row and of each selected worktree
+    /// row the dock shows.
+    private func focusedGuideAncestors() -> Set<SidebarNodeID> {
+        Self.activeGuideAncestors(in: rows, hovered: hoverState.row, selected: appState.selectedWorktreeIDs)
+    }
+
+    /// Recomputes the active guide lines after the selection or the rows
+    /// changed. When they differ, every row view the table holds takes them;
+    /// a view whose configuration comes out the same does not redraw.
+    private func refreshActiveGuides() {
+        let active = focusedGuideAncestors()
+        guard active != activeGuideAncestors else { return }
+        activeGuideAncestors = active
+        table.enumerateAvailableRowViews { rowView, index in
+            guard let rowView = rowView as? SidebarRowView else { return }
+            self.configureRowView(rowView, at: index)
+        }
     }
 
     // MARK: Hover
@@ -625,8 +706,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The tracker's report: the `+` under the pointer arms the shared menu,
-    /// and every row the table has takes the new hover. A recompute that finds
-    /// nothing changed leaves the rows as they are.
+    /// the hovered row lights its group's guide line, and every row the table
+    /// has takes the new hover. A recompute that finds nothing changed leaves
+    /// the rows as they are.
     func hoverChanged(_ state: SidebarHoverTracker.State) {
         let previous = hoverState
         hoverState = state
@@ -635,17 +717,18 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             from: previous.part == .plus ? previous.row : nil, to: state.part == .plus ? state.row : nil,
             in: table, anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
             appState: appState, sheets: sheets)
+        activeGuideAncestors = focusedGuideAncestors()
         applyHoverToAvailableRows()
     }
 
-    /// Hands every row view the table has its hover highlight and pin gap,
-    /// and every cell its hover.
+    /// Hands every row view the table has its hover highlight, active guide
+    /// lines and pin gap, and every cell its hover.
     func applyHoverToAvailableRows() {
         table.enumerateAvailableRowViews { rowView, index in
             guard self.rows.indices.contains(index) else { return }
             let row = self.rows[index]
             if let rowView = rowView as? SidebarRowView {
-                self.configureRowView(rowView, row: row)
+                self.configureRowView(rowView, at: index)
             }
             if let cell = rowView.view(atColumn: 0) as? NSView {
                 self.applyHover(to: cell, id: row.id)
