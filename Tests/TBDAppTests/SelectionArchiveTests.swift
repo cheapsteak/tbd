@@ -71,79 +71,126 @@ struct SelectionArchiveDecisionTests {
         #expect(!acts)
     }
 
-    // MARK: Eligibility
+    // MARK: Eligibility, row by row
 
-    @Test func anActiveLocalRowIsArchivable() {
-        let id = UUID()
-        let selected: Set<UUID> = [id]
-        let archivable = SelectionArchive.isArchivable(SelectionArchive.Candidate(id: id), selectedIDs: selected)
-        #expect(archivable)
+    @Test func anActiveLocalRowCanArchiveItself() {
+        let canGo = SelectionArchive.canArchiveItself(SelectionArchive.Candidate(id: UUID()))
+        #expect(canGo)
     }
 
     /// Only these three are excluded; a failed row's own Archive is enabled,
     /// so it can go with the selection too.
-    @Test func mainCreatingAndArchivedRowsAreNotArchivable() {
+    @Test func mainCreatingAndArchivedRowsCannotArchiveThemselves() {
         for status: WorktreeStatus in [.main, .creating, .archived] {
-            let id = UUID()
-            let selected: Set<UUID> = [id]
-            let candidate = SelectionArchive.Candidate(id: id, status: status)
-            let archivable = SelectionArchive.isArchivable(candidate, selectedIDs: selected)
-            #expect(!archivable)
+            let candidate = SelectionArchive.Candidate(id: UUID(), status: status)
+            let canGo = SelectionArchive.canArchiveItself(candidate)
+            #expect(!canGo)
         }
-        let failed = UUID()
-        let selected: Set<UUID> = [failed]
-        let candidate = SelectionArchive.Candidate(id: failed, status: .failed)
-        let archivable = SelectionArchive.isArchivable(candidate, selectedIDs: selected)
-        #expect(archivable)
+        let failed = SelectionArchive.Candidate(id: UUID(), status: .failed)
+        let failedCanGo = SelectionArchive.canArchiveItself(failed)
+        #expect(failedCanGo)
     }
 
-    @Test func aRemoteLaneWhoseProviderCannotArchiveIsNotArchivable() {
-        let id = UUID()
-        let selected: Set<UUID> = [id]
+    @Test func aRemoteLaneWhoseProviderCannotArchiveCannotArchiveItself() {
         let lane = SelectionArchive.Candidate(
-            id: id, location: .remote(provider: "acme", sessionID: "s1"), providerCapabilities: ["stop"])
-        let archivable = SelectionArchive.isArchivable(lane, selectedIDs: selected)
-        #expect(!archivable)
+            id: UUID(), location: .remote(provider: "acme", sessionID: "s1"), providerCapabilities: ["stop"])
+        let canGo = SelectionArchive.canArchiveItself(lane)
+        #expect(!canGo)
     }
 
-    @Test func aRemoteLaneWhoseProviderCanArchiveIsArchivable() {
-        let id = UUID()
-        let selected: Set<UUID> = [id]
+    @Test func aRemoteLaneWhoseProviderCanArchiveCanArchiveItself() {
         let lane = SelectionArchive.Candidate(
-            id: id, location: .remote(provider: "acme", sessionID: "s1"), providerCapabilities: ["archive"])
-        let archivable = SelectionArchive.isArchivable(lane, selectedIDs: selected)
-        #expect(archivable)
+            id: UUID(), location: .remote(provider: "acme", sessionID: "s1"), providerCapabilities: ["archive"])
+        let canGo = SelectionArchive.canArchiveItself(lane)
+        #expect(canGo)
     }
 
     /// The same exemptions the row's own Archive makes: the daemon files a
     /// gone lane, and one whose provider is retired, row-only.
     @Test func goneAndRetiredLanesAreExemptFromTheCapabilityGate() {
-        let gone = UUID(), retired = UUID()
-        let selected: Set<UUID> = [gone, retired]
         let goneLane = SelectionArchive.Candidate(
-            id: gone, location: .remote(provider: "acme", sessionID: "s1"), isGone: true)
+            id: UUID(), location: .remote(provider: "acme", sessionID: "s1"), isGone: true)
         let retiredLane = SelectionArchive.Candidate(
-            id: retired, location: .remote(provider: "acme", sessionID: "s2"), providerRetired: true)
-        let goneArchivable = SelectionArchive.isArchivable(goneLane, selectedIDs: selected)
-        let retiredArchivable = SelectionArchive.isArchivable(retiredLane, selectedIDs: selected)
-        #expect(goneArchivable)
-        #expect(retiredArchivable)
+            id: UUID(), location: .remote(provider: "acme", sessionID: "s2"), providerRetired: true)
+        let goneCanGo = SelectionArchive.canArchiveItself(goneLane)
+        let retiredCanGo = SelectionArchive.canArchiveItself(retiredLane)
+        #expect(goneCanGo)
+        #expect(retiredCanGo)
     }
+
+    // MARK: Eligibility, bottom up
 
     @Test func aRowWithAnActiveChildOutsideTheSelectionIsNotArchivable() {
         let parent = UUID(), child = UUID(), other = UUID()
-        let selected: Set<UUID> = [parent, other]
-        let candidate = SelectionArchive.Candidate(id: parent, activeChildIDs: [child])
-        let archivable = SelectionArchive.isArchivable(candidate, selectedIDs: selected)
-        #expect(!archivable)
+        let candidates = [
+            SelectionArchive.Candidate(id: parent, activeChildIDs: [child]),
+            SelectionArchive.Candidate(id: other),
+        ]
+        let targets = SelectionArchive.targets(candidates, runOrder: [child, parent, other])
+        let expected = [other]
+        #expect(targets == expected)
     }
 
-    @Test func aRowWhoseActiveChildrenAreAllSelectedIsArchivable() {
+    @Test func aParentAndItsArchivableChildrenAreAllTargetsChildrenFirst() {
         let parent = UUID(), first = UUID(), second = UUID()
-        let selected: Set<UUID> = [parent, first, second]
-        let candidate = SelectionArchive.Candidate(id: parent, activeChildIDs: [first, second])
-        let archivable = SelectionArchive.isArchivable(candidate, selectedIDs: selected)
-        #expect(archivable)
+        let candidates = [
+            SelectionArchive.Candidate(id: parent, activeChildIDs: [first, second]),
+            SelectionArchive.Candidate(id: first),
+            SelectionArchive.Candidate(id: second),
+        ]
+        let targets = SelectionArchive.targets(candidates, runOrder: [first, second, parent])
+        let expected = [first, second, parent]
+        #expect(targets == expected)
+    }
+
+    /// A selected child that cannot go holds its parent back, as an
+    /// unselected one does: the daemon would refuse the parent for it.
+    @Test func aSelectedChildThatCannotGoHoldsBackItsParent() {
+        let creatingChild = SelectionArchive.Candidate(id: UUID(), status: .creating)
+        let laneChild = SelectionArchive.Candidate(
+            id: UUID(), location: .remote(provider: "acme", sessionID: "s1"), providerCapabilities: [])
+        for child in [creatingChild, laneChild] {
+            let parent = SelectionArchive.Candidate(id: UUID(), activeChildIDs: [child.id])
+            let sibling = SelectionArchive.Candidate(id: UUID())
+            let targets = SelectionArchive.targets(
+                [parent, child, sibling], runOrder: [child.id, parent.id, sibling.id])
+            let expected = [sibling.id]
+            #expect(targets == expected)
+        }
+    }
+
+    @Test func aThreeLevelChainGoesWholeOrIsHeldBackFromTheBottom() {
+        let grandchildID = UUID(), childID = UUID(), parentID = UUID()
+        let runOrder = [grandchildID, childID, parentID]
+        let child = SelectionArchive.Candidate(id: childID, activeChildIDs: [grandchildID])
+        let parent = SelectionArchive.Candidate(id: parentID, activeChildIDs: [childID])
+
+        // Every row can go: the whole chain, deepest first.
+        let whole = SelectionArchive.targets(
+            [parent, SelectionArchive.Candidate(id: grandchildID), child], runOrder: runOrder)
+        #expect(whole == runOrder)
+
+        // The grandchild is still creating: it holds back the child, which
+        // holds back the parent.
+        let creating = SelectionArchive.targets(
+            [parent, SelectionArchive.Candidate(id: grandchildID, status: .creating), child], runOrder: runOrder)
+        #expect(creating.isEmpty)
+
+        // The grandchild is not selected: the same.
+        let unselected = SelectionArchive.targets([parent, child], runOrder: runOrder)
+        #expect(unselected.isEmpty)
+    }
+
+    @Test func aLoopingParentChainHoldsBackEveryRowInIt() {
+        let a = UUID(), b = UUID(), free = UUID()
+        let candidates = [
+            SelectionArchive.Candidate(id: a, activeChildIDs: [b]),
+            SelectionArchive.Candidate(id: b, activeChildIDs: [a]),
+            SelectionArchive.Candidate(id: free),
+        ]
+        let targets = SelectionArchive.targets(candidates, runOrder: [a, b, free])
+        let expected = [free]
+        #expect(targets == expected)
     }
 
     // MARK: Run order
@@ -200,18 +247,8 @@ struct SelectionArchiveDecisionTests {
             SelectionArchive.Candidate(id: main, status: .main),
             SelectionArchive.Candidate(id: c),
         ]
-        let selected: Set<UUID> = [a, main, c]
-        let targets = SelectionArchive.targets(candidates, selectedIDs: selected, runOrder: [c, main, a])
+        let targets = SelectionArchive.targets(candidates, runOrder: [c, main, a])
         let expected = [c, a]
-        #expect(targets == expected)
-    }
-
-    @Test func anArchivableRowTheRunOrderDoesNotListGoesLast() {
-        let listed = UUID(), unlisted = UUID()
-        let candidates = [SelectionArchive.Candidate(id: unlisted), SelectionArchive.Candidate(id: listed)]
-        let selected: Set<UUID> = [listed, unlisted]
-        let targets = SelectionArchive.targets(candidates, selectedIDs: selected, runOrder: [listed])
-        let expected = [listed, unlisted]
         #expect(targets == expected)
     }
 
@@ -236,7 +273,10 @@ struct SelectionArchiveDecisionTests {
 
     // MARK: The summary
 
-    @Test func aRefusalIsTheDaemonsSentenceOnOneLine() {
+    /// The first line says what is wrong; the file list after it is left
+    /// out, and the colon that introduced it becomes a full stop. The text is
+    /// `UncommittedArchiveRefusal.evaluate`'s for one dirty file.
+    @Test func aRefusalIsTheFirstLineOfTheDaemonsSentence() {
         let refusal = """
             acme-wt has 1 uncommitted change(s) that archiving would delete:
               ?? notes.md
@@ -244,8 +284,14 @@ struct SelectionArchiveDecisionTests {
             """
         let error = DaemonClientError.rpcError(refusal, code: RPCErrorCode.worktreeArchiveUncommitted.rawValue)
         let reason = SelectionArchive.failureReason(error)
-        #expect(reason == "acme-wt has 1 uncommitted change(s) that archiving would delete: ?? notes.md Commit or remove them first.")
+        #expect(reason == "acme-wt has 1 uncommitted change(s) that archiving would delete.")
         #expect(!reason.hasPrefix("RPC error:"))
+    }
+
+    @Test func blankLinesBeforeTheFirstSentenceAreSkipped() {
+        let error = DaemonClientError.rpcError("\n   \nCannot archive acme-lane: its agent is working.\nMore.", code: nil)
+        let reason = SelectionArchive.failureReason(error)
+        #expect(reason == "Cannot archive acme-lane: its agent is working.")
     }
 
     @Test func anotherErrorIsItsDescription() {
@@ -253,19 +299,74 @@ struct SelectionArchiveDecisionTests {
         #expect(reason == "TBD daemon is not running")
     }
 
+    @Test func aReasonAtTheCharacterLimitIsKeptWhole() {
+        let line = String(repeating: "x", count: SelectionArchive.reasonCharacterLimit)
+        let reason = SelectionArchive.failureReason(DaemonClientError.rpcError(line, code: nil))
+        #expect(reason == line)
+    }
+
+    @Test func aReasonOneCharacterOverTheLimitIsCutToEndInAnEllipsis() {
+        let limit = SelectionArchive.reasonCharacterLimit
+        let line = String(repeating: "x", count: limit + 1)
+        let reason = SelectionArchive.failureReason(DaemonClientError.rpcError(line, code: nil))
+        let expected = String(repeating: "x", count: limit - 1) + "…"
+        #expect(reason == expected)
+        #expect(reason.count == limit)
+    }
+
     @Test func theSummaryCountsThenListsEachFailure() {
         let failures = [
             SelectionArchive.Failure(name: "acme-a", reason: "Its agent is still working."),
             SelectionArchive.Failure(name: "acme-b", reason: "TBD daemon is not running"),
         ]
-        let text = SelectionArchive.summary(archived: 1, attempted: 3, failures: failures)
+        let text = SelectionArchive.summary(archived: 1, total: 3, failures: failures)
         #expect(text == "Archived 1 of 3 worktrees.\n\nacme-a: Its agent is still working.\nacme-b: TBD daemon is not running")
     }
 
-    @Test func oneAttemptReadsInTheSingular() {
+    @Test func oneRowReadsInTheSingular() {
         let failures = [SelectionArchive.Failure(name: "acme-a", reason: "Refused.")]
-        let text = SelectionArchive.summary(archived: 0, attempted: 1, failures: failures)
+        let text = SelectionArchive.summary(archived: 0, total: 1, failures: failures)
         #expect(text == "Archived 0 of 1 worktree.\n\nacme-a: Refused.")
+    }
+
+    private static func failures(_ count: Int) -> [SelectionArchive.Failure] {
+        (1...count).map { SelectionArchive.Failure(name: "acme-\($0)", reason: "Refused.") }
+    }
+
+    @Test func aSummaryAtTheLineLimitListsEveryFailure() {
+        let limit = SelectionArchive.summaryFailureLineLimit
+        let text = SelectionArchive.summary(archived: 0, total: limit, failures: Self.failures(limit))
+        let lines = text.components(separatedBy: "\n")
+        let expected: [String] = ["Archived 0 of \(limit) worktrees.", ""] + (1...limit).map { "acme-\($0): Refused." }
+        #expect(lines == expected)
+    }
+
+    @Test func aSummaryOneOverTheLineLimitCountsTheRestOnOneLine() {
+        let limit = SelectionArchive.summaryFailureLineLimit
+        let total = limit + 1
+        let text = SelectionArchive.summary(archived: 0, total: total, failures: Self.failures(total))
+        let lines = text.components(separatedBy: "\n")
+        let expected: [String] = ["Archived 0 of \(total) worktrees.", ""]
+            + (1...limit).map { "acme-\($0): Refused." }
+            + ["…and 1 more."]
+        #expect(lines == expected)
+    }
+
+    @Test func rowsNotAttemptedShareOneClosingLine() {
+        let failures = [SelectionArchive.Failure(name: "acme-a", reason: "TBD daemon is not running")]
+        let text = SelectionArchive.summary(archived: 1, total: 5, failures: failures, notAttempted: 3)
+        let expected = """
+            Archived 1 of 5 worktrees.
+
+            acme-a: TBD daemon is not running
+            3 more not attempted: lost the connection to the daemon.
+            """
+        #expect(text == expected)
+    }
+
+    @Test func aHeldBackRowNamesTheNestedWorktreeThatStayed() {
+        let reason = SelectionArchive.nestedNotArchivedReason("acme-child")
+        #expect(reason == "Not archived, because its nested worktree \"acme-child\" was not archived.")
     }
 }
 
@@ -448,6 +549,95 @@ struct ArchiveSelectionCallSiteTests {
         }
     }
 
+    /// A menu acting on the selection derives none of the row's own facts:
+    /// its context is the selection and every other field's default, even
+    /// for a row whose own context would set many of them.
+    @Test("inside a selection the context carries the selection alone")
+    func insideASelectionTheContextIsTheSelectionAlone() throws {
+        try withState { state, _, f in
+            state.selectedWorktreeIDs = [f.parent.id, f.child.id, f.sibling.id]
+            let context = rowMenu(state, f.parent).context()
+            let expected = RowActionMenu.Context(
+                selection: .init(archiveTargetIDs: [f.child.id, f.parent.id, f.sibling.id]))
+            #expect(context == expected)
+            // The gate's other branch: the same row outside a selection
+            // derives its own facts.
+            state.selectedWorktreeIDs = [f.parent.id]
+            let own = rowMenu(state, f.parent).context()
+            #expect(own.selection == nil)
+            #expect(own.hasActiveChildren)
+            #expect(own.branch == f.parent.branch)
+        }
+    }
+
+    @Test("a parent whose selected child is still creating is skipped")
+    func aParentWithACreatingChildIsSkipped() throws {
+        try withState { state, _, f in
+            let creatingChild = row("creating-child", repoID: f.repo.id, parent: f.sibling.id, status: .creating)
+            state.worktrees[f.repo.id, default: []].append(creatingChild)
+            state.selectedWorktreeIDs = [f.sibling.id, creatingChild.id, f.parent.id, f.child.id]
+            let items = rowMenu(state, f.sibling).items()
+            let expected = archiveSelectionMenu([f.child.id, f.parent.id])
+            #expect(items == expected)
+        }
+    }
+
+    /// Why `SelectionArchive.targets` needs no branch for a candidate the run
+    /// order leaves out: the run order lists every row `findWorktree(id:)`
+    /// resolves, including the ones the sidebar walk skips.
+    @Test("the run order lists every row a selected ID can resolve to, once")
+    func theRunOrderListsEveryResolvableRow() throws {
+        try withState { state, _, f in
+            let failed = row("failed", repoID: f.repo.id, order: 4, status: .failed)
+            let underFailed = row("under-failed", repoID: f.repo.id, parent: failed.id)
+            state.worktrees[f.repo.id, default: []] += [failed, underFailed]
+            state.scratchWorktrees = [row("scratch", repoID: nil)]
+            let order = state.selectionArchiveRunOrder
+            let resolvable = state.allWorktrees.map(\.id)
+            let orderSet = Set(order)
+            let resolvableSet = Set(resolvable)
+            #expect(order.count == resolvable.count)
+            #expect(orderSet == resolvableSet)
+            for id in resolvable {
+                let found = state.findWorktree(id: id)
+                #expect(found != nil)
+            }
+            let failedIndex = try #require(order.firstIndex(of: failed.id))
+            let childIndex = try #require(order.firstIndex(of: underFailed.id))
+            #expect(childIndex < failedIndex)
+        }
+    }
+
+    // MARK: The archive shortcut
+
+    /// With one row selected the shortcut keeps its old rule: the lane goes
+    /// to `archiveWorktree(id:)`, and the daemon's refusal comes back as that
+    /// path's alert.
+    @Test("the shortcut sends one selected lane its provider cannot archive to the single-row archive")
+    func theShortcutSendsOneSelectedLaneAnyway() throws {
+        try withState { state, _, f in
+            let lane = row("lane", repoID: f.repo.id, order: 3, remote: "s1")
+            state.worktrees[f.repo.id, default: []].append(lane)
+            state.remoteProviders = [acmeProvider()]
+            state.selectedWorktreeIDs = [lane.id]
+            #expect(state.archiveShortcutRoute() == .single(lane.id))
+            // Selected with another row that cannot go, it is held to the
+            // selection's rules, and nothing can go.
+            state.selectedWorktreeIDs = [lane.id, f.main.id]
+            #expect(state.archiveShortcutRoute() == .beep)
+        }
+    }
+
+    @Test("the shortcut beeps for two or more selected rows of which none can go")
+    func theShortcutBeepsWhenNothingSelectedCanGo() throws {
+        try withState { state, _, f in
+            state.selectedWorktreeIDs = [f.main.id, f.creating.id]
+            #expect(state.archiveShortcutRoute() == .beep)
+            state.selectedWorktreeIDs = [UUID(), UUID()]
+            #expect(state.archiveShortcutRoute() == .beep)
+        }
+    }
+
     // MARK: The native sidebar and dock
 
     private static func titles(of menu: NSMenu) -> [String] {
@@ -530,6 +720,9 @@ struct ArchiveSelectionBulkRunTests {
     final class FakeArchiver {
         var calls: [UUID] = []
         var failures: [UUID: any Error] = [:]
+        /// `selectionArchiveInFlight` as each call saw it, for the tests
+        /// that record it.
+        var inFlightSeen: [Bool] = []
 
         func archive(_ worktree: Worktree) throws {
             calls.append(worktree.id)
@@ -575,7 +768,7 @@ struct ArchiveSelectionBulkRunTests {
             Archived 2 of 4 worktrees.
 
             acme-guarded: Its agent is still working.
-            acme-dirty: acme-dirty has 1 uncommitted change(s) that archiving would delete: ?? notes.md Commit or remove them first.
+            acme-dirty: acme-dirty has 1 uncommitted change(s) that archiving would delete.
             """
         #expect(state.alertMessage == summary)
         #expect(state.alertIsError)
@@ -602,11 +795,19 @@ struct ArchiveSelectionBulkRunTests {
 
         let fake = FakeArchiver()
         let targets = [first.id, second.id]
-        await state.archiveInBulk(targets) { try fake.archive($0) }
+        #expect(!state.selectionArchiveInFlight)
+        await state.archiveInBulk(targets) { worktree in
+            try fake.archive(worktree)
+            fake.inFlightSeen.append(state.selectionArchiveInFlight)
+        }
 
         #expect(fake.calls == targets)
         #expect(state.alertMessage == nil)
         #expect(state.worktrees[repo.id]?.isEmpty == true)
+        // The run held the in-flight flag throughout and let it go at the end.
+        let seen = [true, true]
+        #expect(fake.inFlightSeen == seen)
+        #expect(!state.selectionArchiveInFlight)
     }
 
     @Test("a row gone before its turn is not attempted, and the summary counts only what was")
@@ -629,8 +830,99 @@ struct ArchiveSelectionBulkRunTests {
         #expect(state.alertMessage == "Archived 1 of 2 worktrees.\n\nacme-second: Refused.")
     }
 
-    @Test("a dropped connection goes through handleConnectionError and into the summary")
-    func aConnectionFailureIsHandledAndReported() async {
+    @Test("a refused child holds back its parent, which is not sent to the daemon")
+    func aRefusedChildHoldsBackItsParent() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = row("acme-parent", repoID: repo.id, order: 0)
+        let child = row("acme-child", repoID: repo.id, parent: parent.id)
+        let sibling = row("acme-sibling", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [parent, child, sibling]]
+
+        let fake = FakeArchiver()
+        fake.failures[child.id] = DaemonClientError.rpcError("Refused.", code: nil)
+        await state.archiveInBulk([child.id, parent.id, sibling.id]) { try fake.archive($0) }
+
+        let sent = [child.id, sibling.id]
+        #expect(fake.calls == sent)
+        let summary = """
+            Archived 1 of 3 worktrees.
+
+            acme-child: Refused.
+            acme-parent: Not archived, because its nested worktree "acme-child" was not archived.
+            """
+        #expect(state.alertMessage == summary)
+        let remaining = Set((state.worktrees[repo.id] ?? []).map(\.id))
+        let kept: Set<UUID> = [parent.id, child.id]
+        #expect(remaining == kept)
+    }
+
+    @Test("a refused grandchild holds back the whole chain above it, each naming the row below")
+    func aRefusedGrandchildHoldsBackTheChain() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = row("acme-parent", repoID: repo.id)
+        let child = row("acme-child", repoID: repo.id, parent: parent.id)
+        let grandchild = row("acme-grandchild", repoID: repo.id, parent: child.id)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [parent, child, grandchild]]
+
+        let fake = FakeArchiver()
+        fake.failures[grandchild.id] = DaemonClientError.rpcError("Refused.", code: nil)
+        await state.archiveInBulk([grandchild.id, child.id, parent.id]) { try fake.archive($0) }
+
+        let sent = [grandchild.id]
+        #expect(fake.calls == sent)
+        let summary = """
+            Archived 0 of 3 worktrees.
+
+            acme-grandchild: Refused.
+            acme-child: Not archived, because its nested worktree "acme-grandchild" was not archived.
+            acme-parent: Not archived, because its nested worktree "acme-child" was not archived.
+            """
+        #expect(state.alertMessage == summary)
+    }
+
+    @Test("a dropped connection stops the run, and the rows left share one line")
+    func aConnectionFailureStopsTheRun() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = row("acme-first", repoID: repo.id, order: 0)
+        let second = row("acme-second", repoID: repo.id, order: 1)
+        let third = row("acme-third", repoID: repo.id, order: 2)
+        let fourth = row("acme-fourth", repoID: repo.id, order: 3)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [first, second, third, fourth]]
+        state.isConnected = true
+
+        let fake = FakeArchiver()
+        fake.failures[second.id] = DaemonClientError.daemonNotRunning
+        // A row gone before the run reaches it is not counted among the rows
+        // left, as it is not counted when the run does reach it.
+        let gone = UUID()
+        await state.archiveInBulk([first.id, second.id, third.id, gone, fourth.id]) { try fake.archive($0) }
+
+        let sent = [first.id, second.id]
+        #expect(fake.calls == sent)
+        #expect(!state.isConnected)
+        let summary = """
+            Archived 1 of 4 worktrees.
+
+            acme-second: TBD daemon is not running
+            2 more not attempted: lost the connection to the daemon.
+            """
+        #expect(state.alertMessage == summary)
+    }
+
+    /// The other branch: a refusal that is not a lost connection leaves the
+    /// run going, and a lost connection on the last row leaves nothing to
+    /// count.
+    @Test("a refusal does not stop the run, and a lost connection on the last row adds no line")
+    func aRefusalDoesNotStopTheRun() async {
         let (state, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
@@ -638,20 +930,70 @@ struct ArchiveSelectionBulkRunTests {
         let second = row("acme-second", repoID: repo.id, order: 1)
         state.repos = [repo]
         state.worktrees = [repo.id: [first, second]]
-        state.isConnected = true
 
         let fake = FakeArchiver()
-        fake.failures[first.id] = DaemonClientError.daemonNotRunning
-        fake.failures[second.id] = DaemonClientError.daemonNotRunning
+        fake.failures[first.id] = DaemonClientError.rpcError("Refused.", code: nil)
+        fake.failures[second.id] = DaemonClientError.connectionFailed("socket closed")
         await state.archiveInBulk([first.id, second.id]) { try fake.archive($0) }
 
-        #expect(!state.isConnected)
+        let sent = [first.id, second.id]
+        #expect(fake.calls == sent)
         let summary = """
             Archived 0 of 2 worktrees.
 
-            acme-first: TBD daemon is not running
-            acme-second: TBD daemon is not running
+            acme-first: Refused.
+            acme-second: Connection failed: socket closed
             """
         #expect(state.alertMessage == summary)
+    }
+
+    /// The row menu and the shortcut, or the shortcut twice: a bulk trigger
+    /// while a run is in progress archives nothing.
+    @Test("a bulk trigger during a run starts nothing")
+    func aBulkTriggerDuringARunStartsNothing() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = row("acme-first", repoID: repo.id, order: 0)
+        let second = row("acme-second", repoID: repo.id, order: 1)
+        let other = row("acme-other", repoID: repo.id, order: 2)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [first, second, other]]
+
+        let fake = FakeArchiver()
+        let nested = FakeArchiver()
+        let firstID = first.id
+        let otherID = other.id
+        await state.archiveInBulk([first.id, second.id]) { worktree in
+            try fake.archive(worktree)
+            if worktree.id == firstID {
+                await state.archiveInBulk([otherID]) { try nested.archive($0) }
+            }
+        }
+
+        let sent = [first.id, second.id]
+        #expect(fake.calls == sent)
+        #expect(nested.calls.isEmpty)
+        #expect(state.findWorktree(id: other.id) != nil)
+        #expect(!state.selectionArchiveInFlight)
+    }
+
+    @Test("a trigger while a run holds the flag archives nothing and leaves the flag set")
+    func aTriggerWhileTheFlagIsSetArchivesNothing() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let first = row("acme-first", repoID: repo.id)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [first]]
+        state.selectionArchiveInFlight = true
+
+        let fake = FakeArchiver()
+        await state.archiveInBulk([first.id]) { try fake.archive($0) }
+
+        #expect(fake.calls.isEmpty)
+        #expect(state.selectionArchiveInFlight)
+        #expect(state.alertMessage == nil)
+        #expect(state.findWorktree(id: first.id) != nil)
     }
 }

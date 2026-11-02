@@ -270,6 +270,10 @@ final class AppState {
     /// (`toggleNotesPanel`). A press while that create is in flight sends
     /// nothing, so a double click makes one note, not two.
     @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
+    /// Whether a selection's bulk archive is running (`archiveInBulk`). Set
+    /// for the whole run; another bulk trigger meanwhile, from the row menu
+    /// or the archive shortcut, archives nothing. No view reads it.
+    @ObservationIgnored var selectionArchiveInFlight = false
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the

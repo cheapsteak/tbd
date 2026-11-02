@@ -1776,33 +1776,84 @@ extension AppState {
         createWorktree(repoID: repoID)
     }
 
-    /// What the archive shortcut does with the current selection: the whole
-    /// selection, through the same eligibility and run as the row menu's
-    /// Archive Selection (`selectionArchiveTargets`, `SelectionArchive.route`).
-    /// This seam only decides what runs; `runArchive(_:)` runs it, and
-    /// `archiveWorktree(id:)` routes a single scratch row to the
-    /// `scratch.archive` RPC. Returns `.nothing` when:
-    /// - nothing is selected, or
-    /// - every selected ID is stale/unknown (`findWorktree` returns nil — no
-    ///   doomed RPC + error alert for a row that's already gone), or
-    /// - no selected row is archivable: the main branch, a row still
-    ///   creating, a row with active children outside the selection, or a
-    ///   remote lane whose provider cannot archive it. Scratch rows proceed
-    ///   on the same terms; the daemon creates them `.active`, never
-    ///   `.main`/`.creating`.
-    ///
-    /// One archivable row routes `.single`, the single-row archive with its
-    /// prompts; several route `.bulk`, in run order.
-    func archiveShortcutRoute() -> SelectionArchive.Route {
-        SelectionArchive.route(selectionArchiveTargets())
+    /// What the archive shortcut does with the selection
+    /// (`archiveShortcutRoute()`).
+    enum ArchiveShortcutRoute: Equatable {
+        /// Nothing happens: nothing is selected, or the one selected row is
+        /// gone, the main branch, or still creating.
+        case nothing
+        /// Two or more rows are selected and none of them can be archived:
+        /// the system beep, the macOS cue for a keyboard command that cannot
+        /// run.
+        case beep
+        /// One row, through `archiveWorktree(id:)`, prompts and alert
+        /// included.
+        case single(UUID)
+        /// Several rows, in run order, through Archive Selection's bulk run.
+        case bulk([UUID])
     }
 
-    /// Archive the selection (Cmd+Shift+A): one archivable row exactly as the
-    /// row menu's Archive does, several as its Archive Selection does.
+    /// The archive shortcut's rule for a selection of no row or one (the
+    /// caller passes `selectedWorktreeIDs.first.flatMap(findWorktree)`). It
+    /// only decides refuse-vs-proceed — `archiveWorktree(id:)` is
+    /// scratch-aware and self-routes scratch rows to the `scratch.archive`
+    /// RPC. Pure so the branches are unit-testable without a daemon. Returns
+    /// `nil` when:
+    /// - nothing is selected, or
+    /// - the selected ID is stale/unknown (`findWorktree` returned nil — no
+    ///   doomed RPC + error alert for a row that's already gone), or
+    /// - the selected repo worktree is the main branch or still creating
+    ///   (those refuse the archive shortcut; scratch rows always proceed —
+    ///   the daemon creates them `.active`, never `.main`/`.creating`).
+    ///
+    /// Everything else proceeds, and the daemon judges it: a row with active
+    /// children, say, comes back as `archiveWorktree(id:)`'s alert.
+    nonisolated static func archiveShortcutTarget(
+        selectedWorktree: Worktree?
+    ) -> UUID? {
+        guard let wt = selectedWorktree else { return nil }
+        if wt.isScratch { return wt.id }
+        // Don't archive the main branch worktree (or one still creating)
+        if wt.status == .main || wt.status == .creating { return nil }
+        return wt.id
+    }
+
+    /// What the archive shortcut does with the current selection. This seam
+    /// only decides what runs; `archiveSelectedWorktree()` runs it.
+    ///
+    /// - **No row or one** – `archiveShortcutTarget`'s rule: `.single` or
+    ///   `.nothing`.
+    /// - **Two or more** – the whole selection, with the eligibility and run
+    ///   order of the row menu's Archive Selection (`selectionArchiveTargets`,
+    ///   `SelectionArchive.route`): one archivable row routes `.single`,
+    ///   several route `.bulk`, and none routes `.beep`.
+    func archiveShortcutRoute() -> ArchiveShortcutRoute {
+        let selectedIDs = selectedWorktreeIDs
+        guard selectedIDs.count >= 2 else {
+            let selected = selectedIDs.first.flatMap { findWorktree(id: $0) }
+            guard let id = Self.archiveShortcutTarget(selectedWorktree: selected) else { return .nothing }
+            return .single(id)
+        }
+        switch SelectionArchive.route(selectionArchiveTargets()) {
+        case .nothing: return .beep
+        case .single(let id): return .single(id)
+        case .bulk(let ids): return .bulk(ids)
+        }
+    }
+
+    /// Archive the selection (Cmd+Shift+A): one row exactly as the row
+    /// menu's Archive does, several as its Archive Selection does.
     func archiveSelectedWorktree() {
-        let route = archiveShortcutRoute()
-        guard route != .nothing else { return }
-        Task { await runArchive(route) }
+        switch archiveShortcutRoute() {
+        case .nothing:
+            return
+        case .beep:
+            NSSound.beep()
+        case .single(let id):
+            Task { await archiveWorktree(id: id) }
+        case .bulk(let ids):
+            Task { await runArchive(.bulk(ids)) }
+        }
     }
 
     /// Select a worktree by its index in the sidebar order.

@@ -355,7 +355,7 @@ enum RowActionMenu {
     /// declared the `archive` capability. Always false for a local row. A
     /// `gone` lane and one whose provider is retired are exempt: the daemon
     /// files both row-only without invoking any verb (see `regularItems`).
-    /// Shared by the row's own Archive and by `SelectionArchive.isArchivable`,
+    /// Shared by the row's own Archive and by `SelectionArchive.canArchiveItself`,
     /// so the two cannot disagree about which lanes can go.
     static func missingArchiveCapability(
         location: WorktreeLocation, isGone: Bool, providerRetired: Bool,

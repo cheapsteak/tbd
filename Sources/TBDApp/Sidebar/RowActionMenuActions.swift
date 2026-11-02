@@ -31,13 +31,6 @@ struct RowActionMenuActions {
             && SelectionArchive.actsOnSelection(rowID: worktree.id, selectedIDs: appState.selectedWorktreeIDs)
     }
 
-    /// The selection this menu acts on, with its archivable rows resolved in
-    /// run order, or nil when it acts on this row alone.
-    private var selection: RowActionMenu.Selection? {
-        guard actsOnSelection else { return nil }
-        return RowActionMenu.Selection(archiveTargetIDs: appState.selectionArchiveTargets())
-    }
-
     private var terminals: [Terminal] {
         appState.terminals[worktree.id] ?? []
     }
@@ -134,8 +127,18 @@ struct RowActionMenuActions {
 
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
+    ///
+    /// A menu acting on the selection gets a context carrying the selection
+    /// alone, its archivable rows resolved in run order: that menu is the one
+    /// Archive Selection item, which reads nothing else, so none of the row's
+    /// own facts are derived (the hook probe's `fileExists` calls, session
+    /// labels, the hibernation lists, the remote lookups).
     func context() -> RowActionMenu.Context {
-        RowActionMenu.Context(
+        if actsOnSelection {
+            return RowActionMenu.Context(
+                selection: RowActionMenu.Selection(archiveTargetIDs: appState.selectionArchiveTargets()))
+        }
+        return RowActionMenu.Context(
             hasHibernatableClaude: !manuallyParkableTerminals.isEmpty,
             // "Wake" acts on any PARKED session (authoritative hibernatedAt OR
             // legacy suspendedAt) — the unified park state.
@@ -162,16 +165,16 @@ struct RowActionMenuActions {
             providerCapabilities: providerCapabilities,
             isGone: isGone,
             providerRetired: providerRetired,
-            remoteDeleteEnabled: appState.remoteDeleteEnabled,
-            selection: selection
+            remoteDeleteEnabled: appState.remoteDeleteEnabled
         )
     }
 
     /// This row's facts as Archive Selection's eligibility reads them
-    /// (`SelectionArchive.isArchivable`), from the same derivations
-    /// `context()` uses, so a row the selection skips is one whose own
-    /// Archive is disabled too, apart from children that are selected along
-    /// with it.
+    /// (`SelectionArchive.archivableIDs`), from the same derivations
+    /// `context()` uses, so a row the selection skips on its own facts is one
+    /// whose own Archive is disabled too. Its children are judged apart: a
+    /// selection can take a parent along with its children, and holds one
+    /// back for a selected child that cannot go.
     func archiveCandidate() -> SelectionArchive.Candidate {
         SelectionArchive.Candidate(
             id: worktree.id,

@@ -6,11 +6,13 @@ import TBDShared
 /// unit-testable without an `AppState` or a daemon:
 ///
 /// - `actsOnSelection` – whether a row's menu acts on the selection at all.
-/// - `isArchivable` – whether one selected row can be archived.
+/// - `canArchiveItself` and `archivableIDs` – which selected rows can be
+///   archived: each on its own facts, then bottom-up through their children.
 /// - `childrenFirst` and `targets` – which rows run, and in what order.
 /// - `route` – one row takes the single-row archive, prompts included;
 ///   several take the bulk run.
-/// - `failureReason` and `summary` – the bulk run's one alert.
+/// - `failureReason`, `nestedNotArchivedReason` and `summary` – the bulk
+///   run's one alert.
 ///
 /// `AppState+SelectionArchive.swift` wires these to live state.
 enum SelectionArchive {
@@ -26,9 +28,9 @@ enum SelectionArchive {
 
     // MARK: - Eligibility
 
-    /// One selected row's facts, as `isArchivable` reads them. Built by
-    /// `RowActionMenuActions.archiveCandidate()` from the derivations the
-    /// row's own menu uses, so the two read the same state.
+    /// One selected row's facts, as `canArchiveItself` and `archivableIDs`
+    /// read them. Built by `RowActionMenuActions.archiveCandidate()` from the
+    /// derivations the row's own menu uses, so the two read the same state.
     struct Candidate: Equatable {
         let id: UUID
         var status: WorktreeStatus
@@ -57,28 +59,50 @@ enum SelectionArchive {
         }
     }
 
-    /// Whether a selected row can be archived along with the rest:
+    /// Whether a selected row could be archived on its own facts, before its
+    /// children are counted:
     ///
     /// - its status is not `.main`, `.creating` or `.archived`;
     /// - it is not a remote lane whose provider cannot archive it, by the rule
-    ///   the row's own Archive uses (`RowActionMenu.missingArchiveCapability`);
-    /// - every active child it has is selected too, so the run archives the
-    ///   child first.
+    ///   the row's own Archive uses (`RowActionMenu.missingArchiveCapability`).
     ///
-    /// A scratch row is archivable on the same terms; the run sends it to
-    /// `scratch.archive`. The daemon stays the authority: a child it refuses
-    /// leaves its parent refused as well, and both refusals are reported.
-    static func isArchivable(_ candidate: Candidate, selectedIDs: Set<UUID>) -> Bool {
+    /// A scratch row qualifies on the same terms.
+    static func canArchiveItself(_ candidate: Candidate) -> Bool {
         if candidate.status == .main || candidate.status == .creating || candidate.status == .archived {
             return false
         }
-        if RowActionMenu.missingArchiveCapability(
+        return !RowActionMenu.missingArchiveCapability(
             location: candidate.location, isGone: candidate.isGone,
             providerRetired: candidate.providerRetired,
-            providerCapabilities: candidate.providerCapabilities) {
-            return false
+            providerCapabilities: candidate.providerCapabilities)
+    }
+
+    /// The candidates that can be archived with the selection, decided bottom
+    /// up: a row qualifies when it can be archived on its own facts
+    /// (`canArchiveItself`) and every active child it has qualifies too, so
+    /// the run can archive the child first. The daemon refuses to archive a
+    /// row while an active child remains, so a row is held back by any child
+    /// that will not go: one outside the selection (it is no candidate), one
+    /// still creating, a remote lane whose provider cannot archive it, or one
+    /// held back by a child of its own.
+    ///
+    /// A parent chain that loops has no row in it that can go first, so none
+    /// of its rows qualifies. The daemon stays the authority over the rows
+    /// that do: one it refuses at run time holds back its ancestors in the
+    /// bulk run (`AppState.archiveInBulk`).
+    static func archivableIDs(_ candidates: [Candidate]) -> Set<UUID> {
+        var archivable = Set<UUID>()
+        var waiting = candidates.filter { canArchiveItself($0) }
+        // Each pass admits the rows whose children have all been admitted,
+        // so a chain is admitted from its deepest row up. A pass that admits
+        // nothing leaves only rows held back, and ends the walk.
+        while true {
+            let ready = waiting.filter { $0.activeChildIDs.isSubset(of: archivable) }
+            guard !ready.isEmpty else { break }
+            archivable.formUnion(ready.map(\.id))
+            waiting.removeAll { archivable.contains($0.id) }
         }
-        return candidate.activeChildIDs.isSubset(of: selectedIDs)
+        return archivable
     }
 
     // MARK: - Run order
@@ -130,16 +154,15 @@ enum SelectionArchive {
         return result
     }
 
-    /// The selection's archivable rows, in `runOrder`
+    /// The selection's archivable rows (`archivableIDs`), in `runOrder`
     /// (`AppState.selectionArchiveRunOrder`: sidebar order, children before
     /// their parents). Rows that are not archivable are skipped and count for
-    /// nothing. An archivable row `runOrder` does not list goes last, by ID,
-    /// so the run is still deterministic.
-    static func targets(_ candidates: [Candidate], selectedIDs: Set<UUID>, runOrder: [UUID]) -> [UUID] {
-        let archivable = Set(candidates.filter { isArchivable($0, selectedIDs: selectedIDs) }.map(\.id))
-        let ordered = runOrder.filter { archivable.contains($0) }
-        let unlisted = archivable.subtracting(ordered).sorted { $0.uuidString < $1.uuidString }
-        return ordered + unlisted
+    /// nothing. `runOrder` lists every row a candidate can be built from, so
+    /// a candidate it does not list cannot arise; if one did, it would not be
+    /// a target.
+    static func targets(_ candidates: [Candidate], runOrder: [UUID]) -> [UUID] {
+        let archivable = archivableIDs(candidates)
+        return runOrder.filter { archivable.contains($0) }
     }
 
     // MARK: - Routing
@@ -169,11 +192,23 @@ enum SelectionArchive {
         let reason: String
     }
 
-    /// Why one archive failed, on one line: the daemon's refusal sentence for
-    /// an RPC error, without the transport's "RPC error:" prefix, otherwise
-    /// the error's description. A refusal that spans lines, such as the list
-    /// of uncommitted changes, is joined into one so the summary keeps one
-    /// line per worktree.
+    /// The most characters one failure's reason keeps; a longer one is cut
+    /// to end in "…" at this length.
+    static let reasonCharacterLimit = 200
+
+    /// The most failures the summary lists by name before one line counts
+    /// the rest.
+    static let summaryFailureLineLimit = 10
+
+    /// Why one archive failed, on one short line: the first non-empty line of
+    /// the daemon's refusal for an RPC error, without the transport's "RPC
+    /// error:" prefix, otherwise of the error's description.
+    ///
+    /// The first line is the one that says what is wrong. The uncommitted
+    /// changes refusal, for one, opens with "<name> has N uncommitted
+    /// change(s) that archiving would delete:" and then lists the files; the
+    /// list is left out, and the colon that introduced it becomes a full
+    /// stop. A line longer than `reasonCharacterLimit` is cut to end in "…".
     static func failureReason(_ error: any Error) -> String {
         let text: String
         if case .rpcError(let refusal, _)? = error as? DaemonClientError {
@@ -181,18 +216,40 @@ enum SelectionArchive {
         } else {
             text = String(describing: error)
         }
-        return text.split(whereSeparator: \.isNewline)
+        var line = text.split(whereSeparator: \.isNewline)
+            .lazy
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+            .first { !$0.isEmpty } ?? ""
+        if line.hasSuffix(":") {
+            line = String(line.dropLast()) + "."
+        }
+        guard line.count > reasonCharacterLimit else { return line }
+        return line.prefix(reasonCharacterLimit - 1).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    /// Why the bulk run skipped a row without asking the daemon: a nested
+    /// worktree of it, named `nestedName`, was not archived, so the daemon
+    /// would refuse the row for its active child.
+    static func nestedNotArchivedReason(_ nestedName: String) -> String {
+        "Not archived, because its nested worktree \"\(nestedName)\" was not archived."
     }
 
     /// The bulk run's one alert, shown only when something failed: how many
-    /// rows were archived out of how many were attempted, then one line per
-    /// failed worktree with its reason.
-    static func summary(archived: Int, attempted: Int, failures: [Failure]) -> String {
-        let noun = attempted == 1 ? "worktree" : "worktrees"
-        let lines = failures.map { "\($0.name): \($0.reason)" }
-        return (["Archived \(archived) of \(attempted) \(noun).", ""] + lines).joined(separator: "\n")
+    /// rows were archived out of the `total` the run covered, then one line
+    /// per failed or skipped worktree with its reason, up to
+    /// `summaryFailureLineLimit` of them and then one line counting the rest.
+    /// `notAttempted` counts the rows the run never reached because it lost
+    /// the connection to the daemon, the one thing that stops it early; they
+    /// share one closing line rather than one each.
+    static func summary(archived: Int, total: Int, failures: [Failure], notAttempted: Int = 0) -> String {
+        let noun = total == 1 ? "worktree" : "worktrees"
+        var lines = failures.prefix(summaryFailureLineLimit).map { "\($0.name): \($0.reason)" }
+        if failures.count > summaryFailureLineLimit {
+            lines.append("…and \(failures.count - summaryFailureLineLimit) more.")
+        }
+        if notAttempted > 0 {
+            lines.append("\(notAttempted) more not attempted: lost the connection to the daemon.")
+        }
+        return (["Archived \(archived) of \(total) \(noun).", ""] + lines).joined(separator: "\n")
     }
 }
