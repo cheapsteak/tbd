@@ -137,10 +137,13 @@ retained or logged; environments hold secrets. It answers one of three ways:
   `env -i` also reads as hidden, which only returns it to today's cwd rule.
 
 The reader runs after the sweep's `ps` snapshot, so a pid can be reissued in
-between. After each read it takes the pid's start time from the kernel and
-compares it with the start instant the snapshot recorded, using the same
-two-second tolerance as the signal-time re-check. A mismatch makes the answer
-**hidden**.
+between. Right after `ps`, the sweep reads the kernel's process table once
+(`KERN_PROC_ALL`) for each pid's exact start time. After each environment read
+it takes the pid's start time from the kernel again and compares the two. A
+mismatch, or a pid the table did not hold, makes the answer **hidden**. Both
+sides are kernel times, so the check holds under load. A start derived from
+`ps` would not: its elapsed time has one-second resolution and is measured
+whenever `ps` gets to run.
 
 ### Deciding on one escaped root
 
