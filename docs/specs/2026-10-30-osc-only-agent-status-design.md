@@ -253,19 +253,25 @@ It is new UI beside the existing badges and needs no flag.
 An agent decides once, at startup, whether to report: it sends the probe and
 turns reporting on only if the answer arrives before its DA1 reply. A failed
 handshake leaves the session silent for its whole life, so TBD records the
-handshake and its outcome at `.notice`, under the `programStatus` category of
-each process:
+handshake and its outcome at `.notice`, all in the `programStatus` category:
 
-- **daemon** – the holder emulator records each probe it answers, with whether
-  it saw the child from the start and how long after it was adopted the probe
-  came, and each probe it skips because it arrived inside a handback preamble.
-- **app** – the terminal view records each probe it answers, and each it skips
-  because its gate is off or a snapshot replay is in progress.
-- **store** – the store records each incarnation's first accepted report.
+- **daemon** (subsystem `com.tbd.daemon`) – the holder emulator records each
+  probe it answers, with whether it saw the child from the start and how long
+  after it was adopted the probe came, and each probe it skips because it
+  arrived inside a handback preamble.
+- **app** (subsystem `com.tbd.app`) – the terminal view records each probe it
+  answers, and each it skips because its gate is off or a snapshot replay is
+  in progress.
+- **store** (subsystem `com.tbd.daemon`) – the store records the first report
+  that leaves it holding state for an incarnation. A `clear` holds nothing, so
+  it is never recorded. Once the store holds nothing for a session, that
+  session's next such report is recorded again: so it records every reporting
+  session after a daemon restart, which `tbd update` causes, and a session
+  whose `clear` emptied what it held.
 
-Each fires about once per session start. They are notices because macOS
-keeps `.notice` by default and discards debug lines, and without a kept record
-a failed handshake leaves nothing to read: sessions woken together by
+The probe records come about once per session start. They are notices because
+macOS keeps `.notice` by default and discards debug lines, and without a kept
+record a failed handshake leaves nothing to read: sessions woken together by
 `tbd update`, running an agent new enough to report under a TBD that answered
 the probe, stayed silent through two days of turns and left no trace of why.
 
