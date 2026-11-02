@@ -26,6 +26,9 @@ import SwiftUI
 ///   reads `.standard`, and the hosted panes must read the same store.
 ///   `appState.userDefaults` is not that store under `TBD_MOCK`. The
 ///   controllers' `sizingOptions` are `[]`: the split items size the panes.
+/// - **The probe.** `\.hostedPaneProbe`, which the app never sets, draws a
+///   test's view behind each hosted root inside the environment the split
+///   gives it, so a test reads what the real pane reads.
 ///
 /// `updateNSViewController` refreshes only the Stop confirmation's closure.
 /// The panes and the toolbar follow `AppState` themselves, so no AppKit
@@ -34,6 +37,14 @@ import SwiftUI
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window
 /// structure".
 struct MainWindowSplitView: NSViewControllerRepresentable {
+    /// The SwiftUI trees the split hosts, each in a hosting controller or
+    /// view of its own.
+    enum HostedPane: CaseIterable, Sendable {
+        case sidebar
+        case detail
+        case title
+    }
+
     /// Raises the toolbar Stop's confirmation, which `ContentView` owns.
     let requestRemoteStop: (RemoteSessionSelection) -> Void
     /// The hosted trees' `@AppStorage` store: the one the window's root sets
@@ -44,6 +55,7 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+    @Environment(\.hostedPaneProbe) var hostedPaneProbe
 
     /// Keeps the toolbar controller alive for as long as SwiftUI keeps the
     /// split.
@@ -58,10 +70,11 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
     func makeNSViewController(context: Context) -> MainSplitViewController {
         let split = MainSplitViewController(
-            sidebar: hostingController(SidebarView()),
-            content: hostingController(MainDetailArea()),
+            sidebar: hostingController(SidebarView(), pane: .sidebar),
+            content: hostingController(MainDetailArea(), pane: .detail),
             autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
-        let titleView = Self.makeTitleView(withAppEnvironment(ToolbarTitleCluster(appState: appState)))
+        let titleView = Self.makeTitleView(
+            withAppEnvironment(ToolbarTitleCluster(appState: appState), pane: .title))
         let toolbarController = MainToolbarController(
             appState: appState, split: split, titleView: titleView, requestRemoteStop: requestRemoteStop)
         // Weak both ways: this closure holds the controller weakly, as the
@@ -131,13 +144,13 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
     /// `root` with the environment every hosted tree needs. The `@AppStorage`
     /// store is set only when `appStorage` names one; otherwise the tree
-    /// keeps `.standard`, as the window's root does.
+    /// keeps `.standard`, as the window's root does. A test's probe for
+    /// `pane`, when one is set, sits behind `root` inside that environment.
     @ViewBuilder
-    static func hostedRoot<Root: View>(
-        _ root: Root, appState: AppState, appearance: AppearanceSettings,
-        overlayCoordinator: TranscriptOverlayCoordinator, appStorage: UserDefaults?
-    ) -> some View {
+    private func withAppEnvironment<Root: View>(_ root: Root, pane: HostedPane) -> some View {
+        let probe = hostedPaneProbe?(pane)
         let hosted = root
+            .background { probe }
             .environment(appState)
             .environmentObject(appearance)
             .environmentObject(overlayCoordinator)
@@ -148,18 +161,27 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         }
     }
 
-    /// `hostedRoot` with this view's environment and store.
-    private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
-        Self.hostedRoot(
-            root, appState: appState, appearance: appearance,
-            overlayCoordinator: overlayCoordinator, appStorage: appStorage)
-    }
-
-    private func hostingController<Root: View>(_ root: Root) -> NSViewController {
-        let controller = NSHostingController(rootView: withAppEnvironment(root))
+    private func hostingController<Root: View>(_ root: Root, pane: HostedPane) -> NSViewController {
+        let controller = NSHostingController(rootView: withAppEnvironment(root, pane: pane))
         controller.sceneBridgingOptions = []
         controller.sizingOptions = []
         return controller
+    }
+}
+
+/// A test seam: given a pane, the view `MainWindowSplitView` draws behind that
+/// pane's hosted root, inside the environment the split gives the root. A
+/// hosted tree does not inherit its host's environment, so this is how a test
+/// observes what each real pane reads, such as its `@AppStorage` store. The
+/// split reads it once, when it builds the panes. Nothing in the app sets it.
+private struct HostedPaneProbeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
+}
+
+extension EnvironmentValues {
+    var hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? {
+        get { self[HostedPaneProbeKey.self] }
+        set { self[HostedPaneProbeKey.self] = newValue }
     }
 }
 

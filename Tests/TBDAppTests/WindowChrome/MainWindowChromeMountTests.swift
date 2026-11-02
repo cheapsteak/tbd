@@ -85,36 +85,43 @@ struct MainWindowChromeMountTests {
 
     // MARK: - Hosted panes' storage
 
-    /// A hosted tree reads `@AppStorage` from the store `MainWindowSplitView`
-    /// was given for it, not from `.standard`: a hosted tree starts from a
-    /// fresh environment, and the split wraps each pane and the title in
-    /// `hostedRoot`. Observed through a probe wrapped the same way, on a key
-    /// `.standard` never holds, written two different values in turn, so the
-    /// probe can only follow the writes by reading the suite.
-    @Test func hostedTreesReadTheGivenStore() async throws {
-        let suite = TestDefaultsSuite("MainWindowChromeMountTests.hostedStore")
-        defer { suite.tearDown() }
-        let state = AppState(userDefaults: suite.defaults)
-        let appearance = AppearanceSettings(
-            defaults: suite.defaults,
-            userThemesDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("TBDAppTests.MainWindowChromeMount.\(UUID().uuidString)"))
-        let record = StoreProbeRecord()
-        let root = MainWindowSplitView.hostedRoot(
-            StoreProbe(record: record), appState: state, appearance: appearance,
-            overlayCoordinator: TranscriptOverlayCoordinator(), appStorage: suite.defaults)
-        let host = OffscreenHost(root: root, size: NSSize(width: 200, height: 100))
-        defer { host.tearDown() }
-        let mounted = await host.settle { record.value != nil }
-        try #require(mounted, "The probe never evaluated; the reads below would be vacuous")
+    /// Each pane the split hosts, the sidebar, the detail and the title,
+    /// reads `@AppStorage` from the store `ContentView` was given for them,
+    /// which here mirrors the root's `.defaultAppStorage`, not from
+    /// `.standard`: a hosted tree starts from a fresh environment. Observed
+    /// through the probe the split draws behind each real pane's root, inside
+    /// the environment it gives that root (`\.hostedPaneProbe`), on a key
+    /// `.standard` never holds, written two different values in turn, so a
+    /// pane's probe follows the writes only by reading the suite. A pane built
+    /// without that environment draws no probe and fails the first wait.
+    @Test func hostedPanesReadTheGivenStore() async throws {
+        let reads = PaneStoreReads()
+        let mount = ChromeMount(label: "hostedStore", hostedPaneProbe: { pane in
+            AnyView(PaneStoreProbe(pane: pane, reads: reads))
+        })
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+        // The title draws nothing, so nothing behind it, until a worktree is
+        // selected.
+        mount.state.selectedWorktreeIDs = [mount.worktrees[0].id]
 
-        suite.defaults.set("acme-one", forKey: storeProbeKey)
-        let sawFirst = await host.settle { record.value == "acme-one" }
-        #expect(sawFirst, "The hosted probe read \(record.value ?? "nothing"), not the suite's value")
+        let allPanes = Set(MainWindowSplitView.HostedPane.allCases)
+        _ = try await waitForMainActorCondition("a store probe to evaluate in every hosted pane") {
+            reads.panes == allPanes
+        }
+        let probed = reads.panes
+        try #require(probed == allPanes, "A pane with no probe would make the reads below vacuous for it")
 
-        suite.defaults.set("acme-two", forKey: storeProbeKey)
-        let sawSecond = await host.settle { record.value == "acme-two" }
-        #expect(sawSecond, "The hosted probe read \(record.value ?? "nothing"), not the suite's value")
+        for value in ["acme-one", "acme-two"] {
+            mount.suite.defaults.set(value, forKey: storeProbeKey)
+            let expected = PaneStoreReads.everyPane(reading: value)
+            _ = try await waitForMainActorCondition("every hosted pane to read \(value) from the suite") {
+                reads.values == expected
+            }
+            // A pane still at "unset" read `.standard`.
+            let observed = reads.values
+            try #require(observed == expected)
+        }
     }
 
     /// The app builds `ContentView` without the seam, so its hosted panes get
@@ -391,9 +398,15 @@ private final class ChromeMount {
     /// `tearDown()` reaches it even when another toolbar is on the window.
     private weak var readyController: MainToolbarController?
 
-    /// - Parameter sceneBridgingOptions: for the root hosting view; `nil`
-    ///   keeps `NSHostingView`'s default.
-    init(label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil) {
+    /// - Parameters:
+    ///   - sceneBridgingOptions: for the root hosting view; `nil` keeps
+    ///     `NSHostingView`'s default.
+    ///   - hostedPaneProbe: set on the root as `\.hostedPaneProbe`, for the
+    ///     split to draw behind each pane it hosts.
+    init(
+        label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil,
+        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
+    ) {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
         self.suite = suite
         let state = AppState(userDefaults: suite.defaults)
@@ -424,6 +437,7 @@ private final class ChromeMount {
         // The hosted panes get the suite too: they do not inherit the root's
         // `.defaultAppStorage` below.
         let root = ContentView(hostedAppStorage: suite.defaults)
+            .environment(\.hostedPaneProbe, hostedPaneProbe)
             .environment(state)
             .environmentObject(appearance)
             .environmentObject(TranscriptOverlayCoordinator())
@@ -565,27 +579,42 @@ private final class ServerFetchLog {
     var worktreeIDs: [UUID] = []
 }
 
-/// What `StoreProbe` last read.
+/// What each hosted pane's `PaneStoreProbe` last read.
 @MainActor
-private final class StoreProbeRecord {
-    private(set) var value: String?
+private final class PaneStoreReads {
+    private(set) var values: [MainWindowSplitView.HostedPane: String] = [:]
 
-    func note(_ value: String) {
-        self.value = value
+    /// The panes whose probe has evaluated at least once.
+    var panes: Set<MainWindowSplitView.HostedPane> {
+        Set(values.keys)
+    }
+
+    func note(_ value: String, in pane: MainWindowSplitView.HostedPane) {
+        values[pane] = value
+    }
+
+    /// `values` once every pane has read `value`.
+    static func everyPane(reading value: String) -> [MainWindowSplitView.HostedPane: String] {
+        Dictionary(uniqueKeysWithValues: MainWindowSplitView.HostedPane.allCases.map { ($0, value) })
     }
 }
 
-/// A key no real store holds, so `.standard` reads `StoreProbe`'s default.
-private let storeProbeKey = "MainWindowChromeMountTests.storeProbe"
+/// A key no real store holds, so `.standard` reads `PaneStoreProbe`'s
+/// default. Kept free of dots, which key-value observation of a defaults key
+/// reads as key path separators.
+private let storeProbeKey = "mainWindowChromeMountTestsStoreProbe"
 
-/// Reads one `@AppStorage` key and records what it read on every evaluation.
-private struct StoreProbe: View {
-    let record: StoreProbeRecord
+/// Reads one `@AppStorage` key and records what it read, for its pane, on
+/// every evaluation. It draws nothing, so it changes nothing behind the
+/// pane's root.
+private struct PaneStoreProbe: View {
+    let pane: MainWindowSplitView.HostedPane
+    let reads: PaneStoreReads
     @AppStorage(storeProbeKey) private var value: String = "unset"
 
     var body: some View {
-        let _ = record.note(value)
-        Text(value)
+        let _ = reads.note(value, in: pane)
+        Color.clear
     }
 }
 
