@@ -1308,6 +1308,54 @@ struct SidebarGuideLineTests {
         #expect(reopenedStubs == expectedReopenedStubs)
         #expect(reopenedGuides == expectedReopenedGuides)
     }
+
+    /// The dock works its lines out again only when its rows' IDs or depths
+    /// change: a rename reaches the row's model and keeps the lines, and
+    /// opening a subtree works them out once.
+    @Test func dockWorksOutItsLinesOnlyWhenItsRowsChange() throws {
+        let h = GuideDockHarness("guides.dockRebuild")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        var a = SidebarOutlineControllerTests.row("a", repo, order: 0)
+        a.pinnedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        a.pinSortOrder = 0
+        let a1 = SidebarOutlineControllerTests.row("a1", repo, parent: a.id, order: 0)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [a, a1]]
+        h.mount()
+        let closed: [SidebarNodeID] = [.worktree(a.id)]
+        let mountedIDs = h.dock.rows.map(\.id)
+        try #require(mountedIDs == closed, "The dock shows \(mountedIDs)")
+        let mounted = h.dock.guideRebuildCount
+
+        // A rename changes the row's model, not its ID or depth.
+        h.state.worktrees[repo.id]?[0].displayName = "renamed"
+        h.flush()
+        let renamedIDs = h.dock.rows.map(\.id)
+        try #require(renamedIDs == closed, "The dock shows \(renamedIDs)")
+        let renamed: String?
+        if case .worktree(let model)? = h.dock.rows.first?.kind { renamed = model.name } else { renamed = nil }
+        #expect(renamed == "renamed", "The rename never reached the dock's row")
+        let afterRename = h.dock.guideRebuildCount
+        #expect(afterRename == mounted, "A model-only apply worked the lines out again")
+
+        // Selecting the root opens its subtree: new rows, new lines, once.
+        h.state.selectedWorktreeIDs = [a.id]
+        h.flush()
+        let opened: [SidebarNodeID] = [a, a1].map { .worktree($0.id) }
+        let openedIDs = h.dock.rows.map(\.id)
+        try #require(openedIDs == opened, "The dock shows \(openedIDs)")
+        let afterOpen = h.dock.guideRebuildCount
+        let once = mounted + 1
+        #expect(afterOpen == once, "Opening the subtree worked the lines out \(afterOpen - mounted) times")
+        let configurations = try h.configurations(opened)
+        let stubs = configurations.map(\.drawsStub)
+        let guides = configurations.map(\.guides)
+        let rootStarts = [true, false]
+        let childEnds: [[Guide]] = [[], [Guide(level: 0, role: .last, fadeStart: SidebarGuideLine.continuedFadeStart)]]
+        #expect(stubs == rootStarts)
+        #expect(guides == childEnds)
+    }
 }
 
 /// The sidebar's container, mounted offscreen, for its dock: the shape

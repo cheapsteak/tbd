@@ -91,18 +91,14 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     let scrollView = NSScrollView(frame: .zero)
 
     /// The rows the table shows, top to bottom. While the rows are held, the
-    /// held rows carrying the latest models. Written only by the apply, which
-    /// works out every row's guide lines from them once, so a hover or a
-    /// selection only looks them up.
-    private(set) var rows: [DockRow] = [] {
-        didSet {
-            guideHierarchy = DockGuideHierarchy(rows: rows)
-            rowGuides = Self.rowGuides(of: rows, in: guideHierarchy)
-        }
-    }
+    /// held rows carrying the latest models. Written only by the apply,
+    /// through `setRows(_:)`.
+    private(set) var rows: [DockRow] = []
     /// `rows` as the guide-line rules read them.
     private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
-    /// Each row's guide lines, by index into `rows`.
+    /// Each row's guide lines, by index into `rows`, worked out when the
+    /// rows' IDs or depths last changed, so a hover or a selection only
+    /// looks them up.
     private var rowGuides: [SidebarGuideLine.RowGuides] = []
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
@@ -140,6 +136,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private(set) var appStateSelectionWriteCount = 0
     /// Selection notifications the guard kept from being written back.
     private(set) var suppressedSelectionNotificationCount = 0
+    /// Times the rows' guide lines were worked out: once per change to the
+    /// rows' IDs or depths, and never for an apply that changed only models.
+    private(set) var guideRebuildCount = 0
     /// Stands in for `AppState.reorderPins(fromOffsets:toOffset:)`, whose RPC
     /// a test cannot reach.
     var reorderPinsForTesting: ((IndexSet, Int) -> Void)?
@@ -396,7 +395,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             rowViewsNeedRefresh = applyUpdate(
                 to: isHoldingStructure ? Self.content(of: latest, inStructureOf: rows) : latest)
         } else {
-            rows = latest
+            setRows(latest)
             table.reloadData()
             hasLoaded = true
         }
@@ -424,28 +423,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     ///   reload configures every row view afresh, so needs none.
     private func applyUpdate(to target: [DockRow]) -> Bool {
         let previous = rows
-        rows = target
-        let oldIDs = previous.map(\.id)
-        let newIDs = target.map(\.id)
-        if oldIDs != newIDs {
-            // Removals index the old rows, insertions the new ones: the order
-            // `removeRows` then `insertRows` read them in.
-            var removed = IndexSet()
-            var inserted = IndexSet()
-            for change in newIDs.difference(from: oldIDs) {
-                switch change {
-                case .remove(let offset, _, _): removed.insert(offset)
-                case .insert(let offset, _, _): inserted.insert(offset)
-                }
-            }
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.current.duration = 0
-            NSAnimationContext.current.allowsImplicitAnimation = false
-            table.beginUpdates()
-            if !removed.isEmpty { table.removeRows(at: removed, withAnimation: []) }
-            if !inserted.isEmpty { table.insertRows(at: inserted, withAnimation: []) }
-            table.endUpdates()
-            NSAnimationContext.endGrouping()
+        let structureChanged = setRows(target)
+        if structureChanged {
+            insertAndRemoveRows(from: previous.map(\.id), to: target.map(\.id))
         }
 
         let shownRows = table.numberOfRows
@@ -463,7 +443,56 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             if let old = before[row.id], old != row { changed.insert(row.id) }
         }
         reconfigure(changed)
-        return oldIDs != newIDs || previous.map(\.depth) != target.map(\.depth)
+        return structureChanged
+    }
+
+    /// Inserts and removes the table's rows between `oldIDs` and `newIDs`; a
+    /// change of depths alone moves none.
+    private func insertAndRemoveRows(from oldIDs: [SidebarNodeID], to newIDs: [SidebarNodeID]) {
+        guard oldIDs != newIDs else { return }
+        // Removals index the old rows, insertions the new ones: the order
+        // `removeRows` then `insertRows` read them in.
+        var removed = IndexSet()
+        var inserted = IndexSet()
+        for change in newIDs.difference(from: oldIDs) {
+            switch change {
+            case .remove(let offset, _, _): removed.insert(offset)
+            case .insert(let offset, _, _): inserted.insert(offset)
+            }
+        }
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        table.beginUpdates()
+        if !removed.isEmpty { table.removeRows(at: removed, withAnimation: []) }
+        if !inserted.isEmpty { table.insertRows(at: inserted, withAnimation: []) }
+        table.endUpdates()
+        NSAnimationContext.endGrouping()
+    }
+
+    /// Shows `newRows`, and works out every row's guide lines again only when
+    /// the rows' IDs or depths changed, which is all the lines read: an apply
+    /// that changed only models — a status tick, a rename — keeps them.
+    /// - Returns: whether the IDs or depths changed.
+    @discardableResult
+    private func setRows(_ newRows: [DockRow]) -> Bool {
+        let structureChanged = !Self.haveSameStructure(rows, newRows)
+        rows = newRows
+        guard structureChanged else { return false }
+        guideHierarchy = DockGuideHierarchy(rows: newRows)
+        rowGuides = Self.rowGuides(of: newRows, in: guideHierarchy)
+        guideRebuildCount += 1
+        return true
+    }
+
+    /// Whether `lhs` and `rhs` are the same rows at the same depths, in the
+    /// same order, whatever their models.
+    private static func haveSameStructure(_ lhs: [DockRow], _ rhs: [DockRow]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) where left.id != right.id || left.depth != right.depth {
+            return false
+        }
+        return true
     }
 
     /// `shown`'s rows carrying `latest`'s models: what a held apply shows, so a
