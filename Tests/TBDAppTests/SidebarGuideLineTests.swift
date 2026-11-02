@@ -370,6 +370,37 @@ struct SidebarGuideLineTests {
         #expect(recached === afterChange)
     }
 
+    /// A change to the system colours empties the tint cache, and every row
+    /// view drawing with that cache is marked for display, so a row nothing
+    /// else redraws takes the new tint. A row view drawing with a cache on
+    /// another centre is not.
+    @Test func systemColorsChangeRedrawsTheRowsDrawingTheTint() throws {
+        let center = NotificationCenter()
+        let tints = SidebarGuideLine.HighlightTintCache(center: center)
+        let otherTints = SidebarGuideLine.HighlightTintCache(center: NotificationCenter())
+        let drawing = SidebarRowView(frame: Self.bounds, highlightTints: tints)
+        let elsewhere = SidebarRowView(frame: Self.bounds.offsetBy(dx: 0, dy: Self.bounds.height),
+                                       highlightTints: otherTints)
+        let controller = NSViewController()
+        controller.view = NSView(frame: NSRect(x: 0, y: 0, width: Self.bounds.width, height: 2 * Self.bounds.height))
+        controller.view.addSubview(drawing)
+        controller.view.addSubview(elsewhere)
+        let host = OffscreenAppKitHost(controller: controller, size: controller.view.frame.size)
+        defer { host.tearDown() }
+        host.window.displayIfNeeded()
+        drawing.needsDisplay = false
+        elsewhere.needsDisplay = false
+        let cleared = [drawing.needsDisplay, elsewhere.needsDisplay]
+        let neither = [false, false]
+        try #require(cleared == neither, "A row view stayed marked for display before the change")
+
+        center.post(name: NSColor.systemColorsDidChangeNotification, object: nil)
+        #expect(tints.colors.isEmpty)
+        let marked = [drawing.needsDisplay, elsewhere.needsDisplay]
+        let onlyTheDrawingRow = [true, false]
+        #expect(marked == onlyTheDrawingRow, "The rows marked for display after the change: \(marked)")
+    }
+
     /// `color`'s Display P3 components, red, green, blue and alpha.
     static func p3Components(_ color: NSColor) -> [CGFloat] {
         guard let p3 = color.usingColorSpace(.displayP3) else { return [] }

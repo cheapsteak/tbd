@@ -137,16 +137,24 @@ enum SidebarGuideLine {
 
     /// The highlight tint per appearance name, resolved once, so a row
     /// redraw neither resolves the accent nor converts it to Display P3. A
-    /// change to the system colours — the accent among them — empties it.
-    /// Every row view draws with `shared`; a test makes one of its own, on a
-    /// notification centre of its own.
+    /// change to the system colours — the accent among them — empties it,
+    /// and then it posts `didChangeNotification`, on which every row view
+    /// drawing with it marks itself for display: a row nothing else redraws
+    /// would otherwise keep the old tint. Every row view draws with `shared`;
+    /// a test makes one of its own, on a notification centre of its own.
     @MainActor
     final class HighlightTintCache {
         /// The cache the row views draw with, listening on the default
         /// notification centre.
         static let shared = HighlightTintCache()
 
-        /// Where the cache hears that the system colours changed.
+        /// Posted on `center`, on the main thread and with the cache as its
+        /// object, once the cache has emptied: whatever drew with its tints
+        /// draws again.
+        nonisolated static let didChangeNotification = Notification.Name("tbd.sidebar.highlightTintDidChange")
+
+        /// Where the cache hears that the system colours changed, and posts
+        /// `didChangeNotification`.
         nonisolated let center: NotificationCenter
         /// The tints resolved so far, by appearance name.
         private(set) var colors: [NSAppearance.Name: NSColor] = [:]
@@ -178,9 +186,11 @@ enum SidebarGuideLine {
             return color
         }
 
-        /// Empties the cache, so each tint resolves afresh on its next use.
+        /// Empties the cache, so each tint resolves afresh on its next use,
+        /// and tells whatever drew with it to draw again.
         func invalidate() {
             colors.removeAll()
+            center.post(name: Self.didChangeNotification, object: self)
         }
 
         /// Runs `body` on the main actor: at once when already on the main

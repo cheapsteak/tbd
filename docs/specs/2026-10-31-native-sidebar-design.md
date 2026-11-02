@@ -322,8 +322,10 @@ The guide lines show which worktree rows are nested under which:
 - **Strength** – at rest a line is a one-device-pixel hairline; the *active*
   lines draw a point wide and stronger. On a row that draws a highlight every
   line takes the accent blended toward white instead of gray, so a neutral
-  line never muddies the highlight. Each line draws as one shape at its
-  alpha, so the color does not double where the turn leaves the vertical.
+  line never muddies the highlight; the blend is resolved once per appearance
+  and kept until the system colors change, when every row view draws again.
+  Each line draws as one shape at its alpha, so the color does not double
+  where the turn leaves the vertical.
 
 A line is active while the row that focuses it — the hovered row, or a
 selected worktree row the list shows — is joined to it. A focus row lights:

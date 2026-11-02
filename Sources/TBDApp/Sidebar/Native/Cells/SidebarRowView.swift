@@ -65,9 +65,25 @@ final class SidebarRowView: NSTableRowView {
         didSet { if configuration != oldValue { needsDisplay = true } }
     }
 
-    override init(frame frameRect: NSRect) {
+    /// Where the lines on a highlight take their tint. The row draws again
+    /// whenever the cache empties, since an accent change redraws nothing
+    /// else for it.
+    let highlightTints: SidebarGuideLine.HighlightTintCache
+
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, highlightTints: .shared)
+    }
+
+    /// - Parameter highlightTints: `HighlightTintCache.shared`, which every
+    ///   list's rows draw with, or a test's own.
+    init(frame frameRect: NSRect, highlightTints: SidebarGuideLine.HighlightTintCache) {
+        self.highlightTints = highlightTints
         super.init(frame: frameRect)
         identifier = Self.reuseIdentifier
+        // A selector observer, which the centre lets go of with the row.
+        highlightTints.center.addObserver(
+            self, selector: #selector(highlightTintsDidChange(_:)),
+            name: SidebarGuideLine.HighlightTintCache.didChangeNotification, object: highlightTints)
     }
 
     @available(*, unavailable)
@@ -94,6 +110,12 @@ final class SidebarRowView: NSTableRowView {
         didSet {
             if isNextRowSelected != oldValue, SidebarRowHighlight.followsNeighbours() { needsDisplay = true }
         }
+    }
+
+    /// The accent changed, so the tint the lines take on a highlight did.
+    /// Posted on the main thread (`HighlightTintCache.invalidate()`).
+    @objc private func highlightTintsDidChange(_ notification: Notification) {
+        needsDisplay = true
     }
 
     /// The light and dark appearances draw at different alphas.
@@ -257,7 +279,7 @@ final class SidebarRowView: NSTableRowView {
         var colors: [SidebarGuideLine.ColorRole: CGColor] = [:]
         for piece in pieces {
             let role = piece.style.color
-            let color = colors[role] ?? role.cgColor(appearance: effectiveAppearance, tints: .shared)
+            let color = colors[role] ?? role.cgColor(appearance: effectiveAppearance, tints: highlightTints)
             colors[role] = color
             SidebarGuideLine.draw(piece, color: color, in: context)
         }
