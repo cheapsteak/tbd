@@ -82,8 +82,8 @@
 /// **No test raises a SIGPIPE on purpose, so every line is a finding.** A test
 /// that drives a write into a closed pipe or socket does it through a
 /// descriptor that suppresses the signal, as the production code it exercises
-/// does, reads that flag back, and compares `TBDTestHostSIGPIPECount()` across
-/// the write.
+/// does, reads that flag back, and, where nothing else runs in the same
+/// window, compares `TBDTestHostSIGPIPECount()` across the write.
 ///
 /// **It replaces only the default and `SIG_IGN`.** `sa_handler` and
 /// `sa_sigaction` share a union, so the disposition is read through it first:
@@ -112,7 +112,7 @@
 /// This is a net under the per-descriptor guards, not a replacement for them.
 /// The app leaves SIGPIPE at its default, so its sockets and pipes still need
 /// `SO_NOSIGPIPE` or `F_SETNOSIGPIPE` (see `Sources/TBDApp/SocketSIGPIPE.swift`
-/// and `Sources/TBDShared/PipeSIGPIPE.swift`).
+/// and, for the daemon's pipes, `Sources/TBDDaemon/Base/PipeSIGPIPE.swift`).
 /// And a test must not set SIGPIPE's disposition itself: that would replace
 /// this handler process-wide, for every suite running alongside it. The
 /// SwiftLint rule `no_sigpipe_disposition_in_tests` holds that.

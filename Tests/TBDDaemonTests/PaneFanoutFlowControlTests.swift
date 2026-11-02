@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import Testing
-import TestProcessDefaults
 import TestSupport
 
 @testable import TBDDaemonLib
@@ -538,9 +537,12 @@ struct PaneFanoutFlowControlTests {
         // raises no SIGPIPE, because `attach` marks the write end
         // F_SETNOSIGPIPE (`PipeSIGPIPE`). The fanout keeps that end to itself,
         // so the test reaches it as the pipe peer of the read end `attach`
-        // returned, and reads the flag back while both ends are open. The test
-        // must not set the disposition itself: it is process-wide, shared with
-        // every concurrent suite.
+        // returned, and reads the flag back while both ends are open. That
+        // flag is the proof; the test host's SIGPIPE count is not compared
+        // here, because this pass runs suites in parallel and another suite's
+        // signal, or one delivered late, would fail this test for someone
+        // else's write. The test must not set the disposition itself: it is
+        // process-wide, shared with every concurrent suite.
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%14")
         let (readFD, gen) = try fanout.attach(key: key)
@@ -556,11 +558,6 @@ struct PaneFanoutFlowControlTests {
         Darwin.close(readFD)
 
         let chunk = patterned(count: 1024)
-        // The count brackets the two routes, each one non-blocking write that
-        // fails at once, and the stats reads between them: a window of
-        // microseconds. The flag above is the proof; this is the cross-check
-        // `TBDTestHostSIGPIPECount` describes.
-        let caughtBefore = TBDTestHostSIGPIPECount()
         fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.droppedEvents == 1, "a hard write error must count a dropped event")
@@ -570,18 +567,9 @@ struct PaneFanoutFlowControlTests {
         // Counters keep accumulating on further chunks (the log is
         // rate-limited; the accounting never is).
         fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
-        let caughtAfter = TBDTestHostSIGPIPECount()
         let after = try #require(fanout.flowStats(key: key))
         #expect(after.droppedEvents == 2)
         #expect(after.droppedBytes == 2048)
-        #expect(
-            caughtAfter == caughtBefore,
-            """
-            the fanout's write end should have suppressed SIGPIPE, but the test host caught \
-            \(caughtAfter - caughtBefore) across these two writes. If the F_GETNOSIGPIPE check \
-            above passed, this descriptor cannot have raised it: another suite's unprotected write \
-            did (Tests/CLAUDE.md, the SIGPIPE entry)
-            """)
         fanout.detach(key: key)
     }
 }

@@ -49,6 +49,37 @@ struct CodexUsageFetcherLifecycleTests {
         #expect(result.unavailableReason == "Usage unavailable")
         try await fixture.waitUntilDead(pid)
     }
+
+    /// The session writes JSON-RPC requests into the child's stdin, and a CLI
+    /// that exits under a write fails it with EPIPE. `start` marks the write
+    /// end `F_SETNOSIGPIPE` so that failure raises no SIGPIPE. The session
+    /// keeps the write end to itself, so the test reaches it as the pipe peer
+    /// of the child's stdin (`pipeWriteEnd(peerOf:inProcess:)`), which the
+    /// fake holds open while it blocks on its FIFO, and reads the flag back
+    /// before cancelling.
+    @Test func stdinWriteEndIsMarkedNoSIGPIPE() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.cleanup() }
+        let fetch = Task {
+            await fixture.fetcher(clock: EventDrivenTestClock()).fetch()
+        }
+        defer { fetch.cancel() }
+        let pid = try await fixture.waitForPID()
+        defer { fixture.killIfStillAlive(pid) }
+
+        let writeEnd = pipeWriteEnd(peerOf: STDIN_FILENO, inProcess: pid)
+        let noSIGPIPE = writeEnd.map { fcntl($0, F_GETNOSIGPIPE) }
+
+        fetch.cancel()
+        _ = await fetch.value
+        try await fixture.waitUntilDead(pid)
+
+        let readBack = noSIGPIPE.map { "F_GETNOSIGPIPE read \($0)" }
+            ?? "no descriptor in this process was the pipe peer of the child's stdin"
+        #expect(
+            noSIGPIPE == 1,
+            "start must mark the stdin pipe's write end F_SETNOSIGPIPE; \(readBack)")
+    }
 }
 
 private struct ProcessFixture {

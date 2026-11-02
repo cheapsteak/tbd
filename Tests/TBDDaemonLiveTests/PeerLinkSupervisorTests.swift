@@ -1280,9 +1280,8 @@ struct PeerLinkSupervisorTests {
     /// reads the flag back: that is the proof, since the kernel raises SIGPIPE
     /// only for a write to a file without it. The test host's catch count is
     /// compared across the one `send` that fails, as the cross-check
-    /// `TBDTestHostSIGPIPECount` describes. That window holds the write and
-    /// little else: the suite is `.serialized`, the clock that would fire a
-    /// keepalive is left alone, and on CI this target runs one suite at a time.
+    /// `TBDTestHostSIGPIPECount` describes; the comment at that comparison says
+    /// why it is sound here.
     @Test func aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE() async throws {
         let stub = try Stub("closed-stdin", body: """
             IFS= read -r line
@@ -1323,11 +1322,26 @@ struct PeerLinkSupervisorTests {
         }
         // The line the stub waits for before it closes its stdin.
         try await supervisor.send(peerFrame("h-before-close"))
+        // Assumes the stub's fd 0 is the only holder of the pipe's read end, so
+        // closing it leaves the pipe with no reader. `Process` closes the
+        // parent's copy of the read end at launch, and on CI no other suite
+        // runs while this one does (this target runs one suite at a time, in
+        // the quiet pass), so no unrelated child can have inherited a copy
+        // between the pipe's creation and the spawn. A stray copy would show up
+        // here, as this wait timing out with its own diagnostic, rather than as
+        // a send that unexpectedly succeeds.
         _ = try await waitFor(
             "the stub to close its stdin",
             observed: { "the pipe behind write end \(writeEnd) still has a reader" }
         ) { pipeHasNoReader(writeEnd: writeEnd) }
 
+        // Compared across this one send and nothing else, and asserted because
+        // that is sound here: the suite is `.serialized`, the clock that would
+        // fire a keepalive is left alone, and on CI the quiet pass runs one
+        // suite at a time, so the only write in the window is this one. In a
+        // local run that mixes this target with parallel suites, another
+        // suite's stray SIGPIPE could land in the window; the message says how
+        // to tell, since the flag check above names this descriptor's part.
         let caughtBefore = TBDTestHostSIGPIPECount()
         await #expect(throws: PeerLinkSendFailure.writeFailed(errno: EPIPE)) {
             try await supervisor.send(peerFrame("h-after-close"))

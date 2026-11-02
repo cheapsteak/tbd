@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
 import Testing
-import TBDShared
+
+@testable import TBDDaemonLib
 
 /// `PipeSIGPIPE.suppress(on:)` marks a pipe's write end `F_SETNOSIGPIPE`, so a
 /// write after the reader has gone fails with EPIPE and raises no SIGPIPE.
@@ -9,11 +10,11 @@ import TBDShared
 ///
 /// Like `SocketSIGPIPETests`, these read the flag back and never touch the
 /// process-wide disposition, which every suite in the process shares. They
-/// cover the helper. Each production call site is covered by a read-back
-/// through its own descriptor:
-/// `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`,
-/// `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder` and
-/// `PeerLinkSupervisorTests.aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE`.
+/// cover the helper. The production call sites are covered by a read-back
+/// through each one's own descriptor, in the suites for the bounded runner,
+/// the pane fanout, the peer link, the shadow peer helper, the Codex session
+/// importer and the Codex usage fetcher (`Tests/CLAUDE.md`, the SIGPIPE entry,
+/// lists them).
 @Suite("PipeSIGPIPE")
 struct PipeSIGPIPETests {
 
@@ -38,9 +39,13 @@ struct PipeSIGPIPETests {
         #expect(readEnd == 0, "the read end is a separate open file and keeps its own flag")
     }
 
+    /// Through the seam that does not report: the public call would log the
+    /// process's one refusal `.fault`, and spending it here would hide the
+    /// first real refusal in the same process, besides writing a fault on
+    /// every run.
     @Test("suppress reports a descriptor it could not mark")
     func suppressReportsARefusal() {
-        #expect(!PipeSIGPIPE.suppress(on: -1))
+        #expect(!PipeSIGPIPE.suppress(on: -1, reportRefusal: false))
     }
 
     /// The mechanism the call sites rely on: with the flag set, the write that

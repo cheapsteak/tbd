@@ -163,14 +163,21 @@ struct BoundedProcessRunnerTests {
             return
         }
         #expect(status == 7)
-        let noSIGPIPE = try #require(probe.noSIGPIPE, "didCreateProcess never ran, so nothing read the stdin pipe")
-        #expect(
-            noSIGPIPE == 1,
-            """
-            the runner must mark the stdin pipe's write end F_SETNOSIGPIPE before the child starts, \
-            so the write that fails with EPIPE raises no SIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE) \
-            (-1: the process had no stdin pipe)
-            """)
+        let seen = try #require(probe.seen, "didCreateProcess never ran, so nothing read the stdin pipe")
+        switch seen {
+        case .noStdinPipe:
+            Issue.record("the runner handed the child no stdin pipe, though the call passed a stdin payload")
+        case .unreadable(let code):
+            Issue.record(
+                "F_GETNOSIGPIPE failed on the stdin pipe's write end with errno \(code), so the flag could not be read")
+        case .flag(let noSIGPIPE):
+            #expect(
+                noSIGPIPE == 1,
+                """
+                the runner must mark the stdin pipe's write end F_SETNOSIGPIPE before the child starts, \
+                so the write that fails with EPIPE raises no SIGPIPE; F_GETNOSIGPIPE read \(noSIGPIPE)
+                """)
+        }
     }
 
     /// Every other `.pseudoTerminal` test in this file drives a child that
@@ -831,24 +838,38 @@ struct BoundedProcessRunnerTests {
 
 /// What `didCreateProcess` saw of the stdin pipe's write end: its
 /// `F_GETNOSIGPIPE`, read while the runner still holds that end open and before
-/// its one write to it. `-1` when the `Process` had no stdin pipe.
+/// its one write to it.
 private final class StdinWriteEndProbe: @unchecked Sendable {
+    enum Observation: Sendable {
+        /// `standardInput` was not a `Pipe`.
+        case noStdinPipe
+        /// `fcntl(F_GETNOSIGPIPE)` failed, with this errno.
+        case unreadable(errno: Int32)
+        /// What `F_GETNOSIGPIPE` returned: 1 when the flag is set, 0 when not.
+        case flag(Int32)
+    }
+
     private let lock = NSLock()
-    private var seen: Int32?
+    private var observation: Observation?
 
     /// `nil` until `record` has run.
-    var noSIGPIPE: Int32? {
+    var seen: Observation? {
         lock.lock()
         defer { lock.unlock() }
-        return seen
+        return observation
     }
 
     var record: @Sendable (Process) -> Void {
         { [self] process in
-            let stdinPipe = process.standardInput as? Pipe
-            let flag = stdinPipe.map { fcntl($0.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE) } ?? -1
+            let observed: Observation
+            if let stdinPipe = process.standardInput as? Pipe {
+                let flag = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_GETNOSIGPIPE)
+                observed = flag == -1 ? .unreadable(errno: errno) : .flag(flag)
+            } else {
+                observed = .noStdinPipe
+            }
             lock.lock()
-            seen = flag
+            observation = observed
             lock.unlock()
         }
     }

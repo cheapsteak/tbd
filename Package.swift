@@ -347,9 +347,8 @@ let package = Package(
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
                 // The test host's SIGPIPE handler is in the bundle either way;
-                // the dependency lets these suites read its catch count
-                // (`TBDTestHostSIGPIPECount()`) across a write into a closed
-                // pipe and check the handler in their own pass. See the target.
+                // the dependency lets these suites check the handler in their
+                // own two passes. See the target.
                 "TestProcessDefaults",
                 // Declared because these tests use SwiftTerm directly, not
                 // only through the daemon library: the replay round-trip suite

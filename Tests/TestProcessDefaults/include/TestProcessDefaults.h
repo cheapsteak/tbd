@@ -53,8 +53,9 @@ const char *TBDTestHostSIGPIPEDisposition(void);
 /// (`fcntl(fd, F_GETNOSIGPIPE)` for a pipe, `SO_NOSIGPIPE` for a socket),
 /// which no other suite can change and which the kernel reads on every write.
 /// Assert the count unchanged only across a window that holds the write and
-/// little else, and say in the message that a flag check that passed puts the
-/// signal on another suite's write.
+/// nothing else that runs at the same time (a serial pass, not a parallel
+/// one), and say in the message that a flag check that passed puts the signal
+/// on another suite's write.
 long TBDTestHostSIGPIPECount(void);
 
 #endif

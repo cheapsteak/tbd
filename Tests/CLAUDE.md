@@ -1033,31 +1033,43 @@ front.
   blocked call with `EINTR`, and the line names neither the test nor the
   thread: the suspects are the tests started and not yet finished around it in
   the log. Find the write and protect its descriptor where it is created: an
-  app socket through `SocketSIGPIPE.suppress(on:)`, a pipe's write end in
-  production code through `PipeSIGPIPE.suppress(on:)` (`TBDShared`), a
-  fixture's socket with `SO_NOSIGPIPE`, a fixture's pipe write end with
-  `F_SETNOSIGPIPE`.
+  app socket through `SocketSIGPIPE.suppress(on:)`, a daemon pipe's write end
+  through `PipeSIGPIPE.suppress(on:)` (`Sources/TBDDaemon/Base`), a fixture's
+  socket with `SO_NOSIGPIPE`, a fixture's pipe write end with `F_SETNOSIGPIPE`.
 
-  No test raises a SIGPIPE on purpose. The suites that drive a write into a
-  closed pipe — the bounded runner's stdin
-  (`BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`),
-  the pane fanout's write end
-  (`PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder`) and the
-  peer link's stdin pipe (`PeerLinkSupervisorTests`) — do it through a
-  descriptor the production code marks `F_SETNOSIGPIPE`, and read the flag back
-  on that descriptor. A test that writes into a closed pipe or socket does the
-  same:
+  No test raises a SIGPIPE on purpose. Every pipe the daemon writes through to
+  a child's stdin or to a viewer is marked `F_SETNOSIGPIPE` where it is
+  created, and each has a test that reads the flag back on that descriptor:
+  - **Bounded runner's stdin** –
+    `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
+  - **Pane fanout's write end** –
+    `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder`.
+  - **Peer link's stdin pipe** –
+    `PeerLinkSupervisorTests.aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE`.
+  - **Shadow peer helper's stdin** –
+    `ShadowPeerHelperSpawnerSIGPIPETests`.
+  - **Codex app-server connection's stdin** –
+    `CodexSessionImporterTests.connectionMarksItsStdinWriteEndNoSIGPIPE`.
+  - **Codex usage session's stdin** –
+    `CodexUsageFetcherLifecycleTests.stdinWriteEndIsMarkedNoSIGPIPE`.
+
+  A test that writes into a closed pipe or socket proves it raised no SIGPIPE
+  the same way:
   - **The flag is the proof.** Read it on the descriptor the write uses:
     `fcntl(fd, F_GETNOSIGPIPE)` for a pipe, `getsockopt(… SO_NOSIGPIPE …)` for
     a socket. When the code under test keeps the write end to itself and hands
-    out the read end, `pipeWriteEnd(peerOf:inProcess:)` (`TestSupport`) finds
-    the write end from it.
-  - **The count is a cross-check.** `TBDTestHostSIGPIPECount()` before and
-    after the write should match, but it counts the whole process, so another
-    suite's write can raise it in the same window, and it can lag, since the
-    handler runs on whichever thread the kernel picks. Assert it only across a
-    window that holds the write and little else, and say in the message that a
-    passing flag check puts the signal on someone else's write.
+    out the read end, or hands it to a child as stdin,
+    `pipeWriteEnd(peerOf:inProcess:)` (`TestSupport`) finds the write end
+    from it.
+  - **The count is a cross-check, asserted only where it is sound.**
+    `TBDTestHostSIGPIPECount()` counts the whole process, so another suite's
+    write can raise it in the same window, and it can lag, since the handler
+    runs on whichever thread the kernel picks. A test in a parallel pass does
+    not assert it, because a stray from another suite would fail that test
+    for someone else's write. Assert it only across a window that holds the
+    write and nothing else that runs at the same time, as the peer link's test
+    does in the serial quiet pass, and say in the message that a passing flag
+    check puts the signal on someone else's write.
 - **An `NSDraggingInfo` stub must not declare
   `namesOfPromisedFilesDropped(atDestination:)`.** A deprecated `NSObject`
   category already declares it, so the stub's own version fails with
