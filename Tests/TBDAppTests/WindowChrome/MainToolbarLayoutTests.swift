@@ -19,17 +19,6 @@ struct MainToolbarLayoutTests {
             showsReconnect: false, showsStop: false)
     }
 
-    @Test func chromeFollowsTheFlag() {
-        let suite = TestDefaultsSuite("MainToolbarLayoutTests.chrome")
-        defer { suite.tearDown() }
-        let unsetExpected: MainWindowChrome = AppState.appKitSidebarDefault ? .appKit : .swiftUI
-        #expect(MainWindowChrome.resolve(suite.defaults) == unsetExpected)
-        suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
-        #expect(MainWindowChrome.resolve(suite.defaults) == .appKit)
-        suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
-        #expect(MainWindowChrome.resolve(suite.defaults) == .swiftUI)
-    }
-
     @Test func shownOrder() {
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter,
@@ -296,8 +285,7 @@ struct MainToolbarLayoutTests {
     /// holding three buttons one pitch each, one spacing after it and one
     /// before the filter, around the empty flexible space, the 44 pt slot
     /// AppKit gives the filter's item and the margin before the separator:
-    /// 256 pt with the measured inset and slot and the estimated spacing,
-    /// above the SwiftUI sidebar's 220 pt minimum.
+    /// 256 pt with the measured inset and slot and the estimated spacing.
     @Test func minimumThicknessFitsTheSidebarSection() {
         let inset: CGFloat = MainToolbarMetrics.firstItemLeadingInset
         let pitch: CGFloat = MainToolbarMetrics.iconButtonPitch
@@ -308,11 +296,9 @@ struct MainToolbarLayoutTests {
         let derived: CGFloat = inset + leading + 2 * spacing + filter + padding
         let minimum: CGFloat = MainToolbarMetrics.sidebarMinimumThickness
         let maximum: CGFloat = MainToolbarMetrics.sidebarMaximumThickness
-        let swiftUISidebarMinimum: CGFloat = 220
         #expect(minimum == derived)
         #expect(minimum == 256)
         #expect(minimum < maximum)
-        #expect(minimum > swiftUISidebarMinimum)
 
         let threePitches: CGFloat = 3 * pitch
         #expect(leading == threePitches)

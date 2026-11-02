@@ -77,9 +77,6 @@ struct PRLegacyStatusFallbackTests {
         // pre-multi-PR ones — nothing about the fallback is a different shape.
         #expect(PRBindingPresentation.buttonLabel(effective) == "#99")
         #expect(PRBindingPresentation.iconBinding(effective)?.number == 99)
-        #expect(ContentView.prSplitButtonHelp(
-            bindings: effective, armed: false, hibernateArmed: false, blocked: false)
-            .hasPrefix("Open PR #99"))
     }
 
     /// The whole value has to compare equal across evaluations, not just the

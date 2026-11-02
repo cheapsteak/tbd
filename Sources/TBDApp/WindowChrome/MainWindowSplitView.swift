@@ -1,10 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The main window's split and toolbar when it is built with the AppKit
-/// chrome (`MainWindowChrome.appKit`). `ContentView` mounts it between the
-/// banners and the status bar, where the SwiftUI chrome has its
-/// `NavigationSplitView`.
+/// The main window's split and toolbar. `ContentView` mounts it between the
+/// banners and the status bar.
 ///
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
@@ -170,11 +168,12 @@ private struct TrailingEdgeClip: Shape {
     }
 }
 
-/// The detail area in the AppKit split's content pane. The tab choice is
-/// resolved here, in a real `body`, so Observation tracks the three inputs
-/// and a selection change brings the right tab forward; see the matching
-/// call site in `ContentView.body` for why `DetailSectionHostPager` cannot
-/// read them itself.
+/// The detail area in the split's content pane. The tab choice is resolved
+/// here, in a real `body`, and handed to `DetailSectionHostPager` as a value.
+/// Reading the three inputs inside `updateNSViewController` instead would
+/// register no dependency — Observation tracks what a `body` evaluation
+/// reads — so a selection change that touched nothing else this body reads
+/// would leave the detail area on the previous tab.
 struct MainDetailArea: View {
     @Environment(AppState.self) private var appState
 

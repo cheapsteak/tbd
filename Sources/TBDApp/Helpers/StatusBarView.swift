@@ -544,9 +544,7 @@ struct StatusBarView: View {
     /// `blocked` deliberately changes the tooltip and not the label. The arming
     /// is a property of the worktree, and it survives a blocked merge, so the
     /// label keeps stating what the worktree is armed to do and the tooltip
-    /// carries the qualification — the same division the toolbar makes, whose
-    /// armed badge keys on `armed` alone while only its help string mentions
-    /// the block (`ContentView.prSplitButtonHelp`).
+    /// carries the qualification.
     ///
     /// The qualification says the archive is **skipped**, not paused, because
     /// nothing re-attempts it when the children go away.

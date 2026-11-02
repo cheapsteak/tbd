@@ -5,8 +5,7 @@ import SwiftUI
 
 private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
 
-/// The main window's `NSToolbar` when it is built with the AppKit chrome
-/// (`MainWindowChrome.appKit`): the toolbar's delegate, and the one place
+/// The main window's `NSToolbar`: the toolbar's delegate, and the one place
 /// that changes its items.
 ///
 /// - **The split.** One controller serves one split, given at init and kept,

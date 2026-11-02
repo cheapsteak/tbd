@@ -94,8 +94,9 @@ struct ServersButtonLabel: View {
     @MainActor private static var bakedIconCache: [String: NSImage] = [:]
 
     /// `server.rack`, tinted green when a server runs and secondary-label
-    /// otherwise; the same bake `PRButtonLabel.coloredIcon` performs — draw,
-    /// `color.set()`, fill with `.sourceAtop`, `isTemplate = false`.
+    /// otherwise, baked into a non-template image — draw, `color.set()`, fill
+    /// with `.sourceAtop`, `isTemplate = false` — so a toolbar control that
+    /// tints template images keeps the color.
     @MainActor static func bakedIcon(running: Bool, colorScheme: ColorScheme) -> NSImage {
         let key = "\(running)-\(colorScheme)"
         if let cached = bakedIconCache[key] { return cached }
