@@ -166,10 +166,11 @@ struct TableTranscriptView: NSViewRepresentable {
         DispatchQueue.main.async {
             coordinator.scrollToEnd(animated: false)
             // Re-pin once more on the NEXT runloop turn. The first scroll-to-end
-            // lands on the bottom window's exact heights, but a row realizing just
-            // above the viewport can still fire a zero-duration height correction
-            // after this turn; with anchoring removed that correction no longer
-            // compensates the offset, so a second `scrollToEnd` reasserts the
+            // lands on the bottom window's exact heights, but a row realizing
+            // across the viewport's top edge can still fire a zero-duration height
+            // correction after this turn, and nothing compensates that one (only
+            // a row wholly above the viewport is held still — see
+            // `correctRowHeightIfNeeded`), so a second `scrollToEnd` reasserts the
             // bottom after those corrections settle. (#129)
             DispatchQueue.main.async {
                 coordinator.scrollToEnd(animated: false)
@@ -326,6 +327,33 @@ struct TableTranscriptView: NSViewRepresentable {
         /// only by the jump; the setter is internal for the same reason as
         /// `pendingPrependAnchor`'s.
         var pendingJumpAnchor: PrependAnchor?
+        /// Where the reader was looking when a row lying wholly above the
+        /// viewport corrected its estimated height: the first visible row and
+        /// its offset from the viewport top, read before the correction.
+        ///
+        /// A row realizes wherever something asks AppKit for it, not only on
+        /// screen: in AppKit's overdraw region around the viewport, and
+        /// wherever an accessibility client sizes a cell, which builds the
+        /// row's view through `rowView(atRow:makeIfNecessary:)` — a dictation
+        /// app walks every row of the transcript this way. A row above the
+        /// viewport that grows as it realizes pushes everything the reader
+        /// sees down, so this anchor holds the first visible row still, the
+        /// way a held prepend or jump anchor holds its own row.
+        ///
+        /// Set by the first such correction while no anchor is held; a held
+        /// prepend or jump anchor already re-pins when a row above it
+        /// corrects. Restored at the end of each table layout pass and once
+        /// on the next main-queue turn rather than after each correction, so
+        /// the burst of corrections an accessibility walk makes between two
+        /// passes costs one restore, not one per row. The end of the pass is
+        /// what makes it hold: `noteHeightOfRows` may grow the document only
+        /// in a later pass, and until then the clip cannot scroll past the old
+        /// bottom. Released by what releases
+        /// `pendingPrependAnchor`: a reader scroll, a width change, an update
+        /// that changes the rows (which restores it first, so the update reads
+        /// the clip where the reader sees it), the tail-follow and a jump. The
+        /// setter is internal for the jump, as `pendingPrependAnchor`'s is.
+        var pendingRealizeAnchor: PrependAnchor?
         /// Set while the coordinator itself moves the clip — restoring an anchor,
         /// jumping or following the tail — so the bounds observer can tell that
         /// scroll from the reader's.
@@ -817,11 +845,17 @@ struct TableTranscriptView: NSViewRepresentable {
         /// If the now-cached EXACT height differs from the `estimate` AppKit used
         /// for a freshly-realized (previously-estimated) row, ask AppKit to re-lay
         /// just this row, wrapped in a zero-duration animation so the height change
-        /// is instant (no animated grow/shrink). Only on-screen rows reach here, so
-        /// the correction is bounded to what the user can actually see. No
-        /// scroll-offset compensation: the initial open pins to the bottom via
-        /// `scrollToEnd`, and a realize-time correction must not drag the viewport
-        /// away from there. (#129)
+        /// is instant (no animated grow/shrink).
+        ///
+        /// Rows reach here from off screen as well as on it: from AppKit's
+        /// overdraw region around the viewport, and from any accessibility
+        /// client that sizes a cell, which can realize every row of the
+        /// transcript. A row lying wholly above the viewport moves everything
+        /// the reader sees when it corrects, so its correction holds the first
+        /// visible row still (`pendingRealizeAnchor`), and a held prepend or jump
+        /// anchor is re-pinned when the row lies above it. A row that straddles
+        /// the viewport's top edge, lies inside the viewport or lies below it
+        /// moves only the rows below its top, and gets no compensation. (#129)
         private func correctRowHeightIfNeeded(
             _ tableView: NSTableView,
             row: Int,
@@ -833,14 +867,32 @@ struct TableTranscriptView: NSViewRepresentable {
             guard let exact = heightCache[key], abs(exact - estimate) > 0.5 else { return }
             guard tableView.numberOfRows > row else { return }
 
+            // Whether the row lies above the viewport is read before the
+            // correction, off the height the reader's view was laid out with.
+            // Once an anchor is held, nothing here needs reading: it is
+            // restored against whatever heights the rows above have by then.
+            if pendingRealizeAnchor == nil, pendingPrependAnchor == nil, pendingJumpAnchor == nil,
+               let clip = scrollView?.contentView,
+               tableView.rect(ofRow: row).maxY <= clip.bounds.minY,
+               let anchor = capturePrependAnchor(acceptingPositionalIDs: true), anchor.id != nil {
+                pendingRealizeAnchor = anchor
+                // The same double pin the prepend and jump paths use: the end
+                // of the layout pass restores it, and so does the next turn,
+                // whether or not a pass has run by then.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let held = self.pendingRealizeAnchor else { return }
+                    self.restorePrependAnchor(held)
+                }
+            }
+
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
                 tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
             }
             // A row above a held prepend or jump anchor just changed height,
             // which moved the anchor by the same amount: re-pin it. Rows at or
-            // below the anchor cannot move it, and outside a prepend or a jump
-            // nothing is held.
+            // below the anchor cannot move it. A realize anchor is not re-pinned
+            // here: it waits for the end of the layout pass.
             if let anchor = pendingPrependAnchor, row < anchorRowIndex(anchor) {
                 restorePrependAnchor(anchor)
             }
@@ -2127,7 +2179,19 @@ struct TableTranscriptView: NSViewRepresentable {
             // re-rendering the pane, e.g. for state the pane wrote from
             // `onNearTop` — leaves it held so heights still settling above the
             // reader keep re-pinning it.
-            if step != .noop || isPrepend { pendingPrependAnchor = nil }
+            //
+            // A realize anchor goes the same way, but is put back first: a
+            // correction above the viewport may have grown the document
+            // without the clip having followed yet, and `isAtBottom()` and a
+            // prepend's capture below must read the clip where the reader
+            // sees it. It is restored against the old rows, still in `nodes`.
+            if step != .noop || isPrepend {
+                pendingPrependAnchor = nil
+                if let held = pendingRealizeAnchor {
+                    restorePrependAnchor(held)
+                    pendingRealizeAnchor = nil
+                }
+            }
             // A jump anchor is held by row identity, so appended rows and a
             // re-rendered tail, which only add or change rows below it, keep it.
             // A rebuild re-lays the rows around it, and a prepend brings its own
@@ -2157,6 +2221,7 @@ struct TableTranscriptView: NSViewRepresentable {
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 pendingPrependAnchor = nil
+                pendingRealizeAnchor = nil
                 releaseJumpAnchor(.widthChange)
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
@@ -2407,11 +2472,13 @@ struct TableTranscriptView: NSViewRepresentable {
                 #if DEBUG
                 recordHeldReaderMove(from: originBefore)
                 #endif
-                // The reader moved the viewport: a held prepend or jump anchor
-                // no longer describes where they are looking, so stop re-pinning
-                // it, and a jump target stops overriding the active-prompt rule.
-                // A tail-follow queued before the scroll would pull them back.
+                // The reader moved the viewport: a held prepend, realize or jump
+                // anchor no longer describes where they are looking, so stop
+                // re-pinning it, and a jump target stops overriding the
+                // active-prompt rule. A tail-follow queued before the scroll
+                // would pull them back.
                 pendingPrependAnchor = nil
+                pendingRealizeAnchor = nil
                 releaseJumpAnchor(.readerScroll)
                 supersedeQueuedTailFollow()
             }
@@ -2458,13 +2525,16 @@ struct TableTranscriptView: NSViewRepresentable {
             tableLayoutDepth += 1
         }
 
-        /// At the end of the outermost pass, puts a held prepend or jump anchor
-        /// back where it says its row belongs. The pass may have moved the clip
-        /// to keep a different row in place, and this lands the anchored row
-        /// before anything is drawn.
+        /// At the end of the outermost pass, puts a held realize, prepend or jump
+        /// anchor back where it says its row belongs. The pass may have moved the
+        /// clip to keep a different row in place, or grown the document for rows
+        /// that corrected since the last pass, and this lands the anchored row
+        /// before anything is drawn. A realize anchor is never held alongside the
+        /// other two, but goes first so theirs would win.
         func tableLayoutDidEnd() {
             tableLayoutDepth = max(0, tableLayoutDepth - 1)
             guard tableLayoutDepth == 0 else { return }
+            if let anchor = pendingRealizeAnchor { restorePrependAnchor(anchor) }
             if let anchor = pendingPrependAnchor { restorePrependAnchor(anchor) }
             if let anchor = pendingJumpAnchor { restorePrependAnchor(anchor) }
         }
@@ -2499,8 +2569,13 @@ struct TableTranscriptView: NSViewRepresentable {
 
         /// Records the first visible row with a stable id, its offset from the
         /// viewport top, and the viewport's distance from the document bottom.
-        /// Reads the CURRENT (pre-reload) geometry and node array.
-        private func capturePrependAnchor() -> PrependAnchor? {
+        /// Reads the CURRENT geometry and node array: the pre-reload ones for a
+        /// prepend, the pre-correction ones for a realize anchor.
+        ///
+        /// `acceptingPositionalIDs` takes the first visible row whatever its id.
+        /// A realize anchor can: it is released by any update that changes the
+        /// rows, so a positional id names the same row for as long as it is held.
+        private func capturePrependAnchor(acceptingPositionalIDs: Bool = false) -> PrependAnchor? {
             guard let tableView, let scrollView else { return nil }
             let clip = scrollView.contentView
             let visible = tableView.rows(in: clip.documentVisibleRect)
@@ -2508,7 +2583,7 @@ struct TableTranscriptView: NSViewRepresentable {
             var offset: CGFloat = 0
             if visible.location != NSNotFound {
                 for row in visible.location..<(visible.location + visible.length)
-                where row < nodes.count && Self.anchorID(nodes[row].id) {
+                where row < nodes.count && (acceptingPositionalIDs || Self.anchorID(nodes[row].id)) {
                     anchorID = nodes[row].id
                     offset = tableView.rect(ofRow: row).minY - clip.bounds.minY
                     break
@@ -2535,7 +2610,8 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `rect(ofRow:)` NOW, so it accounts for whatever heights (exact or
         /// estimated) the rows above currently have; calling it again after any
         /// of them changes is what keeps the anchor pinned. Idempotent. A jump
-        /// anchor (`pendingJumpAnchor`) is restored the same way.
+        /// anchor (`pendingJumpAnchor`) and a realize anchor
+        /// (`pendingRealizeAnchor`) are restored the same way.
         func restorePrependAnchor(_ anchor: PrependAnchor) {
             guard !isRestoringAnchor, let tableView, let scrollView else { return }
             let clip = scrollView.contentView
@@ -2649,6 +2725,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// pulling the clip to the end would fight over it.
         private func followTail() {
             pendingPrependAnchor = nil
+            pendingRealizeAnchor = nil
             if pendingJumpAnchor != nil { lastJumpRelease = .tailFollow }
             pendingJumpAnchor = nil
             isRestoringAnchor = true

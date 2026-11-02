@@ -179,12 +179,13 @@ extension TableTranscriptView.Coordinator {
         let maxOrigin = max(0, tableView.frame.height - clip.bounds.height)
         let origin = min(max(0, rowTop - Self.jumpTopInset), maxOrigin)
 
-        // The jump moves the reader, so a held prepend anchor no longer says
-        // where they are looking: a later correction above it would pull the
-        // viewport back. The previous jump's anchor is replaced below. A
-        // tail-follow queued before the jump, by content that landed at the
-        // bottom, would undo it.
+        // The jump moves the reader, so a held prepend or realize anchor no
+        // longer says where they are looking: a later correction above it, or
+        // the end of a layout pass, would pull the viewport back. The previous
+        // jump's anchor is replaced below. A tail-follow queued before the
+        // jump, by content that landed at the bottom, would undo it.
         pendingPrependAnchor = nil
+        pendingRealizeAnchor = nil
         supersedeQueuedTailFollow()
         // Held before the move, so the active prompt the move reports through
         // the bounds observer is already the target.

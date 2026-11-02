@@ -179,4 +179,82 @@ struct TranscriptRealizeAboveViewportTests {
                 Comment(rawValue: "the distance from the bottom moved from \(gapBefore) to \(gapAfter) pt"
                     + (atBottom ? ", so a viewport at the bottom left it" : "")))
     }
+
+    /// Holding the view still is the coordinator's own scroll, not the
+    /// reader's: a tail-follow that content landing at the bottom queued just
+    /// before the rows above realized must still run, and reach the new tail.
+    @Test("a tail-follow queued before the rows above realize still reaches the new tail")
+    func queuedTailFollowSurvivesRealizingRowsAbove() async throws {
+        let suite = TestDefaultsSuite("table-realize-above-tail")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.conversation()
+        let scene = try TableTranscriptScene.primedAtEnd(items: items, appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        try #require(scene.gapToBottom <= 1,
+                     Comment(rawValue: "precondition: the pane opened at the bottom (gap \(scene.gapToBottom) pt)"))
+        let firstVisible = try Self.firstVisibleRow(scene)
+        let heightsBefore = (0..<firstVisible).map { scene.tableView.rect(ofRow: $0).height }
+
+        // A reply lands at the bottom, as it does mid-stream, and queues a
+        // tail-follow for the next main-queue turn.
+        let grown = items + [TranscriptItem.assistantText(
+            id: "a-streamed",
+            text: String(repeating: "A freshly streamed paragraph that wraps across the column. ", count: 12),
+            timestamp: nil,
+            usage: nil)]
+        scene.coordinator.update(
+            nodes: transcriptRenderNodes(from: grown), atBottom: .constant(true),
+            activityToggleToken: 0, linkRoot: "")
+        try #require(scene.coordinator.isAwaitingTailFollow, "precondition: the append queued a tail-follow")
+        scene.tableView.layoutSubtreeIfNeeded()
+
+        // Before it runs, the rows above the viewport realize and correct.
+        Self.realizeRows(above: firstVisible, in: scene)
+        scene.tableView.layoutSubtreeIfNeeded()
+        #expect(scene.coordinator.isAwaitingTailFollow,
+                Comment(rawValue: "holding the view still across the corrections superseded the queued "
+                    + "tail-follow, as if the reader had scrolled; \(scene.heldReaderMoveNote)"))
+        await drainMainQueue()
+        scene.settle()
+
+        let corrected = Self.corrections(above: firstVisible, in: scene, since: heightsBefore)
+        try #require(corrected.rows > 0,
+                     "precondition: realizing corrected the rows above the viewport")
+        #expect(scene.gapToBottom <= 2,
+                Comment(rawValue: "the tail-follow did not reach the streamed reply (gap \(scene.gapToBottom) pt)"))
+        #expect(scene.coordinator.pendingRealizeAnchor == nil,
+                "following the tail must end the hold, or the next layout pass pulls the clip back up")
+    }
+
+    /// The hold ends when the reader scrolls: from then on, where they
+    /// scrolled to is what they are looking at.
+    @Test("a reader scroll ends the hold, and the clip stays where the reader put it")
+    func readerScrollEndsTheHold() async throws {
+        let suite = TestDefaultsSuite("table-realize-above-scroll")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let appState = AppState(userDefaults: defaults)
+
+        let scene = try TableTranscriptScene.primedAtEnd(items: Self.conversation(), appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        try Self.parkMidTranscript(scene)
+        let firstVisible = try Self.firstVisibleRow(scene)
+
+        Self.realizeRows(above: firstVisible, in: scene)
+        await Self.settleRealized(scene)
+        try #require(scene.coordinator.pendingRealizeAnchor != nil,
+                     "precondition: the corrections above the viewport hold the reader's place")
+
+        let clip = scene.scrollView.contentView
+        let target = clip.bounds.minY + 200
+        scene.scroll(toY: target)
+        #expect(scene.coordinator.pendingRealizeAnchor == nil, "a reader scroll left the hold in place")
+        await Self.settleRealized(scene)
+        #expect(abs(clip.bounds.minY - target) <= 0.5,
+                Comment(rawValue: "the clip moved from where the reader scrolled it (\(target) → "
+                    + "\(clip.bounds.minY) pt)"))
+    }
 }
