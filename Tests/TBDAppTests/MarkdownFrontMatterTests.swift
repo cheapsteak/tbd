@@ -62,20 +62,26 @@ struct MarkdownFrontMatterTests {
 
     @Test("after a first ... fails, later ... lines never close the block")
     func onlyTheFirstDotsIsTried() throws {
-        // The first `...` fails (`x` is not a key), so every later one must
-        // be skipped rather than re-read the whole block each time.
-        let dots = Array(repeating: "...", count: 5000).joined(separator: "\n")
-        let unclosed = "---\ntitle: Acme\nx\n" + dots + "\nBody"
+        // The shape that was quadratic: many key lines, then `x`, so reading
+        // the block walks every key before it fails, then many `...` lines.
+        // The first `...` fails, and every later one must be skipped rather
+        // than re-read the whole block.
+        // This pins the correct result for that shape; it cannot by itself
+        // detect a speed regression.
+        let keys = (1...2000).map { "k\($0): v" }.joined(separator: "\n")
+        let dots = Array(repeating: "...", count: 2000).joined(separator: "\n")
+        let block = keys + "\nx\n" + dots
+        let unclosed = "---\n" + block + "\nBody"
         let (none, unchanged) = MarkdownFrontMatter.split(unclosed)
         #expect(none == nil)
         #expect(unchanged == unclosed)
 
         // A `---` after them still closes it, as raw YAML that keeps every line.
-        let closed = "---\ntitle: Acme\nx\n" + dots + "\n---\nBody"
+        let closed = "---\n" + block + "\n---\nBody"
         let (frontMatter, body) = MarkdownFrontMatter.split(closed)
-        let block = try #require(frontMatter)
-        #expect(block.entries == nil)
-        #expect(block.yaml == "title: Acme\nx\n" + dots)
+        let parsed = try #require(frontMatter)
+        #expect(parsed.entries == nil)
+        #expect(parsed.yaml == block)
         #expect(body == "Body")
     }
 

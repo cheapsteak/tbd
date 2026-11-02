@@ -73,7 +73,9 @@ struct MarkdownFrontMatter: Equatable, Sendable {
             // `...` too, so it closes only a non-empty block that reads cleanly
             // as keys. Only the first one is tried: a block that fails to read
             // keeps failing as it grows, and retrying at every later `...`
-            // would make the scan quadratic.
+            // would make the scan quadratic. Spending that try on an empty
+            // block is safe, because the stray `...` then becomes the block's
+            // first line, so nothing after it can read as keys.
             var dotsEntries: [Entry]?
             if marker == "...", !triedDots {
                 triedDots = true
