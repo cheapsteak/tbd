@@ -7,7 +7,7 @@ import AppKit
 /// Notch and dash colours, shared by the rail and the card so a card's dashes
 /// match the notches they sit over.
 enum PromptRailNotchStyle {
-    /// Alpha of an inactive peer notch: amber at reduced opacity.
+    /// Alpha of an inactive peer notch: lavender at reduced opacity.
     static let inactivePeerAlpha: CGFloat = 0.5
 
     /// A dynamic colour; resolve it inside the drawing appearance.
@@ -16,7 +16,7 @@ enum PromptRailNotchStyle {
         case .prompt:
             return active ? .controlAccentColor : .tertiaryLabelColor
         case .peer:
-            return AttentionAmber.nsColor(alpha: active ? 1 : inactivePeerAlpha)
+            return PeerLavender.nsColor(alpha: active ? 1 : inactivePeerAlpha)
         }
     }
 }
