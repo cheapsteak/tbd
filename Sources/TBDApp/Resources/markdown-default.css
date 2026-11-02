@@ -17,6 +17,8 @@
   --md-fill: #f4efe2;
   --md-fill-strong: #ebe4d2;
   --md-code-bg: #f1ebdc;
+  /* Translucent, so a chip shows on every tinted ground (alerts) alike. */
+  --md-code-bg-on-tint: rgba(27, 24, 21, 0.07);
   --md-fg: #1b1815;
   --md-heading: #3a342c;
   --md-fg-2: #494339;
@@ -42,6 +44,9 @@
      token if a user stylesheet overrides it. Change this and the sizes
      stay proportional but stop being integers. */
   --md-size: 14px;
+  /* Lets WebKit draw form controls (task-list checkboxes) and scrollbars
+     dark in dark mode. body sets its own colors, so nothing else moves. */
+  color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -49,6 +54,7 @@
     --md-fill: #15120e;
     --md-fill-strong: #241f18;
     --md-code-bg: #26211a;
+    --md-code-bg-on-tint: rgba(236, 231, 221, 0.1);
     --md-fg: #ece7dd;
     --md-heading: #d6cfc2;
     --md-fg-2: #c7bfb1;
@@ -89,9 +95,11 @@ body > :first-child { margin-top: 0; }
 /* Spacing groups by proximity. Blocks sit one 12px gap apart; a heading
    adds space above (32px before h1/h2, 24px before h3, 20px before h4-h6)
    and takes some away below (8px), so it reads as the start of what follows
-   rather than a divider floating between two sections. */
+   rather than a divider floating between two sections. The negative margin
+   only trims the body's flex gap; anywhere else (a list item, an alert) it
+   would eat into the content below. */
 h1, h2, h3, h4, h5, h6 {
-  margin: 20px 0 -4px;
+  margin: 20px 0 0;
   color: var(--md-heading);
   font-weight: 600;
   text-wrap: balance;
@@ -112,6 +120,7 @@ h2 {
   padding-bottom: 0.25em;
   border-bottom: 1px solid var(--md-rule);
 }
+body > :is(h1, h2, h3, h4, h5, h6) { margin-bottom: -4px; }
 h3, h4, h5, h6 { margin-top: 8px; line-height: 1.35; }
 /* h3 and h4 sit above body size: at or below it an h3 matched a bold
    label paragraph (`**Files:**`) and stopped reading as a heading. */
@@ -146,6 +155,8 @@ input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
 li:has(> input[type="checkbox"]:first-child) { position: relative; }
 ul > li:has(> input[type="checkbox"]:first-child) { list-style: none; }
 li > input[type="checkbox"]:first-child {
+  /* A control's em is the UA control font (about 11px), not the item's. */
+  font-size: inherit;
   position: absolute;
   left: -1.357em;   /* 19px: the marker's slot in the 22px list gutter */
   top: 0.286em;     /* 4px: centers 13px in the 21px first line */
@@ -176,6 +187,10 @@ blockquote {
   font-size: 0.857em;   /* 12px */
   font-variant-numeric: tabular-nums;
 }
+/* --md-code-bg sits too close to the alert grounds to show on them. :where
+   keeps this at the base rule's weight, so the link, heading and table-cell
+   rules below still win inside an alert. */
+:where(.markdown-alert) :not(pre) > code { background: var(--md-code-bg-on-tint); }
 a > code { background: none; color: inherit; }
 /* In a heading, code is part of the title: no chip, and sized with the
    heading rather than shrunk to the 12px body chip. 13/14 because mono
@@ -256,8 +271,10 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
 /* YAML front matter. TBD lifts it out before rendering (CommonMark would
    make it an <hr> and a setext <h2>) and shows it as a key/value header:
    metadata, so quieter than the body, and separated from it by one rule. */
+/* 20px below on top of the 12px gap: the 32px a section gets above an h2,
+   so the header groups as a header and its rule does not crowd the title. */
 .tbd-front-matter {
-  margin: 0;
+  margin: 0 0 20px;
   padding: 0 0 8px;
   border-bottom: 1px solid var(--md-rule);
   color: var(--md-fg-2);
