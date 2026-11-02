@@ -72,6 +72,35 @@ struct MainToolbarSnapshotTests {
         }
     }
 
+    /// What the filter button shows, from the presentation alone. No filter:
+    /// inactive, "All Repos", and a tool tip saying what the button does. A
+    /// known repo: active, named in the tool tip and the accessibility value.
+    /// A repo that is gone: still active, since it still filters the sidebar,
+    /// and named as removed.
+    @Test func filterPresentationNamesTheChoice() {
+        withState { state, repos, _ in
+            let none = MainToolbarSnapshot.make(from: state).filter
+            #expect(none.isActive == false)
+            #expect(none.selectedTitle == "All Repos")
+            #expect(none.help == "Filter sidebar by repository")
+            #expect(none.accessibilityValue == "All Repos")
+
+            state.repoFilter = repos[1].id
+            let known = MainToolbarSnapshot.make(from: state).filter
+            #expect(known.isActive)
+            #expect(known.selectedTitle == "widgets")
+            #expect(known.help == "Filtering by widgets")
+            #expect(known.accessibilityValue == "widgets")
+
+            state.repoFilter = UUID()
+            let gone = MainToolbarSnapshot.make(from: state).filter
+            #expect(gone.isActive)
+            #expect(gone.selectedTitle == nil)
+            #expect(gone.help == "Filtering by a removed repository")
+            #expect(gone.accessibilityValue == "Removed repository")
+        }
+    }
+
     @Test func serversNeedOneSelectedWorktreeAndAList() {
         withState { state, _, worktrees in
             let a = worktrees[0].id

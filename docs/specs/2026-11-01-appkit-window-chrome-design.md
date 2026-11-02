@@ -96,9 +96,10 @@ Nothing on this path uses SwiftUI's `.toolbar`. Items, left to right:
    `AppState.canGoBack` and `canGoForward`. The item is not `isNavigational`,
    which would move it after the separator.
 2. **Flexible space.**
-3. **Repo filter** – a menu item showing the current filter, as the `Picker`
-   does today. It is removed from the toolbar while the sidebar is collapsed
-   and put back when it expands.
+3. **Repo filter** – an icon button the size of back and forward, whose click
+   pops up a menu of "All Repos" and each repo with the current choice checked
+   (see "The repo filter"). It is removed from the toolbar while the sidebar is
+   collapsed and put back when it expands.
 4. **Tracking separator** – an `NSTrackingSeparatorToolbarItem` that the
    toolbar creates under an identifier of its own, bound to the split's first
    divider and never changed afterwards. Everything before it sits over the
@@ -143,12 +144,13 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   apart, and their wider slots push the repo filter into the overflow menu at
   the sidebar's minimum width. One item's view lays out its buttons itself.
 - **View** – the item's view is a plain host view, 84 × 28 pt, held by
-  required constraints. It holds three accessory-bar `NSButton`s, toggle,
-  back and forward, each 28 pt wide by a required constraint. Required
-  constraints chain them from the host's leading edge to its trailing edge
-  and pin each to its top and bottom, which wins over the bezel's wider
-  intrinsic size. AppKit centres items vertically, which puts the glyphs on
-  the window buttons' line.
+  required constraints. It holds three `ToolbarIconButton`s, borderless
+  `NSButton`s, toggle, back and forward, each 28 pt wide by a required
+  constraint. Required constraints chain them from the host's leading edge to
+  its trailing edge, hold each button square (height equal to width) and
+  centre it vertically in the host, which wins over each button's own
+  intrinsic size. AppKit centres items vertically, which puts the
+  glyphs on the window buttons' line.
 - **Pitch** – 28 pt: each button is one pitch wide and the buttons touch, so
   none of AppKit's spacing between items falls between them.
 - **Glyph** – `sidebar.left`, `chevron.left` and `chevron.right`, at 13 pt,
@@ -158,16 +160,28 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   drew 19.5 × 15 pt and each chevron's 8 × 14 pt, about 1.25 times too big.
   At medium scale they draw 15 × 12 pt and 6 × 11 pt, against the reference's
   16 × 13 pt and 6 × 11 pt. Back and forward draw grey while disabled.
-- **Hover** – each button is bordered with `showsBorderOnlyWhileMouseInside`,
-  so its bezel shows only while the pointer is over it: it highlights on hover
-  and shows no border at rest.
+- **Hover and hit area** – each button draws a rounded square, corner radius
+  6 pt, the size of the button's shorter side, centred and aligned to whole
+  device pixels so no blurred edge row makes it read taller than wide. Each
+  button is square, so the square fills its 28 × 28 pt frame: the quaternary label colour while the
+  pointer is over it, the label colour at 16 % opacity while it is pressed, and
+  nothing at rest or while disabled. Both colours are semantic, so they follow
+  the light and dark appearance. This matches the Claude desktop app's
+  toolbar, whose icon buttons show a light grey square about 28 pt across
+  behind the glyph on hover, darker while pressed. An accessory-bar button
+  with `showsBorderOnlyWhileMouseInside` shows a hover highlight smaller than
+  its frame, so the square is drawn by the button rather than by a bezel. The
+  button is borderless, so its hit area is its frame, and the three frames
+  tile the host, leaving no gap between them. The hover state comes from a
+  tracking area over the button's visible rect and is cleared when the button
+  moves to another window or is disabled.
 - **No glass** – `NSToolbarItem` forwards `isBordered`, `isEnabled`, target,
   action and image to its view when the view answers them, so a bordered
   button as the item's view would make the item bordered, and a bordered item
   gets a Liquid Glass background. The host answers none of those, so the item
   keeps its own `isBordered = false`, set explicitly, and shows no glass, as
-  the title item does; in the running app no capsule shows. The bordered
-  buttons one level down keep their own hover highlight.
+  the title item does; in the running app no capsule shows. The buttons one
+  level down are borderless and draw their own hover square.
 - **Wiring** – each button carries its own target, action and tool tip, and
   each row of the overflow form its own target and action; the item carries
   none. An item with a custom view keeps no target or action its view does
@@ -190,6 +204,37 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   not its target, since an archive keeps a target only when it archives the
   target too; no displayed item depends on that.
 
+### The repo filter
+
+The filter is an icon like back and forward rather than a menu showing the
+repo's name, so a long name never widens the sidebar's part of the toolbar.
+
+- **View** – a view item over a plain host, 28 × 28 pt, held by required
+  constraints, holding one `ToolbarIconButton` that fills it. The host
+  answers none of the properties an item forwards, so the item stays
+  unbordered and shows no glass, as the leading item does; it decodes for
+  AppKit's copy in the same way. AppKit gives the item its fixed 44 pt slot,
+  centred on the host (see "Width").
+- **Glyph** – `line.3.horizontal.decrease`, at the leading buttons' 13 pt,
+  regular weight and medium scale, with the same hover square and hit area.
+- **Colour** – the other icons' colour while no repo filter is set, and system
+  blue while one is. A filter naming a repo that is gone still filters the
+  sidebar, to no repo at all, so it stays blue.
+- **Text** – the tool tip reads "Filter sidebar by repository" with no filter,
+  "Filtering by" the repo's name with one, and "Filtering by a removed
+  repository" when the repo is gone. The accessibility label is "Filter", and
+  the value is "All Repos", the repo's name or "Removed repository", so
+  VoiceOver reads the choice without opening the menu.
+- **Menu** – a click pops up one menu the toolbar controller keeps, its top
+  leading corner 4 pt below the button's bottom leading corner: "All Repos", a
+  separator, then each repo, the current choice checked, or none when the
+  filter names a repo that is gone, as the SwiftUI `Picker` shows it. Choosing
+  a row sets `AppState.repoFilter`. Each apply keeps the menu in step: it
+  rebuilds the rows only when the options change, sets a check, the tint, the
+  tool tip and the accessibility value only when they differ, and changes
+  nothing while the menu or the overflow row's submenu is open, whose close
+  schedules an apply that catches up.
+
 ### The overflow menu
 
 An item that does not fit goes to the toolbar's overflow menu (») as its menu
@@ -203,7 +248,8 @@ every item but one has an explicit form:
   autoenable; back and forward are disabled, as their buttons are, when
   history has nowhere to go.
 - **Repo filter** – "Filter", with a submenu of "All Repos" and each repo, the
-  current choice checked, kept in step with the popup.
+  current choice checked, the same rows as the button's menu and kept in step
+  with it.
 - **Title cluster** – an inert row showing the title, or "No Selection" when
   nothing is selected. It is never hidden: with nothing selected the title
   item still holds its minimum width, so it can be the only item that
@@ -235,12 +281,14 @@ section at its narrowest, left to right:
   filter, as AppKit spaces both sides of the flexible space between them even
   when it is empty. AppKit does not publish its spacing between items, so
   8 pt is an estimate.
-- **Filter** – 110 pt, its maximum width.
+- **Filter** – 44 pt: the slot AppKit gives a separate unbordered view item,
+  centred on its view whatever the view's width, measured in the running app.
+  The filter's own view is 28 pt wide.
 - **Margin** – 20 pt before the tracking separator.
 
-That is 92 + 84 + 2 × 8 + 110 + 20 = 322 pt, below the 400 pt maximum. The
-spacing is the one estimate in it: the running app confirms it, and the
-thickness grows with it.
+That is 92 + 84 + 2 × 8 + 44 + 20 = 256 pt, below the 400 pt maximum and above
+the SwiftUI sidebar's 220 pt minimum. The spacing is the one estimate in it:
+the running app confirms it, and the thickness grows with it.
 
 ### Shortcuts
 
@@ -280,18 +328,33 @@ No durable resource is added.
 - **Compact buttons:** one unbordered item that does not autovalidate, keeps
   no target or action and is enabled, whose host answers none of the
   selectors an item forwards and holds 84 × 28 pt by required constraints; its
-  three buttons tile the host at 0, 28 and 56 pt, each 28 × 28 pt and each
-  with its identifier, tool tip, accessibility label, target and action; each
-  glyph's ink is within 2 pt of the reference; back and forward start
+  three buttons tile the host at 0, 28 and 56 pt, each a borderless
+  `ToolbarIconButton`, 28 × 28 pt and each with its identifier, tool tip,
+  accessibility label, target and action; the hover square's colour for every
+  combination of hovered, pressed and enabled; each glyph's ink is within 2 pt
+  of the reference; back and forward start
   disabled, button and row, follow the snapshot, and an apply brings back a
   row that drifted; a copy keeps the host, its three buttons with their glyphs
   and actions, and its size; the sidebar's minimum thickness is the "Width"
   formula. The glyph test measures the image drawn on its own, outside any
   control, so it cannot see the control size; the live check does.
+- **Repo filter:** one unbordered item that does not autovalidate and keeps no
+  target, action or tool tip, whose host answers none of the forwarded
+  selectors and holds 28 × 28 pt, filled by one borderless
+  `ToolbarIconButton` showing the filter glyph at the leading buttons'
+  configuration; a copy keeps the host, its button, its glyph and action, and
+  its size; the button's menu, read through the accessor its click pops up,
+  since a test cannot pop a menu up, mirrors the options with the current one
+  checked, or none for a repo that is gone, changes a check only when it
+  differs, and sets the filter when a row is chosen; the menu sits 4 pt below
+  the button, flipped or not and right to left; the tint is none with no
+  filter and system blue with one, and the tool tip and accessibility value
+  name the repo; the item stays 28 pt wide for an 80-character repo name; a
+  filter item made after an apply starts from it.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
   none, sends its action from a menu item without raising, the leading item's
   "Navigation" submenu row by row with Toggle Sidebar checked rather than
-  sent; the filter's form mirrors the popup and sets the filter.
+  sent; the filter's form mirrors the button's menu and sets the filter.
 - **Title width:** the title item keeps its frame as the title goes from short
   to long and back, and starts at or after the divider; a fitting measurement
   of the title view gives its constant ideal width whatever the text.
@@ -299,17 +362,20 @@ No durable resource is added.
 - **Live, before merge,** on the owner's machine: positions with the sidebar
   shown and collapsed and in full screen, no separator line, the filter hiding,
   nothing overflowing at the minimum width, the leading buttons 28 pt apart
-  with no glass behind them and a hover highlight, the title staying put across
-  back and forward, and no collapse after waking from sleep.
+  with no glass behind them, a hover square filling each icon button's frame
+  and clickable across it, the filter's menu opening under its button and its
+  icon blue while a filter is set, the title staying put across back and
+  forward, and no collapse after waking from sleep.
 
 ## Risks
 
 - **Two toolbars to keep in step** until the SwiftUI path is deleted.
-- **Keeping glass off the compact buttons relies on forwarding.** They have
-  none because their item is unbordered and its view forwards nothing. If a
-  macOS release gives glass to view items by another rule, one capsule would
-  sit behind all three buttons. No test can see glass, so only the live check
-  on screen shows whether a capsule appears.
+- **Keeping glass off the compact buttons and the filter relies on
+  forwarding.** They have none because their items are unbordered and their
+  views forward nothing. If a macOS release gives glass to view items by
+  another rule, one capsule would sit behind all three buttons and another
+  behind the filter. No test can see glass, so only the live check on screen
+  shows whether a capsule appears.
 - **Re-enabling collapse could bring back #119** if
   `canCollapseFromWindowResize` is not the whole guard. Waking from sleep is on
   the live checklist.
