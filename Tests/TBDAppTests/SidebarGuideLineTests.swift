@@ -30,12 +30,13 @@ struct SidebarGuideLineTests {
         #expect(SidebarGuideLine.alphas == expected)
         #expect(SidebarGuideLine.restPixelWidth == 1)
         #expect(SidebarGuideLine.activeWidth == 1)
+        #expect(SidebarGuideLine.activeOnHighlightPixelWidth == 1)
         #expect(SidebarGuideLine.defaultBackingScale == 2)
     }
 
     /// Rest and active, on a plain row and on a highlighted one: grey, then
     /// the accent colour, each at its own alpha; a hairline at rest, a point
-    /// when active.
+    /// when active on a plain row, a hairline when active on a highlighted one.
     @Test func styleForEachState() {
         let states: [(active: Bool, highlight: Bool)] = [(false, false), (true, false), (false, true), (true, true)]
         let retina = states.map {
@@ -45,7 +46,7 @@ struct SidebarGuideLineTests {
             Style(color: .secondaryLabel, alpha: 0.12, width: 0.5),
             Style(color: .secondaryLabel, alpha: 0.25, width: 1),
             Style(color: .accent, alpha: 0.30, width: 0.5),
-            Style(color: .accent, alpha: 0.55, width: 1),
+            Style(color: .accent, alpha: 0.55, width: 0.5),
         ]
         #expect(retina == expectedRetina)
 
@@ -102,6 +103,20 @@ struct SidebarGuideLineTests {
         let expectedStandard = [NSRect(x: 28, y: 0, width: 1, height: 28)]
         #expect(retinaRects == expectedRetina)
         #expect(standardRects == expectedStandard)
+    }
+
+    /// An active line on a highlighted row is one device pixel wide: 0.5 pt
+    /// at 2x, whole-pixel aligned; a plain row's active line stays 1 pt.
+    @Test func activeLineOnHighlightIsAHairline() {
+        let activeAccent = SidebarGuideLine.style(isActive: true, isOnHighlight: true, backingScale: 2)
+        let restAccent = SidebarGuideLine.style(isActive: false, isOnHighlight: true, backingScale: 2)
+        let segments = SidebarGuideLine.segments(xs: [28, 44], active: [1], gap: nil, isOnHighlight: true,
+                                                 in: Self.bounds, backingScale: 2)
+        let expected = [
+            Segment(rect: NSRect(x: 28, y: 0, width: 0.5, height: 28), style: restAccent),
+            Segment(rect: NSRect(x: 44, y: 0, width: 0.5, height: 28), style: activeAccent),
+        ]
+        #expect(segments == expected)
     }
 
     /// The gap leaves out its one line, and `Alphas.none` leaves out every

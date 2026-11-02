@@ -43,8 +43,13 @@ enum SidebarGuideLine {
     /// a Retina display.
     static let restPixelWidth: CGFloat = 1
 
-    /// An active line's width in points.
+    /// An active line's width in points on a plain row.
     static let activeWidth: CGFloat = 1
+
+    /// An active line's width in device pixels on a highlighted row: a
+    /// hairline, 0.5 pt on a Retina display. A 1 pt accent line over the
+    /// highlight reads too loud.
+    static let activeOnHighlightPixelWidth: CGFloat = 1
 
     /// The backing scale a row assumes when neither its window nor a screen
     /// can tell it one.
@@ -79,7 +84,12 @@ enum SidebarGuideLine {
     static func style(isActive: Bool, isOnHighlight: Bool, backingScale: CGFloat,
                       alphas: Alphas = SidebarGuideLine.alphas) -> Style {
         let scale = backingScale > 0 ? backingScale : defaultBackingScale
-        let width = isActive ? activeWidth : restPixelWidth / scale
+        let width: CGFloat
+        switch (isActive, isOnHighlight) {
+        case (false, _): width = restPixelWidth / scale
+        case (true, false): width = activeWidth
+        case (true, true): width = activeOnHighlightPixelWidth / scale
+        }
         switch (isActive, isOnHighlight) {
         case (false, false): return Style(color: .secondaryLabel, alpha: alphas.rest, width: width)
         case (true, false): return Style(color: .secondaryLabel, alpha: alphas.active, width: width)
