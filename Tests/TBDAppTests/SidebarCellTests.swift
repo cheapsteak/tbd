@@ -28,7 +28,7 @@ struct SidebarCellTests {
         }
         cell.configure(Self.worktree(
             name: "alpha", leading: .prStatus(open), bold: true, subtitles: ["Creating worktree…"],
-            suffix: .attention, noStatus: true, devServer: true, crossRepo: "(widge…)"))
+            suffix: .attention, devServer: true, crossRepo: "(widge…)"))
         cell.layout()
 
         #expect(cell.textField === cell.nameField)
@@ -40,14 +40,12 @@ struct SidebarCellTests {
         #expect(cell.suffix.indicator == .attention)
         #expect(!cell.suffix.imageView.isHidden)
         #expect(cell.suffix.typingDots?.isHidden ?? true, "Only a working row draws the typing dots")
-        #expect(!cell.noStatusImageView.isHidden)
         #expect(!cell.devServerDot.isHidden)
         #expect(!cell.crossRepoField.isHidden)
         #expect(cell.crossRepoField.stringValue == "(widge…)")
         // The trailing marks pack against the name, in the SwiftUI order.
         #expect(cell.suffix.imageView.frame.minX > cell.nameField.frame.maxX)
-        #expect(cell.noStatusImageView.frame.minX > cell.suffix.imageView.frame.maxX)
-        #expect(cell.devServerDot.frame.minX > cell.noStatusImageView.frame.maxX)
+        #expect(cell.devServerDot.frame.minX > cell.suffix.imageView.frame.maxX)
         #expect(cell.crossRepoField.frame.minX > cell.devServerDot.frame.maxX)
 
         // Each input switched off again, on the same cell.
@@ -59,7 +57,6 @@ struct SidebarCellTests {
         #expect(subtitlesHidden)
         #expect(cell.suffix.imageView.isHidden)
         #expect(cell.suffix.typingDots?.isHidden == false, "A working row draws the typing dots")
-        #expect(cell.noStatusImageView.isHidden)
         #expect(cell.devServerDot.isHidden)
         #expect(cell.crossRepoField.isHidden)
 
@@ -178,11 +175,10 @@ struct SidebarCellTests {
 
     @Test func accessibilityLabelIncludesStatus() throws {
         let cell = WorktreeRowCell()
-        cell.configure(Self.worktree(name: "alpha", suffix: .attention, noStatus: true, devServer: true))
+        cell.configure(Self.worktree(name: "alpha", suffix: .attention, devServer: true))
         let label = try #require(cell.accessibilityLabel())
         #expect(label.hasPrefix("alpha"))
         #expect(label.contains("Needs your attention"))
-        #expect(label.contains(NoStatusMark.accessibilityLabel))
         #expect(label.contains("Dev server running"))
         cell.configure(Self.worktree(name: "alpha"))
         #expect(cell.accessibilityLabel() == "alpha", "A quiet row says only its name")
@@ -224,12 +220,12 @@ struct SidebarCellTests {
 
     static func worktree(
         name: String, leading: WorktreeLeadingSlot? = nil, bold: Bool = false, subtitles: [String] = [],
-        suffix: SuffixRowIndicator? = nil, noStatus: Bool = false, devServer: Bool = false,
+        suffix: SuffixRowIndicator? = nil, devServer: Bool = false,
         crossRepo: String? = nil, dimmed: Bool = false, hiddenSection: Bool = false
     ) -> WorktreeRowModel {
         WorktreeRowModel(
             name: name, leading: leading, isNameBold: bold, subtitles: subtitles, suffix: suffix,
-            showsNoStatusMark: noStatus, showsDevServerDot: devServer, crossRepoLabel: crossRepo, homeRepoID: nil,
+            showsDevServerDot: devServer, crossRepoLabel: crossRepo, homeRepoID: nil,
             isPinned: false, depth: 0, isDimmed: dimmed, isInHiddenSection: hiddenSection, isMain: false,
             heightClass: subtitles.isEmpty ? .single : .withSubtitle)
     }

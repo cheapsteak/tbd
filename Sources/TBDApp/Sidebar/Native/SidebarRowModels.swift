@@ -4,10 +4,10 @@ import TBDShared
 // The values each native sidebar cell draws. One stored property per input
 // the matching SwiftUI view reads today, computed once per rebuild by
 // `SidebarRowModelFactory`; a cell never reads `AppState`. Text shown only on
-// hover — PR freshness, status-badge and no-status tooltips, a provider's
-// summary, a remote session's attention reason, a cross-repo row's full repo
-// name — is not here: it is computed when the pointer arrives, so a clock
-// tick or a tooltip-only change never reconfigures a row.
+// hover — PR freshness, status-badge tooltips, a provider's summary, a remote
+// session's attention reason, a cross-repo row's full repo name — is not
+// here: it is computed when the pointer arrives, so a clock tick or a
+// tooltip-only change never reconfigures a row.
 
 /// A row's height variant. Heights are fixed per kind and variant, so nothing
 /// measures; the cells map each class to a constant.
@@ -48,9 +48,6 @@ struct WorktreeRowModel: Equatable {
     /// `suffixIcon()`: the trailing status badge; `.working` draws the
     /// typing dots.
     var suffix: SuffixRowIndicator?
-    /// `noStatusMark()`: an agent session that has not reported its state
-    /// for the whole grace period.
-    var showsNoStatusMark: Bool
     /// The green dev-server dot.
     var showsDevServerDot: Bool
     /// The muted "(repo)" suffix on a row nested under another repo's

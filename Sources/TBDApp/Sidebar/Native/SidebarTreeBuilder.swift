@@ -486,7 +486,6 @@ struct SidebarRowModelFactory {
             isNameBold: RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreen),
             subtitles: subtitles,
             suffix: suffix,
-            showsNoStatusMark: NoStatusMark.rowHelp(terminals: terminals, sightings: appState.noStatusSightings) != nil,
             showsDevServerDot: WorktreeRowView.showsServerDot(
                 worktreeID: id, running: appState.devServerRunningWorktreeIDs),
             crossRepoLabel: crossRepoLabel,

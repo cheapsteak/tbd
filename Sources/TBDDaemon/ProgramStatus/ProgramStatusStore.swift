@@ -748,7 +748,7 @@ extension ProgramStatusEffects {
                 }
                 guard let applied else { return .refused }
                 // The source is announced with the state: a write can change
-                // only the source, and the app's no-status mark reads it.
+                // only the source, and the app's cached row carries it.
                 if applied.stateChanged || applied.sourceChanged {
                     subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                         terminalID: write.terminalID,
