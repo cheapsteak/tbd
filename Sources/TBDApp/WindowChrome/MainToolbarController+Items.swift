@@ -27,7 +27,7 @@ struct ToolbarImageKey {
 }
 
 /// The view of the toolbar's leading item: a plain view holding the sidebar
-/// toggle, Back and Forward, three accessory-bar buttons side by side, each
+/// toggle, Back and Forward, three `ToolbarIconButton`s side by side, each
 /// `MainToolbarMetrics.iconButtonPitch` wide, so their centres sit one pitch
 /// apart. They share one item because AppKit gives each separate unbordered
 /// view item a fixed 44 pt slot, centred on its view, whatever the view's
@@ -39,17 +39,16 @@ struct ToolbarImageKey {
 /// answers them. A bordered button as an item's view makes the item bordered,
 /// which gives it a Liquid Glass background. A plain view answers none of
 /// them, so the item keeps its own `isBordered = false` and shows no glass,
-/// while the bordered buttons one level down keep their own hover highlight.
-/// That is why this class must not gain any of those properties. The item
-/// stays enabled; `updateContent(_:)` enables Back and Forward on their
-/// buttons.
+/// while the buttons one level down draw their own hover square. That is why
+/// this class must not gain any of those properties. The item stays enabled;
+/// `updateContent(_:)` enables Back and Forward on their buttons.
 ///
 /// AppKit measures the host, which holds the item's size by required
 /// constraints, three pitches by one button's height. Each button holds one
 /// pitch by a required width constraint, and required constraints chain them
-/// leading to trailing and pin each to the host's top and bottom, so they
-/// tile the host over the accessory-bar bezel's own intrinsic size. The host
-/// is not an accessibility element, so VoiceOver lands on each button.
+/// leading to trailing, make each square and centre it vertically in the
+/// host, so they tile the host (`ToolbarButtonTiling`). The host is not an accessibility
+/// element, so VoiceOver lands on each button.
 ///
 /// The host keeps no stored property: its buttons are its subviews, found by
 /// their identifiers. It decodes, where views here usually leave
@@ -71,46 +70,18 @@ final class LeadingToolbarButtonsHost: NSView {
     static let heightID = "tbd.toolbar.leadingButtons.height"
     static let buttonWidthID = "tbd.toolbar.leadingButtons.buttonWidth"
 
-    var toggleButton: NSButton? { button(Self.toggleID) }
-    var backButton: NSButton? { button(Self.backID) }
-    var forwardButton: NSButton? { button(Self.forwardID) }
+    var toggleButton: NSButton? { ToolbarButtonTiling.button(Self.toggleID, in: self) }
+    var backButton: NSButton? { ToolbarButtonTiling.button(Self.backID, in: self) }
+    var forwardButton: NSButton? { ToolbarButtonTiling.button(Self.forwardID, in: self) }
 
     /// Lays out `toggle`, `back` and `forward` in that order, leading to
     /// trailing, and gives each its identifier.
     init(toggle: NSButton, back: NSButton, forward: NSButton) {
         let size = NSSize(width: MainToolbarMetrics.leadingButtonsWidth, height: MainToolbarMetrics.iconButtonHeight)
         super.init(frame: NSRect(origin: .zero, size: size))
-        translatesAutoresizingMaskIntoConstraints = false
-        let ordered: [(NSButton, NSUserInterfaceItemIdentifier)] = [
-            (toggle, Self.toggleID), (back, Self.backID), (forward, Self.forwardID),
-        ]
-        let width = widthAnchor.constraint(equalToConstant: size.width)
-        width.identifier = Self.widthID
-        let height = heightAnchor.constraint(equalToConstant: size.height)
-        height.identifier = Self.heightID
-        var layout = [width, height]
-        var previousEdge = leadingAnchor
-        for (button, identifier) in ordered {
-            button.identifier = identifier
-            button.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(button)
-            let buttonWidth = button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonPitch)
-            buttonWidth.identifier = Self.buttonWidthID
-            layout += [
-                button.leadingAnchor.constraint(equalTo: previousEdge),
-                button.topAnchor.constraint(equalTo: topAnchor),
-                button.bottomAnchor.constraint(equalTo: bottomAnchor),
-                buttonWidth,
-            ]
-            previousEdge = button.trailingAnchor
-        }
-        layout.append(previousEdge.constraint(equalTo: trailingAnchor))
-        // Archived with the host and its buttons, so a copied item keeps its
-        // size and layout.
-        for constraint in layout {
-            constraint.shouldBeArchived = true
-        }
-        NSLayoutConstraint.activate(layout)
+        ToolbarButtonTiling.tile(
+            [(toggle, Self.toggleID), (back, Self.backID), (forward, Self.forwardID)], in: self,
+            widthID: Self.widthID, heightID: Self.heightID, buttonWidthID: Self.buttonWidthID)
         setAccessibilityElement(false)
     }
 
@@ -118,10 +89,93 @@ final class LeadingToolbarButtonsHost: NSView {
         super.init(coder: coder)
         setAccessibilityElement(false)
     }
+}
 
-    /// The subview button carrying `identifier`.
-    private func button(_ identifier: NSUserInterfaceItemIdentifier) -> NSButton? {
-        subviews.lazy.compactMap { $0 as? NSButton }.first { $0.identifier == identifier }
+/// The view of the toolbar's repo filter item: a plain view holding one
+/// `ToolbarIconButton`, one pitch by one button's height, which pops up the
+/// filter menu. A plain host for the reason `LeadingToolbarButtonsHost`
+/// gives: it answers none of the properties an item forwards to its view, so
+/// the item stays unbordered and shows no Liquid Glass. It must not gain any
+/// of them either.
+///
+/// The host holds its size by required constraints and the button tiles it
+/// (`ToolbarButtonTiling`). Like the leading host it keeps no stored
+/// property, decodes for AppKit's copy of the item with its constraints
+/// archived, and is not an accessibility element, so VoiceOver lands on the
+/// button.
+final class FilterToolbarButtonHost: NSView {
+    static let buttonID = NSUserInterfaceItemIdentifier("tbd.toolbar.repoFilter.button")
+
+    /// The identifiers of the host's size constraints and of the button's
+    /// width constraint.
+    static let widthID = "tbd.toolbar.repoFilter.width"
+    static let heightID = "tbd.toolbar.repoFilter.height"
+    static let buttonWidthID = "tbd.toolbar.repoFilter.buttonWidth"
+
+    var button: NSButton? { ToolbarButtonTiling.button(Self.buttonID, in: self) }
+
+    init(button: NSButton) {
+        let size = NSSize(width: MainToolbarMetrics.iconButtonPitch, height: MainToolbarMetrics.iconButtonHeight)
+        super.init(frame: NSRect(origin: .zero, size: size))
+        ToolbarButtonTiling.tile(
+            [(button, Self.buttonID)], in: self,
+            widthID: Self.widthID, heightID: Self.heightID, buttonWidthID: Self.buttonWidthID)
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setAccessibilityElement(false)
+    }
+}
+
+/// The layout the toolbar's button hosts share: buttons side by side, one
+/// pitch each, tiling their host.
+@MainActor
+enum ToolbarButtonTiling {
+    /// Holds `host` at the buttons' pitches by one button's height, adds each
+    /// button with its identifier, one pitch wide, chained leading to
+    /// trailing, square (height equal to width) and centred vertically in the
+    /// host, so the buttons tile the host over their own intrinsic size. Every constraint is required,
+    /// carries `widthID`, `heightID` or `buttonWidthID` where it holds a
+    /// size, and is archived with the host, so a copied item keeps its size
+    /// and layout.
+    static func tile(
+        _ buttons: [(NSButton, NSUserInterfaceItemIdentifier)], in host: NSView,
+        widthID: String, heightID: String, buttonWidthID: String
+    ) {
+        host.translatesAutoresizingMaskIntoConstraints = false
+        let width = host.widthAnchor.constraint(
+            equalToConstant: CGFloat(buttons.count) * MainToolbarMetrics.iconButtonPitch)
+        width.identifier = widthID
+        let height = host.heightAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonHeight)
+        height.identifier = heightID
+        var layout = [width, height]
+        var previousEdge = host.leadingAnchor
+        for (button, identifier) in buttons {
+            button.identifier = identifier
+            button.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(button)
+            let buttonWidth = button.widthAnchor.constraint(equalToConstant: MainToolbarMetrics.iconButtonPitch)
+            buttonWidth.identifier = buttonWidthID
+            layout += [
+                button.leadingAnchor.constraint(equalTo: previousEdge),
+                button.heightAnchor.constraint(equalTo: button.widthAnchor),
+                button.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+                buttonWidth,
+            ]
+            previousEdge = button.trailingAnchor
+        }
+        layout.append(previousEdge.constraint(equalTo: host.trailingAnchor))
+        for constraint in layout {
+            constraint.shouldBeArchived = true
+        }
+        NSLayoutConstraint.activate(layout)
+    }
+
+    /// The subview button of `host` carrying `identifier`.
+    static func button(_ identifier: NSUserInterfaceItemIdentifier, in host: NSView) -> NSButton? {
+        host.subviews.lazy.compactMap { $0 as? NSButton }.first { $0.identifier == identifier }
     }
 }
 
@@ -202,27 +256,28 @@ extension MainToolbarController {
     /// The leading item's label, which titles its overflow row.
     static let leadingButtonsLabel = "Navigation"
 
-    /// One leading button: an accessory-bar `NSButton` showing `symbol` at
-    /// `iconGlyphPointSize`, one pitch by `iconButtonHeight`. It is bordered
-    /// but shows its border only while the pointer is inside it, so it
-    /// highlights on hover and shows no bezel at rest. It does not scale its
-    /// image, which `iconGlyph` sizes.
+    /// One leading button: a `ToolbarIconButton` showing `symbol` at
+    /// `iconGlyphPointSize`, one pitch by `iconButtonHeight`, which draws its
+    /// hover square over its whole frame and does not scale its image, which
+    /// `iconGlyph` sizes.
     private static func makeLeadingButton(
         symbol: String, tip: String, target: AnyObject?, action: Selector
     ) -> NSButton {
-        let button = NSButton(frame: NSRect(
-            x: 0, y: 0, width: MainToolbarMetrics.iconButtonPitch, height: MainToolbarMetrics.iconButtonHeight))
-        button.bezelStyle = .accessoryBar
-        button.isBordered = true
-        button.showsBorderOnlyWhileMouseInside = true
-        button.title = ""
-        button.image = iconGlyph(symbol, description: tip)
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleNone
+        let button = makeIconButton(symbol: symbol, description: tip)
         button.toolTip = tip
         button.setAccessibilityLabel(tip)
         button.target = target
         button.action = action
+        return button
+    }
+
+    /// A `ToolbarIconButton`, one pitch by `iconButtonHeight`, showing
+    /// `symbol` through `iconGlyph`, carrying `description` for
+    /// accessibility.
+    private static func makeIconButton(symbol: String, description: String) -> ToolbarIconButton {
+        let button = ToolbarIconButton(frame: NSRect(
+            x: 0, y: 0, width: MainToolbarMetrics.iconButtonPitch, height: MainToolbarMetrics.iconButtonHeight))
+        button.image = iconGlyph(symbol, description: description)
         return button
     }
 
@@ -252,7 +307,7 @@ extension MainToolbarController {
         return form
     }
 
-    /// `symbol` at the leading buttons' point size, regular weight and
+    /// `symbol` at the toolbar icon buttons' point size, regular weight and
     /// medium scale, carrying `description` for accessibility. The scale is
     /// named because a toolbar draws its buttons at large control size, which
     /// scales up a symbol whose configuration names none: measured in the
@@ -283,55 +338,97 @@ extension MainToolbarController {
             identifier: MainToolbarItemID.sidebarSeparator, splitView: split.splitView, dividerIndex: 0)
     }
 
-    /// The repo filter: a popup whose width is capped and whose compression
-    /// resistance is low, so a long repo name truncates the title rather than
-    /// widening the item past the sidebar's section, where AppKit would move
-    /// it into the overflow menu.
+    /// The repo filter: a view item whose view is a `FilterToolbarButtonHost`
+    /// holding one `ToolbarIconButton`, the same size and glyph size as Back
+    /// and Forward, showing `line.3.horizontal.decrease`. A click pops up
+    /// `filterMenu` under the button (`filterButtonClicked(_:)`). The item is
+    /// not bordered and its host forwards nothing, so it has no Liquid Glass
+    /// background; it keeps no target, action or tool tip, which sit on the
+    /// button, and does not autovalidate, for the reasons the leading item
+    /// gives (`makeLeadingButtonsItem()`).
+    ///
+    /// The button's tint, tool tip and accessibility value, and the overflow
+    /// row, start from what the last apply showed, so an item the toolbar
+    /// re-inserts, as after a collapse, shows the filter until it changes.
     private func makeFilterItem() -> NSToolbarItem {
-        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-        popup.bezelStyle = .toolbar
-        popup.cell?.lineBreakMode = .byTruncatingTail
-        // Items stay enabled whatever validation would say; every row is a
-        // valid choice.
-        popup.autoenablesItems = false
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        popup.widthAnchor.constraint(lessThanOrEqualToConstant: MainToolbarMetrics.filterMaxWidth).isActive = true
-        popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        popup.toolTip = "Filter sidebar by repository"
-        popup.target = self
-        popup.action = #selector(filterChosen(_:))
-        popup.menu?.delegate = filterMenuTracker
+        let button = Self.makeIconButton(symbol: Self.filterSymbol, description: Self.filterLabel)
+        button.setAccessibilityLabel(Self.filterLabel)
+        button.target = self
+        button.action = #selector(filterButtonClicked(_:))
+        Self.showFilter(appliedSnapshot?.filter, on: button)
 
         let item = NSToolbarItem(itemIdentifier: MainToolbarItemID.repoFilter)
-        item.view = popup
-        item.label = "Filter"
-        item.toolTip = "Filter sidebar by repository"
-        // Built from what the last apply showed, so an item the toolbar
-        // re-inserts keeps its row until the filter changes.
+        item.view = FilterToolbarButtonHost(button: button)
+        item.isBordered = false
+        item.autovalidates = false
+        item.label = Self.filterLabel
         item.menuFormRepresentation = makeFilterForm(appliedSnapshot?.filter)
         return item
     }
 
+    /// The filter item's label, which titles its overflow row, and its
+    /// button's accessibility label and glyph description.
+    static let filterLabel = "Filter"
+
+    /// The filter button's glyph.
+    static let filterSymbol = "line.3.horizontal.decrease"
+
+    /// The filter button's tint while a repo filter is set.
+    static let activeFilterTint = NSColor.systemBlue
+
+    /// How far below the filter button the top of its menu sits.
+    static let filterMenuGap: CGFloat = 4
+
+    /// Shows `filter` on the filter button, setting each value only when it
+    /// differs: tinted `activeFilterTint` while a repo filter is set and
+    /// untinted, the other icons' colour, while none is; `help` as its tool
+    /// tip; and `accessibilityValue` as its accessibility value. `nil`,
+    /// before any apply, shows no filter.
+    private static func showFilter(_ filter: RepoFilterPresentation?, on button: NSButton) {
+        let tint: NSColor? = filter?.isActive == true ? activeFilterTint : nil
+        if button.contentTintColor != tint {
+            button.contentTintColor = tint
+        }
+        let help = filter?.help ?? RepoFilterPresentation.inactiveHelp
+        if button.toolTip != help {
+            button.toolTip = help
+        }
+        let value = filter?.accessibilityValue ?? RepoFilterPresentation.allReposTitle
+        if (button.accessibilityValue() as? String) != value {
+            button.setAccessibilityValue(value)
+        }
+    }
+
+    /// Where `filterMenu`'s top leading corner goes, in the coordinates of a
+    /// button with `bounds`: `filterMenuGap` below the button's bottom
+    /// leading corner. `NSMenu` puts the menu's top left corner there, or its
+    /// top right under a right-to-left layout, so the point is the bottom
+    /// left or the bottom right; the bottom is the larger y in a flipped
+    /// view and the smaller in one that is not.
+    static func filterMenuOrigin(in bounds: NSRect, flipped: Bool, rightToLeft: Bool) -> NSPoint {
+        let x = rightToLeft ? bounds.maxX : bounds.minX
+        let y = flipped ? bounds.maxY + filterMenuGap : bounds.minY - filterMenuGap
+        return NSPoint(x: x, y: y)
+    }
+
     /// The filter's overflow row: "Filter", with a submenu of the same rows
-    /// as the popup, each choosing its repo through `filterChosen(_:)`, and
-    /// the row `filter` names checked, or none when it names a repo that is
-    /// gone. Empty without a filter. Without it, AppKit's default row would
-    /// send the popup's action from a bare menu item. The row carries
-    /// `filter` as its represented object, so `updateFilterForm` can tell
-    /// whether it is current. The submenu reports its opening to
-    /// `filterMenuTracker`, so it is not replaced under the pointer.
+    /// as `filterMenu`, each choosing its repo through `filterChosen(_:)`,
+    /// and the row `filter` names checked, or none when it names a repo that
+    /// is gone. Empty without a filter. Without it, AppKit's default row
+    /// would be an inert "Filter": the item has no action, as its host
+    /// answers none. The row carries `filter` as its represented object, so
+    /// `updateFilterForm` can tell whether it is current. The submenu reports
+    /// its opening to `filterMenuTracker`, so it is not replaced under the
+    /// pointer.
     private func makeFilterForm(_ filter: RepoFilterPresentation?) -> NSMenuItem {
-        let form = NSMenuItem(title: "Filter", action: nil, keyEquivalent: "")
+        let form = NSMenuItem(title: Self.filterLabel, action: nil, keyEquivalent: "")
         form.representedObject = filter
-        let rows = NSMenu(title: "Filter")
+        let rows = NSMenu(title: Self.filterLabel)
         rows.autoenablesItems = false
         rows.delegate = filterMenuTracker
         if let filter {
-            fillFilterRows(rows, options: filter.options, action: #selector(filterChosen(_:)))
-            let checked = Self.filterRow(in: rows.items, for: filter)
-            if checked >= 0 {
-                rows.item(at: checked)?.state = .on
-            }
+            fillFilterRows(rows, options: filter.options)
+            Self.checkFilterRow(in: rows, for: filter)
         }
         form.submenu = rows
         return form
@@ -465,8 +562,8 @@ extension MainToolbarController {
         if let leading = item(MainToolbarItemID.leadingButtons) {
             updateHistory(leading, snapshot)
         }
-        if let filterItem = item(MainToolbarItemID.repoFilter), let popup = filterItem.view as? NSPopUpButton {
-            updateFilter(filterItem, popup, snapshot.filter)
+        if let filterItem = item(MainToolbarItemID.repoFilter) {
+            updateFilter(filterItem, snapshot.filter)
         }
         if let titleItem = item(MainToolbarItemID.title) {
             updateTitleForm(titleItem, snapshot.title)
@@ -542,16 +639,29 @@ extension MainToolbarController {
         }
     }
 
-    /// Brings the popup and the filter item's overflow row to `filter`. Both
-    /// are built from the same options, so their rows match.
-    private func updateFilter(_ item: NSToolbarItem, _ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
-        // Never under the pointer: the menu's close schedules an apply that
-        // catches up.
+    /// Brings `filterMenu`, the filter button and the filter item's overflow
+    /// row to `filter`. The menu's rows are rebuilt only when the options
+    /// change, and the menu and the row are built from the same options, so
+    /// their rows match. Never while one of the filter's menus is open: its
+    /// close schedules an apply that catches up. An item whose view is not
+    /// the filter's host, or a host missing its button, is logged and its
+    /// button skipped.
+    private func updateFilter(_ item: NSToolbarItem, _ filter: RepoFilterPresentation) {
         guard !filterMenuTracker.isOpen else { return }
-        if popup !== builtFilterPopup || filter.options != builtFilterOptions {
-            rebuildFilterItems(popup, options: filter.options)
+        if filter.options != builtFilterOptions {
+            fillFilterRows(filterMenu, options: filter.options)
+            builtFilterOptions = filter.options
         }
-        selectFilter(popup, filter)
+        if Self.checkFilterRow(in: filterMenu, for: filter) {
+            filterSelectionCount += 1
+            itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public)")
+        }
+        if let button = (item.view as? FilterToolbarButtonHost)?.button {
+            Self.showFilter(filter, on: button)
+        } else {
+            let kind = item.view.map { String(describing: type(of: $0)) } ?? "no view"
+            itemsLogger.error("Main toolbar's filter item holds \(kind, privacy: .public), not its button; skipped")
+        }
         updateFilterForm(item, filter)
     }
 
@@ -565,58 +675,49 @@ extension MainToolbarController {
         item.menuFormRepresentation = makeFilterForm(filter)
     }
 
-    /// Rebuilds the popup's rows. They have no action, as the popup sends its
-    /// own.
-    private func rebuildFilterItems(_ popup: NSPopUpButton, options: [RepoFilterPresentation.Option]) {
-        if let menu = popup.menu {
-            fillFilterRows(menu, options: options, action: nil)
-        }
-        builtFilterPopup = popup
-        builtFilterOptions = options
-    }
-
-    /// "All Repos", a separator, then each repo, each row carrying its repo's
-    /// ID, or none for "All Repos", and sending `action` to the controller
-    /// when one is given. Rows are added to the menu directly:
+    /// Replaces `menu`'s rows with "All Repos", a separator, then each repo,
+    /// each row carrying its repo's ID, or none for "All Repos", and choosing
+    /// it through `filterChosen(_:)`. Rows are added to the menu directly:
     /// `addItem(withTitle:)` drops a row whose title repeats, and two repos
     /// can share a display name.
-    private func fillFilterRows(_ menu: NSMenu, options: [RepoFilterPresentation.Option], action: Selector?) {
+    private func fillFilterRows(_ menu: NSMenu, options: [RepoFilterPresentation.Option]) {
         menu.removeAllItems()
         for (index, option) in options.enumerated() {
-            let row = NSMenuItem(title: option.title, action: action, keyEquivalent: "")
-            if action != nil {
-                row.target = self
-            }
+            let row = NSMenuItem(title: option.title, action: #selector(filterChosen(_:)), keyEquivalent: "")
+            row.target = self
             row.representedObject = option.id
             menu.addItem(row)
             if index == 0 { menu.addItem(.separator()) }
         }
     }
 
-    /// Checks the row the filter names, or none when it names a repo that is
-    /// gone, as the SwiftUI `Picker` shows it, rather than a false "All Repos".
-    /// Only when that differs from the popup's selection: an apply that finds
-    /// the popup already showing the filter sets nothing.
-    private func selectFilter(_ popup: NSPopUpButton, _ filter: RepoFilterPresentation) {
-        let target = Self.filterRow(in: popup.itemArray, for: filter)
-        guard popup.indexOfSelectedItem != target else { return }
-        if target < 0 {
-            popup.select(nil)
-        } else {
-            popup.selectItem(at: target)
+    /// Checks the row `filter` names and no other, or none when it names a
+    /// repo that is gone, as the SwiftUI `Picker` shows it, rather than a
+    /// false "All Repos". Only a row whose check differs is set, so a menu
+    /// already showing the filter is left alone.
+    ///
+    /// - Returns: whether any row's check changed.
+    @discardableResult
+    private static func checkFilterRow(in menu: NSMenu, for filter: RepoFilterPresentation) -> Bool {
+        let target = filterRow(in: menu.items, for: filter)
+        var changed = false
+        for (index, row) in menu.items.enumerated() where !row.isSeparatorItem {
+            let state: NSControl.StateValue = index == target ? .on : .off
+            if row.state != state {
+                row.state = state
+                changed = true
+            }
         }
-        filterSelectionCount += 1
-        itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public): row \(target, privacy: .public)")
+        return changed
     }
 
-    /// The index among `rows` of the row `filter` names, or -1, the popup's
-    /// "no selection", when it names a repo that is gone.
-    private static func filterRow(in rows: [NSMenuItem], for filter: RepoFilterPresentation) -> Int {
-        guard filter.selectedIsKnown else { return -1 }
-        let index = rows.firstIndex { row in
+    /// The index among `rows` of the row `filter` names, or `nil` when it
+    /// names a repo that is gone.
+    private static func filterRow(in rows: [NSMenuItem], for filter: RepoFilterPresentation) -> Int? {
+        guard filter.selectedIsKnown else { return nil }
+        return rows.firstIndex { row in
             !row.isSeparatorItem && (row.representedObject as? UUID) == filter.selected
         }
-        return index ?? -1
     }
 
     private func updateServers(_ item: NSMenuToolbarItem, _ servers: ServersPresentation) {
@@ -739,12 +840,26 @@ extension MainToolbarController {
         appState.navigateForward()
     }
 
-    /// Sets the filter to the row chosen: the popup's selected row, or the
-    /// overflow row that sent it. Its repo ID, or none for "All Repos", is
-    /// the row's represented object. A sender that is neither changes
-    /// nothing.
+    /// Pops `filterMenu` up under the filter button that sent it, its top
+    /// leading corner `filterMenuGap` below the button's bottom leading
+    /// corner (`filterMenuOrigin(in:flipped:rightToLeft:)`). The menu is
+    /// kept in step by each apply, so it opens as it is. Returns once the
+    /// menu closes, then reads the pointer again for the button's hover
+    /// square. A sender that is not a button opens nothing.
+    @objc func filterButtonClicked(_ sender: Any?) {
+        guard let button = sender as? NSButton else { return }
+        let origin = Self.filterMenuOrigin(
+            in: button.bounds, flipped: button.isFlipped,
+            rightToLeft: button.userInterfaceLayoutDirection == .rightToLeft)
+        filterMenu.popUp(positioning: nil, at: origin, in: button)
+        (button as? ToolbarIconButton)?.refreshHover()
+    }
+
+    /// Sets the filter to the row chosen, from `filterMenu` or the overflow
+    /// row's submenu. Its repo ID, or none for "All Repos", is the row's
+    /// represented object. A sender that is not a menu item changes nothing.
     @objc func filterChosen(_ sender: Any?) {
-        guard let row = (sender as? NSPopUpButton)?.selectedItem ?? (sender as? NSMenuItem) else { return }
+        guard let row = sender as? NSMenuItem else { return }
         let chosen = row.representedObject as? UUID
         guard appState.repoFilter != chosen else { return }
         appState.repoFilter = chosen

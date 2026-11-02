@@ -178,11 +178,18 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// Whether one of the repo filter's menus is open, so its rows are not
     /// rebuilt under the pointer.
     let filterMenuTracker: FilterMenuTracker
-    /// The popup the filter options were last built into, and the options.
-    weak var builtFilterPopup: NSPopUpButton?
+    /// The menu the filter button pops up: "All Repos", a separator, then
+    /// each repo, the current choice checked. One menu for whichever filter
+    /// item the toolbar holds, so an item re-inserted after a collapse finds
+    /// it built. Each apply keeps it in step with the snapshot's filter, and
+    /// it reports its opening to `filterMenuTracker`. Its rows stay enabled
+    /// whatever validation would say; every row is a valid choice.
+    let filterMenu: NSMenu
+    /// The options `filterMenu`'s rows were last built from.
     var builtFilterOptions: [RepoFilterPresentation.Option] = []
-    /// Filter selections set so far, for the debug log and for tests. An
-    /// apply that finds the popup already showing the filter sets none.
+    /// Applies that changed `filterMenu`'s check so far, for the debug log
+    /// and for tests. An apply that finds the menu already checking the
+    /// filter changes none.
     var filterSelectionCount = 0
     /// The Servers icon per running state, appearance and accessibility label.
     var serversImages: [String: NSImage] = [:]
@@ -208,7 +215,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         self.clock = clock
         toolbar = NSToolbar(identifier: MainToolbarController.identifierPrefix + UUID().uuidString)
         filterMenuTracker = FilterMenuTracker()
+        filterMenu = NSMenu(title: MainToolbarController.filterLabel)
         super.init()
+        filterMenu.autoenablesItems = false
+        filterMenu.delegate = filterMenuTracker
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
@@ -594,8 +604,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     }
 }
 
-/// Follows whether one of the repo filter's menus is open: the popup's, or
-/// the submenu of its overflow row.
+/// Follows whether one of the repo filter's menus is open: the one its
+/// button pops up, or the submenu of its overflow row.
 @MainActor
 final class FilterMenuTracker: NSObject, NSMenuDelegate {
     private(set) var isOpen = false

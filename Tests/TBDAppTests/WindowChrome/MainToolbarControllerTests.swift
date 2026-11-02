@@ -273,10 +273,10 @@ struct MainToolbarControllerTests {
     /// to its trailing edge and pin each to its top and bottom, and each
     /// button holds one pitch by a required width constraint, so once laid
     /// out the buttons tile the host at 0, 28 and 56 pt, each 28 × 28 pt.
-    /// Each button is an accessory-bar button, bordered but showing its
-    /// border only under the pointer, image-only and unscaled, with its
-    /// identifier, tool tip, accessibility label and glyph description, and
-    /// its target and action.
+    /// Each button is a borderless `ToolbarIconButton`, which draws its hover
+    /// square over its whole frame, image-only, untitled and unscaled, with
+    /// its identifier, tool tip, accessibility label and glyph description,
+    /// and its target and action.
     ///
     /// The overflow row is "Navigation", with a submenu that does not
     /// autoenable, of a row per button carrying the button's target and
@@ -352,11 +352,12 @@ struct MainToolbarControllerTests {
             #expect(button.toolTip == tip)
             #expect(button.accessibilityLabel() == tip)
             #expect(button.image?.accessibilityDescription == tip)
+            let isIconButton = button is ToolbarIconButton
+            #expect(isIconButton, "\(tip) is a \(type(of: button))")
+            #expect(button.isBordered == false)
             #expect(button.imagePosition == .imageOnly)
             #expect(button.imageScaling == .scaleNone)
-            #expect(button.bezelStyle == .accessoryBar)
-            #expect(button.isBordered)
-            #expect(button.showsBorderOnlyWhileMouseInside)
+            #expect(button.title.isEmpty)
             let wired = button.target === target
             #expect(wired, "\(tip) targets \(String(describing: button.target))")
             #expect(button.action == action)
@@ -393,10 +394,11 @@ struct MainToolbarControllerTests {
     /// trapping. The copy is still unbordered, over a new
     /// `LeadingToolbarButtonsHost` that answers none of the forwarded
     /// selectors, whose three buttons come back as new subviews, found by
-    /// their identifiers, carrying the originals' glyphs and actions, and
-    /// still tiling the host, with the host at its size: the constraints are
-    /// archived with it. The buttons' targets are not compared: an archive
-    /// keeps a target only when it archives the target too.
+    /// their identifiers, still borderless `ToolbarIconButton`s, carrying the
+    /// originals' glyphs and actions, and still tiling the host, with the
+    /// host at its size: the constraints are archived with it. The buttons'
+    /// targets are not compared: an archive keeps a target only when it
+    /// archives the target too.
     ///
     /// The item is fresh from the delegate, as AppKit asks for one it will
     /// not insert, so no window state rides along in the archive.
@@ -426,6 +428,9 @@ struct MainToolbarControllerTests {
         for (button, originalButton) in zip(buttons, originalButtons) {
             let buttonIsNew = button !== originalButton
             #expect(buttonIsNew)
+            let isIconButton = button is ToolbarIconButton
+            #expect(isIconButton, "a copied button is a \(type(of: button))")
+            #expect(button.isBordered == false)
             let glyphDescription = button.image?.accessibilityDescription
             #expect(glyphDescription == originalButton.image?.accessibilityDescription)
             #expect(button.action == originalButton.action)
@@ -566,84 +571,278 @@ struct MainToolbarControllerTests {
 
     // MARK: - Repo filter
 
-    @Test func filterPopupShowsAndSetsTheFilter() async throws {
-        let fixture = ToolbarFixture(label: "filterPopupShowsAndSetsTheFilter")
+    /// The repo filter is one borderless `ToolbarIconButton` in a
+    /// `FilterToolbarButtonHost`, the structure that keeps Liquid Glass off
+    /// it, as for the leading item: the item is not bordered and its view
+    /// answers none of the selectors an item forwards to its view. The item
+    /// does not autovalidate, keeps no target, action or tool tip, and is
+    /// enabled.
+    ///
+    /// The host holds one pitch by one button's height, 28 × 28 pt, by
+    /// required constraints found by their identifiers, and its fitting size
+    /// is that; its button fills it, by the pins that tile the leading host.
+    /// The button is image-only, untitled and unscaled, and shows
+    /// `line.3.horizontal.decrease` at the leading buttons' configuration:
+    /// its image is the size of that symbol at 13 pt, regular weight and
+    /// medium scale, and fits the pitch. It carries "Filter" as its glyph's
+    /// description and its accessibility label, and the controller as the
+    /// target of `filterButtonClicked(_:)`. The host is not an accessibility
+    /// element, so VoiceOver lands on the button.
+    @Test func filterIsOneIconButtonInAnUnborderedItem() async throws {
+        let fixture = ToolbarFixture(label: "filterIsOneIconButtonInAnUnborderedItem")
         defer { fixture.tearDown() }
         try await fixture.ready()
+        let controller = fixture.controller
+        let item = try #require(controller.item(MainToolbarItemID.repoFilter))
+        let host = try #require(item.view as? FilterToolbarButtonHost)
+
+        // What keeps the glass off: an unbordered item over a view that
+        // forwards nothing.
+        #expect(item.isBordered == false)
+        let answered = ToolbarFixture.answeredForwardedSelectors(of: host)
+        #expect(answered.isEmpty, "the filter host answers \(answered)")
+        #expect(item.autovalidates == false)
+        #expect(item.isEnabled)
+        let itemHasNoTarget = item.target == nil
+        #expect(itemHasNoTarget)
+        #expect(item.action == nil)
+        #expect(item.toolTip == nil)
+        #expect(item.label == "Filter")
+        #expect(host.translatesAutoresizingMaskIntoConstraints == false)
+        #expect(host.isAccessibilityElement() == false)
+
+        // The host's size.
+        let widths = ToolbarFixture.constraints(of: host, identified: FilterToolbarButtonHost.widthID)
+        let heights = ToolbarFixture.constraints(of: host, identified: FilterToolbarButtonHost.heightID)
+        try #require(widths.count == 1)
+        try #require(heights.count == 1)
+        #expect(widths[0].constant == 28)
+        #expect(widths[0].relation == .equal)
+        #expect(widths[0].priority == .required)
+        #expect(heights[0].constant == 28)
+        #expect(heights[0].relation == .equal)
+        #expect(heights[0].priority == .required)
+        let filterSize = NSSize(width: 28, height: 28)
+        #expect(host.fittingSize == filterSize)
+
+        // Its button, filling it.
+        let button = try #require(host.button, "no filter button found by its identifier")
+        let inHost = button.superview === host
+        #expect(inHost)
+        let isIconButton = button is ToolbarIconButton
+        #expect(isIconButton, "the filter button is a \(type(of: button))")
+        #expect(button.isBordered == false)
+        let missingPins = ToolbarFixture.missingTilePins(of: [button], in: host)
+        #expect(missingPins.isEmpty, "the filter host lacks the pins \(missingPins)")
+        let buttonWidths = ToolbarFixture.constraints(of: button, identified: FilterToolbarButtonHost.buttonWidthID)
+        try #require(buttonWidths.count == 1)
+        #expect(buttonWidths[0].constant == MainToolbarMetrics.iconButtonPitch)
+        #expect(buttonWidths[0].priority == .required)
+        host.layoutSubtreeIfNeeded()
+        let buttonFrame = button.frame
+        let expectedFrame = NSRect(x: 0, y: 0, width: 28, height: 28)
+        #expect(buttonFrame == expectedFrame)
+
+        // Its glyph, at the leading buttons' configuration.
+        #expect(button.imagePosition == .imageOnly)
+        #expect(button.imageScaling == .scaleNone)
+        #expect(button.title.isEmpty)
+        let glyph = try #require(button.image)
+        let configuration = NSImage.SymbolConfiguration(
+            pointSize: MainToolbarMetrics.iconGlyphPointSize, weight: .regular, scale: .medium)
+        let symbol = NSImage(systemSymbolName: "line.3.horizontal.decrease", accessibilityDescription: nil)
+        let reference = try #require(symbol?.withSymbolConfiguration(configuration))
+        let glyphSize = glyph.size
+        let referenceSize = reference.size
+        #expect(glyphSize == referenceSize)
+        #expect(glyphSize.width <= MainToolbarMetrics.iconButtonPitch)
+        #expect(glyph.accessibilityDescription == "Filter")
+        #expect(button.accessibilityLabel() == "Filter")
+        let wired = button.target === controller
+        #expect(wired, "the filter button targets \(String(describing: button.target))")
+        #expect(button.action == #selector(MainToolbarController.filterButtonClicked(_:)))
+    }
+
+    /// The filter item survives AppKit's copy, as the leading item does: its
+    /// host decodes rather than trapping. The copy is still unbordered, over
+    /// a new `FilterToolbarButtonHost` that answers none of the forwarded
+    /// selectors, whose button comes back as a new borderless
+    /// `ToolbarIconButton`, found by its identifier, carrying the original's
+    /// glyph and action and still filling the host, with the host at its
+    /// size. The item is fresh from the delegate, as AppKit asks for one it
+    /// will not insert.
+    @Test func filterItemSurvivesACopy() async throws {
+        let fixture = ToolbarFixture(label: "filterItemSurvivesACopy")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+
+        let made = controller.toolbar(
+            controller.toolbar, itemForItemIdentifier: MainToolbarItemID.repoFilter,
+            willBeInsertedIntoToolbar: false)
+        let original = try #require(made)
+        let originalHost = try #require(original.view as? FilterToolbarButtonHost)
+        let originalButton = try #require(originalHost.button)
+
+        let copied = try #require(original.copy() as? NSToolbarItem)
+        let host = try #require(copied.view as? FilterToolbarButtonHost)
+        let button = try #require(host.button, "no copied filter button found by its identifier")
+        let hostIsNew = host !== originalHost
+        #expect(hostIsNew)
+        let buttonIsNew = button !== originalButton
+        #expect(buttonIsNew)
+        #expect(copied.itemIdentifier == MainToolbarItemID.repoFilter)
+        #expect(copied.isBordered == false)
+        let answered = ToolbarFixture.answeredForwardedSelectors(of: host)
+        #expect(answered.isEmpty, "the copied filter host answers \(answered)")
+        let isIconButton = button is ToolbarIconButton
+        #expect(isIconButton, "the copied filter button is a \(type(of: button))")
+        #expect(button.isBordered == false)
+        let glyphDescription = button.image?.accessibilityDescription
+        #expect(glyphDescription == originalButton.image?.accessibilityDescription)
+        #expect(button.action == originalButton.action)
+
+        let missingPins = ToolbarFixture.missingTilePins(of: [button], in: host)
+        #expect(missingPins.isEmpty, "the copied filter host lacks the pins \(missingPins)")
+        let widths = ToolbarFixture.constraints(of: host, identified: FilterToolbarButtonHost.widthID)
+        let heights = ToolbarFixture.constraints(of: host, identified: FilterToolbarButtonHost.heightID)
+        #expect(widths.count == 1)
+        #expect(heights.count == 1)
+        let filterSize = NSSize(width: 28, height: 28)
+        #expect(host.fittingSize == filterSize)
+        #expect(copied.menuFormRepresentation != nil)
+    }
+
+    /// The menu the filter button pops up, `filterMenu`, holds "All Repos",
+    /// a separator and each repo, the current choice checked and no other.
+    /// Its rows stay enabled, its opening is reported to `filterMenuTracker`,
+    /// and each row carries its repo's ID, or none for "All Repos", and
+    /// chooses it through `filterChosen(_:)`: choosing one sets the filter,
+    /// and the next apply checks it. A test cannot pop the menu up, which
+    /// blocks in the menu's tracking loop, so this reads the menu the click
+    /// pops up.
+    @Test func filterMenuShowsAndSetsTheFilter() async throws {
+        let fixture = ToolbarFixture(label: "filterMenuShowsAndSetsTheFilter")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let menu = controller.filterMenu
+        let chooseAction = #selector(MainToolbarController.filterChosen(_:))
 
         fixture.state.repoFilter = fixture.repos[1].id
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let popup = try #require(fixture.filterPopup)
-        let titles = popup.itemArray.map { $0.isSeparatorItem ? "-" : $0.title }
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let titles = Self.describeFilterRows(menu)
         let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
         #expect(titles == expectedTitles)
-        #expect(popup.titleOfSelectedItem == "widgets")
-        #expect(popup.toolTip == "Filter sidebar by repository")
+        let checkedWidgets = Self.checkedTitles(menu)
+        let expectedWidgets: [String] = ["widgets"]
+        #expect(checkedWidgets == expectedWidgets)
+        #expect(menu.autoenablesItems == false)
+        let tracked = menu.delegate === controller.filterMenuTracker
+        #expect(tracked)
 
-        popup.selectItem(at: 0)
-        let sent = popup.sendAction(popup.action, to: popup.target)
-        #expect(sent)
+        let choosable = menu.items.filter { !$0.isSeparatorItem }
+        try #require(choosable.count == 3)
+        let ids = choosable.map { $0.representedObject as? UUID }
+        let expectedIDs: [UUID?] = [nil, fixture.repos[0].id, fixture.repos[1].id]
+        #expect(ids == expectedIDs)
+        let wired = choosable.allSatisfy { $0.target === controller && $0.action == chooseAction && $0.isEnabled }
+        #expect(wired)
+
+        // Choosing "All Repos" clears the filter, and the next apply checks it.
+        let choseAll = NSApplication.shared.sendAction(chooseAction, to: controller, from: choosable[0])
+        #expect(choseAll)
         #expect(fixture.state.repoFilter == nil)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let checkedAll = Self.checkedTitles(menu)
+        let expectedAll: [String] = ["All Repos"]
+        #expect(checkedAll == expectedAll)
+
+        // Choosing a repo sets it.
+        let choseAcme = NSApplication.shared.sendAction(chooseAction, to: controller, from: choosable[1])
+        #expect(choseAcme)
+        #expect(fixture.state.repoFilter == fixture.repos[0].id)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let checkedAcme = Self.checkedTitles(menu)
+        let expectedAcme: [String] = ["acme"]
+        #expect(checkedAcme == expectedAcme)
     }
 
     @Test func filterNamingAMissingRepoChecksNothing() async throws {
         let fixture = ToolbarFixture(label: "filterNamingAMissingRepoChecksNothing")
         defer { fixture.tearDown() }
         try await fixture.ready()
+        let menu = fixture.controller.filterMenu
 
-        // Control: a known repo is checked, so -1 below is the missing case.
+        // Control: a known repo is checked, so none below is the missing case.
         fixture.state.repoFilter = fixture.repos[0].id
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let popup = try #require(fixture.filterPopup)
-        #expect(popup.indexOfSelectedItem == 2)
+        let checkedKnown = Self.checkedTitles(menu)
+        let expectedKnown: [String] = ["acme"]
+        #expect(checkedKnown == expectedKnown)
 
         fixture.state.repoFilter = UUID()
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(popup.indexOfSelectedItem == -1)
+        let checkedMissing = Self.checkedTitles(menu)
+        #expect(checkedMissing.isEmpty)
+        let titles = Self.describeFilterRows(menu)
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        #expect(titles == expectedTitles)
     }
 
-    /// The filter's row is selected only when the popup does not already
-    /// show it: an apply with the filter unchanged sets no selection, for a
-    /// known repo or a missing one. A popup whose selection something else
-    /// moved is set back, which is also what shows the count does move when
-    /// a selection is set. Every apply here is direct and nothing suspends,
-    /// so no scheduled apply lands in between.
+    /// The filter's row is checked only when the menu does not already check
+    /// it: an apply with the filter unchanged changes no check, for a known
+    /// repo or a missing one. A menu whose check something else moved is set
+    /// back, which is also what shows the count does move when a check is
+    /// set. Every apply here is direct and nothing suspends, so no scheduled
+    /// apply lands in between.
     @Test func anUnchangedFilterIsNotSelectedAgain() async throws {
         let fixture = ToolbarFixture(label: "anUnchangedFilterIsNotSelectedAgain")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let menu = controller.filterMenu
+        let expectedWidgets: [String] = ["widgets"]
 
         fixture.state.repoFilter = fixture.repos[1].id
         let known = MainToolbarSnapshot.make(from: fixture.state)
         let before = controller.filterSelectionCount
         controller.apply(known)
-        let popup = try #require(fixture.filterPopup)
-        #expect(popup.indexOfSelectedItem == 3)
+        let checkedFirst = Self.checkedTitles(menu)
+        #expect(checkedFirst == expectedWidgets)
         #expect(controller.filterSelectionCount == before + 1)
 
         controller.apply(known)
-        #expect(popup.indexOfSelectedItem == 3)
+        let checkedAgain = Self.checkedTitles(menu)
+        #expect(checkedAgain == expectedWidgets)
         #expect(controller.filterSelectionCount == before + 1)
 
-        popup.selectItem(at: 0)
+        menu.item(at: 0)?.state = .on
+        menu.item(at: 3)?.state = .off
         controller.apply(known)
-        #expect(popup.indexOfSelectedItem == 3)
+        let checkedBack = Self.checkedTitles(menu)
+        #expect(checkedBack == expectedWidgets)
         #expect(controller.filterSelectionCount == before + 2)
 
         fixture.state.repoFilter = UUID()
         let missing = MainToolbarSnapshot.make(from: fixture.state)
         controller.apply(missing)
-        #expect(popup.indexOfSelectedItem == -1)
+        let checkedMissing = Self.checkedTitles(menu)
+        #expect(checkedMissing.isEmpty)
         #expect(controller.filterSelectionCount == before + 3)
 
         controller.apply(missing)
-        #expect(popup.indexOfSelectedItem == -1)
+        let checkedMissingAgain = Self.checkedTitles(menu)
+        #expect(checkedMissingAgain.isEmpty)
         #expect(controller.filterSelectionCount == before + 3)
     }
 
-    @Test func filterWidthIsCapped() async throws {
-        let fixture = ToolbarFixture(label: "filterWidthIsCapped")
+    /// The filter is a 28 pt icon whatever the repo it filters by is called:
+    /// a long name reaches the tool tip and the menu, never the toolbar, so
+    /// it cannot widen the item past the sidebar's section, where AppKit
+    /// would move it into the overflow menu.
+    @Test func filterHoldsItsSizeWhateverTheRepoName() async throws {
+        let fixture = ToolbarFixture(label: "filterHoldsItsSizeWhateverTheRepoName")
         defer { fixture.tearDown() }
         try await fixture.ready()
 
@@ -652,18 +851,89 @@ struct MainToolbarControllerTests {
         fixture.state.repos.append(long)
         fixture.state.repoFilter = long.id
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let popup = try #require(fixture.filterPopup)
-        #expect(popup.titleOfSelectedItem == long.displayName)
-        // Uncapped, the name would be wider, so the cap is what holds it.
-        #expect(popup.intrinsicContentSize.width > MainToolbarMetrics.filterMaxWidth)
+        let host = try #require(fixture.filterHost)
+        let button = try #require(host.button)
+        #expect(button.toolTip == "Filtering by \(long.displayName)")
+        let checked = Self.checkedTitles(fixture.controller.filterMenu)
+        let expectedChecked: [String] = [long.displayName]
+        #expect(checked == expectedChecked)
+        let filterSize = NSSize(width: 28, height: 28)
+        #expect(host.fittingSize == filterSize)
 
         let laidOut = try await waitForMainActorCondition("the filter to be laid out in the toolbar") {
             fixture.window.layoutIfNeeded()
-            return popup.window === fixture.window && popup.frame.width > 0
+            return host.window === fixture.window && host.frame.width > 0
         }
         try #require(laidOut)
-        #expect(popup.frame.width <= MainToolbarMetrics.filterMaxWidth)
-        #expect(popup.fittingSize.width <= MainToolbarMetrics.filterMaxWidth)
+        let pitch = MainToolbarMetrics.iconButtonPitch
+        #expect(host.frame.width == pitch)
+        #expect(button.frame.width == pitch)
+    }
+
+    /// The filter button shows the filter. With no repo filter it is
+    /// untinted, the other icons' colour, its tool tip says what it does and
+    /// its accessibility value is "All Repos". With one it is tinted system
+    /// blue and both name the repo. Naming a repo that is gone still filters
+    /// the sidebar, so it stays tinted and says the repo was removed. Cleared,
+    /// it is untinted again. Its accessibility label stays "Filter".
+    @Test func filterButtonShowsTheFilter() async throws {
+        let fixture = ToolbarFixture(label: "filterButtonShowsTheFilter")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let button = try #require(fixture.filterButton)
+        let blue = NSColor.systemBlue
+
+        let unfilteredTint = button.contentTintColor
+        #expect(unfilteredTint == nil)
+        #expect(button.toolTip == "Filter sidebar by repository")
+        let unfilteredValue = button.accessibilityValue() as? String
+        #expect(unfilteredValue == "All Repos")
+
+        fixture.state.repoFilter = fixture.repos[1].id
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let filteredTint = button.contentTintColor
+        #expect(filteredTint == blue)
+        #expect(button.toolTip == "Filtering by widgets")
+        let filteredValue = button.accessibilityValue() as? String
+        #expect(filteredValue == "widgets")
+        #expect(button.accessibilityLabel() == "Filter")
+
+        fixture.state.repoFilter = UUID()
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let goneTint = button.contentTintColor
+        #expect(goneTint == blue)
+        #expect(button.toolTip == "Filtering by a removed repository")
+        let goneValue = button.accessibilityValue() as? String
+        #expect(goneValue == "Removed repository")
+
+        fixture.state.repoFilter = nil
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let clearedTint = button.contentTintColor
+        #expect(clearedTint == nil)
+        #expect(button.toolTip == "Filter sidebar by repository")
+        let clearedValue = button.accessibilityValue() as? String
+        #expect(clearedValue == "All Repos")
+        #expect(button.accessibilityLabel() == "Filter")
+    }
+
+    /// The filter menu's top leading corner sits `filterMenuGap` below the
+    /// button's bottom leading corner: the larger y in a flipped button and
+    /// the smaller in one that is not, at the trailing edge under a
+    /// right-to-left layout, where `NSMenu` places the menu's top right
+    /// corner.
+    @Test func filterMenuOpensBelowTheButton() {
+        let bounds = NSRect(x: 0, y: 0, width: 28, height: 28)
+        #expect(MainToolbarController.filterMenuGap == 4)
+        let unflipped = MainToolbarController.filterMenuOrigin(in: bounds, flipped: false, rightToLeft: false)
+        let flipped = MainToolbarController.filterMenuOrigin(in: bounds, flipped: true, rightToLeft: false)
+        let rightToLeft = MainToolbarController.filterMenuOrigin(in: bounds, flipped: false, rightToLeft: true)
+        let expectedUnflipped = NSPoint(x: 0, y: -4)
+        let expectedFlipped = NSPoint(x: 0, y: 32)
+        let expectedRightToLeft = NSPoint(x: 28, y: -4)
+        #expect(unflipped == expectedUnflipped)
+        #expect(flipped == expectedFlipped)
+        #expect(rightToLeft == expectedRightToLeft)
     }
 
     // MARK: - Overflow menu
@@ -752,13 +1022,14 @@ struct MainToolbarControllerTests {
         #expect(fixture.stopRequests == expectedStops)
     }
 
-    /// The filter's overflow row is "Filter" with a submenu of the popup's
-    /// rows. It checks the current choice, or none for a repo that is gone;
-    /// choosing a row sets the filter; and it follows the options and the
-    /// choice as they change. Each check reads the item's current row, as a
-    /// change replaces the row rather than editing it.
-    @Test func filterOverflowRowMirrorsThePopup() async throws {
-        let fixture = ToolbarFixture(label: "filterOverflowRowMirrorsThePopup")
+    /// The filter's overflow row is "Filter" with a submenu of the filter
+    /// menu's rows. It checks the current choice, or none for a repo that is
+    /// gone; choosing a row sets the filter; and it follows the options and
+    /// the choice as they change, as the filter button's menu does. Each
+    /// check reads the item's current row, as a change replaces the row
+    /// rather than editing it.
+    @Test func filterOverflowRowMirrorsTheMenu() async throws {
+        let fixture = ToolbarFixture(label: "filterOverflowRowMirrorsTheMenu")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
@@ -820,8 +1091,10 @@ struct MainToolbarControllerTests {
         let expectedGadgets: [String] = ["gadgets"]
         #expect(checkedGadgets == expectedGadgets)
         #expect(grownRows.delegate === controller.filterMenuTracker)
-        let popup = try #require(fixture.filterPopup)
-        #expect(popup.titleOfSelectedItem == "gadgets")
+        let menuTitles = Self.describeFilterRows(controller.filterMenu)
+        #expect(menuTitles == expectedGrown)
+        let menuChecked = Self.checkedTitles(controller.filterMenu)
+        #expect(menuChecked == expectedGadgets)
     }
 
     /// The title's and the filter's overflow rows are replaced, never
@@ -892,11 +1165,12 @@ struct MainToolbarControllerTests {
     }
 
     /// A filter or title item made before any apply carries an empty row:
-    /// "Filter" with no repos, and "No Selection". One made after an apply
-    /// starts from what that apply showed, so an item the toolbar re-inserts,
-    /// as after a collapse, never shows an empty row in between. Made with
-    /// `willBeInserted: false`, so the title item leaves the shared title
-    /// view where it is.
+    /// "Filter" with no repos, and "No Selection", and the filter's button
+    /// shows no filter. One made after an apply starts from what that apply
+    /// showed, its filter button tinted and naming the repo, so an item the
+    /// toolbar re-inserts, as after a collapse, never shows an empty row or
+    /// a stale button in between. Made with `willBeInserted: false`, so the
+    /// title item leaves the shared title view where it is.
     @Test func newItemsStartFromTheLastApply() async throws {
         let fixture = ToolbarFixture(label: "newItemsStartFromTheLastApply")
         defer { fixture.tearDown() }
@@ -910,6 +1184,10 @@ struct MainToolbarControllerTests {
         let emptyRows = try #require(emptyForm.submenu)
         #expect(emptyRows.items.isEmpty)
         #expect(emptyRows.delegate === unapplied.filterMenuTracker)
+        let emptyButton = try #require((emptyFilter.view as? FilterToolbarButtonHost)?.button)
+        let emptyTint = emptyButton.contentTintColor
+        #expect(emptyTint == nil)
+        #expect(emptyButton.toolTip == "Filter sidebar by repository")
         let emptyTitle = try #require(unapplied.makeItem(MainToolbarItemID.title, willBeInserted: false))
         let emptyTitleRow = try #require(emptyTitle.menuFormRepresentation)
         #expect(emptyTitleRow.title == "No Selection")
@@ -929,6 +1207,11 @@ struct MainToolbarControllerTests {
         let checked = Self.checkedTitles(rows)
         let expectedChecked: [String] = ["widgets"]
         #expect(checked == expectedChecked)
+        let filterButton = try #require((filterItem.view as? FilterToolbarButtonHost)?.button)
+        let startTint = filterButton.contentTintColor
+        let blue = NSColor.systemBlue
+        #expect(startTint == blue)
+        #expect(filterButton.toolTip == "Filtering by widgets")
         let titleItem = try #require(fixture.controller.makeItem(MainToolbarItemID.title, willBeInserted: false))
         let titleRow = try #require(titleItem.menuFormRepresentation)
         #expect(titleRow.title == "feature")
@@ -939,39 +1222,46 @@ struct MainToolbarControllerTests {
         #expect(fixture.controller.item(MainToolbarItemID.title)?.view === fixture.titleView)
     }
 
-    /// While one of the filter's menus is open its row is not replaced under
-    /// the pointer; the close catches it up, with no apply but the one it
-    /// schedules.
+    /// While one of the filter's menus is open, neither its overflow row nor
+    /// the button's menu is rebuilt under the pointer; the close catches both
+    /// up, with no apply but the one it schedules. The button's menu is the
+    /// one opened here; the overflow submenu reports to the same tracker.
     @Test func filterOverflowRowsWaitForAnOpenMenuToClose() async throws {
         let fixture = ToolbarFixture(label: "filterOverflowRowsWaitForAnOpenMenuToClose")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
+        let menu = controller.filterMenu
         let openForm = try #require(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation)
         let openRows = try #require(openForm.submenu)
         let before = Self.describeFilterRows(openRows)
+        let menuBefore = Self.describeFilterRows(menu)
+        try #require(menuBefore == before)
 
-        controller.filterMenuTracker.menuWillOpen(openRows)
+        controller.filterMenuTracker.menuWillOpen(menu)
         fixture.state.repos.append(Repo(path: "/tmp/gadgets", displayName: "gadgets"))
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === openForm)
         let whileOpen = Self.describeFilterRows(openRows)
         #expect(whileOpen == before)
+        let menuWhileOpen = Self.describeFilterRows(menu)
+        #expect(menuWhileOpen == menuBefore)
 
-        controller.filterMenuTracker.menuDidClose(openRows)
-        let caughtUp = try await waitForMainActorCondition("the filter's overflow row to catch up once it closes") {
+        controller.filterMenuTracker.menuDidClose(menu)
+        let caughtUp = try await waitForMainActorCondition("the filter's menu and overflow row to catch up once it closes") {
             let rows = MainToolbarControllerTests.filterOverflowRows(of: controller)
-            return rows.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
+            let rowCaughtUp = rows.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
+            let menuCaughtUp = MainToolbarControllerTests.describeFilterRows(controller.filterMenu).contains("gadgets")
+            return rowCaughtUp && menuCaughtUp
         }
         #expect(caughtUp)
     }
 
     /// `filterChosen(_:)` reads its sender's class rather than assuming it.
-    /// A bare menu item, as AppKit's default overflow row for the filter
-    /// would send, carries no repo, which is "All Repos". A sender that is
-    /// neither a popup nor a menu item, a popup with no selected row, and no
-    /// sender at all change nothing. The popup sender is
-    /// `filterPopupShowsAndSetsTheFilter`'s.
+    /// A bare menu item carries no repo, which is "All Repos". A sender that
+    /// is not a menu item, such as the filter's own button, and no sender at
+    /// all change nothing. The rows of the button's menu are
+    /// `filterMenuShowsAndSetsTheFilter`'s.
     @Test func filterChosenToleratesAnySender() async throws {
         let fixture = ToolbarFixture(label: "filterChosenToleratesAnySender")
         defer { fixture.tearDown() }
@@ -984,9 +1274,9 @@ struct MainToolbarControllerTests {
         let fromButton = NSApplication.shared.sendAction(action, to: controller, from: NSButton())
         #expect(fromButton)
         #expect(fixture.state.repoFilter == acme)
-        let emptyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        let fromEmptyPopup = NSApplication.shared.sendAction(action, to: controller, from: emptyPopup)
-        #expect(fromEmptyPopup)
+        let filterButton = try #require(fixture.filterButton)
+        let fromFilterButton = NSApplication.shared.sendAction(action, to: controller, from: filterButton)
+        #expect(fromFilterButton)
         #expect(fixture.state.repoFilter == acme)
         controller.filterChosen(nil)
         #expect(fixture.state.repoFilter == acme)
@@ -2258,8 +2548,14 @@ private final class ToolbarFixture {
         return MainToolbarLayout.identifiers(for: snapshot.layoutState(sidebarCollapsed: split.isSidebarCollapsed))
     }
 
-    var filterPopup: NSPopUpButton? {
-        controller.item(MainToolbarItemID.repoFilter)?.view as? NSPopUpButton
+    /// The filter item's view, holding its button.
+    var filterHost: FilterToolbarButtonHost? {
+        controller.item(MainToolbarItemID.repoFilter)?.view as? FilterToolbarButtonHost
+    }
+
+    /// The filter item's button, which pops up the filter menu.
+    var filterButton: NSButton? {
+        filterHost?.button
     }
 
     /// The leading item's view, holding the toggle, back and forward.
@@ -2308,7 +2604,7 @@ private final class ToolbarFixture {
             buttonsMaxX: zoom.convert(zoom.bounds, to: nil).maxX,
             dividerX: pane.convert(pane.bounds, to: nil).maxX,
             leading: leading,
-            filter: filterPopup.flatMap { Self.placedFrame(of: $0, in: window) },
+            filter: filterHost.flatMap { Self.placedFrame(of: $0, in: window) },
             title: title)
     }
 
@@ -2348,7 +2644,7 @@ private final class ToolbarFixture {
     /// The pins that tile `buttons` across `host` which `host`'s constraints
     /// lack, named by button index and edge: each button's leading edge to
     /// the host's leading edge for the first and to the trailing edge of the
-    /// one before for the rest, each button's top and bottom to the host's,
+    /// one before for the rest, each button's height to its width and its vertical centre to the host's,
     /// and the last one's trailing edge to the host's. Empty when all are
     /// there, required, equal and with no offset.
     static func missingTilePins(of buttons: [NSView], in host: NSView) -> [String] {
@@ -2358,8 +2654,8 @@ private final class ToolbarFixture {
                 ? pinned(button, .leading, to: host, .leading, in: host)
                 : pinned(button, .leading, to: buttons[index - 1], .trailing, in: host)
             if !leadingPinned { missing.append("\(index).leading") }
-            if !pinned(button, .top, to: host, .top, in: host) { missing.append("\(index).top") }
-            if !pinned(button, .bottom, to: host, .bottom, in: host) { missing.append("\(index).bottom") }
+            if !pinned(button, .height, to: button, .width, in: button) { missing.append("\(index).square") }
+            if !pinned(button, .centerY, to: host, .centerY, in: host) { missing.append("\(index).centerY") }
         }
         if let last = buttons.last, !pinned(last, .trailing, to: host, .trailing, in: host) {
             missing.append("\(buttons.count - 1).trailing")
@@ -2367,13 +2663,15 @@ private final class ToolbarFixture {
         return missing
     }
 
-    /// Whether one of `host`'s constraints holds `first`'s `firstAttribute`
+    /// Whether one of `owner`'s constraints holds `first`'s `firstAttribute`
     /// to `second`'s `secondAttribute`: required, equal, with no offset.
+    /// A constraint between two attributes of one view is installed on that
+    /// view, so the square pin is searched in the button's own constraints.
     private static func pinned(
         _ first: NSView, _ firstAttribute: NSLayoutConstraint.Attribute,
-        to second: NSView, _ secondAttribute: NSLayoutConstraint.Attribute, in host: NSView
+        to second: NSView, _ secondAttribute: NSLayoutConstraint.Attribute, in owner: NSView
     ) -> Bool {
-        host.constraints.contains { constraint in
+        owner.constraints.contains { constraint in
             constraint.firstItem === first && constraint.secondItem === second
                 && constraint.firstAttribute == firstAttribute && constraint.secondAttribute == secondAttribute
                 && constraint.relation == .equal && constraint.priority == .required
@@ -2541,7 +2839,7 @@ private struct ToolbarEdges {
     var dividerX: CGFloat
     /// The leading item, holding the toggle, back and forward buttons.
     var leading: NSRect
-    /// The filter popup, while it is in the toolbar and laid out.
+    /// The filter's host, while it is in the toolbar and laid out.
     var filter: NSRect?
     var title: NSRect
 
