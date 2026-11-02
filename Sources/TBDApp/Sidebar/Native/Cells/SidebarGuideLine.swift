@@ -12,23 +12,25 @@ import AppKit
 /// tick that stops `tickInset` short of the child's own content. The line
 /// ends in its last child's turn, so nothing of it draws below the last
 /// child; deeper rows above the last child draw it passing straight by.
+/// Where a child shows its gutter pin, which sits on its parent's line, the
+/// line leaves out the turn and tick and breaks across the pin's glyph
+/// (`pinGapHalfHeight`), carrying on above and, to a later child, below.
 /// `Role` names a row's part in one line, and `pieces(role:x:tickEnd:...)`
-/// turns that part into the rectangle, curve and fade the row draws.
+/// turns that part into the rectangles, curve and fade the row draws.
 ///
 /// **Strength.** At rest a line is a quiet hairline. The line the hovered
 /// row and each selected row is joined to — the one it starts, or the one it
 /// branches off — is *active* and draws at full strength, so the group you
-/// are in stands out. On a row that draws a
-/// highlight, every line takes the highlight's accent colour, blended toward
-/// white, instead of grey, so a neutral line never muddies the tint. Each
-/// line draws as one shape at its alpha, so where its turn leaves the
-/// vertical the colour does not double.
+/// are in stands out. On a row that draws a highlight, every line takes the
+/// highlight's accent colour, blended toward white, instead of grey, so a
+/// neutral line never muddies the tint. Each line draws as one shape at its
+/// alpha, so where its turn leaves the vertical the colour does not double.
 ///
 /// Which lines are active is the list's hierarchy's to say
 /// (`GuideHierarchy.activeGuideAncestor(of:)`), and which part of which line
 /// a row draws too (`GuideHierarchy.guideRuns(of:)`), by one set of rules for
-/// the outline and the dock; how each one draws is here,
-/// beside `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
+/// the outline and the dock; how each one draws is here, beside
+/// `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
 /// `SidebarGuideLineTests` pins every value.
 enum SidebarGuideLine {
     // MARK: Strength
@@ -90,6 +92,11 @@ enum SidebarGuideLine {
 
     /// How far short of the child's own content the branch's tick stops.
     static let tickInset: CGFloat = 3
+
+    /// How far above and below a row's centre the line the gutter pin sits
+    /// on breaks: half the pin glyph's height — the 10 pt `pin` symbol draws
+    /// 12 pt of ink, centred on the row — and 2 pt clear of it.
+    static let pinGapHalfHeight: CGFloat = 8
 
     // MARK: Style
 
@@ -327,10 +334,12 @@ enum SidebarGuideLine {
         var endFraction: CGFloat { (rect.maxY - start) / length }
     }
 
-    /// What one line draws in one row, in the row's flipped coordinates: a
-    /// filled vertical, a stroked turn, the fade masking them, and the style.
+    /// What one line draws in one row, in the row's flipped coordinates: the
+    /// filled verticals, a stroked turn, the fade masking them, and the style.
     struct Pieces: Equatable, Sendable {
-        var vertical: NSRect?
+        /// The line's straight runs, top to bottom: one, none on a last child
+        /// whose line is all turn, or the two either side of the gutter pin.
+        var verticals: [NSRect]
         var turn: Turn?
         var fade: Fade?
         var style: Style
@@ -354,9 +363,14 @@ enum SidebarGuideLine {
     ///     top, on the owner's first child; a stub's fade starts where the
     ///     stub does, whatever this says.
     ///   - bounds: the row's bounds, flipped: `minY` is the top edge.
+    ///   - pinGap: the gutter pin sits on this line, centred on the row, and
+    ///     covers its turn and tick: the line leaves out both, and breaks
+    ///     across the pin's glyph, `pinGapHalfHeight` above and below the
+    ///     row's centre. What runs above the pin keeps the fade; what runs
+    ///     below it draws only where the line goes on to a later child.
     static func pieces(role: Role, x: CGFloat, tickEnd: CGFloat, fadeStart: CGFloat?, style: Style,
                        in bounds: NSRect, backingScale: CGFloat,
-                       fadeLength: CGFloat = SidebarGuideLine.fadeLength) -> Pieces? {
+                       fadeLength: CGFloat = SidebarGuideLine.fadeLength, pinGap: Bool = false) -> Pieces? {
         guard style.alpha > 0, style.width > 0, bounds.height > 0 else { return nil }
         let scale = backingScale > 0 ? backingScale : defaultBackingScale
         let width = style.width
@@ -379,25 +393,40 @@ enum SidebarGuideLine {
         let tickTop = (bounds.midY * scale).rounded(.down) / scale
         let tickY = tickTop + width / 2
         let endX = max(tickEnd, lineX + branchRadius)
-        let vertical: NSRect?
-        let turn: Turn?
+        func vertical(from start: CGFloat, to end: CGFloat) -> NSRect? {
+            end > start ? NSRect(x: left, y: start, width: width, height: end - start) : nil
+        }
+        var verticals: [NSRect]
+        var turn: Turn?
         switch role {
         case .passing, .stub:
-            vertical = NSRect(x: left, y: top, width: width, height: bottom - top)
-            turn = nil
+            verticals = [vertical(from: top, to: bottom)].compactMap { $0 }
         case .branch:
-            vertical = NSRect(x: left, y: top, width: width, height: bottom - top)
+            verticals = [vertical(from: top, to: bottom)].compactMap { $0 }
             turn = Turn(lineX: lineX, startY: tickY - branchRadius, tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         case .last:
-            vertical = nil
+            verticals = []
             turn = Turn(lineX: lineX, startY: min(top, tickY - branchRadius), tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         }
 
+        if pinGap {
+            // The straight run the line makes down the row — on a last child,
+            // down to where it would turn — less the pin's span.
+            let spanTop = verticals.first?.minY ?? turn?.startY ?? top
+            let spanBottom = verticals.first?.maxY ?? turn?.turnY ?? bottom
+            let gapTop = ((bounds.midY - pinGapHalfHeight) * scale).rounded(.down) / scale
+            let gapBottom = ((bounds.midY + pinGapHalfHeight) * scale).rounded(.up) / scale
+            verticals = [vertical(from: spanTop, to: min(gapTop, spanBottom)),
+                         vertical(from: max(gapBottom, spanTop), to: spanBottom)].compactMap { $0 }
+            turn = nil
+            guard !verticals.isEmpty else { return nil }
+        }
+
         var fade: Fade?
         if let fadeY, fadeLength > 0 {
-            let lineTop = vertical?.minY ?? turn?.startY ?? top
+            let lineTop = verticals.first?.minY ?? turn?.startY ?? top
             let spanTop = max(fadeY, lineTop)
             let spanBottom = min(fadeY + fadeLength, bottom)
             if spanBottom > spanTop {
@@ -406,7 +435,7 @@ enum SidebarGuideLine {
                             start: fadeY, length: fadeLength)
             }
         }
-        return Pieces(vertical: vertical, turn: turn, fade: fade, style: style)
+        return Pieces(verticals: verticals, turn: turn, fade: fade, style: style)
     }
 
     /// The turn's stroke: down the line from `startY`, the quarter turn,
@@ -474,7 +503,7 @@ enum SidebarGuideLine {
         let opaque = color.copy(alpha: 1) ?? color
         context.setFillColor(opaque)
         context.setStrokeColor(opaque)
-        if let vertical = pieces.vertical {
+        for vertical in pieces.verticals {
             context.fill(vertical)
         }
         if let turn = pieces.turn {

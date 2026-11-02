@@ -42,7 +42,8 @@ final class SidebarRowView: NSTableRowView {
         /// The row's own line is the focused group's.
         var isStubActive = false
         /// The gutter pin is showing, so the line it sits on — the one a
-        /// level up, under the pin's centre — leaves the row out.
+        /// level up, under the pin's centre — leaves out its turn and tick
+        /// and breaks across the pin.
         var showsPinGap = false
         /// The row's model names it selected though the list does not select
         /// it: a repo, Scratch or provider header, which runs an action on a
@@ -132,7 +133,8 @@ final class SidebarRowView: NSTableRowView {
     /// colour while the row draws a highlight — hovered or selected, not the
     /// nest target's wash. The pin lands in the row's own gutter, centred on
     /// the line a level up — its parent's — and over that line's turn and
-    /// tick, so that line leaves the row out rather than strike the glyph.
+    /// tick, so that line leaves out only what the pin covers rather than
+    /// strike the glyph: it breaks across the pin and keeps the rest.
     func guidePieces(backingScale: CGFloat,
                      alphas: SidebarGuideLine.Alphas = SidebarGuideLine.alphas) -> [SidebarGuideLine.Pieces] {
         let isOnHighlight = highlightAlpha != nil
@@ -144,11 +146,11 @@ final class SidebarRowView: NSTableRowView {
                                                backingScale: backingScale, alphas: alphas)
             if let pieces = SidebarGuideLine.pieces(
                 role: role, x: lineX(level: level), tickEnd: tickEnd, fadeStart: fadeStart,
-                style: style, in: bounds, backingScale: backingScale) {
+                style: style, in: bounds, backingScale: backingScale, pinGap: level == pinnedLevel) {
                 result.append(pieces)
             }
         }
-        for (index, guide) in configuration.guides.enumerated() where guide.level != pinnedLevel {
+        for (index, guide) in configuration.guides.enumerated() {
             appendPieces(role: guide.role, level: guide.level, fadeStart: guide.fadeStart,
                          isActive: configuration.activeGuides.contains(index))
         }

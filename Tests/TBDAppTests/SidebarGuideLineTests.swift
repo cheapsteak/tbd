@@ -119,15 +119,17 @@ struct SidebarGuideLineTests {
         #expect(SidebarGuideLine.fadeStopCount == 9)
         #expect(SidebarGuideLine.branchRadius == 4)
         #expect(SidebarGuideLine.tickInset == 3)
+        #expect(SidebarGuideLine.pinGapHalfHeight == 8)
     }
 
     /// The pieces of the line under x 26 that a 28 pt row draws at 2x, for a
     /// child whose content starts at 36, so its tick ends at 33.
     static func pieces(_ role: SidebarGuideLine.Role, style: Style = SidebarGuideLineTests.rest, fadeStart: CGFloat? = nil,
-                       height: CGFloat = 28, fadeLength: CGFloat = SidebarGuideLine.fadeLength) -> Pieces? {
+                       height: CGFloat = 28, fadeLength: CGFloat = SidebarGuideLine.fadeLength,
+                       pinGap: Bool = false) -> Pieces? {
         SidebarGuideLine.pieces(role: role, x: 26, tickEnd: 33, fadeStart: fadeStart, style: style,
                                 in: NSRect(x: 0, y: 0, width: 300, height: height), backingScale: 2,
-                                fadeLength: fadeLength)
+                                fadeLength: fadeLength, pinGap: pinGap)
     }
 
     /// Each part a row can draw: a passing line the full height; a branch
@@ -137,28 +139,28 @@ struct SidebarGuideLineTests {
     /// 2 pt under its icon to the bottom, fading in.
     @Test func piecesForEachRole() {
         let fullHeight = NSRect(x: 26, y: 0, width: 0.5, height: 28)
-        let expectedPassing = Pieces(vertical: fullHeight, turn: nil, fade: nil, style: Self.rest)
+        let expectedPassing = Pieces(verticals: [fullHeight], turn: nil, fade: nil, style: Self.rest)
         #expect(Self.pieces(.passing) == expectedPassing)
 
         let branchTurn = Turn(lineX: 26.25, startY: 10.25, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
-        let expectedBranch = Pieces(vertical: fullHeight, turn: branchTurn, fade: nil, style: Self.rest)
+        let expectedBranch = Pieces(verticals: [fullHeight], turn: branchTurn, fade: nil, style: Self.rest)
         #expect(Self.pieces(.branch) == expectedBranch)
         #expect(branchTurn.turnY == 10.25)
 
         let lastTurn = Turn(lineX: 26.25, startY: 0, tickY: 14.25, endX: 33, radius: 4, width: 0.5)
-        let expectedLast = Pieces(vertical: nil, turn: lastTurn, fade: nil, style: Self.rest)
+        let expectedLast = Pieces(verticals: [], turn: lastTurn, fade: nil, style: Self.rest)
         #expect(Self.pieces(.last) == expectedLast)
 
         let stubRect = NSRect(x: 26, y: 22, width: 0.5, height: 6)
         let stubFade = Fade(rect: stubRect, start: 22, length: 12)
-        let expectedStub = Pieces(vertical: stubRect, turn: nil, fade: stubFade, style: Self.rest)
+        let expectedStub = Pieces(verticals: [stubRect], turn: nil, fade: stubFade, style: Self.rest)
         #expect(Self.pieces(.stub) == expectedStub)
 
         // A point-wide active line: the turn's stroke stays half a width
         // inside the line's edges and the tick's.
         let activeTurn = Turn(lineX: 26.5, startY: 10.5, tickY: 14.5, endX: 33, radius: 4, width: 1)
         let activeRect = NSRect(x: 26, y: 0, width: 1, height: 28)
-        let expectedActive = Pieces(vertical: activeRect, turn: activeTurn, fade: nil, style: Self.active)
+        let expectedActive = Pieces(verticals: [activeRect], turn: activeTurn, fade: nil, style: Self.active)
         #expect(Self.pieces(.branch, style: Self.active) == expectedActive)
 
         // A tick that would end inside the turn runs to the turn's end.
@@ -183,11 +185,11 @@ struct SidebarGuideLineTests {
         let standard = try #require(SidebarGuideLine.pieces(
             role: .branch, x: 28.75, tickEnd: 40, fadeStart: nil, style: standardStyle, in: oddRow, backingScale: 1))
         let expectedRetina = Pieces(
-            vertical: NSRect(x: 28.5, y: 0, width: 0.5, height: 27),
+            verticals: [NSRect(x: 28.5, y: 0, width: 0.5, height: 27)],
             turn: Turn(lineX: 28.75, startY: 9.75, tickY: 13.75, endX: 40, radius: 4, width: 0.5),
             fade: nil, style: retinaStyle)
         let expectedStandard = Pieces(
-            vertical: NSRect(x: 28, y: 0, width: 1, height: 27),
+            verticals: [NSRect(x: 28, y: 0, width: 1, height: 27)],
             turn: Turn(lineX: 28.5, startY: 9.5, tickY: 13.5, endX: 40, radius: 4, width: 1),
             fade: nil, style: standardStyle)
         #expect(retina == expectedRetina)
@@ -205,7 +207,7 @@ struct SidebarGuideLineTests {
     /// in device pixels.
     static func pixelEdges(_ pieces: Pieces, scale: CGFloat) -> [CGFloat] {
         var edges: [CGFloat] = []
-        if let vertical = pieces.vertical {
+        for vertical in pieces.verticals {
             edges += [vertical.minX * scale, vertical.maxX * scale]
         }
         if let turn = pieces.turn {
@@ -214,6 +216,52 @@ struct SidebarGuideLineTests {
                       (turn.tickY - half) * scale, (turn.tickY + half) * scale]
         }
         return edges
+    }
+
+    /// The gutter pin sits on the parent's line at the row's centre: there
+    /// the line leaves out its turn and tick and breaks 8 pt above and below
+    /// the centre. A first child keeps the parent's fade above the pin and
+    /// carries the line on below it to the next child; a middle child does
+    /// the same unfaded; a last child, whose line ends in the turn the pin
+    /// covers, keeps only what runs above it; a passing line breaks too.
+    @Test func pinBreaksTheLineAcrossItsGlyph() throws {
+        let top = NSRect(x: 26, y: 0, width: 0.5, height: 6)
+        let bottom = NSRect(x: 26, y: 22, width: 0.5, height: 6)
+        let fade = Fade(rect: NSRect(x: 26, y: 0, width: 0.5, height: 6), start: -6, length: 12)
+
+        let first = Self.pieces(.branch, fadeStart: -6, pinGap: true)
+        let expectedFirst = Pieces(verticals: [top, bottom], turn: nil, fade: fade, style: Self.rest)
+        #expect(first == expectedFirst)
+
+        let middle = Self.pieces(.branch, pinGap: true)
+        let expectedMiddle = Pieces(verticals: [top, bottom], turn: nil, fade: nil, style: Self.rest)
+        #expect(middle == expectedMiddle)
+
+        let last = Self.pieces(.last, pinGap: true)
+        let expectedLast = Pieces(verticals: [top], turn: nil, fade: nil, style: Self.rest)
+        #expect(last == expectedLast)
+
+        let only = Self.pieces(.last, fadeStart: -6, pinGap: true)
+        let expectedOnly = Pieces(verticals: [top], turn: nil, fade: fade, style: Self.rest)
+        #expect(only == expectedOnly)
+
+        let passing = Self.pieces(.passing, pinGap: true)
+        let expectedPassing = Pieces(verticals: [top, bottom], turn: nil, fade: nil, style: Self.rest)
+        #expect(passing == expectedPassing)
+
+        // Without the pin the same rows keep their turns.
+        let unpinned = [Self.pieces(.branch, fadeStart: -6), Self.pieces(.branch), Self.pieces(.last)]
+        let turns = unpinned.map { $0?.turn != nil }
+        let allTurn = [true, true, true]
+        #expect(turns == allTurn)
+
+        // An odd-height row's centre sits on a half point: the break's edges
+        // stay on device pixels.
+        let odd = try #require(SidebarGuideLine.pieces(
+            role: .branch, x: 26, tickEnd: 33, fadeStart: nil, style: Self.rest,
+            in: NSRect(x: 0, y: 0, width: 300, height: 27), backingScale: 2, pinGap: true))
+        let expectedOdd = [NSRect(x: 26, y: 0, width: 0.5, height: 5.5), NSRect(x: 26, y: 21.5, width: 0.5, height: 5.5)]
+        #expect(odd.verticals == expectedOdd)
     }
 
     /// The fade runs 12 pt from clear where the stub starts. A 28 pt
@@ -235,14 +283,16 @@ struct SidebarGuideLineTests {
         let childFade = Fade(rect: NSRect(x: 26, y: 0, width: 7, height: 6), start: -6, length: 12)
         let fullHeight = NSRect(x: 26, y: 0, width: 0.5, height: 28)
         #expect(child.fade == childFade)
-        #expect(child.vertical == fullHeight)
+        let fullHeightOnly = [fullHeight]
+        #expect(child.verticals == fullHeightOnly)
         #expect(childFade.startFraction == 0.5)
         #expect(childFade.endFraction == 1)
 
         let tallStub = try #require(Self.pieces(.stub, height: 36))
         let tallStubRect = NSRect(x: 26, y: 26, width: 0.5, height: 10)
         let tallStubFade = Fade(rect: tallStubRect, start: 26, length: 12)
-        #expect(tallStub.vertical == tallStubRect)
+        let tallStubOnly = [tallStubRect]
+        #expect(tallStub.verticals == tallStubOnly)
         #expect(tallStub.fade == tallStubFade)
         #expect(tallStubFade.startFraction == 0)
         #expect(abs(tallStubFade.endFraction - 10.0 / 12.0) < 1e-9)
@@ -262,7 +312,8 @@ struct SidebarGuideLineTests {
         let unfadedStub = Self.pieces(.stub, fadeLength: 0)
         let stubRect = NSRect(x: 26, y: 22, width: 0.5, height: 6)
         #expect(unfadedStub?.fade == nil)
-        #expect(unfadedStub?.vertical == stubRect)
+        let stubOnly = [stubRect]
+        #expect(unfadedStub?.verticals == stubOnly)
         #expect(Self.pieces(.branch, fadeStart: -6, fadeLength: 0)?.fade == nil)
     }
 
@@ -363,7 +414,7 @@ struct SidebarGuideLineTests {
 
     /// The row view draws grey on a plain row and the nest target, accent on
     /// a hovered or selected one, the active lines at full strength, its own
-    /// line last, and leaves out the line the pin sits on.
+    /// line last, and breaks the line the pin sits on across the pin.
     @Test func rowViewStylesItsLines() {
         let rowView = SidebarRowView(frame: Self.bounds)
         rowView.appearance = NSAppearance(named: .aqua)
@@ -413,12 +464,26 @@ struct SidebarGuideLineTests {
         let activeStub = [rest, active, active]
         #expect(Self.styles(rowView) == activeStub)
 
-        // The pin sits on the line a level up: that one leaves the row, the
-        // line two levels up and the row's own stay.
+        // The pin sits on the line a level up: that one, the row's parent's,
+        // leaves out its turn and keeps only what runs above the pin, since
+        // it ends in this row; the line two levels up and the row's own draw
+        // whole.
+        let unpinned = rowView.guidePieces(backingScale: 2)
+        let unpinnedParentLine = unpinned.count > 1 ? unpinned[1] : nil
+        #expect(unpinnedParentLine?.turn != nil, "Without the pin the parent's line turns into the row")
         rowView.configuration.showsPinGap = true
         let gappedXs = Self.lineLefts(rowView)
-        let expectedGappedXs: [CGFloat] = [26, 58]
-        #expect(gappedXs == expectedGappedXs, "The pin breaks only the line under it")
+        #expect(gappedXs == expectedStubbedXs, "The pin takes no line out of the row")
+        let gapped = rowView.guidePieces(backingScale: 2)
+        let verticals = gapped.map(\.verticals)
+        let expectedVerticals: [[NSRect]] = [
+            [NSRect(x: 26, y: 0, width: 0.5, height: 28)], // passing, whole
+            [NSRect(x: 42, y: 0, width: 1, height: 6)], // the parent's, above the pin
+            [NSRect(x: 58, y: 22, width: 1, height: 6)], // the row's own stub, active
+        ]
+        #expect(verticals == expectedVerticals, "The pin breaks only the line under it")
+        let parentLine = gapped.count > 1 ? gapped[1] : nil
+        #expect(parentLine?.turn == nil, "The pin covers the parent line's turn")
 
         let hidden = rowView.guidePieces(backingScale: 2, alphas: .none)
         #expect(hidden.isEmpty)
@@ -431,7 +496,7 @@ struct SidebarGuideLineTests {
     /// The left edge of each line the row draws, in order.
     static func lineLefts(_ rowView: SidebarRowView) -> [CGFloat] {
         rowView.guidePieces(backingScale: 2).map { pieces in
-            if let vertical = pieces.vertical { return vertical.minX }
+            if let vertical = pieces.verticals.first { return vertical.minX }
             if let turn = pieces.turn { return turn.lineX - turn.width / 2 }
             return -1
         }
@@ -842,12 +907,6 @@ struct SidebarGuideLineTests {
         return result
     }
 
-    /// The left edge of each line `id`'s row draws, in order.
-    static func lineLefts(_ id: SidebarNodeID, in h: OutlineHarness) throws -> [CGFloat] {
-        let view = try #require(h.rowView(id, make: true) as? SidebarRowView, "No row view for \(id)")
-        return lineLefts(view)
-    }
-
     /// A parent with three children: the first carries the fade on, the
     /// middle branches, the last ends the line. A grandchild before the last
     /// child draws the parent's line passing; the last child's own child
@@ -895,9 +954,31 @@ struct SidebarGuideLineTests {
         #expect(hovered == pLit, h.evidence(names))
     }
 
-    /// The gutter pin is centred on the line a level up — the parent's — so
-    /// a row showing it leaves that line out; a line further up and the
-    /// row's own line stay. A row without the pin draws them all.
+    /// What one line draws in a row: the top and bottom of each straight
+    /// run, down from the row's top, whether it turns, and whether it fades.
+    struct LineShape: Equatable, CustomStringConvertible {
+        var spans: [[CGFloat]]
+        var turns: Bool
+        var fades: Bool
+
+        var description: String { "\(spans)\(turns ? " turn" : "")\(fades ? " fade" : "")" }
+    }
+
+    /// Each line `id`'s row draws, outermost first.
+    static func lineShapes(_ id: SidebarNodeID, in h: OutlineHarness) throws -> [LineShape] {
+        let view = try #require(h.rowView(id, make: true) as? SidebarRowView, "No row view for \(id)")
+        return view.guidePieces(backingScale: 2).map { pieces in
+            LineShape(spans: pieces.verticals.map { [$0.minY - view.bounds.minY, $0.maxY - view.bounds.minY] },
+                      turns: pieces.turn != nil, fades: pieces.fade != nil)
+        }
+    }
+
+    /// The gutter pin is centred on the line a level up — the parent's — and
+    /// covers its turn and tick, so a row showing it draws that line without
+    /// them, broken 8 pt above and below its centre: a first child keeps the
+    /// fade above the pin and the line below it, a middle child the line
+    /// both sides, an only child only what runs above. A line further up and
+    /// the row's own draw whole, and a top-level row's pin sits on no line.
     @Test func pinBreaksOnlyTheLineUnderIt() throws {
         let h = OutlineHarness("guides.pin")
         defer { h.tearDown() }
@@ -906,23 +987,27 @@ struct SidebarGuideLineTests {
         let p = SidebarNodeID.worktree(f.p.id)
         let c1 = SidebarNodeID.worktree(f.c1.id)
         let g1 = SidebarNodeID.worktree(f.g1.id)
-        let pConfigurations = try Self.configurations([p], in: h, names)
-        let origin = try #require(pConfigurations.first?.contentOrigin)
-        let pLine = origin + 6
-        let c1Line = origin + 22
+        let c2 = SidebarNodeID.worktree(f.c2.id)
+        let whole = LineShape(spans: [[0, 28]], turns: false, fades: false)
+        let stub = LineShape(spans: [[22, 28]], turns: false, fades: true)
 
-        // At rest no pin shows.
-        let restingG1 = try Self.lineLefts(g1, in: h)
-        let restingC1 = try Self.lineLefts(c1, in: h)
-        let bothLines = [pLine, c1Line]
-        #expect(restingG1 == bothLines, h.evidence(names))
-        #expect(restingC1 == bothLines, h.evidence(names))
+        // At rest no pin shows: every child's line turns into it.
+        let restingG1 = try Self.lineShapes(g1, in: h)
+        let restingC1 = try Self.lineShapes(c1, in: h)
+        let expectedRestingG1 = [whole, LineShape(spans: [], turns: true, fades: true)]
+        let expectedRestingC1 = [LineShape(spans: [[0, 28]], turns: true, fades: true), stub]
+        #expect(restingG1 == expectedRestingG1, h.evidence(names))
+        #expect(restingC1 == expectedRestingC1, h.evidence(names))
 
         let tracker = try #require(h.controller.hoverTracker)
-        let steps: [(row: SidebarNodeID, lines: [CGFloat], label: String)] = [
-            (g1, [pLine], "the pin breaks c1's line on g1 and leaves p's"),
-            (c1, [c1Line], "the pin breaks p's line on c1 and leaves c1's own"),
-            (p, [pLine], "a top-level row's pin sits on no line"),
+        let steps: [(row: SidebarNodeID, lines: [LineShape], label: String)] = [
+            (g1, [whole, LineShape(spans: [[0, 6]], turns: false, fades: true)],
+             "an only child keeps c1's line above the pin, and p's whole"),
+            (c1, [LineShape(spans: [[0, 6], [22, 28]], turns: false, fades: true), stub],
+             "a first child keeps p's fade above the pin and its line below, and its own stub"),
+            (c2, [LineShape(spans: [[0, 6], [22, 28]], turns: false, fades: false)],
+             "a middle child keeps p's line either side of the pin"),
+            (p, [stub], "a top-level row's pin sits on no line"),
         ]
         for step in steps {
             let point = try #require(SidebarInteractionTests.windowPoint(of: step.row, in: h), h.evidence(names))
@@ -931,7 +1016,7 @@ struct SidebarGuideLineTests {
             let stepConfigurations = try Self.configurations([step.row], in: h, names)
             let gap = try #require(stepConfigurations.first?.showsPinGap)
             #expect(gap, "\(step.label): \(h.evidence(names).rawValue)")
-            let lines = try Self.lineLefts(step.row, in: h)
+            let lines = try Self.lineShapes(step.row, in: h)
             #expect(lines == step.lines, "\(step.label): \(h.evidence(names).rawValue)")
         }
     }
