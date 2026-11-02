@@ -55,7 +55,7 @@ private struct SplitMix64: RandomNumberGenerator {
 }
 
 @Suite("SidebarSessionPlacement — matched sessions: order, parse-once")
-struct RepoSectionMatchedSessionsTests {
+struct SidebarSessionPlacementMatchOrderTests {
     static let repoID = UUID()
 
     /// About 800 sessions for one repo, drawn from every timestamp shape the

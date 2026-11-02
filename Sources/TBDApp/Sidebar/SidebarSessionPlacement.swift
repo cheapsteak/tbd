@@ -104,10 +104,11 @@ enum SidebarSessionPlacement {
     /// key), `payload.createdAt` (the sort key), and the three filter gates.
     /// `AppState` clears its match memo only when this is false for some
     /// position, so this list must equal what the filter and the sort read;
-    /// the sync-fence test in `RepoSectionMatchedSessionsTests` pins it. Fields
-    /// that change on every sighting or drive row state (`lastSeen`, `gone`,
-    /// `payload.state`, `agentState`) are deliberately absent, so a sighting
-    /// that changes only those does not force a re-sort.
+    /// the sync-fence test in `SidebarSessionPlacementMatchOrderTests` pins
+    /// it. Fields that change on every sighting or drive row state
+    /// (`lastSeen`, `gone`, `payload.state`, `agentState`) are deliberately
+    /// absent, so a sighting that changes only those does not force a
+    /// re-sort.
     static func sameMatchInputs(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
         a.provider == b.provider
             && a.payload.id == b.payload.id
@@ -144,8 +145,8 @@ enum SidebarSessionPlacement {
     /// counted that repo as known.
     ///
     /// The two axes get a deliberately different answer here, reasoned
-    /// about separately (see `RemoteSectionViewTests` for both halves
-    /// pinned down):
+    /// about separately (see `SidebarSessionPlacementProviderTests` for both
+    /// halves pinned down):
     ///
     /// - A repo FILTER never narrows this set: only the filtered repo (if
     ///   any) counts as "known", so every OTHER repo's matched sessions
