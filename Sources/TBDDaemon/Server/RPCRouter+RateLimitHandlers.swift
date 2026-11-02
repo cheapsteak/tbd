@@ -21,11 +21,20 @@ extension RPCRouter {
     /// Runs the turn-end transcript sync first, latch or not: the hook prints
     /// nothing once this call is accepted, so the `tbd notify --type error`
     /// call that would otherwise run it never happens.
-    func handleRateLimitDetected(_ paramsData: Data) async throws -> RPCResponse {
+    ///
+    /// A caller proven to run outside the terminal it names gets the unknown
+    /// terminal's reply and changes nothing: no sync, no row, no notification.
+    func handleRateLimitDetected(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(RateLimitDetectedParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             // Fire-and-forget hook caller — soft no-op like sessionEvent.
             logger.debug("rateLimitDetected: unknown terminal \(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+        if await hookCallerRefused(
+            method: RPCMethod.claudeRateLimitDetected, terminal: terminal, connection: connection) {
             return .ok()
         }
         await syncTranscriptIntoCurrentProjectDir(terminal)
@@ -142,10 +151,22 @@ extension RPCRouter {
     /// Every handled answer runs the turn-end transcript sync, since the hook
     /// then prints nothing and makes no `tbd notify --type error` call to run
     /// it. An unhandled one leaves it to that call.
-    func handleTransientApiErrorDetected(_ paramsData: Data) async throws -> RPCResponse {
+    ///
+    /// A caller proven to run outside the terminal it names is not handled,
+    /// as an unknown terminal is not: nothing is scheduled or posted here, and
+    /// the hook falls back to its `tbd notify --type error` call, which this
+    /// check does not cover.
+    func handleTransientApiErrorDetected(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TransientApiErrorDetectedParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             logger.debug("transientApiErrorDetected: unknown terminal \(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return try RPCResponse(result: TransientApiErrorDetectedResult(handled: false))
+        }
+        if await hookCallerRefused(
+            method: RPCMethod.claudeTransientApiErrorDetected, terminal: terminal,
+            connection: connection) {
             return try RPCResponse(result: TransientApiErrorDetectedResult(handled: false))
         }
         let enabled = (try? await db.config.get())?.autoResumeOnApiError ?? false

@@ -247,6 +247,17 @@ public enum TBDConstants {
             .appendingPathComponent("dev-servers", isDirectory: true)
     }
 
+    /// The orphan-process sweep's keep-list: `~/tbd/gc-keep-processes`. A
+    /// user-authored file, so it lives beside the other editable config rather
+    /// than in the database. Honors TBD_HOME.
+    public static func gcKeepProcessesPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("gc-keep-processes").path
+    }
+
+    public static var gcKeepProcessesPath: String {
+        gcKeepProcessesPath(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// A repo's personal dev-server declarations:
     /// `~/tbd/repos/<repoID>/servers.toml`. Honors TBD_HOME.
     public static func serversConfigPath(repoID: UUID, environment: [String: String]) -> String {

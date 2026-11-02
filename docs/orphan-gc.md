@@ -439,6 +439,11 @@ than the preceding dry run predicted.
 - **`gcOrphanProcessesEnabled`** – default `false`; `tbd gc orphan-processes [on|off]`,
   the Settings → Cleanup toggle "Reclaim orphaned processes", and the
   `config.setGCOrphanProcessesEnabled` RPC.
+- **`~/tbd/gc-keep-processes`** – the orphan-process sweep's keep-list, one
+  command-line pattern per line. The shipped defaults apply until
+  `tbd gc keep-list customize` (or the Settings → Cleanup row) writes the file;
+  after that the file replaces them. TBD never rewrites it. A file that cannot
+  be read skips the orphan-process phase rather than falling back to defaults.
 - **`gcRetainedTranscriptsEnabled`** – default `false`;
   `tbd gc retained-transcripts [on|off]`, the Settings → Cleanup toggle "Reclaim
   unreferenced retained transcripts", and the `config.setGCRetainedTranscriptsEnabled`
@@ -482,6 +487,8 @@ tbd gc profile-dirs [on|off]           # gate the profile-config-dir collector (
 tbd gc orphan-processes [on|off]       # gate the orphaned-process collector (ships off); no argument prints the current value
 tbd gc retained-transcripts [on|off]   # gate the retained-transcript collector (ships off); no argument prints the current value
 tbd gc hang-stacks [on|off]            # gate the hang-stack reclaimer (ships off); no argument prints the current value
+tbd gc keep-list                       # print the orphan-process keep-list in effect: its path, shipped defaults or your file, and each pattern
+tbd gc keep-list customize             # write the shipped defaults to ~/tbd/gc-keep-processes for editing (never overwrites)
 ```
 
 ## Non-goals (from the design spec)

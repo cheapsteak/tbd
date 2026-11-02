@@ -5660,6 +5660,11 @@ extension RPCRouter {
     /// One guard, one behavior: every hook bridge gets the same answer,
     /// including the promoted-scratch acceptance, rather than a per-handler
     /// variant that drifts.
+    ///
+    /// A cwd is reported, not observed, so it cannot catch a foreign session
+    /// working in the same worktree. `hookCallerRefused` runs first and asks
+    /// the kernel instead: whether the calling process descends from the
+    /// terminal's job at all.
     func hookCWDBelongsToTerminal(
         _ cwd: String,
         terminal: Terminal,
@@ -5710,8 +5715,11 @@ extension RPCRouter {
     /// `TBD_TERMINAL_ID` env to this method. We persist both fields and
     /// broadcast a delta so the app's transcript pane re-targets the new
     /// session file. Unknown terminal IDs are treated as a soft no-op (the
-    /// terminal may have been deleted between hook fire and arrival).
-    func handleTerminalSessionEvent(_ paramsData: Data) async throws -> RPCResponse {
+    /// terminal may have been deleted between hook fire and arrival), and so
+    /// is a caller proven to run outside the terminal it names.
+    func handleTerminalSessionEvent(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEventParams.self, from: paramsData)
         // Establish event order before the first suspension: a Codex
         // SessionStart with a later timestamp wins the session-identity rail
@@ -5722,6 +5730,11 @@ extension RPCRouter {
             // Soft success — caller is a fire-and-forget hook, returning an
             // error would just spam stderr inside Claude.
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+        // Before anything this event could change, the activity stamp included.
+        if await hookCallerRefused(
+            method: RPCMethod.terminalSessionEvent, terminal: terminal, connection: connection) {
             return .ok()
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
@@ -5899,8 +5912,20 @@ extension RPCRouter {
     /// alive, session id known — so one wake path and one UI cover both
     /// (`docs/specs/2026-09-05-transcript-composer-design.md`, landing in
     /// PR #821, "Not-running delivery").
-    func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
+    ///
+    /// A caller proven to run outside the terminal it names does neither. The
+    /// check needs the row, so the row is read first; with no row, or a read
+    /// that fails, there is nothing to check against and the prompts are
+    /// still resolved, as they always were.
+    func handleTerminalSessionEnded(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
+        if let terminal = try? await db.terminals.get(id: params.terminalID),
+           await hookCallerRefused(
+               method: RPCMethod.terminalSessionEnded, terminal: terminal, connection: connection) {
+            return .ok()
+        }
         // Whatever the reason, the session that opened this terminal's prompts
         // is over, and its dialogs with it: clear them before the park guard,
         // which returns early for reasons that do not park.
@@ -6031,11 +6056,18 @@ extension RPCRouter {
     /// The identity check is the one a hook's state write used to make: a
     /// delayed hook from a replaced process, or one that fires while a
     /// managed replacement is staged, is never handed a title and never moves
-    /// the record of what the live session carries.
-    func handleTerminalSessionTitle(_ paramsData: Data) async throws -> RPCResponse {
+    /// the record of what the live session carries. Nor is a caller proven to
+    /// run outside the terminal, which gets the unknown row's reply.
+    func handleTerminalSessionTitle(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionTitleParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             logger.debug("sessionTitle: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+        if await hookCallerRefused(
+            method: RPCMethod.terminalSessionTitle, terminal: terminal, connection: connection) {
             return .ok()
         }
         guard terminal.pendingSessionIncarnationID == nil,

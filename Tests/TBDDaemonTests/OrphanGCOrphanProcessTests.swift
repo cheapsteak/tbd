@@ -55,6 +55,25 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         return String(cString: resolved)
     }
 
+    /// The keep-list file the sweep reads, inside the sandbox. Absent unless a
+    /// test writes it, so the shipped defaults apply.
+    var keepListPath: String {
+        sandbox.appendingPathComponent("gc-keep-processes", isDirectory: false).path
+    }
+
+    /// `markers` is each pid's environment as the reader would report it. A
+    /// pid it does not name reads as hidden — neutral — which leaves every test
+    /// written before markers existed on the cwd rule alone, and means no test
+    /// here ever reads a real process's environment.
+    ///
+    /// `kernelStarts` is each pid's start as the kernel records it, and the
+    /// fixture answers it twice over: as the `startedAt` of an injected
+    /// process table, and from the start-time reader. The two always agree, so
+    /// an environment read verifies unless a test says otherwise. It defaults
+    /// to the start the `ps` snapshot implies, which is what an unloaded
+    /// machine reports; a test that skews `ps` from the kernel passes its own.
+    /// `processTableAvailable: false` makes the table read fail. Either way no
+    /// test here reads the real kernel table.
     private func makeGC(
         db: TBDDatabase,
         signaller: ProcessSignaller,
@@ -62,9 +81,21 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         cwdByPID: [Int32: String],
         now: Date,
         processSnapshotAvailable: Bool = true,
-        snapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)? = nil
+        snapshotProvider: (@Sendable () async -> [ProcessSnapshotEntry]?)? = nil,
+        markers: [Int32: ProcessEnvironmentMarkers] = [:],
+        kernelStarts: [Int32: Date]? = nil,
+        processTableAvailable: Bool = true
     ) -> OrphanGC {
-        OrphanGC(
+        let startTimes = kernelStarts
+            ?? OrphanProcessCollector.startInstants(processes, capturedAt: now)
+        var entries: [Int32: ProcessTableSnapshot.Entry] = [:]
+        for process in processes {
+            entries[process.pid] = ProcessTableSnapshot.Entry(
+                parent: process.ppid, startedAt: startTimes[process.pid])
+        }
+        let table: ProcessTableSnapshot? =
+            processTableAvailable ? ProcessTableSnapshot(entries: entries) : nil
+        return OrphanGC(
             db: db, git: GitManager(),
             broadcast: { _ in },
             liveCWDsProvider: { [] },
@@ -89,8 +120,18 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             devServersBase: sandbox.appendingPathComponent("dev-servers", isDirectory: true),
             retainedTranscriptsBase: sandbox.appendingPathComponent("transcripts", isDirectory: true),
             scratchSpacesBase: sandbox.appendingPathComponent("scratch-spaces", isDirectory: true),
-            worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true)
+            worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true),
+            processEnvironmentReader: { markers[$0] ?? .hidden },
+            processStartTimeReader: { startTimes[$0] },
+            processTableReader: { table },
+            gcKeepListPath: keepListPath
         )
+    }
+
+    /// What a process started in a TBD tab carries: the IDs of the worktree
+    /// and terminal it was started under, as the uppercase strings TBD writes.
+    private func marked(worktree: UUID? = nil, terminal: UUID? = nil) -> ProcessEnvironmentMarkers {
+        .markers(worktreeID: worktree?.uuidString, terminalID: terminal?.uuidString)
     }
 
     /// A repo row whose worktree pool is the sandbox `pool` directory.
@@ -107,6 +148,14 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
     private func makeWorktree(
         db: TBDDatabase, repo: Repo, name: String, archived: Bool
     ) async throws -> String {
+        try await makeWorktreeRow(db: db, repo: repo, name: name, archived: archived).path
+    }
+
+    /// `makeWorktree`, also handing back the row's ID — what a process started
+    /// in one of its tabs carries as `TBD_WORKTREE_ID`.
+    private func makeWorktreeRow(
+        db: TBDDatabase, repo: Repo, name: String, archived: Bool
+    ) async throws -> (id: UUID, path: String) {
         let dir = pool.appendingPathComponent(name, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let row = try await db.worktrees.create(
@@ -115,7 +164,32 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         if archived {
             try await db.worktrees.archive(id: row.id)
         }
-        return canon(dir)
+        return (row.id, canon(dir))
+    }
+
+    /// A scratch space promoted into `repo` the way `scratch.promote` retires
+    /// one: the repo's main worktree row, then `promoteScratchMigration`, which
+    /// archives the scratch row with `archivedAt` and `promotedToRepoID` set.
+    /// Hands back the scratch row's ID — what a process started in one of its
+    /// tabs before the promotion still carries as `TBD_WORKTREE_ID`.
+    private func makePromotedScratchRow(db: TBDDatabase, repo: Repo) async throws -> UUID {
+        let scratchPath = sandbox
+            .appendingPathComponent("scratch-spaces", isDirectory: true)
+            .appendingPathComponent("promoted", isDirectory: true).path
+        let scratch = try await db.worktrees.createScratch(
+            name: "promoted", displayName: "promoted", path: scratchPath,
+            tmuxServer: "tbd-scratch")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: "tbd-test")
+        try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            tmuxServer: "tbd-scratch")
+        let row = try #require(try await db.worktrees.get(id: scratch.id))
+        #expect(row.status == .archived)
+        #expect(row.archivedAt != nil)
+        #expect(row.promotedToRepoID == repo.id)
+        return scratch.id
     }
 
     /// A worktree row at a path the user chose, the way `adoptWorktree` makes
@@ -202,14 +276,14 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
 
         #expect(signaller.terminated == [4242])
         #expect(signaller.killed.isEmpty, "a process that honors SIGTERM is never SIGKILLed")
-        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 \(dead)"))
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"))
 
         let record = try #require(
             try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
         #expect(record.worktreePath == dead, "the dead worktree the process was rooted in")
         #expect(record.repoPath == repoDir.path)
         let description = try #require(record.processDescription)
-        #expect(description.hasPrefix("pid=4242 tree=1 "))
+        #expect(description.hasPrefix("pid=4242 tree=1 via=cwd "))
         #expect(description.contains("--port 3000"))
         // The path- and git-shaped fields go unused for this kind.
         #expect(record.branch == nil)
@@ -255,7 +329,7 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             now: Date().addingTimeInterval(7200)
         ).sweep(dryRun: true)
 
-        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 \(dead)"))
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"))
         #expect(result.reaped == 0)
         #expect(signaller.terminated.isEmpty, "a dry run touches nothing")
         #expect(signaller.killed.isEmpty)
@@ -289,7 +363,7 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         ).sweep()
 
         #expect(signaller.terminated == [702, 701, 700], "leaf-first, deepest generation first")
-        #expect(result.planned.contains("REAP orphan-process pid=700 tree=3 \(dead)"))
+        #expect(result.planned.contains("REAP orphan-process pid=700 tree=3 via=cwd \(dead)"))
         let record = try #require(
             try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
         #expect(try #require(record.processDescription).hasPrefix("pid=700 tree=3 "))
@@ -737,7 +811,7 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         ).sweep()
 
         #expect(signaller.terminated == [5100])
-        #expect(result.planned.contains("REAP orphan-process pid=5100 tree=1 \(adopted)"))
+        #expect(result.planned.contains("REAP orphan-process pid=5100 tree=1 via=cwd \(adopted)"))
         let record = try #require(
             try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
         #expect(record.worktreePath == adopted)
@@ -869,8 +943,738 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
         #expect(signaller.terminated.isEmpty, "an identity that cannot be re-read is a skip")
         #expect(signaller.killed.isEmpty)
         #expect(result.reaped == 0)
-        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 \(dead)"))
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"))
         #expect(result.planned.contains("KEEP nothing-signalled \(dead)"))
+    }
+
+    // MARK: - Environment markers: flag branches
+
+    /// The env route adds kills, so it rides the same default-off flag the cwd
+    /// route soaks under. Discriminates when inverted: an env route that
+    /// ignored the flag would signal 4242 here.
+    @Test("flag off: a root only the env route would admit is left running")
+    func flagOffTheEnvRouteTouchesNothing() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, command: "/usr/bin/nix print-dev-env")],
+            cwdByPID: [4242: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(signaller.terminated.isEmpty)
+        #expect(signaller.killed.isEmpty)
+        #expect(!result.planned.contains { $0.hasPrefix("REAP orphan-process") })
+        #expect(try await db.reapRecords.list(repoPath: nil).allSatisfy { $0.kind != .orphanProcess })
+    }
+
+    /// Someone deciding whether to turn the flag on sees, by route, what it
+    /// would reclaim. Discriminates against the old code, which planned
+    /// nothing for a root whose cwd is `/`.
+    @Test("with the flag off a dry run still plans the env route, by route")
+    func aDryRunWithTheFlagOffPlansTheEnvRoute() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, command: "/usr/bin/nix print-dev-env")],
+            cwdByPID: [4242: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: gone.id)]
+        ).sweep(dryRun: true)
+
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=env \(gone.path)"))
+        #expect(result.reaped == 0)
+        #expect(signaller.terminated.isEmpty, "a dry run touches nothing")
+    }
+
+    // MARK: - Environment markers: the env route
+
+    /// The measured miss: a process whose cwd left the worktree — here it
+    /// daemonized to `/` — carrying the archived worktree's marker. The cwd
+    /// rule never sees it; the old code left it running.
+    @Test("the env route reclaims a root whose cwd is `/` once the grace has passed")
+    func theEnvRouteReclaimsACwdSlashRootOnceGraceHasPassed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, command: "/usr/bin/nix print-dev-env --profile p")],
+            cwdByPID: [4242: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [4242])
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=env \(gone.path)"))
+        let record = try #require(
+            try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
+        #expect(record.worktreePath == gone.path, "the worktree the marker names, since `/` names none")
+        #expect(record.repoPath == repoDir.path)
+        #expect(try #require(record.processDescription).hasPrefix("pid=4242 tree=1 via=env "))
+    }
+
+    /// Grace runs from the row's `archivedAt`, never from process start: the
+    /// process here is a day old, so a process-start grace would already have
+    /// passed. Discriminates when inverted: an env route without the grace
+    /// would signal 4242 a minute after the archive.
+    @Test("the env route leaves a `/` root alone until the grace since archivedAt has passed")
+    func theEnvRouteLeavesACwdSlashRootAloneBeforeGraceHasPassed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        // `archive` stamps the row with the real clock, so a sweep clock a
+        // minute later is well inside the 3600 s window.
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, elapsed: 86_400)],
+            cwdByPID: [4242: "/"],
+            now: Date().addingTimeInterval(60),
+            markers: [4242: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(signaller.terminated.isEmpty)
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+    }
+
+    /// A row archived without an instant cannot measure the grace, so the env
+    /// route admits nothing for it; 4243, the same shape naming a dated row,
+    /// proves the route ran. Discriminates against a route that fell back to
+    /// process start, as the cwd route does for a `.deleting/` entry: 4242 is
+    /// a day old and would be signalled.
+    @Test("an archived row with no archivedAt never admits by env")
+    func anArchivedRowWithoutArchivedAtNeverAdmitsByEnv() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let undated = try await makeWorktreeRow(db: db, repo: repo, name: "undated", archived: true)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let undatedID = undated.id.uuidString
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE worktree SET archivedAt = NULL WHERE id = ?", arguments: [undatedID])
+        }
+        let row = try #require(try await db.worktrees.get(id: undated.id))
+        #expect(row.status == .archived)
+        #expect(row.archivedAt == nil)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, elapsed: 86_400), entry(pid: 4243, elapsed: 86_400)],
+            cwdByPID: [4242: "/", 4243: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: undated.id), 4243: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(signaller.terminated == [4243])
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+    }
+
+    // MARK: - Environment markers: vetoes
+
+    /// TBD's own tmux server: `ppid == 1`, its cwd one worktree's directory
+    /// while it serves every worktree of the repo, and no marker, because the
+    /// daemon that spawned it carries none. **The old code reclaimed it** —
+    /// and every pane under it — once that one worktree was archived.
+    @Test("TBD's tmux-server shape — readable, no markers, cwd in an archived worktree — is kept")
+    func tmuxServerShapeIsKept() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 4242, command: "tmux -L tbd-acme new-session -d -s main"),
+                entry(pid: 4243),
+            ],
+            cwdByPID: [4242: dead, 4243: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: .noMarkers]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242), "a server no TBD terminal started is not this sweep's")
+        #expect(!signaller.killed.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        // The hidden orphan beside it proves the phase ran.
+        #expect(signaller.terminated == [4243])
+    }
+
+    /// An existing terminal row belongs to a live worktree, so its marker keeps
+    /// a root whose cwd is in an archived one. Discriminates against the old
+    /// code, which reclaimed 4242 by cwd.
+    @Test("a terminal marker naming an existing row keeps a root whose cwd is in an archived worktree")
+    func aTerminalMarkerNamingAnExistingRowKeeps() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let working = try await makeWorktreeRow(db: db, repo: repo, name: "working", archived: false)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let tab = try await db.terminals.create(
+            worktreeID: working.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242), entry(pid: 4243)],
+            cwdByPID: [4242: dead, 4243: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(terminal: tab.id)]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(signaller.terminated == [4243])
+    }
+
+    /// A promoted scratch space's row is archived, but its folder and sessions
+    /// carry on as a repo's main worktree, so a process started in one of its
+    /// tabs still belongs to live work. 4243, the same shape naming a plainly
+    /// archived row in the same sweep, proves the env route ran. Discriminates
+    /// against the code before the fix, which read the promoted row as
+    /// archived and signalled 4242 too.
+    @Test("a marker naming a promoted scratch space keeps a `/` root the env route would admit")
+    func aMarkerNamingAPromotedScratchSpaceKeeps() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let promoted = try await makePromotedScratchRow(db: db, repo: repo)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242), entry(pid: 4243)],
+            cwdByPID: [4242: "/", 4243: "/"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: promoted), 4243: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(!signaller.killed.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(signaller.terminated == [4243])
+        #expect(result.planned.contains("REAP orphan-process pid=4243 tree=1 via=env \(gone.path)"))
+    }
+
+    /// A marker naming no row attests nothing, so the `.deleting/<uuid>` arm —
+    /// which exists for worktrees whose rows are gone — still decides.
+    /// Discriminates against the old code (no `via=`) and against reading a
+    /// missing row as a veto.
+    @Test("an unknown worktree ID with a cwd in a `.deleting/` entry is reclaimed by cwd")
+    func anUnknownWorktreeIDWithADeletingCwdIsReclaimed() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        _ = try await makeRepo(db: db)
+        let queued = try makeQueuedEntry()
+        let canonQueued = canon(URL(fileURLWithPath: queued, isDirectory: true))
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[550] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 550, elapsed: 86_400)],
+            cwdByPID: [550: canonQueued],
+            now: Date(),
+            markers: [550: marked(worktree: UUID())]
+        ).sweep()
+
+        #expect(signaller.terminated == [550])
+        #expect(result.planned.contains("REAP orphan-process pid=550 tree=1 via=cwd \(canonQueued)"))
+    }
+
+    /// The other half: with the cwd outside every TBD root, a marker naming no
+    /// row admits nothing. Discriminates when inverted — a missing row read as
+    /// death would signal 4242.
+    @Test("an unknown worktree ID with a cwd elsewhere is kept")
+    func anUnknownWorktreeIDWithCwdElsewhereIsKept() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242), entry(pid: 4243)],
+            cwdByPID: [4242: canon(sandbox) + "/elsewhere", 4243: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: UUID())]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(signaller.terminated == [4243])
+    }
+
+    /// Apple's platform binaries — `caffeinate`, `log stream`, `tail -f`,
+    /// `zsh -c` — show no environment, and they are a real share of what the
+    /// cwd route reclaimed in the field. Hidden must stay neutral. Discriminates
+    /// against the old code (no `via=`) and against hidden read as a veto.
+    @Test("a hidden root in an archived worktree is still reclaimed, by cwd")
+    func aHiddenRootInAnArchivedWorktreeIsReclaimedByCwd() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242, command: "/usr/bin/caffeinate -i")],
+            cwdByPID: [4242: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: .hidden]
+        ).sweep()
+
+        #expect(signaller.terminated == [4242])
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"))
+        let record = try #require(
+            try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
+        #expect(try #require(record.processDescription).hasPrefix("pid=4242 tree=1 via=cwd "))
+    }
+
+    /// Both routes admit, and the record names the cwd's dead root — a
+    /// different archived worktree from the one the marker names, so the test
+    /// can tell which root was chosen. Discriminates against the old code (no
+    /// `via=`) and against naming the marker's worktree.
+    @Test("both routes admitting records cwd+env and the cwd's dead root")
+    func bothRoutesRecordCwdPlusEnv() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let cwdRoot = try await makeWorktree(db: db, repo: repo, name: "gone-a", archived: true)
+        let named = try await makeWorktreeRow(db: db, repo: repo, name: "gone-b", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242)],
+            cwdByPID: [4242: cwdRoot + "/sub"],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: marked(worktree: named.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [4242])
+        #expect(result.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd+env \(cwdRoot)"))
+        let record = try #require(
+            try await db.reapRecords.list(repoPath: nil).first { $0.kind == .orphanProcess })
+        #expect(record.worktreePath == cwdRoot)
+        #expect(try #require(record.processDescription).hasPrefix("pid=4242 tree=1 via=cwd+env "))
+    }
+
+    /// Without a cwd nothing can say the process is not sitting in live work,
+    /// so the env route is bound by the cwd gate too. Discriminates when
+    /// inverted: an env route that skipped the gate would signal 600.
+    @Test("an unreadable cwd keeps even when the marker names an archived worktree")
+    func anUnreadableCwdKeepsEvenWithAnArchivedMarker() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[600] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[601] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            // 600 is absent from the cwd map entirely.
+            processes: [entry(pid: 600), entry(pid: 601)],
+            cwdByPID: [601: gone.path],
+            now: Date().addingTimeInterval(7200),
+            markers: [600: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(!signaller.terminated.contains(600))
+        #expect(!result.planned.contains { $0.contains("pid=600") })
+        #expect(signaller.terminated == [601])
+    }
+
+    // MARK: - Environment markers: the start-time check
+
+    /// Under load `ps` runs well after the sweep stamps its capture time, and
+    /// `etime` is whole seconds, so the start a snapshot implies sits seconds
+    /// before the kernel's. Here it is 5 s off, while the process table and
+    /// the start-time reader — both the kernel — agree. Fails against an
+    /// environment check that compared the kernel's start with the one `ps`
+    /// implies: 5 s is past the 2 s tolerance, the read turns hidden, the
+    /// no-marker veto falls away, and the cwd rule reclaims the server.
+    @Test("TBD's tmux-server shape stays kept when ps's start sits 5 s off the kernel's")
+    func tmuxServerShapeIsKeptWhenPsSkewsFromTheKernel() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+        let now = Date().addingTimeInterval(7200)
+        let processes = [
+            entry(pid: 4242, command: "tmux -L tbd-acme new-session -d -s main"),
+            entry(pid: 4243),
+        ]
+        // `ps` got to run 5 s after the stamp, so the start it implies is 5 s
+        // earlier than the one the kernel recorded.
+        let kernelStarts = OrphanProcessCollector.startInstants(processes, capturedAt: now)
+            .mapValues { $0.addingTimeInterval(5) }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: processes,
+            cwdByPID: [4242: dead, 4243: dead],
+            now: now,
+            markers: [4242: .noMarkers],
+            kernelStarts: kernelStarts
+        ).sweep()
+
+        #expect(
+            !signaller.terminated.contains(4242),
+            "the kernel's start verifies the read, so the no-marker veto holds however late ps ran")
+        #expect(!signaller.killed.contains(4242))
+        #expect(!result.planned.contains { $0.contains("pid=4242") })
+        #expect(!result.planned.contains("KEEP process-table-unavailable env-evidence"))
+        // The hidden orphan beside it proves the phase ran, and that the
+        // signal-time identity — `ps` against `ps` — is untouched by the skew.
+        #expect(signaller.terminated == [4243])
+    }
+
+    /// With no process table there is nothing to verify an environment read
+    /// against, so every environment reads as hidden and the cwd rule decides
+    /// alone, as it did before markers. That costs the no-marker veto: a root
+    /// shaped like TBD's tmux server, its cwd in an archived worktree, is
+    /// reclaimed. This is the accepted fallback, and the plan names it.
+    /// Fails against code that does not read the table (no plan line, and
+    /// 4242 kept on a verified no-marker read), and against code that skips
+    /// the phase on a failed read (4243 kept).
+    @Test("a failed process-table read is the accepted fallback: the cwd rule decides alone, no-marker roots included")
+    func aFailedTableReadIsTheAcceptedFallbackToTheCwdRule() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+        signaller.behaviors[4243] = .init(aliveAfterTerminate: false)
+
+        let gc = makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 4242, command: "tmux -L tbd-acme new-session -d -s main"),
+                entry(pid: 4243, command: "/usr/bin/caffeinate -i"),
+            ],
+            cwdByPID: [4242: dead, 4243: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [4242: .noMarkers, 4243: .hidden],
+            processTableAvailable: false
+        )
+
+        let dryRun = await gc.sweep(dryRun: true)
+        #expect(dryRun.planned.contains("KEEP process-table-unavailable env-evidence"))
+        #expect(dryRun.planned.contains("REAP orphan-process pid=4243 tree=1 via=cwd \(dead)"))
+        #expect(
+            dryRun.planned.contains("REAP orphan-process pid=4242 tree=1 via=cwd \(dead)"),
+            "the accepted fallback: with every environment hidden, a no-marker root loses its veto")
+        #expect(signaller.terminated.isEmpty, "a dry run touches nothing")
+
+        let result = await gc.sweep()
+        #expect(result.planned.contains("KEEP process-table-unavailable env-evidence"))
+        #expect(Set(signaller.terminated) == [4242, 4243])
+        #expect(result.reaped == 2)
+    }
+
+    // MARK: - Environment markers: guards on the tree
+
+    /// A process born in an archived worktree may now host work for a live
+    /// one; killing the host kills that work. One member naming live work
+    /// keeps the whole tree. **The old code reclaimed all three.**
+    @Test("one tree member naming a live worktree keeps the whole tree")
+    func oneTreeMemberNamingALiveWorktreeKeepsTheWholeTree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let working = try await makeWorktreeRow(db: db, repo: repo, name: "working", archived: false)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 701, 702, 900] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 700, command: "process-compose up"),
+                entry(pid: 701, ppid: 700, command: "/usr/bin/node server.js"),
+                entry(pid: 702, ppid: 701, command: "/usr/bin/node worker.js"),
+                entry(pid: 900),
+            ],
+            cwdByPID: [700: dead, 701: dead, 702: dead, 900: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [701: marked(worktree: working.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [900], "only the unrelated orphan; the guarded tree is untouched")
+        #expect(result.planned.contains("KEEP live-marker-in-tree pid=700"))
+        #expect(!result.planned.contains { $0.hasPrefix("REAP orphan-process pid=700") })
+    }
+
+    /// The tree guard counts a promoted scratch space as live work too: a host
+    /// born in an archived worktree may serve a session of the scratch space
+    /// that became a repo. Discriminates against the code before the fix,
+    /// which read 701's marker as naming an archived worktree and reclaimed
+    /// all three.
+    @Test("a tree member naming a promoted scratch space keeps the whole tree")
+    func aTreeMemberNamingAPromotedScratchSpaceKeepsTheWholeTree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let promoted = try await makePromotedScratchRow(db: db, repo: repo)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 701, 702, 900] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 700, command: "process-compose up"),
+                entry(pid: 701, ppid: 700, command: "/usr/bin/node server.js"),
+                entry(pid: 702, ppid: 701, command: "/usr/bin/node worker.js"),
+                entry(pid: 900),
+            ],
+            cwdByPID: [700: dead, 701: dead, 702: dead, 900: dead],
+            now: Date().addingTimeInterval(7200),
+            markers: [701: marked(worktree: promoted)]
+        ).sweep()
+
+        #expect(signaller.terminated == [900], "only the unrelated orphan; the guarded tree is untouched")
+        #expect(result.planned.contains("KEEP live-marker-in-tree pid=700"))
+        #expect(!result.planned.contains { $0.hasPrefix("REAP orphan-process pid=700") })
+    }
+
+    /// Claude Code's background host inherits the markers and cwd of whichever
+    /// tab started it and serves sessions for every worktree afterwards. The
+    /// shipped list keeps it whichever route would have admitted it: 4242 by
+    /// cwd, 4243 by env. Discriminates against the old code, which reclaimed
+    /// 4242.
+    @Test("the shipped keep-list protects a --bg-pty-host root on both routes")
+    func theShippedListProtectsABgPtyHostRootOnBothRoutes() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        #expect(!fm.fileExists(atPath: keepListPath), "no file, so the shipped defaults are in effect")
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [4242, 4243, 4244] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 4242, command: "/opt/acme/bin/claude --bg-pty-host --session x"),
+                entry(pid: 4243, command: "/opt/acme/bin/claude --bg-pty-host --session y"),
+                entry(pid: 4244),
+            ],
+            cwdByPID: [4242: gone.path, 4243: "/", 4244: gone.path],
+            now: Date().addingTimeInterval(7200),
+            markers: [4243: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [4244])
+        #expect(!result.planned.contains { $0.contains("pid=4242") || $0.contains("pid=4243") })
+    }
+
+    /// A keep-list match is protected like a foreign uid: neither signalled nor
+    /// walked through, so the `gpg-agent` an escaped job started and the
+    /// `scdaemon` beneath it both survive. **The old code signalled all three.**
+    @Test("a keep-list match stops the descendant walk")
+    func aKeepListMatchStopsTheWalk() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 701, 702] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 700, command: "/usr/bin/make dev"),
+                entry(pid: 701, ppid: 700, command: "/opt/homebrew/bin/gpg-agent --homedir /x --daemon"),
+                entry(pid: 702, ppid: 701, command: "scdaemon --multi-server"),
+            ],
+            cwdByPID: [700: dead, 701: dead, 702: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(signaller.terminated == [700])
+        #expect(result.planned.contains("REAP orphan-process pid=700 tree=1 via=cwd \(dead)"))
+    }
+
+    /// Once the file exists it is the whole list. An empty file protects
+    /// nothing, so the background host the defaults would keep is reclaimed;
+    /// a pattern of the user's own then protects its process while the
+    /// default still does not. Discriminates against the old code (the second
+    /// sweep would signal 4243) and against merging the file with the defaults
+    /// (the first sweep would keep 4242).
+    @Test("a user's keep-list file replaces the shipped defaults")
+    func aUserFileReplacesTheDefaults() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        let processes = [
+            entry(pid: 4242, command: "/opt/acme/bin/claude --bg-pty-host"),
+            entry(pid: 4243, command: "/opt/acme/bin/acme-agent --serve"),
+        ]
+        let cwds: [Int32: String] = [4242: dead, 4243: dead]
+
+        try Data().write(to: URL(fileURLWithPath: keepListPath))
+        let emptyList = FakeProcessSignaller()
+        emptyList.behaviors[4242] = .init(aliveAfterTerminate: false)
+        emptyList.behaviors[4243] = .init(aliveAfterTerminate: false)
+        _ = await makeGC(
+            db: db, signaller: emptyList, processes: processes, cwdByPID: cwds,
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+        #expect(emptyList.terminated == [4242, 4243], "an empty file is a list with no patterns")
+
+        try Data("# mine\nacme-agent\n".utf8).write(to: URL(fileURLWithPath: keepListPath))
+        let ownList = FakeProcessSignaller()
+        ownList.behaviors[4242] = .init(aliveAfterTerminate: false)
+        ownList.behaviors[4243] = .init(aliveAfterTerminate: false)
+        _ = await makeGC(
+            db: db, signaller: ownList, processes: processes, cwdByPID: cwds,
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+        #expect(ownList.terminated == [4242], "the user's pattern protects; the shipped one no longer does")
+    }
+
+    /// A file that exists but cannot be read skips the phase: the sweep never
+    /// guesses which list the user meant, and falling back to the defaults
+    /// would drop the user's own protections. Discriminates against the old
+    /// code, which reclaimed 4242.
+    @Test("an unreadable keep-list file skips the phase, and says so")
+    func anUnreadableKeepListSkipsThePhase() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let dead = try await makeWorktree(db: db, repo: repo, name: "gone", archived: true)
+        try Data("gpg-agent\n".utf8).write(to: URL(fileURLWithPath: keepListPath))
+        try fm.setAttributes([.posixPermissions: 0], ofItemAtPath: keepListPath)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keepListPath) }
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveAfterTerminate: false)
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [entry(pid: 4242)], cwdByPID: [4242: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep()
+
+        #expect(signaller.terminated.isEmpty)
+        #expect(signaller.killed.isEmpty)
+        #expect(result.planned.contains("KEEP keep-list-unreadable orphan-processes"))
+        #expect(!result.planned.contains { $0.hasPrefix("REAP orphan-process") })
+
+        let dryRun = await makeGC(
+            db: db, signaller: FakeProcessSignaller(),
+            processes: [entry(pid: 4242)], cwdByPID: [4242: dead],
+            now: Date().addingTimeInterval(7200)
+        ).sweep(dryRun: true)
+        #expect(dryRun.planned.contains("KEEP keep-list-unreadable orphan-processes"))
+    }
+
+    /// `nohup zsh -c 'cd /tmp && node server.js' &`: the root is a hidden
+    /// `/bin/zsh` whose cwd left the worktree, and only its child shows the
+    /// archived worktree's marker. Inferring the root from its children would
+    /// kill a single-instance app opened from a tab along with every window it
+    /// holds, so the gap is accepted and the root is kept. Discriminates when
+    /// inverted: an upward inference would signal 700 and 701.
+    @Test("the accepted gap: a hidden root with its cwd elsewhere is kept though its child is marked")
+    func theAcceptedGapKeepsAHiddenRootWhoseChildIsMarked() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCEnabled(true)
+        try await db.config.setGCOrphanProcessesEnabled(true)
+        let repo = try await makeRepo(db: db)
+        let gone = try await makeWorktreeRow(db: db, repo: repo, name: "gone", archived: true)
+        let signaller = FakeProcessSignaller()
+        for pid: Int32 in [700, 701, 900] {
+            signaller.behaviors[pid] = .init(aliveAfterTerminate: false)
+        }
+
+        let result = await makeGC(
+            db: db, signaller: signaller,
+            processes: [
+                entry(pid: 700, command: "/bin/zsh -c cd /tmp && node server.js"),
+                entry(pid: 701, ppid: 700, command: "/usr/bin/node server.js"),
+                entry(pid: 900),
+            ],
+            cwdByPID: [700: "/private/tmp", 701: gone.path, 900: gone.path],
+            now: Date().addingTimeInterval(7200),
+            markers: [700: .hidden, 701: marked(worktree: gone.id)]
+        ).sweep()
+
+        #expect(signaller.terminated == [900])
+        #expect(!result.planned.contains { $0.contains("pid=700") })
     }
 }
 

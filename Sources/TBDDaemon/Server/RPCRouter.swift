@@ -435,6 +435,14 @@ public final class RPCRouter: Sendable {
     /// it signalled.
     let processSignaller: any ProcessSignaller
 
+    /// How the hook-caller guard reads the kernel's process table: one
+    /// `KERN_PROC_ALL` read per checked hook event, walked for the peer's
+    /// ancestry. Injected so a test can state a table — a holder, its job, a
+    /// caller below it and a caller outside it — without a process to
+    /// inspect. Nil means the read failed, which the guard answers by
+    /// accepting.
+    let processTableReader: @Sendable () -> ProcessTableSnapshot?
+
     /// Behavior seam for send-path settling after an image paste and the
     /// signal ending's poll before an in-place profile replacement. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
@@ -483,12 +491,14 @@ public final class RPCRouter: Sendable {
         actuationLog: ActuationLog,
         remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         modelProfileKeychain: ModelProfileKeychain.Store = ModelProfileKeychain.Store(),
+        processTableReader: @escaping @Sendable () -> ProcessTableSnapshot? = { ProcessTableSnapshot.read() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionsDir = sessionsDir
         self.modelProfileKeychain = modelProfileKeychain
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
+        self.processTableReader = processTableReader
         self.clock = clock
         self.now = now
         self.paneProcessInspector = paneProcessInspector
@@ -811,12 +821,15 @@ public final class RPCRouter: Sendable {
                     request.paramsData, actor: request.actor)
             case RPCMethod.terminalSwapProfile:
                 return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
+            // The hook-only methods are handed the connection too: each checks
+            // that its caller descends from the tab it names
+            // (`RPCRouter+HookCallerGuard.swift`).
             case RPCMethod.terminalSessionEvent:
-                return try await handleTerminalSessionEvent(request.paramsData)
+                return try await handleTerminalSessionEvent(request.paramsData, connection: connection)
             case RPCMethod.terminalSessionEnded:
-                return try await handleTerminalSessionEnded(request.paramsData)
+                return try await handleTerminalSessionEnded(request.paramsData, connection: connection)
             case RPCMethod.terminalSessionTitle:
-                return try await handleTerminalSessionTitle(request.paramsData)
+                return try await handleTerminalSessionTitle(request.paramsData, connection: connection)
             case RPCMethod.sessionStates:
                 return try await handleSessionStates(request.paramsData)
             case RPCMethod.notify:
@@ -844,15 +857,16 @@ public final class RPCRouter: Sendable {
             case RPCMethod.prBindingsAll:
                 return try await handlePRBindingsAll()
             case RPCMethod.prAttach:
-                return try await handlePRAttach(request.paramsData)
+                return try await handlePRAttach(request.paramsData, connection: connection)
             case RPCMethod.prDetach:
                 return try await handlePRDetach(request.paramsData)
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.claudeRateLimitDetected:
-                return try await handleRateLimitDetected(request.paramsData)
+                return try await handleRateLimitDetected(request.paramsData, connection: connection)
             case RPCMethod.claudeTransientApiErrorDetected:
-                return try await handleTransientApiErrorDetected(request.paramsData)
+                return try await handleTransientApiErrorDetected(
+                    request.paramsData, connection: connection)
             case RPCMethod.terminalCancelScheduledResume:
                 return try await handleCancelScheduledResume(request.paramsData)
             case RPCMethod.attachRequest:
@@ -900,9 +914,11 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalTranscriptItemFullBody:
                 return try await handleTerminalTranscriptItemFullBody(request.paramsData)
             case RPCMethod.terminalAskUserQuestionPending:
-                return try await handleTerminalAskUserQuestionPending(request.paramsData)
+                return try await handleTerminalAskUserQuestionPending(
+                    request.paramsData, connection: connection)
             case RPCMethod.terminalAskUserQuestionCleared:
-                return try await handleTerminalAskUserQuestionCleared(request.paramsData)
+                return try await handleTerminalAskUserQuestionCleared(
+                    request.paramsData, connection: connection)
             case RPCMethod.terminalAskUserQuestionSatisfied:
                 return try await handleTerminalAskUserQuestionSatisfied(request.paramsData)
             case RPCMethod.terminalProgramStatusReport:
@@ -2217,8 +2233,20 @@ public final class RPCRouter: Sendable {
         return try RPCResponse(result: PRBindingsAllResult(worktrees: entries))
     }
 
-    private func handlePRAttach(_ paramsData: Data) async throws -> RPCResponse {
+    /// `pr.attach`. A hook-sourced attach (`tbd pr bind --from-hook`) names its
+    /// worktree from an inherited `TBD_WORKTREE_ID`, so it is refused when the
+    /// caller is proven not to descend from any of that worktree's tabs, with
+    /// the OK an unrecognised hook event gets. Every other source is a person
+    /// or the daemon choosing the worktree, and is not checked.
+    private func handlePRAttach(
+        _ paramsData: Data, connection: RPCConnectionContext? = nil
+    ) async throws -> RPCResponse {
         let params = try decoder.decode(PRBindingRefParams.self, from: paramsData)
+        if params.source == PRBindingSource.hook.rawValue,
+           await hookCallerRefused(
+               method: RPCMethod.prAttach, worktreeID: params.worktreeID, connection: connection) {
+            return .ok()
+        }
         let parsed: ParsedPRURL
         switch await resolvePRRef(params) {
         case .resolved(let value):
