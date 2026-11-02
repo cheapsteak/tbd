@@ -384,33 +384,45 @@ struct SidebarGuideLineTests {
 
     /// A change to the system colours empties the tint cache, and every row
     /// view drawing with that cache is marked for display, so a row nothing
-    /// else redraws takes the new tint. A row view drawing with a cache on
-    /// another centre is not.
+    /// else redraws takes the new tint: AppKit's next display pass draws the
+    /// row, whose line resolves the tint afresh and fills the cache again. A
+    /// row view drawing with a cache on another centre is not redrawn.
+    ///
+    /// The mark shows only in what the rows draw. Reading `needsDisplay` back
+    /// cannot show it: set to true, it read false in every arrangement
+    /// measured, in a window or out of one, though the next display pass
+    /// drew the view. Nor does `window.displayIfNeeded()` draw anything in
+    /// this host; the display pass runs on a run-loop turn.
     @Test func systemColorsChangeRedrawsTheRowsDrawingTheTint() throws {
         let center = NotificationCenter()
         let tints = SidebarGuideLine.HighlightTintCache(center: center)
         let otherTints = SidebarGuideLine.HighlightTintCache(center: NotificationCenter())
+        // Hovered, with a line of its own, so the row draws a line in the tint.
+        let tinted = SidebarRowView.Configuration(drawsStub: true, isHovered: true)
         let drawing = SidebarRowView(frame: Self.bounds, highlightTints: tints)
         let elsewhere = SidebarRowView(frame: Self.bounds.offsetBy(dx: 0, dy: Self.bounds.height),
                                        highlightTints: otherTints)
+        drawing.configuration = tinted
+        elsewhere.configuration = tinted
+        let elsewhereDraws = DrawCounter(frame: elsewhere.bounds)
+        elsewhere.addSubview(elsewhereDraws)
         let controller = NSViewController()
         controller.view = NSView(frame: NSRect(x: 0, y: 0, width: Self.bounds.width, height: 2 * Self.bounds.height))
         controller.view.addSubview(drawing)
         controller.view.addSubview(elsewhere)
         let host = OffscreenAppKitHost(controller: controller, size: controller.view.frame.size)
         defer { host.tearDown() }
-        host.window.displayIfNeeded()
-        drawing.needsDisplay = false
-        elsewhere.needsDisplay = false
-        let cleared = [drawing.needsDisplay, elsewhere.needsDisplay]
-        let neither = [false, false]
-        try #require(cleared == neither, "A row view stayed marked for display before the change")
+        let drawn = RunLoopPump.until { !tints.colors.isEmpty && !otherTints.colors.isEmpty && elsewhereDraws.count > 0 }
+        try #require(drawn, "The rows never drew their lines in the tint")
+        let elsewhereDrawn = elsewhereDraws.count
 
         center.post(name: NSColor.systemColorsDidChangeNotification, object: nil)
-        #expect(tints.colors.isEmpty)
-        let marked = [drawing.needsDisplay, elsewhere.needsDisplay]
-        let onlyTheDrawingRow = [true, false]
-        #expect(marked == onlyTheDrawingRow, "The rows marked for display after the change: \(marked)")
+        #expect(tints.colors.isEmpty, "A change to the system colours kept the old tint")
+        let redrawn = RunLoopPump.until { !tints.colors.isEmpty }
+        #expect(redrawn, "The row drawing with the emptied cache was not redrawn, so it keeps the old tint")
+        // The pass that redrew the row would have redrawn the other one too,
+        // had it been marked.
+        #expect(elsewhereDraws.count == elsewhereDrawn, "A row drawing with a cache on another centre was redrawn")
     }
 
     /// `color`'s Display P3 components, red, green, blue and alpha.
@@ -1462,6 +1474,16 @@ struct SidebarGuideLineTests {
         let childEnds: [[Guide]] = [[], [Guide(level: 0, role: .last, fadeStart: SidebarGuideLine.continuedFadeStart)]]
         #expect(stubs == rootStarts)
         #expect(guides == childEnds)
+    }
+}
+
+/// A transparent view that counts the times it draws: laid over a row view,
+/// it draws whenever the display pass draws the row.
+private final class DrawCounter: NSView {
+    private(set) var count = 0
+
+    override func draw(_ dirtyRect: NSRect) {
+        count += 1
     }
 }
 
