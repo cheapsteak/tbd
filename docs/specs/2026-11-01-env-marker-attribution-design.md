@@ -234,10 +234,11 @@ as an editable default rather than as compiled law:
 
 herdr-core stamps its token with a monotonic time so a scan can skip every
 process older than the token, which both saves reads and defeats pid reuse.
-TBD needs neither. The sweep reads environments only for escaped roots and
-their trees — tens of processes, not the roughly 945 on the measured machine —
-and pid reuse is already handled twice: by the start-time check after each
-read, and by the re-check before each signal volley. `TBD_TERMINAL_INCARNATION_ID`
+TBD needs neither. The sweep reads environments only for escaped roots
+outside live worktrees and for the trees it plans. On the measured machine that
+was 485 of 1,177 processes, and reading all 485 took about 20 ms from Python,
+once an hour. Pid reuse is already handled twice: by the start-time check after
+each read, and by the re-check before each signal volley. `TBD_TERMINAL_INCARNATION_ID`
 stays a plain UUID.
 
 ### Forged markers
@@ -438,8 +439,9 @@ including windows for other projects. The tree guard does not help, because
 those children inherit the app's own markers.
 
 **A time-stamped token.** It speeds up scans of the whole process table and
-defeats pid reuse. The sweep scans tens of processes, and pid reuse is already
-checked at read time and at signal time.
+defeats pid reuse. The sweep reads only escaped roots, about 20 ms of reads
+per hourly sweep on the measured machine, and pid reuse is already checked at
+read time and at signal time.
 
 **Compile the daemon list.** Fewer surfaces, but the list encodes facts about
 other tools' argv that change with their releases, and toolsets differ. A
