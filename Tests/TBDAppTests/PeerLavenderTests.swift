@@ -52,14 +52,18 @@ struct PeerLavenderTests {
         let appearance: NSAppearance
         let lavender: (r: Double, g: Double, b: Double)
         let amber: (r: Double, g: Double, b: Double)
+        let lavenderColor: NSColor
+        let amberColor: NSColor
     }
 
     private func cases() throws -> [Case] {
         let aqua = try #require(NSAppearance(named: .aqua))
         let darkAqua = try #require(NSAppearance(named: .darkAqua))
         return [
-            Case(name: "light", appearance: aqua, lavender: (156, 115, 208), amber: (183, 121, 31)),
-            Case(name: "dark", appearance: darkAqua, lavender: (180, 150, 220), amber: (210, 153, 34))
+            Case(name: "light", appearance: aqua, lavender: (156, 115, 208), amber: (183, 121, 31),
+                 lavenderColor: PeerLavender.light, amberColor: AttentionAmber.light),
+            Case(name: "dark", appearance: darkAqua, lavender: (180, 150, 220), amber: (210, 153, 34),
+                 lavenderColor: PeerLavender.dark, amberColor: AttentionAmber.dark)
         ]
     }
 
@@ -72,10 +76,8 @@ struct PeerLavenderTests {
     @Test("lavender has the luminance of the amber it sits beside, in both appearances")
     func luminanceMatchesAmber() throws {
         for c in try cases() {
-            let lavenderColor = c.name == "light" ? PeerLavender.light : PeerLavender.dark
-            let amberColor = c.name == "light" ? AttentionAmber.light : AttentionAmber.dark
-            let lavender = luminance(try #require(srgb(lavenderColor, in: c.appearance)))
-            let amber = luminance(try #require(srgb(amberColor, in: c.appearance)))
+            let lavender = luminance(try #require(srgb(c.lavenderColor, in: c.appearance)))
+            let amber = luminance(try #require(srgb(c.amberColor, in: c.appearance)))
             #expect(
                 abs(lavender - amber) <= Self.luminanceTolerance,
                 "\(c.name): lavender \(lavender) vs amber \(amber)"
@@ -119,8 +121,7 @@ struct PeerLavenderTests {
             let sidebar = NSColor(SuffixRowIndicator.attention.color)
             let got = try #require(srgb(sidebar, in: c.appearance), "sidebar attention did not resolve in \(c.name)")
             #expect(matches(got, c.amber), "\(c.name): sidebar attention changed")
-            let amberColor = c.name == "light" ? AttentionAmber.light : AttentionAmber.dark
-            let amber = try #require(srgb(amberColor, in: c.appearance))
+            let amber = try #require(srgb(c.amberColor, in: c.appearance))
             #expect(matches(amber, c.amber), "\(c.name): AttentionAmber changed")
         }
     }

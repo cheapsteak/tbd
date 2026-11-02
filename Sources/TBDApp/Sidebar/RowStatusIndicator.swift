@@ -55,12 +55,9 @@ enum SuffixRowIndicator: Equatable {
         case .error:
             return .red
         case .attention:
-            // Light: amber #B7791F readable on light sidebar (~#F1F1F1).
-            // Dark:  GitHub attention.fg #D29922 readable on dark sidebar.
-            return adaptiveColor(
-                light: NSColor(srgbRed: 183 / 255, green: 121 / 255, blue: 31 / 255, alpha: 1),
-                dark: NSColor(srgbRed: 210 / 255, green: 153 / 255, blue: 34 / 255, alpha: 1)
-            )
+            // The shared attention amber: #B7791F light, GitHub attention.fg
+            // #D29922 dark.
+            return AttentionAmber.color
         case .working:
             return .secondary
         case .suspended:

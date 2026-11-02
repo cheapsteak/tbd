@@ -25,8 +25,8 @@ enum AttentionAmber {
     }
 
     /// The pair resolved per appearance, fully opaque — the form a glyph or a
-    /// label wants. `RowStatusIndicator`'s `.attention` case and
-    /// `PRStatusPresentation`'s dark swatch still spell these numbers out inline;
-    /// folding them onto this property is a mechanical follow-up.
+    /// label wants. `RowStatusIndicator`'s `.attention` case draws it;
+    /// only `PRStatusPresentation`'s dark swatch still spells the numbers out
+    /// inline.
     static var color: Color { adaptiveColor(light: light, dark: dark) }
 }
