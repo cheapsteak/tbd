@@ -549,6 +549,55 @@ struct OrphanProcessCollectorTests {
         #expect(subject.readMarkers(pid: 50, plannedStart: Date(timeIntervalSince1970: 900_000)) == .hidden)
     }
 
+    // The three tests above pin `readMarkers` alone; these two pin that both
+    // sweep call sites go through it. Fails against a `candidates` that calls
+    // `environmentReader` directly: the archived marker would then admit 50 by
+    // env, exactly as the verified control does.
+    @Test("a root whose start moved after the plan is judged by its cwd alone")
+    func candidatesReadsARootsMarkersThroughTheStartTimeCheck() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let processes = [entry(pid: 50)]
+        let starts = plannedStarts(processes, at: now)
+        let moved = starts.mapValues { $0.addingTimeInterval(3) }
+        let environment = [Int32(50): marked(archivedWorktree.uuidString)]
+
+        func found(liveStarts: [Int32: Date]) -> [OrphanProcessCandidate] {
+            collector(now: now, environment: environment, startTimes: liveStarts).candidates(
+                processes: processes, cwdByPID: [50: "/"], cwdsCapturedAt: now,
+                roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600,
+                markerRows: markerRows(), plannedStarts: starts)
+        }
+
+        let verified = found(liveStarts: starts).map(\.route)
+        #expect(verified == [OrphanAdmissionRoute.env], "the control: an unmoved start admits by env")
+        #expect(
+            found(liveStarts: moved).isEmpty,
+            "the read is hidden, so the cwd decides, and `/` admits nothing")
+    }
+
+    // Fails against a `treeNamesSomethingLive` that calls `environmentReader`
+    // directly: 61's live marker would then keep the tree, exactly as the
+    // verified control does.
+    @Test("a tree member whose start moved after the plan does not keep the tree")
+    func theTreeGuardReadsMarkersThroughTheStartTimeCheck() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let processes = [entry(pid: 60), entry(pid: 61, ppid: 60)]
+        let starts = plannedStarts(processes, at: now)
+        let moved = starts.mapValues { $0.addingTimeInterval(3) }
+        let environment = [Int32(61): marked(liveWorktree.uuidString)]
+        let tree = collector().descendantClosure(of: 60, processes: processes, protected: [])
+        #expect(tree == [61, 60])
+
+        let verified = collector(now: now, environment: environment, startTimes: starts)
+        #expect(
+            verified.treeNamesSomethingLive(tree, plannedStarts: starts, rows: markerRows()),
+            "the control: an unmoved start lets 61's marker keep the tree")
+        let reissued = collector(now: now, environment: environment, startTimes: moved)
+        #expect(
+            !reissued.treeNamesSomethingLive(tree, plannedStarts: starts, rows: markerRows()),
+            "61's pid now names another process, whose marker speaks for nothing")
+    }
+
     // The old code had no env route: a root at `/` was never a candidate.
     @Test("the env route admits a root whose cwd left the worktree, naming the archived worktree")
     func theEnvRouteAdmitsARootWhoseCwdLeft() {
