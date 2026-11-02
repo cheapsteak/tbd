@@ -422,6 +422,15 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             base: ProcessInfo.processInfo.environment, contractVersion: contractVersion)
         let outPipe = Pipe()
         let inPipe = Pipe()
+        // A failed pipe(2) hands back descriptor 0 (see `isUsablePipe`), which
+        // is not this link's to mark or write to. Returning here is handled
+        // like any other failed connection: the outer loop backs off and
+        // retries.
+        guard isUsablePipe(inPipe) else {
+            peerBridgeLogger.error(
+                "messages \(self.config.name, privacy: .public) could not create its stdin pipe; retrying after backoff")
+            return
+        }
         // A provider can exit or close its stdin under any write this link
         // makes, `hello` and keepalives included, and every such write fails
         // with EPIPE. Marking the write end before the first write keeps those

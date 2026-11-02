@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import os
-import TBDShared
 
 /// Composite pane identity. tmux pane IDs ("%0", "%1", …) are only unique
 /// within one tmux server, and TBD runs one server per repo — so every
