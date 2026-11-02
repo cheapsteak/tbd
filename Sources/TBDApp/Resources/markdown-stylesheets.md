@@ -41,7 +41,7 @@ elements appear as you would expect: `h1`–`h6`, `p`, `ul`, `ol`, `li`,
 `blockquote`, `pre`, `code`, `table`, `thead`, `th`, `td`, `hr`, `img`, `a`,
 `strong`, `em`, `del`, and `input[type=checkbox]` for task lists.
 
-Four classes have no standard equivalent, so a stylesheet that ignores them will
+Five classes have no standard equivalent, so a stylesheet that ignores them will
 render those pieces unstyled:
 
 - `.markdown-alert` wraps a GitHub-style callout, with one of
@@ -51,6 +51,12 @@ render those pieces unstyled:
 - `.tbd-oversized-image` replaces an image too large to inline (over 2 MiB, or
   once the document's 16 MiB budget is spent).
 - `.footnotes` wraps the footnote list at the end of the document.
+- `.tbd-front-matter` is a file's YAML front matter, shown above the body. It
+  is a `<dl>` with a `<dt>` per top-level key and a `<dd>` for its value; a
+  value written over several lines (a nested list or map, a `|` or `>` block)
+  sits in a `<pre>` inside its `<dd>`. When the block is not a set of top-level
+  keys, it is instead one `<pre class="tbd-front-matter">` holding the YAML as
+  written.
 
 ## Light and dark
 

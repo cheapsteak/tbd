@@ -198,6 +198,44 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
   font-size: 0.857em;   /* 12px */
 }
 
+/* YAML front matter. TBD lifts it out before rendering (CommonMark would
+   make it an <hr> and a setext <h2>) and shows it as a key/value header:
+   metadata, so quieter than the body, and separated from it by one rule. */
+.tbd-front-matter {
+  margin: 0;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--md-rule);
+  color: var(--md-fg-2);
+  font-size: 0.929em;   /* 13px */
+  line-height: 1.45;
+}
+dl.tbd-front-matter {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  gap: 2px 14px;
+  align-items: baseline;
+}
+.tbd-front-matter dt {
+  color: var(--md-muted);
+  font-family: var(--md-mono);
+  /* Against --md-size, not em: the block is already 13px. */
+  font-size: calc(var(--md-size) * 11 / 14);   /* 11px */
+  overflow-wrap: anywhere;
+}
+.tbd-front-matter dd { margin: 0; min-width: 0; }
+/* Nested values, block scalars, and a block that is not top-level keys at
+   all keep their lines as written. */
+.tbd-front-matter pre,
+pre.tbd-front-matter {
+  background: none;
+  border-radius: 0;
+  overflow-x: visible;
+  white-space: pre-wrap;
+  font-size: calc(var(--md-size) * 12 / 14);   /* 12px */
+}
+.tbd-front-matter pre { margin: 0; padding: 0; }
+.tbd-front-matter + :is(h1, h2, h3, h4, h5, h6) { margin-top: 0; }
+
 /* Alert accents are semantic (severity), not decorative — they carry the same
    meaning as the keyword GitHub renders them from. The source palette has
    three semantic hues, so informational and advisory keywords pair up. */
