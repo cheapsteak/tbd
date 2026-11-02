@@ -26,11 +26,14 @@ fi
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-test.XXXXXX")"
 # Only this shell may delete TEST_TMP. A child bash forks for `sleep 30 &` keeps
-# a copy of this trap until it execs, and runs it if a signal lands first. bash
-# 3.2 has no BASHPID, so there the check always passes; it runs no trap in a
-# pre-exec child anyway.
-TEST_TMP_OWNER="${BASHPID:-$$}"
-trap '[[ "${BASHPID:-$$}" == "$TEST_TMP_OWNER" ]] && rm -rf "$TEST_TMP"' EXIT
+# a copy of this trap until it execs, and runs it if a signal lands first, on
+# bash 3.2 as well as bash 5.
+HARNESS_PID="$$"
+# True only in the harness's own shell. `$$` names the harness in every child it
+# forks too, and bash 3.2 has no BASHPID, so ask a process this shell execs for
+# its parent pid.
+in_harness_shell() { [ "$(exec /bin/sh -c 'echo "$PPID"')" = "$HARNESS_PID" ]; }
+trap 'in_harness_shell && rm -rf "$TEST_TMP"' EXIT
 
 # Every nested `bash` — the cases' `bash "$SCRIPT"`, update.sh's own re-exec,
 # and `#!/usr/bin/env bash` stubs — runs the same interpreter as this harness,
@@ -3591,8 +3594,8 @@ test_release_failed_signing_restores_the_link
 # directory under the running suite. No case can win that race on demand, so
 # this one runs the trap's own text in a subshell, which is a forked child just
 # as `cmd &` is until its exec, aimed at a decoy so the real directory is safe.
-# On bash 3.2 there is no BASHPID and no pre-exec child runs a trap, so the
-# check always passes there and is not asserted.
+# It runs on every bash. On bash 3.2 a check built on `${BASHPID:-$$}` would
+# fail the forked-child assertion below, which keeps that form from coming back.
 dir_state() { if [ -d "$1" ]; then echo present; else echo gone; fi; }
 
 # Run trap text $1 in this shell with TEST_TMP aimed at directory $2.
@@ -3602,10 +3605,6 @@ run_trap_aimed_at() {
 }
 
 test_only_the_harness_shell_deletes_the_scratch_dir() {
-    if [ -z "${BASHPID:-}" ]; then
-        pass "bash $BASH_VERSION has no BASHPID, so the trap owner check is not checked here"
-        return 0
-    fi
     local spec body unguarded decoy
     spec="$(trap -p EXIT)"
     eval "set -- $spec"

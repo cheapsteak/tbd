@@ -27,14 +27,17 @@ mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
 # Only this shell may delete MUTANT_DIR. A child that bash forks for `sleep 30 &`
 # keeps a copy of this trap until it execs `sleep`, and bash runs the EXIT trap
-# when a signal kills it in that window. The kill-discipline cases below kill
-# their sleeps microseconds after spawning them. Without the check, the child
-# deleted the directory and every later `mutant_of` wrote into one that no longer
-# existed. `${BASHPID:-$$}` because bash 3.2 has no BASHPID; the comment above
-# test_only_the_harness_shell_deletes_the_mutant_dir says why that is safe.
+# when a signal kills it in that window, on bash 3.2 as well as bash 5. The
+# kill-discipline cases below kill their sleeps microseconds after spawning
+# them. Without the check, the child deleted the directory and every later
+# `mutant_of` wrote into one that no longer existed.
+HARNESS_PID="$$"
+# True only in the harness's own shell. `$$` names the harness in every child it
+# forks too, and bash 3.2 has no BASHPID, so ask a process this shell execs for
+# its parent pid.
+in_harness_shell() { [ "$(exec /bin/sh -c 'echo "$PPID"')" = "$HARNESS_PID" ]; }
 MUTANT_DIR="$(mktmpd)"
-MUTANT_DIR_OWNER="${BASHPID:-$$}"
-trap '[[ "${BASHPID:-$$}" == "$MUTANT_DIR_OWNER" ]] && rm -rf "$MUTANT_DIR"' EXIT
+trap 'in_harness_shell && rm -rf "$MUTANT_DIR"' EXIT
 
 # mutant_of NAME FUNCTION SED_EXPR: write a copy of the script with one guard
 # deliberately weakened by SED_EXPR, and set NAME to its path. FUNCTION is the
@@ -328,14 +331,14 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
 # on demand, so this one runs the trap's own code in a subshell, which is a
 # forked child exactly as `sleep 30 &` is until its exec.
 #
-# The guard needs BASHPID, which bash 3.2 lacks. On bash 3.2 it always passes,
-# and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
-# in a child that had not exec'd yet. It dropped the signal instead.
+# The check runs on every bash. On bash 3.2 a check built on `${BASHPID:-$$}`
+# would fail the forked-child assertion below, which keeps that form from
+# coming back.
 #
 # The script's own `trap cleanup EXIT INT TERM` gets no such guard, on purpose.
-# The flake bot runs it under bash 3.2, where the guard could not tell a child
-# from its parent and no pre-exec child runs a trap anyway. It signals its
-# spinners and deadline commands long after they exec. And the bash 3.2 lint
+# It signals its spinners and deadline commands long after they exec. On bash
+# 3.2 its own TERM trap makes a pre-exec child drop a SIGTERM rather than run a
+# trap (0 of 300 tries ran one, measured). And the bash 3.2 lint
 # (scripts/flake-bash32.test.sh) forbids BASHPID in it. Here, a pre-exec child
 # that runs `cleanup` finds no spinners in its copy of SPINNER_PIDS and exits.
 
@@ -350,10 +353,6 @@ run_trap_aimed_at() {
 }
 
 test_only_the_harness_shell_deletes_the_mutant_dir() {
-  if [[ -z "${BASHPID:-}" ]]; then
-    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap guard is not checked here"
-    return 0
-  fi
   local spec body unguarded decoy
   spec="$(trap -p EXIT)"
   eval "set -- $spec"
