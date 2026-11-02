@@ -355,8 +355,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         let blockHeight = nameSize.height + subtitleSizes.reduce(0) { $0 + $1.height - 2 }
         var y = ((bounds.height - blockHeight) / 2).rounded()
         nameField.frame = NSRect(x: x, y: y, width: min(nameSize.width, blockWidth), height: nameSize.height)
-        // `WorktreeRowView.updateNameTruncation`'s half-point tolerance.
-        isNameTruncated = nameSize.width > nameField.frame.width + 0.5
+        isNameTruncated = SidebarCellKit.truncates(nameField)
         if let editor = renameEditor {
             editor.view.frame = NSRect(x: x, y: 0, width: max(room - 4, 40), height: bounds.height)
         }

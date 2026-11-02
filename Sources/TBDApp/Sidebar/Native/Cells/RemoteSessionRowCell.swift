@@ -146,7 +146,7 @@ final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
         let blockHeight = nameSize.height + (captionField.isHidden ? 0 : captionSize.height - 2)
         let top = ((bounds.height - blockHeight) / 2).rounded()
         nameField.frame = NSRect(x: x, y: top, width: min(nameSize.width, blockWidth), height: nameSize.height)
-        isNameTruncated = nameSize.width > nameField.frame.width + 0.5
+        isNameTruncated = SidebarCellKit.truncates(nameField)
         if let editor = renameEditor {
             editor.view.frame = NSRect(
                 x: x, y: 0, width: max(bounds.width - x - trailingWidth - 4, 40), height: bounds.height)
