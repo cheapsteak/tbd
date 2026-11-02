@@ -396,17 +396,16 @@ enum SidebarGuideLine {
         func vertical(from start: CGFloat, to end: CGFloat) -> NSRect? {
             end > start ? NSRect(x: left, y: start, width: width, height: end - start) : nil
         }
-        var verticals: [NSRect]
+        var verticals: [NSRect] = []
         var turn: Turn?
         switch role {
         case .passing, .stub:
-            verticals = [vertical(from: top, to: bottom)].compactMap { $0 }
+            if let run = vertical(from: top, to: bottom) { verticals.append(run) }
         case .branch:
-            verticals = [vertical(from: top, to: bottom)].compactMap { $0 }
+            if let run = vertical(from: top, to: bottom) { verticals.append(run) }
             turn = Turn(lineX: lineX, startY: tickY - branchRadius, tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         case .last:
-            verticals = []
             turn = Turn(lineX: lineX, startY: min(top, tickY - branchRadius), tickY: tickY, endX: endX,
                         radius: branchRadius, width: width)
         }
@@ -418,8 +417,9 @@ enum SidebarGuideLine {
             let spanBottom = verticals.first?.maxY ?? turn?.turnY ?? bottom
             let gapTop = ((bounds.midY - pinGapHalfHeight) * scale).rounded(.down) / scale
             let gapBottom = ((bounds.midY + pinGapHalfHeight) * scale).rounded(.up) / scale
-            verticals = [vertical(from: spanTop, to: min(gapTop, spanBottom)),
-                         vertical(from: max(gapBottom, spanTop), to: spanBottom)].compactMap { $0 }
+            verticals.removeAll(keepingCapacity: true)
+            if let above = vertical(from: spanTop, to: min(gapTop, spanBottom)) { verticals.append(above) }
+            if let below = vertical(from: max(gapBottom, spanTop), to: spanBottom) { verticals.append(below) }
             turn = nil
             guard !verticals.isEmpty else { return nil }
         }
