@@ -106,6 +106,14 @@ Verified by execution: `<details>` became `<!-- raw HTML omitted -->`,
 for injected attributes. This holds only while safe mode holds; enabling `unsafe_` would require
 an allowlist sanitizer and re-opens the `onerror`/`onload` class.
 
+One block of the page does not come from comrak. A leading YAML front-matter block is split off
+before rendering, since CommonMark would turn it into a rule and a setext heading, and
+`MarkdownFrontMatter` builds it into a key/value header itself. That header is guarded by TBD's
+own escaping instead: every piece of file text in it is HTML-escaped (`&`, `<`, `>`, `"`, `'`),
+and it is inserted after the link and image passes, so neither rewrites it. So the body relies
+on comrak's safe mode and the front-matter header on that escaping; nothing else stands between
+file text and the page.
+
 Accepted cost: `<details>`/`<summary>`, `<kbd>`, `<br>`, and `<img align>` do not render.
 
 ### Freeform CSS as the configuration format
@@ -134,7 +142,8 @@ Scope is global. No per-repo override and no repo-local config file.
 > false` strips `srcdoc` and blocks scripting in every frame.
 >
 > Consequence: comrak's safe mode becomes the single layer preventing script injection from
-> markdown when mermaid is enabled, rather than one of two. It remains the load-bearing layer in
+> the markdown body when mermaid is enabled, rather than one of two (the front-matter header
+> relies on TBD's escaping, above). It remains the load-bearing layer in
 > both designs.
 
 The display webview uses a `.nonPersistent()` data store, installs **no script message
