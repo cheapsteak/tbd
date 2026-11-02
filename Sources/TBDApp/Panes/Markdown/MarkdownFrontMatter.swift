@@ -9,13 +9,18 @@ import Foundation
 /// of showing it. So the builder splits it off before comrak sees the text and
 /// shows it as a properties header above the body (`html`).
 ///
-/// A block is front matter only when the very first line is `---`, the line
-/// after it is not blank, a later line is `---` or `...` with no code fence
-/// before it, and at least one line between is a column-0 `key:` line (or
-/// there are no lines at all). Anything else is left exactly as it was: a
-/// document may open with a thematic break, a banner or a heading between two
-/// rules, and a `---` inside a fenced YAML example must not close a block that
-/// never was one.
+/// A block is front matter only when all of these hold:
+/// - the very first line is `---` and the line after it is not blank;
+/// - the first line that is not a column-0 `#` comment is a `key:` line, or
+///   the block is empty;
+/// - a later line closes it: `---`, or `...` when the block reads cleanly as
+///   keys;
+/// - no code fence comes before the closer, except indented inside a `|` or
+///   `>` block scalar.
+///
+/// Anything else is left exactly as it was: a document may open with a
+/// thematic break, a banner or a heading between two rules, and a `---` inside
+/// a fenced YAML example must not close a block that never was one.
 struct MarkdownFrontMatter: Equatable, Sendable {
 
     /// One top-level `key: value` line and the indented lines that continue it.
@@ -23,10 +28,12 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         let key: String
         /// The rest of the key's own line, trimmed. Empty for `key:`, and for
         /// a block scalar's `|` or `>` indicator, which is syntax, not content.
+        /// A plain scalar that runs onto indented lines is folded as YAML folds
+        /// it: lines joined with a space, a line break for each blank line.
         let value: String
         /// The lines that continue the value — a nested map or list, a block
         /// scalar — with their common indentation removed. Nil when the value
-        /// is the one line.
+        /// is the one line or was folded into `value`.
         let continuation: String?
     }
 
@@ -47,7 +54,7 @@ struct MarkdownFrontMatter: Equatable, Sendable {
             cursor = markdown.unicodeScalars.index(after: cursor)
         }
         guard let opening = nextLine(in: markdown, from: cursor),
-              isDelimiter(opening.content, closing: false)
+              delimiter(opening.content) == "---"
         else { return (nil, markdown) }
         // Pandoc's rule: a blank line straight after the opening `---` means
         // the document opens with a thematic break, not a metadata block.
@@ -56,16 +63,15 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         }
 
         var lines: [Substring] = []
+        var inBlockScalar = false
         cursor = opening.next
         while let line = nextLine(in: markdown, from: cursor) {
-            if isDelimiter(line.content, closing: true) {
-                // Front matter is metadata. A block with no `key:` line is a
-                // rule, a banner or a heading, then a rule. An empty block is
-                // the exception: `---` straight after `---` is the
-                // conventional empty front matter.
-                guard lines.isEmpty || lines.contains(where: { keyValue($0) != nil }) else {
-                    return (nil, markdown)
-                }
+            let content = line.content
+            let marker = delimiter(content)
+            // `...` also ends a YAML document, but a markdown line can be just
+            // `...` too, so it closes only a block that reads cleanly as keys.
+            if marker == "---" || (marker == "..." && readEntries(lines) != nil) {
+                guard opensWithKey(lines) else { return (nil, markdown) }
                 let frontMatter = MarkdownFrontMatter(
                     yaml: lines.joined(separator: "\n"),
                     entries: readEntries(lines)
@@ -73,12 +79,30 @@ struct MarkdownFrontMatter: Equatable, Sendable {
                 return (frontMatter, String(markdown[line.next...]))
             }
             // YAML has no code fences, so one means this is markdown, and the
-            // `---` that would close it may sit inside the fence.
-            if isFence(line.content) { return (nil, markdown) }
-            lines.append(line.content)
+            // `---` that would close it may sit inside the fence. The one
+            // exception is an indented fence inside a `|` or `>` block scalar,
+            // which is the scalar's text.
+            let indented = content.first?.isWhitespace == true
+            if isFence(content), !(inBlockScalar && indented) { return (nil, markdown) }
+            if let pair = keyValue(content) {
+                inBlockScalar = isBlockScalarIndicator(pair.value)
+            } else if !content.isEmpty, !indented {
+                inBlockScalar = false
+            }
+            lines.append(content)
             cursor = line.next
         }
         return (nil, markdown)
+    }
+
+    /// Whether the block reads as metadata: its first line that is not a
+    /// column-0 `#` comment is a `key:` line. Otherwise it is a rule, a banner
+    /// or a heading, then a rule. An empty block counts: `---` straight after
+    /// `---` is the conventional empty front matter.
+    private static func opensWithKey(_ lines: [Substring]) -> Bool {
+        guard !lines.isEmpty else { return true }
+        guard let first = lines.first(where: { !$0.hasPrefix("#") }) else { return false }
+        return keyValue(first) != nil
     }
 
     /// The header shown above the rendered body: a `<dl>` of the entries, the
@@ -92,9 +116,13 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         }
         guard !entries.isEmpty else { return "" }
         let rows = entries.map { entry -> String in
+            // A folded value's line breaks are paragraph breaks.
+            let paragraphs = entry.value.split(separator: "\n")
+            let value = paragraphs.count > 1
+                ? paragraphs.map { "<p>" + Self.escape(String($0)) + "</p>" }.joined()
+                : Self.escape(entry.value)
             let more = entry.continuation.map { "<pre>" + Self.escape($0) + "</pre>" } ?? ""
-            return "<dt>" + Self.escape(entry.key) + "</dt><dd>" + Self.escape(entry.value)
-                + more + "</dd>"
+            return "<dt>" + Self.escape(entry.key) + "</dt><dd>" + value + more + "</dd>"
         }
         return #"<dl class="tbd-front-matter">"# + rows.joined() + "</dl>"
     }
@@ -124,12 +152,43 @@ struct MarkdownFrontMatter: Equatable, Sendable {
             }
         }
         return groups.map { group in
-            Entry(
-                key: group.key,
-                value: isBlockScalarIndicator(group.value) ? "" : group.value,
-                continuation: dedented(group.more)
-            )
+            if isBlockScalarIndicator(group.value) {
+                return Entry(key: group.key, value: "", continuation: dedented(group.more))
+            }
+            if !group.value.isEmpty, isPlainText(group.more) {
+                return Entry(
+                    key: group.key, value: folded(group.value, group.more), continuation: nil
+                )
+            }
+            return Entry(key: group.key, value: group.value, continuation: dedented(group.more))
         }
+    }
+
+    /// Whether continuation lines are prose rather than structure: none is a
+    /// nested `key:` line or a `- ` list item.
+    private static func isPlainText(_ lines: [Substring]) -> Bool {
+        lines.allSatisfy { line in
+            let text = trimmed(line)
+            return text.isEmpty || (keyValue(text) == nil && !isSequenceItem(text))
+        }
+    }
+
+    /// A plain scalar's lines folded as YAML folds them: joined with a space,
+    /// and a line break for each blank line between them.
+    private static func folded(_ first: String, _ lines: [Substring]) -> String {
+        var result = first
+        var breaks = 0
+        for line in lines {
+            let text = trimmed(line)
+            if text.isEmpty {
+                breaks += 1
+                continue
+            }
+            result += breaks > 0 ? String(repeating: "\n", count: breaks) : " "
+            result += text
+            breaks = 0
+        }
+        return result
     }
 
     /// Whether `value` is a block scalar's header — `|` or `>`, optional
@@ -151,8 +210,10 @@ struct MarkdownFrontMatter: Equatable, Sendable {
     /// `https://example.com` does not split the key. A quoted key (`"a: b": c`)
     /// ends at its closing quote and is shown without the quotes.
     private static func keyValue(_ line: Substring) -> (key: String, value: String)? {
+        // A YAML indicator, or markdown syntax (`> quote`, `*emphasis*`,
+        // `| table |`), cannot start a plain key.
         guard let first = line.first, !first.isWhitespace, !isSequenceItem(line),
-              !"#[{?".contains(first)
+              !"#[]{}?>|*!&%@`,".contains(first)
         else { return nil }
         if first == "\"" || first == "'" { return quotedKeyValue(line) }
         var searchFrom = line.startIndex
@@ -272,11 +333,11 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         return (text[start...], text.endIndex)
     }
 
-    /// `---`, or for a closing line also `...`, with nothing else on the line
-    /// except trailing spaces or tabs.
-    private static func isDelimiter(_ line: Substring, closing: Bool) -> Bool {
+    /// `---` or `...` when that is all the line holds apart from trailing
+    /// spaces or tabs; nil for any other line.
+    private static func delimiter(_ line: Substring) -> String? {
         var content = line
         while content.last == " " || content.last == "\t" { content.removeLast() }
-        return content == "---" || (closing && content == "...")
+        return content == "---" || content == "..." ? String(content) : nil
     }
 }

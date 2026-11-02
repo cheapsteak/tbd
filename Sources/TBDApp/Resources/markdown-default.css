@@ -147,6 +147,10 @@ ul { list-style: disc; }
 ol { list-style: decimal; }
 li::marker { color: var(--md-muted); }
 :is(li, td, th) > * + :is(p, ul, ol, blockquote, pre, table) { margin-top: 6px; }
+/* A tight item's code block follows its text with no <p> around the text,
+   so `* + pre` cannot see it. A code block that opens an item gets the 6px
+   too, which is the cheaper miss. */
+li > pre { margin-top: 6px; }
 input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
 /* Task items: the checkbox takes the bullet's place in the gutter, so task
    text lines up with plain items. comrak gives the item no class, hence
@@ -295,6 +299,7 @@ dl.tbd-front-matter {
   overflow-wrap: anywhere;
 }
 .tbd-front-matter dd { margin: 0; min-width: 0; }
+.tbd-front-matter dd p + p { margin-top: 4px; }   /* a folded value's paragraphs */
 /* Nested values, block scalars, and a block that is not top-level keys at
    all keep their lines as written. */
 .tbd-front-matter pre,

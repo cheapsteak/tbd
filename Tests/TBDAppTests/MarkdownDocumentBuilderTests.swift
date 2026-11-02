@@ -102,6 +102,10 @@ struct MarkdownDocumentBuilderTests {
             "---\nSetup notes for the widget service.\n\n```yaml\n---\nname: acme\n```\n\nMore text.\n",
             "---\n# Intro\n\nSome *text*\n\n---\n\nMore",
             "---\n**DEPRECATED** — see the new docs.\n---\n\n# Project",
+            "---\n# Project Title\n\nSome description.\n\nNote: this requires Node 18.\n\n---\n\n## Next",
+            "---\n> Note: this page moved to docs/new.md\n---\n# Title",
+            "---\n*Status*: draft\n---\n# Title",
+            "---\n| Owner: | me |\n---\n# Title",
         ] {
             let doc = try #require(MarkdownDocumentBuilder.build(
                 markdown: source, documentDirectory: dir, worktreeRoot: dir, css: ""

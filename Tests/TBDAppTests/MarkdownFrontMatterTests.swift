@@ -52,6 +52,14 @@ struct MarkdownFrontMatterTests {
         #expect(body == "Body text.")
     }
 
+    @Test("... closes only a block that reads cleanly as keys")
+    func dotsCloseOnlyCleanBlocks() {
+        let source = "---\nNote: draft\nMore thoughts\n...\n\n# Title"
+        let (frontMatter, body) = MarkdownFrontMatter.split(source)
+        #expect(frontMatter == nil)
+        #expect(body == source)
+    }
+
     @Test("... does not open a block")
     func dotsDoNotOpen() {
         let source = "...\nlayer: example\n...\nBody text."
@@ -111,12 +119,14 @@ struct MarkdownFrontMatterTests {
         }
     }
 
-    @Test("a block with no key: line is a rule, a banner or a heading, not front matter")
+    @Test("a block that does not open with a key: line is a rule, a banner or a heading")
     func noKeyLines() {
         for source in [
             "---\n# Intro\n\nSome *text*\n\n---\n\nMore",
             "---\n**DEPRECATED** — see the new docs.\n---\n\n# Project",
             "---\n- one\n- two\n---\n",
+            "---\n# Project Title\n\nSome description.\n\nNote: this requires Node 18.\n\n---\n\n## Next",
+            "---\n# only a comment\n---\n",
         ] {
             let (frontMatter, body) = MarkdownFrontMatter.split(source)
             #expect(frontMatter == nil)
@@ -135,6 +145,32 @@ struct MarkdownFrontMatterTests {
             #expect(frontMatter == nil)
             #expect(body == source)
         }
+    }
+
+    @Test("markdown syntax at the start of a line is never a key")
+    func markdownSyntaxIsNotAKey() {
+        for source in [
+            "---\n> Note: this page moved to docs/new.md\n---\n# Title",
+            "---\n*Status*: draft\n---\n# Title",
+            "---\n| Owner: | me |\n---\n# Title",
+            "---\n`code`: x\n---\n# Title",
+        ] {
+            let (frontMatter, body) = MarkdownFrontMatter.split(source)
+            #expect(frontMatter == nil)
+            #expect(body == source)
+        }
+    }
+
+    @Test("an indented fence inside a block scalar is the scalar's text, not markdown")
+    func fenceInsideBlockScalar() throws {
+        let source = "---\ntitle: Acme\nexample: |\n  ```sh\n  make\n  ```\n---\nBody"
+        let (frontMatter, body) = MarkdownFrontMatter.split(source)
+        let block = try #require(frontMatter)
+        #expect(block.entries == [
+            Entry(key: "title", value: "Acme", continuation: nil),
+            Entry(key: "example", value: "", continuation: "```sh\nmake\n```"),
+        ])
+        #expect(body == "Body")
     }
 
     @Test("four spaces of indent is not a fence, so the block still splits")
@@ -202,6 +238,42 @@ struct MarkdownFrontMatterTests {
             Entry(key: "updated", value: "2026-01-01", continuation: nil),
         ])
         #expect(block.html.contains("<dt>notes</dt><dd></dd>"))
+    }
+
+    @Test("a plain value that wraps onto indented lines is folded into one value")
+    func foldedPlainScalar() throws {
+        let source = """
+        ---
+        summary: A long summary that
+          wraps onto a second line
+        description: First paragraph
+          that wraps.
+
+          Second paragraph.
+        tags: acme
+          - not folded
+        updated: 2026-01-01
+        ---
+        """
+        let block = try #require(MarkdownFrontMatter.split(source).frontMatter)
+        #expect(block.entries == [
+            Entry(key: "summary", value: "A long summary that wraps onto a second line", continuation: nil),
+            Entry(key: "description", value: "First paragraph that wraps.\nSecond paragraph.", continuation: nil),
+            Entry(key: "tags", value: "acme", continuation: "- not folded"),
+            Entry(key: "updated", value: "2026-01-01", continuation: nil),
+        ])
+        let html = block.html
+        #expect(html.contains("<dt>summary</dt><dd>A long summary that wraps onto a second line</dd>"))
+        #expect(html.contains(
+            "<dt>description</dt><dd><p>First paragraph that wraps.</p><p>Second paragraph.</p></dd>"
+        ))
+        #expect(html.contains("<dt>tags</dt><dd>acme<pre>- not folded</pre></dd>"))
+    }
+
+    @Test("a nested map under a valued key keeps its lines")
+    func nestedMapIsNotFolded() throws {
+        let block = try #require(MarkdownFrontMatter.split("---\nowner: acme\n  team: widgets\n---\n").frontMatter)
+        #expect(block.entries == [Entry(key: "owner", value: "acme", continuation: "team: widgets")])
     }
 
     @Test("a comment after a block scalar indicator is dropped with it; one after a value is kept")
