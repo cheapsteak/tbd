@@ -56,9 +56,6 @@ final class SidebarRowView: NSTableRowView {
         /// highlight in the highlight's shape. The outline draws no drop
         /// feedback of its own.
         var isNestTarget = false
-
-        /// How many ancestors' lines the row draws a part of.
-        var guideCount: Int { guides.count }
     }
 
     var configuration = Configuration() {
@@ -137,11 +134,6 @@ final class SidebarRowView: NSTableRowView {
     func lineX(level: Int) -> CGFloat {
         configuration.contentOrigin + CGFloat(level) * SidebarNativeMetrics.indentation
             + SidebarNativeMetrics.guideLineOffset
-    }
-
-    /// The x of each ancestor's line the row draws, outermost first.
-    var guideLineXs: [CGFloat] {
-        configuration.guides.map { lineX(level: $0.level) }
     }
 
     /// Where a branch's tick ends: `SidebarGuideLine.tickInset` short of the

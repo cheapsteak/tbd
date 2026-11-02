@@ -278,8 +278,11 @@ struct SidebarGuideLineTests {
         #expect(SidebarGuideLine.stubStart(rowHeight: 36) == 26)
 
         let stubFade = try #require(Self.pieces(.stub)?.fade)
-        #expect(stubFade.startFraction == 0)
-        #expect(stubFade.endFraction == 0.5)
+        let expectedStubFade = Fade(rect: NSRect(x: 26, y: 22, width: 0.5, height: 6), start: 22, length: 12)
+        #expect(stubFade == expectedStubFade)
+        let stubSpan = Self.fadeSpan(stubFade)
+        let firstHalf: [CGFloat] = [0, 6]
+        #expect(stubSpan == firstHalf, "The stub holds the fade's first 6 pt")
 
         let child = try #require(Self.pieces(.branch, fadeStart: -6))
         let childFade = Fade(rect: NSRect(x: 26, y: 0, width: 7, height: 6), start: -6, length: 12)
@@ -287,8 +290,9 @@ struct SidebarGuideLineTests {
         #expect(child.fade == childFade)
         let fullHeightOnly = [fullHeight]
         #expect(child.verticals == fullHeightOnly)
-        #expect(childFade.startFraction == 0.5)
-        #expect(childFade.endFraction == 1)
+        let childSpan = Self.fadeSpan(childFade)
+        let secondHalf: [CGFloat] = [6, 12]
+        #expect(childSpan == secondHalf, "The first child's top holds the fade's last 6 pt")
 
         let tallStub = try #require(Self.pieces(.stub, height: 36))
         let tallStubRect = NSRect(x: 26, y: 26, width: 0.5, height: 10)
@@ -296,14 +300,16 @@ struct SidebarGuideLineTests {
         let tallStubOnly = [tallStubRect]
         #expect(tallStub.verticals == tallStubOnly)
         #expect(tallStub.fade == tallStubFade)
-        #expect(tallStubFade.startFraction == 0)
-        #expect(abs(tallStubFade.endFraction - 10.0 / 12.0) < 1e-9)
+        let tallStubSpan = Self.fadeSpan(tallStubFade)
+        let firstTen: [CGFloat] = [0, 10]
+        #expect(tallStubSpan == firstTen)
 
         let tallChildFade = try #require(Self.pieces(.branch, fadeStart: -10)?.fade)
         let expectedTallChild = Fade(rect: NSRect(x: 26, y: 0, width: 7, height: 2), start: -10, length: 12)
         #expect(tallChildFade == expectedTallChild)
-        #expect(abs(tallChildFade.startFraction - 10.0 / 12.0) < 1e-9)
-        #expect(tallChildFade.endFraction == 1)
+        let tallChildSpan = Self.fadeSpan(tallChildFade)
+        let lastTwo: [CGFloat] = [10, 12]
+        #expect(tallChildSpan == lastTwo)
 
         let only = try #require(Self.pieces(.last, fadeStart: -6))
         #expect(only.fade == childFade)
@@ -317,6 +323,12 @@ struct SidebarGuideLineTests {
         let stubOnly = [stubRect]
         #expect(unfadedStub?.verticals == stubOnly)
         #expect(Self.pieces(.branch, fadeStart: -6, fadeLength: 0)?.fade == nil)
+    }
+
+    /// How far into its fade a row's span of it starts and ends, in points:
+    /// the gradient runs from `start` over `length`, clipped to `rect`.
+    static func fadeSpan(_ fade: Fade) -> [CGFloat] {
+        [fade.rect.minY - fade.start, fade.rect.maxY - fade.start]
     }
 
     /// The fade's gradient samples smoothstep at nine even stops, clear to
@@ -484,7 +496,6 @@ struct SidebarGuideLineTests {
         let plainXs = Self.lineLefts(rowView)
         let expectedXs: [CGFloat] = [26, 42]
         #expect(plainXs == expectedXs)
-        #expect(rowView.guideLineXs == expectedXs)
         #expect(rowView.tickEndX == 49)
         #expect(Self.styles(rowView) == grey, "A plain row draws grey lines")
 
@@ -801,7 +812,7 @@ struct SidebarGuideLineTests {
         var guideCounts: [Int] = []
         for id in f.rows {
             let view = try #require(h.rowView(id, make: true) as? SidebarRowView, h.evidence(names))
-            guideCounts.append(view.configuration.guideCount)
+            guideCounts.append(view.configuration.guides.count)
         }
         let expectedCounts = [0, 1, 2, 1, 0]
         #expect(guideCounts == expectedCounts, h.evidence(names))

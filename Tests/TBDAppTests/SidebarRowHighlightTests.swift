@@ -46,7 +46,7 @@ struct SidebarRowHighlightTests {
             rowView.configuration = configuration
             let rect = rowView.highlightRect
             #expect(rect == edgeToEdge, "The \(label) row's highlight is \(rect)")
-            let lines = rowView.guideLineXs
+            let lines = SidebarGuideLineTests.lineLefts(rowView)
             #expect(lines == guides, "The \(label) row's guide lines are at \(lines)")
         }
         #expect(SidebarRowHighlight.horizontalInset == 0)

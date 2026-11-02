@@ -492,7 +492,7 @@ struct SidebarOutlineControllerTests {
         let parkedItem = try #require(h.controller.item(for: .worktree(parked.id)))
         let before = try #require(h.rowView(.worktree(parked.id), make: true) as? SidebarRowView)
         // On the shelf: one level of group padding, no worktree ancestor.
-        try #require(before.configuration.level == 1 && before.configuration.guideCount == 0)
+        try #require(before.configuration.level == 1 && before.configuration.guides.isEmpty)
 
         let found = h.state.worktrees[repo.id]?.firstIndex { $0.id == parked.id }
         let index = try #require(found)
@@ -515,7 +515,7 @@ struct SidebarOutlineControllerTests {
                                  h.rowViewEvidence(.worktree(parked.id), captured: before, names))
         #expect(shown === before, "A move keeps the row's view; \(h.rowViewEvidence(.worktree(parked.id), captured: before, names).rawValue)")
         #expect(shown.configuration.level == 1, h.rowViewEvidence(.worktree(parked.id), captured: before, names))
-        #expect(shown.configuration.guideCount == 1, h.rowViewEvidence(.worktree(parked.id), captured: before, names))
+        #expect(shown.configuration.guides.count == 1, h.rowViewEvidence(.worktree(parked.id), captured: before, names))
         // Its line is its new parent's, a level up.
         let lineLevels = shown.configuration.guides.map(\.level)
         let parentLevel = [0]

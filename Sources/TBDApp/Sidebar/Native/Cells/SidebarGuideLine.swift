@@ -378,11 +378,6 @@ enum SidebarGuideLine {
         /// Where the line is clear. Above the row on the owner's first child.
         var start: CGFloat
         var length: CGFloat
-
-        /// How far through the fade the row's span starts, 0 to 1.
-        var startFraction: CGFloat { (rect.minY - start) / length }
-        /// How far through the fade the row's span ends, 0 to 1.
-        var endFraction: CGFloat { (rect.maxY - start) / length }
     }
 
     /// What one line draws in one row, in the row's flipped coordinates: the
