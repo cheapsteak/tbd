@@ -39,21 +39,22 @@ struct WorktreeTitleView: View {
 /// The worktree's title set over its project name, the way macOS sets a
 /// window's subtitle under its title, for the main pane's top row with the
 /// Tabs in the toolbar setting on: the title in 13 pt semibold, and under it
-/// the notes button and the project name in 11 pt, secondary. Each line keeps
-/// the menu `WorktreeTitleView` gives it. A worktree with no project, a
-/// scratch space, shows the title alone, which the row centres on its
-/// midline, and the notes button leads that line instead.
+/// the project name in 11 pt, secondary, followed by the notes button. Each
+/// line keeps the menu `WorktreeTitleView` gives it. A worktree with no
+/// project, a scratch space, shows the title alone, which the row centres on
+/// its midline, and the notes button follows that line instead.
 ///
-/// The notes button, sized to the line it leads, never shrinks. Neither text
+/// The notes button, sized to the line it follows, never shrinks. Neither text
 /// holds its ideal width: offered less, the title truncates in the middle and
-/// the project name at the end, and hovering the title shows it whole.
+/// the project name at the end, with the button right after the truncated
+/// text, and hovering the title shows it whole.
 /// `MainTabRowWidths` decides how much the column gets.
 struct WorktreeTitleColumn: View {
     let appState: AppState
     let worktree: Worktree
     let repoName: String?
 
-    /// The line the notes button leads.
+    /// The line the notes button follows.
     enum NotesLine: Equatable {
         /// The project name's line, under the title.
         case project
@@ -80,7 +81,6 @@ struct WorktreeTitleColumn: View {
             VStack(alignment: .leading, spacing: MainTabRowMetrics.titleLineSpacing) {
                 titleMenu
                 HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
-                    notesButton(.project)
                     WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
                         Text(repoName)
                             .font(.system(size: MainTabRowMetrics.projectFontSize))
@@ -88,12 +88,13 @@ struct WorktreeTitleColumn: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
+                    notesButton(.project)
                 }
             }
         } else {
             HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
-                notesButton(.title)
                 titleMenu
+                notesButton(.title)
             }
         }
     }
@@ -119,7 +120,7 @@ struct WorktreeTitleColumn: View {
 /// (`RowIconButtonStyle`) at its small size: a square
 /// `MainTabRowMetrics.notesHitOutset` past its symbol on each side, which is
 /// its hit area too and leaves the button's size, and the layout around it,
-/// as they are. A full 28 pt square would dwarf the line of text it leads.
+/// as they are. A full 28 pt square would dwarf the line of text it follows.
 /// The style draws its symbol in the secondary colour too.
 struct WorktreeNotesButton: View {
     /// How the button draws.

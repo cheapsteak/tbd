@@ -35,7 +35,8 @@ enum MainTabRowMetrics {
     static let projectFontSize: CGFloat = 11
     /// Between the worktree title and the project name under it.
     static let titleLineSpacing: CGFloat = 3
-    /// Between the notes button and the text after it on the line it leads.
+    /// Between the text on the title column's bottom line and the notes button
+    /// that follows it.
     static let notesToProjectSpacing: CGFloat = 4
     /// How far the notes button's hover square, which is its hit area too,
     /// reaches past its symbol on each side (`RowIconSquare.Size.outset`).

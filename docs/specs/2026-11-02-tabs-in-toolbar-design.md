@@ -14,8 +14,8 @@ at the top of the window, and the Servers button moves to the status bar.
 A worktree's window spends two rows on chrome before its content starts:
 
 - **The toolbar row** holds the window buttons, the sidebar's controls and,
-  over the main area, the title cluster: the repo notes button, the project
-  name and the worktree title. The rest of that row is empty.
+  over the main area, the title cluster: the worktree title, the project
+  name and the repo notes button after it. The rest of that row is empty.
 - **The tab row** sits under it, 30 pt tall: the session tabs over the main
   pane, and the side panel's strip over the side panel.
 
@@ -28,8 +28,8 @@ the main area carries nothing.
 - Each pane's tab strip sits in the toolbar row, so both panes' content starts
   directly under it, 30 pt sooner.
 - The title cluster keeps the worktree title and the project name, each with
-  its menu, at full length when there is room, and the notes button with its
-  popover.
+  its menu, at full length when there is room, and the notes button after the
+  project name, with its popover.
 - A worktree keeps any number of session tabs; none is hidden while the title
   can still give up room.
 - The window can still be dragged and double-clicked by its top row.
@@ -125,13 +125,13 @@ Left to right:
    clears the window's edge; the row's background still reaches the edge.
 2. **Title cluster.** A column of two lines: the worktree title in 13 pt
    semibold, and under it the project name in 11 pt, secondary colour, the way
-   macOS sets a window's subtitle under its title. The notes button leads the
-   bottom line, 4 pt before the project name, its symbol drawn at the line's
+   macOS sets a window's subtitle under its title. The notes button follows the
+   bottom line's text, 4 pt after the project name, its symbol drawn at the line's
    11 pt in the same secondary colour, so the line is no taller than its text.
    Its hit area reaches a little past the symbol, it names itself on hover with
    a help tag, and it keeps its popover. Each line keeps its menu. A worktree
    with no project (a scratch space) shows the title alone, centred on the
-   midline, with the notes button leading that line at the title's 13 pt.
+   midline, with the notes button following that line at the title's 13 pt.
 3. **Session tabs**, then the + button straight after the last tab
    (`TabsThenAddLayout`, unchanged), in the pill style below.
 4. **Drag gap,** at least 24 pt, taking all spare width (see "Dragging the
@@ -234,8 +234,8 @@ Each gated behaviour is tested with the setting on and off.
 - **Row height:** the row's height equals the hosted pane's top safe-area
   inset.
 - **Title cluster:** a worktree with a project shows two lines, the notes
-  button leading the project's; a scratch space shows the title alone, the
-  notes button leading it.
+  button following the project's; a scratch space shows the title alone, the
+  notes button following it.
 - **Overflow, as values:** everything fits; the title shrinks and the tabs
   keep their width; the title at its floor and the tabs scrolling; a title
   already narrower than the floor never grows.

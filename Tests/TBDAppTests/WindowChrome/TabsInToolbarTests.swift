@@ -224,9 +224,9 @@ struct TabsInToolbarTests {
 
     // MARK: - The title column
 
-    /// The notes button leads the project name's line, sized to its 11 pt,
+    /// The notes button follows the project name's line, sized to its 11 pt,
     /// and with no project the title's own line, sized to its 13 pt.
-    @Test func theNotesButtonLeadsTheBottomLine() {
+    @Test func theNotesButtonFollowsTheBottomLine() {
         let withProject = WorktreeTitleColumn.notesLine(repoName: "acme")
         #expect(withProject == .project)
         let projectSize = withProject.fontSize
