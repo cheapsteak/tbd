@@ -1693,6 +1693,113 @@ test_seed_rejects_a_missing_argument() {
     assert_fail "seed requires tbd_home" seed_tmux_fallback
 }
 
+# relink_installed_cli cases. Each builds its own dir (with a space in the
+# name, on purpose) holding an executable new CLI at build/TBDCLI and the
+# install path's directory, bin/.
+relink_fixture() {
+    local d="$TEST_TMP/relink $1"
+    mkdir -p "$d/build" "$d/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$d/build/TBDCLI"
+    chmod +x "$d/build/TBDCLI"
+    echo "$d"
+}
+
+# `ls -di` rather than `stat`, whose BSD and GNU dialects disagree.
+file_inode() {
+    ls -di "${1-}" 2>/dev/null | awk '{print $1}'
+}
+
+test_relink_points_an_installed_regular_file_at_the_new_cli() {
+    local d out
+    d="$(relink_fixture regular)"
+    printf 'old\n' > "$d/bin/tbd"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink makes an installed regular file the new CLI's inode" \
+        "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink says what it refreshed" "refreshed $d/bin/tbd" "$out"
+}
+
+test_relink_leaves_a_symlink_alone() {
+    local d out
+    d="$(relink_fixture symlink)"
+    printf 'theirs\n' > "$d/theirs"
+    ln -s "$d/theirs" "$d/bin/tbd"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    if [ -L "$d/bin/tbd" ]; then
+        pass "relink leaves a symlink at the install path a symlink"
+    else
+        fail "relink leaves a symlink at the install path a symlink"
+    fi
+    assert_eq "relink leaves the symlink's destination alone" "$d/theirs" "$(readlink "$d/bin/tbd")"
+    assert_eq "relink leaves the file the symlink names alone" "theirs" "$(cat "$d/theirs")"
+    assert_eq "relink says nothing when it leaves a symlink" "" "$out"
+}
+
+test_relink_never_creates_an_install() {
+    local d out
+    d="$(relink_fixture absent)"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    if [ -e "$d/bin/tbd" ] || [ -L "$d/bin/tbd" ]; then
+        fail "relink does not install a CLI the operator never installed"
+    else
+        pass "relink does not install a CLI the operator never installed"
+    fi
+    assert_eq "relink says nothing when there is no install" "" "$out"
+}
+
+test_relink_skips_a_non_executable_new_cli() {
+    local d out before
+    d="$(relink_fixture nonexec)"
+    chmod 644 "$d/build/TBDCLI"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink keeps the installed file when the new CLI is not executable" \
+        "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink leaves that file's contents alone" "old" "$(cat "$d/bin/tbd")"
+    assert_eq "relink says nothing when the new CLI is not executable" "" "$out"
+}
+
+# restart.sh runs under set -e, so a failed ln must come back as a warning and
+# a zero status, not end the restart. A stub ln first on PATH fails every call.
+test_relink_warns_and_succeeds_when_ln_fails() {
+    local d out rc
+    d="$(relink_fixture lnfails)"
+    mkdir -p "$d/stub"
+    printf '#!/bin/sh\nexit 1\n' > "$d/stub/ln"
+    chmod +x "$d/stub/ln"
+    printf 'old\n' > "$d/bin/tbd"
+    out="$(PATH="$d/stub:/usr/bin:/bin" bash -c \
+        'set -e; source "$1"; relink_installed_cli "$2" "$3"; echo survived' \
+        _ "$HELPER" "$d/bin/tbd" "$d/build/TBDCLI" 2>/dev/null)"; rc=$?
+    assert_eq "relink returns 0 to a set -e caller when ln fails" "0" "$rc"
+    assert_contains "relink warns when ln fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "a set -e caller carries on after a failed relink" "survived" "$out"
+}
+
+# restart.sh cannot be run here (it builds and launches the real app), so this
+# reads it. The relink must sit in the branch that starts a daemon from
+# $BUILD_DIR, after that daemon's handover and before the branch that skips the
+# daemon for a WIP build. --app skips the whole branch, so it never relinks,
+# and --dry-run exits long before it.
+# shellcheck disable=SC2016 # literal restart.sh text, not expansions
+test_restart_relinks_the_cli_only_after_starting_a_daemon() {
+    local restart="$HERE/restart.sh" branch handover relink skip order="wrong"
+    branch="$(grep -nF 'if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then' "$restart" | head -1 | cut -d: -f1)"
+    handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
+    relink="$(grep -nF 'relink_installed_cli "$HOME/.local/bin/tbd" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
+    skip="$(grep -nF 'elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then' "$restart" | head -1 | cut -d: -f1)"
+    if [[ -n "$branch" && -n "$handover" && -n "$relink" && -n "$skip" ]] \
+        && (( branch < handover && handover < relink && relink < skip )); then
+        order="right"
+    fi
+    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) after the handover (${handover:-?}), inside the daemon branch (${branch:-?} to ${skip:-?})" \
+        "right" "$order"
+    # A second call elsewhere would relink on --app too.
+    assert_eq "restart.sh calls relink_installed_cli once" \
+        "1" "$(grep -cF 'relink_installed_cli "' "$restart")"
+}
+
 test_build_identity_describes_the_tree
 test_build_identity_marks_a_dirty_tree
 test_build_identity_ignores_dirt_outside_the_build
@@ -1745,6 +1852,12 @@ test_seed_warns_and_succeeds_without_tmux
 test_seed_keeps_a_symlinked_tmux_path
 test_seed_ignores_a_non_absolute_command_v
 test_seed_rejects_a_missing_argument
+test_relink_points_an_installed_regular_file_at_the_new_cli
+test_relink_leaves_a_symlink_alone
+test_relink_never_creates_an_install
+test_relink_skips_a_non_executable_new_cli
+test_relink_warns_and_succeeds_when_ln_fails
+test_restart_relinks_the_cli_only_after_starting_a_daemon
 
 # A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a
 # background job keeps a copy of this harness's EXIT trap until it execs, so a

@@ -1211,23 +1211,17 @@ restart_app() {
     launch_installed_app
 }
 
-# Re-point an existing ~/.local/bin/tbd at the CLI we just built. Only when the
-# operator already installed one: creating it here would be a gesture they
-# never made. A hard link for the same reason the app uses one — the target
-# keeps working when a build directory goes away.
+# Re-point an existing ~/.local/bin/tbd at the CLI this run built. The rule —
+# only an existing regular file, never created, never a failure — is
+# relink_installed_cli in restart-bundle-lib.sh, which restart.sh runs too;
+# this stage supplies update.sh's install path and writes the outcome to the
+# update log. Its own name, not the library's, so main sourcing the library
+# cannot replace a stand-in a test defines for this stage.
 refresh_installed_cli() {
-    local new_cli="${1-}"
-    if [ ! -f "$CLI_INSTALL_PATH" ] || [ -L "$CLI_INSTALL_PATH" ]; then
-        return 0
-    fi
-    if [ ! -x "$new_cli" ]; then
-        return 0
-    fi
-    if ln -f "$new_cli" "$CLI_INSTALL_PATH" 2>/dev/null; then
-        log "refreshed $CLI_INSTALL_PATH"
-    else
-        log "WARNING: could not refresh $CLI_INSTALL_PATH — run tbd from the app's CLI installer"
-    fi
+    local outcome
+    outcome="$(relink_installed_cli "$CLI_INSTALL_PATH" "${1-}")"
+    [ -z "$outcome" ] || log "$outcome"
+    return 0
 }
 
 # MARK: - Waking what the reconcile parked

@@ -48,8 +48,9 @@ BUILD_IDENTITY_PATHSPECS=(
 #                  daemon's sibling copy as TBD_CLI_PATH and its hooks run that
 #                  one, swallowing the error when it is missing
 #                  (AgentProcessEnvironment, ClaudeHookOverlay,
-#                  CodexHomeManager). update.sh also re-links an existing
-#                  ~/.local/bin/tbd hard link to it.
+#                  CodexHomeManager). restart.sh and update.sh both
+#                  re-link an existing ~/.local/bin/tbd hard link to it
+#                  (relink_installed_cli).
 #   TBDHolder      the pty holder the daemon spawns for a holder-backed session
 #                  (HolderSpawner.locateSiblingExecutable). Missing, the daemon
 #                  reports ptyHolderSupported=false: the Settings toggle greys
@@ -1121,6 +1122,39 @@ app_process_pid() {
     pid="$(pgrep -f "^${pattern}\$" 2>/dev/null | head -1)"
     [ -n "$pid" ] || return 1
     printf '%s\n' "$pid"
+}
+
+# MARK: - The CLI hard link
+
+# Re-link an existing <install_path> (~/.local/bin/tbd for both callers) to
+# <new_cli>, the TBDCLI beside the daemon the caller just started. The app
+# compares the install against that same file at launch, so after this it
+# finds the CLI current and has nothing to ask. restart.sh and update.sh both
+# call it, each right after starting a daemon from a build.
+#
+# Only when the operator already installed one, as a regular file: creating it
+# here would be a gesture they never made, and a symlink there is theirs (or a
+# legacy install the app offers to replace). A hard link for the same reason
+# the app uses one: the target keeps working when a build directory goes away.
+# Nothing happens when <new_cli> is not executable.
+#
+# Prints one line saying what it did, for the caller to print or log, and
+# nothing when it did nothing. Always returns 0: a CLI it could not re-link
+# must not fail an install that otherwise succeeded, and the app checks the
+# CLI again at its next launch.
+#
+#   relink_installed_cli <install_path> <new_cli>
+relink_installed_cli() {
+    local install_path="${1-}" new_cli="${2-}"
+    if [ ! -f "$install_path" ] || [ -L "$install_path" ] || [ ! -x "$new_cli" ]; then
+        return 0
+    fi
+    if ln -f "$new_cli" "$install_path" 2>/dev/null; then
+        printf 'refreshed %s\n' "$install_path"
+    else
+        printf 'WARNING: could not refresh %s; reinstall it with Install Command-Line Tool in the TBD menu\n' "$install_path"
+    fi
+    return 0
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
