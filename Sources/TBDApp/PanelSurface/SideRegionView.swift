@@ -721,8 +721,11 @@ struct SideRegionView: View {
     /// then, below a divider, the worktree's notes that no panel shows. It is
     /// keyed by its items, so a changed note list always reaches the menu
     /// AppKit builds. Not being a button, it takes the row icon buttons'
-    /// square from outside (`rowIconHoverSquare`): AppKit lays out a
-    /// borderless menu's label itself.
+    /// square from outside (`rowIconHoverSquare`), and its label sets the
+    /// row's grey itself. It is a plain button-style menu, as the title's
+    /// menus are, so SwiftUI draws the label in its own colour and size, and
+    /// the label fills the square, all of it clickable. A borderless menu
+    /// would leave the label to AppKit, which draws it in the label colour.
     private var addMenu: some View {
         let items = SideRegionStrip.addMenuItems(
             notes: appState.notes[worktree.id] ?? [], worktreePanels: surface.worktreePanels)
@@ -741,8 +744,12 @@ struct SideRegionView: View {
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: RowIconSquare.standardSide, height: RowIconSquare.standardSide)
+                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .rowIconHoverSquare()

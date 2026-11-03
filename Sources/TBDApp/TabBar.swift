@@ -474,9 +474,11 @@ private struct AddTabButton: View {
         Button {
             showMenu()
         } label: {
+            // Concrete colours: a hierarchical level here would be a level
+            // of the row style's grey.
             Image(systemName: "plus")
                 .font(.caption)
-                .foregroundStyle(isHovering ? .primary : .secondary)
+                .foregroundStyle(Color(nsColor: isHovering ? .labelColor : .secondaryLabelColor))
         }
         .onHover { hovering in isHovering = hovering }
         .help("New Tab")
@@ -1594,13 +1596,13 @@ private struct HistoryTabButton: View {
 
     var body: some View {
         Button(action: action) {
+            // Concrete colours: a hierarchical level here would be a level
+            // of the row style's grey.
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 10))
-                .foregroundStyle(
-                    isSelected
-                        ? AnyShapeStyle(.primary)
-                        : AnyShapeStyle(isHovering ? .secondary : .tertiary)
-                )
+                .foregroundStyle(Color(nsColor: isSelected
+                    ? .labelColor
+                    : (isHovering ? .secondaryLabelColor : .tertiaryLabelColor)))
                 .frame(width: RowIconSquare.standardSide, height: RowIconSquare.standardSide)
                 .background(
                     RoundedRectangle(cornerRadius: MainToolbarMetrics.iconButtonCornerRadius)

@@ -120,6 +120,7 @@ struct WorktreeTitleColumn: View {
 /// `MainTabRowMetrics.notesHitOutset` past its symbol on each side, which is
 /// its hit area too and leaves the button's size, and the layout around it,
 /// as they are. A full 28 pt square would dwarf the line of text it leads.
+/// The style draws its symbol in the secondary colour too.
 struct WorktreeNotesButton: View {
     /// How the button draws.
     enum Style: Equatable {
@@ -186,9 +187,9 @@ struct WorktreeNotesButton: View {
             Button {
                 showNotes.toggle()
             } label: {
+                // In the style's own secondary colour.
                 Image(systemName: "square.and.pencil")
                     .font(.system(size: fontSize))
-                    .foregroundStyle(.secondary)
             }
             .buttonStyle(Self.squareStyle)
             .help(notesTooltip)

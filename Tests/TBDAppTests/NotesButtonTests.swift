@@ -201,7 +201,7 @@ struct NotesButtonTests {
 
     // MARK: - The button
 
-    @Test("the button draws note.text: accent while on, primary while off, secondary and disabled while loading")
+    @Test("the button draws note.text: accent while on, the row's grey while off, secondary and disabled while loading")
     func notesControlAppearance() {
         let on = PaneChromeControl.notes(isOn: true, isEnabled: true)
         let off = PaneChromeControl.notes(isOn: false, isEnabled: true)
@@ -213,7 +213,7 @@ struct NotesButtonTests {
         #expect(on.help == "Hide notes")
         #expect(on.isEnabled)
         #expect(off.systemImage == "note.text")
-        #expect(off.tint == .primary)
+        #expect(off.tint == nil)
         #expect(off.help == "Show notes")
         #expect(off.isEnabled)
         #expect(loading.systemImage == "note.text")

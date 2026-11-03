@@ -232,12 +232,15 @@ enum PaneChromeControl: Equatable {
         }
     }
 
-    /// Nil leaves the symbol in the button style's own colour.
+    /// Nil leaves the symbol in the button style's own colour: the row's
+    /// secondary grey (`RowIconButtonStyle`). The transcript and Notes
+    /// buttons take the accent colour while on, and the row's grey while off.
+    /// The render toggle's primary marks it showing source.
     var tint: Tint? {
         switch self {
         case .transcript(let isOn, let isEnabled), .notes(let isOn, let isEnabled):
             guard isEnabled else { return .secondary }
-            return isOn ? .accent : .primary
+            return isOn ? .accent : nil
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
         case .copyAddress, .refresh:
@@ -298,6 +301,9 @@ struct PaneChromeControlButton: View {
         .accessibilityLabel(Text(control.help))
     }
 
+    /// The symbol in its tint. Secondary is the row style's own colour, so it
+    /// sets none; primary names the label colour itself, because a
+    /// hierarchical `.primary` would be a level of the style's grey.
     @ViewBuilder
     private var symbol: some View {
         let image = Image(systemName: control.systemImage)
@@ -306,10 +312,8 @@ struct PaneChromeControlButton: View {
         case .accent?:
             image.foregroundStyle(Color.accentColor)
         case .primary?:
-            image.foregroundStyle(.primary)
-        case .secondary?:
-            image.foregroundStyle(.secondary)
-        case nil:
+            image.foregroundStyle(Color(nsColor: .labelColor))
+        case .secondary?, nil:
             image
         }
     }

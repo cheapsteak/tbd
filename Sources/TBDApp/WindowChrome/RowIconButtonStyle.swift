@@ -60,14 +60,22 @@ enum RowIconSquare {
 /// `RowIconSquare`, which fills on hover and on press and is the button's hit
 /// area. A disabled button draws no square and dims its label.
 ///
+/// **It draws the label in the secondary colour**, the grey of the toolbar's
+/// leading glyphs, unless the label sets a colour of its own, which wins. A
+/// label that shows a state in a colour of its own names a concrete one
+/// (`Color.accentColor`, `Color(nsColor: .labelColor)`): a hierarchical style
+/// in the label (`.primary`, `.secondary`, `.tertiary`) is a level of this
+/// default, not of the label colour, so `.primary` there draws grey.
+///
 /// **It is the rows' default.** The main pane's row (`TabBar`) and the side
 /// region's strip (`SideRegionView`) apply it once at their root, so a new
 /// `Button` in either row gets the square with no code of its own. A control
 /// with its own look — a tab, the title's menus — sets its style explicitly,
 /// and the row's default never reaches it. A control that is not a `Button`,
-/// such as a `Menu`, takes `.rowIconHoverSquare()` instead: a custom button
-/// style does not reach a menu's label, and AppKit lays out a borderless
-/// menu's label itself.
+/// such as a `Menu`, takes `.rowIconHoverSquare()` instead, and sets its
+/// label's colour itself: a custom button style does not reach a menu's
+/// label, and AppKit lays out a borderless menu's label itself, in the label
+/// colour.
 struct RowIconButtonStyle: ButtonStyle {
     let size: RowIconSquare.Size
 
@@ -78,16 +86,17 @@ struct RowIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         RowIconSquareHost(
             size: size, isPressed: configuration.isPressed, dimsLabelWhenDisabled: true,
-            content: configuration.label)
+            content: configuration.label.foregroundStyle(.secondary))
     }
 }
 
 extension View {
     /// Draws a row icon button's hover square behind a control that is not a
     /// `Button`, such as a `Menu`, as `RowIconButtonStyle` draws it for a
-    /// button: on hover, never while disabled. It has no pressed state. Put
-    /// it outside a borderless `Menu`, whose label AppKit lays out ignoring
-    /// the label's own modifiers.
+    /// button: on hover, never while disabled. It has no pressed state, and
+    /// it sets no colour, so the control's label sets its own. Put it outside
+    /// a borderless `Menu`, whose label AppKit lays out ignoring the label's
+    /// own modifiers.
     func rowIconHoverSquare(_ size: RowIconSquare.Size = RowIconSquare.standard) -> some View {
         RowIconSquareHost(size: size, isPressed: false, dimsLabelWhenDisabled: false, content: self)
     }

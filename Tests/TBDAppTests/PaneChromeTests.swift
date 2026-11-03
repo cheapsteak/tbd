@@ -180,7 +180,8 @@ struct PaneChromeTests {
         #expect(on.help == "Hide the chat-style live transcript pane")
         #expect(on.isEnabled)
         #expect(off.systemImage == "text.bubble")
-        #expect(off.tint == .primary)
+        // Off, it takes the row's own grey (`RowIconButtonStyle`).
+        #expect(off.tint == nil)
         #expect(off.help == "Show the chat-style live transcript pane")
         #expect(off.isEnabled)
     }
