@@ -338,18 +338,19 @@ struct MainToolbarControllerTests {
         ]
         #expect(frames == expectedFrames)
 
-        let expected: [(NSUserInterfaceItemIdentifier, String, AnyObject?, Selector)] = [
-            (LeadingToolbarButtonsHost.toggleID, "Toggle Sidebar", fixture.split,
+        let expected: [(NSUserInterfaceItemIdentifier, String, String, AnyObject?, Selector)] = [
+            (LeadingToolbarButtonsHost.toggleID, "Toggle Sidebar", "Toggle Sidebar", fixture.split,
              #selector(NSSplitViewController.toggleSidebar(_:))),
-            (LeadingToolbarButtonsHost.backID, "Back", controller, #selector(MainToolbarController.navigateBack(_:))),
-            (LeadingToolbarButtonsHost.forwardID, "Forward", controller,
+            (LeadingToolbarButtonsHost.backID, "Back", "Back (⌘[)", controller,
+             #selector(MainToolbarController.navigateBack(_:))),
+            (LeadingToolbarButtonsHost.forwardID, "Forward", "Forward (⌘])", controller,
              #selector(MainToolbarController.navigateForward(_:))),
         ]
-        for (button, (identifier, tip, target, action)) in zip(buttons, expected) {
+        for (button, (identifier, tip, help, target, action)) in zip(buttons, expected) {
             let inHost = button.superview === host
             #expect(inHost)
             #expect(button.identifier == identifier)
-            #expect(button.toolTip == tip)
+            #expect(button.toolTip == help)
             #expect(button.accessibilityLabel() == tip)
             #expect(button.image?.accessibilityDescription == tip)
             let isIconButton = button is ToolbarIconButton
@@ -379,7 +380,7 @@ struct MainToolbarControllerTests {
         let expectedRowTitles: [String] = ["Toggle Sidebar", "Back", "Forward"]
         #expect(rowTitles == expectedRowTitles)
         let rows = try ToolbarFixture.navigationRows(of: item)
-        for (row, (_, tip, target, action)) in zip(rows, expected) {
+        for (row, (_, tip, _, target, action)) in zip(rows, expected) {
             let wired = row.target === target
             #expect(wired, "the \(tip) row targets \(String(describing: row.target))")
             #expect(row.action == action)

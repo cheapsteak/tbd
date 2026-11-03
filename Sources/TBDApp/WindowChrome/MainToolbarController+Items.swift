@@ -238,9 +238,11 @@ extension MainToolbarController {
             symbol: "sidebar.left", tip: "Toggle Sidebar",
             target: split, action: #selector(NSSplitViewController.toggleSidebar(_:)))
         let back = Self.makeLeadingButton(
-            symbol: "chevron.left", tip: "Back", target: self, action: #selector(navigateBack(_:)))
+            symbol: "chevron.left", tip: MainWindowCommand.back.title,
+            toolTip: MainWindowCommand.back.toolTip, target: self, action: #selector(navigateBack(_:)))
         let forward = Self.makeLeadingButton(
-            symbol: "chevron.right", tip: "Forward", target: self, action: #selector(navigateForward(_:)))
+            symbol: "chevron.right", tip: MainWindowCommand.forward.title,
+            toolTip: MainWindowCommand.forward.toolTip, target: self, action: #selector(navigateForward(_:)))
         back.isEnabled = false
         forward.isEnabled = false
 
@@ -259,12 +261,14 @@ extension MainToolbarController {
     /// One leading button: a `ToolbarIconButton` showing `symbol` at
     /// `iconGlyphPointSize`, one pitch by `iconButtonHeight`, which draws its
     /// hover square over its whole frame and does not scale its image, which
-    /// `iconGlyph` sizes.
+    /// `iconGlyph` sizes. `tip` is the accessibility label and image
+    /// description; the tool tip is `toolTip` when given (Back and Forward
+    /// name their shortcuts) and `tip` otherwise.
     private static func makeLeadingButton(
-        symbol: String, tip: String, target: AnyObject?, action: Selector
+        symbol: String, tip: String, toolTip: String? = nil, target: AnyObject?, action: Selector
     ) -> NSButton {
         let button = makeIconButton(symbol: symbol, description: tip)
-        button.toolTip = tip
+        button.toolTip = toolTip ?? tip
         button.setAccessibilityLabel(tip)
         button.target = target
         button.action = action

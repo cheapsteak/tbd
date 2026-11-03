@@ -22,4 +22,12 @@ struct MainWindowCommandTests {
         #expect(MainWindowCommand.toggleChanges.key.character == "e")
         #expect(MainWindowCommand.toggleChanges.modifiers == changesModifiers)
     }
+
+    @Test func shortcutDisplayAndToolTip() {
+        #expect(MainWindowCommand.back.shortcutDisplay == "⌘[")
+        #expect(MainWindowCommand.forward.shortcutDisplay == "⌘]")
+        #expect(MainWindowCommand.toggleChanges.shortcutDisplay == "⇧⌘E")
+        #expect(MainWindowCommand.back.toolTip == "Back (⌘[)")
+        #expect(MainWindowCommand.forward.toolTip == "Forward (⌘])")
+    }
 }

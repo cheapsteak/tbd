@@ -196,7 +196,10 @@ whose window buttons, toggle and arrows sit 28 pt apart, centre to centre.
   level down are borderless and draw their own hover square.
 - **Wiring** – each button carries its own target, action and tool tip, and
   each row of the overflow form its own target and action; the item carries
-  none. An item with a custom view keeps no target or action its view does
+  none. Back's and Forward's tool tips name their shortcuts ("Back (⌘[)"),
+  taken from `MainWindowCommand` so they cannot drift from the menu bar,
+  while their accessibility labels stay the bare titles. An item with a
+  custom view keeps no target or action its view does
   not answer, so the item reads nil (measured on CI), and it forwards a tool
   tip to any view, where it would sit on the host under the buttons. The item
   stays enabled. Back and forward start disabled, button and row, and each
