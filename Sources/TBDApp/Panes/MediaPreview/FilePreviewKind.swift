@@ -48,7 +48,9 @@ enum TextSniff {
 }
 
 /// Classifies a file for the viewer, outside any SwiftUI `body`.
-/// Order: rendered markdown, image, text, media, unpreviewable.
+/// Order: rendered markdown, image, text, media, unpreviewable. Only the text
+/// sniff, which reads the file, runs off the main actor; the extension checks,
+/// the media lookup and its cache stay on it.
 @MainActor
 final class FilePreviewClassifier {
     static let shared = FilePreviewClassifier()
@@ -56,24 +58,25 @@ final class FilePreviewClassifier {
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "ico", "svg"]
 
     private let playableTypeIdentifiers: Set<String>
-    private let sniffsAsText: @MainActor (String) -> Bool
+    private let sniffsAsText: @Sendable (String) -> Bool
     private var mediaKindCache: [String: FilePreviewKind?] = [:]
 
     init(
         playableTypeIdentifiers: Set<String> = Set(AVURLAsset.audiovisualTypes().map(\.rawValue)),
-        sniffsAsText: @escaping @MainActor (String) -> Bool = { TextSniff.fileReadsAsText(atPath: $0) }
+        sniffsAsText: @escaping @Sendable (String) -> Bool = { TextSniff.fileReadsAsText(atPath: $0) }
     ) {
         self.playableTypeIdentifiers = playableTypeIdentifiers
         self.sniffsAsText = sniffsAsText
     }
 
-    func kind(forPath path: String, rendersMarkdown: Bool) -> FilePreviewKind {
+    func kind(forPath path: String, rendersMarkdown: Bool) async -> FilePreviewKind {
         let ext = (path as NSString).pathExtension.lowercased()
         if rendersMarkdown && MarkdownWebViewConfiguration.renderableExtensions.contains(ext) {
             return .renderedMarkdown
         }
         if Self.imageExtensions.contains(ext) { return .image }
-        if sniffsAsText(path) { return .text }
+        let sniff = sniffsAsText
+        if await Task.detached(priority: .utility, operation: { sniff(path) }).value { return .text }
         return mediaKind(forExtension: ext) ?? .unpreviewable
     }
 

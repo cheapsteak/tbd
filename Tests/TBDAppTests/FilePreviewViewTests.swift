@@ -147,7 +147,7 @@ struct FilePreviewViewTests {
         let fixtures = try PreviewFixtures()
         defer { fixtures.remove() }
         let url = try fixtures.text("export const x = 1\n", named: "index.ts")
-        let kind = FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
+        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
         #expect(kind == .text)
         let host = OffscreenHost(
             root: PreviewRoot(
@@ -172,7 +172,7 @@ struct FilePreviewViewTests {
         let fixtures = try PreviewFixtures()
         defer { fixtures.remove() }
         let url = try fixtures.garbageWAV()
-        let kind = FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
+        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
         try #require(kind == .audio, "the fixture must reach the player, but it classified as \(kind)")
         let host = OffscreenHost(
             root: PreviewRoot(

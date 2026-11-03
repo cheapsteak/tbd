@@ -211,13 +211,15 @@ struct CodeViewerPaneView: View {
 ///
 /// `FilePreviewClassifier` makes that decision in a `.task` keyed on the path,
 /// the revision and whether markdown renders, never in `body`: the text sniff
-/// reads the file and the media check queries Launch Services. The result is
-/// kept with the path it was made for, and `body` uses it only while that path
-/// is still the one shown; until then it shows a 1 pt placeholder rather than
-/// the previous file's view. It deliberately does not compare the revision. A
-/// rewrite keeps the previous kind until the new one arrives, so the same
-/// branch, and with it the same `RenderedContentView` or `MediaPlayerView`,
-/// stays mounted and reloads in place instead of being rebuilt on every write.
+/// reads the file on a detached task, off the main actor, and the media check
+/// queries Launch Services once per extension. A task cancelled while the
+/// sniff runs drops its result. The result is kept with the path it was made
+/// for, and `body` uses it only while that path is still the one shown; until
+/// then it shows a 1 pt placeholder rather than the previous file's view. It
+/// deliberately does not compare the revision. A rewrite keeps the previous
+/// kind until the new one arrives, so the same branch, and with it the same
+/// `RenderedContentView` or `MediaPlayerView`, stays mounted and reloads in
+/// place instead of being rebuilt on every write.
 ///
 /// File-watching plumbing intentionally avoids `@StateObject` /
 /// `ObservableObject` / `@Published` — see the doc-comment on
@@ -284,10 +286,12 @@ struct FilePreviewView: View {
             }
         }
         .task(id: "\(filePath)#\(revision)#\(rendersMarkdown && !showSourceCode)") {
-            let kind = FilePreviewClassifier.shared.kind(
+            let kind = await FilePreviewClassifier.shared.kind(
                 forPath: filePath,
                 rendersMarkdown: rendersMarkdown && !showSourceCode
             )
+            // Cancelled while the sniff ran: a newer task owns `classified`.
+            guard !Task.isCancelled else { return }
             let next = Classified(path: filePath, kind: kind)
             // Assigned only on a change, so a rewrite that keeps the kind
             // costs no update of this view.
