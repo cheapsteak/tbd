@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Tests for scripts/update.sh — run: /bin/bash scripts/update.test.sh (macOS bash 3.2; any bash works)
 #
-# Nothing here builds, installs, signals a daemon, or touches a real ~/tbd.
-# HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
-# `codesign` and `security` are stubs on a temp PATH; and the update clone is a
+# Nothing here builds, installs, signals a daemon, creates a key or keychain,
+# or touches a real ~/tbd. HOME and TBD_HOME point at a temp directory for
+# every case; `tbd`, `open`, `codesign` and `security` are stubs on a temp
+# PATH, and openssl a stub behind its seam; and the update clone is a
 # real clone of a fixture repo whose `scripts/swift-safe` writes five empty
 # files instead of compiling. git is the real git, against fixture repos. The
 # handover cases stand a copy of sleep named TBDDaemon in for the daemon being
@@ -74,6 +75,26 @@ cat > "$TBD_LSREGISTER" << 'EOF'
 printf 'lsregister %s\n' "$*" >> "${FAKE_LSREGISTER_LOG:-/dev/null}"
 EOF
 chmod +x "$TBD_LSREGISTER"
+
+# Signing reaches openssl by absolute path too, so PATH cannot shadow it
+# either, and every case that runs the real sign_app_bundle with CI unset
+# would make a real key with /usr/bin/openssl. Point the seam at a stub that
+# records its arguments to FAKE_OPENSSL_LOG and fails, which sends signing to
+# its ad-hoc fallback before any keychain is made; and never wait on a
+# provisioning lock. The keychain and that lock derive from HOME, which every
+# run fences to its case directory. The harness shell sourced the library with
+# the real HOME, so its own copy of the keychain path points into TEST_TMP,
+# unexported so that no run inherits it in place of its own.
+export TBD_OPENSSL="$TEST_TMP/stub-openssl"
+cat > "$TBD_OPENSSL" << 'EOF'
+#!/bin/sh
+printf 'openssl %s\n' "$*" >> "${FAKE_OPENSSL_LOG:-/dev/null}"
+exit 1
+EOF
+chmod +x "$TBD_OPENSSL"
+export TBD_SIGNING_LOCK_WAIT_SECONDS=0
+unset TBD_SIGNING_KEYCHAIN
+TBD_SIGNING_KEYCHAIN="$TEST_TMP/keychains/tbd-signing.keychain-db"
 
 FAIL=0
 pass() { echo "ok   - $1"; }
@@ -2699,6 +2720,46 @@ test_an_app_started_during_the_handover_is_stopped_before_the_launch() {
     fi
 }
 
+# The real sign_app_bundle runs here (run_update_around_handover stubs only
+# the handover), and with CI unset it tries to create the signing identity.
+# Neither way may that run the real openssl or leave anything outside the
+# case: HOME is the case's, so the keychain and its lock land under it, and
+# so does TMPDIR, where the key's scratch directory is made. A GitHub runner
+# sets CI=true, so the case runs both ways on purpose.
+test_signing_stays_inside_the_case_with_and_without_ci() {
+    local ci case_dir rc log
+    for ci in unset true; do
+        case_dir="$(mkcase "signing-ci-$ci")"
+        mkdir -p "$case_dir/tmp"
+        if [ "$ci" = unset ]; then
+            (
+                unset CI
+                FAKE_OPENSSL_LOG="$case_dir/openssl.log" TMPDIR="$case_dir/tmp" \
+                    run_update_around_handover "$case_dir" >/dev/null
+            )
+            rc=$?
+        else
+            CI=true FAKE_OPENSSL_LOG="$case_dir/openssl.log" TMPDIR="$case_dir/tmp" \
+                run_update_around_handover "$case_dir" >/dev/null
+            rc=$?
+        fi
+        log="$(cat "$case_dir/openssl.log" 2>/dev/null)"
+        assert_eq "an update that cannot create the signing identity still succeeds (CI $ci)" "0" "$rc"
+        if [ "$ci" = unset ]; then
+            assert_contains_literal "without CI, the identity is tried with the stub openssl" \
+                "openssl req -x509" "$log"
+            assert_contains_literal "and its key directory is under the case's TMPDIR" \
+                "-keyout $case_dir/tmp/tbd-signing." "$log"
+        else
+            assert_eq "under CI, no openssl runs" "" "$log"
+        fi
+        assert_eq "no key directory is left (CI $ci)" "" \
+            "$(find "$case_dir/tmp" -name 'tbd-signing.*' 2>/dev/null)"
+        assert_eq "no keychain or lock is left (CI $ci)" "" \
+            "$(find "$case_dir/home" -name 'tbd-signing*' 2>/dev/null)"
+    done
+}
+
 # Before the stop moved ahead of the handover, a handover that failed left the
 # old app running, and it reconnected to whichever daemon came back. Now the
 # run has stopped it, so the rollback has to bring it back, from the bundle the
@@ -3550,6 +3611,7 @@ test_summary_survives_an_unknown_commit
 test_cli_refresh_only_touches_an_existing_install
 test_the_app_is_stopped_before_the_handover
 test_an_app_started_during_the_handover_is_stopped_before_the_launch
+test_signing_stays_inside_the_case_with_and_without_ci
 test_a_failed_handover_relaunches_the_stopped_app
 test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
 test_a_failed_handover_never_restores_an_earlier_updates_bundle

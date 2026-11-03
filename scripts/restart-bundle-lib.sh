@@ -333,6 +333,25 @@ assemble_app_bundle() {
 
 # MARK: - Signing and installation
 
+# The stable signing identity: its name, the dedicated keychain that holds it,
+# and that keychain's password. The password is fixed and public on purpose:
+# codesign has to unlock the keychain without a prompt, and the key it guards
+# signs nothing that leaves this machine. The keychain path is a seam, so a
+# harness keeps provisioning out of the developer's ~/Library/Keychains.
+TBD_SIGNING_IDENTITY="TBD Dev Signing"
+TBD_SIGNING_KEYCHAIN="${TBD_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/tbd-signing.keychain-db}"
+TBD_SIGNING_KEYCHAIN_PASSWORD="tbd-signing"
+
+# The openssl that makes the identity's key and certificate. An absolute path,
+# like TBD_LSREGISTER, so a Homebrew or nix OpenSSL 3 first on PATH is never
+# the one used, and a variable so a harness can point it at a stub instead of
+# generating real keys.
+TBD_OPENSSL="${TBD_OPENSSL:-/usr/bin/openssl}"
+
+# How many seconds a run waits for another run that is creating the identity
+# before it signs ad-hoc instead. A seam so a harness never waits.
+TBD_SIGNING_LOCK_WAIT_SECONDS="${TBD_SIGNING_LOCK_WAIT_SECONDS:-30}"
+
 # Sign a bundle in place.
 #
 #   sign_app_bundle <bundle_dir>
@@ -341,32 +360,199 @@ assemble_app_bundle() {
 # CFBundleIdentifier; SPM's default ad-hoc signature uses TBDApp-<hash>, which
 # macOS uses for permission tracking and rejects.
 #
-# Prefer a stable self-signed identity so TCC grants and denials persist across
-# rebuilds. Ad-hoc signing gives TCC only a bare cdhash with no stable anchor,
-# so every rebuild — and even repeated accesses within one build, when access
-# is attributed via a spawned child like a `claude` session — fails the stored
-# code-requirement check and re-prompts. One-time setup creates the "TBD Dev
-# Signing" identity in a dedicated tbd-signing keychain (docs/tcc-signing.md).
-# If it is absent (a fresh clone, another contributor's machine), fall back to
-# ad-hoc so installing still works.
+# The signature comes from a stable self-signed identity, so privacy (TCC)
+# grants and denials persist across rebuilds. An ad-hoc signature gives TCC
+# only a bare cdhash with no stable anchor, so every rebuild — and even
+# repeated accesses within one build, when access is attributed via a spawned
+# child like a `claude` session — fails the stored code-requirement check:
+# macOS re-prompts, or denies outright while System Settings still shows the
+# grant switched on. The first install on a machine creates the "TBD Dev
+# Signing" identity in a dedicated tbd-signing keychain
+# (provision_signing_identity; docs/tcc-signing.md), and every install after
+# signs with it. Under CI, when creating the identity fails, or while another
+# run holds the provisioning lock past the wait, the bundle is signed ad-hoc
+# instead: a missing identity never stops an install.
 sign_app_bundle() {
     local bundle_dir="${1-}"
-    local sign_keychain="$HOME/Library/Keychains/tbd-signing.keychain-db"
-    local sign_identity="TBD Dev Signing"
+    local sign_keychain="$TBD_SIGNING_KEYCHAIN"
 
     if [ -z "$bundle_dir" ]; then
         echo "error: sign_app_bundle needs a bundle dir" >&2
         return 1
     fi
 
-    if security find-identity -p codesigning "$sign_keychain" 2>/dev/null | grep -q "$sign_identity"; then
-        security unlock-keychain -p tbd-signing "$sign_keychain" 2>/dev/null || true
+    if signing_identity_present "$sign_keychain" ||
+        provision_signing_identity "$sign_keychain"; then
+        security unlock-keychain -p "$TBD_SIGNING_KEYCHAIN_PASSWORD" "$sign_keychain" 2>/dev/null || true
         codesign --force --deep --identifier com.github.cheapsteak.tbd \
-            --sign "$sign_identity" --keychain "$sign_keychain" "$bundle_dir" >/dev/null
+            --sign "$TBD_SIGNING_IDENTITY" --keychain "$sign_keychain" "$bundle_dir" >/dev/null
     else
         codesign --force --deep --sign - "$bundle_dir" >/dev/null
     fi
 }
+
+# True when <keychain> holds the signing identity. find-identity lists it with
+# CSSMERR_TP_NOT_TRUSTED beside it, as it does any self-signed identity: nothing
+# outside this machine trusts the certificate, and codesign signs with it all
+# the same. The output is read from a variable rather than piped into grep, so
+# that under a caller's pipefail an early-exiting grep cannot turn a match into
+# a SIGPIPE failure.
+#
+#   signing_identity_present <keychain>
+signing_identity_present() {
+    local keychain="${1-}" identities=""
+
+    if [ -z "$keychain" ] || [ ! -f "$keychain" ]; then
+        return 1
+    fi
+    identities="$(security find-identity -p codesigning "$keychain" 2>/dev/null)" || true
+    grep -qF -- "$TBD_SIGNING_IDENTITY" <<< "$identities"
+}
+
+# Run one provisioning step with its output discarded. When it fails, say
+# which step it was, and fail.
+_signing_step() {
+    if "$@" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "warning: could not create the TBD signing identity: '${1##*/} ${2-}' failed; signing this build ad-hoc" >&2
+    return 1
+}
+
+# Create the signing identity in <keychain> when it is missing.
+#
+#   provision_signing_identity <keychain>
+#
+# Succeeds when the identity is in <keychain> at the end, whether this run made
+# it or a concurrent run did, and fails otherwise, leaving no keychain of its
+# own behind. Under CI it does nothing and fails: a runner is thrown away after
+# every job, and an identity made there would go with it.
+#
+# No step prompts. openssl makes a self-signed code-signing certificate and
+# its key, a PKCS#12 file carries both into a new keychain with the fixed
+# password, only codesign may use the key (-T), and the partition list lets
+# codesign use it without asking. The keychain is never added to the search
+# list; codesign is told where it is with --keychain.
+#
+# The key, the certificate and the PKCS#12 file live in a scratch directory
+# from mktemp. On every exit, an interrupt included, a trap deletes a keychain
+# this run left half made, removes that directory, and releases the lock last.
+# The body is a subshell so that these traps leave the traps of the script that
+# sourced this file in place.
+provision_signing_identity() (
+    set +e
+    umask 077
+    keychain="${1-}"
+    lock="$keychain.lock"
+    p12_password="tbd-signing"
+    wait_seconds="$TBD_SIGNING_LOCK_WAIT_SECONDS"
+    work=""
+    locked=false
+    created=false
+    provisioned=false
+
+    [ -n "$keychain" ] || exit 1
+    [ -z "${CI:-}" ] || exit 1
+    _is_whole_number "$wait_seconds" || wait_seconds=30
+
+    trap '
+        if [ "$created" = true ] && [ "$provisioned" != true ]; then
+            security delete-keychain "$keychain" >/dev/null 2>&1 || rm -f "$keychain"
+        fi
+        [ -z "$work" ] || rm -rf "$work"
+        [ "$locked" != true ] || rm -rf "$lock"
+    ' EXIT
+    trap 'exit 1' HUP INT TERM
+
+    mkdir -p "$(dirname "$keychain")" 2>/dev/null || exit 1
+
+    # Two runs that each imported an identity would leave two of one name in
+    # the keychain, and codesign refuses an ambiguous name on every run after.
+    # So creating one holds a lock: a directory beside the keychain naming the
+    # pid of the script that holds it, and broken once that process is gone. A
+    # lock whose pid file is not written yet is taken to be held.
+    waited=0
+    until mkdir "$lock" 2>/dev/null; do
+        [ -d "$lock" ] || exit 1
+        owner="$(head -1 "$lock/pid" 2>/dev/null | tr -dc '0-9')"
+        if [ -n "$owner" ] && ! process_is_running "$owner"; then
+            rm -rf "$lock" || exit 1
+            continue
+        fi
+        if [ "$waited" -ge "$wait_seconds" ]; then
+            echo "warning: another run is creating the TBD signing identity (lock: $lock); signing this build ad-hoc" >&2
+            exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    locked=true
+    printf '%s\n' "$$" > "$lock/pid"
+
+    # Another run may have made the identity while this one waited. A keychain
+    # with no identity in it is what a run stopped partway leaves, and is made
+    # again. One that TBD's password does not open was made some other way,
+    # and is left alone.
+    if [ -f "$keychain" ]; then
+        if ! security unlock-keychain -p "$TBD_SIGNING_KEYCHAIN_PASSWORD" "$keychain" >/dev/null 2>&1; then
+            echo "warning: $keychain does not open with TBD's password, so TBD leaves it alone and signs this build ad-hoc; delete it with 'security delete-keychain $keychain' to have TBD make a new one" >&2
+            exit 1
+        fi
+        signing_identity_present "$keychain" && exit 0
+        security delete-keychain "$keychain" >/dev/null 2>&1 || rm -f "$keychain"
+        [ ! -e "$keychain" ] || exit 1
+    fi
+
+    work="$(mktemp -d "${TMPDIR:-/tmp}/tbd-signing.XXXXXX")" || exit 1
+    printf '%s\n' \
+        '[ req ]' \
+        'distinguished_name = dn' \
+        'x509_extensions = v3' \
+        'prompt = no' \
+        '[ dn ]' \
+        "CN = $TBD_SIGNING_IDENTITY" \
+        '[ v3 ]' \
+        'basicConstraints = critical,CA:false' \
+        'keyUsage = critical,digitalSignature' \
+        'extendedKeyUsage = critical,codeSigning' > "$work/codesign.cnf" || exit 1
+
+    _signing_step "$TBD_OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -config "$work/codesign.cnf" -keyout "$work/key.pem" -out "$work/cert.pem" || exit 1
+    # OpenSSL 3 writes PKCS#12 with AES and PBKDF2 unless told -legacy, and
+    # macOS cannot import that file: its MAC check fails. /usr/bin/openssl is
+    # LibreSSL, which has no -legacy and writes the older format already. So
+    # the export is tried with -legacy, then again without it.
+    p12_args=(-inkey "$work/key.pem" -in "$work/cert.pem" -name "$TBD_SIGNING_IDENTITY"
+        -passout "pass:$p12_password" -out "$work/identity.p12")
+    if ! "$TBD_OPENSSL" pkcs12 -export -legacy "${p12_args[@]}" >/dev/null 2>&1; then
+        rm -f "$work/identity.p12"
+        _signing_step "$TBD_OPENSSL" pkcs12 -export "${p12_args[@]}" || exit 1
+    fi
+
+    created=true
+    _signing_step security create-keychain -p "$TBD_SIGNING_KEYCHAIN_PASSWORD" "$keychain" || exit 1
+    # No settings means no auto-lock timeout.
+    _signing_step security set-keychain-settings "$keychain" || exit 1
+    _signing_step security unlock-keychain -p "$TBD_SIGNING_KEYCHAIN_PASSWORD" "$keychain" || exit 1
+    _signing_step security import "$work/identity.p12" -k "$keychain" -P "$p12_password" \
+        -T /usr/bin/codesign || exit 1
+    _signing_step security set-key-partition-list -S apple-tool:,apple: -s \
+        -k "$TBD_SIGNING_KEYCHAIN_PASSWORD" "$keychain" || exit 1
+    if ! signing_identity_present "$keychain"; then
+        echo "warning: could not create the TBD signing identity: $keychain lists none after the import; signing this build ad-hoc" >&2
+        exit 1
+    fi
+    provisioned=true
+
+    {
+        echo "note: TBD is now signed with a stable local identity, \"$TBD_SIGNING_IDENTITY\" in $keychain."
+        echo "note: Privacy permissions granted to earlier builds need granting again, once:"
+        echo "note: in System Settings > Privacy & Security, remove TBD from each list that"
+        echo "note: grants it access (Screen Recording, for example) and add it back."
+        echo "note: From then on, grants persist across rebuilds."
+    } >&2
+    exit 0
+)
 
 # Copy a signed bundle over the installed one and re-register it.
 #

@@ -14,9 +14,8 @@ That much is expected. The real bug was that the prompts **never stopped** — a
 
 ### Root cause
 
-`scripts/restart.sh` signed the assembled bundle **ad-hoc** (`codesign --sign -`).
-An ad-hoc signature gives TCC a designated requirement that is just a bare
-`cdhash` with no stable anchor:
+An ad-hoc signature (`codesign --sign -`) gives TCC a designated requirement
+that is just a bare `cdhash` with no stable anchor:
 
 ```
 designated => cdhash H"967b10c8…"     flags=0x2(adhoc)   TeamIdentifier=not set
@@ -34,6 +33,13 @@ tccd: Failed to match existing code requirement for subject
 
 No match → re-prompt, forever.
 
+The same mismatch takes away grants as well as denials. Every rebuild has a
+new cdhash, so a permission granted to one build does not match the next: the
+switch in System Settings still shows TBD as allowed while tccd logs the
+failure above and denies the access. Some services never ask again. With
+Screen Recording, `screencapture` run in a TBD terminal fails with "could not
+create image from display" and no prompt appears.
+
 ## Fix
 
 Sign with a **stable self-signed code-signing identity** instead of ad-hoc. That
@@ -46,67 +52,77 @@ designated => identifier "com.github.cheapsteak.tbd"
 
 The leaf-cert hash never changes as long as we sign with the same cert, so a
 single Allow/Deny decision now persists across rebuilds and across spawned child
-sessions. `restart.sh` uses this identity when present and falls back to ad-hoc
-otherwise (fresh clones / other contributors keep working).
+sessions.
 
-## One-time setup (per machine)
+## The signing identity
 
-Create the `TBD Dev Signing` identity in a dedicated keychain so `restart.sh`
-can sign non-interactively:
+`scripts/restart.sh` and `tbd update` (`scripts/update.sh`) both sign the
+bundle with `sign_app_bundle` in `scripts/restart-bundle-lib.sh`. When the
+identity is missing, the first install on a machine creates it, with no
+prompt, and every install after signs with it:
 
-```bash
-cd /tmp
-cat > tbd-codesign.cnf <<'EOF'
-[ req ]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[ dn ]
-CN = TBD Dev Signing
-[ v3 ]
-basicConstraints = critical,CA:false
-keyUsage = critical,digitalSignature
-extendedKeyUsage = critical,codeSigning
-EOF
+- **What and where** – a self-signed code-signing certificate named
+  `TBD Dev Signing` and its private key, in a dedicated keychain at
+  `~/Library/Keychains/tbd-signing.keychain-db` whose password is
+  `tbd-signing`. The login keychain is untouched, and the new keychain is not
+  added to the keychain search list: `codesign` is pointed at it with
+  `--keychain`.
+- **How** – `/usr/bin/openssl`, by absolute path so that a Homebrew or nix
+  OpenSSL first on `PATH` is never used, makes the key and certificate in a
+  private scratch directory that is deleted on every way out. `security` then
+  creates the keychain with no auto-lock timeout, imports the key so that only
+  `/usr/bin/codesign` may use it, and sets the key's partition list so that
+  `codesign` uses it without asking. `provision_signing_identity` in
+  `scripts/restart-bundle-lib.sh` holds the exact commands.
+- **Concurrent installs** – runs in several worktrees can install at once.
+  While one creates the identity it holds a lock, a directory beside the
+  keychain (`tbd-signing.keychain-db.lock`) naming its pid. Another run waits
+  up to 30 seconds for it, looks again once it has the lock, and signs that
+  build ad-hoc if the wait runs out. A lock whose process has gone is broken.
+- **Failure** – if any step fails, the run says so and signs that build ad-hoc,
+  and the install carries on. A keychain the failed run had created is deleted.
+  A keychain left with no identity in it, by a run that was killed partway, is
+  deleted and made again by the next install. A keychain at that path that the
+  password `tbd-signing` does not unlock was made some other way: TBD leaves
+  it alone and signs ad-hoc, and says how to delete it.
+- **CI** – with `CI` set, nothing is created and the bundle is signed ad-hoc.
+  A runner's keychain is thrown away with the runner.
 
-# Self-signed code-signing cert + key
-openssl req -x509 -newkey rsa:2048 -keyout tbd-key.pem -out tbd-cert.pem \
-  -days 3650 -nodes -config tbd-codesign.cnf
+`security find-identity -p codesigning ~/Library/Keychains/tbd-signing.keychain-db`
+lists the identity. `CSSMERR_TP_NOT_TRUSTED` next to it is normal for a
+self-signed cert: it only means Gatekeeper won't trust it, which is irrelevant
+here, and `codesign` still signs with it. To confirm which signature an
+installed bundle carries, `codesign -d -r- /Applications/TBD.app` prints its
+designated requirement.
 
-# IMPORTANT: -legacy, or macOS Security can't import the PKCS12 (MAC verify fails)
-openssl pkcs12 -export -legacy -inkey tbd-key.pem -in tbd-cert.pem \
-  -out tbd.p12 -passout pass:tbd -name "TBD Dev Signing"
+### Granting permissions again, once
 
-# Dedicated keychain with a known password so codesign never GUI-prompts
-KC="$HOME/Library/Keychains/tbd-signing.keychain-db"
-security create-keychain -p tbd-signing "$KC"
-security set-keychain-settings "$KC"                 # no auto-lock timeout
-security unlock-keychain -p tbd-signing "$KC"
-security import tbd.p12 -k "$KC" -P tbd -T /usr/bin/codesign -A
-security set-key-partition-list -S apple-tool:,apple:,unsigned: -s -k tbd-signing "$KC"
-
-# Add to the user keychain search list (preserve existing)
-EXISTING=$(security list-keychains -d user | sed 's/[" ]//g' | tr '\n' ' ')
-security list-keychains -d user -s "$KC" $EXISTING
-
-rm -f tbd-key.pem tbd-cert.pem tbd.p12 tbd-codesign.cnf
-security find-identity -p codesigning "$KC"   # should list "TBD Dev Signing"
-```
-
-`CSSMERR_TP_NOT_TRUSTED` next to the identity is normal for a self-signed cert —
-it only means Gatekeeper won't trust it, which is irrelevant here. `codesign`
-still signs with it.
-
-Then clear any stale ad-hoc-era grants once, so the next decision records
-against the new identity:
+The first bundle signed with the identity has a new designated requirement,
+which the grants and denials recorded for earlier ad-hoc builds do not match.
+The install that creates the identity says so in a note on stderr. Re-grant
+each permission once: in **System Settings > Privacy & Security**, open each
+list that grants TBD access (Screen Recording, Full Disk Access, Microphone,
+and so on), remove TBD, and add it back. To clear every decision at once
+instead, so that macOS asks again on next use:
 
 ```bash
 tccutil reset All com.github.cheapsteak.tbd
 ```
 
-After the next `scripts/restart.sh`, the first folder prompt is the last one:
-click **Don't Allow** (Claude only probes those folders; TBD worktrees live under
-`~/tbd/`, which isn't protected), and it stays denied silently from then on.
+From then on grants and denials persist across rebuilds. Folder prompts work
+the same way: the first one is the last one. Click **Don't Allow** (Claude only
+probes those folders; TBD worktrees live under `~/tbd/`, which isn't
+protected), and it stays denied silently.
+
+### Removing the identity
+
+```bash
+security delete-keychain ~/Library/Keychains/tbd-signing.keychain-db
+```
+
+This deletes the keychain, the certificate and the key. The next install
+creates a new identity with a new certificate, so every permission needs
+granting again once more.
 
 ## Microphone access
 
@@ -131,7 +147,11 @@ tccutil reset Microphone com.github.cheapsteak.tbd
 
 ## Security note
 
-`TBD Dev Signing` is a self-signed, locally-generated dev key with `-A`
-(any-app) keychain access and a known keychain password. That's acceptable for a
-local developer-tool signing key; it confers no trust outside this machine and is
-not used to ship anything.
+`TBD Dev Signing` is a self-signed, locally generated dev key in a keychain
+whose password is fixed and written down here, so that installs can sign
+without a prompt. The key's access list names only `/usr/bin/codesign`
+(`security import -T /usr/bin/codesign`), and its partition list admits Apple's
+own tools. Any process running as you can still unlock the keychain with the
+known password. That's acceptable for a local developer-tool signing key: no
+one else trusts the certificate, it confers no trust outside this machine, and
+it signs nothing that ships.
