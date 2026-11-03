@@ -1763,6 +1763,43 @@ test_relink_replaces_a_leftover_staging_link() {
     assert_no_staging "relink leaves no leftover staging link" "$d"
 }
 
+# `ln` given a directory links into it, so a directory at the sibling's name
+# must stop the relink with nothing created inside it.
+test_relink_refuses_a_directory_at_the_staging_name() {
+    local d out before staging
+    d="$(relink_fixture stagingdir)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    staging="$(relink_staging "$d")"
+    mkdir -p "$staging"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_contains "relink warns about a directory at the staging name" \
+        "WARNING: could not refresh $d/bin/tbd, left it as it was: $staging is in the way" "$out"
+    assert_eq "relink keeps the installed file past a directory at the staging name" \
+        "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink links nothing into a directory at the staging name" "" "$(ls -A "$staging")"
+}
+
+# A symlink to a directory is removed, not followed: the relink then succeeds,
+# the install is a regular file again, and nothing lands in the directory.
+test_relink_removes_a_symlink_at_the_staging_name() {
+    local d out
+    d="$(relink_fixture stagingsymlink)"
+    printf 'old\n' > "$d/bin/tbd"
+    mkdir -p "$d/elsewhere"
+    ln -s "$d/elsewhere" "$(relink_staging "$d")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink refreshes past a symlink at the staging name" "refreshed $d/bin/tbd" "$out"
+    if [ -f "$d/bin/tbd" ] && [ ! -L "$d/bin/tbd" ]; then
+        pass "the install stays a regular file"
+    else
+        fail "the install stays a regular file"
+    fi
+    assert_eq "the install is the new CLI" "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink links nothing into the directory the symlink named" "" "$(ls -A "$d/elsewhere")"
+    assert_no_staging "relink leaves no staging link after removing a symlink there" "$d"
+}
+
 test_relink_leaves_a_symlink_alone() {
     local d out
     d="$(relink_fixture symlink)"
@@ -1863,23 +1900,36 @@ test_relink_warns_and_keeps_the_file_when_mv_fails() {
 # reads it. The relink must sit in the branch that starts a daemon from
 # $BUILD_DIR, after that daemon's handover and before the branch that skips the
 # daemon for a WIP build. --app skips the whole branch, so it never relinks,
-# and --dry-run exits long before it.
+# and --dry-run exits long before it. Within that branch it must sit in the
+# then-arm of the default-TBD_HOME guard, so a sandboxed instance never
+# re-points the developer's tbd: the guard comes first, and no `else` or `fi`
+# falls between the guard and the relink.
 # shellcheck disable=SC2016 # literal restart.sh text, not expansions
 test_restart_relinks_the_cli_only_after_starting_a_daemon() {
-    local restart="$HERE/restart.sh" branch handover relink skip order="wrong"
+    local restart="$HERE/restart.sh" branch handover guard relink skip between
+    local order="wrong"
     branch="$(grep -nF 'if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then' "$restart" | head -1 | cut -d: -f1)"
     handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
+    guard="$(grep -nF 'if is_default_tbd_home "${TBD_HOME:-}" "$HOME"; then' "$restart" | head -1 | cut -d: -f1)"
     relink="$(grep -nF 'relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
     skip="$(grep -nF 'elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then' "$restart" | head -1 | cut -d: -f1)"
-    if [[ -n "$branch" && -n "$handover" && -n "$relink" && -n "$skip" ]] \
-        && (( branch < handover && handover < relink && relink < skip )); then
-        order="right"
+    if [[ -n "$branch" && -n "$handover" && -n "$guard" && -n "$relink" && -n "$skip" ]] \
+        && (( branch < handover && handover < guard && guard < relink && relink < skip )); then
+        between="$(sed -n "$((guard + 1)),$((relink - 1))p" "$restart" | grep -cE '^[[:space:]]*(else|elif|fi)([[:space:]]|;|$)')"
+        [ "$between" = 0 ] && order="right"
     fi
-    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) after the handover (${handover:-?}), inside the daemon branch (${branch:-?} to ${skip:-?})" \
+    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) inside the default-TBD_HOME guard (${guard:-?}), after the handover (${handover:-?}), in the daemon branch (${branch:-?} to ${skip:-?})" \
         "right" "$order"
-    # A second call elsewhere would relink on --app too.
+    # A second call elsewhere would relink on --app, or for a sandbox, too.
     assert_eq "restart.sh calls relink_installed_cli once" \
         "1" "$(grep -cF 'relink_installed_cli "' "$restart")"
+}
+
+test_is_default_tbd_home_wants_the_default_or_nothing() {
+    assert_ok "an unset TBD_HOME is the default home" is_default_tbd_home "" "/x home"
+    assert_ok "HOME/tbd is the default home" is_default_tbd_home "/x home/tbd" "/x home"
+    assert_fail "another TBD_HOME is a sandbox" is_default_tbd_home "/tmp/sandbox/tbd" "/x home"
+    assert_fail "a TBD_HOME under the default is a sandbox" is_default_tbd_home "/x home/tbd/sub" "/x home"
 }
 
 test_build_identity_describes_the_tree
@@ -1938,12 +1988,15 @@ test_default_cli_install_path_is_under_home
 test_relink_points_an_installed_regular_file_at_the_new_cli
 test_relink_leaves_an_already_current_link_alone
 test_relink_replaces_a_leftover_staging_link
+test_relink_refuses_a_directory_at_the_staging_name
+test_relink_removes_a_symlink_at_the_staging_name
 test_relink_leaves_a_symlink_alone
 test_relink_never_creates_an_install
 test_relink_skips_a_non_executable_new_cli
 test_relink_warns_and_keeps_the_file_when_ln_fails
 test_relink_warns_and_keeps_the_file_when_mv_fails
 test_restart_relinks_the_cli_only_after_starting_a_daemon
+test_is_default_tbd_home_wants_the_default_or_nothing
 
 # A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a
 # background job keeps a copy of this harness's EXIT trap until it execs, so a

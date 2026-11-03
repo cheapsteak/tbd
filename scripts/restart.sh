@@ -412,15 +412,22 @@ if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
         || exit 1
 
     # The running daemon is now this build's, and the app checks the
-    # installed CLI (~/.local/bin/tbd) against the TBDCLI beside it. Re-link an existing hard
-    # link there, as `tbd update` does, so a dev build never leaves the app a
-    # stale CLI to ask about. Only in this branch, where a daemon was started
-    # from $BUILD_DIR — --daemon and --quick included, the latter from the
-    # binaries already there. --app starts no daemon, and a WIP build that
-    # skips the daemon restart leaves the shared daemon on another build's
-    # CLI. Never fails the restart (relink_installed_cli, restart-bundle-lib.sh).
-    cli_outcome="$(relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI")"
-    [ -z "$cli_outcome" ] || echo "  CLI: $cli_outcome"
+    # installed CLI (~/.local/bin/tbd) against the TBDCLI beside it. Re-link an
+    # existing hard link there, as `tbd update` does, so a dev build never
+    # leaves the app a stale CLI to ask about. Only in this branch, where a
+    # daemon was started from $BUILD_DIR — --daemon and --quick included, the
+    # latter from the binaries already there. --app starts no daemon, and a WIP
+    # build that skips the daemon restart leaves the shared daemon on another
+    # build's CLI. Only for the default TBD_HOME, too: a sandboxed instance
+    # (TBD_HOME pointing anywhere else) must not re-point the developer's
+    # global `tbd`. Never fails the restart (relink_installed_cli,
+    # restart-bundle-lib.sh).
+    if is_default_tbd_home "${TBD_HOME:-}" "$HOME"; then
+        cli_outcome="$(relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI")"
+        [ -z "$cli_outcome" ] || echo "  CLI: $cli_outcome"
+    else
+        echo "  CLI: not re-linked; TBD_HOME is not the default home"
+    fi
 elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
     echo "(Skipping daemon restart for WIP worktree)"
 fi

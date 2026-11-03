@@ -1132,6 +1132,15 @@ default_cli_install_path() {
     printf '%s\n' "$HOME/.local/bin/tbd"
 }
 
+# True when <tbd_home> is TBD's default home for <home>: empty (TBD_HOME unset)
+# or exactly <home>/tbd. Any other TBD_HOME is a sandboxed instance, whose
+# builds must not re-point the developer's global `tbd`.
+#
+#   is_default_tbd_home <tbd_home> <home>
+is_default_tbd_home() {
+    [ -z "${1-}" ] || [ "${1-}" = "${2-}/tbd" ]
+}
+
 # Re-link an existing <install_path> (default_cli_install_path for both
 # callers) to <new_cli>, the TBDCLI beside the daemon the caller just started.
 # The app compares the install against that same file at launch, so after this
@@ -1150,7 +1159,8 @@ default_cli_install_path() {
 # volume, say) would delete a working `tbd` on every restart. Instead the new
 # link goes to a hidden sibling first, and `mv` renames it over the install
 # path in one step; on any failure the sibling is removed and the old file
-# stays as it was. The sibling's name is fixed, `.<name>.tbd-install`, the same
+# stays as it was. A directory at the sibling's name is left alone and stops
+# the relink. The sibling's name is fixed, `.<name>.tbd-install`, the same
 # one CLIInstaller.stagingPath (TBDShared) uses, so a leftover from a crash
 # here or in the app is replaced by the next install from either side.
 #
@@ -1174,7 +1184,16 @@ relink_installed_cli() {
         return 0
     fi
     staging="$(dirname "$install_path")/.$(basename "$install_path").tbd-install"
-    if ! reason="$(ln -f "$new_cli" "$staging" 2>&1 >/dev/null)"; then
+    # Clear a leftover sibling first, and link only to a name that is then
+    # free: `ln` given an existing directory, or a symlink to one, puts the
+    # link inside it. `rm -f` removes a file or a symlink without following
+    # it and leaves a directory, which then stops the relink here.
+    rm -f "$staging" 2>/dev/null || true
+    if [ -e "$staging" ] || [ -L "$staging" ]; then
+        printf 'WARNING: could not refresh %s, left it as it was: %s is in the way\n' "$install_path" "$staging"
+        return 0
+    fi
+    if ! reason="$(ln "$new_cli" "$staging" 2>&1 >/dev/null)"; then
         reason="${reason:-ln failed}"
     elif ! reason="$(mv -f "$staging" "$install_path" 2>&1 >/dev/null)"; then
         reason="${reason:-mv failed}"
