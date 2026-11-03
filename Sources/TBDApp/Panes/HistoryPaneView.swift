@@ -381,6 +381,11 @@ struct SessionTranscriptView: View {
     /// table holding every row, which is the 18–21 s hang. Keyed by session
     /// because this view persists across selection changes; only the table is
     /// rebuilt per session (`.id(sessionId)`).
+    ///
+    /// Cleared on every selection change, so a session reselected after one
+    /// that mounted no table (no messages, or still loading) mounts windowed
+    /// again. A remount while the same session stays selected (its store entry
+    /// evicted, then refilled whole) keeps it, and is not covered.
     @State private var widenedSessionID: String?
 
     /// Per-pane memo for `TranscriptPresentation.build`, which is called inline
@@ -596,6 +601,16 @@ struct SessionTranscriptView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // On the outer stack, which exists whichever branch shows, so the
+        // reset happens even when the new session mounts no table. Not in an
+        // `onDisappear`: a removal transition can run that after the next
+        // session's table has already settled and widened, leaving that table
+        // stuck on its last `tailLimit` rows. This runs in the same update as
+        // the new table's `makeNSView`, two main-queue turns before its
+        // `onOpenSettled`.
+        .onChange(of: sessionId) { _, _ in
+            widenedSessionID = nil
+        }
     }
 
     private func openTranscriptItem(_ itemID: String) {

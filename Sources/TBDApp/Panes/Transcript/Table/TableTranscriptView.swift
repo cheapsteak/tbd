@@ -66,10 +66,11 @@ struct TableTranscriptView: NSViewRepresentable {
     var promptRail: PromptRailMount = .none
     /// Called once, when the table's open has settled: two main-queue turns
     /// after `makeNSView`, with the first layout done and the re-pinned scroll
-    /// to the end applied. Session History widens its windowed node list here,
-    /// so the rest of a long transcript reaches a table that is already in the
-    /// window as an update rather than as a mount (`TranscriptTailFirstOpen`).
-    /// Nil where nothing waits on the open.
+    /// to the end applied. Not called if the table has left its window by
+    /// then. Session History widens its windowed node list here, so the rest
+    /// of a long transcript reaches a table that is already in the window as
+    /// an update rather than as a mount (`TranscriptTailFirstOpen`). Nil where
+    /// nothing waits on the open.
     var onOpenSettled: (@MainActor () -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
@@ -187,7 +188,12 @@ struct TableTranscriptView: NSViewRepresentable {
                 let settledMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
                 Self.log.debug(
                     "table.open.firstLayoutSettled ms=\(settledMs, format: .fixed(precision: 1), privacy: .public)")
-                onOpenSettled?()
+                // A table torn down inside these two turns has no open to
+                // report, and reporting it would re-arm its pane's widen for a
+                // session no longer shown.
+                if coordinator.tableView?.window != nil {
+                    onOpenSettled?()
+                }
             }
         }
 

@@ -165,7 +165,8 @@ extension AppState {
     /// same session, so neither publish may overwrite what another writer put
     /// there meanwhile: the tail lands only in an empty slot, and the full
     /// transcript only in a slot that is still empty or still holds exactly
-    /// the tail this load wrote (`mayPublishFullTranscript`).
+    /// the tail this load wrote (`mayPublishFullTranscript`). An empty full
+    /// read keeps a tail already on screen.
     ///
     /// The readers are parameters so a test can run each phase against the
     /// store; `selectSession` passes the daemon client's two reads.
@@ -189,27 +190,29 @@ extension AppState {
         do {
             let messages = try await readFull()
             guard Self.mayPublishFullTranscript(
-                current: sessionTranscripts[sessionID], publishedTail: publishedTail
+                messages, current: sessionTranscripts[sessionID], publishedTail: publishedTail
             ) else { return }
             sessionTranscripts[sessionID] = messages
             touchSessionTranscript(sessionID)
         } catch {
-            // Leave the slot empty, so selecting the session again retries.
-            // That means withdrawing the tail this load published, unless
-            // another writer has replaced it since.
-            if let publishedTail, sessionTranscripts[sessionID] == publishedTail {
-                sessionTranscripts.removeValue(forKey: sessionID)
-            }
+            // leave empty, user can try again. Only the RPC read throws, and
+            // it runs with no tail published, so the slot is still empty.
         }
     }
 
-    /// Whether a session's full transcript may replace what the store holds
-    /// for it now: nothing, or exactly the tail this load published. Anything
-    /// else came from another writer, such as a live pane streaming the session.
+    /// Whether the full transcript `full` may replace what the store holds for
+    /// its session now. An empty slot takes it. A slot holding exactly the tail
+    /// this load published takes it unless `full` is empty: the full read can come
+    /// back empty where the tail did not (a file that is not valid UTF-8 as a
+    /// whole parses to nothing, while the tail decodes only its last chunk),
+    /// and the rows already on screen are worth more than "No messages found".
+    /// Anything else came from another writer, such as a live pane streaming
+    /// the session.
     nonisolated static func mayPublishFullTranscript(
-        current: [TranscriptItem]?, publishedTail: [TranscriptItem]?
+        _ full: [TranscriptItem], current: [TranscriptItem]?, publishedTail: [TranscriptItem]?
     ) -> Bool {
-        current == nil || current == publishedTail
+        guard let current else { return true }
+        return current == publishedTail && !full.isEmpty
     }
 
     /// Clear a session's loading flag, without publishing a change when it is
