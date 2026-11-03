@@ -207,6 +207,15 @@ final class TranscriptContainerView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         startObservingKeyWindow()
+        // An open that settled while the table was out of a window is reported
+        // now that it is back in one. A turn later, because this can run
+        // inside a SwiftUI update and the report writes the pane's state; the
+        // coordinator checks the window again then.
+        if window != nil, coordinator?.pendingOpenSettled != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.coordinator?.reportPendingOpenSettled()
+            }
+        }
     }
 
     private func startObservingKeyWindow() {
