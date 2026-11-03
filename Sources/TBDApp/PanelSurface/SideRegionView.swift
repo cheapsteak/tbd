@@ -478,6 +478,7 @@ struct SideRegionView: View {
         // The strip's icon buttons draw the toolbar's hover square; a tab
         // sets its own style.
         .buttonStyle(RowIconButtonStyle())
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
         .frame(height: tabsInToolbar
             ? MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset)
             : TabRowMetrics.height)

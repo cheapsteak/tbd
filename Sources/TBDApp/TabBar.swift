@@ -237,7 +237,7 @@ struct TabBar: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
         }
-        .padding(.horizontal, 0)
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
         // The row's icon buttons draw the toolbar's hover square; a tab sets
         // its own style.
         .buttonStyle(RowIconButtonStyle())
@@ -323,6 +323,7 @@ struct TabBar: View {
         // The row's icon buttons draw the toolbar's hover square; a tab and
         // the title's menus set their own style.
         .buttonStyle(RowIconButtonStyle())
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
         .padding(.leading, MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge))
         .frame(height: MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset))
         .background(Color(nsColor: .windowBackgroundColor))

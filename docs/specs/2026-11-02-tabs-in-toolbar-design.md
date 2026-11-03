@@ -119,8 +119,10 @@ Left to right:
    item (window buttons, sidebar toggle, back and forward) still sits over the
    main pane's top-left corner. The toolbar controller reports that item's
    trailing edge in window coordinates; the row starts 8 pt past it. While the
-   sidebar is shown, the edge lies left of the pane and the row starts 9 pt in,
-   where the toolbar's title cluster starts today.
+   sidebar is shown, the edge lies left of the pane and the row starts 16 pt in.
+   Every tab row (this one, the classic row and the side region's strip) ends
+   12 pt short of its trailing edge, so the last icon button's hover square
+   clears the window's edge; the row's background still reaches the edge.
 2. **Title cluster.** A column of two lines: the worktree title in 13 pt
    semibold, and under it the project name in 11 pt, secondary colour, the way
    macOS sets a window's subtitle under its title. The notes button leads the

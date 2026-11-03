@@ -15,9 +15,14 @@ enum MainTabRowMetrics {
     /// The gap between the toolbar's leading item and the main row's first
     /// item while the item sits over the main pane (sidebar collapsed).
     static let leadingItemClearance: CGFloat = 8
-    /// The main row's leading inset while the sidebar is shown: where the
-    /// toolbar's title cluster starts with the setting off.
-    static let shownSidebarInset: CGFloat = 9
+    /// The main row's leading inset while the sidebar is shown: the gap
+    /// between the sidebar's border and the title column.
+    static let shownSidebarInset: CGFloat = 16
+    /// The gap between a tab row's last icon button and the row's trailing
+    /// edge, so the button's hover square stays off the window's edge and its
+    /// rounded corner. Applied inside each row's background, which still
+    /// reaches the edge.
+    static let trailingInset: CGFloat = 12
     /// The narrowest the title column shrinks to before the tabs scroll.
     static let titleFloor: CGFloat = 110
     /// The narrowest the main row's drag gap gets.

@@ -103,14 +103,14 @@ struct TabsInToolbarTests {
     }
 
     /// The main row starts 8 pt past the toolbar's leading item while that
-    /// item reaches over the main pane, and 9 pt in while it does not.
+    /// item reaches over the main pane, and 16 pt in while it does not.
     @Test func theRowClearsTheLeadingItemOnlyWhileItSitsOverThePane() {
         let unmeasured = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: nil)
-        #expect(unmeasured == 9)
+        #expect(unmeasured == MainTabRowMetrics.shownSidebarInset)
         let sidebarShown = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: -120)
-        #expect(sidebarShown == 9)
+        #expect(sidebarShown == MainTabRowMetrics.shownSidebarInset)
         let atTheEdge = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: 0)
-        #expect(atTheEdge == 9)
+        #expect(atTheEdge == MainTabRowMetrics.shownSidebarInset)
         let sidebarCollapsed = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: 176)
         #expect(sidebarCollapsed == 184)
     }
