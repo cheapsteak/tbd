@@ -9,13 +9,14 @@ import TBDShared
 
 /// The trailing ends of the tab row: the workspace tab bar's
 /// (`TabBarTrailingItem`) and the side region's strip's
-/// (`SideStripTrailingItem`). The transcript and Notes buttons
+/// (`SideStripTrailingItem`). The Changes, transcript and Notes toggles
 /// (`TabRowEdgeControls`) keep to the window's right edge, just before the
-/// button that hides or shows the side region: in the strip while the region
-/// shows, at the bar's end while it is hidden. Session History stays at the
-/// bar's trailing end. With the transcript view on, the transcript button is
-/// drawn on every tab, disabled in front of anything but a Claude terminal, so
-/// nothing before it moves as the selection changes.
+/// button that hides or shows the side region: as pills in the strip while
+/// the region shows, as icon buttons at the bar's end while it is hidden.
+/// Session History stays at the bar's trailing end. With the transcript view
+/// on, the transcript toggle is drawn on every tab, disabled in front of
+/// anything but a Claude terminal, so nothing before it moves as the
+/// selection changes. The strip has no + menu.
 @Suite("Tab row trailing items")
 @MainActor
 struct TabRowTrailingTests {
@@ -25,12 +26,14 @@ struct TabRowTrailingTests {
 
     // MARK: - Controls
 
-    private static var transcriptLive: PaneChromeControl { .transcript(isOn: false, isEnabled: true) }
-    private static var transcriptOpen: PaneChromeControl { .transcript(isOn: true, isEnabled: true) }
-    private static var transcriptDisabled: PaneChromeControl { .transcript(isOn: false, isEnabled: false) }
-    private static var notesOff: PaneChromeControl { .notes(isOn: false, isEnabled: true) }
-    private static var notesOn: PaneChromeControl { .notes(isOn: true, isEnabled: true) }
-    private static var notesLoading: PaneChromeControl { .notes(isOn: false, isEnabled: false) }
+    private static var changesOff: PaneChromeControl { .changes(state: .off) }
+    private static var transcriptLive: PaneChromeControl { .transcript(state: .off, isEnabled: true) }
+    private static var transcriptFront: PaneChromeControl { .transcript(state: .front, isEnabled: true) }
+    private static var transcriptBehind: PaneChromeControl { .transcript(state: .behind, isEnabled: true) }
+    private static var transcriptDisabled: PaneChromeControl { .transcript(state: .off, isEnabled: false) }
+    private static var notesOff: PaneChromeControl { .notes(state: .off, isEnabled: true) }
+    private static var notesFront: PaneChromeControl { .notes(state: .front, isEnabled: true) }
+    private static var notesLoading: PaneChromeControl { .notes(state: .off, isEnabled: false) }
     private static var renderToggle: PaneChromeControl { .renderToggle(showingSource: false) }
     private static var copyAddress: PaneChromeControl { .copyAddress(copied: false) }
 
@@ -187,6 +190,7 @@ struct TabRowTrailingTests {
             switch item {
             case .viewerControl: kinds.append("viewer control")
             case .sessionHistory: kinds.append("session history")
+            case .edge(.changes): kinds.append("changes")
             case .edge(.transcript): kinds.append("transcript")
             case .edge(.notes): kinds.append("notes")
             case .expand: kinds.append("expand")
@@ -201,8 +205,8 @@ struct TabRowTrailingTests {
         var kinds: [String] = []
         for item in items.reversed() {
             switch item {
-            case .addMenu: kinds.append("add menu")
             case .activePanelControl: kinds.append("active panel control")
+            case .edge(.changes): kinds.append("changes")
             case .edge(.transcript): kinds.append("transcript")
             case .edge(.notes): kinds.append("notes")
             case .collapse: kinds.append("collapse")
@@ -213,18 +217,18 @@ struct TabRowTrailingTests {
 
     // MARK: - The transcript button's decision
 
-    /// `WorkspaceTabBarChrome.transcriptControl`, argument labels dropped.
+    /// `WorkspaceTabBarChrome.transcriptControl`, argument labels shortened.
     private static func transcriptControl(
-        _ primary: PaneContent, isClaudeTerminal: Bool, viewEnabled: Bool, open: Bool
+        _ primary: PaneContent, isClaudeTerminal: Bool, viewEnabled: Bool, state: SidePanelPillState
     ) -> PaneChromeControl? {
         WorkspaceTabBarChrome.transcriptControl(
             primary: primary,
             isClaudeTerminal: isClaudeTerminal,
             transcriptViewEnabled: viewEnabled,
-            transcriptOpen: open)
+            transcript: state)
     }
 
-    @Test("the transcript button is live for a Claude terminal, disabled for every other primary, and absent with the view off")
+    @Test("the transcript toggle is live for a Claude terminal, disabled and off for every other primary, and absent with the view off")
     func transcriptControlPerPrimary() {
         let terminal = PaneContent.terminal(terminalID: UUID())
         let file = PaneContent.codeViewer(id: UUID(), path: "/w/README.md")
@@ -232,66 +236,81 @@ struct TabRowTrailingTests {
         let note = PaneContent.note(noteID: UUID())
         let transcript = PaneContent.liveTranscript(id: UUID(), terminalID: UUID())
 
-        // A Claude terminal with the transcript view on: live, and on exactly
-        // while its panel exists.
-        let open: PaneChromeControl? = Self.transcriptOpen
+        // A Claude terminal with the transcript view on: live, in its panel's
+        // state.
+        let front: PaneChromeControl? = Self.transcriptFront
+        let behind: PaneChromeControl? = Self.transcriptBehind
         let live: PaneChromeControl? = Self.transcriptLive
-        #expect(Self.transcriptControl(terminal, isClaudeTerminal: true, viewEnabled: true, open: true) == open)
-        #expect(Self.transcriptControl(terminal, isClaudeTerminal: true, viewEnabled: true, open: false) == live)
+        #expect(Self.transcriptControl(terminal, isClaudeTerminal: true, viewEnabled: true, state: .front) == front)
+        #expect(Self.transcriptControl(terminal, isClaudeTerminal: true, viewEnabled: true, state: .behind) == behind)
+        #expect(Self.transcriptControl(terminal, isClaudeTerminal: true, viewEnabled: true, state: .off) == live)
 
         // A plain or Codex terminal, and every viewer primary, with the view
         // on: drawn, disabled, and never on.
         let disabled: PaneChromeControl? = Self.transcriptDisabled
-        #expect(Self.transcriptControl(terminal, isClaudeTerminal: false, viewEnabled: true, open: true) == disabled)
+        #expect(Self.transcriptControl(terminal, isClaudeTerminal: false, viewEnabled: true, state: .front) == disabled)
         let viewers: [PaneContent] = [file, web, note, transcript]
         for primary in viewers {
-            #expect(Self.transcriptControl(primary, isClaudeTerminal: false, viewEnabled: true, open: false)
+            #expect(Self.transcriptControl(primary, isClaudeTerminal: false, viewEnabled: true, state: .off)
                 == disabled, "\(primary)")
             // A stray Claude flag does not make viewer content a Claude terminal.
-            #expect(Self.transcriptControl(primary, isClaudeTerminal: true, viewEnabled: true, open: true)
+            #expect(Self.transcriptControl(primary, isClaudeTerminal: true, viewEnabled: true, state: .front)
                 == disabled, "\(primary)")
         }
 
         // The transcript view off: no button on any tab.
         let every: [PaneContent] = [terminal, file, web, note, transcript]
         for primary in every {
-            #expect(Self.transcriptControl(primary, isClaudeTerminal: true, viewEnabled: false, open: true)
+            #expect(Self.transcriptControl(primary, isClaudeTerminal: true, viewEnabled: false, state: .front)
                 == nil, "\(primary)")
-            #expect(Self.transcriptControl(primary, isClaudeTerminal: false, viewEnabled: false, open: false)
+            #expect(Self.transcriptControl(primary, isClaudeTerminal: false, viewEnabled: false, state: .off)
                 == nil, "\(primary)")
         }
     }
 
     // MARK: - The orders, as values
 
-    @Test("the edge pair's order: the transcript button while it is drawn, then Notes")
+    @Test("the toggles' order: Changes, the transcript while it is drawn, then Notes")
     func edgeItemsOrder() {
+        let changes: PaneChromeControl = Self.changesOff
         let transcript: PaneChromeControl = Self.transcriptLive
         let notes: PaneChromeControl = Self.notesOff
 
         let withTranscript = TabRowEdgeControls(
-            transcript: transcript, onTranscript: {}, notes: notes, onNotes: {})
-        let expectedWithTranscript: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
+            changes: changes, onChanges: {}, transcript: transcript, transcriptTerminalID: UUID(),
+            onTranscript: {}, notes: notes, onNotes: {})
+        let expectedWithTranscript: [TabRowEdgeItem] = [
+            .changes(changes), .transcript(transcript), .notes(notes),
+        ]
         #expect(withTranscript.items == expectedWithTranscript)
 
         let withoutTranscript = TabRowEdgeControls(
-            transcript: nil, onTranscript: {}, notes: notes, onNotes: {})
-        let expectedWithoutTranscript: [TabRowEdgeItem] = [.notes(notes)]
+            changes: changes, onChanges: {}, transcript: nil, transcriptTerminalID: nil,
+            onTranscript: {}, notes: notes, onNotes: {})
+        let expectedWithoutTranscript: [TabRowEdgeItem] = [.changes(changes), .notes(notes)]
         #expect(withoutTranscript.items == expectedWithoutTranscript)
+
+        // Each pill reads its panel's name, the Notes pill whatever the note
+        // is titled.
+        let labels = withTranscript.items.map(\.pillLabel)
+        let expectedLabels = ["Changes", "Transcript", "Notes"]
+        #expect(labels == expectedLabels)
     }
 
     @Test("the bar ends at Session History while the region shows, and carries the edge controls and expand while it is hidden")
     func barItemsOrder() {
         let viewer: PaneChromeControl = Self.copyAddress
+        let changes: PaneChromeControl = Self.changesOff
         let transcript: PaneChromeControl = Self.transcriptLive
         let notes: PaneChromeControl = Self.notesOff
-        let edgeItems: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
-        let notesOnly: [TabRowEdgeItem] = [.notes(notes)]
+        let edgeItems: [TabRowEdgeItem] = [.changes(changes), .transcript(transcript), .notes(notes)]
+        let notesOnly: [TabRowEdgeItem] = [.changes(changes), .notes(notes)]
 
         let hidden = TabBarTrailingItem.items(
             viewerControl: viewer, edgeItems: edgeItems, showsSide: false, showsExpandButton: true)
         let expectedHidden: [TabBarTrailingItem] = [
-            .viewerControl(viewer), .sessionHistory, .edge(.transcript(transcript)), .edge(.notes(notes)), .expand,
+            .viewerControl(viewer), .sessionHistory, .edge(.changes(changes)),
+            .edge(.transcript(transcript)), .edge(.notes(notes)), .expand,
         ]
         #expect(hidden == expectedHidden)
 
@@ -299,14 +318,17 @@ struct TabRowTrailingTests {
         let noExpand = TabBarTrailingItem.items(
             viewerControl: viewer, edgeItems: edgeItems, showsSide: false, showsExpandButton: false)
         let expectedNoExpand: [TabBarTrailingItem] = [
-            .viewerControl(viewer), .sessionHistory, .edge(.transcript(transcript)), .edge(.notes(notes)),
+            .viewerControl(viewer), .sessionHistory, .edge(.changes(changes)),
+            .edge(.transcript(transcript)), .edge(.notes(notes)),
         ]
         #expect(noExpand == expectedNoExpand)
 
         // No viewer control and no transcript button.
         let bare = TabBarTrailingItem.items(
             viewerControl: nil, edgeItems: notesOnly, showsSide: false, showsExpandButton: true)
-        let expectedBare: [TabBarTrailingItem] = [.sessionHistory, .edge(.notes(notes)), .expand]
+        let expectedBare: [TabBarTrailingItem] = [
+            .sessionHistory, .edge(.changes(changes)), .edge(.notes(notes)), .expand,
+        ]
         #expect(bare == expectedBare)
 
         // Shown: the strip carries the edge controls and the collapse button,
@@ -322,23 +344,44 @@ struct TabRowTrailingTests {
         #expect(shownBare == expectedShownBare)
     }
 
-    @Test("the strip ends with the + menu, the active panel's control, the edge controls and collapse")
+    @Test("the strip ends with the active panel's control, the Changes, transcript and Notes pills and collapse, and no + menu")
     func stripItemsOrder() {
         let refresh: PaneChromeControl = .refresh
+        let changes: PaneChromeControl = Self.changesOff
         let transcript: PaneChromeControl = Self.transcriptDisabled
         let notes: PaneChromeControl = Self.notesLoading
-        let edgeItems: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
-        let notesOnly: [TabRowEdgeItem] = [.notes(notes)]
+        let edgeItems: [TabRowEdgeItem] = [.changes(changes), .transcript(transcript), .notes(notes)]
+        let withoutTranscript: [TabRowEdgeItem] = [.changes(changes), .notes(notes)]
 
         let full = SideStripTrailingItem.items(activePanelControl: refresh, edgeItems: edgeItems)
         let expectedFull: [SideStripTrailingItem] = [
-            .addMenu, .activePanelControl(refresh), .edge(.transcript(transcript)), .edge(.notes(notes)), .collapse,
+            .activePanelControl(refresh), .edge(.changes(changes)), .edge(.transcript(transcript)),
+            .edge(.notes(notes)), .collapse,
         ]
         #expect(full == expectedFull)
 
-        let bare = SideStripTrailingItem.items(activePanelControl: nil, edgeItems: notesOnly)
-        let expectedBare: [SideStripTrailingItem] = [.addMenu, .edge(.notes(notes)), .collapse]
+        // No active panel control.
+        let noControl = SideStripTrailingItem.items(activePanelControl: nil, edgeItems: edgeItems)
+        let expectedNoControl: [SideStripTrailingItem] = [
+            .edge(.changes(changes)), .edge(.transcript(transcript)), .edge(.notes(notes)), .collapse,
+        ]
+        #expect(noControl == expectedNoControl)
+
+        // No transcript pill.
+        let noTranscript = SideStripTrailingItem.items(activePanelControl: refresh, edgeItems: withoutTranscript)
+        let expectedNoTranscript: [SideStripTrailingItem] = [
+            .activePanelControl(refresh), .edge(.changes(changes)), .edge(.notes(notes)), .collapse,
+        ]
+        #expect(noTranscript == expectedNoTranscript)
+
+        // Neither.
+        let bare = SideStripTrailingItem.items(activePanelControl: nil, edgeItems: withoutTranscript)
+        let expectedBare: [SideStripTrailingItem] = [.edge(.changes(changes)), .edge(.notes(notes)), .collapse]
         #expect(bare == expectedBare)
+
+        // At most five slots, so the strip's fixed controls stay 240 pt.
+        let slotCount = full.count
+        #expect(slotCount == SideStripMetrics.trailingSlotCount)
     }
 
     // MARK: - What each primary draws
@@ -350,11 +393,12 @@ struct TabRowTrailingTests {
             let row = Self.row(state, world, primary: world.claude)
 
             let hiddenBar: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOff)), .expand,
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptLive)),
+                .edge(.notes(Self.notesOff)), .expand,
             ]
             let shownBar: [TabBarTrailingItem] = [.sessionHistory]
             let shownStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress),
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOff)), .collapse,
             ]
             #expect(row.hiddenBar == hiddenBar)
@@ -370,11 +414,12 @@ struct TabRowTrailingTests {
             let row = Self.row(state, world, primary: world.plain)
 
             let hiddenBar: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .expand,
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptDisabled)),
+                .edge(.notes(Self.notesOff)), .expand,
             ]
             let shownBar: [TabBarTrailingItem] = [.sessionHistory]
             let shownStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress),
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .collapse,
             ]
             #expect(row.hiddenBar == hiddenBar)
@@ -390,12 +435,12 @@ struct TabRowTrailingTests {
             let row = Self.row(state, world, primary: world.file)
 
             let hiddenBar: [TabBarTrailingItem] = [
-                .viewerControl(Self.renderToggle), .sessionHistory,
+                .viewerControl(Self.renderToggle), .sessionHistory, .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .expand,
             ]
             let shownBar: [TabBarTrailingItem] = [.viewerControl(Self.renderToggle), .sessionHistory]
             let shownStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress),
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .collapse,
             ]
             #expect(row.hiddenBar == hiddenBar)
@@ -411,12 +456,12 @@ struct TabRowTrailingTests {
             let row = Self.row(state, world, primary: world.web)
 
             let hiddenBar: [TabBarTrailingItem] = [
-                .viewerControl(Self.copyAddress), .sessionHistory,
+                .viewerControl(Self.copyAddress), .sessionHistory, .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .expand,
             ]
             let shownBar: [TabBarTrailingItem] = [.viewerControl(Self.copyAddress), .sessionHistory]
             let shownStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress),
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)), .collapse,
             ]
             #expect(row.hiddenBar == hiddenBar)
@@ -425,7 +470,7 @@ struct TabRowTrailingTests {
         }
     }
 
-    @Test("a Claude terminal whose transcript panel exists draws the button on, in the strip and at the bar's end")
+    @Test("a Claude terminal whose transcript panel exists draws its toggle in front in the strip, and behind at the bar's end while the region is collapsed")
     func claudeTerminalWithTranscriptOpen() async {
         await Fixture.withState { state in
             let world = Self.world(state)
@@ -443,10 +488,12 @@ struct TabRowTrailingTests {
 
             // A transcript panel has no control of its own.
             let expectedStrip: [SideStripTrailingItem] = [
-                .addMenu, .edge(.transcript(Self.transcriptOpen)), .edge(.notes(Self.notesOff)), .collapse,
+                .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptFront)),
+                .edge(.notes(Self.notesOff)), .collapse,
             ]
             let expectedBar: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptOpen)), .edge(.notes(Self.notesOff)), .expand,
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptBehind)),
+                .edge(.notes(Self.notesOff)), .expand,
             ]
             #expect(strip == expectedStrip)
             #expect(bar == expectedBar)
@@ -461,10 +508,12 @@ struct TabRowTrailingTests {
             let plain = Self.bar(state, world, primary: world.plain, surface: nil).items
 
             let expectedClaude: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOff)),
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptLive)),
+                .edge(.notes(Self.notesOff)),
             ]
             let expectedPlain: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptDisabled)), .edge(.notes(Self.notesOff)),
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptDisabled)),
+                .edge(.notes(Self.notesOff)),
             ]
             #expect(claude == expectedClaude)
             #expect(plain == expectedPlain)
@@ -506,13 +555,17 @@ struct TabRowTrailingTests {
             let plain = Self.row(state, world, primary: world.plain, transcriptViewEnabled: false)
             let file = Self.row(state, world, primary: world.file, transcriptViewEnabled: false)
 
-            let terminalHiddenBar: [TabBarTrailingItem] = [.sessionHistory, .edge(.notes(Self.notesOff)), .expand]
+            let terminalHiddenBar: [TabBarTrailingItem] = [
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.notes(Self.notesOff)), .expand,
+            ]
             let fileHiddenBar: [TabBarTrailingItem] = [
-                .viewerControl(Self.renderToggle), .sessionHistory, .edge(.notes(Self.notesOff)), .expand,
+                .viewerControl(Self.renderToggle), .sessionHistory, .edge(.changes(Self.changesOff)),
+                .edge(.notes(Self.notesOff)), .expand,
             ]
             let terminalShownBar: [TabBarTrailingItem] = [.sessionHistory]
             let shownStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress), .edge(.notes(Self.notesOff)), .collapse,
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
+                .edge(.notes(Self.notesOff)), .collapse,
             ]
             #expect(claude.hiddenBar == terminalHiddenBar)
             #expect(plain.hiddenBar == terminalHiddenBar)
@@ -525,7 +578,7 @@ struct TabRowTrailingTests {
         }
     }
 
-    @Test("the Notes button draws disabled until the notes load, and on while the first note is in front")
+    @Test("the Notes toggle draws disabled until the notes load, and in front while the first note is in front")
     func notesButtonStates() async {
         await Fixture.withState { state in
             let world = Self.world(state)
@@ -534,10 +587,11 @@ struct TabRowTrailingTests {
             let unloaded = Self.row(state, world, primary: world.claude)
 
             let unloadedBar: [TabBarTrailingItem] = [
-                .sessionHistory, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesLoading)), .expand,
+                .sessionHistory, .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptLive)),
+                .edge(.notes(Self.notesLoading)), .expand,
             ]
             let unloadedStrip: [SideStripTrailingItem] = [
-                .addMenu, .activePanelControl(Self.copyAddress),
+                .activePanelControl(Self.copyAddress), .edge(.changes(Self.changesOff)),
                 .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesLoading)), .collapse,
             ]
             #expect(unloaded.hiddenBar == unloadedBar)
@@ -554,15 +608,140 @@ struct TabRowTrailingTests {
 
             // A note panel has no control of its own.
             let expectedStrip: [SideStripTrailingItem] = [
-                .addMenu, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOn)), .collapse,
+                .edge(.changes(Self.changesOff)), .edge(.transcript(Self.transcriptLive)),
+                .edge(.notes(Self.notesFront)), .collapse,
             ]
             #expect(strip == expectedStrip)
         }
     }
 
+    // MARK: - Pill states
+
+    /// Each toggle's state by its kind, for the world's Claude terminal tab
+    /// over `surface`.
+    private static func pillStates(
+        _ state: AppState, _ world: World, surface: WorkspaceTabSurface
+    ) -> [String: SidePanelPillState] {
+        let edge = Self.edge(state, world, primary: world.claude, surface: surface)
+        var states: [String: SidePanelPillState] = [:]
+        for item in edge.items {
+            states[item.id] = item.state
+        }
+        return states
+    }
+
+    @Test("each pill reads off with no panel, in front while its panel is, and behind otherwise, a collapsed region reading as behind")
+    func pillStatesOffFrontBehind() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let note = NoteSummary(worktreeID: world.worktreeID, title: "Plan")
+            state.notes[world.worktreeID] = [note]
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let notePanel = WorktreePanel(id: UUID(), content: .note(noteID: note.id))
+            let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: world.claudeTerminalID))
+            let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
+            let own = [transcript, web]
+            let recency = [web.id, transcript.id]
+            let worktreePanels = [changes, notePanel]
+
+            // No panel for any of them, with a web page in front.
+            let none = Self.pillStates(state, world, surface: Self.surface(
+                world, side: SideRegion(panels: [web], activePanelID: web.id, recency: [web.id])))
+            let allOff: [String: SidePanelPillState] = ["changes": .off, "transcript": .off, "notes": .off]
+            #expect(none == allOff)
+
+            // Every panel open, the web page in front: every pill behind.
+            let webInFront = Self.pillStates(state, world, surface: Self.surface(
+                world, side: SideRegion(panels: own, activePanelID: web.id, recency: recency),
+                worktreePanels: worktreePanels))
+            let allBehind: [String: SidePanelPillState] = [
+                "changes": .behind, "transcript": .behind, "notes": .behind,
+            ]
+            #expect(webInFront == allBehind)
+
+            // Each panel in front of a visible region: its pill in front, the
+            // others behind.
+            let fronts: [(active: PanelID, kind: String)] = [
+                (changes.id, "changes"), (transcript.id, "transcript"), (notePanel.id, "notes"),
+            ]
+            for front in fronts {
+                let states = Self.pillStates(state, world, surface: Self.surface(
+                    world, side: SideRegion(panels: own, activePanelID: front.active, recency: recency),
+                    worktreePanels: worktreePanels))
+                var expected = allBehind
+                expected[front.kind] = .front
+                #expect(states == expected, "\(front.kind) in front")
+
+                // The same panel in front of a collapsed region: behind.
+                let collapsed = Self.pillStates(state, world, surface: Self.surface(
+                    world,
+                    side: SideRegion(panels: own, activePanelID: front.active, recency: recency, collapsed: true),
+                    worktreePanels: worktreePanels))
+                #expect(collapsed == allBehind, "\(front.kind) in front of a collapsed region")
+            }
+        }
+    }
+
+    @Test("each toggle's action is the one its kind names")
+    func actionForEachItem() async {
+        await Fixture.withState { _ in
+            let log = PanelEventLog()
+            let edge = TabRowEdgeControls(
+                changes: Self.changesOff, onChanges: { log.record("changes") },
+                transcript: Self.transcriptLive, transcriptTerminalID: UUID(),
+                onTranscript: { log.record("transcript") },
+                notes: Self.notesOff, onNotes: { log.record("notes") })
+
+            for item in edge.items {
+                edge.action(for: item)()
+            }
+
+            let expected = ["changes", "transcript", "notes"]
+            #expect(log.events == expected)
+        }
+    }
+
+    @Test("the Changes toggle's press sends the Changes toggle's operation for its own tab")
+    func changesPressSendsTheToggle() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let surface = Self.surface(world)
+            let edge = Self.edge(state, world, primary: world.claude, surface: surface)
+            let envelopes = Fixture.collectEnvelopes(state, replying: surface)
+
+            edge.onChanges()
+            await Fixture.drainMainActor()
+
+            let sent: [PanelOperation] = envelopes.envelopes.map(\.operation)
+            let expected: [PanelOperation] = [.open(content: .changes, newPanel: false)]
+            #expect(sent == expected)
+            let tabIDs: [UUID] = envelopes.envelopes.map(\.tabID)
+            let expectedTabIDs: [UUID] = [world.tabID]
+            #expect(tabIDs == expectedTabIDs)
+        }
+    }
+
+    @Test("the transcript toggle names the terminal its pill stands for only while it can act")
+    func transcriptTerminalIDOnlyWhileLive() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let surface = Self.surface(world)
+
+            let claude = Self.edge(state, world, primary: world.claude, surface: surface)
+            #expect(claude.transcriptTerminalID == world.claudeTerminalID)
+            let plain = Self.edge(state, world, primary: world.plain, surface: surface)
+            #expect(plain.transcriptTerminalID == nil, "a disabled toggle stands for no panel")
+            let file = Self.edge(state, world, primary: world.file, surface: surface)
+            #expect(file.transcriptTerminalID == nil)
+            let viewOff = Self.edge(
+                state, world, primary: world.claude, surface: surface, transcriptViewEnabled: false)
+            #expect(viewOff.transcriptTerminalID == nil, "no toggle with the transcript view off")
+        }
+    }
+
     // MARK: - Stable positions
 
-    /// The reason a disabled transcript button is drawn rather than removed:
+    /// The reason a disabled transcript toggle is drawn rather than removed:
     /// switching between a Claude terminal's tab and any other moves nothing
     /// at the row's trailing end.
     @Test("the edge controls keep their places from the right edge across a Claude terminal's tab and a plain one")
@@ -598,9 +777,9 @@ struct TabRowTrailingTests {
             let primaries = world.primaries
             let settings: [Bool] = [true, false]
             for transcriptViewEnabled in settings {
-                // Hidden: expand, Notes and, while the view is on, the
-                // transcript button lie to its right.
-                let hiddenIndex: Int? = transcriptViewEnabled ? 3 : 2
+                // Hidden: expand, Notes, Changes and, while the view is on,
+                // the transcript toggle lie to its right.
+                let hiddenIndex: Int? = transcriptViewEnabled ? 4 : 3
                 // Shown: it ends the bar.
                 let shownIndex: Int? = 0
                 for primary in primaries {

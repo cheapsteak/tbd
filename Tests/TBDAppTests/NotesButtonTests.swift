@@ -7,7 +7,7 @@ import TBDShared
 // `note.create`, `note.delete` and `panel.apply` go through injected seams, so
 // no socket opens, and every `AppState` is on a throwaway defaults suite.
 
-/// The Notes button at the window's right edge: nothing opens a note panel by
+/// The Notes toggle at the window's right edge: nothing opens a note panel by
 /// itself, so the button shows, brings forward or closes the worktree's first
 /// note — the oldest by `createdAt` — with the transcript button's three
 /// states, and in a worktree whose notes are listed and empty creates one
@@ -172,7 +172,35 @@ struct NotesButtonTests {
             == .close(notePanel.id))
     }
 
-    @Test("each decision's operation, and the button is on only while a press would close")
+    @Test("the first note is decided in one place: the oldest listed note with its panel, or before the notes load the tab's first note panel")
+    func firstNoteIsDecidedOnce() {
+        let older = Self.note(createdAt: 1_000)
+        let newer = Self.note(createdAt: 2_000)
+        let newerPanel = WorktreePanel(id: UUID(), content: .note(noteID: newer.id))
+        let olderPanel = WorktreePanel(id: UUID(), content: .note(noteID: older.id))
+        let both = Self.surface(worktreePanels: [newerPanel, olderPanel], active: nil)
+        let onlyNewer = Self.surface(worktreePanels: [newerPanel], active: nil)
+
+        let listed = PaneActions.firstNote(surface: both, notes: [newer, older])
+        let expectedListed = FirstNote(noteID: older.id, panel: olderPanel)
+        #expect(listed == expectedListed)
+        let noSurface = PaneActions.firstNote(surface: nil, notes: [newer, older])
+        let expectedNoSurface = FirstNote(noteID: older.id, panel: nil)
+        #expect(noSurface == expectedNoSurface)
+        // Listed, with the first note shown nowhere: another note's panel
+        // does not stand in for it.
+        let firstWithoutPanel = PaneActions.firstNote(surface: onlyNewer, notes: [newer, older])
+        #expect(firstWithoutPanel == expectedNoSurface)
+        // Not loaded: the tab's first note panel in strip order.
+        let standIn = PaneActions.firstNote(surface: both, notes: nil)
+        let expectedStandIn = FirstNote(noteID: newer.id, panel: newerPanel)
+        #expect(standIn == expectedStandIn)
+        // Neither a listed note nor a note panel.
+        #expect(PaneActions.firstNote(surface: nil, notes: nil) == nil)
+        #expect(PaneActions.firstNote(surface: nil, notes: []) == nil)
+    }
+
+    @Test("each decision's operation, and the pill state each stands for: off, behind or in front")
     func decisionOperationsAndOnState() {
         let noteID = UUID()
         let panelID = UUID()
@@ -186,11 +214,12 @@ struct NotesButtonTests {
         #expect(NotesToggleDecision.select(panelID).operation == selectsPanel)
         #expect(NotesToggleDecision.close(panelID).operation == closesPanel)
 
-        #expect(!NotesToggleDecision.create.isOn)
-        #expect(!NotesToggleDecision.open(noteID: noteID).isOn)
-        #expect(!NotesToggleDecision.select(panelID).isOn)
-        #expect(NotesToggleDecision.close(panelID).isOn)
-        #expect(!NotesToggleDecision.unavailable.isOn)
+        let decisions: [NotesToggleDecision] = [
+            .create, .unavailable, .open(noteID: noteID), .select(panelID), .close(panelID),
+        ]
+        let states = decisions.map { SidePanelPillState.state(for: $0) }
+        let expectedStates: [SidePanelPillState] = [.off, .off, .off, .behind, .front]
+        #expect(states == expectedStates)
 
         #expect(!NotesToggleDecision.unavailable.isEnabled)
         #expect(NotesToggleDecision.create.isEnabled)
@@ -201,17 +230,21 @@ struct NotesButtonTests {
 
     // MARK: - The button
 
-    @Test("the button draws doc.text: accent while on, the row's grey while off, secondary and disabled while loading")
+    @Test("the toggle draws doc.text: accent while its note's panel is open, the row's grey while off, secondary and disabled while loading")
     func notesControlAppearance() {
-        let on = PaneChromeControl.notes(isOn: true, isEnabled: true)
-        let off = PaneChromeControl.notes(isOn: false, isEnabled: true)
-        let loading = PaneChromeControl.notes(isOn: false, isEnabled: false)
+        let front = PaneChromeControl.notes(state: .front, isEnabled: true)
+        let behind = PaneChromeControl.notes(state: .behind, isEnabled: true)
+        let off = PaneChromeControl.notes(state: .off, isEnabled: true)
+        let loading = PaneChromeControl.notes(state: .off, isEnabled: false)
 
-        #expect(on.systemImage == "doc.text")
-        #expect(on.systemImage == PanelKind.note.tabSystemImage)
-        #expect(on.tint == .accent)
-        #expect(on.help == "Hide notes")
-        #expect(on.isEnabled)
+        #expect(front.systemImage == "doc.text")
+        #expect(front.systemImage == PanelKind.note.tabSystemImage)
+        #expect(front.tint == .accent)
+        #expect(front.help == "Hide notes")
+        #expect(front.isEnabled)
+        #expect(behind.systemImage == "doc.text")
+        #expect(behind.tint == .accent)
+        #expect(behind.help == "Show notes", "behind, a press brings it forward")
         #expect(off.systemImage == "doc.text")
         #expect(off.tint == nil)
         #expect(off.help == "Show notes")
@@ -221,38 +254,44 @@ struct NotesButtonTests {
         #expect(loading.help == "Notes are loading")
         #expect(!loading.isEnabled)
         // The viewer controls can always be pressed, and so can a live
-        // transcript button.
+        // transcript toggle and the Changes toggle.
         let others: [PaneChromeControl] = [
-            .transcript(isOn: true, isEnabled: true), .transcript(isOn: false, isEnabled: true),
-            .renderToggle(showingSource: false), .copyAddress(copied: false), .refresh,
+            .transcript(state: .front, isEnabled: true), .transcript(state: .off, isEnabled: true),
+            .changes(state: .off), .renderToggle(showingSource: false), .copyAddress(copied: false), .refresh,
         ]
         for control in others {
             #expect(control.isEnabled, "\(control)")
         }
     }
 
-    @Test("the button draws on while the first note is in front, and disabled while it cannot act")
+    @Test("the toggle draws in front while the first note is in front, behind while it is open behind or collapsed, and disabled while it cannot act")
     func workspaceBarNotesControl() {
         let first = Self.note(createdAt: 1_000)
         let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
-        let on: PaneChromeControl = .notes(isOn: true, isEnabled: true)
-        let off: PaneChromeControl = .notes(isOn: false, isEnabled: true)
-        let loading: PaneChromeControl = .notes(isOn: false, isEnabled: false)
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        let front: PaneChromeControl = .notes(state: .front, isEnabled: true)
+        let behind: PaneChromeControl = .notes(state: .behind, isEnabled: true)
+        let off: PaneChromeControl = .notes(state: .off, isEnabled: true)
+        let loading: PaneChromeControl = .notes(state: .off, isEnabled: false)
 
         #expect(PanelSurfaceWorkspaceView.notesControl(
             surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id), notes: [first])
-            == on)
+            == front)
         #expect(PanelSurfaceWorkspaceView.notesControl(
             surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id, collapsed: true),
             notes: [first])
-            == off)
+            == behind)
+        #expect(PanelSurfaceWorkspaceView.notesControl(
+            surface: Self.surface(worktreePanels: [firstPanel, changes], active: changes.id),
+            notes: [first])
+            == behind)
         #expect(PanelSurfaceWorkspaceView.notesControl(surface: nil, notes: [first]) == off)
         #expect(PanelSurfaceWorkspaceView.notesControl(surface: nil, notes: []) == off)
         // Not loaded: disabled with no note panel, live with one.
         #expect(PanelSurfaceWorkspaceView.notesControl(surface: nil, notes: nil) == loading)
         #expect(PanelSurfaceWorkspaceView.notesControl(
             surface: Self.surface(worktreePanels: [firstPanel], active: firstPanel.id), notes: nil)
-            == on)
+            == front)
     }
 
     @Test("a bar drawn off the daemon path has Session History alone, and no Notes button")

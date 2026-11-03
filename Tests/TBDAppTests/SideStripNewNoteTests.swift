@@ -7,18 +7,19 @@ import TBDShared
 // `panel.apply` go through injected seams (`AppState.noteCreator`,
 // `PanelTabsFixture`), so no socket opens.
 
-/// The side strip's New Note (side panel notes spec, "App"): a note is made
-/// in the side panel, so it is born where it lives. `AppState.createNote`
-/// creates the note with the daemon's default title, lists its summary in
-/// `notes`, and opens it as a worktree panel in the workspace tab whose strip
-/// it came from. It never makes a workspace tab. The Notes button's create,
-/// in a worktree with no note, is `NotesButtonTests`'.
-@Suite("Side strip New Note")
+/// Creating a note in the side panel (side panel notes spec, "App"): a note
+/// is made in the side panel, so it is born where it lives.
+/// `AppState.createNote` creates the note, with the daemon's default title
+/// when it names none, lists its summary in `notes`, and opens it as a
+/// worktree panel in the workspace tab it came from. It never makes a
+/// workspace tab. Its one caller, the Notes toggle's create in a worktree
+/// with no note, is `NotesButtonTests`'.
+@Suite("Side panel note create")
 @MainActor
 struct SideStripNewNoteTests {
     private typealias Fixture = PanelTabsFixture
 
-    @Test("New Note creates the note, then opens it as a worktree panel in the tab it came from")
+    @Test("a create makes the note, then opens it as a worktree panel in the tab it came from")
     func newNoteCreatesThenOpensInItsTab() async {
         await Fixture.withState { state in
             let worktreeID = UUID()
@@ -40,7 +41,7 @@ struct SideStripNewNoteTests {
 
             await state.createNote(worktreeID: worktreeID, tabID: tabID)
 
-            // New Note names no title, so the daemon's default applies.
+            // No title named, so the daemon's default applies.
             let expectedCreates: [String] = ["create \(worktreeID) title <default>"]
             #expect(creates.events == expectedCreates)
             let applied = envelopes.envelopes.map(\.operation)

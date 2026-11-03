@@ -582,8 +582,9 @@ extension View {
     ///
     /// Where the leaf draws its header, the menu hangs on the header's title.
     /// On the daemon path no leaf draws one: a side panel's menu hangs on the
-    /// panel's tab in the side region's strip (`SideRegionView`), and a
-    /// primary's items are on its workspace tab's right-click menu (`TabBar`).
+    /// panel's tab in the side region's strip (`SideRegionView`), a
+    /// transcript's on the strip's transcript pill, and a primary's items are
+    /// on its workspace tab's right-click menu (`TabBar`).
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
         modifier(HeaderFileContextMenu(
             target: headerMenuTarget(for: content, transcriptPath: transcriptPath)))
@@ -597,6 +598,13 @@ extension View {
 /// always follows a hover finds a file created since, or a handler installed
 /// since, in the list. Never while a body is evaluated: the menu reads them
 /// back from `lookup.apps`.
+///
+/// The menu's content resets any custom button style around it with
+/// `.buttonStyle(.automatic)`: the side strip's transcript pill hangs this
+/// menu inside the strip's `RowIconButtonStyle` group, and a custom style in
+/// a context menu's environment rebuilds the open menu continuously, closing
+/// the Open With submenu (`Sources/TBDApp/CLAUDE.md`, "Toolbars"). Where no
+/// style is around, the reset changes nothing.
 private struct HeaderFileContextMenu: ViewModifier {
     let target: HeaderMenuTarget?
     @StateObject private var lookup = OpenWithAppsLookup()
@@ -605,8 +613,11 @@ private struct HeaderFileContextMenu: ViewModifier {
         if let target {
             content
                 .contextMenu {
-                    Button(target.copyLabel) { copyToPasteboard(target.path) }
-                    RevealAndOpenWithMenuItems(path: target.path, apps: lookup.apps)
+                    Group {
+                        Button(target.copyLabel) { copyToPasteboard(target.path) }
+                        RevealAndOpenWithMenuItems(path: target.path, apps: lookup.apps)
+                    }
+                    .buttonStyle(.automatic)
                 }
                 .onAppear { lookup.show(path: target.path) }
                 .onChange(of: target.path) { _, path in

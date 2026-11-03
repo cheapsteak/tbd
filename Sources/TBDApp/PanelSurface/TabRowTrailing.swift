@@ -3,37 +3,47 @@ import TBDShared
 
 // MARK: - TabRowEdgeControls
 
-/// The two buttons at the window's right edge, just before the button that
-/// hides or shows the side region: the transcript button and the Notes
-/// button, in that order (`items`). They act on the workspace tab as a whole,
-/// not on whatever column they sit over, so they keep to the edge: in the side
-/// region's strip while the region shows (`SideStripTrailingItem`), and at
-/// the end of the workspace tab bar while it is hidden
-/// (`TabBarTrailingItem`).
+/// The three toggles at the window's right edge, just before the button that
+/// hides or shows the side region: Changes, the transcript and Notes, in that
+/// order (`items`). They act on the workspace tab as a whole, not on whatever
+/// column they sit over, so they keep to the edge: in the side region's strip
+/// while the region shows, as pills (`SideStripTrailingItem`,
+/// `SidePanelPillButton`), and at the end of the workspace tab bar while it
+/// is hidden, as icon buttons (`TabBarTrailingItem`, `TabRowEdgeButton`).
 ///
 /// `make` builds them, values and actions together, so the strip and the bar
-/// draw the same two buttons from one decision. The workspace view builds
+/// draw the same three toggles from one decision. The workspace view builds
 /// them for the bar, only while the bar draws them
 /// (`PanelSurfaceWorkspaceView.barEdgeControls`), and `SideRegionView` builds
 /// them for the strip from the same plain inputs, so no view hands another a
 /// struct of closures SwiftUI cannot compare.
 struct TabRowEdgeControls {
-    /// The transcript button (`WorkspaceTabBarChrome.transcriptControl`), or
+    /// The Changes toggle (`PanelSurfaceWorkspaceView.changesControl`).
+    let changes: PaneChromeControl
+    /// What a press of the Changes toggle does
+    /// (`AppState.toggleChangesPanel(worktreeID:tabID:)`).
+    let onChanges: @MainActor () -> Void
+    /// The transcript toggle (`WorkspaceTabBarChrome.transcriptControl`), or
     /// nil while the transcript view is off.
     let transcript: PaneChromeControl?
-    /// What a press of the transcript button does; nothing unless the button
+    /// The Claude terminal whose transcript panel the transcript toggle
+    /// stands for: the primary, while the toggle is drawn and can act. Nil
+    /// otherwise, when no pill stands for any transcript panel, so the strip
+    /// shows one as a tab (`SideRegionStrip.pillPanelIDs`).
+    let transcriptTerminalID: UUID?
+    /// What a press of the transcript toggle does; nothing unless the toggle
     /// is enabled.
     let onTranscript: @MainActor () -> Void
-    /// The Notes button (`PanelSurfaceWorkspaceView.notesControl`).
+    /// The Notes toggle (`PanelSurfaceWorkspaceView.notesControl`).
     let notes: PaneChromeControl
-    /// What a press of the Notes button does (`AppState.toggleNotesPanel`).
+    /// What a press of the Notes toggle does (`AppState.toggleNotesPanel`).
     let onNotes: @MainActor () -> Void
 
-    /// The buttons, left to right: the transcript button while it is drawn,
-    /// then Notes. The one place the pair's order is decided; the bar and
-    /// the strip both take it from here.
+    /// The toggles, left to right: Changes, the transcript while it is drawn,
+    /// then Notes. The one place their order is decided; the bar and the
+    /// strip both take it from here.
     var items: [TabRowEdgeItem] {
-        var items: [TabRowEdgeItem] = []
+        var items: [TabRowEdgeItem] = [.changes(changes)]
         if let transcript {
             items.append(.transcript(transcript))
         }
@@ -41,21 +51,35 @@ struct TabRowEdgeControls {
         return items
     }
 
-    /// The transcript and Notes buttons of the workspace tab `tabID`, whose
-    /// primary is `primary`, with what a press of each sends. One function
-    /// decides both, so the side region's strip and the workspace tab bar,
-    /// whichever reaches the window's right edge, draw the same two buttons:
-    /// `PanelSurfaceWorkspaceView` calls it for the bar, and `SideRegionView`
-    /// for the strip.
+    /// What a press of `item`'s toggle does.
+    func action(for item: TabRowEdgeItem) -> @MainActor () -> Void {
+        switch item {
+        case .changes: onChanges
+        case .transcript: onTranscript
+        case .notes: onNotes
+        }
+    }
+
+    /// The Changes, transcript and Notes toggles of the workspace tab
+    /// `tabID`, whose primary is `primary`, with what a press of each sends.
+    /// One function decides all three, so the side region's strip and the
+    /// workspace tab bar, whichever reaches the window's right edge, draw the
+    /// same toggles: `PanelSurfaceWorkspaceView` calls it for the bar, and
+    /// `SideRegionView` for the strip.
     ///
-    /// - **The transcript button** is the one
-    ///   `WorkspaceTabBarChrome.transcriptControl` decides: on while a Claude
-    ///   terminal's transcript panel exists, whether or not it is in front.
-    ///   Enabled, a press opens, selects or closes that panel through the
-    ///   daemon action set (`PaneActions.toggleTranscript`), the only set that
-    ///   can send it; disabled, a press sends nothing.
-    /// - **The Notes button** (`PanelSurfaceWorkspaceView.notesControl`)
-    ///   shows, brings forward or closes the worktree's first note
+    /// - **Changes** is in the state of the worktree's Changes panel in this
+    ///   tab (`PaneActions.changesToggleDecision`), and a press opens,
+    ///   selects or closes it in this tab, whichever tab is on screen
+    ///   (`AppState.toggleChangesPanel(worktreeID:tabID:)`).
+    /// - **The transcript** is the toggle
+    ///   `WorkspaceTabBarChrome.transcriptControl` decides, in the state of a
+    ///   Claude terminal's transcript panel
+    ///   (`PaneActions.transcriptToggleDecision`). Enabled, a press opens,
+    ///   selects or closes that panel through the daemon action set
+    ///   (`PaneActions.toggleTranscript`), the only set that can send it;
+    ///   disabled, a press sends nothing.
+    /// - **Notes** (`PanelSurfaceWorkspaceView.notesControl`) shows, brings
+    ///   forward or closes the worktree's first note
     ///   (`AppState.toggleNotesPanel`).
     @MainActor
     static func make(
@@ -67,23 +91,31 @@ struct TabRowEdgeControls {
         transcriptViewEnabled: Bool
     ) -> TabRowEdgeControls {
         var isClaudeTerminal = false
-        var transcriptOpen = false
+        var transcriptState = SidePanelPillState.off
         if case .terminal(let terminalID) = primary {
             isClaudeTerminal = appState.terminal(id: terminalID, in: worktreeID)?.isClaudeResumable == true
             if isClaudeTerminal && transcriptViewEnabled {
-                transcriptOpen = PaneActions.daemon(
-                    appState: appState, worktreeID: worktreeID, tabID: tabID, panelID: nil
-                ).isTranscriptOpen(terminalID)
+                transcriptState = .state(for: PaneActions.transcriptToggleDecision(
+                    side: PanelSurfaceWorkspaceView.sideRegion(of: surface), terminalID: terminalID))
             }
         }
         let transcript = WorkspaceTabBarChrome.transcriptControl(
             primary: primary,
             isClaudeTerminal: isClaudeTerminal,
             transcriptViewEnabled: transcriptViewEnabled,
-            transcriptOpen: transcriptOpen)
+            transcript: transcriptState)
+        var transcriptTerminalID: UUID?
+        if transcript?.isEnabled == true, case .terminal(let terminalID) = primary {
+            transcriptTerminalID = terminalID
+        }
 
         return TabRowEdgeControls(
+            changes: PanelSurfaceWorkspaceView.changesControl(surface: surface),
+            onChanges: {
+                appState.toggleChangesPanel(worktreeID: worktreeID, tabID: tabID)
+            },
             transcript: transcript,
+            transcriptTerminalID: transcriptTerminalID,
             onTranscript: {
                 guard transcript?.isEnabled == true, case .terminal(let terminalID) = primary else { return }
                 PaneActions.daemon(
@@ -101,43 +133,72 @@ struct TabRowEdgeControls {
 
 // MARK: - TabRowEdgeItem
 
-/// One of the two buttons at the window's right edge (`TabRowEdgeControls`),
-/// as a value.
+/// One of the three toggles at the window's right edge
+/// (`TabRowEdgeControls`), as a value.
 enum TabRowEdgeItem: Equatable, Identifiable {
-    /// The transcript button (`TabRowEdgeControls.transcript`).
+    /// The Changes toggle (`TabRowEdgeControls.changes`).
+    case changes(PaneChromeControl)
+    /// The transcript toggle (`TabRowEdgeControls.transcript`).
     case transcript(PaneChromeControl)
-    /// The Notes button (`TabRowEdgeControls.notes`).
+    /// The Notes toggle (`TabRowEdgeControls.notes`).
     case notes(PaneChromeControl)
 
-    /// One per kind, whatever the control's state, so a button whose state
+    static let changesLabel = "Changes"
+    static let transcriptLabel = "Transcript"
+    static let notesLabel = "Notes"
+    /// Every pill's label, in the toggles' order.
+    static let pillLabels = [changesLabel, transcriptLabel, notesLabel]
+
+    /// One per kind, whatever the control's state, so a toggle whose state
     /// changes keeps its place in the row.
     var id: String {
         switch self {
+        case .changes: return "changes"
         case .transcript: return "transcript"
         case .notes: return "notes"
+        }
+    }
+
+    /// The toggle's control.
+    var control: PaneChromeControl {
+        switch self {
+        case .changes(let control), .transcript(let control), .notes(let control):
+            return control
+        }
+    }
+
+    /// The state of the panel the toggle stands for.
+    var state: SidePanelPillState {
+        control.pillState ?? .off
+    }
+
+    /// What the toggle's pill reads while its panel is open: the panel's name.
+    /// The Notes pill reads "Notes" whatever its note is titled.
+    var pillLabel: String {
+        switch self {
+        case .changes: return Self.changesLabel
+        case .transcript: return Self.transcriptLabel
+        case .notes: return Self.notesLabel
         }
     }
 }
 
 // MARK: - TabRowEdgeButton
 
-/// One of the two buttons at the window's right edge, drawn the same way in
-/// the side region's strip and the workspace tab bar: `item`'s control,
-/// pressing which does what `edge` says for it.
+/// One of the three toggles at the window's right edge as the workspace tab
+/// bar draws it while the side region is hidden: `item`'s control as an icon
+/// button, tinted while its panel is open (`PaneChromeControl.tint`), with no
+/// label, since no panel is in view. Pressing it does what `edge` says for
+/// it. The strip draws the same toggles as pills instead
+/// (`SidePanelPillButton`).
 struct TabRowEdgeButton: View {
     let item: TabRowEdgeItem
     let edge: TabRowEdgeControls
 
     var body: some View {
-        switch item {
-        case .transcript(let control):
-            PaneChromeControlButton(control: control) {
-                edge.onTranscript()
-            }
-        case .notes(let control):
-            PaneChromeControlButton(control: control) {
-                edge.onNotes()
-            }
+        let action = edge.action(for: item)
+        PaneChromeControlButton(control: item.control) {
+            action()
         }
     }
 }
@@ -151,7 +212,7 @@ enum TabBarTrailingItem: Equatable, Identifiable {
     case viewerControl(PaneChromeControl)
     /// Session History.
     case sessionHistory
-    /// The transcript or Notes button (`TabRowEdgeControls.items`).
+    /// The Changes, transcript or Notes toggle (`TabRowEdgeControls.items`).
     case edge(TabRowEdgeItem)
     /// The button that shows the hidden side region.
     case expand
@@ -172,7 +233,7 @@ enum TabBarTrailingItem: Equatable, Identifiable {
     /// hidden (`showsSide` false) the bar reaches the window's right edge, so
     /// `edgeItems` (`TabRowEdgeControls.items`) follow, and the expand button
     /// last, when `PanelSurfaceWorkspaceView.showsExpandButton` says so. While
-    /// the region shows, its strip holds the edge buttons and its own collapse
+    /// the region shows, its strip holds the toggles and its own collapse
     /// button, so the bar ends at Session History.
     static func items(
         viewerControl: PaneChromeControl?,
@@ -199,11 +260,9 @@ enum TabBarTrailingItem: Equatable, Identifiable {
 /// One item at the side region's strip's trailing end, decided as a value so
 /// the strip's order can be asserted without standing up a view.
 enum SideStripTrailingItem: Equatable, Identifiable {
-    /// The + menu (`SideRegionStrip.addMenuItems`).
-    case addMenu
     /// The active panel's own control (`SideRegionStrip.trailingControl`).
     case activePanelControl(PaneChromeControl)
-    /// The transcript or Notes button (`TabRowEdgeControls.items`).
+    /// The Changes, transcript or Notes pill (`TabRowEdgeControls.items`).
     case edge(TabRowEdgeItem)
     /// The button that hides the region, carrying `⌘\`.
     case collapse
@@ -212,22 +271,21 @@ enum SideStripTrailingItem: Equatable, Identifiable {
     /// changes keeps its place in the row.
     var id: String {
         switch self {
-        case .addMenu: return "add-menu"
         case .activePanelControl: return "active-panel-control"
         case .edge(let item): return item.id
         case .collapse: return "collapse"
         }
     }
 
-    /// The strip's trailing items, left to right: the + menu, the active
-    /// panel's control when it has one, `edgeItems`
+    /// The strip's trailing items, left to right: the active panel's control
+    /// when it has one, then the pills, `edgeItems`
     /// (`TabRowEdgeControls.items`), and the collapse button, which ends the
     /// strip at the window's right edge.
     static func items(
         activePanelControl: PaneChromeControl?,
         edgeItems: [TabRowEdgeItem]
     ) -> [SideStripTrailingItem] {
-        var items: [SideStripTrailingItem] = [.addMenu]
+        var items: [SideStripTrailingItem] = []
         if let activePanelControl {
             items.append(.activePanelControl(activePanelControl))
         }

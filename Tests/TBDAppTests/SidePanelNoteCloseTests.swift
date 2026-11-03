@@ -437,6 +437,79 @@ struct SidePanelNoteCloseTests {
             #expect(state.notes[seeded.worktreeID]?.count == 1)
         }
     }
+
+    // MARK: - The Notes pill's Delete Note…
+
+    @Test("Delete Note… on a note no panel shows asks when it has content, then deletes it, and sends nothing")
+    func deleteNoteWithoutPanelAsksThenDeletes() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let noteID = UUID()
+            let surface = WorkspaceTabSurface(
+                id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: tabID), revision: 1)
+            state.panelSurfaces = [worktreeID: [tabID: surface]]
+            state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Plan")]]
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Self.writeContent("- ship it\n", state: state, worktreeID: worktreeID, noteID: noteID)
+            // The fixture's `panel.apply` records an issue if it is reached.
+            let notes = Self.stubNoteSeams(state, confirming: true)
+
+            await state.deleteNoteAsking(worktreeID: worktreeID, tabID: tabID, noteID: noteID)
+
+            #expect(notes.confirmations == 1)
+            let confirmedTitles: [String] = notes.confirmedNotes.map(\.title)
+            let expectedTitles = ["Plan"]
+            #expect(confirmedTitles == expectedTitles)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
+            #expect(state.notes[worktreeID]?.isEmpty == true, "the deleted note leaves `notes`")
+        }
+    }
+
+    @Test("Delete Note… declined on a note no panel shows deletes nothing")
+    func deleteNoteWithoutPanelDeclined() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let noteID = UUID()
+            state.notes = [worktreeID: [NoteSummary(id: noteID, worktreeID: worktreeID, title: "Plan")]]
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Self.writeContent("- ship it\n", state: state, worktreeID: worktreeID, noteID: noteID)
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.deleteNoteAsking(worktreeID: worktreeID, tabID: tabID, noteID: noteID)
+
+            #expect(notes.confirmations == 1)
+            #expect(notes.deleted.isEmpty)
+            #expect(state.notes[worktreeID]?.count == 1, "the note stays in `notes`")
+        }
+    }
+
+    @Test("Delete Note… on a note whose panel is open closes the panel, then deletes the note, as its tab's × does")
+    func deleteNoteWithPanelClosesThenDeletes() async {
+        await Fixture.withState { state in
+            let noteID = UUID()
+            let seeded = Self.seed(state, content: .note(noteID: noteID))
+            let root = Self.useScratchNoteFiles(state)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let envelopes = Fixture.collectEnvelopes(state, replying: Self.closed(seeded))
+            // An empty note: declining would block the delete, so a prompt
+            // cannot go unnoticed.
+            let notes = Self.stubNoteSeams(state, confirming: false)
+
+            await state.deleteNoteAsking(worktreeID: seeded.worktreeID, tabID: seeded.tabID, noteID: noteID)
+
+            let applied = envelopes.envelopes.map(\.operation)
+            let expectedApplied: [PanelOperation] = [.close(panelID: seeded.panelID)]
+            #expect(applied == expectedApplied)
+            #expect(notes.confirmations == 0)
+            let expectedDeleted: [UUID] = [noteID]
+            #expect(notes.deleted == expectedDeleted)
+        }
+    }
 }
 
 /// The note confirmations asked and the notes deleted, in order.

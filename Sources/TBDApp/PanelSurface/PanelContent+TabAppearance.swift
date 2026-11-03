@@ -20,11 +20,10 @@ extension PanelKind {
         }
     }
 
-    /// A note tab's symbol, which the Notes button and the side strip's +
-    /// menu show too.
+    /// A note tab's symbol, which the Notes toggle shows too.
     static let noteSystemImage = "doc.text"
 
-    /// The Changes tab's symbol, which the side strip's + menu shows too.
+    /// The Changes tab's symbol, which the Changes toggle shows too.
     static let changesSystemImage = "plus.forwardslash.minus"
 }
 

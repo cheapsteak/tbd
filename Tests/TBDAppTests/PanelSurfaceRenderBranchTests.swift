@@ -11,7 +11,8 @@ import TBDShared
 /// The render branch, and the view-level decisions behind the daemon renderer
 /// (panel tabs spec, "The render branch" and "The renderer"): which path a
 /// workspace tab takes, what the side region's strip shows — the worktree's
-/// panels, then the tab's own — and what its + menu offers, what the divider
+/// panels, then the tab's own, less the ones its pills stand for — and what
+/// the Notes pill's menu lists, what the divider
 /// sends on release, which viewer control the workspace tab bar carries for
 /// the selected tab, and when the expand button shows and what it sends.
 @Suite("Panel surface render branch")
@@ -351,8 +352,8 @@ struct PanelSurfaceRenderBranchTests {
         let side = SideRegion(
             panels: [empty, shown], activePanelID: shown.id, recency: [shown.id, empty.id])
 
-        let tabs = SideRegionStrip.tabs(
-            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in nil })
+        let tabs = SideRegionStrip.panels(
+            for: Self.surface(side: side), notes: nil, transcriptPath: { _ in nil })
 
         #expect(tabs.map(\.id) == [shown.id])
     }
@@ -370,9 +371,9 @@ struct PanelSurfaceRenderBranchTests {
             panels: [file, web, transcript], activePanelID: web.id,
             recency: [web.id, file.id, transcript.id])
 
-        let tabs = SideRegionStrip.tabs(
+        let tabs = SideRegionStrip.panels(
             for: Self.surface(side: side, worktreePanels: [note, changes]),
-            noteTitle: { $0 == noteID ? "Plan" : nil },
+            notes: [NoteSummary(id: noteID, worktreeID: UUID(), title: "Plan")],
             transcriptPath: { _ in nil })
 
         let ids: [PanelID] = [note.id, changes.id, file.id, web.id, transcript.id]
@@ -406,9 +407,9 @@ struct PanelSurfaceRenderBranchTests {
             panels: [file, transcript, web], activePanelID: file.id,
             recency: [file.id, transcript.id, web.id])
 
-        let tabs = SideRegionStrip.tabs(
+        let tabs = SideRegionStrip.panels(
             for: Self.surface(side: side, worktreePanels: [note, changes]),
-            noteTitle: { _ in nil },
+            notes: nil,
             transcriptPath: { $0 == terminalID ? "/w/session.jsonl" : nil })
         // What the tab hands `headerFileContextMenu`, resolved the same way;
         // a tab with no leaf content gets no menu, as `SideRegionView` does.
@@ -429,8 +430,8 @@ struct PanelSurfaceRenderBranchTests {
         let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
         let side = SideRegion(panels: [transcript], activePanelID: transcript.id, recency: [transcript.id])
 
-        let tabs = SideRegionStrip.tabs(
-            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in "" })
+        let tabs = SideRegionStrip.panels(
+            for: Self.surface(side: side), notes: nil, transcriptPath: { _ in "" })
 
         let tab = try #require(tabs.first)
         let paneContent = try #require(tab.paneContent)
@@ -533,9 +534,9 @@ struct PanelSurfaceRenderBranchTests {
             panels: [file, web, transcript], activePanelID: file.id,
             recency: [file.id, web.id, transcript.id])
 
-        let tabs = SideRegionStrip.tabs(
+        let tabs = SideRegionStrip.panels(
             for: Self.surface(side: side, worktreePanels: [note]),
-            noteTitle: { $0 == noteID ? "Plan" : nil },
+            notes: [NoteSummary(id: noteID, worktreeID: UUID(), title: "Plan")],
             transcriptPath: { _ in nil })
         try #require(tabs.count == 4)
 
@@ -550,7 +551,7 @@ struct PanelSurfaceRenderBranchTests {
 
     // MARK: - Worktree panels in the strip
 
-    @Test("the strip lists the worktree's panels first, in their order, then the tab's own")
+    @Test("the strip's panels list the worktree's first, in their order, then the tab's own")
     func stripListsWorktreePanelsFirst() throws {
         let firstNoteID = UUID()
         let secondNoteID = UUID()
@@ -565,9 +566,9 @@ struct PanelSurfaceRenderBranchTests {
             panels: [transcript, file], activePanelID: secondNote.id,
             recency: [file.id, transcript.id])
 
-        let tabs = SideRegionStrip.tabs(
+        let tabs = SideRegionStrip.panels(
             for: Self.surface(side: side, worktreePanels: [changes, firstNote, secondNote]),
-            noteTitle: { $0 == firstNoteID ? "Plan" : nil },
+            notes: [NoteSummary(id: firstNoteID, worktreeID: UUID(), title: "Plan")],
             transcriptPath: { $0 == terminalID ? "/w/session.jsonl" : nil })
 
         let ids: [PanelID] = [changes.id, firstNote.id, secondNote.id, transcript.id, file.id]
@@ -585,8 +586,8 @@ struct PanelSurfaceRenderBranchTests {
         #expect(tabs[0].noteID == nil)
 
         // A tab with no worktree panels lists its own alone.
-        let ownOnly = SideRegionStrip.tabs(
-            for: Self.surface(side: side), noteTitle: { _ in nil }, transcriptPath: { _ in nil })
+        let ownOnly = SideRegionStrip.panels(
+            for: Self.surface(side: side), notes: nil, transcriptPath: { _ in nil })
         let ownIDs: [PanelID] = [transcript.id, file.id]
         let ownWorktreeWide: [Bool] = ownOnly.map(\.isWorktreeWide)
         let expectedOwnWorktreeWide: [Bool] = [false, false]
@@ -594,46 +595,126 @@ struct PanelSurfaceRenderBranchTests {
         #expect(ownWorktreeWide == expectedOwnWorktreeWide)
     }
 
-    @Test("the + menu offers New Note and Changes, then exactly the notes no panel shows, in order")
-    func addMenuListsExactlyNotesWithoutPanel() {
-        let worktreeID = UUID()
-        let shown = NoteSummary(worktreeID: worktreeID, title: "Shown")
-        let untitled = NoteSummary(worktreeID: worktreeID, title: "")
-        let hidden = NoteSummary(worktreeID: worktreeID, title: "Hidden")
+    // MARK: - Pills in the strip
+
+    /// A note created `seconds` after the epoch, titled `title`.
+    private static func note(_ title: String, createdAt seconds: TimeInterval) -> NoteSummary {
+        let date = Date(timeIntervalSince1970: seconds)
+        return NoteSummary(worktreeID: UUID(), title: title, createdAt: date, updatedAt: date)
+    }
+
+    @Test("the strip's tabs leave out the transcript, first note and Changes panels, and keep files, web pages and other notes")
+    func tabsLeaveOutWhatPillsStandFor() {
+        let terminalID = UUID()
+        let first = Self.note("Plan", createdAt: 1_000)
+        let extra = Self.note("Scratch", createdAt: 2_000)
+        let changes = WorktreePanel(id: UUID(), content: .changes)
+        let extraPanel = WorktreePanel(id: UUID(), content: .note(noteID: extra.id))
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: first.id))
+        let file = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/w/a.md")))
+        let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
+        let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
+        let side = SideRegion(
+            panels: [file, transcript, web], activePanelID: transcript.id,
+            recency: [transcript.id, file.id, web.id])
+        // The extra note's panel comes before the first's, so strip order is
+        // not what picks the first note.
+        let surface = Self.surface(side: side, worktreePanels: [changes, extraPanel, firstPanel])
+
+        let tabs = SideRegionStrip.tabs(
+            for: surface, notes: [extra, first], transcriptTerminalID: terminalID,
+            transcriptPath: { _ in nil })
+
+        let ids: [PanelID] = tabs.map(\.id)
+        let expectedIDs: [PanelID] = [extraPanel.id, file.id, web.id]
+        #expect(ids == expectedIDs)
+        let titles: [String] = tabs.map(\.title)
+        let expectedTitles = ["Scratch", "a.md", "example.com"]
+        #expect(titles == expectedTitles)
+        let pilled = SideRegionStrip.pillPanelIDs(
+            surface: surface, notes: [extra, first], transcriptTerminalID: terminalID)
+        let expectedPilled: Set<PanelID> = [changes.id, firstPanel.id, transcript.id]
+        #expect(pilled == expectedPilled)
+    }
+
+    @Test("before the notes load, the tab's first note panel is the Notes pill's, and later note panels keep their tabs")
+    func tabsLeaveOutTheStandInFirstNote() {
+        let firstPanel = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let secondPanel = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+        let surface = Self.surface(side: .empty, worktreePanels: [firstPanel, secondPanel])
+
+        let tabs = SideRegionStrip.tabs(
+            for: surface, notes: nil, transcriptTerminalID: nil, transcriptPath: { _ in nil })
+
+        let ids: [PanelID] = tabs.map(\.id)
+        let expectedIDs: [PanelID] = [secondPanel.id]
+        #expect(ids == expectedIDs)
+    }
+
+    @Test("a transcript panel keeps its tab when no transcript pill can act for it, or when it is another terminal's")
+    func transcriptTabWithoutAPillStandingForIt() {
+        let terminalID = UUID()
+        let otherTerminalID = UUID()
+        let own = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminalID))
+        let other = ViewerPanel(id: UUID(), content: .transcript(terminalID: otherTerminalID))
+        let side = SideRegion(panels: [own, other], activePanelID: own.id, recency: [own.id, other.id])
+        let surface = Self.surface(side: side)
+
+        // No pill that can act: the transcript view is off, or the primary is
+        // not a Claude terminal.
+        let noPill = SideRegionStrip.tabs(
+            for: surface, notes: [], transcriptTerminalID: nil, transcriptPath: { _ in nil })
+        let noPillIDs: [PanelID] = noPill.map(\.id)
+        let expectedNoPill: [PanelID] = [own.id, other.id]
+        #expect(noPillIDs == expectedNoPill)
+
+        // The pill stands for its own terminal's transcript only.
+        let withPill = SideRegionStrip.tabs(
+            for: surface, notes: [], transcriptTerminalID: terminalID, transcriptPath: { _ in nil })
+        let withPillIDs: [PanelID] = withPill.map(\.id)
+        let expectedWithPill: [PanelID] = [other.id]
+        #expect(withPillIDs == expectedWithPill)
+    }
+
+    @Test("Open Other Note lists exactly the notes other than the first with no panel, in order, and nothing when there are none")
+    func otherNotesListsExtrasWithoutPanels() {
+        let first = Self.note("Plan", createdAt: 1_000)
+        let shown = Self.note("Shown", createdAt: 2_000)
+        let untitled = Self.note("", createdAt: 3_000)
+        let hidden = Self.note("Hidden", createdAt: 4_000)
         let panels: [WorktreePanel] = [
             WorktreePanel(id: UUID(), content: .changes),
             WorktreePanel(id: UUID(), content: .note(noteID: shown.id)),
         ]
+        let surface = Self.surface(side: .empty, worktreePanels: panels)
 
-        let items = SideRegionStrip.addMenuItems(notes: [untitled, shown, hidden], worktreePanels: panels)
-
-        let expected: [SideStripAddItem] = [
-            .newNote,
-            .changes,
-            .note(id: untitled.id, title: "Note"),
-            .note(id: hidden.id, title: "Hidden"),
+        // The list's order, whatever the creation order; the first note,
+        // with no panel of its own, is the Notes pill's and is not listed.
+        let others = SideRegionStrip.otherNotes(notes: [hidden, untitled, first, shown], surface: surface)
+        let expected: [SideStripOtherNote] = [
+            SideStripOtherNote(id: hidden.id, title: "Hidden"),
+            SideStripOtherNote(id: untitled.id, title: "Note"),
         ]
-        #expect(items == expected)
-        let titles: [String] = ["New Note", "Changes", "Note", "Hidden"]
-        #expect(items.map(\.title) == titles)
-        let distinctIDs = Set(items.map(\.id))
-        #expect(distinctIDs.count == items.count, "each item has its own ID")
+        #expect(others == expected)
 
-        // No notes, or every note shown: the two fixed items alone, Changes
-        // offered even while its panel is open.
-        let fixed: [SideStripAddItem] = [.newNote, .changes]
-        #expect(SideRegionStrip.addMenuItems(notes: [], worktreePanels: []) == fixed)
-        #expect(SideRegionStrip.addMenuItems(notes: [shown], worktreePanels: panels) == fixed)
+        // None: the first note alone, every other note shown, no notes, and
+        // notes not loaded.
+        let firstOnly = SideRegionStrip.otherNotes(notes: [first], surface: surface)
+        let allShown = SideRegionStrip.otherNotes(notes: [first, shown], surface: surface)
+        let noNotes = SideRegionStrip.otherNotes(notes: [], surface: surface)
+        let notLoaded = SideRegionStrip.otherNotes(notes: nil, surface: surface)
+        #expect(firstOnly.isEmpty)
+        #expect(allShown.isEmpty)
+        #expect(noNotes.isEmpty)
+        #expect(notLoaded.isEmpty)
     }
 
-    @Test("Changes and a listed note send open; New Note sends nothing itself")
-    func addMenuItemsSendOpen() {
+    @Test("Open Other Note opens the note, as a worktree panel the daemon places")
+    func openOtherNoteSendsOpen() {
         let noteID = UUID()
-        let openChanges: PanelOperation? = .open(content: .changes, newPanel: false)
-        let openNote: PanelOperation? = .open(content: .note(noteID: noteID), newPanel: false)
-        #expect(SideRegionStrip.addMenuOperation(for: .changes) == openChanges)
-        #expect(SideRegionStrip.addMenuOperation(for: .note(id: noteID, title: "Plan")) == openNote)
-        #expect(SideRegionStrip.addMenuOperation(for: .newNote) == nil)
+        let operation = SideRegionStrip.openOperation(for: SideStripOtherNote(id: noteID, title: "Scratch"))
+        let expected: PanelOperation = .open(content: .note(noteID: noteID), newPanel: false)
+        #expect(operation == expected)
     }
 
     // MARK: - The divider

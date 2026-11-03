@@ -263,7 +263,7 @@ final class AppState {
     /// the note it loads, holding the model weakly, so the registry never
     /// keeps a model alive. Several editors of one note have one entry each.
     @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
-    /// Worktrees whose Notes button is creating their first note
+    /// Worktrees whose Notes toggle is creating their first note
     /// (`toggleNotesPanel`). A press while that create is in flight sends
     /// nothing, so a double click makes one note, not two.
     @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
@@ -2522,14 +2522,14 @@ final class AppState {
         { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
     /// How a note is created in a worktree on the daemon (`createNote`),
     /// given the worktree and the title to create it with, or nil for the
-    /// daemon's default. Injectable so a test can drive the side strip's New
-    /// Note and the Notes button without a daemon.
+    /// daemon's default. Injectable so a test can drive the Notes toggle's
+    /// create without a daemon.
     @ObservationIgnored lazy var noteCreator: @MainActor (UUID, String?) async throws -> Note =
         { [daemonClient] worktreeID, title in
             try await daemonClient.createNote(worktreeID: worktreeID, title: title) }
-    /// Asks the user to confirm closing a note's side-panel tab whose note has
-    /// content — that close hard-deletes the note row (`closeSidePanel` →
-    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// Asks the user to confirm closing a note's side-panel tab, or the Notes
+    /// pill's Delete Note…, when the note has content — either hard-deletes
+    /// the note row (`closeSidePanel`, `deleteNoteAsking` → `deleteNote`). Injectable so tests can exercise both branches without
     /// a real modal NSAlert.
     ///
     /// Takes the content-file path rather than deriving one: the alert
@@ -2541,9 +2541,11 @@ final class AppState {
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Close note \u{201C}\(note.title)\u{201D}?"
-        alert.informativeText = "Closing this tab removes the note from TBD. Its contents are kept on disk at \(filePath)."
-        alert.addButton(withTitle: "Close Note")
+        // Worded for both places that ask: a note tab's ×, which closes the
+        // tab, and the Notes pill's Delete Note…, which may have no tab.
+        alert.messageText = "Delete note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "This removes the note from TBD. Its contents are kept on disk at \(filePath)."
+        alert.addButton(withTitle: "Delete Note")
         alert.addButton(withTitle: "Cancel")
         // HIG: destructive action shouldn't be the Return-key default (same
         // pattern as LegacyHooksCoordinator's migrate dialog).

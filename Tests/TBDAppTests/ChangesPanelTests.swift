@@ -277,6 +277,79 @@ struct ChangesPanelTests {
         }
     }
 
+    // MARK: - The Changes pill
+
+    /// The pill acts on the workspace tab whose strip or bar draws it, not on
+    /// the tab on screen: here the worktree is not selected at all, and the
+    /// tab is not its active one.
+    @Test("the Changes toggle opens, selects and closes Changes in its own workspace tab, whichever tab is on screen")
+    func tabScopedChangesToggleThreeStates() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let ownTab = UUID()
+            let otherTab = UUID()
+            let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let otherSurface = Self.surface(
+                tabID: otherTab, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id)
+            let cases: [(surface: WorkspaceTabSurface, expected: PanelOperation, pill: SidePanelPillState)] = [
+                // No Changes panel: open one.
+                (Self.surface(tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note], active: note.id),
+                 .open(content: .changes, newPanel: false), .off),
+                // Behind another panel: select it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note, changes], active: note.id),
+                 .select(panelID: changes.id), .behind),
+                // In front of a collapsed region: select it, which expands it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id,
+                    collapsed: true),
+                 .select(panelID: changes.id), .behind),
+                // In front and visible: close it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note, changes], active: changes.id),
+                 .close(panelID: changes.id), .front),
+            ]
+            for testCase in cases {
+                state.panelSurfaces = [worktreeID: [ownTab: testCase.surface, otherTab: otherSurface]]
+                let envelopes = Fixture.collectEnvelopes(state, replying: testCase.surface)
+
+                state.toggleChangesPanel(worktreeID: worktreeID, tabID: ownTab)
+                await Fixture.drainMainActor()
+
+                let sent = try Fixture.single(envelopes.envelopes)
+                #expect(sent.operation == testCase.expected)
+                #expect(sent.worktreeID == worktreeID)
+                #expect(sent.tabID == ownTab, "the toggle's own tab, not another")
+                // The pill draws the state its press acts on.
+                let control = PanelSurfaceWorkspaceView.changesControl(surface: testCase.surface)
+                let expectedControl: PaneChromeControl = .changes(state: testCase.pill)
+                #expect(control == expectedControl)
+            }
+        }
+    }
+
+    @Test("the Changes toggle on a tab with no surface yet opens Changes there, and draws off")
+    func tabScopedChangesToggleWithoutSurfaceOpens() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let reply = Self.surface(tabID: tabID, worktreeID: worktreeID, worktreePanels: [], active: nil)
+            let envelopes = Fixture.collectEnvelopes(state, replying: reply)
+
+            state.toggleChangesPanel(worktreeID: worktreeID, tabID: tabID)
+            await Fixture.drainMainActor()
+
+            let sent = try Fixture.single(envelopes.envelopes)
+            let expectedOpen: PanelOperation = .open(content: .changes, newPanel: false)
+            #expect(sent.operation == expectedOpen)
+            #expect(sent.tabID == tabID)
+            let control = PanelSurfaceWorkspaceView.changesControl(surface: nil)
+            let off: PaneChromeControl = .changes(state: .off)
+            #expect(control == off)
+        }
+    }
+
     // MARK: - The refresh control
 
     @Test("the Changes list's control is refresh, whatever the other inputs say")
@@ -294,7 +367,8 @@ struct ChangesPanelTests {
 
         state.perform(.renderToggle(showingSource: false), contentURL: nil)
         state.perform(.copyAddress(copied: false), contentURL: nil)
-        state.perform(.transcript(isOn: true, isEnabled: true), contentURL: nil)
+        state.perform(.transcript(state: .front, isEnabled: true), contentURL: nil)
+        state.perform(.changes(state: .front), contentURL: nil)
         #expect(state.refreshCount == 0)
 
         state.perform(.refresh, contentURL: nil)
