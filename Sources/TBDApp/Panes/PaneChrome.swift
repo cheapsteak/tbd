@@ -220,9 +220,9 @@ enum PaneChromeControl: Equatable {
     var systemImage: String {
         switch self {
         case .transcript(let isOn, _):
-            return isOn ? "text.bubble.fill" : "text.bubble"
+            return isOn ? "bubble.fill" : "bubble"
         case .notes:
-            return PanelKind.note.tabSystemImage
+            return PanelKind.noteSystemImage
         case .renderToggle:
             return "chevron.left.forwardslash.chevron.right"
         case .copyAddress(let copied):
@@ -232,12 +232,15 @@ enum PaneChromeControl: Equatable {
         }
     }
 
-    /// Nil leaves the symbol in the button style's own colour.
+    /// Nil leaves the symbol in the button style's own colour: the row's
+    /// secondary grey (`RowIconButtonStyle`). The transcript and Notes
+    /// buttons take the accent colour while on, and the row's grey while off.
+    /// The render toggle's primary marks it showing source.
     var tint: Tint? {
         switch self {
         case .transcript(let isOn, let isEnabled), .notes(let isOn, let isEnabled):
             guard isEnabled else { return .secondary }
-            return isOn ? .accent : .primary
+            return isOn ? .accent : nil
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
         case .copyAddress, .refresh:
@@ -282,9 +285,9 @@ enum PaneChromeControl: Equatable {
 
 // MARK: - PaneChromeControlButton
 
-/// An icon-only button for a ``PaneChromeControl``, sized for a tab row:
-/// `TabRowMetrics.controlWidth` wide and the row's full height, all of it
-/// clickable. It reads nothing but its control.
+/// An icon-only button for a ``PaneChromeControl``. The tab row's icon group
+/// it sits in sizes it and draws its hover square (`RowIconButtonStyle`,
+/// which the rows apply to those groups). It reads nothing but its control.
 struct PaneChromeControlButton: View {
     let control: PaneChromeControl
     let action: () -> Void
@@ -292,16 +295,15 @@ struct PaneChromeControlButton: View {
     var body: some View {
         Button(action: action) {
             symbol
-                .frame(width: TabRowMetrics.controlWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .disabled(!control.isEnabled)
         .help(control.help)
         .accessibilityLabel(Text(control.help))
     }
 
+    /// The symbol in its tint. Secondary is the row style's own colour, so it
+    /// sets none; primary names the label colour itself, because a
+    /// hierarchical `.primary` would be a level of the style's grey.
     @ViewBuilder
     private var symbol: some View {
         let image = Image(systemName: control.systemImage)
@@ -310,10 +312,8 @@ struct PaneChromeControlButton: View {
         case .accent?:
             image.foregroundStyle(Color.accentColor)
         case .primary?:
-            image.foregroundStyle(.primary)
-        case .secondary?:
-            image.foregroundStyle(.secondary)
-        case nil:
+            image.foregroundStyle(Color(nsColor: .labelColor))
+        case .secondary?, nil:
             image
         }
     }

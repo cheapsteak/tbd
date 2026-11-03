@@ -207,7 +207,7 @@ struct PanePlaceholder: View {
         case .liveTranscript(_, let terminalID):
             let term = terminal(for: terminalID)
             HStack(spacing: 4) {
-                Image(systemName: "text.bubble")
+                Image(systemName: "bubble")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .frame(width: 10)
@@ -224,7 +224,7 @@ struct PanePlaceholder: View {
                 let transcriptOpen = actions.isTranscriptOpen(terminalID)
                 Button(action: { actions.toggleTranscript(content, terminalID) }) {
                     HStack(spacing: 2) {
-                        Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
+                        Image(systemName: transcriptOpen ? "bubble.fill" : "bubble")
                         Text("Transcript")
                     }
                     .font(.caption)
@@ -527,7 +527,7 @@ struct PanePlaceholder: View {
     /// Renders a centered message pointing the user to enable the feature in Settings.
     private var transcriptDisabledPlaceholder: some View {
         VStack(spacing: 8) {
-            Image(systemName: "text.bubble")
+            Image(systemName: "bubble")
                 .font(.system(size: 32))
                 .foregroundStyle(.tertiary)
             Text("Transcript view is turned off")

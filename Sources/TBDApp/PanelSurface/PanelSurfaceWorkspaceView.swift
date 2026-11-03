@@ -388,7 +388,7 @@ struct PanelSurfaceWorkspaceView: View {
     ///
     /// Never below the range's lower bound, and never above its upper bound,
     /// so the primary always keeps what that bound leaves it. A main area too
-    /// small for even the upper bound to fit the controls (about 233 pt) is
+    /// small for even the upper bound to fit the controls (about 253 pt) is
     /// the one case the cap wins and the strip falls back on its own clip.
     /// With no space to share, the lower bound.
     static func minimumSideShare(availableSpace: CGFloat) -> CGFloat {

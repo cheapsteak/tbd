@@ -361,6 +361,171 @@ struct MainWindowChromeMountTests {
         #expect(shown)
     }
 
+    // MARK: - Tabs in the toolbar
+
+    /// With the setting on and a worktree's tab bar showing, the toolbar's
+    /// items end at the tracking separator and the main pane's row takes the
+    /// toolbar row's clicks: a hit test at every point along the row's
+    /// midline over the visible part of the pane, a tab's centre among them,
+    /// reaches a view inside the pane, the worktree's own view and the row's
+    /// drag gap among them, and never a toolbar viewer.
+    @Test func withTheSettingOnTheRowTakesTheToolbarRowsClicks() async throws {
+        let mount = ChromeMount(label: "tabsInToolbarOn", tabsInToolbar: true)
+        defer { mount.tearDown() }
+        let controller = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        mount.showSingleWorktree()
+
+        let what = "the main pane's row to take the toolbar row's clicks"
+        let log = RowWaitLog()
+        let drawn = try await waitForMainActorCondition(what) {
+            mount.keepConnected()
+            let row = mount.observeRow(in: split)
+            return log.note(row, clauses: [
+                ("the toolbar ends at the tracking separator",
+                 mount.toolbarIdentifiers.last == MainToolbarItemID.sidebarSeparator),
+                ("every point reaches the pane", row.allInPane),
+                ("no point reaches the title bar or a toolbar item", !row.anyOutsideContent),
+                ("a point reaches the worktree's view", row.anyInWorktreeView),
+                ("a point reaches the drag gap", row.reachesDragGap),
+            ])
+        }
+        if !drawn {
+            Issue.record(RowWaitTimedOut(what: what, observed: log.last))
+        }
+        #expect(drawn)
+        let identifiers = mount.toolbarIdentifiers
+        let expected: [NSToolbarItem.Identifier] = [
+            MainToolbarItemID.leadingButtons, .flexibleSpace, MainToolbarItemID.repoFilter,
+            MainToolbarItemID.sidebarSeparator,
+        ]
+        #expect(identifiers == expected)
+        #expect(controller.appliedSnapshot?.tabsInToolbar == true)
+    }
+
+    /// Positive control for `withTheSettingOnTheRowTakesTheToolbarRowsClicks`:
+    /// with the setting off and the same selection, the title follows the
+    /// tracking separator, some of the same points reach a toolbar item's
+    /// view, the title's or a flexible space's, and no row draws a drag gap.
+    /// A point that reaches nothing, or the title bar view itself, does not
+    /// count: the clause names the title bar when the points land there.
+    @Test func withTheSettingOffTheToolbarKeepsTheRow() async throws {
+        let mount = ChromeMount(label: "tabsInToolbarOff")
+        defer { mount.tearDown() }
+        let controller = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        mount.showSingleWorktree()
+
+        let what = "the worktree's view under the toolbar's title"
+        let log = RowWaitLog()
+        let shown = try await waitForMainActorCondition(what) {
+            mount.keepConnected()
+            let row = mount.observeRow(in: split)
+            return log.note(row, clauses: [
+                ("the toolbar shows the title", mount.toolbarIdentifiers.contains(MainToolbarItemID.title)),
+                ("the snapshot sees the tab bar", controller.appliedSnapshot?.showsWorktreeTabBar == true),
+                ("the worktree's view is mounted",
+                 ChromeMount.worktreePagerTabView(in: split.contentItem.viewController.view) != nil),
+                (row.anyTitlebar
+                    ? "a point reaches a toolbar item's view (points reach the title bar view itself)"
+                    : "a point reaches a toolbar item's view",
+                 row.anyToolbarItem),
+            ])
+        }
+        if !shown {
+            Issue.record(RowWaitTimedOut(what: what, observed: log.last))
+        }
+        #expect(shown)
+        let row = mount.observeRow(in: split)
+        #expect(row.reachesDragGap == false)
+        #expect(mount.dragGapFrames(in: split).isEmpty)
+    }
+
+    /// With the setting on, the main pane's row is the toolbar's height, the
+    /// content pane's top safe-area inset, and starts at the pane's top edge,
+    /// so its centre is the toolbar row's midline. Measured on the row's drag
+    /// gap, which spans the row's height.
+    @Test func theRowIsTheTopSafeAreaInsetTall() async throws {
+        let mount = ChromeMount(label: "tabsInToolbarHeight", tabsInToolbar: true)
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        let pane = split.contentItem.viewController.view
+        mount.showSingleWorktree()
+
+        let measured = try await waitForMainActorCondition("the row to lay out at the toolbar's height") {
+            mount.keepConnected()
+            let inset = pane.safeAreaInsets.top
+            guard inset > ChromeMount.titlebarOnlyHeight,
+                  mount.state.windowChrome.topSafeAreaInset == inset,
+                  let gap = mount.dragGapFrames(in: split).first else { return false }
+            let paneTop = pane.convert(pane.bounds, to: nil).maxY
+            return abs(gap.height - inset) < 0.5 && abs(gap.maxY - paneTop) < 0.5
+        }
+        #expect(measured)
+    }
+
+    /// With the setting on and the sidebar collapsed, the toolbar's leading
+    /// item still sits over the main pane's top-left corner and takes its own
+    /// clicks: a hit test on Back returns the toolbar's button. The row
+    /// starts past it, and every point from there on reaches the pane, the
+    /// drag gap among them, never a toolbar viewer.
+    @Test func withTheSidebarCollapsedBackStaysTheToolbars() async throws {
+        let mount = ChromeMount(label: "tabsInToolbarCollapsed", tabsInToolbar: true)
+        defer { mount.tearDown() }
+        let controller = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+        mount.showSingleWorktree()
+        split.sidebarItem.isCollapsed = true
+
+        let chrome = mount.state.windowChrome
+        let what = "the collapsed toolbar and the row past its leading item"
+        let log = RowWaitLog()
+        let settled = try await waitForMainActorCondition(what) {
+            mount.keepConnected()
+            let expected: [NSToolbarItem.Identifier] = [
+                MainToolbarItemID.leadingButtons, MainToolbarItemID.sidebarSeparator,
+            ]
+            let edge = chrome.leadingItemTrailingEdge ?? 0
+            let rowStart = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: edge)
+            let row = mount.observeRow(in: split, from: rowStart + 4)
+            return log.note(row, clauses: [
+                ("the toolbar shows only the leading item and the separator",
+                 mount.toolbarIdentifiers == expected),
+                ("the published leading edge reaches over the pane", edge > 0),
+                ("every point past the row's start reaches the pane", row.allInPane),
+                ("no point reaches the title bar or a toolbar item", !row.anyOutsideContent),
+                ("a point reaches the drag gap", row.reachesDragGap),
+            ])
+        }
+        if !settled {
+            Issue.record(RowWaitTimedOut(what: what, observed: log.last))
+        }
+        try #require(settled)
+
+        let host = try #require(
+            controller.item(MainToolbarItemID.leadingButtons)?.view as? LeadingToolbarButtonsHost)
+        let back = try #require(host.backButton)
+        let frameView = try #require(mount.host.window.contentView?.superview)
+        let centre = back.convert(NSPoint(x: back.bounds.midX, y: back.bounds.midY), to: nil)
+        let hit = frameView.hitTest(centre)
+        let reachesBack = hit.map { $0 === back || $0.isDescendant(of: back) } ?? false
+        if !reachesBack {
+            let hitClass = hit.map { String(describing: type(of: $0)) } ?? "nil"
+            Issue.record(RowWaitTimedOut(
+                what: "a hit test at Back's centre \(centre) to reach Back",
+                observed: "hit \(hitClass), Back \(back.convert(back.bounds, to: nil)), "
+                    + "frame view bounds \(frameView.bounds)"))
+        }
+        #expect(reachesBack)
+        // The row's start lies past the leading item it clears.
+        let leadingEnd = host.convert(host.bounds, to: nil).maxX
+        let pane = split.contentItem.viewController.view
+        let paneStart = pane.convert(pane.bounds, to: nil).minX
+        let rowStart = paneStart + MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge)
+        #expect(rowStart > leadingEnd)
+    }
+
     // MARK: - Dismantling
 
     /// SwiftUI dismantling the split takes the AppKit toolbar off the window,
@@ -451,12 +616,18 @@ private final class ChromeMount {
     ///     `NSHostingView`'s default.
     ///   - hostedPaneProbe: set on the root as `\.hostedPaneProbe`, for the
     ///     split to draw behind each pane it hosts.
+    ///   - tabsInToolbar: the Tabs in the toolbar setting, written to the
+    ///     suite before the state reads it.
     init(
         label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil,
-        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
+        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil,
+        tabsInToolbar: Bool = false
     ) {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
         self.suite = suite
+        if tabsInToolbar {
+            suite.defaults.set(true, forKey: AppState.tabsInToolbarKey)
+        }
         let state = AppState(userDefaults: suite.defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let worktrees = [
@@ -493,6 +664,10 @@ private final class ChromeMount {
         host = OffscreenHost(
             root: AnyView(root), size: ChromeMount.size, styleMask: ChromeMount.styleMask,
             sceneBridgingOptions: sceneBridgingOptions)
+        // The app's own main window chrome, through the function the app
+        // applies it with: a transparent title bar, among the rest, is what
+        // lets a click under the toolbar reach the content.
+        MainWindowChrome.apply(to: host.window)
     }
 
     /// Takes the toolbar off the window before the host goes, so the window
@@ -554,6 +729,126 @@ private final class ChromeMount {
                 worktreeID: worktreeID, servers: [server], parseErrors: [], runningFileDiagnostics: [])
         }
         return log
+    }
+
+    // MARK: Tabs in the toolbar
+
+    /// Shows the feature worktree in the detail area: one tab, with Session
+    /// History open so no terminal view mounts, and the daemon taken as
+    /// connected. The selection's one-shot daemon calls fail in this harness
+    /// and can clear `isConnected`; `keepConnected()` sets it back.
+    func showSingleWorktree() {
+        let worktree = worktrees[1]
+        let tabID = UUID()
+        state.tabs[worktree.id] = [
+            TBDShared.Tab(id: tabID, content: .terminal(terminalID: tabID), label: "acme"),
+        ]
+        state.historyActiveWorktrees.insert(worktree.id)
+        state.selectedWorktreeIDs = [worktree.id]
+        state.isConnected = true
+    }
+
+    /// Takes the daemon as connected again if a failed call cleared it.
+    func keepConnected() {
+        if !state.isConnected {
+            state.isConnected = true
+        }
+    }
+
+    /// One look at the main pane's top row: the toolbar's items, the window's
+    /// and the panes' geometry, and what a hit test through the window's
+    /// frame view, as a click is routed, returns at points along the row's
+    /// midline. The points lie inside the window's own bounds and the visible
+    /// part of the content pane, past the sidebar while it shows, from
+    /// `leadingOffset` past the pane's leading edge (and at least 16 pt past
+    /// the visible part's) to 16 pt before the visible part's end, 16 pt
+    /// apart. Every position comes from the views' own frames, never from
+    /// the size the window was asked for: on CI the window comes out smaller
+    /// than the root hosting view, which then reaches past it.
+    func observeRow(in split: MainSplitViewController, from leadingOffset: CGFloat = 16) -> RowObservation {
+        let window = host.window
+        let pane = split.contentItem.viewController.view
+        let paneFrame = pane.convert(pane.bounds, to: nil)
+        let inset = pane.safeAreaInsets.top
+        let sidebarFrame: NSRect? = split.sidebarItem.isCollapsed
+            ? nil
+            : split.splitView.arrangedSubviews.first.map { $0.convert($0.bounds, to: nil) }
+        let worktreeView = Self.worktreePagerTabView(in: pane)
+        let frameView = window.contentView?.superview
+        let windowBounds = frameView?.bounds ?? .zero
+        let chrome = state.windowChrome
+        let geometry = [
+            "window frame \(window.frame)",
+            "content layout rect \(window.contentLayoutRect)",
+            "frame view bounds \(windowBounds)",
+            "split \(split.view.convert(split.view.bounds, to: nil))",
+            "sidebar \(sidebarFrame.map { "\($0)" } ?? "collapsed")",
+            "pane \(paneFrame)",
+            "pane safe area top \(inset) leading \(pane.safeAreaInsets.left)",
+            "published inset \(chrome.topSafeAreaInset) leading edge \(chrome.leadingItemTrailingEdge.map { "\($0)" } ?? "nil")",
+            "connected \(state.isConnected)",
+            "worktree view \(worktreeView.map { "\($0.convert($0.bounds, to: nil))" } ?? "none")",
+            "drag gaps \(dragGapFrames(in: split))",
+        ].joined(separator: ", ")
+
+        var samples: [RowObservation.Sample] = []
+        var midline: CGFloat?
+        if let frameView, inset > 0 {
+            let visibleMinX = max(paneFrame.minX, sidebarFrame?.maxX ?? paneFrame.minX, windowBounds.minX)
+            let visibleMaxX = min(paneFrame.maxX, windowBounds.maxX)
+            let top = min(paneFrame.maxY, windowBounds.maxY)
+            let y = top - inset / 2
+            midline = y
+            var x = max(paneFrame.minX + leadingOffset, visibleMinX + 16)
+            while x < visibleMaxX - 16 {
+                let hit = frameView.hitTest(NSPoint(x: x, y: y))
+                samples.append(RowObservation.Sample(
+                    x: x,
+                    kind: Self.kind(of: hit, pane: pane, worktreeView: worktreeView, content: window.contentView),
+                    hitClass: hit.map { String(describing: type(of: $0)) } ?? "nil"))
+                x += 16
+            }
+        }
+        return RowObservation(
+            toolbar: toolbarIdentifiers.map(\.rawValue), geometry: geometry, midline: midline, samples: samples)
+    }
+
+    /// Where a hit test's view lies: a row's drag gap, the worktree's own
+    /// view, elsewhere in the content pane, elsewhere in the window's
+    /// content, or outside the content view, in the titlebar's hierarchy:
+    /// the title bar view itself, or a view in it, which is a toolbar item's.
+    ///
+    /// The title bar view is told apart by its class name, `NSTitlebarView`,
+    /// which is private: a deliberate test seam, as `KeyViewProxy` is in
+    /// `TabBarHitAreaTests`, so a hit the title bar takes itself is never
+    /// read as one a toolbar item took.
+    static func kind(
+        of hit: NSView?, pane: NSView, worktreeView: NSView?, content: NSView?
+    ) -> RowObservation.HitKind {
+        guard let hit else { return .nothing }
+        if hit is WindowDragGapView { return .dragGap }
+        if let worktreeView, hit.isDescendant(of: worktreeView) { return .worktreeView }
+        if hit.isDescendant(of: pane) { return .pane }
+        if let content, hit.isDescendant(of: content) { return .otherContent }
+        if String(describing: type(of: hit)) == "NSTitlebarView" { return .titlebar }
+        return .toolbarItem
+    }
+
+    /// The drag gaps drawn in the content pane, in window coordinates.
+    func dragGapFrames(in split: MainSplitViewController) -> [NSRect] {
+        let pane = split.contentItem.viewController.view
+        return OffscreenHost<AnyView>.descendants(WindowDragGapView.self, of: pane).map {
+            $0.convert($0.bounds, to: nil)
+        }
+    }
+
+    /// The worktree pager's tab view: an `NSTabView` nested inside the
+    /// detail area's own.
+    static func worktreePagerTabView(in pane: NSView) -> NSTabView? {
+        let tabViews = OffscreenHost<AnyView>.descendants(NSTabView.self, of: pane)
+        return tabViews.first { inner in
+            tabViews.contains { outer in outer !== inner && inner.isDescendant(of: outer) }
+        }
     }
 
     // MARK: Lookups
@@ -645,6 +940,113 @@ private final class ChromeMount {
             return item as? NSTrackingSeparatorToolbarItem
         }
         return nil
+    }
+}
+
+/// What `ChromeMount.observeRow(in:from:)` saw.
+private struct RowObservation: CustomStringConvertible {
+    /// Where a hit test's view lies (`ChromeMount.kind(of:pane:worktreeView:content:)`).
+    enum HitKind: String {
+        case nothing, dragGap, worktreeView, pane, otherContent, titlebar, toolbarItem
+
+        /// A view inside the content pane.
+        var isInPane: Bool {
+            switch self {
+            case .dragGap, .worktreeView, .pane: return true
+            case .nothing, .otherContent, .titlebar, .toolbarItem: return false
+            }
+        }
+    }
+
+    /// One point on the row's midline, in window coordinates, and what a hit
+    /// test there returned.
+    struct Sample {
+        let x: CGFloat
+        let kind: HitKind
+        let hitClass: String
+    }
+
+    /// The toolbar's item identifiers, left to right.
+    let toolbar: [String]
+    /// The window's and panes' frames, the published chrome geometry and the
+    /// connection, as text.
+    let geometry: String
+    /// The row's midline in window coordinates; nil before the pane has a
+    /// toolbar over it or the window has a frame view.
+    let midline: CGFloat?
+    let samples: [Sample]
+
+    /// Every point reached a view inside the content pane, and there was at
+    /// least one point.
+    var allInPane: Bool {
+        !samples.isEmpty && samples.allSatisfy { $0.kind.isInPane }
+    }
+
+    /// Some point reached the worktree's own view, its row's drag gap
+    /// included.
+    var anyInWorktreeView: Bool {
+        samples.contains { $0.kind == .worktreeView || $0.kind == .dragGap }
+    }
+
+    /// Some point reached a row's drag gap.
+    var reachesDragGap: Bool {
+        samples.contains { $0.kind == .dragGap }
+    }
+
+    /// Some point reached a view outside the window's content: the title
+    /// bar view itself or a toolbar item's.
+    var anyOutsideContent: Bool {
+        samples.contains { $0.kind == .titlebar || $0.kind == .toolbarItem }
+    }
+
+    /// Some point reached a toolbar item's view, not the title bar view.
+    var anyToolbarItem: Bool {
+        samples.contains { $0.kind == .toolbarItem }
+    }
+
+    /// Some point reached the title bar view itself.
+    var anyTitlebar: Bool {
+        samples.contains { $0.kind == .titlebar }
+    }
+
+    var description: String {
+        let points = samples.map { sample in
+            "x \(sample.x): \(sample.kind.rawValue) (\(sample.hitClass))"
+        }.joined(separator: "; ")
+        let line = midline.map { "\($0)" } ?? "none"
+        return "toolbar \(toolbar); \(geometry); midline \(line); points [\(points)]"
+    }
+}
+
+/// The last observation a wait on the row made, with the clauses it checked,
+/// for the diagnostic of a wait that timed out.
+@MainActor
+private final class RowWaitLog {
+    private(set) var last = "nothing observed"
+
+    /// Records `observation` and each clause's value; returns whether every
+    /// clause held.
+    func note(_ observation: RowObservation, clauses: [(String, Bool)]) -> Bool {
+        let failing = clauses.filter { !$0.1 }.map { $0.0 }
+        let verdict = failing.isEmpty ? "every clause held" : "failing: \(failing.joined(separator: ", "))"
+        last = "\(verdict); \(observation)"
+        return failing.isEmpty
+    }
+
+    /// Records free text, for a check that is not a row observation.
+    func note(_ text: String) {
+        last = text
+    }
+}
+
+/// A wait on the row that timed out, with what it last observed, as the
+/// error its issue records so the text reaches the CI summary.
+private struct RowWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    let observed: String
+
+    var description: String {
+        "\(what) never held. Last observed: \(observed)"
     }
 }
 

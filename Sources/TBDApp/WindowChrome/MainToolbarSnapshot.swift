@@ -82,12 +82,13 @@ struct RemotePresentation: Equatable {
     /// The detail pane shows the transcript, so the toggle reads "Hide".
     var transcriptShown: Bool
 
-    var transcriptSymbolName: String { transcriptShown ? "text.bubble.fill" : "text.bubble" }
+    var transcriptSymbolName: String { transcriptShown ? "bubble.fill" : "bubble" }
     var transcriptHelp: String { transcriptShown ? "Hide transcript" : "Show transcript" }
 }
 
 /// Everything the AppKit main toolbar reads from `AppState`, and from its
-/// defaults store for the filter's Show Hidden Repos row, as plain values.
+/// defaults store for the filter's Show Hidden Repos row and the Tabs in the
+/// toolbar setting, as plain values.
 /// Each apply makes one. The controller compares it with the one it last
 /// applied only to skip an apply an observed change asked for when nothing
 /// the toolbar shows changed, since making it reads more than it shows, such
@@ -103,14 +104,25 @@ struct MainToolbarSnapshot: Equatable {
     /// The title cluster's main title (`ToolbarTitleCluster.mainTitle(in:)`),
     /// which the title item's overflow row shows. `nil` with nothing selected.
     var title: String?
+    /// The Tabs in the toolbar setting, read from the defaults store
+    /// (`AppState.tabsInToolbarKey`), which the controller's defaults watch
+    /// follows.
+    var tabsInToolbar: Bool = false
+    /// Whether the detail area shows a worktree's tab bar
+    /// (`AppState.showsWorktreeTabBar`, from `MainDetailContent`).
+    var showsWorktreeTabBar: Bool = false
 
+    /// The layout's inputs. With the Tabs in the toolbar setting on, the
+    /// Servers item never shows, as it lives in the status bar, and the
+    /// panes draw the top row while a worktree's tab bar shows.
     func layoutState(sidebarCollapsed: Bool) -> MainToolbarLayoutState {
         MainToolbarLayoutState(
             sidebarCollapsed: sidebarCollapsed,
-            showsServers: servers != nil,
+            showsServers: servers != nil && !tabsInToolbar,
             showsTranscript: remote?.showsTranscript ?? false,
             showsReconnect: remote?.showsReconnect ?? false,
-            showsStop: remote?.showsStop ?? false)
+            showsStop: remote?.showsStop ?? false,
+            panesDrawTopRow: tabsInToolbar && showsWorktreeTabBar)
     }
 
     @MainActor
@@ -165,6 +177,10 @@ struct MainToolbarSnapshot: Equatable {
             filter: filter,
             servers: servers,
             remote: remote,
-            title: ToolbarTitleCluster.mainTitle(in: appState))
+            title: ToolbarTitleCluster.mainTitle(in: appState),
+            // Like the Show Hidden Repos key, read from the store: the
+            // controller's defaults watch asks for the apply that reads it.
+            tabsInToolbar: AppState.tabsInToolbarEnabled(defaults: appState.userDefaults),
+            showsWorktreeTabBar: appState.showsWorktreeTabBar)
     }
 }

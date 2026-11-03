@@ -30,8 +30,9 @@ struct SideRegionTab: Equatable, Identifiable {
         return noteID
     }
 
-    /// The symbol the workspace tab bar shows for the same kind.
-    var systemImage: String { content.kind.tabSystemImage }
+    /// The symbol the workspace tab bar shows for the same kind; nil for a
+    /// file, whose tab shows its name alone.
+    var systemImage: String? { content.kind.tabSystemImage }
 
     /// A web page's address, which its copy-address control copies until the
     /// page reports one of its own; nil for the other kinds.
@@ -61,8 +62,9 @@ struct SideStripHistoryButtons: Equatable {
 enum SideStripMetrics {
     /// The inset before the history buttons.
     static let historyLeadingInset: CGFloat = 4
-    /// Each history button's width: search, back and forward.
-    static let historyButtonWidth: CGFloat = 22
+    /// Each history button's width: search, back and forward, each a row
+    /// icon button's square (`RowIconButtonStyle`).
+    static let historyButtonWidth: CGFloat = TabRowMetrics.controlWidth
     /// Search, back and forward.
     static let historyButtonCount = 3
     /// The most buttons the trailing group holds: the + menu, the active
@@ -72,14 +74,16 @@ enum SideStripMetrics {
     static let trailingSlotCount = 5
 
     /// The width the strip's fixed controls need, in points: the history
-    /// buttons with their inset, and a full trailing group of
-    /// `TabRowMetrics.controlWidth` buttons. The panel tabs between them need
+    /// buttons with their inset, a full trailing group of
+    /// `TabRowMetrics.controlWidth` buttons, and the strip's trailing inset
+    /// (`MainTabRowMetrics.trailingInset`). The panel tabs between them need
     /// none, since they scroll. The side region is kept at least this wide
     /// (`PanelSurfaceWorkspaceView.minimumSideShare`).
     static var fixedControlsWidth: CGFloat {
         historyLeadingInset
             + CGFloat(historyButtonCount) * historyButtonWidth
             + CGFloat(trailingSlotCount) * TabRowMetrics.controlWidth
+            + MainTabRowMetrics.trailingInset
     }
 }
 
@@ -114,8 +118,8 @@ enum SideStripAddItem: Hashable, Identifiable {
     var systemImage: String {
         switch self {
         case .newNote: return "square.and.pencil"
-        case .changes: return PanelKind.changes.tabSystemImage
-        case .note: return PanelKind.note.tabSystemImage
+        case .changes: return PanelKind.changesSystemImage
+        case .note: return PanelKind.noteSystemImage
         }
     }
 }
@@ -242,7 +246,9 @@ enum SideRegionStrip {
 /// renderer"): its strip, a divider, and the active panel through the shared
 /// leaf view.
 ///
-/// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`), so
+/// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`, or
+/// with the Tabs in the toolbar setting on the toolbar's height,
+/// `MainTabRowMetrics.height`), so
 /// the two read as one row split by the divider, and clipped to its frame, so
 /// it never draws over the divider. The region is never narrower than the
 /// strip's fixed controls (`SideStripMetrics.fixedControlsWidth`), so none of
@@ -421,34 +427,68 @@ struct SideRegionView: View {
 
     /// The strip's row, without its scrolling. Its trailing end draws
     /// `SideStripTrailingItem.items` in the order they come, `edge`'s
-    /// buttons among them.
+    /// buttons among them. The history group and the trailing group take
+    /// `RowIconButtonStyle`, and the + menu, which is not a button, the same
+    /// square (`rowIconHoverSquare`). The tabs, with their context menus, take
+    /// no part of it.
     private func stripRow(tabs: [SideRegionTab], active: ActivePanel?, edge: TabRowEdgeControls) -> some View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
             edgeItems: edge.items)
+        // With the Tabs in the toolbar setting on, the strip is the window's
+        // top row over the side region: the toolbar's height, pill tabs, and
+        // a drag gap in the width after the last tab.
+        let chrome = appState.windowChrome
+        let tabsInToolbar = chrome.tabsInToolbar
         return HStack(spacing: 0) {
             historyGroup(active: active)
+                // Icon buttons only, so the style reaches no tab and no
+                // context menu (`RowIconButtonStyle`).
+                .buttonStyle(RowIconButtonStyle())
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(tabs) { tab in
-                        tabItem(tab)
+            if tabsInToolbar {
+                TabsThenDragGapLayout {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: MainTabRowMetrics.pillSpacing) {
+                            ForEach(tabs) { tab in
+                                tabItem(tab, pill: true)
+                            }
+                        }
+                        // Pills hold their own height; the stack fills the
+                        // row's to centre them on its midline.
+                        .frame(maxHeight: .infinity)
+                    }
+                    WindowDragGap()
+                }
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(tabs) { tab in
+                            tabItem(tab, pill: false)
+                        }
                     }
                 }
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 0) {
                 ForEach(trailingItems) { item in
                     trailingItem(item, active: active, edge: edge)
                 }
             }
+            // Icon buttons, and the + menu, whose content resets the style
+            // (`addMenu`).
+            .buttonStyle(RowIconButtonStyle())
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
         }
-        .frame(height: TabRowMetrics.height)
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
+        .frame(height: tabsInToolbar
+            ? MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset)
+            : TabRowMetrics.height)
         // A backstop. The workspace view keeps the region at least as wide as
         // the two fixed-width ends (`SideStripMetrics.fixedControlsWidth`,
         // `PanelSurfaceWorkspaceView.minimumSideShare`), so they fit and only
@@ -516,11 +556,7 @@ struct SideRegionView: View {
             // weight the three bars crowd into a smudge.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 10, weight: .regular))
-                .frame(width: SideStripMetrics.historyButtonWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .help("Search panel history")
         .accessibilityLabel(Text("Search panel history"))
         .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
@@ -528,12 +564,14 @@ struct SideRegionView: View {
                 PaneHistoryPaletteView(history: history) { index in
                     active.actions.historyStep(paneContent, .jump(index))
                 }
+                // The strip's icon-button style stops at the palette.
+                .buttonStyle(.automatic)
             }
         }
     }
 
-    /// A back or forward chevron, `SideStripMetrics.historyButtonWidth` wide at
-    /// the row's full height.
+    /// A back or forward chevron, in the history group's `RowIconButtonStyle`,
+    /// `SideStripMetrics.historyButtonWidth` square.
     private func historyStepButton(
         icon: String,
         help: String,
@@ -542,11 +580,7 @@ struct SideRegionView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 9, weight: .bold))
-                .frame(width: SideStripMetrics.historyButtonWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(Text(help))
     }
@@ -557,16 +591,21 @@ struct SideRegionView: View {
     /// beside it — siblings, not nested, so each takes its own clicks. A
     /// right-click offers the file menu for file and transcript tabs, and
     /// Rename Tab alone for a note tab, which a double-click also renames.
+    /// As a pill (`pill`), with the Tabs in the toolbar setting on, it draws
+    /// the workspace tab bar's pill fill instead of the active tab's
+    /// background and line (`SideStripTabFill`).
     @ViewBuilder
-    private func tabItem(_ tab: SideRegionTab) -> some View {
+    private func tabItem(_ tab: SideRegionTab, pill: Bool) -> some View {
         let item = HStack(spacing: 0) {
             Button {
                 send(.select(panelID: tab.id))
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: tab.systemImage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(tab.isActive ? .primary : .tertiary)
+                    if let systemImage = tab.systemImage {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 10))
+                            .foregroundStyle(tab.isActive ? .primary : .tertiary)
+                    }
                     tabTitle(tab)
                 }
                 .padding(.leading, 8)
@@ -600,14 +639,7 @@ struct SideRegionView: View {
             .help("Close panel")
         }
         .frame(maxHeight: .infinity)
-        .background(tab.isActive ? Color(nsColor: .controlBackgroundColor) : Color.clear)
-        .overlay(alignment: .bottom) {
-            if tab.isActive {
-                Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
-                    .frame(height: 2)
-            }
-        }
+        .modifier(SideStripTabFill(isActive: tab.isActive, pill: pill))
 
         if tab.noteID != nil {
             item.contextMenu {
@@ -698,31 +730,45 @@ struct SideRegionView: View {
     /// The + menu (`SideRegionStrip.addMenuItems`): New Note and Changes,
     /// then, below a divider, the worktree's notes that no panel shows. It is
     /// keyed by its items, so a changed note list always reaches the menu
-    /// AppKit builds.
+    /// AppKit builds. Not being a button, it takes the row icon buttons'
+    /// square from outside (`rowIconHoverSquare`), and its label sets the
+    /// row's grey itself. It is a plain button-style menu, as the title's
+    /// menus are, so SwiftUI draws the label in its own colour and size, and
+    /// the label fills the square, all of it clickable. A borderless menu
+    /// would leave the label to AppKit, which draws it in the label colour.
+    /// Its content resets the trailing group's `RowIconButtonStyle` with
+    /// `.buttonStyle(.automatic)`: a custom button style over a menu's content
+    /// rebuilds the open menu continuously.
     private var addMenu: some View {
         let items = SideRegionStrip.addMenuItems(
             notes: appState.notes[worktree.id] ?? [], worktreePanels: surface.worktreePanels)
         let fixed = items.filter { !Self.isListedNote($0) }
         let listed = items.filter { Self.isListedNote($0) }
         return Menu {
-            ForEach(fixed) { item in
-                addMenuButton(item)
-            }
-            if !listed.isEmpty {
-                Divider()
-                ForEach(listed) { item in
+            Group {
+                ForEach(fixed) { item in
                     addMenuButton(item)
                 }
+                if !listed.isEmpty {
+                    Divider()
+                    ForEach(listed) { item in
+                        addMenuButton(item)
+                    }
+                }
             }
+            .buttonStyle(.automatic)
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: RowIconSquare.standardSide, height: RowIconSquare.standardSide)
+                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: TabRowMetrics.controlWidth)
-        .frame(maxHeight: .infinity)
+        .rowIconHoverSquare()
         .help("Add a side panel")
         .accessibilityLabel(Text("Add a side panel"))
         .id(items)
@@ -770,6 +816,32 @@ struct SideRegionView: View {
     }
 }
 
+// MARK: - SideStripTabFill
+
+/// A side strip tab's fill: the active tab's background and the line under
+/// it, or, as a pill (`pill`), the workspace tab bar's pill fill, which
+/// follows the pointer too (`TabPillBackground`).
+private struct SideStripTabFill: ViewModifier {
+    let isActive: Bool
+    let pill: Bool
+
+    func body(content: Content) -> some View {
+        if pill {
+            content.modifier(TabPillBackground(isActive: isActive))
+        } else {
+            content
+                .background(isActive ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                .overlay(alignment: .bottom) {
+                    if isActive {
+                        Rectangle()
+                            .fill(Color(nsColor: .separatorColor))
+                            .frame(height: 2)
+                    }
+                }
+        }
+    }
+}
+
 // MARK: - SidePanelToggleButton
 
 /// The button that hides or shows the side region: the strip's collapse
@@ -791,14 +863,12 @@ struct SidePanelToggleButton: View {
     }
 
     var body: some View {
+        // Sized, with its hover square, by the `RowIconButtonStyle` of the
+        // group it sits in.
         Button(action: action) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 11))
-                .frame(width: TabRowMetrics.controlWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .keyboardShortcut("\\", modifiers: .command)
         .help(Self.help(collapsed: collapsed))
     }

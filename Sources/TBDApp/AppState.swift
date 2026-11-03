@@ -2836,11 +2836,16 @@ final class AppState {
     /// preferences.
     let userDefaults: UserDefaults
 
+    /// The Tabs in the toolbar setting and the chrome geometry the panes'
+    /// top rows read (`WindowChromeState`), following `userDefaults`.
+    let windowChrome: WindowChromeState
+
     init(
         userDefaults: UserDefaults = .standard,
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
     ) {
         self.userDefaults = userDefaults
+        self.windowChrome = WindowChromeState(defaults: userDefaults)
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()

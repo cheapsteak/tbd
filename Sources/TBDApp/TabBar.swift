@@ -83,12 +83,12 @@ private struct TabDropDelegate: DropDelegate {
 /// share one row across the window, so both take their height from here.
 enum TabRowMetrics {
     static let height: CGFloat = 30
-    /// The width of one icon button at a tab row's trailing end: a
-    /// `PaneChromeControlButton`, the refresh control's slot
-    /// (`PaneRefreshControl`), the strip's + menu and the side panel toggle
-    /// (`SidePanelToggleButton`). The side region's minimum width is built
-    /// from it (`SideStripMetrics.fixedControlsWidth`).
-    static let controlWidth: CGFloat = 28
+    /// The width of one icon button in a tab row: the side of the square
+    /// `RowIconButtonStyle` frames each one in (`RowIconSquare.standardSide`).
+    /// The refresh control's spinner (`PaneRefreshControl`) takes a slot this
+    /// wide too. The side region's minimum width is built from it
+    /// (`SideStripMetrics.fixedControlsWidth`).
+    static let controlWidth: CGFloat = RowIconSquare.standardSide
 }
 
 // MARK: - TabBarTrailingItems
@@ -183,11 +183,19 @@ struct TabBar: View {
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
+        // Read once per body, so the bar draws one row or the other whole.
+        let tabsInToolbar = appState.windowChrome.tabsInToolbar
         ScrollViewReader { proxy in
-            row
-                .onAppear { scrollSelectedTabIntoView(proxy) }
-                .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
-                .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
+            Group {
+                if tabsInToolbar {
+                    topRow
+                } else {
+                    row
+                }
+            }
+            .onAppear { scrollSelectedTabIntoView(proxy) }
+            .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
+            .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
         }
     }
 
@@ -211,37 +219,11 @@ struct TabBar: View {
         proxy.scrollTo(selectedTabID)
     }
 
-    /// The tabs, the + button and the trailing group, in one row.
+    /// The tabs, the + button and the trailing group, in one row. The + button
+    /// and the trailing group take `RowIconButtonStyle`; the tabs do not.
     private var row: some View {
         HStack(spacing: 0) {
-            TabsThenAddLayout {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                            TabBarItem(
-                                tab: tab,
-                                index: index,
-                                worktreeID: worktreeID,
-                                isSelected: index == activeTabIndex,
-                                terminal: terminalForTab(tab.id),
-                                onSelect: { activeTabIndex = index },
-                                onClose: { onCloseTab(index) }
-                            )
-                        }
-                    }
-                }
-                // Tabs that fit stay put under a trackpad swipe.
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-
-                AddTabButton(
-                    profiles: appState.modelProfiles,
-                    onAddShell: onAddShell,
-                    onAddClaude: onAddClaude,
-                    onAddClaudeProfile: onAddClaudeProfile,
-                    onChooseAccount: onChooseAccount,
-                    onAddCodex: onAddCodex
-                )
-            }
+            tabsThenAdd(pills: false)
             // Exactly the width the trailing group leaves, the tabs and the +
             // button at its leading edge: `minWidth: 0` stops the frame from
             // reporting the tabs' full width, which would push the trailing
@@ -255,7 +237,7 @@ struct TabBar: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
         }
-        .padding(.horizontal, 0)
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
         .frame(height: TabRowMetrics.height)
         .background(Color(nsColor: .windowBackgroundColor))
         // Catch-all so dropping a tab on the +/history button or empty
@@ -268,13 +250,100 @@ struct TabBar: View {
         }
     }
 
-    /// `trailing`'s items, left to right, in the order it gives them.
+    /// The tabs, a horizontal scroll view, then the + button straight after
+    /// the last one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs
+    /// in the toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing`
+    /// apart, centred on the row's midline.
+    private func tabsThenAdd(pills: Bool) -> some View {
+        TabsThenAddLayout {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: pills ? MainTabRowMetrics.pillSpacing : 0) {
+                    ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                        TabBarItem(
+                            tab: tab,
+                            index: index,
+                            worktreeID: worktreeID,
+                            isSelected: index == activeTabIndex,
+                            terminal: terminalForTab(tab.id),
+                            onSelect: { activeTabIndex = index },
+                            onClose: { onCloseTab(index) },
+                            pillStyle: pills
+                        )
+                    }
+                }
+                // Pills hold their own height, so the stack fills the scroll
+                // view's height to centre them; classic tabs fill it
+                // themselves.
+                .frame(maxHeight: pills ? CGFloat.infinity : nil)
+            }
+            // Tabs that fit stay put under a trackpad swipe.
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+
+            AddTabButton(
+                profiles: appState.modelProfiles,
+                onAddShell: onAddShell,
+                onAddClaude: onAddClaude,
+                onAddClaudeProfile: onAddClaudeProfile,
+                onChooseAccount: onChooseAccount,
+                onAddCodex: onAddCodex
+            )
+            // On the button alone: the tabs' context menus must stay outside
+            // the style (`RowIconButtonStyle`).
+            .buttonStyle(RowIconButtonStyle())
+        }
+    }
+
+    /// The main pane's top row, with the Tabs in the toolbar setting on, in
+    /// the window's toolbar row (`MainTabRowLayout`): the worktree's title
+    /// over the notes button and the project name (`WorktreeTitleColumn`),
+    /// the tabs as pills with the + button after them, the drag gap, and the
+    /// trailing group. It starts past the toolbar's leading item while that
+    /// item sits over the pane (`MainTabRowMetrics.leadingInset`), and is the
+    /// toolbar's height (`MainTabRowMetrics.height`), both as the toolbar
+    /// controller measured them (`WindowChromeState`). A worktree the app
+    /// cannot find shows no title. The + button and the trailing group take
+    /// `RowIconButtonStyle`; the title column and the tabs do not.
+    private var topRow: some View {
+        let chrome = appState.windowChrome
+        let worktree = appState.findWorktree(id: worktreeID)
+        let repoName = worktree?.repoID.flatMap { appState.repoName(for: $0) }
+        return MainTabRowLayout {
+            if let worktree {
+                WorktreeTitleColumn(appState: appState, worktree: worktree, repoName: repoName)
+            } else {
+                Color.clear.frame(width: 0, height: 0)
+            }
+            // Clipped only for a width too narrow for the + button itself.
+            tabsThenAdd(pills: true)
+                .clipped()
+            WindowDragGap()
+            trailingGroup
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.trailing, MainTabRowMetrics.trailingInset)
+        .padding(.leading, MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge))
+        .frame(height: MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset))
+        .background(Color(nsColor: .windowBackgroundColor))
+        // The same catch-all as the classic row's: a tab dropped anywhere in
+        // the row but on another tab ends the drag without a reorder.
+        .onDrop(of: [UTType.tbdTabDrag], isTargeted: nil) { _ in
+            appState.draggingTabID = nil
+            return false
+        }
+    }
+
+    /// `trailing`'s items, left to right, in the order it gives them, each an
+    /// icon button in `RowIconButtonStyle`, which the group applies so a new
+    /// item in it gets the style with no code of its own. The group holds
+    /// icon buttons only, never a tab, a `.contextMenu` or a `Menu`'s content,
+    /// which the style must not reach.
     private var trailingGroup: some View {
         HStack(spacing: 0) {
             ForEach(trailing.items) { item in
                 trailingItem(item)
             }
         }
+        .buttonStyle(RowIconButtonStyle())
     }
 
     @ViewBuilder
@@ -376,9 +445,10 @@ struct TabsThenAddLayout: Layout {
 
 // MARK: - AddTabButton
 
-/// Plain Button that shows an NSMenu on click. SwiftUI's Menu + borderlessButton
-/// swallows hover events, making custom hover styling impossible. Using NSMenu
-/// directly sidesteps this entirely.
+/// A button that shows an NSMenu on click, in `RowIconButtonStyle`, which
+/// `TabBar` applies to it and which draws its hover square. SwiftUI's Menu +
+/// borderlessButton swallows hover events, making custom hover styling
+/// impossible. Using NSMenu directly sidesteps this entirely.
 private struct AddTabButton: View {
     let profiles: [ModelProfileWithUsage]
     let onAddShell: () -> Void
@@ -404,22 +474,20 @@ private struct AddTabButton: View {
     @State private var availability = AgentExecutableAvailability.allAvailable
 
     var body: some View {
-        Image(systemName: "plus")
-            .font(.caption)
-            .foregroundStyle(isHovering ? .primary : .secondary)
-            .frame(width: 20, height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovering ? Color.primary.opacity(0.08) : Color.clear)
-            )
-            .padding(6)
-            .contentShape(Rectangle())
-            .onHover { hovering in isHovering = hovering }
-            .onTapGesture { showMenu() }
-            .help("New Tab")
-            .task {
-                availability = AgentExecutableAvailability.detect()
-            }
+        Button {
+            showMenu()
+        } label: {
+            // Concrete colours: a hierarchical level here would be a level
+            // of the row style's grey.
+            Image(systemName: "plus")
+                .font(.caption)
+                .foregroundStyle(Color(nsColor: isHovering ? .labelColor : .secondaryLabelColor))
+        }
+        .onHover { hovering in isHovering = hovering }
+        .help("New Tab")
+        .task {
+            availability = AgentExecutableAvailability.detect()
+        }
     }
 
     private func showMenu() {
@@ -917,6 +985,10 @@ private struct TabBarItem: View {
     let terminal: Terminal?
     let onSelect: () -> Void
     let onClose: () -> Void
+    /// Draws the tab as a pill (`MainTabRowMetrics`), as the top row does
+    /// with the Tabs in the toolbar setting on: a rounded fill for the active
+    /// and the hovered tab, and no line under the active one.
+    var pillStyle: Bool = false
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
@@ -1021,9 +1093,11 @@ private struct TabBarItem: View {
                     }
 
                     // Type icon
-                    tabIconView
-                        .frame(width: 14)
-                        .padding(.trailing, 3)
+                    if showsTabIcon {
+                        tabIconView
+                            .frame(width: 14)
+                            .padding(.trailing, 3)
+                    }
 
                     if isEditing {
                         RenameableLabel(
@@ -1108,12 +1182,19 @@ private struct TabBarItem: View {
         // Without maxHeight the 28px item center-aligns in the 30px bar,
         // leaving a ~1px sliver under the indicator. Content stays centered,
         // so the label doesn't shift on select/deselect.
-        .frame(minHeight: 28, maxHeight: .infinity)
-        .background(
-            isSelected
-                ? Color(nsColor: .controlBackgroundColor)
-                : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
-        )
+        // A pill holds its own height instead, centred in the row.
+        .frame(
+            minHeight: pillStyle ? MainTabRowMetrics.pillHeight : 28,
+            maxHeight: pillStyle ? MainTabRowMetrics.pillHeight : .infinity)
+        .background {
+            if pillStyle {
+                TabPillShape(isActive: isSelected, isHovering: isHovering)
+            } else {
+                isSelected
+                    ? Color(nsColor: .controlBackgroundColor)
+                    : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
+            }
+        }
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: TabWidthPreference.self, value: geo.size.width)
@@ -1121,8 +1202,9 @@ private struct TabBarItem: View {
         )
         // Active-tab indicator: a bottom lip drawn as an overlay so it never
         // participates in layout — the tab content must not shift on selection.
+        // A pill has none.
         .overlay(alignment: .bottom) {
-            if isSelected {
+            if isSelected && !pillStyle {
                 Rectangle()
                     .fill(Color(nsColor: .separatorColor))
                     .frame(height: 2)
@@ -1168,7 +1250,9 @@ private struct TabBarItem: View {
         .draggable(TabDragPayload(tabID: tab.id)) {
             // Drag preview: a translucent copy of the tab content.
             HStack(spacing: 0) {
-                tabIconView.frame(width: 14).padding(.trailing, 3)
+                if showsTabIcon {
+                    tabIconView.frame(width: 14).padding(.trailing, 3)
+                }
                 Text(tabLabel).font(.system(size: 11)).lineLimit(1).fixedSize()
             }
             .padding(.horizontal, 8)
@@ -1454,15 +1538,26 @@ private struct TabBarItem: View {
         isEditing = true
     }
 
+    /// False for viewer content whose tab shows no icon: a file, whose tab
+    /// shows its name alone. The tab then leaves out the icon's column and
+    /// the gap after it, not only the symbol.
+    private var showsTabIcon: Bool {
+        guard let viewer = LegacyTabConverter.panelContent(from: tab.content) else { return true }
+        return viewer.kind.tabSystemImage != nil
+    }
+
     /// Viewer content shows the icon it shares with the side region's strip
-    /// (`PanelKind.tabSystemImage`); a terminal's icon follows its session.
+    /// (`PanelKind.tabSystemImage`), or none (`showsTabIcon`); a terminal's
+    /// icon follows its session.
     @ViewBuilder
     private var tabIconView: some View {
         let style = isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary)
         if let viewer = LegacyTabConverter.panelContent(from: tab.content) {
-            Image(systemName: viewer.kind.tabSystemImage)
-                .font(.system(size: 10))
-                .foregroundStyle(style)
+            if let systemImage = viewer.kind.tabSystemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            }
         } else if isParked {
             Image(systemName: "moon")
                 .font(.system(size: 10))
@@ -1509,6 +1604,9 @@ private struct TabBarItem: View {
 
 // MARK: - HistoryTabButton
 
+/// Session History, in the trailing group's `RowIconButtonStyle`, which draws
+/// its hover square. While it is open its label fills the same square, so the
+/// two coincide.
 private struct HistoryTabButton: View {
     let isSelected: Bool
     let action: () -> Void
@@ -1516,20 +1614,19 @@ private struct HistoryTabButton: View {
 
     var body: some View {
         Button(action: action) {
+            // Concrete colours: a hierarchical level here would be a level
+            // of the row style's grey.
             Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 10))
-                .foregroundStyle(
-                    isSelected
-                        ? AnyShapeStyle(.primary)
-                        : AnyShapeStyle(isHovering ? .secondary : .tertiary)
-                )
-                .frame(width: 28, height: 28)
+                .foregroundStyle(Color(nsColor: isSelected
+                    ? .labelColor
+                    : (isHovering ? .secondaryLabelColor : .tertiaryLabelColor)))
+                .frame(width: RowIconSquare.standardSide, height: RowIconSquare.standardSide)
                 .background(
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: MainToolbarMetrics.iconButtonCornerRadius)
                         .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
                 )
         }
-        .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .help("Session History")
     }

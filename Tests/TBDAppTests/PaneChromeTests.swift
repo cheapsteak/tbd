@@ -175,12 +175,13 @@ struct PaneChromeTests {
         let on = PaneChromeControl.transcript(isOn: true, isEnabled: true)
         let off = PaneChromeControl.transcript(isOn: false, isEnabled: true)
 
-        #expect(on.systemImage == "text.bubble.fill")
+        #expect(on.systemImage == "bubble.fill")
         #expect(on.tint == .accent)
         #expect(on.help == "Hide the chat-style live transcript pane")
         #expect(on.isEnabled)
-        #expect(off.systemImage == "text.bubble")
-        #expect(off.tint == .primary)
+        #expect(off.systemImage == "bubble")
+        // Off, it takes the row's own grey (`RowIconButtonStyle`).
+        #expect(off.tint == nil)
         #expect(off.help == "Show the chat-style live transcript pane")
         #expect(off.isEnabled)
     }
@@ -191,7 +192,7 @@ struct PaneChromeTests {
     func disabledTranscriptControl() {
         let disabled = PaneChromeControl.transcript(isOn: false, isEnabled: false)
 
-        #expect(disabled.systemImage == "text.bubble")
+        #expect(disabled.systemImage == "bubble")
         #expect(disabled.tint == .secondary)
         #expect(!disabled.isEnabled)
         #expect(disabled.help == "No transcript for this tab")

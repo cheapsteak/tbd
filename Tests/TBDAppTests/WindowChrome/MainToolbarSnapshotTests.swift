@@ -271,9 +271,9 @@ struct MainToolbarSnapshotTests {
             showsTranscript: true, showsReconnect: true, showsStop: false, transcriptShown: true)
         var hidden = shown
         hidden.transcriptShown = false
-        #expect(shown.transcriptSymbolName == "text.bubble.fill")
+        #expect(shown.transcriptSymbolName == "bubble.fill")
         #expect(shown.transcriptHelp == "Hide transcript")
-        #expect(hidden.transcriptSymbolName == "text.bubble")
+        #expect(hidden.transcriptSymbolName == "bubble")
         #expect(hidden.transcriptHelp == "Show transcript")
     }
 

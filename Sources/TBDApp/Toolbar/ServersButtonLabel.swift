@@ -2,9 +2,11 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// The Servers toolbar item's wording and icon: its title, its accessibility
-/// label, its menu's titles, and one baked icon (green when something runs),
-/// for `MainToolbarSnapshot`, `ServersToolbarMenu` and the toolbar's item.
+/// The Servers button's wording and icon: its title, its accessibility label,
+/// its menu's titles, and one baked icon (green when something runs), for
+/// `MainToolbarSnapshot`, `ServersToolbarMenu`, the toolbar's item and the
+/// status bar's Servers chip (`ServersChipPresentation`), which uses the
+/// wording but draws its own glyph.
 enum ServersButtonLabel {
     static func runningCount(_ list: DevServerListResult) -> Int {
         list.servers.filter { $0.state == .running }.count

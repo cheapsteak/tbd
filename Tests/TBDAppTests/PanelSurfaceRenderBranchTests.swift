@@ -377,11 +377,13 @@ struct PanelSurfaceRenderBranchTests {
 
         let ids: [PanelID] = [note.id, changes.id, file.id, web.id, transcript.id]
         let titles = ["Plan", "Changes", "main.swift", "example.com", "Transcript"]
-        let icons = ["note.text", "plus.forwardslash.minus", "doc.text", "globe", "text.bubble"]
+        // A file tab shows its name alone.
+        let icons: [String?] = ["doc.text", "plus.forwardslash.minus", nil, "globe", "bubble"]
         let active = [false, false, false, true, false]
         #expect(tabs.map(\.id) == ids)
         #expect(tabs.map(\.title) == titles)
-        #expect(tabs.map(\.systemImage) == icons)
+        let tabIcons = tabs.map(\.systemImage)
+        #expect(tabIcons == icons)
         #expect(tabs.map(\.isActive) == active)
     }
 
@@ -654,13 +656,13 @@ struct PanelSurfaceRenderBranchTests {
 
     /// The strip's controls are measured in points and the model's width in
     /// shares, so the app turns one into the other for the space at hand.
-    @Test("the strip's fixed controls need 210 pt, and the side's smallest share is theirs, within the model's range")
+    @Test("the strip's fixed controls need 240 pt, and the side's smallest share is theirs, within the model's range")
     func minimumSideShareFitsTheFixedControls() {
-        #expect(SideStripMetrics.fixedControlsWidth == 210)
+        #expect(SideStripMetrics.fixedControlsWidth == 240)
 
         let lowerBound = CGFloat(SideRegion.widthRange.lowerBound)
         let upperBound = CGFloat(SideRegion.widthRange.upperBound)
-        let controlsShareAt1400: CGFloat = 210 / 1400
+        let controlsShareAt1400: CGFloat = 240 / 1400
         // A 1,400 pt main area: the controls' own share, above the floor.
         #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 1400) == controlsShareAt1400)
         // A wide one: the controls need less than the floor, so the floor.

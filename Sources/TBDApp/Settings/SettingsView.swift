@@ -281,6 +281,7 @@ struct GeneralSettingsTab: View {
                 sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
+                tabsInToolbarToggle
                 updateModePicker
             }
         }
@@ -427,6 +428,25 @@ struct GeneralSettingsTab: View {
         ))
         .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
     }
+
+    /// The Tabs in the toolbar setting (`AppState.tabsInToolbarKey`). Read
+    /// from and written to `appState.userDefaults` through
+    /// `appState.windowChrome`, the store the toolbar and the panes follow,
+    /// rather than through `@AppStorage`, whose store is `.standard` and so
+    /// another one under `TBD_MOCK`. Off by default (soaking).
+    private var tabsInToolbarToggle: some View {
+        let chrome = appState.windowChrome
+        return Toggle(Self.tabsInToolbarLabel, isOn: Binding(
+            get: { chrome.tabsInToolbar },
+            set: { chrome.setTabsInToolbar($0) }
+        ))
+        .help(Self.tabsInToolbarHelp)
+    }
+
+    static let tabsInToolbarLabel = "Tabs in the toolbar"
+    static let tabsInToolbarHelp =
+        "Moves each pane's tabs and the worktree's title into the window's top row, " +
+        "and the Servers button to the status bar. Off by default (soaking)."
 
     /// How TBD updates itself. Reads the persisted mode from
     /// `daemon.capabilities` and writes via `config.setUpdateMode`. Off by
