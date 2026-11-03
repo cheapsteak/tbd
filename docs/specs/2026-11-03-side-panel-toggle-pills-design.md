@@ -2,7 +2,9 @@
 
 The side region's Changes, transcript and Notes are each reached by one
 button at the window's right edge. While one is open, that button draws as a
-labelled pill, and the panel gets no tab of its own. A worktree has one note.
+labelled pill, and the panel gets no tab of its own. The Changes button shows
+only while the worktree has changes or its panel is open. A worktree has one
+note.
 
 Related specs: [`2026-11-01-side-panel-notes-and-changes-design.md`](2026-11-01-side-panel-notes-and-changes-design.md)
 (worktree panels, the notes model) and
@@ -27,6 +29,7 @@ Related specs: [`2026-11-01-side-panel-notes-and-changes-design.md`](2026-11-01-
 
 - One control per panel: Changes, the transcript and Notes each turn on and off
   from one pill, which shows the panel's name while it is open.
+- No Changes control for a worktree with nothing to show in it.
 - One note per worktree.
 - No + menu in the strip.
 - The strip keeps its 240 pt minimum width.
@@ -49,10 +52,15 @@ Left to right:
    first note's panel and the Changes panel: their pills stand for them.
 3. **The active panel's own control** (`SideRegionStrip.trailingControl`): a
    file's rendered/source toggle, a web page's copy-address, Changes' refresh.
-4. **The pills:** Changes, transcript, Notes. The transcript pill is drawn only
-   where the transcript button is today (a Claude terminal, with the
-   transcript view on).
+4. **The pills:** Changes, transcript, Notes. The Changes pill is drawn only
+   while the worktree has changes or its panel is open (see "The Changes
+   pill"). The transcript pill is drawn wherever the transcript button is: on
+   every tab while the transcript view is on, disabled in front of anything
+   but a Claude terminal.
 5. **Collapse.**
+
+With the Changes pill absent, the trailing group is the active panel's
+control, transcript, Notes and collapse.
 
 With Tabs in the toolbar on, the drag gap fills the width between the last
 tab and the trailing group, as before, so a strip whose only open panels have
@@ -62,21 +70,65 @@ pills is history buttons, drag gap, and the trailing group.
 
 Each pill has three states:
 
-- **Off:** its icon alone, in the 28 × 28 hover square every row icon button
-  draws (`RowIconButtonStyle`).
-- **On, in front:** icon and label, filled as the selected tab is.
-- **On, behind** another panel, or with the region collapsed: icon and label,
-  with an outline and no fill.
+- **Off:** its icon alone, in the row's grey, in the 28 × 28 hover square every
+  row icon button draws (`RowIconButtonStyle`).
+- **On, in front:** icon and label in the label colour, filled as the selected
+  tab is.
+- **On, behind** another panel, or with the region collapsed: icon and label in
+  the label colour, with no fill and no outline.
 
 Labels: "Changes", "Transcript", "Notes". The Notes pill reads "Notes" whatever
-the note's title.
+the note's title. Icons: `plusminus` for Changes, `bubble` for the transcript,
+filled (`bubble.fill`) while its panel is open, and `doc.text` for Notes.
+Changes' tab symbol (`PanelKind.changesSystemImage`) is the same `plusminus`.
 
-**When the strip is narrow,** the pills that are on keep their outline and fill
-and drop their labels, so on, off, in front and behind still read. The tabs
-give up their room first. One pure function of the strip's width and the
-pills' states decides whether the labels show, so it can be tested without a
-view. The pills' icon-only widths equal the buttons they replace (Changes takes
-the + menu's slot), so `SideStripMetrics.fixedControlsWidth` stays 240 pt.
+Each pill's hover and pressed square is the row's, sized to the pill's width,
+so the feedback covers the shape the pill draws.
+
+**When the strip is narrow,** the pills that are on keep their label colour,
+and the one in front its fill, and drop their labels, so on, off, in front and
+behind still read. The tabs give up their room first. One pure function of the
+strip's width and the pills' states decides whether the labels show, so it can
+be tested without a view. The pills' icon-only widths equal the buttons they
+replace (Changes takes the + menu's slot), so `SideStripMetrics.fixedControlsWidth`
+stays 240 pt. That width is a minimum: a pill that is not drawn only leaves the
+tabs more room.
+
+## The Changes pill
+
+**When it shows.** The Changes pill, and the Changes button at the bar's end
+while the region is hidden, show while the worktree's Changes list
+(`ChangesSnapshot`) has anything in it, staged, unstaged or untracked files or
+files the branch changed, or while the Changes panel is open in the tab, so an
+open panel can always be closed. They are hidden while the last load found an
+empty list, and before any load has finished. One pure function of the list's
+emptiness and whether the panel is open decides it
+(`TabRowEdgeControls.showsChanges`). ⌘⇧E still opens the Changes list
+whatever it holds, and a ◫ press that finds the region empty still opens
+Changes.
+
+**Where the answer comes from.** The app's existing Changes cache
+(`AppState.changesSnapshots`, `loadChangesSnapshot`, `ChangesSnapshotCache`);
+the daemon is unchanged. Each load records whether its list is empty in an
+observed per-worktree value (`AppState.changesListIsEmpty`), written only when
+the answer changes, so a poll that finds what the last one found redraws
+nothing.
+
+**How it stays fresh.** `ChangesListPoller` loads the list of the worktree on
+screen, the single selected worktree, and never of the other worktrees the
+window keeps mounted. It polls:
+
+- **when a worktree comes on screen**, through a change of the selection;
+- **when TBD becomes active** (`NSApplication.didBecomeActiveNotification`);
+- **every `ChangesSnapshotCache.maxAge` (10 s) while TBD is active**, counted
+  from when the previous poll's loads finish.
+
+A poll skips a list the cache holds fresh
+(`changesSnapshotNeedsLoad(refresh: false)`) and a list a load is still
+reading, so the poller never starts a second load of one worktree's list.
+While TBD is inactive nothing polls. The poller sleeps on an injected clock
+(`clock: any Clock<Duration> = ContinuousClock()`), so its schedule is tested
+in virtual time.
 
 ## Clicks
 
@@ -128,27 +180,46 @@ NSMenu's item notifications while it is open.
 
 While the region is hidden, the workspace tab bar's trailing end holds the
 Changes, transcript and Notes buttons (`TabBarTrailingItem.edge`), then the
-expand button. They draw as icons, tinted while their panel is open, as the
-transcript and Notes buttons do today: no panel is in view, so none shows a
-label. A click follows the rule above, so it expands the region.
+expand button, with Tabs in the toolbar on or off. The Changes button shows by
+the Changes pill's rule. They draw as plain icons in the row's grey whatever
+their panel's state, and a disabled one in the secondary colour: no panel is
+in view, so none shows a label, an accent colour, or a filled symbol, each of
+which would read as a panel showing. The transcript's is a plain `bubble`. A
+click follows the pill's rule ("Clicks"), so it expands the region.
 
 ## Rollout
 
 This ships without a setting. It moves items users rely on: the transcript and
 note tabs leave the strip, and the + menu goes. The repo's rule asks for a
 default-off setting for such changes, and the project's owner chose to ship it
-directly. Going back is a revert; no state changes, so a revert restores the
-old strip with every panel and note intact.
+directly. The Changes poller runs on a timer, which the same rule covers; it
+only reads git, for the one worktree on screen while TBD is active, as the
+Changes list already does when it appears. Going back is a revert; no state
+changes, so a revert restores the old strip with every panel and note intact.
 
 ## Testing
 
 - **`SideRegionStrip.tabs`** leaves out the transcript panel, the first note's
   panel and the Changes panel, and keeps files, web pages and extra notes.
 - **Trailing items:** the order (active panel control, Changes, transcript,
-  Notes, collapse) with and without an active panel control and a transcript
-  pill; no + menu.
+  Notes, collapse) with and without an active panel control, a transcript pill
+  and a Changes pill; no + menu.
 - **Pill state:** off, in front, and behind, for each pill, including a
   collapsed region reading as behind.
+- **Icons:** `plusminus` for Changes in the pill, the tab and the bar; the
+  transcript pill's bubble filled while on; the bar's three icons in the row's
+  grey, with a plain `bubble`, in every state.
+- **The Changes pill's show rule**, one case per branch: no list loaded and the
+  panel closed, hidden; an empty list and the panel closed, hidden; a list with
+  files, shown; the panel open with an empty list or none, shown. The strip and
+  the bar draw no Changes control for a worktree whose list is empty or not
+  loaded.
+- **The poller**, on a test clock: nothing polls while TBD is inactive;
+  activation loads at once and then once per interval; a fresh list is not
+  loaded; a list still being read is not loaded again; another worktree on
+  screen loads at once; resigning active stops the polling. A load records
+  whether its list is empty and counts as in flight while it reads git, and
+  the poller follows the single selected worktree only.
 - **The label rule** at its boundaries: labels at the width that fits them,
   icons one point narrower, and icons for every pill that is off.
 - **The Changes pill's decision** for its own workspace tab: open, select, close.
@@ -180,3 +251,8 @@ old strip with every panel and note intact.
 - **Labels always shown**, with the strip's minimum width grown to about
   385 pt to fit three. It narrows every terminal beside a side region.
 - **A label only on the pill in front.** It hides which other panels are on.
+- **Changes always shown.** For a worktree with nothing changed, it is a pill
+  that opens an empty list.
+- **Polling every mounted worktree's Changes list.** The window keeps several
+  worktrees mounted, and each poll runs git; only the one on screen draws a
+  Changes control.
