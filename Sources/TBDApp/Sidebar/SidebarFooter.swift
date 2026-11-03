@@ -13,9 +13,16 @@ struct SidebarFooter: View {
     @AppStorage(SidebarBuildOptions.showHiddenReposKey) private var showHiddenRepos: Bool = false
     @State private var showingClone = false
 
-    /// The gap between the plus and the label, tuned by eye. The menu button
-    /// adds its own leading inset, so the visible gap is larger than this.
-    static let plusGap: CGFloat = 3
+    /// The spacing between the plus and the menu button. The menu button starts
+    /// its text about 7 pt inside its own frame, so a negative spacing brings the
+    /// plus's ink to about 5 pt from the "A". The values are measured, so
+    /// re-measure if the control changes.
+    static let plusGap: CGFloat = -2
+
+    /// How far the plus is lifted. The borderless menu button draws its text
+    /// with the capitals' middle 1.5 pt above the bar's centre (measured), and
+    /// lifting the plus by this much centres it on the capitals.
+    static let plusLift: CGFloat = 1.5
 
     private var plusImage: some View {
         Group {
@@ -42,6 +49,7 @@ struct SidebarFooter: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Add Repository")
+                .offset(y: -SidebarFooter.plusLift)
                 Menu {
                     Button("Local Folder…", action: addRepo)
                     Button("Clone from URL…") { showingClone = true }
