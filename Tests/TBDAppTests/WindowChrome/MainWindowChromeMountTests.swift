@@ -98,23 +98,26 @@ struct MainWindowChromeMountTests {
     }
 
     /// The sidebar column has no bar of its own: `SidebarView` holds only the
-    /// native sidebar, whose outline and dock fill the sidebar pane down to
-    /// its foot, the window's bottom edge, beside the status bar. A bar
-    /// beneath the native sidebar would leave a band between the two feet.
-    @Test func sidebarReachesTheWindowsFoot() async throws {
+    /// native sidebar, which fills the sidebar pane down to the pane's foot,
+    /// so a bar beneath the native sidebar would leave a band between the
+    /// native sidebar's foot and the pane's. On macOS 26 the sidebar item is
+    /// AppKit's floating glass sidebar: AppKit puts the pane in a glass view
+    /// inset 8 pt from the split item's leading, top and bottom edges
+    /// (measured on macOS 26.6), so this test does not assert where the pane
+    /// ends. That the split reaches the window's foot is
+    /// `statusBarSitsAtTheFootOfTheContentPane()`'s assertion.
+    @Test func nothingSitsBeneathTheNativeSidebar() async throws {
         let mount = ChromeMount(label: "sidebarFoot")
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
         let split = try #require(mount.mountedSplit)
 
         _ = try await waitForMainActorCondition("the native sidebar to reach the sidebar pane's foot") {
-            mount.sidebarBottomEdges(in: split)?.reachTheWindowsFoot == true
+            mount.sidebarBottomEdges(in: split)?.sidebarReachesThePanesFoot == true
         }
         let edges = try #require(mount.sidebarBottomEdges(in: split), "The native sidebar never laid out")
         let sidebarGap = abs(edges.sidebarAbovePane)
-        let paneGap = abs(edges.paneAboveRoot)
         #expect(sidebarGap < 0.5, "The native sidebar ends \(edges.sidebarAbovePane) pt above its pane's foot")
-        #expect(paneGap < 0.5, "The sidebar pane ends \(edges.paneAboveRoot) pt above the window's foot")
     }
 
     /// The divider autosaves only into the real store, where `NSSplitView`
@@ -619,10 +622,7 @@ private final class ChromeMount {
     func sidebarBottomEdges(in split: MainSplitViewController) -> SidebarBottomEdges? {
         let pane = split.sidebarItem.viewController.view
         guard let root = Self.nativeSidebarRoots(in: pane).first, root.frame.height > 0 else { return nil }
-        let paneBottom = Self.bottomInWindow(pane)
-        return SidebarBottomEdges(
-            sidebarAbovePane: Self.bottomInWindow(root) - paneBottom,
-            paneAboveRoot: paneBottom - Self.bottomInWindow(host.hostingView))
+        return SidebarBottomEdges(sidebarAbovePane: Self.bottomInWindow(root) - Self.bottomInWindow(pane))
     }
 
     /// `view`'s bottom edge in window coordinates, which put the origin at the
@@ -668,12 +668,10 @@ private struct PaneBottomEdges {
 private struct SidebarBottomEdges {
     /// The native sidebar's bottom above the sidebar pane's.
     let sidebarAbovePane: CGFloat
-    /// The sidebar pane's bottom above the bottom of the window's root.
-    let paneAboveRoot: CGFloat
 
-    /// Both on the window's bottom edge.
-    var reachTheWindowsFoot: Bool {
-        abs(sidebarAbovePane) < 0.5 && abs(paneAboveRoot) < 0.5
+    /// The native sidebar on the sidebar pane's bottom edge.
+    var sidebarReachesThePanesFoot: Bool {
+        abs(sidebarAbovePane) < 0.5
     }
 }
 
