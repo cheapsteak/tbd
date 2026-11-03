@@ -171,6 +171,7 @@ struct TableTranscriptView: NSViewRepresentable {
         // table-pane gate.
         coordinator.precomputeBottomWindowInstrumented()
         tableView.reloadData()
+        coordinator.rowsAtMount = tableView.numberOfRows
 
         // Pin the initial open to the newest message (last row), deferred so the
         // table has performed its first layout pass and row frames exist.
@@ -303,6 +304,12 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The near-top answer last reported, so `onNearTop` fires on transitions
         /// only. Nil until the first report.
         private var lastNearTop: Bool?
+
+        /// How many rows the table held when `makeNSView` built it, which is
+        /// what the first layout, inside the window insertion, realizes from.
+        /// The mount-time figure a hang is about; `numberOfRows` read later
+        /// reflects every update since.
+        var rowsAtMount: Int?
 
         /// The `onOpenSettled` report `makeNSView` could not make because the
         /// table was out of a window when its open settled. The container

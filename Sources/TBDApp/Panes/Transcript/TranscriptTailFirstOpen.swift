@@ -21,32 +21,37 @@ import Foundation
 ///   already holds. That covers a pane mounting over a populated store: a
 ///   session reopened in Session History, or a live pane remounted on
 ///   returning to a worktree that left the keep-alive set, or moved or reopened.
-/// - **The tail-first read.** Where the store holds nothing yet, each reads
-///   the tail before the whole session: the live pane's daemon poll fetches
-///   the last `tailLimit` items before its full fetch, and writes that tail
-///   only into an empty slot (`TableTranscriptPaneView.publishOpeningTail`);
-///   Session History reads the tail first (`AppState.loadSessionTranscript`).
+/// - **The tail-first read.** Each reads the tail before the whole session:
+///   the live pane's daemon poll fetches the last `tailLimit` items before its
+///   full fetch, and writes that tail into an empty slot, or splices it onto
+///   a slot that already holds its first item, never cutting the history a
+///   slot holds (`TableTranscriptPaneView.openingTailMerge`); Session History
+///   reads the tail first when the store holds nothing for the session
+///   (`AppState.loadSessionTranscript`).
 enum TranscriptTailFirstOpen {
     /// How many items a tail-first read fetches, and how many render nodes a
     /// pane's table first mounts with. Fast to read even on a 2000+ item /
     /// 30 MB session, and well over a screenful.
     static let tailLimit = 60
 
-    /// The nodes a pane hands its table for `sessionID`: only the last `limit`
-    /// until that session's table has mounted and settled its open
-    /// (`widenedSessionID == sessionID`), and every node from then on.
+    /// The nodes a pane hands the table it mounts under `mountKey`: only the
+    /// last `limit` until that table has mounted and settled its open
+    /// (`widenedKey == mountKey`), and every node from then on.
     ///
-    /// Keyed by session because each pane outlives a change of session while
-    /// its table is rebuilt per session; each pane also clears its widened
-    /// session on every such change, so a session it has not widened for
-    /// mounts windowed again, whatever the store already holds.
-    static func mountedNodes<Node>(
+    /// The key is the table's own SwiftUI identity (its `.id`): the session ID
+    /// in Session History, the terminal and session in the live pane. Each
+    /// pane outlives the tables it rebuilds, and a key that names the table
+    /// cannot match a newly built one, so a new table mounts windowed in the
+    /// very pass that builds it, whatever the store already holds. Each pane
+    /// also clears its widened key whenever a table of the same identity can
+    /// be built again (a change of selection, or the table leaving the body).
+    static func mountedNodes<Node, Key: Equatable>(
         _ nodes: [Node],
-        sessionID: String,
-        widenedSessionID: String?,
+        mountKey: Key,
+        widenedKey: Key?,
         limit: Int = tailLimit
     ) -> [Node] {
-        guard widenedSessionID != sessionID, nodes.count > limit else { return nodes }
+        guard widenedKey != mountKey, nodes.count > limit else { return nodes }
         return Array(nodes.suffix(limit))
     }
 }

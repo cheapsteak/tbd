@@ -50,16 +50,73 @@ struct LiveTranscriptOpeningTailTests {
 
         #expect(appState.sessionTranscripts["s"] == tail)
     }
+
+    /// The slot a pane left behind on leaving the keep-alive set: the session
+    /// as it stood then. The tail reads it as it stands now.
+    @Test("an opening tail refreshes the bottom of an older snapshot and keeps its history")
+    func openingTailRefreshesAStaleBottom() {
+        let now = LiveTailFirstFixtures.conversation(count: 200)
+        let then = Array(now.prefix(150))
+        let tail = Array(now.suffix(TranscriptTailFirstOpen.tailLimit))
+
+        let merged = TableTranscriptPaneView.openingTailMerge(slot: then, tail: tail)
+
+        #expect(merged == now)
+    }
+
+    @Test("an opening tail the slot already ends with changes nothing")
+    func openingTailMatchingTheBottomChangesNothing() {
+        let full = LiveTailFirstFixtures.conversation(count: 200)
+        let tail = Array(full.suffix(TranscriptTailFirstOpen.tailLimit))
+
+        #expect(TableTranscriptPaneView.openingTailMerge(slot: full, tail: tail) == nil)
+    }
+
+    @Test("an opening tail that reaches nothing in the slot leaves it alone")
+    func openingTailReachingNothingLeavesTheSlot() {
+        let now = LiveTailFirstFixtures.conversation(count: 300)
+        let then = Array(now.prefix(100))
+        let tail = Array(now.suffix(TranscriptTailFirstOpen.tailLimit))
+
+        #expect(TableTranscriptPaneView.openingTailMerge(slot: then, tail: tail) == nil)
+    }
+
+    @Test("an empty opening tail changes nothing")
+    func emptyOpeningTailChangesNothing() {
+        let full = LiveTailFirstFixtures.conversation(count: 200)
+
+        #expect(TableTranscriptPaneView.openingTailMerge(slot: full, tail: []) == nil)
+        #expect(TableTranscriptPaneView.openingTailMerge(slot: [], tail: []) == nil)
+    }
+
+    /// The live pane clears its widen whenever `body` stops showing the table,
+    /// so a table rebuilt under the same identity mounts windowed again. Every
+    /// state other than `.table` is such a stop, an error first of all: Retry
+    /// after one rebuilds the table with the identity of the one that widened.
+    @Test("an error, a terminal with no session and the waiting state all take the table out")
+    func branchesOtherThanTheTableTakeItOut() {
+        let error = TableTranscriptPaneView.Branch.resolve(
+            loadError: "Lost connection to the daemon.", sessionID: "s",
+            messagesEmpty: false, hasShownInitialMessages: true)
+        let noSession = TableTranscriptPaneView.Branch.resolve(
+            loadError: nil, sessionID: nil, messagesEmpty: false, hasShownInitialMessages: true)
+        let waiting = TableTranscriptPaneView.Branch.resolve(
+            loadError: nil, sessionID: "s", messagesEmpty: true, hasShownInitialMessages: false)
+        let table = TableTranscriptPaneView.Branch.resolve(
+            loadError: nil, sessionID: "s", messagesEmpty: true, hasShownInitialMessages: true)
+
+        #expect(error == .error("Lost connection to the daemon."))
+        #expect(noSession == .noSession)
+        #expect(waiting == .waiting)
+        #expect(table == .table)
+    }
 }
 
 /// The live pane mounted over a store that already holds its session.
 ///
-/// Each table's rows are read the first time the table can be found. That
-/// read precedes the widen: the widen waits on two main-queue turns after
-/// `makeNSView` (`onOpenSettled`) and then a SwiftUI update, and `settle`'s
-/// condition runs before each of its pumps and again after each one's single
-/// `Task.yield()`, whose continuation is queued ahead of the second of those
-/// turns.
+/// Each table's row count is the one its coordinator recorded inside
+/// `makeNSView`, right after `reloadData` (`rowsAtMount`), so it is the count
+/// the table was built with, whatever updates landed before the test looked.
 ///
 /// The terminals carry a transcript path, so the pane polls app-side and
 /// publishes the fixture file's own transcript over the one put in the store;
@@ -102,9 +159,10 @@ struct LiveTranscriptTailFirstMountTests {
 
     /// Session A widens; the terminal rolls to session B, whose table must
     /// mount windowed; B widens; the terminal loses its session, so the pane
-    /// shows no table; it gets B back. B is still in the store, so only the
-    /// reset on the session change keeps that last table from mounting with
-    /// every row.
+    /// shows no table; it gets B back. B is still in the store and its table
+    /// has the identity of the one that widened, so only clearing the widen
+    /// when the table leaves the body keeps it from mounting with every row.
+    /// The error and waiting states leave the body by the same rule.
     @Test("a session change mounts the next table on the tail, even back to a widened session")
     func sessionChangeMountsTheNextTableSmall() async throws {
         let suite = TestDefaultsSuite("live-tail-first-rollover")
@@ -169,8 +227,8 @@ struct LiveTranscriptTailFirstMountTests {
 
     /// A terminal switch reuses the pane and rebuilds its table. When the new
     /// terminal carries the same Claude session, as after `claude --resume`,
-    /// only the reset on the terminal change keeps that table from mounting
-    /// with every row.
+    /// a widen keyed by session alone would still match in the very pass that
+    /// builds the new table; keyed by the table's identity, it cannot.
     @Test("a terminal switch onto the same session mounts the next table on the tail")
     func terminalSwitchMountsTheNextTableSmall() async throws {
         let suite = TestDefaultsSuite("live-tail-first-terminal")
@@ -215,16 +273,17 @@ struct LiveTranscriptTailFirstMountTests {
 
     // MARK: Helpers
 
-    /// The first table found that is not `other`, with its row count at that
-    /// moment, or nil when none appeared within `settle`'s bound.
+    /// The first table found that is not `other`, with the row count it was
+    /// built with (`rowsAtMount`), or nil when none appeared within `settle`'s
+    /// bound.
     private static func firstSight<Root: View>(
         in host: OffscreenHost<Root>, other: TranscriptContainerView?
     ) async -> (container: TranscriptContainerView, rows: Int)? {
         var found: (container: TranscriptContainerView, rows: Int)?
         _ = await host.settle {
             guard let container = host.firstDescendant(TranscriptContainerView.self, where: { $0 !== other }),
-                  let table = container.coordinator?.tableView else { return false }
-            found = (container: container, rows: table.numberOfRows)
+                  let rows = container.coordinator?.rowsAtMount else { return false }
+            found = (container: container, rows: rows)
             return true
         }
         return found
