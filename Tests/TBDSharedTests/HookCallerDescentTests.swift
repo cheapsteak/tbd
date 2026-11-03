@@ -189,19 +189,16 @@ struct HookCallerDescentTests {
     // MARK: - Codex tabs
 
     /// The anchoring row and complete foreign chain that prove foreign for a
-    /// shell, on a Codex tab. Codex's shared server runs the tab's own hooks
-    /// outside its tree, so the table cannot tell that session from a
-    /// stranger. Fails against the code before the fix, which answered
-    /// `.provenForeign`.
-    @Test func aCodexTabCannotProveACallerForeign() {
+    /// shell, on a Codex tab. Codex tabs launch with `--no-daemon`, so their
+    /// hooks run inside the tab, and a complete foreign chain proves foreign
+    /// as it does for any tab.
+    @Test func aCodexTabProvesACallerForeign() {
         let row = Self.holderRow(holderPID: 20, childPID: 21, kind: .codex)
         #expect(Self.verdict(peer: 41, row: row, processes: Self.table(Self.tab))
-            == .cannotTell(.codexTab))
+            == .provenForeign)
     }
 
-    /// Inside still comes first: a hook below a Codex tab's job is inside.
-    /// Passes before the fix too; it fails against a Codex check placed
-    /// ahead of the walk.
+    /// A hook below a Codex tab's job is inside, as below any tab's job.
     @Test func aHookBelowACodexTabsJobIsInside() {
         let row = Self.holderRow(holderPID: 20, childPID: 21, kind: .codex)
         var parents = Self.tab
@@ -210,10 +207,9 @@ struct HookCallerDescentTests {
             == .inside(terminalID: row.id, depth: 1))
     }
 
-    /// Both rows anchor and the chain misses both jobs, which proves foreign
-    /// with the Claude row alone. Fails against the code before the fix,
-    /// which answered `.provenForeign` with the Codex row beside it too.
-    @Test func aWorktreeWithACodexTabCannotProveACallerForeign() {
+    /// Both rows anchor and the chain misses both jobs. A Codex row beside the
+    /// Claude row proves foreign just as the Claude row alone does.
+    @Test func aWorktreeWithACodexTabProvesACallerForeign() {
         let worktree = UUID()
         let claude = Self.holderRow(worktreeID: worktree, holderPID: 20, childPID: 21, kind: .claude)
         let codex = Self.holderRow(worktreeID: worktree, holderPID: 30, childPID: 31, kind: .codex)
@@ -223,7 +219,7 @@ struct HookCallerDescentTests {
             == .provenForeign, "the control: the Claude row alone proves")
         #expect(Self.verdict(
             peer: 41, worktree: worktree, rows: [claude, codex], processes: processes)
-            == .cannotTell(.codexTab))
+            == .provenForeign)
     }
 
     // MARK: - A worktree
