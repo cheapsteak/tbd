@@ -88,7 +88,8 @@ final class SidebarOutlineView: NSOutlineView {
     var hoverTracker: SidebarHoverTracker?
 
     /// The context menu for a row, built when the menu is asked for. Nil
-    /// rows — group headers, provider headers, the scratch prompt — show none.
+    /// rows — group headers, provider headers, the scratch prompt, the Add
+    /// Repository row — show none.
     var contextMenuProvider: ((Int) -> NSMenu?)?
 
     /// The row a drag's mouse-down landed on, recorded by

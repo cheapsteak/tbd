@@ -22,7 +22,7 @@ Each of these looks right in review and fails only when it runs or builds.
   - A symbol named in the label is sized to that font. A `+` came out 10.5 pt across, as tall as the capitals.
   - A pre-sized `Image(nsImage:)` keeps its size, but AppKit still sets its gap and baseline (measured: a 10 pt plus sat 9 pt from the text and 1.5 pt below the middle of the capitals).
 
-  To size or place an icon exactly, put it outside the menu, as `SidebarFooter` does with the Add Repository plus. Measure the result on a window capture, because the code does not show where AppKit put it.
+  To size or place an icon exactly, put it outside the menu, as its own view beside the menu's button. Measure the result on a window capture, because the code does not show where AppKit put it.
 
 ## Toolbars
 

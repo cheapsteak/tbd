@@ -535,18 +535,7 @@ private struct OtherSectionContent: View {
     // MARK: - Actions
 
     private func addRepo() {
-        let panel = NSOpenPanel()
-        panel.title = "Select a Git Repository"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-
-        if panel.runModal() == .OK, let url = panel.url {
-            Task {
-                await appState.addRepo(path: url.path)
-            }
-        }
+        AddRepositoryPanel.run(appState: appState)
     }
 }
 

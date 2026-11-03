@@ -13,6 +13,8 @@ enum SidebarNodeID: Hashable {
     case remoteSession(UUID)
     case providerHeader(String)
     case group(SidebarGroupID)
+    /// The Add Repository row, the last root. There is only ever one.
+    case addRepository
 }
 
 /// One row of the native sidebar and the rows nested under it.
@@ -40,6 +42,9 @@ enum SidebarNodeKind: Equatable {
     case remoteSession(RemoteSessionRowModel)
     case providerHeader(ProviderHeaderModel)
     case groupHeader(GroupHeaderModel)
+    /// The Add Repository row: not an item of the sidebar but an action at
+    /// the end of it. It takes no selection, menu, drag or drop.
+    case addRepository
 
     /// The row's height class. A change to it asks the outline for
     /// `noteHeightOfRows` on that row.
@@ -49,7 +54,7 @@ enum SidebarNodeKind: Equatable {
         case .remoteSession(let model): model.heightClass
         case .providerHeader(let model): model.heightClass
         case .groupHeader(let model): model.heightClass
-        case .scratchHeader, .scratchPrompt, .repoHeader: .single
+        case .scratchHeader, .scratchPrompt, .repoHeader, .addRepository: .single
         }
     }
 }

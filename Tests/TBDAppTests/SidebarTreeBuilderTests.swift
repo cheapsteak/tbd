@@ -39,12 +39,13 @@ struct SidebarTreeBuilderTests {
         state.remoteProviders = [SidebarGroupFixtures.provider()]
 
         #expect(Self.build(state).roots.map(\.id)
-                == [.scratchHeader, .repoHeader(two.id), .repoHeader(one.id), .providerHeader("acme")])
+                == [.scratchHeader, .repoHeader(two.id), .repoHeader(one.id), .providerHeader("acme"), .addRepository])
         #expect(Self.build(state, Self.options(scratch: false)).roots.map(\.id)
-                == [.repoHeader(two.id), .repoHeader(one.id), .providerHeader("acme")])
+                == [.repoHeader(two.id), .repoHeader(one.id), .providerHeader("acme"), .addRepository])
 
         state.remoteProviders = []
-        #expect(Self.build(state).roots.map(\.id) == [.scratchHeader, .repoHeader(two.id), .repoHeader(one.id)],
+        #expect(Self.build(state).roots.map(\.id)
+                == [.scratchHeader, .repoHeader(two.id), .repoHeader(one.id), .addRepository],
                 "No registered provider hides the Remote section")
     }
 
@@ -146,6 +147,52 @@ struct SidebarTreeBuilderTests {
         state.repoFilter = UUID()
         let gone = Self.build(state, Self.options(hidden: true))
         #expect(Self.repoHeaders(gone).isEmpty)
+    }
+
+    /// The Add Repository row ends every tree, once and childless, whatever
+    /// the repo filter and Show Hidden Repos say: with repos and providers,
+    /// with a repo chosen in the filter, with the filter naming a repo that
+    /// is gone, with hidden repos shown and left out, and with no repos at
+    /// all, Scratch section or not.
+    @Test func addRepositoryRowEndsEveryTree() {
+        let suite = TestDefaultsSuite("SidebarTreeBuilderTests.addRepository")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+
+        // No repos at all: the row still shows, alone or after Scratch.
+        let emptyWithScratch = Self.build(state).roots.map(\.id)
+        #expect(emptyWithScratch == [.scratchHeader, .addRepository])
+        let emptyWithoutScratch = Self.build(state, Self.options(scratch: false)).roots.map(\.id)
+        #expect(emptyWithoutScratch == [.addRepository])
+
+        let shown = Repo(path: "/tmp/acme-shown", displayName: "shown")
+        let hidden = Repo(path: "/tmp/acme-hidden", displayName: "hidden", hidden: true)
+        state.repos = [shown, hidden]
+        state.worktrees = [shown.id: [Self.row("work", repo: shown.id)], hidden.id: [Self.row("work", repo: hidden.id)]]
+        state.remoteProviders = [SidebarGroupFixtures.provider()]
+
+        let filters: [(label: String, filter: UUID?)] = [
+            ("no filter", nil), ("a shown repo chosen", shown.id), ("a hidden repo chosen", hidden.id),
+            ("a removed repo chosen", UUID()),
+        ]
+        for (label, filter) in filters {
+            state.repoFilter = filter
+            for showHidden in [false, true] {
+                let tree = Self.build(state, Self.options(hidden: showHidden))
+                let ids = tree.roots.map(\.id)
+                let count = ids.filter { $0 == .addRepository }.count
+                let context = "\(label), hidden repos shown \(showHidden): \(ids)"
+                #expect(ids.last == .addRepository, Comment(rawValue: context))
+                #expect(count == 1, Comment(rawValue: context))
+                #expect(tree.node(.addRepository)?.children.isEmpty == true, Comment(rawValue: context))
+            }
+        }
+        // The fixture reaches the configurations the loop is about: a removed
+        // repo leaves no repo section, and the unfiltered tree shows both.
+        state.repoFilter = UUID()
+        #expect(Self.repoHeaders(Self.build(state, Self.options(hidden: true))).isEmpty)
+        state.repoFilter = nil
+        #expect(Self.repoHeaders(Self.build(state, Self.options(hidden: true))) == [shown.id, hidden.id])
     }
 
     /// Providers are first-class selectable places: a registered provider keeps

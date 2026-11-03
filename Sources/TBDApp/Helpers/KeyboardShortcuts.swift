@@ -89,6 +89,20 @@ struct TBDCommands: Commands {
     var appState: AppState
 
     var body: some Commands {
+        // The TBD menu opens with adding a repository, in a section of its
+        // own; About TBD lives in the Help menu instead. The two items run
+        // what the sidebar's Add Repository row runs: the folder picker, and
+        // the clone request the native sidebar presents its sheet for.
+        CommandGroup(replacing: .appInfo) {
+            Button("Add Local Repository…") {
+                AddRepositoryPanel.run(appState: appState)
+            }
+            Button("Clone Repository…") {
+                appState.requestCloneRepository()
+            }
+            Divider()
+        }
+
         CommandGroup(after: .appInfo) {
             Button("Install Command-Line Tool…") {
                 Task { @MainActor in
@@ -124,6 +138,14 @@ struct TBDCommands: Commands {
                 TextFinderCommand.perform(.previousMatch)
             }
             .keyboardShortcut("g", modifiers: [.command, .shift])
+        }
+
+        // The standard About panel, below the Help menu's own items.
+        CommandGroup(after: .help) {
+            Divider()
+            Button("About TBD") {
+                NSApplication.shared.orderFrontStandardAboutPanel(nil)
+            }
         }
 
         // Ungated, like the prompt commands: it does nothing without a single

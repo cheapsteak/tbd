@@ -3,9 +3,10 @@ import SwiftUI
 import TBDShared
 
 /// Clones a repository and adds it to TBD. Opened from "Clone from URL…" in the
-/// sidebar's Add Repository menu and from "Clone Repository…" on the empty
-/// start screen. The rules live in `CloneRepositoryModel`; this view only lays
-/// them out.
+/// sidebar's Add Repository row menu and "Clone Repository…" in the TBD menu,
+/// both through `AppState.requestCloneRepository()`, and from "Clone
+/// Repository…" on the empty start screen. The rules live in
+/// `CloneRepositoryModel`; this view only lays them out.
 struct CloneRepositorySheet: View {
     @Environment(AppState.self) private var appState
 

@@ -705,8 +705,7 @@ struct StatusBarView: View {
         }
         .font(.caption)
         .padding(.horizontal)
-        // One height whatever is selected, shared with the sidebar footer so
-        // the two bars line up across the split; the content is centred in it.
+        // One height whatever is selected; the content is centred in it.
         .frame(height: WindowBottomBarMetrics.height)
         .background(.bar)
     }

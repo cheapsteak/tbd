@@ -651,6 +651,12 @@ final class AppState {
     /// to scroll the worktree row into view, then clears the value.
     var pendingScrollToWorktreeID: UUID?
 
+    /// Set by `requestCloneRepository()` until the native sidebar takes it:
+    /// its outline reads and clears it at the top of a rebuild, then asks its
+    /// sheet presenter for `CloneRepositorySheet`, so every caller shows the
+    /// sheet through that one presenter.
+    var cloneRepositoryRequested = false
+
     /// Expanded workflow-group disclosures. Polling preserves the user's
     /// choices, and every change is written to `sidebarExpandedGroupsKey` so
     /// a restart reopens the same groups; `init` restores it.

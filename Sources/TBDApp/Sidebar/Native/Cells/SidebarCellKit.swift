@@ -165,6 +165,10 @@ enum SidebarHoverPart: Equatable {
     case pin
     /// A worktree row's leading PR glyph or PR-unknown mark.
     case leadingGlyph
+    /// The Add Repository row's `+` and label, one button.
+    case addRepository
+    /// The Add Repository row's chevron, which opens its menu.
+    case addRepositoryMenu
 }
 
 /// A cell with controls or glyphs the pointer can be over.
@@ -177,7 +181,9 @@ protocol SidebarHoverTarget: AnyObject {
 /// A borderless glyph button that draws a hover wash: the primary colour at
 /// 0.08 while the pointer is over it, 0.15 while pressed.
 /// The hover tracker, not a tracking area of its own, says when it is hovered.
-final class SidebarHoverButton: NSButton {
+/// Not final: the Add Repository row's button draws its `+` and label as
+/// subviews of one (`AddRepositoryButton`).
+class SidebarHoverButton: NSButton {
     var showsHoverWash = false {
         didSet { if showsHoverWash != oldValue { needsDisplay = true } }
     }

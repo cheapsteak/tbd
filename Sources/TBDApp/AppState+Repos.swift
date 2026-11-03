@@ -38,6 +38,14 @@ extension AppState {
         }
     }
 
+    /// Asks the native sidebar to show `CloneRepositorySheet`: the TBD menu's
+    /// Clone Repository… and the Add Repository row's Clone from URL… both
+    /// call it. A request while another sidebar sheet is up is dropped, as
+    /// the sidebar's presenter drops any second sheet.
+    func requestCloneRepository() {
+        cloneRepositoryRequested = true
+    }
+
     /// Remove a repository.
     func removeRepo(repoID: UUID, force: Bool = false) async {
         do {

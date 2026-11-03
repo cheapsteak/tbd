@@ -26,7 +26,7 @@ enum SidebarSelectionBridge {
             switch id {
             case .worktree(let uuid), .remoteSession(let uuid):
                 ids.insert(uuid)
-            case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group:
+            case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group, .addRepository:
                 break
             }
         }
@@ -73,11 +73,14 @@ enum SidebarSelectionBridge {
     }
 
     /// Worktree, scratch and remote session rows are selectable; headers, the
-    /// scratch prompt and group disclosures run an action instead.
+    /// scratch prompt and group disclosures run an action instead, and the
+    /// Add Repository row's buttons run theirs. The outline asks this for
+    /// clicks and for the arrow keys alike, so the keys pass over every row
+    /// it refuses.
     static func isSelectable(_ id: SidebarNodeID) -> Bool {
         switch id {
         case .worktree, .remoteSession: true
-        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group: false
+        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group, .addRepository: false
         }
     }
 }

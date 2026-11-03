@@ -83,6 +83,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
     /// drop, so a test can make `AppState` refuse a move the shown tree
     /// allows.
     var moveWorktreesForTesting: ((SidebarDropMove) -> UUID?)?
+    /// Stands in for the folder picker the Add Repository row runs, so a
+    /// test can click the row without a modal panel.
+    var addRepositoryForTesting: (() -> Void)?
     /// The update the last structural apply ran, for a failing test to print.
     var lastAppliedUpdate: OutlineUpdate?
     /// The modifier keys of the event that changed the selection: what tells
@@ -379,6 +382,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         case .providerHeader(let model): ProviderHeaderCell.height(for: model)
         case .groupHeader(let model): GroupHeaderCell.height(for: model)
         case .scratchPrompt: ScratchPromptCell.rowHeight
+        case .addRepository: AddRepositoryCell.rowHeight
         }
     }
 
@@ -406,6 +410,7 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         var scratchPaths: Set<String> = []
         var options = self.options
         var renameRequest: RenameRequest?
+        var cloneRequested = false
         let latest: SidebarTree = withObservationTracking { () -> SidebarTree in
             // Reveals write `AppState` before the tracking is installed, so
             // their writes schedule nothing, and the build below sees them.
@@ -420,6 +425,8 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
             // installed, like the reveals; the rename starts after the apply.
             // A row not shown yet leaves the request pending.
             renameRequest = self.takeRenameRequest(in: built)
+            // Taken the same way: the menu's or the row's clone request.
+            cloneRequested = self.takeCloneRepositoryRequest()
             return built
         } onChange: { [weak self] in
             // On the writing thread; read the weak reference on the main one.
@@ -436,6 +443,9 @@ final class SidebarOutlineController: NSViewController, NSOutlineViewDataSource,
         if let renameRequest {
             startRename(.worktree(renameRequest.id), seed: renameRequest.seed,
                         commitOpenEdit: !renameRequest.handsOver)
+        }
+        if cloneRequested {
+            present(.cloneRepository)
         }
     }
 

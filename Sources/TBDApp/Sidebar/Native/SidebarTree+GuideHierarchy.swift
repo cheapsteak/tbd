@@ -15,7 +15,7 @@ extension SidebarTree: GuideHierarchy {
         case .worktree(let model): return model.depth
         case .remoteSession(let model): return model.depth
         case .groupHeader(let model): return model.depth
-        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader: return 0
+        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .addRepository: return 0
         }
     }
 

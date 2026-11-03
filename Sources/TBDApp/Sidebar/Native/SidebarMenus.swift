@@ -24,8 +24,8 @@ protocol SidebarMenuHost: AnyObject {
 /// - the Scratch header: Collapse or Expand, Edit Scratch Instructions…;
 /// - a remote session row: `RemoteSessionActionMenu` through
 ///   `RemoteSessionActionMenuActions`.
-/// Group headers, provider headers and the scratch prompt have none. Each
-/// menu is built when it is asked for, never per rebuild.
+/// Group headers, provider headers, the scratch prompt and the Add Repository
+/// row have none. Each menu is built when it is asked for, never per rebuild.
 @MainActor
 struct SidebarMenus {
     let appState: AppState
@@ -46,7 +46,7 @@ struct SidebarMenus {
         case .remoteSession(let id):
             guard let session = appState.remoteSessions.first(where: { $0.id == id }) else { return nil }
             items = remoteSessionItems(session)
-        case .scratchPrompt, .providerHeader, .group:
+        case .scratchPrompt, .providerHeader, .group, .addRepository:
             return nil
         }
         guard !items.isEmpty else { return nil }

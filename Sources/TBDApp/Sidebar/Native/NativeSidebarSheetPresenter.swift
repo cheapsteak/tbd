@@ -11,6 +11,10 @@ enum NativeSidebarSheet: Identifiable {
     case scratchInstructions
     /// `RemoteRemediationTerminalSheet`, from the needs-auth popover.
     case remediation(RemoteRemediationRun)
+    /// `CloneRepositorySheet`, from the Add Repository row's Clone from URL…
+    /// and the TBD menu's Clone Repository…, both through
+    /// `AppState.requestCloneRepository()`.
+    case cloneRepository
 
     var id: String {
         switch self {
@@ -21,6 +25,8 @@ enum NativeSidebarSheet: Identifiable {
             "scratchInstructions"
         case .remediation(let run):
             "remediation|\(run.id)"
+        case .cloneRepository:
+            "cloneRepository"
         }
     }
 }
@@ -77,6 +83,8 @@ final class NativeSidebarSheetPresenter {
             ScratchInstructionsView()
         case .remediation(let run):
             RemoteRemediationTerminalSheet(run: run)
+        case .cloneRepository:
+            CloneRepositorySheet()
         }
     }
 }
