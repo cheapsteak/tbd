@@ -380,7 +380,7 @@ struct MainToolbarControllerTests {
         let expectedRowTitles: [String] = ["Toggle Sidebar", "Back", "Forward"]
         #expect(rowTitles == expectedRowTitles)
         let rows = try ToolbarFixture.navigationRows(of: item)
-        for (row, (_, tip, target, action)) in zip(rows, expected) {
+        for (row, (_, tip, _, target, action)) in zip(rows, expected) {
             let wired = row.target === target
             #expect(wired, "the \(tip) row targets \(String(describing: row.target))")
             #expect(row.action == action)
