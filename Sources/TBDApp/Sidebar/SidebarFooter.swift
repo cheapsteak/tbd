@@ -21,7 +21,7 @@ struct SidebarFooter: View {
                 Button("Local Folder…", action: addRepo)
                 Button("Clone from URL…") { showingClone = true }
             } label: {
-                Label("Add Repository", systemImage: "plus.rectangle")
+                Label("Add Repository", systemImage: "plus")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } primaryAction: {
