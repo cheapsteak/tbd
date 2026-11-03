@@ -767,6 +767,63 @@ func aFailedLinkLeavesTheExistingFileIntact(linkError: Int32) async throws {
     #expect(entries == ["tbd"])
 }
 
+/// unlink(2) refuses a directory, so a directory at the staging name stops
+/// the install before link(2) runs; nothing is linked into it and the
+/// installed file is untouched.
+@Test func replaceLinkRefusesADirectoryAtTheStagingName() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+    let before = try #require(CLIFileIdentity(regularFileAt: installPath))
+    let staging = CLIInstaller.stagingPath(forInstallPath: installPath)
+    try FileManager.default.createDirectory(atPath: staging, withIntermediateDirectories: true)
+    try makeFile(staging + "/keep", contents: Data("keep".utf8))
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    #expect(throws: CLIInstallerError.self) {
+        try installer.replaceLink(target: target)
+    }
+
+    let after = CLIFileIdentity(regularFileAt: installPath)
+    let contents = try Data(contentsOf: URL(fileURLWithPath: installPath))
+    let insideStaging = try FileManager.default.contentsOfDirectory(atPath: staging)
+    #expect(after == before)
+    #expect(contents == Data("old".utf8))
+    #expect(insideStaging == ["keep"])
+}
+
+/// A symlink at the staging name is removed, not followed, so a symlink to a
+/// directory never gets the new link put inside the directory.
+@Test func replaceLinkRemovesASymlinkAtTheStagingName() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+    let elsewhere = home.path + "/elsewhere"
+    try FileManager.default.createDirectory(atPath: elsewhere, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+        atPath: CLIInstaller.stagingPath(forInstallPath: installPath),
+        withDestinationPath: elsewhere
+    )
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    try installer.replaceLink(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    let insideElsewhere = try FileManager.default.contentsOfDirectory(atPath: elsewhere)
+    #expect(installed != nil)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+    #expect(insideElsewhere.isEmpty)
+}
+
 @Test func installRemovesAStagingLinkLeftByAnInterruptedInstall() async throws {
     let home = try TempHome()
     defer { home.cleanup() }

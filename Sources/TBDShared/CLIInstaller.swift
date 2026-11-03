@@ -152,7 +152,10 @@ public enum CLILaunchAction: Equatable, Sendable {
 }
 
 public extension CLIInstallState {
-    /// Decide what the launch-time check does.
+    /// What a prompt about this install would say, given who owns the file.
+    /// This is the one mapping from install state to prompt; the menu shows it
+    /// as is, and ``launchAction(installedFile:recorded:userPreviouslyDismissed:)``
+    /// derives the launch check from it.
     ///
     /// - Parameters:
     ///   - installedFile: the identity of the regular file at the install
@@ -160,41 +163,13 @@ public extension CLIInstallState {
     ///     is there or the entry is not a regular file.
     ///   - recorded: the identity TBD recorded when it last installed the CLI
     ///     or saw a healthy install; nil when it has none.
-    ///   - userPreviouslyDismissed: true if the user clicked "Not Now" on an
-    ///     earlier `.missing` prompt. That suppresses the `.missing` prompt so
-    ///     it does not nag; nothing else reads it.
     ///
-    /// A stale install whose file still has the recorded identity is the one
-    /// TBD installed, so it is refreshed without asking. Every other stale
-    /// install — a different file, the same file rewritten in place, no
-    /// record, or a symlink — is asked about, because TBD cannot tell it from
-    /// the user's own. Only the menu ever asks about `.stale`. Recording the
-    /// identity of an `.installed` file is the caller's job.
-    func launchAction(
-        installedFile: CLIFileIdentity?,
-        recorded: CLIFileIdentity?,
-        userPreviouslyDismissed: Bool
-    ) -> CLILaunchAction {
-        switch self {
-        case .installed:
-            return .none
-        case .notInstalled:
-            return userPreviouslyDismissed ? .none : .prompt(.missing)
-        case .stale(let current):
-            if CLIFileIdentity.isRecognizedInstall(installedFile: installedFile, recorded: recorded) {
-                return .refreshSilently
-            }
-            return .prompt(.unrecognized(current: current))
-        case .unexpectedFileType:
-            return .prompt(.unexpectedFileType)
-        }
-    }
-
-    /// The prompt the menu item shows. The menu always asks, because the user
-    /// opened it. Nil for `.installed`, which gets the "already installed"
-    /// alert instead. A stale install with the recorded identity really is an
-    /// older version of TBD's CLI and is described as one; any other stale
-    /// install is `.unrecognized`, as at launch.
+    /// Nil for `.installed`, which the menu answers with its "already
+    /// installed" alert. A stale install with the recorded identity really is
+    /// an older version of TBD's CLI and is described as one. Every other
+    /// stale install — a different file, the same file rewritten in place, no
+    /// record, or a symlink — is `.unrecognized`, because TBD cannot tell it
+    /// from the user's own.
     func menuPromptKind(
         installedFile: CLIFileIdentity?,
         recorded: CLIFileIdentity?
@@ -211,6 +186,34 @@ public extension CLIInstallState {
             return .unrecognized(current: current)
         case .unexpectedFileType:
             return .unexpectedFileType
+        }
+    }
+
+    /// Decide what the launch-time check does: the menu's prompt, except that
+    /// TBD's own stale install is refreshed without asking, and a missing CLI
+    /// the user already declined is left alone. So the launch check never
+    /// asks about `.stale`. Recording the identity of an `.installed` file is
+    /// the caller's job.
+    ///
+    /// `userPreviouslyDismissed` is true if the user clicked "Not Now" on an
+    /// earlier `.missing` prompt. It suppresses that prompt so it does not
+    /// nag; nothing else reads it. The other parameters are
+    /// ``menuPromptKind(installedFile:recorded:)``'s.
+    func launchAction(
+        installedFile: CLIFileIdentity?,
+        recorded: CLIFileIdentity?,
+        userPreviouslyDismissed: Bool
+    ) -> CLILaunchAction {
+        guard let kind = menuPromptKind(installedFile: installedFile, recorded: recorded) else {
+            return .none
+        }
+        switch kind {
+        case .stale:
+            return .refreshSilently
+        case .missing where userPreviouslyDismissed:
+            return .none
+        case .missing, .unrecognized, .unexpectedFileType:
+            return .prompt(kind)
         }
     }
 }
@@ -408,7 +411,9 @@ public struct CLIInstaller: Sendable {
         // without asking: a failed refresh must not delete a working `tbd`.
         // The sibling's name is fixed rather than unique, so a crash between
         // the two steps leaves at most one leftover, and the next install
-        // removes it here first.
+        // removes it here first. unlink(2) removes a leftover file or symlink
+        // (without following it) and refuses a directory, so a directory
+        // there stops the install here, before anything is linked.
         let stagingPath = Self.stagingPath(forInstallPath: installPath)
         if unlink(stagingPath) != 0, errno != ENOENT {
             let msg = String(cString: strerror(errno))

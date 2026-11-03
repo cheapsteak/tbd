@@ -330,6 +330,68 @@ struct CLILaunchCheckTests {
         #expect(!installPathExists)
     }
 
+    // MARK: - Recording on reconnect
+
+    @Test func recordIfInstalledRecordsACurrentInstall() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        // An older record, as one left from before a re-link made while the
+        // app ran.
+        try scratch.placeStaleFile()
+        let old = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
+        record(old, in: suite.defaults)
+        try FileManager.default.removeItem(atPath: scratch.installPath)
+        try FileManager.default.linkItem(atPath: scratch.target, toPath: scratch.installPath)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+
+        let recordedNow = check.recordIfInstalled(target: scratch.target)
+
+        let recorded = check.recordedIdentity
+        let source = CLIFileIdentity(regularFileAt: scratch.target)
+        #expect(recordedNow)
+        #expect(source != nil)
+        #expect(recorded == source)
+    }
+
+    @Test func recordIfInstalledLeavesTheRecordAloneForAStaleInstall() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        try scratch.placeStaleFile()
+        let earlier = try #require(CLIFileIdentity(regularFileAt: scratch.target))
+        record(earlier, in: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+
+        let recordedNow = check.recordIfInstalled(target: scratch.target)
+
+        let recorded = check.recordedIdentity
+        let contents = try scratch.installedContents()
+        #expect(!recordedNow)
+        #expect(recorded == earlier)
+        #expect(contents == "old build")
+    }
+
+    @Test func recordIfInstalledLeavesTheRecordAloneWhenNothingIsInstalled() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        let earlier = try #require(CLIFileIdentity(regularFileAt: scratch.target))
+        record(earlier, in: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+
+        let recordedNow = check.recordIfInstalled(target: scratch.target)
+
+        let recorded = check.recordedIdentity
+        let installPathExists = FileManager.default.fileExists(atPath: scratch.installPath)
+        #expect(!recordedNow)
+        #expect(recorded == earlier)
+        #expect(!installPathExists)
+    }
+
     // MARK: - Recording after an install
 
     @Test func recordingAfterAnInstallStoresTheNewIdentity() async throws {

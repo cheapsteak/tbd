@@ -72,6 +72,21 @@ struct CLILaunchCheck {
         }
     }
 
+    /// Record the identity of the file at the install path when it is a
+    /// current link to `target`, and say whether it was. Touches nothing
+    /// otherwise. The coordinator calls it on every daemon reconnect, because
+    /// `scripts/restart.sh --daemon` re-links the CLI while the app keeps
+    /// running, and a record left on the old file would later read as
+    /// someone else's.
+    @discardableResult
+    func recordIfInstalled(target: String) -> Bool {
+        guard case .installed = installer.currentState(expectedTarget: target) else {
+            return false
+        }
+        recordInstalledIdentity()
+        return true
+    }
+
     /// Record the identity of the file now at the install path. Called after
     /// every successful install, prompted or from the menu, and whenever the
     /// install is seen healthy. Leaves the record alone when no regular file

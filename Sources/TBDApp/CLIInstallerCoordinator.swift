@@ -13,8 +13,9 @@ final class CLIInstallerCoordinator {
     /// The decisions and the identity record; this class only presents them.
     private let launchCheck: CLILaunchCheck
 
-    /// Set after `checkOnLaunch` runs, so daemon reconnects within the same
-    /// app session don't check, or prompt, again.
+    /// Set after `checkOnLaunch` first gets a target, so daemon reconnects
+    /// within the same app session don't refresh or prompt again. Recording
+    /// a current install is not latched.
     private var hasCheckedThisSession = false
 
     /// Persists across launches. Set when the user clicks "Not Now" on the
@@ -35,19 +36,23 @@ final class CLIInstallerCoordinator {
         self.launchCheck = CLILaunchCheck(installer: installer, userDefaults: userDefaults)
     }
 
-    /// Called once at end of `connectAndLoadInitialState`. Silent when the
-    /// install is healthy, and when it is stale but still the file TBD
-    /// installed: that one is re-linked without asking. Otherwise surfaces a
-    /// one-click prompt, except for a missing CLI the user already declined
-    /// to install. No-op on subsequent calls within the same app session —
-    /// daemon reconnects shouldn't re-prompt.
+    /// Called at the end of `connectAndLoadInitialState`, and whenever the
+    /// daemon answers a new delta subscription, the sign of a possibly new
+    /// daemon. Every call records the installed CLI's identity when it is
+    /// current, so a re-link made while the app runs
+    /// (`scripts/restart.sh --daemon`) is recorded once the new daemon
+    /// answers. The rest runs once per app session: silent when the install
+    /// is healthy, and when it is stale but still the file TBD installed,
+    /// which is re-linked without asking. Otherwise it surfaces a one-click
+    /// prompt, except for a missing CLI the user already declined to install.
     func checkOnLaunch() async {
-        guard !hasCheckedThisSession else { return }
         guard let target = await fetchExpectedTarget() else {
             // Don't latch the flag — a later reconnect with a healthy daemon
             // status response should still get its first chance to check.
             return
         }
+        launchCheck.recordIfInstalled(target: target)
+        guard !hasCheckedThisSession else { return }
         hasCheckedThisSession = true
 
         let outcome = launchCheck.run(target: target, userPreviouslyDismissed: notInstalledDismissed)
