@@ -204,8 +204,9 @@ New files live in `Sources/TBDApp/Panes/MediaPreview/`, so
 ### What this change does not need
 
 - **No feature flag.** The change is new UI beside what is there. It starts
-  nothing without a click, and it moves no existing item. A media file used to
-  reach a dead-end screen and now shows a player.
+  nothing without a click, and it moves no existing item. The player takes the
+  place of the "Cannot preview" screen only for files that screen could not
+  show.
 - **No daemon, database or RPC change.** Rendering a file is app-only, and no
   user-land surface can draw into a pane.
 - **No reconciler.** The change creates no durable resource: no file, process,
