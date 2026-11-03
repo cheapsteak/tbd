@@ -31,6 +31,18 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
     return (st.st_dev, st.st_ino)
 }
 
+/// Rewrite the file at `path` in place, as `cp` onto an existing file does:
+/// truncate and write through an open handle, so the inode stays. Then set its
+/// modification time to `modified`, so the test never depends on the clock
+/// having moved since the first write.
+private func rewriteInPlace(_ path: String, contents: Data, modified: Date) throws {
+    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    try handle.truncate(atOffset: 0)
+    try handle.write(contentsOf: contents)
+    try handle.close()
+    try FileManager.default.setAttributes([.modificationDate: modified], ofItemPath: path)
+}
+
 // MARK: - cliPath(forDaemonExecutable:)
 
 @Test func cliPathDerivedFromSiblingOfDaemon() {
@@ -144,8 +156,17 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
 
 // MARK: - launchAction
 
-private let recordedIdentity = CLIFileIdentity(device: 16_777_232, inode: 4_242)
-private let otherIdentity = CLIFileIdentity(device: 16_777_232, inode: 9_999)
+private let recordedIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 4_242, modifiedSeconds: 1_700_000_000, modifiedNanoseconds: 5
+)
+private let otherIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 9_999, modifiedSeconds: 1_700_000_000, modifiedNanoseconds: 5
+)
+/// The recorded file after an in-place rewrite: same device and inode, a new
+/// modification time.
+private let rewrittenIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 4_242, modifiedSeconds: 1_700_000_100, modifiedNanoseconds: 5
+)
 
 @Test func launchActionIsNoneWhenInstalled() {
     let state: CLIInstallState = .installed(target: "/bin/tbd")
@@ -179,6 +200,12 @@ private let otherIdentity = CLIFileIdentity(device: 16_777_232, inode: 9_999)
 @Test func launchActionPromptsUnrecognizedWhenTheStaleFileIsNotTheRecordedOne() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
     let action = state.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
+    #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionPromptsUnrecognizedWhenTheRecordedFileWasRewrittenInPlace() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: rewrittenIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
     #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
 }
 
@@ -217,9 +244,11 @@ private let otherIdentity = CLIFileIdentity(device: 16_777_232, inode: 9_999)
 @Test func menuPromptKindCallsAnUnrecordedStaleFileUnrecognized() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
     let mismatch = state.menuPromptKind(installedFile: otherIdentity, recorded: recordedIdentity)
+    let rewritten = state.menuPromptKind(installedFile: rewrittenIdentity, recorded: recordedIdentity)
     let noRecord = state.menuPromptKind(installedFile: otherIdentity, recorded: nil)
     let symlink = state.menuPromptKind(installedFile: nil, recorded: recordedIdentity)
     #expect(mismatch == .unrecognized(current: "/home/.local/bin/tbd"))
+    #expect(rewritten == .unrecognized(current: "/home/.local/bin/tbd"))
     #expect(noRecord == .unrecognized(current: "/home/.local/bin/tbd"))
     #expect(symlink == .unrecognized(current: "/home/.local/bin/tbd"))
 }
@@ -240,17 +269,39 @@ private let otherIdentity = CLIFileIdentity(device: 16_777_232, inode: 9_999)
 
 @Test func fileIdentityRoundTripsThroughItsStorageString() {
     // An inode above Int64.max is why the identity is stored as a string.
-    let identity = CLIFileIdentity(device: -3, inode: UInt64.max)
+    let identity = CLIFileIdentity(
+        device: -3, inode: UInt64.max, modifiedSeconds: -1, modifiedNanoseconds: 999_999_999
+    )
     let stored = identity.storageString
-    #expect(stored == "-3:18446744073709551615")
+    #expect(stored == "-3:18446744073709551615:-1:999999999")
     #expect(CLIFileIdentity(storageString: stored) == identity)
 }
 
+@Test func fileIdentityRejectsTheFormWithoutAModificationTime() {
+    // Device and inode alone would match a file rewritten in place, so such a
+    // record must read as no record at all.
+    #expect(CLIFileIdentity(storageString: "16777232:4242") == nil)
+}
+
 @Test func fileIdentityRejectsMalformedStorageStrings() {
-    let malformed = ["", "1", "1:", ":2", "1:2:3", "a:2", "1:-2", "1:2 "]
+    let malformed = [
+        "", "1", "1:2", "1:2:3", "1:2:3:4:5", ":2:3:4", "1::3:4", "1:2::4", "1:2:3:",
+        "a:2:3:4", "1:-2:3:4", "1:2:x:4", "1:2:3:4 ",
+    ]
     for text in malformed {
         #expect(CLIFileIdentity(storageString: text) == nil, "accepted \(text)")
     }
+}
+
+@Test func fileIdentityEqualityIncludesTheModificationTime() {
+    let sameNanoseconds = CLIFileIdentity(
+        device: 1, inode: 2, modifiedSeconds: 3, modifiedNanoseconds: 4
+    )
+    let otherNanoseconds = CLIFileIdentity(
+        device: 1, inode: 2, modifiedSeconds: 3, modifiedNanoseconds: 5
+    )
+    #expect(sameNanoseconds != otherNanoseconds)
+    #expect(recordedIdentity != rewrittenIdentity)
 }
 
 @Test func installedFileIdentityIsEqualForTwoHardLinksToOneFile() throws {
@@ -286,6 +337,22 @@ private let otherIdentity = CLIFileIdentity(device: 16_777_232, inode: 9_999)
     #expect(installed != nil)
     #expect(source != nil)
     #expect(installed != source)
+}
+
+@Test func installedFileIdentityChangesWhenTheFileIsRewrittenInPlace() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("tbd".utf8))
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    let before = try #require(installer.installedFileIdentity())
+
+    try rewriteInPlace(installPath, contents: Data("my own".utf8), modified: Date(timeIntervalSince1970: 1_000_000_000))
+
+    let after = try #require(installer.installedFileIdentity())
+    #expect(after.device == before.device)
+    #expect(after.inode == before.inode)
+    #expect(after != before)
 }
 
 @Test func installedFileIdentityIsNilForASymlinkAndForAMissingPath() throws {

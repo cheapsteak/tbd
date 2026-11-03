@@ -22,9 +22,9 @@ import os
 // the daemon they start, so their builds never leave it behind. After any
 // other rebuild the launch-time check (`CLILaunchCheck` in TBDApp) notices the
 // inode mismatch. While the file at the install path is still the one TBD
-// installed — its `CLIFileIdentity` matches the one TBD recorded — the check
-// re-links it without asking. Any other file there may be the user's, so the
-// check asks before replacing it.
+// installed — its `CLIFileIdentity` (device, inode and modification time)
+// matches the one TBD recorded — the check re-links it without asking. Any
+// other file there may be the user's, so the check asks before replacing it.
 //
 // This is the same trick `scripts/restart.sh` applies to the `.app` bundle
 // binary (see lines 57–67 of that file) for the same fragility reason:
@@ -45,24 +45,33 @@ public enum CLIInstallState: Equatable, Sendable {
     case unexpectedFileType
 }
 
-/// A file's identity on disk: the device and inode `lstat` reports for it.
-/// Two paths with equal identities are hard links to one file.
+/// A file's identity on disk: the device, inode and modification time `lstat`
+/// reports for it. Hard links share all three, so two paths with equal
+/// identities are links to one unmodified file.
 ///
 /// TBD records the identity of the `tbd` it installs. A rebuild gives the
 /// daemon's TBDCLI a new inode, so the install goes stale, but while the file
 /// at the install path keeps the recorded identity it is the one TBD put
-/// there, and TBD may replace it without asking. An inode number can in
-/// principle be reused once its file is deleted; that risk is accepted. The
-/// change time is deliberately not part of the identity: a hard link's ctime
-/// changes whenever its link count does, which every rebuild and every
-/// worktree removal causes.
+/// there, and TBD may replace it without asking. The modification time is what
+/// catches a file rewritten in place, such as `cp mytbd ~/.local/bin/tbd`,
+/// which keeps the inode but is no longer TBD's to replace. Linking, renaming
+/// and unlinking leave it alone. An inode number can in principle be reused
+/// once its file is deleted; that risk is accepted. The change time is
+/// deliberately not part of the identity: a hard link's ctime changes whenever
+/// its link count does, which every rebuild and every worktree removal causes.
 public struct CLIFileIdentity: Equatable, Sendable {
     public let device: Int64
     public let inode: UInt64
+    /// `st_mtimespec`: whole seconds since the epoch, and the nanoseconds past
+    /// them.
+    public let modifiedSeconds: Int64
+    public let modifiedNanoseconds: Int64
 
-    public init(device: Int64, inode: UInt64) {
+    public init(device: Int64, inode: UInt64, modifiedSeconds: Int64, modifiedNanoseconds: Int64) {
         self.device = device
         self.inode = inode
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
     }
 
     /// The identity of the regular file at `path`, or nil when nothing is
@@ -73,23 +82,47 @@ public struct CLIFileIdentity: Equatable, Sendable {
         guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
             return nil
         }
-        self.init(device: Int64(st.st_dev), inode: UInt64(st.st_ino))
+        self.init(
+            device: Int64(st.st_dev),
+            inode: UInt64(st.st_ino),
+            modifiedSeconds: Int64(st.st_mtimespec.tv_sec),
+            modifiedNanoseconds: Int64(st.st_mtimespec.tv_nsec)
+        )
     }
 
-    /// `"<device>:<inode>"`, the form the identity is stored in. A string
-    /// rather than a number, because an inode is a `UInt64` and a stored
-    /// integer is an `Int`, which cannot hold every inode.
-    public var storageString: String { "\(device):\(inode)" }
+    /// The ownership rule: the file at the install path is the one TBD
+    /// installed exactly when it is a regular file (`installedFile` is not
+    /// nil) whose identity equals the recorded one. No record, or no regular
+    /// file, is never TBD's.
+    static func isRecognizedInstall(installedFile: CLIFileIdentity?, recorded: CLIFileIdentity?) -> Bool {
+        guard let installedFile, let recorded else { return false }
+        return installedFile == recorded
+    }
 
-    /// Parse a ``storageString``. Nil for anything else.
+    /// `"<device>:<inode>:<seconds>:<nanoseconds>"`, the form the identity is
+    /// stored in. A string rather than numbers, because an inode is a `UInt64`
+    /// and a stored integer is an `Int`, which cannot hold every inode.
+    public var storageString: String {
+        "\(device):\(inode):\(modifiedSeconds):\(modifiedNanoseconds)"
+    }
+
+    /// Parse a ``storageString``. Nil for anything else, including a string
+    /// without the modification time, which then counts as no record.
     public init?(storageString: String) {
         let parts = storageString.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 2,
+        guard parts.count == 4,
               let device = Int64(parts[0]),
-              let inode = UInt64(parts[1]) else {
+              let inode = UInt64(parts[1]),
+              let modifiedSeconds = Int64(parts[2]),
+              let modifiedNanoseconds = Int64(parts[3]) else {
             return nil
         }
-        self.init(device: device, inode: inode)
+        self.init(
+            device: device,
+            inode: inode,
+            modifiedSeconds: modifiedSeconds,
+            modifiedNanoseconds: modifiedNanoseconds
+        )
     }
 }
 
@@ -102,9 +135,10 @@ public enum CLILaunchPromptKind: Equatable, Sendable {
     /// without asking.
     case stale(current: String)
     /// Something TBD has no record of installing is at the install path: a
-    /// regular file whose identity differs from the recorded one, any file
-    /// when nothing is recorded, or a symlink. It may be the user's own, so
-    /// nothing may call it an older version of TBD's CLI.
+    /// regular file whose identity differs from the recorded one (another
+    /// file, or TBD's rewritten in place), any file when nothing is recorded,
+    /// or a symlink. It may be the user's own, so nothing may call it an older
+    /// version of TBD's CLI.
     case unrecognized(current: String)
     case unexpectedFileType
 }
@@ -132,9 +166,10 @@ public extension CLIInstallState {
     ///
     /// A stale install whose file still has the recorded identity is the one
     /// TBD installed, so it is refreshed without asking. Every other stale
-    /// install — a different file, no record, or a symlink — is asked about,
-    /// because TBD cannot tell it from the user's own. Recording the identity
-    /// of an `.installed` file is the caller's job.
+    /// install — a different file, the same file rewritten in place, no
+    /// record, or a symlink — is asked about, because TBD cannot tell it from
+    /// the user's own. Only the menu ever asks about `.stale`. Recording the
+    /// identity of an `.installed` file is the caller's job.
     func launchAction(
         installedFile: CLIFileIdentity?,
         recorded: CLIFileIdentity?,
@@ -146,7 +181,7 @@ public extension CLIInstallState {
         case .notInstalled:
             return userPreviouslyDismissed ? .none : .prompt(.missing)
         case .stale(let current):
-            if let installedFile, installedFile == recorded {
+            if CLIFileIdentity.isRecognizedInstall(installedFile: installedFile, recorded: recorded) {
                 return .refreshSilently
             }
             return .prompt(.unrecognized(current: current))
@@ -170,7 +205,7 @@ public extension CLIInstallState {
         case .notInstalled:
             return .missing
         case .stale(let current):
-            if let installedFile, installedFile == recorded {
+            if CLIFileIdentity.isRecognizedInstall(installedFile: installedFile, recorded: recorded) {
                 return .stale(current: current)
             }
             return .unrecognized(current: current)

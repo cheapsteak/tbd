@@ -25,6 +25,18 @@ private final class ProbeCalls: @unchecked Sendable {
     }
 }
 
+/// Rewrite the file at `path` in place, as `cp` onto an existing file does:
+/// truncate and write through an open handle, so the inode stays. Then set its
+/// modification time to `modified`, so the test never depends on the clock
+/// having moved since the first write.
+private func rewriteInPlace(_ path: String, contents: Data, modified: Date) throws {
+    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    try handle.truncate(atOffset: 0)
+    try handle.write(contentsOf: contents)
+    try handle.close()
+    try FileManager.default.setAttributes([.modificationDate: modified], ofItemPath: path)
+}
+
 /// The launch-time CLI check: what it records, when it refreshes without
 /// asking, and that a refresh it cannot finish leaves the file alone.
 ///
@@ -137,7 +149,12 @@ struct CLILaunchCheckTests {
         defer { suite.tearDown() }
         try scratch.placeStaleFile()
         let stale = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
-        let someOtherFile = CLIFileIdentity(device: stale.device, inode: stale.inode &+ 1)
+        let someOtherFile = CLIFileIdentity(
+            device: stale.device,
+            inode: stale.inode &+ 1,
+            modifiedSeconds: stale.modifiedSeconds,
+            modifiedNanoseconds: stale.modifiedNanoseconds
+        )
         record(someOtherFile, in: suite.defaults)
         let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
 
@@ -154,6 +171,37 @@ struct CLILaunchCheckTests {
         #expect(installed == stale)
         #expect(contents == "old build")
         #expect(recorded == someOtherFile)
+    }
+
+    /// The inode still matches the record, but the user wrote their own file
+    /// over it, so it is theirs now.
+    @Test func aStaleFileRewrittenInPlaceAfterRecordingIsAskedAboutAndLeftAlone() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        try scratch.placeStaleFile()
+        let recorded = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
+        record(recorded, in: suite.defaults)
+        try rewriteInPlace(
+            scratch.installPath,
+            contents: Data("my own tbd".utf8),
+            modified: Date(timeIntervalSince1970: 1_000_000_000)
+        )
+        let rewritten = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
+        #expect(rewritten.inode == recorded.inode)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+
+        let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
+
+        guard case .prompt(.unrecognized) = outcome else {
+            Issue.record("expected .prompt(.unrecognized), got \(outcome)")
+            return
+        }
+        let installed = CLIFileIdentity(regularFileAt: scratch.installPath)
+        let contents = try scratch.installedContents()
+        #expect(installed == rewritten)
+        #expect(contents == "my own tbd")
     }
 
     @Test func aStaleFileWithNoRecordIsAskedAboutAndLeftAlone() throws {

@@ -66,16 +66,10 @@ final class CLIInstallerCoordinator {
         case .nothing:
             logger.debug("Skipping CLI install prompt — user previously dismissed Not Now")
         case .prompt(let kind):
-            switch kind {
-            case .missing:
-                logger.info("CLI install missing — prompting to install")
-            case .stale(let current):
-                logger.info("CLI install stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
-            case .unrecognized(let current):
-                logger.info("CLI at \(current, privacy: .public) is not one TBD recorded installing; expected=\(target, privacy: .public) — prompting to replace")
-            case .unexpectedFileType:
-                logger.info("Unexpected file at \(self.installer.installPath, privacy: .public) — prompting to replace")
-            }
+            // `kind` is .missing, .unrecognized or .unexpectedFileType.
+            // launchAction refreshes a stale install TBD recognizes instead of
+            // asking, so it never returns .stale; only the menu asks that.
+            logger.info("CLI install at \(self.installer.installPath, privacy: .public) needs the user: \(String(describing: kind), privacy: .public); expected=\(target, privacy: .public)")
             await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
         }
     }
