@@ -126,6 +126,7 @@ struct SidebarCellTests {
             (GroupHeaderCell(), GroupHeaderCell.reuseIdentifier),
             (ProviderHeaderCell(), ProviderHeaderCell.reuseIdentifier),
             (ScratchPromptCell(), ScratchPromptCell.reuseIdentifier),
+            (AddRepositoryCell(), AddRepositoryCell.reuseIdentifier),
             (SidebarRowView(frame: .zero), SidebarRowView.reuseIdentifier),
         ]
         for (view, identifier) in cells {
@@ -152,6 +153,7 @@ struct SidebarCellTests {
             case .providerHeader: ProviderHeaderCell.reuseIdentifier
             case .group: GroupHeaderCell.reuseIdentifier
             case .scratchPrompt: ScratchPromptCell.reuseIdentifier
+            case .addRepository: AddRepositoryCell.reuseIdentifier
             }
             #expect(cell?.identifier == expected, "Row \(row) (\(item.id)) has the wrong cell")
             #expect(h.outline.rowView(atRow: row, makeIfNecessary: true) is SidebarRowView)
@@ -230,6 +232,10 @@ struct SidebarCellTests {
         #expect(h.controller.rowHeight(for: .groupHeader(Self.group(summary: "1 running")))
                 == GroupHeaderCell.summaryHeight)
         #expect(h.controller.rowHeight(for: .scratchPrompt) == ScratchPromptCell.rowHeight)
+        // The Add Repository row is the sidebar's minimum row height, a
+        // section header's.
+        #expect(h.controller.rowHeight(for: .addRepository) == AddRepositoryCell.rowHeight)
+        #expect(AddRepositoryCell.rowHeight == SectionHeaderCell.rowHeight)
     }
 
     // MARK: Fixtures
@@ -399,6 +405,45 @@ struct SidebarCellCentringTests {
         #expect(plusMidY == midY, "The provider + centres at \(plusMidY), not the row's \(midY)")
         #expect(healthMidY == midY, "The health glyph centres at \(healthMidY), not the row's \(midY)")
         #expect(nameOffset <= 0.5, "The provider name centres \(nameOffset) pt off the row's midline")
+    }
+
+    /// The Add Repository row's `+` starts at the section headers' leading
+    /// inset, its label follows it whole, the chevron follows the label, and
+    /// every item centres on the row's midline at whole-point origins, in an
+    /// even row and an odd one.
+    @Test func addRepositoryRowCentresAtTheHeaderInset() throws {
+        for height in [AddRepositoryCell.rowHeight, 27] {
+            let cell = AddRepositoryCell()
+            cell.frame = NSRect(x: 0, y: 0, width: 260, height: height)
+            cell.configure()
+            cell.layout()
+            let plus = cell.convert(cell.plusView.bounds, from: cell.plusView)
+            let title = cell.convert(cell.titleField.bounds, from: cell.titleField)
+            let frames: [(name: String, frame: NSRect)] = [
+                ("add button", cell.addButton.frame), ("chevron", cell.menuButton.frame),
+                ("+", plus), ("label", title),
+            ]
+            let midY = cell.bounds.midY
+            for (name, frame) in frames {
+                let minY = frame.minY
+                let isWhole = minY == minY.rounded()
+                let offset = abs(frame.midY - midY)
+                #expect(isWhole, "Row \(height): the \(name) starts at y \(minY), between whole points")
+                #expect(offset <= 0.5, "Row \(height): the \(name) centres \(offset) pt off the row's midline")
+                #expect(frame.width > 0, "Row \(height): the \(name) has no width")
+            }
+            let plusX = plus.minX
+            let inset = SidebarNativeMetrics.headerContentInset
+            #expect(plusX == inset, "Row \(height): the + starts at \(plusX), not the header inset \(inset)")
+            let isWholeX = plusX == plusX.rounded()
+            #expect(isWholeX)
+            #expect(title.minX > plus.maxX)
+            #expect(!SidebarCellKit.truncates(cell.titleField), "The label is cut at \(title.width) pt")
+            #expect(cell.menuButton.frame.minX >= cell.addButton.frame.maxX)
+            // The add button's wash covers the + and the label.
+            let washCoversBoth = cell.addButton.frame.contains(plus) && cell.addButton.frame.contains(title)
+            #expect(washCoversBoth)
+        }
     }
 
     /// A working row's typing dots centre on the midline, where the status

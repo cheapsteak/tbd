@@ -36,7 +36,9 @@ extension SidebarOutlineController {
             appState.toggleSidebarGroup(groupID)
         case .scratchPrompt:
             appState.createScratch()
-        case .worktree, .remoteSession:
+        case .worktree, .remoteSession, .addRepository:
+            // The Add Repository row's own buttons run its actions; a click
+            // beside them does nothing.
             break
         }
     }
@@ -64,7 +66,7 @@ extension SidebarOutlineController {
             defaults.set(!expanded, forKey: AppState.scratchSectionExpandedKey)
         case .group(let groupID):
             appState.toggleSidebarGroup(groupID)
-        case .worktree, .remoteSession, .providerHeader, .scratchPrompt:
+        case .worktree, .remoteSession, .providerHeader, .scratchPrompt, .addRepository:
             break
         }
     }

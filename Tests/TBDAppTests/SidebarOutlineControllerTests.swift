@@ -136,6 +136,7 @@ final class OutlineHarness {
         case .group(let group): "\(group.kind) group"
         case .scratchHeader: "scratch"
         case .scratchPrompt: "scratch prompt"
+        case .addRepository: "add repository"
         }
     }
 
@@ -951,7 +952,7 @@ struct SidebarOutlineControllerTests {
         h.state.worktrees = [repo.id: rows]
         h.mount(size: NSSize(width: 320, height: 200))
         let header = SidebarNodeID.repoHeader(repo.id)
-        try #require(h.shownIDs == [header], "The repo must start collapsed")
+        try #require(h.shownIDs == [header, .addRepository], "The repo must start collapsed")
 
         let target = rows[30]
         h.state.navigateToActiveWorktree(target.id)
@@ -989,7 +990,7 @@ struct SidebarOutlineControllerTests {
         let target = rows[30]
         h.state.navigateToActiveWorktree(target.id)
         h.controller.flushPendingRebuild()
-        #expect(h.shownIDs == [header], "The section's expansion waits for the hold")
+        #expect(h.shownIDs == [header, .addRepository], "The section's expansion waits for the hold")
         #expect(h.clip.bounds.minY == 0)
 
         h.controller.endHold(.rename)

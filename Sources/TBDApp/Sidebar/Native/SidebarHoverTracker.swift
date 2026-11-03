@@ -217,7 +217,7 @@ final class SidebarHoverTracker: NSResponder {
             section = row.id
         case .worktree, .remoteSession:
             if case .repoHeader? = row.section { section = row.section }
-        case .scratchHeader, .scratchPrompt, .providerHeader, .group:
+        case .scratchHeader, .scratchPrompt, .providerHeader, .group, .addRepository:
             break
         }
         let scratch: SidebarNodeID? = row.id == .scratchHeader ? row.id : nil

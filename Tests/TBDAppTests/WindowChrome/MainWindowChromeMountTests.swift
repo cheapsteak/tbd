@@ -97,6 +97,26 @@ struct MainWindowChromeMountTests {
         #expect(abs(edges.bandBelowDetail - WindowBottomBarMetrics.height) < 0.5)
     }
 
+    /// The sidebar column has no bar of its own: `SidebarView` holds only the
+    /// native sidebar, whose outline and dock fill the sidebar pane down to
+    /// its foot, the window's bottom edge, beside the status bar. A bar
+    /// beneath the native sidebar would leave a band between the two feet.
+    @Test func sidebarReachesTheWindowsFoot() async throws {
+        let mount = ChromeMount(label: "sidebarFoot")
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+
+        _ = try await waitForMainActorCondition("the native sidebar to reach the sidebar pane's foot") {
+            mount.sidebarBottomEdges(in: split)?.reachTheWindowsFoot == true
+        }
+        let edges = try #require(mount.sidebarBottomEdges(in: split), "The native sidebar never laid out")
+        let sidebarGap = abs(edges.sidebarAbovePane)
+        let paneGap = abs(edges.paneAboveRoot)
+        #expect(sidebarGap < 0.5, "The native sidebar ends \(edges.sidebarAbovePane) pt above its pane's foot")
+        #expect(paneGap < 0.5, "The sidebar pane ends \(edges.paneAboveRoot) pt above the window's foot")
+    }
+
     /// The divider autosaves only into the real store, where `NSSplitView`
     /// writes it: never into a test's suite or `TBD_MOCK`'s.
     @Test func dividerAutosavesOnlyForTheStandardStore() {
@@ -594,6 +614,17 @@ private final class ChromeMount {
             bandBelowDetail: Self.bottomInWindow(tabView) - paneBottom)
     }
 
+    /// Where the native sidebar and the sidebar pane end, once the native
+    /// sidebar is laid out; nil before.
+    func sidebarBottomEdges(in split: MainSplitViewController) -> SidebarBottomEdges? {
+        let pane = split.sidebarItem.viewController.view
+        guard let root = Self.nativeSidebarRoots(in: pane).first, root.frame.height > 0 else { return nil }
+        let paneBottom = Self.bottomInWindow(pane)
+        return SidebarBottomEdges(
+            sidebarAbovePane: Self.bottomInWindow(root) - paneBottom,
+            paneAboveRoot: paneBottom - Self.bottomInWindow(host.hostingView))
+    }
+
     /// `view`'s bottom edge in window coordinates, which put the origin at the
     /// bottom left.
     private static func bottomInWindow(_ view: NSView) -> CGFloat {
@@ -630,6 +661,19 @@ private struct PaneBottomEdges {
     /// the content pane's foot and its detail area.
     var placeTheStatusBarInTheContentPane: Bool {
         abs(splitAboveRoot) < 0.5 && abs(bandBelowDetail - WindowBottomBarMetrics.height) < 0.5
+    }
+}
+
+/// The bottom of the native sidebar and of the sidebar pane, in points.
+private struct SidebarBottomEdges {
+    /// The native sidebar's bottom above the sidebar pane's.
+    let sidebarAbovePane: CGFloat
+    /// The sidebar pane's bottom above the bottom of the window's root.
+    let paneAboveRoot: CGFloat
+
+    /// Both on the window's bottom edge.
+    var reachTheWindowsFoot: Bool {
+        abs(sidebarAbovePane) < 0.5 && abs(paneAboveRoot) < 0.5
     }
 }
 

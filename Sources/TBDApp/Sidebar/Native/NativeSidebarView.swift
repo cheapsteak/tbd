@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Mounts the native (AppKit) sidebar in its SwiftUI host. `SidebarView`
-/// shows it with `SidebarFooter` beneath. Spec:
+/// shows it as the whole sidebar column. Spec:
 /// `docs/specs/2026-10-31-native-sidebar-design.md`.
 ///
 /// The sheets the native sidebar opens are presented here, with SwiftUI's

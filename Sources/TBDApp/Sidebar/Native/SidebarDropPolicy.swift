@@ -193,7 +193,7 @@ enum SidebarDropPolicy {
         case .worktree:
             // Scratch rows render flat.
             if rows.isScratch { return rejected }
-        case .remoteSession, .scratchPrompt:
+        case .remoteSession, .scratchPrompt, .addRepository:
             return rejected
         }
         for row in rows.rows {
@@ -234,7 +234,9 @@ enum SidebarDropPolicy {
     /// So the proposal is used only to find the rows above and below the gap;
     /// the pointer's depth, clamped between theirs, picks the level. Between
     /// two sections the row below is the next header, and the gap reads as
-    /// the end of the section above, down to its top level.
+    /// the end of the section above, down to its top level. Below the last
+    /// section the row below is the Add Repository row, or the gap below
+    /// that, and either reads as the end of the last section.
     private static func canonicalGap(parent: SidebarNodeID?, childIndex: Int, pointerDepth: Int,
                                      index: SidebarDropIndex) -> (parent: SidebarNodeID, childIndex: Int)? {
         guard childIndex >= 0 else { return nil }
@@ -254,8 +256,12 @@ enum SidebarDropPolicy {
             }
             shallowest = childIndex < count ? entry.level + 1 : levelBelowSubtree(of: entry, index: index)
         } else {
-            guard childIndex > 0, childIndex <= index.rootCount,
-                  let last = lastVisible(index.root(at: childIndex - 1).id, index: index) else { return nil }
+            // The Add Repository row ends the roots and takes no rows, so the
+            // gap below it is the gap above it: the end of the last section.
+            guard childIndex <= index.rootCount else { return nil }
+            let rootIndex = min(childIndex, index.sectionRootCount)
+            guard rootIndex > 0,
+                  let last = lastVisible(index.root(at: rootIndex - 1).id, index: index) else { return nil }
             above = last
             shallowest = 1
         }
@@ -338,7 +344,7 @@ enum SidebarDropPolicy {
                 if !node.isExpanded { isCollapsed = true }
             case .scratchHeader, .repoHeader, .providerHeader:
                 if !node.isExpanded { isCollapsed = true }
-            case .remoteSession, .scratchPrompt:
+            case .remoteSession, .scratchPrompt, .addRepository:
                 break
             }
         }
@@ -507,6 +513,12 @@ struct SidebarDropIndex {
     }
 
     var rootCount: Int { tree.roots.count }
+
+    /// The roots a drop between roots can follow: every root but a trailing
+    /// Add Repository row, which takes no rows.
+    var sectionRootCount: Int {
+        tree.roots.last?.id == .addRepository ? rootCount - 1 : rootCount
+    }
 
     func root(at position: Int) -> SidebarNode {
         counter?.count += 1

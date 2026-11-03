@@ -120,6 +120,7 @@ final class AppStateEmissionTracker {
         _ = state.highlightedArchivedWorktreeID
         _ = state.activeToast
         _ = state.pendingScrollToWorktreeID
+        _ = state.cloneRepositoryRequested
         _ = state.isInitialStateLoaded
         _ = state.dockRatio
         _ = state.skipAccountPicker
@@ -249,6 +250,7 @@ final class AppStateEmissionTracker {
         "highlightedArchivedWorktreeID",
         "activeToast",
         "pendingScrollToWorktreeID",
+        "cloneRepositoryRequested",
         "isInitialStateLoaded",
         "dockRatio",
         "skipAccountPicker",

@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// The native sidebar's root: the outline's scroll view filling the column,
-/// then the pinned dock along the bottom edge, the outline's bottom on the
-/// dock's top. The dock and the footer beneath it (`SidebarView`) share one
-/// `.bar` backdrop, which starts at the dock's top edge.
+/// The native sidebar's root, the whole sidebar column: the outline's scroll
+/// view filling it, then the pinned dock along the window's bottom edge, the
+/// outline's bottom on the dock's top. The dock sits on a `.bar` backdrop that
+/// runs from its top edge to the column's bottom.
 ///
 /// The dock's height is `PinnedDockMetrics.height(rowCount:availableHeight:)`:
 /// at most five rows and 40% of the list above it. It is recomputed on every
@@ -46,8 +46,8 @@ final class SidebarContainerController: NSViewController {
         addChild(dockController)
         let outlineView = outlineController.view
         let dockView = dockController.view
-        // The SwiftUI footer's own backdrop, behind the dock from its top
-        // edge down, so the dock and the footer read as one group.
+        // The `.bar` material behind the dock, from its top edge to the
+        // column's bottom edge.
         let backdrop = NSHostingView(rootView: SidebarBarBackdrop())
         backdrop.sizingOptions = []
         for view in [outlineView, backdrop, dockView] {
@@ -118,7 +118,7 @@ final class SidebarContainerController: NSViewController {
     }
 }
 
-/// The `.bar` material the SwiftUI footer draws behind itself.
+/// The `.bar` material the dock sits on.
 private struct SidebarBarBackdrop: View {
     var body: some View {
         Rectangle().fill(.bar)

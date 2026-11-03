@@ -80,6 +80,8 @@ extension SidebarOutlineController: SidebarMenuHost {
         case let cell as RemoteSessionRowCell:
             cell.setHovered(hovered)
             cell.setDimmedByChevron(isDimmedByChevron(id))
+        case let cell as AddRepositoryCell:
+            cell.setHoveredPart(part)
         default:
             break
         }
@@ -96,7 +98,7 @@ extension SidebarOutlineController: SidebarMenuHost {
             var top = id
             while let parent = tree.parent(of: top) { top = parent }
             return top == section
-        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group:
+        case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .group, .addRepository:
             return false
         }
     }
@@ -132,7 +134,7 @@ extension SidebarOutlineController: SidebarMenuHost {
             guard let worktree = appState.findWorktree(id: worktreeID), worktree.status != .main,
                   let repoID = worktree.repoID else { return nil }
             return SidebarPlusTarget(repoID: repoID, parent: worktreeID)
-        case .scratchHeader, .scratchPrompt, .remoteSession, .providerHeader, .group:
+        case .scratchHeader, .scratchPrompt, .remoteSession, .providerHeader, .group, .addRepository:
             return nil
         }
     }
@@ -286,7 +288,7 @@ extension SidebarOutlineController: SidebarMenuHost {
         case .repoHeader:
             guard let target = plusTarget(for: id) else { return }
             plusMenu.press(owner: id, anchor: sender, in: outline, target: target, appState: appState, sheets: sheets)
-        case .worktree, .scratchPrompt, .remoteSession, .providerHeader, .group:
+        case .worktree, .scratchPrompt, .remoteSession, .providerHeader, .group, .addRepository:
             break
         }
     }
@@ -312,6 +314,56 @@ extension SidebarOutlineController: SidebarMenuHost {
         guard let binding = PRBindingPresentation.iconBinding(appState.effectivePRBindings(worktreeID: worktreeID)),
               let url = URL(string: binding.url) else { return false }
         openURL(url)
+        return true
+    }
+
+    // MARK: The Add Repository row
+
+    /// The Add Repository row's `+` and label, and its menu's Local Folder…:
+    /// the folder picker, `AddRepositoryPanel`, which the TBD menu's Add
+    /// Local Repository… runs too.
+    @objc func addRepositoryClicked(_ sender: Any?) {
+        if let addRepositoryForTesting {
+            addRepositoryForTesting()
+            return
+        }
+        AddRepositoryPanel.run(appState: appState)
+    }
+
+    /// The Add Repository row's chevron: its menu, under the chevron.
+    @objc func addRepositoryMenuClicked(_ sender: NSView) {
+        let origin = NSPoint(x: 0, y: sender.isFlipped ? sender.bounds.maxY : sender.bounds.minY)
+        addRepositoryMenu().popUp(positioning: nil, at: origin, in: sender)
+    }
+
+    /// The chevron's menu: Local Folder…, the folder picker, and Clone from
+    /// URL…, the clone sheet. Built each time it opens.
+    func addRepositoryMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let local = NSMenuItem(title: "Local Folder…", action: #selector(addRepositoryClicked(_:)), keyEquivalent: "")
+        local.target = self
+        let clone = NSMenuItem(title: "Clone from URL…", action: #selector(cloneRepositoryChosen(_:)), keyEquivalent: "")
+        clone.target = self
+        menu.addItem(local)
+        menu.addItem(clone)
+        return menu
+    }
+
+    /// Clone from URL…: the request the TBD menu's Clone Repository… makes
+    /// too. The next rebuild takes it and presents the sheet
+    /// (`takeCloneRepositoryRequest()`).
+    @objc func cloneRepositoryChosen(_ sender: Any?) {
+        appState.requestCloneRepository()
+    }
+
+    /// `AppState.cloneRepositoryRequested`, taken: read and cleared inside
+    /// the tracked build, before its tracking is installed, as the reveals
+    /// and the rename request are, so clearing it schedules nothing. A rebuild
+    /// that takes it presents the clone sheet once it has applied.
+    func takeCloneRepositoryRequest() -> Bool {
+        guard appState.cloneRepositoryRequested else { return false }
+        appState.cloneRepositoryRequested = false
         return true
     }
 

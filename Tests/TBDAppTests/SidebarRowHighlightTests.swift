@@ -211,6 +211,9 @@ struct SidebarRowHighlightTests {
         #expect(SidebarOutlineController.showsHoverHighlight(.repoHeader(header)))
         #expect(SidebarOutlineController.showsHoverHighlight(.scratchHeader(header)))
         #expect(SidebarOutlineController.showsHoverHighlight(.scratchPrompt))
+        // The Add Repository row's buttons draw their own washes; the row
+        // draws no highlight.
+        #expect(!SidebarOutlineController.showsHoverHighlight(.addRepository))
         #expect(SidebarOutlineController.showsHoverHighlight(.worktree(SidebarCellTests.worktree(name: "work"))))
     }
 

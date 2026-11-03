@@ -62,8 +62,8 @@ never re-nests a lane the user placed. `AppState.moveWorktree` has no caller.
 - Dragging unadopted remote sessions or any header.
 - Reordering repos. `Repo` has no stored order.
 - Collapsible worktree subtrees. They stay always expanded.
-- AppKit versions of the footer (Add Repository), the profile picker panel,
-  the emoji panel, popovers or sheets. None is a list; all are SwiftUI.
+- AppKit versions of the profile picker panel, the emoji panel, popovers or
+  sheets. None is a list; all are SwiftUI.
 
 ## Scope
 
@@ -79,6 +79,8 @@ The native sidebar renders every kind of sidebar row:
   their groups.
 - **Pinned dock** – pinned roots, their subtrees while selected, remote pins, the
   height clamp (at most five rows and 40% of the list's height), and pin reorder.
+- **Add Repository** – the outline's last row, after every section (see "The
+  Add Repository row").
 
 `SidebarSectionLayout` and its flags (`sidebarWorkflowGroupsKey`,
 `sidebarCollapseEndedSessionsKey`) decide which rows appear.
@@ -88,9 +90,9 @@ Which repo sections appear is one rule,
 repo chosen in the toolbar's repo filter shows alone, hidden or not. With none
 chosen, every repo shows, less the hidden ones unless the filter menu's Show
 Hidden Repos toggle (`SidebarBuildOptions.showHiddenReposKey`) is on. A hidden
-repo's section draws dimmed wherever it shows. The footer beneath the sidebar
-holds only the Add Repository split button; the window chrome spec describes
-the filter.
+repo's section draws dimmed wherever it shows. The window chrome spec
+describes the filter. None of this touches the Add Repository row, which ends
+the list whatever the filter shows, and with no repos at all.
 
 ## Architecture
 
@@ -101,9 +103,10 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
 - **`SidebarTree`** – a pure value. Each `SidebarNode` has a stable
   `SidebarNodeID`, a kind and children. The kind carries an `Equatable` row model
   holding everything its cell draws. Kinds: scratch header, scratch prompt, repo
-  header, worktree, remote session, provider header and group header. IDs come
-  from identities that already exist: worktree, session and repo UUIDs, and
-  `SidebarGroupID`.
+  header, worktree, remote session, provider header, group header and the Add
+  Repository row. IDs come from identities that already exist: worktree,
+  session and repo UUIDs, and `SidebarGroupID`; the Add Repository row, of
+  which there is one, has an ID of its own.
 - **`SidebarTreeBuilder`** – reads `AppState` and returns a `SidebarTree`. It
   reuses the existing pure types: `SidebarSectionLayout`, `RowStatusIndicator`,
   `PRBindingPresentation`, `PinnedDockContent` and the remote grouping in
@@ -115,11 +118,11 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   helpers (`WorktreeRowPresentation`, `RemoteSessionRowPresentation` and the
   rest). The builder takes its row models from it, and so does the dock, which
   builds no tree.
-- **`SidebarContainerController`** – the native sidebar's root: the outline's
-  scroll view filling the column, then the dock along the bottom edge, above
-  the SwiftUI footer. No line separates them: the outline ends where the dock
-  begins, and the dock and the footer share one `.bar` backdrop from the
-  dock's top edge down. It sets the dock's height in closed form,
+- **`SidebarContainerController`** – the native sidebar's root and the whole
+  sidebar column: the outline's scroll view filling it, then the dock along
+  the window's bottom edge. No line separates them: the outline ends where the
+  dock begins, and the dock sits on a `.bar` backdrop from its top edge to the
+  column's bottom. It sets the dock's height in closed form,
   `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
   five rows and 40% of the list above the dock — on every layout and
   whenever the dock's row count changes. It hands the outline and the dock one
@@ -163,8 +166,7 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
 - **`SidebarDropPolicy`** – pure; decides what a drag proposal means.
 - **`NativeSidebarView`** – the sidebar's SwiftUI wrapper: it mounts the
   container controller through an `NSViewControllerRepresentable` and presents
-  the sidebar's sheets from the presenter. `SidebarView` shows it, with the
-  SwiftUI footer beneath.
+  the sidebar's sheets from the presenter. `SidebarView` shows it alone.
 
 ### Update loop
 
@@ -458,6 +460,46 @@ which a commit then applies to the real row.
   `@Environment(\.dismiss)`, which every one of these sheets closes itself
   with, has no effect on an `NSHostingController` presented from AppKit.
 
+### The Add Repository row
+
+The outline's last row adds a repository. It is the builder's last root in
+every tree, after the Scratch, repo and provider sections, whatever the repo
+filter and Show Hidden Repos say, and with no repos at all, so adding a
+repository never depends on which sections show. The dock has no such row.
+
+- **Look** – `AddRepositoryCell`, at the sidebar's 26 pt minimum row height:
+  the repo header's 10 pt `+` at the section headers' leading inset, "Add
+  Repository" in the secondary colour, then a small chevron. Every item
+  centres on the row's midline at whole-point origins, as a header's do.
+- **Buttons** – the `+` and the label are one button, which runs the folder
+  picker. The chevron is a second button, which pops up a menu of "Local
+  Folder…", the same picker, and "Clone from URL…", `CloneRepositorySheet`.
+  Each draws the hover wash a header's buttons draw while the pointer is over
+  it; the row itself draws no hover highlight.
+- **One action each** – the folder picker is `AddRepositoryPanel`, one open
+  panel that picks a single existing directory and hands it to
+  `AppState.addRepo(path:)`; the empty start screen's Add Repository runs it
+  too. The clone sheet is shown one way: `AppState.requestCloneRepository()`
+  sets a request, the outline takes and clears it in its next rebuild, inside
+  the tracked build and before the tracking is installed, as it takes a
+  rename request, and asks the sidebar's sheet presenter for the sheet once
+  the apply is done. A request while another sidebar sheet is up is dropped,
+  as the presenter drops any second sheet.
+- **The menu bar** – the TBD menu opens with "Add Local Repository…", the
+  folder picker, and "Clone Repository…", the clone request, in a section of
+  their own above Install Command-Line Tool…, with no keyboard shortcut. The
+  row's menu names them "Local Folder…" and "Clone from URL…" because they
+  sit under its "Add Repository" label there. About TBD is the Help menu's
+  last item, below a separator.
+- **Not a sidebar item** – the row takes no selection, from a click or from
+  the arrow keys, which pass over it as they pass over a header. A click beside
+  its buttons does nothing. It has no context menu, writes no drag payload, and
+  takes no drop: onto it and into it reject, and the gap below it reads as the
+  gap above it, the end of the last section. It draws no selection, highlight
+  or guide line, and lights no guide line when hovered.
+- **Accessibility** – the `+` and label read as one button, "Add Repository",
+  and the chevron as "More ways to add a repository".
+
 ### Keyboard and accessibility
 
 - Arrow and shift-arrow navigation are native, including from a remote session
@@ -560,7 +602,7 @@ Each rule applies to every carried row; if one fails, the drop is rejected.
     clears before the held structural changes replay.
 - **Retargeted:** a proposal above the main row, or among the inline remote
   sessions that follow a repo's worktrees, becomes the nearest valid top-level
-  gap.
+  gap. A proposal below the Add Repository row becomes the gap above it.
 
 ### Depth at the end of a subtree
 
@@ -571,7 +613,8 @@ input and picks the depth `round((x − inset) / 16)`, clamped between the visua
 depths of the rows below and above the gap. It ignores the depth
 `NSOutlineView` proposes, which reads raw x against raw outline levels and so
 lags this sidebar's visual depth by one level. A proposal between two sections
-reads as the end of the section above.
+reads as the end of the section above, and so does a proposal on either side
+of the Add Repository row, which is the end of the last section.
 
 ### Feedback
 
@@ -758,8 +801,8 @@ a slow frame to the list that spent it.
 ## The sidebar and the window
 
 - **One sidebar** – the AppKit outline and the pinned dock are the sidebar.
-  `SidebarView` mounts `NativeSidebarView` with the SwiftUI footer beneath, and
-  no setting chooses another list.
+  `SidebarView` mounts `NativeSidebarView` alone, the column has no bar
+  beneath it, and no setting chooses another list.
 - **One window structure** – the AppKit split and toolbar of
   [`2026-11-01-appkit-window-chrome-design.md`](2026-11-01-appkit-window-chrome-design.md)
   are the main window's split and toolbar, and the sidebar fills the split's
@@ -797,9 +840,11 @@ The behaviors the sidebar keeps that a change to it most easily loses:
 8. Every input a row draws refreshes it: status suffix, typing dots, PR glyph,
    unread bold, subtitles, the dev-server dot.
 9. Rows that take no selection, on a live `NSOutlineView`: ↓ and ↑ cross a
-   section header without stopping at it, and a real click on a header runs
-   its action through the outline's `action`, which the offscreen tests drive
-   only through the click handler.
+   section header without stopping at it, ↓ stops on the last row above the
+   Add Repository row, and a real click on a header runs its action through
+   the outline's `action`, which the offscreen tests drive only through the
+   click handler. A click on the Add Repository row's `+`, label or chevron
+   opens the picker or the menu.
 10. The window chrome: the toggle, back and forward stay beside the window
     buttons with the sidebar shown and collapsed; the repo filter hides while
     collapsed; the Servers item and the remote session's transcript, reconnect
@@ -814,13 +859,16 @@ Most coverage is pure:
 - **`SidebarTreeBuilder`** – `AppState` fixtures map to expected trees for each
   section kind, with workflow groups on and off, collapse-ended on and off,
   hidden repos, the repo filter (a hidden repo chosen in it included), the
-  scratch prompt and cross-repo children. One test per row-model input proves
+  scratch prompt and cross-repo children. The Add Repository row ends every
+  tree, once: with repos and with none, with the filter set, naming a repo
+  that is gone, and with hidden repos shown and left out. One test per row-model input proves
   that changing it changes the tree, which guards parity item 8.
 - **Tree diff** – old and new trees map to the expected insert, remove, move and
   reconfigure operations, and held structural changes apply at drag end.
 - **`SidebarDropPolicy`** – a case per rule above, including the end-of-subtree
   depth choice, the onto-main un-nest, retargeting, collapsed sections, creating
-  placeholders, and the carried set for multi-row drags.
+  placeholders, the Add Repository row and its gaps, and the carried set for
+  multi-row drags.
 - **`SiblingPlacement.place`** – before, end, carried rows already in the group,
   and preserved relative order of non-carried rows.
 - **`SidebarSelectionBridge`** – both directions, with mixed local and remote
@@ -867,14 +915,18 @@ App:
   `NSDraggingInfo`, rebuild coalescing through `flushPendingRebuild()`, the
   rename field appearing when `editingWorktreeID` is set, the scroll anchor
   across inserts, removes, cross-parent moves and height-class changes above
-  it, and the scratch re-probe on a test clock.
+  it, and the scratch re-probe on a test clock. For the Add Repository row
+  they check that it refuses the selection and the ↓ key, has no context menu
+  and no drag payload, washes only the button under the pointer, runs the
+  picker from its button and its menu, and that a clone request reaches the
+  presenter, or is dropped while another sheet is up.
 - Observation tests drive the outline through `OutlineHarness`: a write to
   state a row reads, such as a child added through `AppState`'s memo caches, a
   reparented scratch space or a provider going stale, must reach the outline's
   observation, which `flushPendingRebuild()` acts on only when it fired, and
   change the rows the outline shows.
 - `ContentView` mounted offscreen holds exactly one native sidebar in the
-  split's sidebar pane. Tests that touch defaults use `TestDefaultsSuite`,
+  split's sidebar pane, which fills the pane down to the window's bottom edge. Tests that touch defaults use `TestDefaultsSuite`,
   never `UserDefaults.standard`.
 - The env-gated `SidebarRenderHarness` renders `SidebarView` from fixtures as
   images for review. It is not a CI gate.

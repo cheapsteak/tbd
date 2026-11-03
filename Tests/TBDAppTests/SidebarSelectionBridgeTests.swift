@@ -20,6 +20,7 @@ struct SidebarSelectionBridgeTests {
         let selected: [SidebarNodeID] = [
             .repoHeader(repo), .worktree(worktree), .remoteSession(lane), .scratchHeader, .scratchPrompt,
             .providerHeader("acme"), .group(SidebarGroupID(owner: .repository(repo), kind: .remote)),
+            .addRepository,
         ]
         #expect(SidebarSelectionBridge.appStateIDs(for: selected) == [worktree, lane])
         #expect(SidebarSelectionBridge.appStateIDs(for: [.worktree(worktree)]) == [worktree])
@@ -84,5 +85,6 @@ struct SidebarSelectionBridgeTests {
         #expect(!SidebarSelectionBridge.isSelectable(.scratchPrompt))
         #expect(!SidebarSelectionBridge.isSelectable(.providerHeader("acme")))
         #expect(!SidebarSelectionBridge.isSelectable(.group(SidebarGroupID(owner: .scratch, kind: .hibernated))))
+        #expect(!SidebarSelectionBridge.isSelectable(.addRepository))
     }
 }

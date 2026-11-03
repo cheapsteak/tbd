@@ -68,9 +68,8 @@ once.
 through an `NSViewControllerRepresentable`, `MainWindowSplitView`:
 
 - **The sidebar item** is `NSSplitViewItem(sidebarWithViewController:)` hosting
-  `SidebarView`, the native outline and dock with the footer beneath. Its
-  minimum thickness fits every item in the sidebar's part of the toolbar (see
-  "Width").
+  `SidebarView`, the native outline and dock. Its minimum thickness fits
+  every item in the sidebar's part of the toolbar (see "Width").
 - **The content item** hosts `MainDetailArea`: the detail area,
   `DetailSectionHostPager`, with the status bar, `StatusBarView`, beneath it.
 - **Collapse** is the split item's: `canCollapse` is true and
@@ -87,11 +86,12 @@ window's bottom edge:
   area only, so the sidebar column runs to the window's bottom edge beside it.
   While the sidebar is collapsed the content pane fills the window, and the
   status bar spans it.
-- **The bottom bars line up.** The sidebar's footer and the status bar share
-  one height, `WindowBottomBarMetrics.height` (32 pt), and each centres its
-  content in it. Both sit on the window's bottom edge, so their tops and centre
-  lines meet across the split between the sidebar column and the content
-  pane. The status bar keeps that height whatever is selected.
+- **The status bar's height** is `WindowBottomBarMetrics.height` (32 pt),
+  whatever is selected, with its content centred in it.
+- **The sidebar column has no bar of its own.** The outline and the dock run
+  to the window's bottom edge beside the status bar, and Add Repository is
+  the outline's last row (the native sidebar spec, "The Add Repository
+  row").
 
 ## The toolbar
 
@@ -346,6 +346,7 @@ No durable resource is added.
   `@AppStorage` from the store the window's root gives them. The split reaches
   the window's bottom edge, and the content pane ends its detail area one
   bottom-bar height above the pane's own foot, the band the status bar fills.
+  The native sidebar fills the sidebar pane down to that same edge.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
   only while shown, the leading item first and before the separator in both;
   each conditional item against the state that shows it.
@@ -403,8 +404,8 @@ No durable resource is added.
   with no glass behind them, a hover square filling each icon button's frame
   and clickable across it, the filter's menu opening under its button and its
   icon blue while a filter is set, the title staying put across back and
-  forward, the sidebar's footer and the status bar lined up across the
-  divider, and no collapse after waking from sleep.
+  forward, the sidebar reaching the window's bottom edge beside the status
+  bar, and no collapse after waking from sleep.
 
 ## Risks
 

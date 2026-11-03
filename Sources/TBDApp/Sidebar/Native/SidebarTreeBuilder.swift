@@ -59,8 +59,9 @@ struct SidebarBuildOptions: Equatable {
 
 /// Turns `AppState` into the `SidebarTree` the native outline shows: the
 /// Scratch section, the repo sections and the provider sections, with their
-/// rows, order and depths. Membership and order come from `AppState`'s
-/// sidebar helpers (`sidebarRepositoryLayout`, `sidebarRemoteGroups(parentID:)`,
+/// rows, order and depths, and the Add Repository row after them all.
+/// Membership and order come from `AppState`'s sidebar helpers
+/// (`sidebarRepositoryLayout`, `sidebarRemoteGroups(parentID:)`,
 /// `children(of:)` and the rest), which the reveal pass and the dock read too,
 /// so no two surfaces disagree about which rows a section holds.
 ///
@@ -136,7 +137,10 @@ private struct BuildPass {
         self.expandedGroups = appState.expandedSidebarGroups
     }
 
-    /// Scratch, then the repos, then the Remote section's providers.
+    /// Scratch, then the repos, then the Remote section's providers, then the
+    /// Add Repository row. That last row is there in every tree, whatever the
+    /// repo filter and Show Hidden Repos say and with no repos at all, so a
+    /// repository can always be added from the list.
     mutating func roots() -> [SidebarNode] {
         var roots: [SidebarNode] = []
         if AppState.scratchSectionVisible(setting: options.showScratchSection, spaces: appState.scratchWorktrees) {
@@ -149,6 +153,7 @@ private struct BuildPass {
         if AppState.remoteSectionVisible(providers: appState.remoteProviders) {
             roots.append(contentsOf: providerSections())
         }
+        roots.append(SidebarNode(id: .addRepository, kind: .addRepository, children: [], isExpanded: false))
         return roots
     }
 

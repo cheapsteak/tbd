@@ -100,6 +100,8 @@ extension SidebarOutlineController {
             return dequeue(GroupHeaderCell.reuseIdentifier) { GroupHeaderCell() }
         case .scratchPrompt:
             return dequeue(ScratchPromptCell.reuseIdentifier) { ScratchPromptCell() }
+        case .addRepository:
+            return dequeue(AddRepositoryCell.reuseIdentifier) { AddRepositoryCell() }
         }
     }
 
@@ -155,6 +157,14 @@ extension SidebarOutlineController {
             guard let cell = cell as? ScratchPromptCell else { return }
             cell.leadingInset = rowInset + 2
             cell.configure()
+        case .addRepository:
+            guard let cell = cell as? AddRepositoryCell else { return }
+            cell.leadingInset = SidebarNativeMetrics.headerContentInset
+            cell.addButton.target = self
+            cell.addButton.action = #selector(addRepositoryClicked(_:))
+            cell.menuButton.target = self
+            cell.menuButton.action = #selector(addRepositoryMenuClicked(_:))
+            cell.configure()
         }
         applyHover(to: cell, id: id)
     }
@@ -205,7 +215,7 @@ extension SidebarOutlineController {
                 configuration.isSelectedByModel = model.isSelected
             case .providerHeader(let model):
                 configuration.isSelectedByModel = model.isSelected
-            case .scratchPrompt:
+            case .scratchPrompt, .addRepository:
                 break
             }
         }
@@ -244,12 +254,13 @@ extension SidebarOutlineController {
     /// Whether a row of `kind` draws the hover highlight: every row whose
     /// click selects something — the row itself, a header's repo, section or
     /// provider, or the scratch space the prompt creates and selects. A group
-    /// header's click only opens or closes the group, so it draws none.
+    /// header's click only opens or closes the group, so it draws none, and
+    /// the Add Repository row's buttons draw their own washes instead.
     static func showsHoverHighlight(_ kind: SidebarNodeKind) -> Bool {
         switch kind {
         case .worktree, .remoteSession, .scratchHeader, .repoHeader, .providerHeader, .scratchPrompt:
             true
-        case .groupHeader:
+        case .groupHeader, .addRepository:
             false
         }
     }

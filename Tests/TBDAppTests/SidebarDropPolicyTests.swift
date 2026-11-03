@@ -120,6 +120,33 @@ struct SidebarDropPolicyTests {
         #expect(endOfGroup.retarget == Self.at(.group(Self.hibernatedA), 2))
     }
 
+    /// The Add Repository row ends the roots and takes no rows: onto it and
+    /// into it reject, and the gap below it reads as the gap above it, the
+    /// end of the last section.
+    @Test func addRepositoryRowTakesNoRows() {
+        let rows = [
+            Self.row(Rows.mainE, home: Rows.repoE, main: true),
+            Self.row(Rows.e1, home: Rows.repoE),
+            Self.row(Rows.e2, home: Rows.repoE),
+        ]
+        let tree = SidebarTree(roots: [Self.repo(Rows.repoE, rows), Self.addRepository])
+        #expect(Self.drop([Rows.e1], onto: .addRepository, in: tree).decision == .reject)
+        #expect(Self.drop([Rows.e1], into: .addRepository, at: 0, in: tree).decision == .reject)
+
+        let above = Self.drop([Rows.e1], into: nil, at: 1, in: tree)
+        let below = Self.drop([Rows.e1], into: nil, at: 2, in: tree)
+        #expect(above.decision == .place(parent: nil, before: nil))
+        #expect(above.retarget == Self.at(.repoHeader(Rows.repoE), 3))
+        #expect(below.decision == above.decision)
+        #expect(below.retarget == above.retarget)
+
+        // Alone in the roots it is no section to land in.
+        let alone = SidebarTree(roots: [Self.addRepository])
+        let aloneIndex = SidebarDropIndex(tree: alone)
+        #expect(aloneIndex.sectionRootCount == 0)
+        #expect(SidebarDropIndex(tree: tree).sectionRootCount == 1)
+    }
+
     @Test func noRetargetWhenAnswerMatchesProposal() {
         let tree = Self.tree
         #expect(Self.drop([Rows.b], onto: .worktree(Rows.a), in: tree).retarget == nil)
@@ -715,6 +742,11 @@ struct SidebarDropPolicyTests {
     static func scratch(_ children: [SidebarNode]) -> SidebarNode {
         SidebarNode(id: .scratchHeader, kind: .scratchHeader(header(expanded: true)),
                     children: children, isExpanded: true)
+    }
+
+    /// The Add Repository row, which the builder puts last in every tree.
+    static var addRepository: SidebarNode {
+        SidebarNode(id: .addRepository, kind: .addRepository, children: [], isExpanded: false)
     }
 
     static func header(expanded: Bool) -> SectionHeaderModel {
