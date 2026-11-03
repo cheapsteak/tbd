@@ -328,8 +328,8 @@ The guard gives one of three answers:
     reaches launchd without passing through the job.
 - **Can't tell: accept, and log the reason.** Everything else: no peer pid, a
   failed table read, an ancestry broken by a process that exited mid-walk, a
-  tmux row, a parked row, a Codex tab, a job outside the start window, or two
-  rows naming one job.
+  tmux row, a parked row, a job outside the start window, or two rows naming
+  one job.
 
 For `pr.attach`, the caller is inside when it descends from the job of any row
 in the named worktree. It is proven foreign only when the worktree has at
@@ -342,13 +342,12 @@ row records its pid, so the new session's SessionStart can arrive while the row
 still looks parked. Refusing it would leave the tab on its old session — the
 costliest mistake this guard could make.
 
-A Codex tab is "can't tell" for a different reason. Codex's TUI hosts its
-sessions in a shared background server unless started with `--no-daemon`, and
-that server runs hooks with the environment of whichever tab started it
-(herdrdev/herdr#4649). A hook for the tab's own session can then come from
-outside the tab's tree, and the process table cannot tell it from a stranger's.
-Starting Codex tabs with `--no-daemon` would put their hooks back inside the
-tab, and is a separate decision.
+A Codex tab is checked like any other tab. TBD launches every Codex tab with
+`--no-daemon`, so Codex runs the tab's hooks inside the tab's own tree, never
+in its shared background server, which runs hooks with the environment of
+whichever tab started it (herdrdev/herdr#4649). The guard therefore treats a
+Codex tab's hooks as it treats any tab's. See
+[`docs/specs/2026-11-02-codex-no-daemon-design.md`](2026-11-02-codex-no-daemon-design.md).
 
 A process whose parent exits is moved under launchd. So a hook that is still
 running after its own agent died reads as proven foreign: the table cannot tell
@@ -494,6 +493,8 @@ keep-list is one user-authored file at a fixed path. Part 2 creates nothing.
 
 - `docs/specs/2026-08-18-orphan-process-gc-design.md` — the cwd rule this
   extends.
+- `docs/specs/2026-11-02-codex-no-daemon-design.md` — why Codex tabs launch
+  with `--no-daemon`, so the guard checks them like any tab.
 - `docs/research/2026-10-30-herdr/README.md` and `identity.md` — the env-read
   measurements, the census, and herdr-core's `HC_SCOPE` sweep.
 - `docs/theory-placement.md` — why the keep-list is an editable default.

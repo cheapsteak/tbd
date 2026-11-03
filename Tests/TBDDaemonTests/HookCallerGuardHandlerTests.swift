@@ -119,17 +119,21 @@ struct HookCallerGuardHandlerTests {
         #expect(await f.router.activityLedger.snapshot().hooks[f.terminal.id] != nil)
     }
 
-    /// Codex's shared server can run a Codex tab's own hooks outside the tab's
-    /// tree, so a caller the table puts outside it is "can't tell", and its
-    /// SessionStart binds. Discriminates against the code before the fix,
-    /// which refused it as proven foreign and left the session unbound.
-    @Test func aForeignSessionStartForACodexTabBindsTheSession() async throws {
+    /// Codex tabs launch with `--no-daemon`, so Codex runs a tab's hooks
+    /// inside the tab's own tree. A caller whose whole ancestry misses the
+    /// tab's job is proven foreign and refused as for any tab: the session
+    /// stays unbound and the activity ledger is untouched. Fails against a
+    /// guard that exempts Codex tabs, which binds the session.
+    @Test func aForeignSessionStartForACodexTabIsRefused() async throws {
         let f = try await makeFixture(kind: .codex)
+        await f.router.activityLedger.setEnabled(true)
 
         let response = await f.router.handle(try sessionStart(f), connection: Self.foreign)
 
         #expect(response.success)
-        #expect(try await f.db.terminals.get(id: f.terminal.id)?.claudeSessionID == "other-session")
+        #expect(response.result == nil)
+        #expect(try await f.db.terminals.get(id: f.terminal.id)?.claudeSessionID == nil)
+        #expect(await f.router.activityLedger.snapshot().hooks[f.terminal.id] == nil)
     }
 
     /// A request that reached the router without a socket has no peer pid,

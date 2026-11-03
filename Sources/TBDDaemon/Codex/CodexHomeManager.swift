@@ -564,14 +564,27 @@ enum CodexSpawnCommandBuilder {
         return "\(command) \(shellEscape(initialPrompt))"
     }
 
-    /// The execution-mode flags every TBD-launched Codex carries. Hook trust is
-    /// bypassed alongside approvals and the sandbox: a session that can already
-    /// run any command gains nothing from gating the repo's own hooks, and an
-    /// untrusted hook either parks the session on Codex's startup review
-    /// screen, where no prompt reaches it, or is skipped outright. Codex still
-    /// honors a hook the user switched off (`enabled = false`).
+    /// The execution-mode flags every TBD-launched Codex carries.
+    ///
+    /// `--no-daemon` makes Codex run the tab's hooks and tool commands inside
+    /// the tab's own process tree, with the tab's own environment. Without it,
+    /// Codex may host the session in its shared background server, which runs
+    /// hooks with the environment of whichever tab started that server, so a
+    /// hook could speak for the wrong tab and the hook-caller guard
+    /// (`HookCallerDescent`) could not check it by descent. Codex also runs
+    /// embedded when it sees `--profile` or `--dangerously-bypass-hook-trust`,
+    /// but that list is Codex's implementation, not a contract; `--no-daemon`
+    /// is the stated one. It is a global option, so it precedes any `resume`
+    /// subcommand. See `docs/specs/2026-11-02-codex-no-daemon-design.md`.
+    ///
+    /// Hook trust is bypassed alongside approvals and the sandbox: a session
+    /// that can already run any command gains nothing from gating the repo's
+    /// own hooks, and an untrusted hook either parks the session on Codex's
+    /// startup review screen, where no prompt reaches it, or is skipped
+    /// outright. Codex still honors a hook the user switched off
+    /// (`enabled = false`).
     private static let executionModeFlags =
-        "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+        "--no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
 
     private static func baseCommand(profileFlag: String) -> String {
         return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd \(executionModeFlags)"

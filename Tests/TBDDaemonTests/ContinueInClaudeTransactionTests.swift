@@ -568,7 +568,7 @@ struct ContinueInClaudeTransactionTests {
     private static let launchOptions = CodexLaunchOptions(
         model: "acme-model", disabledFeatures: ["computer_use"])
     private static let relaunchWithOptions =
-        #"tbd -c 'model="acme-model"' --disable 'computer_use' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'codex-thread'"#
+        #"tbd -c 'model="acme-model"' --disable 'computer_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'codex-thread'"#
 
     /// The Codex a recovery restores runs in the same tab, so it keeps the
     /// model and disabled features the tab was started with.
