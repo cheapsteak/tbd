@@ -3,9 +3,10 @@
 #
 # Every case runs against a temp directory. The three functions that reach for
 # system tools (codesign/security, open, pkill/pgrep) get stubs on a temp PATH
-# that record their arguments, and the library's `TBD_LSREGISTER` seam points
-# at a stub that does the same, so nothing here signs, launches, registers, or
-# kills anything real. The daemon process cases start copies of `sleep` of
+# that record their arguments, and the library's `TBD_LSREGISTER` and
+# `TBD_OPENSSL` seams point at stubs that do the same, with
+# `TBD_SIGNING_KEYCHAIN` inside the temp directory, so nothing here signs,
+# creates a keychain or a key, launches, registers, or kills anything real. The daemon process cases start copies of `sleep` of
 # their own and signal only those. macOS-only: the assembly reads `plutil` and
 # the install uses `/bin/cp -cR`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
@@ -47,6 +48,45 @@ cat > "$TBD_LSREGISTER" << 'EOF'
 printf 'lsregister %s\n' "$*" >> "${FAKE_LSREGISTER_LOG:-/dev/null}"
 EOF
 chmod +x "$TBD_LSREGISTER"
+
+# Signing creates its identity with openssl, also reached by absolute path, in
+# a keychain under ~/Library/Keychains. Point both seams into TEST_TMP before
+# the library is sourced, so that no case, even one that forgets the stubs,
+# can run the real /usr/bin/openssl or touch the developer's keychains; the
+# signing cases name a keychain of their own besides. And never wait on a
+# provisioning lock: a case that wants a wait asks for one.
+#
+# The openssl stub records its arguments to STUB_LOG and writes each file it
+# is asked for (-out, -keyout). Like /usr/bin/openssl, which is LibreSSL, it
+# rejects `pkcs12 -legacy` unless STUB_OPENSSL_LEGACY is set, the way an
+# OpenSSL 3 would accept it. STUB_OPENSSL_FAILS fails every call.
+export TBD_SIGNING_KEYCHAIN="$TEST_TMP/keychains-unused/tbd-signing.keychain-db"
+export TBD_SIGNING_LOCK_WAIT_SECONDS=0
+export TBD_OPENSSL="$TEST_TMP/stub-openssl"
+cat > "$TBD_OPENSSL" << 'EOF'
+#!/bin/sh
+printf 'openssl %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+[ -z "${STUB_OPENSSL_FAILS:-}" ] || exit 1
+for arg in "$@"; do
+    if [ "$arg" = -legacy ] && [ -z "${STUB_OPENSSL_LEGACY:-}" ]; then
+        echo "unknown option '-legacy'" >&2
+        exit 1
+    fi
+done
+want=""
+for arg in "$@"; do
+    if [ -n "$want" ]; then
+        printf 'stub %s\n' "$want" > "$arg" || exit 1
+        want=""
+        continue
+    fi
+    case "$arg" in
+        -out | -keyout) want="$arg" ;;
+    esac
+done
+exit 0
+EOF
+chmod +x "$TBD_OPENSSL"
 
 # shellcheck source=/dev/null
 source "$HELPER"
@@ -148,13 +188,39 @@ mkstubs() {
 #!/bin/sh
 printf '%s\n' "codesign $*" >> "$STUB_LOG"
 EOF
+    # A keychain is a file here and an identity is a line in it: create-keychain
+    # makes the file (refusing one that exists, as the real one does), import
+    # writes the line into the file after -k, find-identity reads it back, and
+    # delete-keychain removes the file. The keychain is the last argument of
+    # every other subcommand signing uses. STUB_UNLOCK_FAILS and
+    # STUB_IMPORT_FAILS fail those two subcommands.
     cat > "$dir/security" << 'EOF'
 #!/bin/sh
 printf '%s\n' "security $*" >> "$STUB_LOG"
-if [ "$1" = "find-identity" ]; then
-    [ -n "${STUB_HAS_IDENTITY:-}" ] && echo "  1) ABC TBD Dev Signing"
-    exit 0
-fi
+cmd="$1"
+for last; do :; done
+case "$cmd" in
+    find-identity)
+        if grep -qx identity "$last" 2>/dev/null; then
+            echo '  1) ABC123 "TBD Dev Signing" (CSSMERR_TP_NOT_TRUSTED)'
+        fi
+        ;;
+    create-keychain)
+        [ ! -e "$last" ] || exit 48
+        : > "$last"
+        ;;
+    delete-keychain) rm -f "$last" ;;
+    unlock-keychain) [ -z "${STUB_UNLOCK_FAILS:-}" ] || exit 51 ;;
+    import)
+        [ -z "${STUB_IMPORT_FAILS:-}" ] || exit 1
+        keychain=""
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = -k ]; then shift; keychain="$1"; fi
+            shift
+        done
+        echo identity >> "$keychain"
+        ;;
+esac
 exit 0
 EOF
     cat > "$dir/open" << 'EOF'
@@ -503,34 +569,382 @@ test_assemble_bundle_clears_a_dropped_resource_bundle() {
 
 # MARK: - Signing
 
-test_sign_prefers_the_stable_identity() {
-    local repo build bundle stubs
-    repo="$(mkrepo)"
-    build="$repo/.build/release"
-    mkbuild "$build"
-    assemble_app_bundle "$repo" "$build" "/usr/bin:/bin" >/dev/null 2>&1
-    bundle="$(bundle_dir_for_build "$build")"
+# The stubs every signing case puts first on PATH.
+SIGN_STUBS="$TEST_TMP/stubs-signing"
+mkstubs "$SIGN_STUBS"
 
-    stubs="$TEST_TMP/stubs-signing"
-    mkstubs "$stubs"
-    export STUB_LOG="$TEST_TMP/signing.log"
-    : > "$STUB_LOG"
+# A scratch directory for one signing case, echoed: <case>/log is the stubs'
+# log, <case>/tmp the TMPDIR provisioning makes its key directory in, and
+# <case>/keychains/tbd-signing.keychain-db the keychain, which nothing creates
+# up front.
+mksigncase() {
+    local d="$TEST_TMP/signing/$1"
+    mkdir -p "$d/tmp" "$d/bundle/TBD.app"
+    : > "$d/log"
+    printf '%s\n' "$d"
+}
 
-    PATH="$stubs:$PATH" STUB_HAS_IDENTITY=1 sign_app_bundle "$bundle" >/dev/null 2>&1
-    if grep -q -- "--sign TBD Dev Signing" "$STUB_LOG"; then
-        pass "an installed signing identity is used when present"
+# The keychain mksigncase names for <case>.
+case_keychain() {
+    printf '%s\n' "$1/keychains/tbd-signing.keychain-db"
+}
+
+# Run sign_app_bundle on <case>'s bundle with the stubs first on PATH and the
+# case's keychain and TMPDIR. CI is <ci>, or unset when <ci> is empty: a
+# GitHub runner sets CI=true, so the harness says which it wants either way.
+# stdout goes to <case>/out and stderr to <case>/err; the status is
+# sign_app_bundle's.
+#
+#   sign_in_case <case> <ci>
+sign_in_case() {
+    local d="$1" ci="$2"
+    (
+        unset CI
+        [ -z "$ci" ] || export CI="$ci"
+        STUB_LOG="$d/log" PATH="$SIGN_STUBS:$PATH" TMPDIR="$d/tmp" \
+            TBD_SIGNING_KEYCHAIN="$(case_keychain "$d")" \
+            sign_app_bundle "$d/bundle/TBD.app" > "$d/out" 2> "$d/err"
+    )
+}
+
+# The number of the first line of <file> containing <text>, or nothing.
+first_line_with() {
+    grep -nF -- "$2" "$1" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+# Pass when line <a> exists and comes before line <b>, which also exists.
+assert_line_before() {
+    if [ -n "$2" ] && [ -n "$3" ] && [ "$2" -lt "$3" ]; then
+        pass "$1"
     else
-        fail "an installed signing identity is used when present: $(cat "$STUB_LOG")"
+        fail "$1: expected line [$2] before line [$3]"
     fi
+}
 
-    : > "$STUB_LOG"
-    PATH="$stubs:$PATH" sign_app_bundle "$bundle" >/dev/null 2>&1
-    if grep -q -- "--sign -" "$STUB_LOG"; then
-        pass "signing falls back to ad-hoc without an identity"
+# Pass when directory <dir> exists and is empty: the scratch directory the key
+# was made in is gone, and nothing else was left beside it.
+assert_empty_dir() {
+    local entries
+    entries="$(find "$2" -mindepth 1 -maxdepth 1 2>&1)"
+    if [ -d "$2" ] && [ -z "$entries" ]; then
+        pass "$1"
     else
-        fail "signing falls back to ad-hoc without an identity: $(cat "$STUB_LOG")"
+        fail "$1: $2 holds [$(tr '\n' ' ' <<< "$entries")]"
     fi
-    unset STUB_LOG
+}
+
+# What a run that signed ad-hoc and provisioned nothing looks like: status 0,
+# an ad-hoc codesign, no openssl, no keychain created, and no keychain file or
+# lock left behind.
+assert_signed_ad_hoc_without_provisioning() {
+    local why="$1" d="$2" rc="$3" log
+    log="$(cat "$d/log")"
+    assert_eq "$why: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "$why: the bundle is signed ad-hoc" "codesign --force --deep --sign - $d/bundle/TBD.app" "$log"
+    assert_not_contains "$why: no keychain is created" "create-keychain" "$log"
+    assert_no_file "$why: no keychain is left" "$(case_keychain "$d")"
+    assert_no_dir "$why: no lock is left" "$(case_keychain "$d").lock"
+}
+
+test_sign_uses_an_existing_identity() {
+    local d rc log
+    d="$(mksigncase existing)"
+    mkdir -p "$d/keychains"
+    echo identity > "$(case_keychain "$d")"
+
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "signing with an existing identity succeeds" "0" "$rc"
+    assert_contains "an existing identity signs the bundle" \
+        "--sign TBD Dev Signing --keychain $(case_keychain "$d") $d/bundle/TBD.app" "$log"
+    assert_contains "an existing identity's keychain is unlocked before signing" \
+        "security unlock-keychain -p tbd-signing $(case_keychain "$d")" "$log"
+    assert_not_contains "an existing identity runs no openssl" "openssl " "$log"
+    assert_not_contains "an existing identity creates no keychain" "create-keychain" "$log"
+    assert_not_contains "an existing identity deletes no keychain" "delete-keychain" "$log"
+    assert_eq "an existing identity prints nothing" "" "$(cat "$d/err" "$d/out")"
+}
+
+test_sign_provisions_a_missing_identity() {
+    local d rc log keychain create settings import partition sign
+    d="$(mksigncase provision)"
+    keychain="$(case_keychain "$d")"
+
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "signing that provisions an identity succeeds" "0" "$rc"
+    create="$(first_line_with "$d/log" "security create-keychain -p tbd-signing $keychain")"
+    settings="$(first_line_with "$d/log" "security set-keychain-settings $keychain")"
+    import="$(first_line_with "$d/log" "security import $d/tmp/")"
+    partition="$(first_line_with "$d/log" "security set-key-partition-list -S apple-tool:,apple: -s -k tbd-signing $keychain")"
+    sign="$(first_line_with "$d/log" "codesign ")"
+    assert_line_before "the keychain is created before the import" "$create" "$import"
+    assert_line_before "its settings drop the auto-lock before the import" "$settings" "$import"
+    assert_line_before "the import comes before the partition list" "$import" "$partition"
+    assert_line_before "the partition list is set before the bundle is signed" "$partition" "$sign"
+    assert_contains "the import lets codesign alone use the key" \
+        "-k $keychain -P tbd-signing -T /usr/bin/codesign" "$log"
+    assert_not_contains "the import opens the key to no other app" " -A" \
+        "$(grep '^security import' "$d/log")"
+    assert_not_contains "the keychain search list is left alone" "list-keychains" "$log"
+    assert_contains "the new identity signs the bundle" \
+        "--sign TBD Dev Signing --keychain $keychain $d/bundle/TBD.app" "$log"
+    assert_not_contains "the bundle is not signed ad-hoc" "--sign - " "$log"
+    assert_eq "the keychain holds the identity" "identity" "$(cat "$keychain" 2>/dev/null)"
+
+    assert_contains "openssl makes a code-signing certificate" "openssl req -x509 -newkey rsa:2048" "$log"
+    assert_contains "openssl works in the case's TMPDIR" "-keyout $d/tmp/tbd-signing." "$log"
+    assert_eq "the PKCS#12 export is tried with -legacy and again without" "2" \
+        "$(grep -c '^openssl pkcs12 -export' "$d/log")"
+    assert_eq "the retry drops -legacy" "0" \
+        "$(grep '^openssl pkcs12 -export' "$d/log" | tail -1 | grep -c -- '-legacy')"
+    assert_empty_dir "the private key's scratch directory is removed" "$d/tmp"
+    assert_no_dir "the lock is released" "$keychain.lock"
+
+    assert_contains "the provisioning run says the identity is new" \
+        "TBD is now signed with a stable local identity" "$(cat "$d/err")"
+    assert_contains "and that earlier grants need granting again" \
+        "System Settings > Privacy & Security" "$(cat "$d/err")"
+    assert_eq "the notice goes to stderr only" "" "$(cat "$d/out")"
+
+    # The next run finds the identity it made, and says nothing.
+    : > "$d/log"
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "the run after provisioning succeeds" "0" "$rc"
+    assert_contains "the run after provisioning signs with the identity" "--sign TBD Dev Signing" "$log"
+    assert_not_contains "the run after provisioning creates no keychain" "create-keychain" "$log"
+    assert_not_contains "the run after provisioning runs no openssl" "openssl " "$log"
+    assert_eq "the run after provisioning prints no notice" "" "$(cat "$d/err")"
+}
+
+# An OpenSSL 3 passed through the seam takes -legacy, and one export is enough.
+test_sign_exports_legacy_pkcs12_when_openssl_takes_it() {
+    local d rc
+    d="$(mksigncase legacy)"
+    STUB_OPENSSL_LEGACY=1 sign_in_case "$d" ""; rc=$?
+    assert_eq "provisioning with an OpenSSL 3 succeeds" "0" "$rc"
+    assert_eq "an openssl that takes -legacy exports once" "1" \
+        "$(grep -c '^openssl pkcs12 -export -legacy' "$d/log")"
+    assert_eq "and never without it" "1" "$(grep -c '^openssl pkcs12 -export' "$d/log")"
+    assert_contains "an OpenSSL 3's identity signs the bundle" "--sign TBD Dev Signing" "$(cat "$d/log")"
+}
+
+test_sign_under_ci_never_provisions() {
+    local d rc
+    d="$(mksigncase ci)"
+    sign_in_case "$d" true; rc=$?
+    assert_signed_ad_hoc_without_provisioning "under CI" "$d" "$rc"
+    assert_not_contains "under CI, no openssl runs" "openssl " "$(cat "$d/log")"
+    assert_eq "under CI, nothing is printed" "" "$(cat "$d/err" "$d/out")"
+    # MUTATION: the same case with CI unset provisions, so CI is what stopped it.
+    d="$(mksigncase ci-unset)"
+    sign_in_case "$d" ""; rc=$?
+    assert_contains "with CI unset, the same run provisions" "create-keychain" "$(cat "$d/log")"
+}
+
+test_sign_falls_back_when_openssl_fails() {
+    local d rc
+    d="$(mksigncase openssl-fails)"
+    STUB_OPENSSL_FAILS=1 sign_in_case "$d" ""; rc=$?
+    assert_signed_ad_hoc_without_provisioning "when openssl fails" "$d" "$rc"
+    assert_contains "a failed openssl was tried" "openssl req" "$(cat "$d/log")"
+    assert_contains "a failed openssl is reported" "signing this build ad-hoc" "$(cat "$d/err")"
+    assert_not_contains "a failed openssl prints no notice" "stable local identity" "$(cat "$d/err")"
+    assert_empty_dir "a failed openssl leaves no key directory" "$d/tmp"
+}
+
+test_sign_falls_back_when_the_import_fails() {
+    local d rc log
+    d="$(mksigncase import-fails)"
+    STUB_IMPORT_FAILS=1 sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "when the import fails: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "when the import fails: the bundle is signed ad-hoc" \
+        "codesign --force --deep --sign - $d/bundle/TBD.app" "$log"
+    assert_contains "when the import fails: a keychain had been created" "create-keychain" "$log"
+    assert_line_before "when the import fails: the partial keychain is deleted after it" \
+        "$(first_line_with "$d/log" "security import")" \
+        "$(first_line_with "$d/log" "security delete-keychain $(case_keychain "$d")")"
+    assert_no_file "when the import fails: no keychain is left" "$(case_keychain "$d")"
+    assert_no_dir "when the import fails: no lock is left" "$(case_keychain "$d").lock"
+    assert_empty_dir "when the import fails: no key directory is left" "$d/tmp"
+    assert_not_contains "when the import fails: no notice" "stable local identity" "$(cat "$d/err")"
+}
+
+# restart.sh runs under `set -e` and update.sh under `set -uo pipefail`. A
+# provisioning that fails must not stop either script before the ad-hoc sign.
+test_sign_survives_a_failed_provisioning_in_strict_mode() {
+    local d out rc
+    d="$(mksigncase strict)"
+    # shellcheck disable=SC2016 # the script's own arguments, expanded by it
+    out="$(env -u CI STUB_LOG="$d/log" STUB_IMPORT_FAILS=1 PATH="$SIGN_STUBS:$PATH" TMPDIR="$d/tmp" \
+        TBD_SIGNING_KEYCHAIN="$(case_keychain "$d")" \
+        bash -c 'set -euo pipefail; source "$1"; sign_app_bundle "$2"; echo "after the sign"' \
+        _ "$HELPER" "$d/bundle/TBD.app" 2>/dev/null)"; rc=$?
+    assert_eq "under set -euo pipefail, a failed provisioning still signs" "0" "$rc"
+    assert_contains "and the script goes on past the sign" "after the sign" "$out"
+    assert_contains "and the sign was ad-hoc" "--sign - " "$(cat "$d/log")"
+}
+
+test_sign_recreates_a_keychain_without_an_identity() {
+    local d rc log keychain
+    d="$(mksigncase partial)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$d/keychains"
+    : > "$keychain"
+
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "a keychain without an identity: sign_app_bundle succeeds" "0" "$rc"
+    assert_line_before "a keychain without an identity is deleted before one is created" \
+        "$(first_line_with "$d/log" "security delete-keychain $keychain")" \
+        "$(first_line_with "$d/log" "security create-keychain")"
+    assert_eq "the new keychain holds the identity" "identity" "$(cat "$keychain" 2>/dev/null)"
+    assert_contains "the new identity signs the bundle" "--sign TBD Dev Signing" "$log"
+    assert_contains "remaking the keychain prints the notice" "stable local identity" "$(cat "$d/err")"
+}
+
+# A keychain at the path that TBD's password does not open was not made by TBD:
+# it is left as it is, and the build is signed ad-hoc.
+test_sign_leaves_a_foreign_keychain_alone() {
+    local d rc log keychain
+    d="$(mksigncase foreign)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$d/keychains"
+    printf 'someone else\n' > "$keychain"
+
+    STUB_UNLOCK_FAILS=1 sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "a foreign keychain: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a foreign keychain: the bundle is signed ad-hoc" "--sign - " "$log"
+    assert_not_contains "a foreign keychain is not deleted" "delete-keychain" "$log"
+    assert_not_contains "a foreign keychain: no openssl runs" "openssl " "$log"
+    assert_eq "a foreign keychain keeps its contents" "someone else" "$(cat "$keychain" 2>/dev/null)"
+    assert_contains "a foreign keychain is reported" "does not open with TBD's password" "$(cat "$d/err")"
+    assert_no_dir "a foreign keychain: the lock is released" "$keychain.lock"
+}
+
+test_sign_respects_a_live_lock_and_breaks_a_dead_one() {
+    local d rc log keychain holder
+    d="$(mksigncase lock-live)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    sleep 30 > /dev/null 2>&1 &
+    holder=$!
+    printf '%s\n' "$holder" > "$keychain.lock/pid"
+
+    sign_in_case "$d" ""; rc=$?
+    kill "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null
+    log="$(cat "$d/log")"
+    assert_eq "a live lock: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a live lock: the bundle is signed ad-hoc" "--sign - " "$log"
+    assert_not_contains "a live lock: no openssl runs" "openssl " "$log"
+    assert_not_contains "a live lock: no keychain is created" "create-keychain" "$log"
+    assert_eq "a live lock is left to its holder" "$holder" "$(cat "$keychain.lock/pid" 2>/dev/null)"
+    assert_contains "a live lock is reported" "another run is creating the TBD signing identity" "$(cat "$d/err")"
+
+    d="$(mksigncase lock-dead)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    unused_pid > "$keychain.lock/pid"
+
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "a dead lock: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a dead lock is broken and the identity created" "create-keychain" "$log"
+    assert_contains "a dead lock: the new identity signs the bundle" "--sign TBD Dev Signing" "$log"
+    assert_no_dir "a dead lock: the lock is released afterwards" "$keychain.lock"
+}
+
+# A lock is also broken by age, whatever its pid file says: one with no pid
+# (its run was killed before writing it) or with a pid a live process has
+# since been given would otherwise send every later run to ad-hoc for good. A
+# fresh lock with no pid file is a run that has not written it yet, and is
+# respected.
+test_sign_breaks_a_lock_by_age_alone() {
+    local d rc log keychain holder
+    d="$(mksigncase lock-old-no-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    touch -t 202001010000 "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "an old lock with no pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "an old lock with no pid is broken and the identity created" "create-keychain" "$log"
+    assert_contains "an old lock with no pid: the new identity signs the bundle" "--sign TBD Dev Signing" "$log"
+    assert_no_dir "an old lock with no pid: the lock is released afterwards" "$keychain.lock"
+
+    # The pid file is written first: writing it would set the mtime again.
+    d="$(mksigncase lock-old-live-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    sleep 30 > /dev/null 2>&1 &
+    holder=$!
+    printf '%s\n' "$holder" > "$keychain.lock/pid"
+    touch -t 202001010000 "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    kill "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null
+    log="$(cat "$d/log")"
+    assert_eq "an old lock naming a live pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "an old lock naming a live pid is broken all the same" "create-keychain" "$log"
+    assert_no_dir "an old lock naming a live pid: the lock is released afterwards" "$keychain.lock"
+
+    d="$(mksigncase lock-fresh-no-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "a fresh lock with no pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a fresh lock with no pid: the bundle is signed ad-hoc" "--sign - " "$log"
+    assert_not_contains "a fresh lock with no pid: no openssl runs" "openssl " "$log"
+    assert_not_contains "a fresh lock with no pid: no keychain is created" "create-keychain" "$log"
+    if [ -d "$keychain.lock" ] && [ ! -e "$keychain.lock/pid" ]; then
+        pass "a fresh lock with no pid is left as it was"
+    else
+        fail "a fresh lock with no pid is left as it was"
+    fi
+    assert_contains "a fresh lock with no pid is reported" \
+        "another run is creating the TBD signing identity" "$(cat "$d/err")"
+
+    # MUTATION: the same fresh lock under a stale age of 0 is broken, so the
+    # age is what spared it above.
+    d="$(mksigncase lock-fresh-stale-zero)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    TBD_SIGNING_LOCK_STALE_SECONDS=0 sign_in_case "$d" ""; rc=$?
+    assert_eq "a stale age of 0: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "under a stale age of 0, a fresh lock is broken" "create-keychain" "$(cat "$d/log")"
+    assert_no_dir "under a stale age of 0, the lock is released afterwards" "$keychain.lock"
+}
+
+# A run that waited for the lock looks again once it has it: the run that held
+# the lock may have made the identity in the meantime, and making a second one
+# is what the lock is for preventing.
+test_sign_rechecks_for_the_identity_after_waiting() {
+    local d rc log keychain holder
+    d="$(mksigncase lock-wait)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    (
+        sleep 1
+        echo identity > "$keychain"
+        rm -rf "$keychain.lock"
+    ) > /dev/null 2>&1 &
+    holder=$!
+    printf '%s\n' "$holder" > "$keychain.lock/pid"
+
+    TBD_SIGNING_LOCK_WAIT_SECONDS=10 sign_in_case "$d" ""; rc=$?
+    wait "$holder" 2>/dev/null
+    log="$(cat "$d/log")"
+    assert_eq "a run that waited: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a run that waited signs with the other run's identity" "--sign TBD Dev Signing" "$log"
+    assert_not_contains "a run that waited creates no keychain" "create-keychain" "$log"
+    assert_not_contains "a run that waited runs no openssl" "openssl " "$log"
+    assert_eq "a run that waited prints no notice" "" "$(cat "$d/err")"
+    assert_no_dir "a run that waited releases the lock" "$keychain.lock"
 }
 
 test_sign_rejects_a_missing_bundle_argument() {
@@ -1966,7 +2380,18 @@ test_assemble_bundle_drops_a_stale_sidecar
 test_assemble_bundle_stages_every_dependency_resource_bundle
 test_assemble_bundle_skips_test_fixture_bundles
 test_assemble_bundle_clears_a_dropped_resource_bundle
-test_sign_prefers_the_stable_identity
+test_sign_uses_an_existing_identity
+test_sign_provisions_a_missing_identity
+test_sign_exports_legacy_pkcs12_when_openssl_takes_it
+test_sign_under_ci_never_provisions
+test_sign_falls_back_when_openssl_fails
+test_sign_falls_back_when_the_import_fails
+test_sign_survives_a_failed_provisioning_in_strict_mode
+test_sign_recreates_a_keychain_without_an_identity
+test_sign_leaves_a_foreign_keychain_alone
+test_sign_respects_a_live_lock_and_breaks_a_dead_one
+test_sign_breaks_a_lock_by_age_alone
+test_sign_rechecks_for_the_identity_after_waiting
 test_sign_rejects_a_missing_bundle_argument
 test_install_replaces_the_previous_bundle
 test_install_rejects_missing_arguments
