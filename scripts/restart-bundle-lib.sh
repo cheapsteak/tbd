@@ -1133,12 +1133,17 @@ default_cli_install_path() {
 }
 
 # True when <tbd_home> is TBD's default home for <home>: empty (TBD_HOME unset)
-# or exactly <home>/tbd. Any other TBD_HOME is a sandboxed instance, whose
-# builds must not re-point the developer's global `tbd`.
+# or the directory <home>/tbd, however it is spelled — with a trailing slash,
+# or through a symlink to it. Any other TBD_HOME is a sandboxed instance, whose
+# builds must not re-point the developer's global `tbd`. The app decides the
+# same way (TBDConstants.isDefaultConfigDir).
 #
 #   is_default_tbd_home <tbd_home> <home>
 is_default_tbd_home() {
-    [ -z "${1-}" ] || [ "${1-}" = "${2-}/tbd" ]
+    local tbd_home="${1-}" default_home="${2-}/tbd"
+    [ -z "$tbd_home" ] && return 0
+    [ "${tbd_home%/}" = "$default_home" ] && return 0
+    [ "$tbd_home" -ef "$default_home" ]
 }
 
 # Re-link an existing <install_path> (default_cli_install_path for both

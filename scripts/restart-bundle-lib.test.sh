@@ -1928,8 +1928,24 @@ test_restart_relinks_the_cli_only_after_starting_a_daemon() {
 test_is_default_tbd_home_wants_the_default_or_nothing() {
     assert_ok "an unset TBD_HOME is the default home" is_default_tbd_home "" "/x home"
     assert_ok "HOME/tbd is the default home" is_default_tbd_home "/x home/tbd" "/x home"
+    assert_ok "HOME/tbd/ is the default home, even before it exists" is_default_tbd_home "/x home/tbd/" "/x home"
     assert_fail "another TBD_HOME is a sandbox" is_default_tbd_home "/tmp/sandbox/tbd" "/x home"
     assert_fail "a TBD_HOME under the default is a sandbox" is_default_tbd_home "/x home/tbd/sub" "/x home"
+}
+
+# The same directory under another name, against a scratch HOME whose tbd
+# exists: a symlink to it, or the path with a trailing slash, is the default.
+test_is_default_tbd_home_follows_the_directory() {
+    local home="$TEST_TMP/default home"
+    mkdir -p "$home/tbd" "$TEST_TMP/sandbox home/tbd"
+    ln -s "$home/tbd" "$TEST_TMP/link to tbd"
+    assert_ok "a symlink to HOME/tbd is the default home" \
+        is_default_tbd_home "$TEST_TMP/link to tbd" "$home"
+    assert_ok "HOME/tbd/ is the default home" is_default_tbd_home "$home/tbd/" "$home"
+    assert_ok "a symlink with a trailing slash is the default home" \
+        is_default_tbd_home "$TEST_TMP/link to tbd/" "$home"
+    assert_fail "another existing tbd is a sandbox" \
+        is_default_tbd_home "$TEST_TMP/sandbox home/tbd" "$home"
 }
 
 test_build_identity_describes_the_tree
@@ -1997,6 +2013,7 @@ test_relink_warns_and_keeps_the_file_when_ln_fails
 test_relink_warns_and_keeps_the_file_when_mv_fails
 test_restart_relinks_the_cli_only_after_starting_a_daemon
 test_is_default_tbd_home_wants_the_default_or_nothing
+test_is_default_tbd_home_follows_the_directory
 
 # A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a
 # background job keeps a copy of this harness's EXIT trap until it execs, so a
