@@ -51,7 +51,7 @@ struct CLILaunchCheck {
     /// Check the install against `target`, the TBDCLI beside the running
     /// daemon. `userPreviouslyDismissed` is the coordinator's Not-Now flag for
     /// the missing-CLI prompt.
-    func run(target: String, userPreviouslyDismissed: Bool) async -> Outcome {
+    func run(target: String, userPreviouslyDismissed: Bool) -> Outcome {
         let state = installer.currentState(expectedTarget: target)
         if case .installed = state {
             recordInstalledIdentity()
@@ -68,7 +68,7 @@ struct CLILaunchCheck {
         case .prompt(let kind):
             return .prompt(kind)
         case .refreshSilently:
-            return await refreshSilently(target: target)
+            return refreshSilently(target: target)
         }
     }
 
@@ -81,10 +81,13 @@ struct CLILaunchCheck {
         userDefaults.set(identity.storageString, forKey: Self.recordedIdentityKey)
     }
 
-    private func refreshSilently(target: String) async -> Outcome {
+    /// Re-link without asking. Only the link: `install(target:)` would also
+    /// run the PATH probe, which starts the user's login shell, and nothing
+    /// here would show its answer.
+    private func refreshSilently(target: String) -> Outcome {
         let installPath = installer.installPath
         do {
-            _ = try await installer.install(target: target)
+            try installer.replaceLink(target: target)
         } catch {
             logger.error("Silent CLI refresh at \(installPath, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             return .silentRefreshFailed(error)

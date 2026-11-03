@@ -50,7 +50,7 @@ final class CLIInstallerCoordinator {
         }
         hasCheckedThisSession = true
 
-        let outcome = await launchCheck.run(target: target, userPreviouslyDismissed: notInstalledDismissed)
+        let outcome = launchCheck.run(target: target, userPreviouslyDismissed: notInstalledDismissed)
         switch outcome {
         case .upToDate:
             logger.debug("CLI installed and current at \(self.installer.installPath, privacy: .public)")

@@ -315,19 +315,36 @@ public struct CLIInstaller: Sendable {
         CLIFileIdentity(regularFileAt: installPath)
     }
 
-    /// The hidden sibling `install(target:)` links to before renaming it over
-    /// `installPath`: `.<name>.tbd-install` in the same directory, so the
-    /// rename never crosses a filesystem.
+    /// The hidden sibling `replaceLink(target:)` links to before renaming it
+    /// over `installPath`: `.<name>.tbd-install` in the same directory, so the
+    /// rename never crosses a filesystem. `relink_installed_cli` in
+    /// `scripts/restart-bundle-lib.sh` stages through the same name, so either
+    /// one clears a leftover from the other.
     static func stagingPath(forInstallPath installPath: String) -> String {
         let directory = (installPath as NSString).deletingLastPathComponent
         let name = (installPath as NSString).lastPathComponent
         return (directory as NSString).appendingPathComponent(".\(name).tbd-install")
     }
 
-    /// Create or replace the install path as a hard link to `target`.
-    /// Idempotent. A failure leaves whatever was at the install path as it
-    /// was.
+    /// Create or replace the install path as a hard link to `target`, then
+    /// report whether its directory is on the login shell's PATH. The second
+    /// step runs `pathProbe`, which by default starts the user's login shell.
     public func install(target: String) async throws -> CLIInstallResult {
+        try replaceLink(target: target)
+        let pathInfo = await pathStatus()
+        return CLIInstallResult(
+            installPath: installPath,
+            target: target,
+            onPath: pathInfo.onPath,
+            suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
+            exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
+        )
+    }
+
+    /// Create or replace the install path as a hard link to `target`, and
+    /// nothing else: no PATH probe. Idempotent. A failure leaves whatever was
+    /// at the install path as it was.
+    public func replaceLink(target: String) throws {
         let fm = FileManager.default
         let parent = (installPath as NSString).deletingLastPathComponent
         if !fm.fileExists(atPath: parent) {
@@ -390,15 +407,6 @@ public struct CLIInstaller: Sendable {
         // may succeed without removing the sibling. Remove it; after a real
         // rename this finds nothing.
         unlink(stagingPath)
-
-        let pathInfo = await pathStatus()
-        return CLIInstallResult(
-            installPath: installPath,
-            target: target,
-            onPath: pathInfo.onPath,
-            suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
-            exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
-        )
     }
 
     /// Compute current path status (whether the install path's parent dir is

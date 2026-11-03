@@ -674,6 +674,32 @@ func aFailedLinkLeavesTheExistingFileIntact(linkError: Int32) async throws {
     #expect(entries == ["tbd"])
 }
 
+@Test func replaceLinkLinksWithoutRunningThePathProbe() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+
+    let installer = CLIInstaller(
+        installPath: installPath,
+        homeDir: home.path,
+        pathProbe: {
+            Issue.record("replaceLink ran the PATH probe")
+            return nil
+        }
+    )
+    try installer.replaceLink(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    #expect(installed != nil)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+}
+
 @Test func installRemovesAStagingLinkLeftByAnInterruptedInstall() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
