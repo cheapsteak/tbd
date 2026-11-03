@@ -4,8 +4,8 @@
 
 The file viewer pane plays audio and video files with the macOS system player
 (AVKit's `AVPlayerView`). Which files qualify comes from the system at run
-time, not from a list in TBD: a file is media when its type is audio or video
-and AVFoundation says it can play that type.
+time, not from a list in TBD: a file is media when it is not text, its type is
+audio or video, and AVFoundation says it can play that type.
 
 The player never starts by itself, pauses whenever its view is removed or
 hidden, and only one file plays at a time across the app. Audio shows as a compact card
@@ -30,6 +30,13 @@ Measured on macOS 27.0.1 (26A434) on 2026-11-03.
 - **The list includes text formats**: playlists (m3u, m3u8, pls) and captions
   (vtt, webvtt, ttml, scc, itt). These are not audio or video content, so the
   type check below keeps them on the text view.
+- **Source files share extensions with playable types.** `ts` (TypeScript)
+  looks up as `public.mpeg-2-transport-stream`, and `mts` (a TypeScript
+  module) as `public.avchd-mpeg-2-transport-stream`. Both conform to `.movie`
+  and are playable. On a machine with VLC installed, `mod`, as in Go's
+  `go.mod`, looks up as `org.videolan.mod`, a playable audio type, and `ps`
+  can resolve to an MPEG program stream. A type check alone would give these
+  text files a player.
 - **Hidden worktrees stay alive.** `WorktreePager` is an `NSTabViewController`,
   so the views of a worktree the user switched away from are detached from the
   window but not destroyed. An `AVPlayerView` detached while playing kept
@@ -43,21 +50,32 @@ Measured on macOS 27.0.1 (26A434) on 2026-11-03.
 ### Which files get the player
 
 The viewer decides a file's view in this order: rendered markdown, image,
-**media**, text, then the "Cannot preview" screen.
+text, **media**, then the "Cannot preview" screen.
 
-A file is media when both hold:
+A file is text when its first 8 KB decodes as UTF-8 and holds no NUL byte.
+The NUL test is the one Git uses to call a file binary. Every audio and video
+container TBD plays puts a NUL byte in its first few bytes (WAV, MP4 and MOV
+chunk sizes, the ID3 header of an MP3, the Ogg and CAF headers), so no real
+media file reads as text. A multi-byte character cut off at the 8 KB edge
+does not make a file binary.
+
+Text comes before media because of the extension collisions above: a
+TypeScript file or a `go.mod` is text, whatever type its extension looks up
+as.
+
+A file that is not text is media when both hold:
 
 - its `UTType`, looked up from the file extension, conforms to `.audio` or
   `.movie`
 - that type is in `AVURLAsset.audiovisualTypes()`
 
-Playlists and captions fail the first test and reach the text view. A webm or
+Playlists and captions are text, and they also fail the first test. A webm or
 mkv file can pass the first test, through a type another app registers, but
 fails the second, so it reaches the "Cannot preview" screen.
 
 ### Audio
 
-A compact card centered in the pane, with these parts:
+A compact card centered in the pane's visible area, with these parts:
 
 - a music symbol
 - the file name
@@ -70,8 +88,13 @@ QuickTime logo over an empty area.
 
 ### Video
 
-An `AVPlayerView` with inline controls fills the pane, the way an image does
-today.
+An `AVPlayerView` with inline controls fills the pane's visible area, the way
+an image does today.
+
+The viewer stacks files in a `ScrollView`, which proposes no height, and an
+`AVPlayerView` has no height of its own. So the player sizes itself against
+the scroll view's visible area with `containerRelativeFrame`, instead of
+taking the pane over the way a rendered markdown document does.
 
 ### Multi-file selection
 
@@ -143,17 +166,25 @@ New files live in `Sources/TBDApp/Panes/MediaPreview/`, so
     `body`.
 - **`MediaPlaybackCoordinator`**
   - **What it does:** enforces "one at a time".
-  - **How:** each `MediaPlayerView` registers its player. The coordinator
-    observes each player's `timeControlStatus`, and when one starts playing it
-    pauses the rest. It holds players weakly.
+  - **How:** each `MediaPlayerView` registers with the coordinator and
+    observes its own player's `rate`. When the rate turns non-zero, the view
+    tells the coordinator, which pauses every other registered player. It
+    holds them weakly.
+  - **Why `rate`:** `play()` sets it at once. `timeControlStatus` passes
+    through a waiting state that depends on the audio output device, so a
+    machine with no output, like a CI runner, could never report playing.
   - **How views get it:** through the SwiftUI environment, with an app-wide
     default instance, so a test can supply its own.
 
 ### Changes to existing code
 
 - **`FilePreviewView`** routes through `FilePreviewKind`. The UTF-8 sniff that
-  today reads 8 KB from disk inside `body` moves into the existing
-  `.task(id: path#revision)` alongside the rest of the classification.
+  today reads 8 KB from disk inside `body` moves into a
+  `.task(id: path#revision)` alongside the rest of the classification. The
+  sniff also gains the NUL test and stops calling a file binary for a
+  character cut at the 8 KB edge. A valid UTF-8 file with a NUL byte near its
+  start, which showed as text before, now reaches the "Cannot preview" screen,
+  as Git treats it.
 - **`BinaryFallbackView`** gets the two buttons above. Reveal in Finder calls
   the existing `revealInFinder(path:)` helper in `HeaderFileActions.swift`.
 - **`TranscriptQuickLook`** becomes `QuickLookPresenter` and moves out of
@@ -189,11 +220,19 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - mov and mp4 classify as video
   - mkv, absent from the set, classifies as unpreviewable
   - m3u and vtt classify as text
+  - ts, mts and `go.mod` that read as text classify as text, though their
+    types are in the playable set
   - png classifies as an image
   - md classifies as rendered markdown
 - **`FilePreviewKind` against the real system list**: m4a, wav and mov classify
   as media. This guards the conformance assumption if the system renames a
   type.
+- **The text sniff:**
+  - ASCII and multi-byte UTF-8 read as text
+  - a sample with a NUL byte does not
+  - invalid UTF-8 does not
+  - a file whose 8 KB sample ends partway through a multi-byte character
+    reads as text
 - **`MediaPlayerView`**, in an offscreen window, with a short wav the test
   writes with `AVAudioFile`:
   - after load, `rate == 0`
@@ -211,7 +250,7 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
 Live verification after `scripts/restart.sh`, with cua-driver window captures:
 
 1. m4a, wav and mov files opened from a terminal link start paused and play on
-   click.
+   click. A `.ts` source file and a `go.mod` still open as highlighted text.
 2. Audio playing, then a switch to another worktree, stops. Switching back
    finds it still paused.
 3. With file A playing in one pane, starting file B in another pauses A.
