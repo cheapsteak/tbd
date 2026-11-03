@@ -144,15 +144,82 @@ extension AppState {
     func selectSession(_ summary: SessionSummary, worktreeID: UUID) async {
         selectedSessionIDs[worktreeID] = summary.sessionId
         selectedClosedTerminalIDs.removeValue(forKey: worktreeID)
-        guard sessionTranscripts[summary.sessionId] == nil else { return }
-        sessionTranscriptLoading.insert(summary.sessionId)
-        defer { sessionTranscriptLoading.remove(summary.sessionId) }
+        let client = daemonClient
+        let path = summary.filePath
+        let tailLimit = TranscriptTailFirstOpen.tailLimit
+        await loadSessionTranscript(
+            sessionID: summary.sessionId,
+            readTail: { await client.sessionMessages(filePath: path, tailLimit: tailLimit) },
+            readFull: { try await client.sessionMessages(filePath: path) })
+    }
+
+    /// Load a session's transcript into `sessionTranscripts` tail first, as
+    /// the live pane opens (see `TranscriptTailFirstOpen`): publish the last
+    /// items and clear the loading flag, so the table mounts small, then
+    /// publish the full transcript, which reaches the mounted table as an
+    /// update. Both reads run off the main thread. A nil tail means there is
+    /// no tail read (the RPC fallback), and the one full read runs under the
+    /// spinner; so does an empty one, which has nothing to show.
+    ///
+    /// The store is shared with the live pane, which may be streaming this
+    /// same session, so neither publish may overwrite what another writer put
+    /// there meanwhile: the tail lands only in an empty slot, and the full
+    /// transcript only in a slot that is still empty or still holds exactly
+    /// the tail this load wrote (`mayPublishFullTranscript`). An empty full
+    /// read keeps a tail already on screen.
+    ///
+    /// The readers are parameters so a test can run each phase against the
+    /// store; `selectSession` passes the daemon client's two reads.
+    func loadSessionTranscript(
+        sessionID: String,
+        readTail: @Sendable () async -> [TranscriptItem]?,
+        readFull: @Sendable () async throws -> [TranscriptItem]
+    ) async {
+        guard sessionTranscripts[sessionID] == nil else { return }
+        sessionTranscriptLoading.insert(sessionID)
+        defer { endSessionTranscriptLoading(sessionID) }
+
+        var publishedTail: [TranscriptItem]?
+        if let tail = await readTail(), !tail.isEmpty, sessionTranscripts[sessionID] == nil {
+            sessionTranscripts[sessionID] = tail
+            touchSessionTranscript(sessionID)
+            publishedTail = tail
+            endSessionTranscriptLoading(sessionID)
+        }
+
         do {
-            let messages = try await daemonClient.sessionMessages(filePath: summary.filePath)
-            sessionTranscripts[summary.sessionId] = messages
-            touchSessionTranscript(summary.sessionId)
+            let messages = try await readFull()
+            guard Self.mayPublishFullTranscript(
+                messages, current: sessionTranscripts[sessionID], publishedTail: publishedTail
+            ) else { return }
+            sessionTranscripts[sessionID] = messages
+            touchSessionTranscript(sessionID)
         } catch {
-            // leave empty, user can try again
+            // leave empty, user can try again. Only the RPC read throws, and
+            // it runs with no tail published, so the slot is still empty.
+        }
+    }
+
+    /// Whether the full transcript `full` may replace what the store holds for
+    /// its session now. An empty slot takes it. A slot holding exactly the tail
+    /// this load published takes it unless `full` is empty: the full read can come
+    /// back empty where the tail did not (a file that is not valid UTF-8 as a
+    /// whole parses to nothing, while the tail decodes only its last chunk),
+    /// and the rows already on screen are worth more than "No messages found".
+    /// Anything else came from another writer, such as a live pane streaming
+    /// the session.
+    nonisolated static func mayPublishFullTranscript(
+        _ full: [TranscriptItem], current: [TranscriptItem]?, publishedTail: [TranscriptItem]?
+    ) -> Bool {
+        guard let current else { return true }
+        return current == publishedTail && !full.isEmpty
+    }
+
+    /// Clear a session's loading flag, without publishing a change when it is
+    /// already clear: the history view observes the set.
+    private func endSessionTranscriptLoading(_ sessionID: String) {
+        if sessionTranscriptLoading.contains(sessionID) {
+            sessionTranscriptLoading.remove(sessionID)
         }
     }
 

@@ -64,6 +64,17 @@ struct TableTranscriptView: NSViewRepresentable {
     /// each `updateNSView` hands the card the mount's earlier-history state.
     /// `.none` (the default) mounts no rail and no gutter.
     var promptRail: PromptRailMount = .none
+    /// Called once, when the table's open has settled: two main-queue turns
+    /// after `makeNSView`, with the first layout done and the re-pinned scroll
+    /// to the end applied. A table out of its window by then (a kept-alive
+    /// worktree's pane, which `WorktreePager` detaches) is reported a turn
+    /// after it is next in one (`Coordinator.reportOpenSettled`). A table
+    /// SwiftUI tore down is never in a window again, so its report never
+    /// re-arms a widen for a session no longer shown. Session History widens
+    /// its windowed node list here, so the rest of a long transcript reaches
+    /// a table that is already in the window as an update rather than as a
+    /// mount (`TranscriptTailFirstOpen`). Nil where nothing waits on the open.
+    var onOpenSettled: (@MainActor () -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -163,6 +174,7 @@ struct TableTranscriptView: NSViewRepresentable {
 
         // Pin the initial open to the newest message (last row), deferred so the
         // table has performed its first layout pass and row frames exist.
+        let onOpenSettled = self.onOpenSettled
         DispatchQueue.main.async {
             coordinator.scrollToEnd(animated: false)
             // Re-pin once more on the NEXT runloop turn. The first scroll-to-end
@@ -179,6 +191,9 @@ struct TableTranscriptView: NSViewRepresentable {
                 let settledMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
                 Self.log.debug(
                     "table.open.firstLayoutSettled ms=\(settledMs, format: .fixed(precision: 1), privacy: .public)")
+                if let onOpenSettled {
+                    coordinator.reportOpenSettled(onOpenSettled)
+                }
             }
         }
 
@@ -288,6 +303,30 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The near-top answer last reported, so `onNearTop` fires on transitions
         /// only. Nil until the first report.
         private var lastNearTop: Bool?
+
+        /// The `onOpenSettled` report `makeNSView` could not make because the
+        /// table was out of a window when its open settled. The container
+        /// makes it once the table is back in one
+        /// (`TranscriptContainerView.viewDidMoveToWindow`). Cleared when made,
+        /// so a mount reports at most once.
+        private(set) var pendingOpenSettled: (@MainActor () -> Void)?
+
+        /// Make the open-settled report now if the table is in a window, and
+        /// hold it until the table is in one otherwise.
+        func reportOpenSettled(_ report: @escaping @MainActor () -> Void) {
+            guard tableView?.window != nil else {
+                pendingOpenSettled = report
+                return
+            }
+            pendingOpenSettled = nil
+            report()
+        }
+
+        /// Make the held open-settled report, if one is held.
+        func reportPendingOpenSettled() {
+            guard let pending = pendingOpenSettled else { return }
+            reportOpenSettled(pending)
+        }
 
         /// Where the reader was looking when a prepend arrived: the first visible
         /// row that carries a stable id and that row's offset from the viewport

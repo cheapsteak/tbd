@@ -56,8 +56,17 @@ enum TranscriptDetailReader {
             attachment: detail.attachment)
     }
 
-    /// The whole transcript for a session file — the history pane's one read.
+    /// The whole transcript for a session file — the history pane's full read.
     static func messages(path: String) -> [TranscriptItem] {
         TranscriptParser.parse(filePath: path)
+    }
+
+    /// The last `limit` items of a session file — the history pane's first,
+    /// small read, which lets its table mount on a screenful before the full
+    /// read lands. `parseTail` builds them with the same code as the full
+    /// parse, so they are the full read's bottom and the swap leaves the
+    /// bottom unchanged.
+    static func tailMessages(path: String, limit: Int) -> [TranscriptItem] {
+        TranscriptParser.parseTail(filePath: path, limit: limit)
     }
 }

@@ -374,6 +374,20 @@ struct SessionTranscriptView: View {
     /// streaming update (follow the tail).
     @State private var activityToggleToken: Int = 0
 
+    /// The session whose table has mounted and settled its open, and so gets
+    /// every render node. Any other session's table mounts on only the last
+    /// `TranscriptTailFirstOpen.tailLimit`, whatever the store already holds —
+    /// a session reopened from the shared store would otherwise mount the
+    /// table holding every row, which is the 18–21 s hang. Keyed by session
+    /// because this view persists across selection changes; only the table is
+    /// rebuilt per session (`.id(sessionId)`).
+    ///
+    /// Cleared on every selection change, so a session reselected after one
+    /// that mounted no table (no messages, or still loading) mounts windowed
+    /// again. A remount while the same session stays selected (its store entry
+    /// evicted, then refilled whole) keeps it, and is not covered.
+    @State private var widenedSessionID: String?
+
     /// Per-pane memo for `TranscriptPresentation.build`, which is called inline
     /// in `body` and so re-ran on every body evaluation — and this view observes
     /// `AppState`, so any unrelated publish paid for it. Per-pane rather than
@@ -498,6 +512,10 @@ struct SessionTranscriptView: View {
                 // resolver closure calls, so the value handed to the table and
                 // the value the resolver reads cannot disagree.
                 let linkRoot = Self.historyWorktreePath(in: appState, worktreeID: worktreeID)
+                // Only the table is windowed; the index and everything else
+                // read the whole presentation.
+                let tableNodes = TranscriptTailFirstOpen.mountedNodes(
+                    presentation.nodes, sessionID: sessionId, widenedSessionID: widenedSessionID)
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
@@ -528,8 +546,11 @@ struct SessionTranscriptView: View {
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
                         linkRoot: linkRoot,
-                        nodesProvider: { presentation.nodes },
-                        promptRail: .rail(earlier: nil)
+                        nodesProvider: { tableNodes },
+                        promptRail: .rail(earlier: nil),
+                        // The rest arrives as an update to the table now in
+                        // the window, as the live pane's backfill does.
+                        onOpenSettled: { [sessionId] in widenedSessionID = sessionId }
                     )
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {
@@ -580,6 +601,16 @@ struct SessionTranscriptView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // On the outer stack, which exists whichever branch shows, so the
+        // reset happens even when the new session mounts no table. Not in an
+        // `onDisappear`: a removal transition can run that after the next
+        // session's table has already settled and widened, leaving that table
+        // stuck on its last `tailLimit` rows. This runs in the same update as
+        // the new table's `makeNSView`, two main-queue turns before its
+        // `onOpenSettled`.
+        .onChange(of: sessionId) { _, _ in
+            widenedSessionID = nil
+        }
     }
 
     private func openTranscriptItem(_ itemID: String) {
