@@ -86,8 +86,7 @@ builds its command there, so all of them get the flag:
 
 The flag precedes the `resume` subcommand, as `--disable` does; Codex parses it
 there. TBD checks no Codex version for this flag and records nothing per tab:
-the flag is part of every
-launch.
+the flag is part of every launch.
 
 `CodexUsageFetcher` and `CodexSessionImporter` start `codex app-server --stdio`
 themselves. They are servers, not TUIs, and `--no-daemon` does not apply.
@@ -107,27 +106,28 @@ like any tmux row.
 
 ### Docs
 
-- The Codex paragraph in the env-marker spec's Part 2 states the current design:
-  Codex tabs launch with `--no-daemon`, so their hooks run inside the tab and the
-  guard treats them like any other tab. The "can't tell" list drops "a Codex
-  tab".
+- The env-marker spec's Part 2 says Codex tabs launch with `--no-daemon`, so
+  their hooks run inside the tab and the guard treats them like any other tab.
+  Its "can't tell" list names no Codex case.
 - The doc comments on `HookCallerDescent` and on the execution-mode flags say
   why the flag is there.
-- `CLAUDE.md` gains "Support only the current agent CLIs": no version checks,
-  `--help` probes or fallbacks for older releases of Claude Code or Codex.
+- `CLAUDE.md` section "Support only the current agent CLIs" rules out version
+  checks, `--help` probes and fallbacks for older releases of Claude Code or
+  Codex.
 
 ## Why no flag
 
-On Codex 0.166.0 the launch already runs embedded, so adding `--no-daemon`
-changes nothing a user can see. Removing the exemption restores the theory the
-guard already holds — a hook speaks for the tab it runs in — for one more kind
-of tab, and the guard still refuses only on proof and logs each refusal at
-`.info`. The env-marker spec shipped the guard unflagged on the same reasoning.
+On Codex 0.166.0 TBD's other launch flags already make Codex run embedded, so
+`--no-daemon` changes nothing a user can see. Checking Codex tabs by descent
+applies the theory the guard already holds — a hook speaks for the tab it runs
+in — to one more kind of tab, and the guard still refuses only on proof and
+logs each refusal at `.info`. The env-marker spec ships the guard unflagged on
+the same reasoning.
 
 ## Resources
 
-The change creates no durable resource. It removes a path to one: a TBD tab can
-no longer start Codex's shared server, which would outlive the tab, install a
+The design creates no durable resource, and it closes a path to one: a TBD tab
+never starts Codex's shared server, which would outlive the tab, install a
 binary under the Codex home, and leave a `pid-update-loop` process behind.
 
 ## Failure modes
@@ -141,8 +141,8 @@ binary under the Codex home, and leave a `pid-update-loop` process behind.
 
 ## Testing
 
-- **Command builder.** Every expected Codex command string gains `--no-daemon`,
-  and a test checks that it precedes `resume`.
+- **Command builder.** Every expected Codex command string carries
+  `--no-daemon`, and a test checks that it precedes `resume`.
 - **Descent.** A caller whose complete ancestry passes outside a Codex tab's
   job is `.provenForeign`, for the per-tab and per-worktree verdicts. A caller
   inside a Codex tab's job is `.inside`.
