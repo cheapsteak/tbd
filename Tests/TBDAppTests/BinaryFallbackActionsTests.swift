@@ -29,4 +29,15 @@ struct BinaryFallbackActionsTests {
         #expect(presenter.previewURL?.path == "/x/a.zip")
         #expect(rec.selected.isEmpty)
     }
+
+    /// With no Quick Look panel (`QLPreviewPanel.shared()` returning nil), the
+    /// screen still keeps its promise not to open the file in its default
+    /// app: the fallback reveals it in Finder.
+    @Test func quickLookRevealsWhenThePanelIsUnavailable() {
+        let rec = RecordingWorkspace()
+        let presenter = QuickLookPresenter()
+        presenter.showPanel = { [unowned presenter] in presenter.runUnavailableFallback() }
+        BinaryFallbackActions.live(workspace: rec, presenter: presenter).openQuickLook("/x/a.zip")
+        #expect(rec.selected == [[URL(fileURLWithPath: "/x/a.zip")]])
+    }
 }

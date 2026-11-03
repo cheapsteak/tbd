@@ -21,9 +21,11 @@ import os
 /// through exactly this app-delegate chain, and it reported
 /// `isVisible == true`, a non-nil `currentController`, and the expected
 /// `currentPreviewItem` while rendering the picture. QuickLookUI reads nothing
-/// out of the bundle here, so no `bundleIdentifier` guard is warranted; the only
-/// fallback is for `sharedPreviewPanel` coming back nil, which opens the file in
-/// its default app instead of failing silently.
+/// out of the bundle here, so no `bundleIdentifier` guard is warranted. The only
+/// fallback is for `QLPreviewPanel.shared()` coming back nil, and each caller
+/// chooses it per call so a click never does nothing: a transcript attachment
+/// opens in its default app, while the "Cannot preview" screen, which promises
+/// never to do that, reveals the file in Finder.
 @MainActor
 final class QuickLookPresenter: NSObject, @MainActor QLPreviewPanelDataSource {
     static let shared = QuickLookPresenter()
@@ -35,23 +37,38 @@ final class QuickLookPresenter: NSObject, @MainActor QLPreviewPanelDataSource {
     /// `acceptsPreviewPanelControl` synchronously inside that call.
     private(set) var previewURL: URL?
 
+    /// What happens to `previewURL` when there is no panel to show it in, as
+    /// the last `preview(url:ifUnavailable:)` call chose.
+    private var unavailableFallback: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
+
     /// Test seam: how the panel is actually put on screen. A test replaces this
     /// so the click path can be exercised without a real Quick Look panel
     /// appearing over the developer's screen mid-run. Production leaves it alone.
     var showPanel: @MainActor () -> Void = { QuickLookPresenter.showSharedPanel() }
 
-    /// Preview `url`, or open it in its default app if the panel is unavailable.
-    func preview(url: URL) {
+    /// Preview `url`. If the panel is unavailable, `ifUnavailable` gets the
+    /// file instead; the default opens it in its default app.
+    func preview(
+        url: URL,
+        ifUnavailable: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
+    ) {
         previewURL = url
+        unavailableFallback = ifUnavailable
         showPanel()
+    }
+
+    /// The panel-unavailable branch: hands `previewURL` to the caller's
+    /// fallback rather than letting the click do nothing. Internal so a test
+    /// can run it without making `QLPreviewPanel.shared()` return nil.
+    func runUnavailableFallback() {
+        guard let url = previewURL else { return }
+        unavailableFallback(url)
+        Self.log.debug("quick look unavailable, ran the caller's fallback")
     }
 
     private static func showSharedPanel() {
         guard let panel = QLPreviewPanel.shared() else {
-            // No panel to drive: opening in Preview.app is the honest fallback,
-            // rather than a click that does nothing.
-            if let url = shared.previewURL { NSWorkspace.shared.open(url) }
-            log.debug("quick look unavailable, opened externally")
+            shared.runUnavailableFallback()
             return
         }
         if panel.isVisible {

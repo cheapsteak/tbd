@@ -2,7 +2,8 @@ import AppKit
 
 /// The two actions on the file viewer's "Cannot preview" screen. Neither one
 /// opens the file in its default app: Quick Look previews it in place and
-/// Finder reveals it. Closures so a test can build the view with recording
+/// Finder reveals it. When the Quick Look panel is unavailable, Quick Look
+/// reveals the file too. Closures so a test can build the view with recording
 /// stand-ins.
 @MainActor
 struct BinaryFallbackActions {
@@ -14,7 +15,11 @@ struct BinaryFallbackActions {
         presenter: QuickLookPresenter = .shared
     ) -> BinaryFallbackActions {
         BinaryFallbackActions(
-            openQuickLook: { path in presenter.preview(url: URL(fileURLWithPath: path)) },
+            openQuickLook: { path in
+                presenter.preview(
+                    url: URL(fileURLWithPath: path),
+                    ifUnavailable: { url in revealInFinder(path: url.path, workspace: workspace) })
+            },
             reveal: { path in revealInFinder(path: path, workspace: workspace) }
         )
     }
