@@ -2,15 +2,14 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// The sidebar's footer row: the Add Repository split button and the filter
-/// menu, with the clone sheet the split button presents. It is
+/// The sidebar's footer row: the Add Repository split button at its leading
+/// edge, with the clone sheet the split button presents. It is
 /// `WindowBottomBarMetrics.height` tall, as the status bar beside it is.
 ///
-/// The filter menu binds `SidebarBuildOptions.showHiddenReposKey`, the key the
-/// native outline reads, so flipping it here re-filters the outline.
+/// The sidebar's filtering, Show Hidden Repos included, is the toolbar's repo
+/// filter (`MainToolbarController`), so the footer holds nothing else.
 struct SidebarFooter: View {
     @Environment(AppState.self) var appState
-    @AppStorage(SidebarBuildOptions.showHiddenReposKey) private var showHiddenRepos: Bool = false
     @State private var showingClone = false
 
     /// The spacing between the plus and the menu button. The menu button starts
@@ -35,40 +34,39 @@ struct SidebarFooter: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            // A split button: a click on the label opens the folder picker, as it
-            // always has; the arrow offers cloning too. The plus sits outside the
-            // menu because the borderless menu button places its label's image
-            // with its own gap and baseline; it runs the same action as clicking
-            // the label, and is the repo header's 10 pt plus.
-            HStack(spacing: SidebarFooter.plusGap) {
-                Button(action: addRepo) {
-                    plusImage
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                // The plus is a visual extension of the menu's label; the menu
-                // already exposes the action to accessibility.
-                .accessibilityHidden(true)
-                .offset(y: -SidebarFooter.plusLift)
-                Menu {
-                    Button("Local Folder…", action: addRepo)
-                    Button("Clone from URL…") { showingClone = true }
-                } label: {
-                    Text("Add Repository")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } primaryAction: {
-                    addRepo()
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .foregroundStyle(.secondary)
+        // A split button: a click on the label opens the folder picker, as it
+        // always has; the arrow offers cloning too. The plus sits outside the
+        // menu because the borderless menu button places its label's image
+        // with its own gap and baseline; it runs the same action as clicking
+        // the label, and is the repo header's 10 pt plus.
+        HStack(spacing: SidebarFooter.plusGap) {
+            Button(action: addRepo) {
+                plusImage
+                    .contentShape(Rectangle())
             }
-            Spacer()
-            filterMenu
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            // The plus is a visual extension of the menu's label; the menu
+            // already exposes the action to accessibility.
+            .accessibilityHidden(true)
+            .offset(y: -SidebarFooter.plusLift)
+            Menu {
+                Button("Local Folder…", action: addRepo)
+                Button("Clone from URL…") { showingClone = true }
+            } label: {
+                Text("Add Repository")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } primaryAction: {
+                addRepo()
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .foregroundStyle(.secondary)
         }
+        // The footer spans the column, so its `.bar` backdrop does, with the
+        // split button at the leading edge.
+        .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $showingClone) {
             CloneRepositorySheet()
         }
@@ -76,34 +74,6 @@ struct SidebarFooter: View {
         // The status bar's height, so the footer lines up with it across the
         // split; the content is centred in it.
         .frame(height: WindowBottomBarMetrics.height)
-    }
-
-    private var hiddenCount: Int {
-        appState.repos.filter { $0.hidden }.count
-    }
-
-    private var filterMenu: some View {
-        Menu {
-            Toggle(isOn: $showHiddenRepos) {
-                if hiddenCount > 0 {
-                    Text("Show hidden repos (\(hiddenCount))")
-                } else {
-                    Text("Show hidden repos")
-                }
-            }
-        } label: {
-            Image(systemName: showHiddenRepos
-                  ? "line.3.horizontal.decrease.circle.fill"
-                  : "line.3.horizontal.decrease.circle")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Filter")
     }
 
     private func addRepo() {

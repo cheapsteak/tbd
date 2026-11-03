@@ -101,6 +101,54 @@ struct MainToolbarSnapshotTests {
         }
     }
 
+    /// The Show Hidden Repos row names how many repos are hidden, and only
+    /// when there are any: "Show Hidden Repos" with none, then the count in
+    /// parentheses, which follows `repos` as repos are hidden.
+    @Test func showHiddenReposRowCountsHiddenRepos() {
+        withState { state, _, _ in
+            let none = MainToolbarSnapshot.make(from: state).filter
+            #expect(none.hiddenRepoCount == 0)
+            #expect(none.showHiddenReposRowTitle == "Show Hidden Repos")
+
+            state.repos[1].hidden = true
+            let one = MainToolbarSnapshot.make(from: state).filter
+            #expect(one.hiddenRepoCount == 1)
+            #expect(one.showHiddenReposRowTitle == "Show Hidden Repos (1)")
+
+            state.repos[0].hidden = true
+            let two = MainToolbarSnapshot.make(from: state).filter
+            #expect(two.hiddenRepoCount == 2)
+            #expect(two.showHiddenReposRowTitle == "Show Hidden Repos (2)")
+        }
+    }
+
+    /// The snapshot carries the Show Hidden Repos key from `AppState`'s own
+    /// store: off while unset, then each value written, and a flip makes a
+    /// snapshot unequal to the one before, which is what makes the apply the
+    /// defaults watch queues run. Showing hidden repos never makes the filter
+    /// active: the button's tint, tool tip and accessibility value stay as
+    /// they are with no repo chosen.
+    @Test func showsHiddenReposFollowsTheKey() {
+        withState { state, _, _ in
+            let unset = MainToolbarSnapshot.make(from: state)
+            #expect(unset.filter.showsHiddenRepos == false)
+
+            state.userDefaults.set(true, forKey: SidebarBuildOptions.showHiddenReposKey)
+            let on = MainToolbarSnapshot.make(from: state)
+            #expect(on.filter.showsHiddenRepos)
+            #expect(on != unset)
+            #expect(on.filter.isActive == false)
+            #expect(on.filter.help == "Filter sidebar by repository")
+            #expect(on.filter.accessibilityValue == "All Repos")
+
+            state.userDefaults.set(false, forKey: SidebarBuildOptions.showHiddenReposKey)
+            let off = MainToolbarSnapshot.make(from: state)
+            #expect(off.filter.showsHiddenRepos == false)
+            #expect(off != on)
+            #expect(off == unset)
+        }
+    }
+
     @Test func serversNeedOneSelectedWorktreeAndAList() {
         withState { state, _, worktrees in
             let a = worktrees[0].id
@@ -231,7 +279,8 @@ struct MainToolbarSnapshotTests {
 
     @Test func layoutStateMapsPresence() {
         let filter = RepoFilterPresentation(
-            options: [.init(id: nil, title: "All Repos")], selected: nil, selectedIsKnown: true)
+            options: [.init(id: nil, title: "All Repos")], selected: nil, selectedIsKnown: true,
+            hiddenRepoCount: 0, showsHiddenRepos: false)
         let servers = ServersPresentation(
             title: "Servers", isRunning: false, primaryURL: nil,
             help: "Dev servers", accessibilityLabel: "Dev servers")

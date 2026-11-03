@@ -439,6 +439,52 @@ struct SidebarOutlineControllerTests {
         #expect(h.shownIDs == h.freshTree().visibleIDs)
     }
 
+    // MARK: The toolbar's repo filter
+
+    /// The toolbar's Show Hidden Repos row writes the store the outline
+    /// reads, `AppState.userDefaults`, which is the store the app hands the
+    /// outline: choosing it shows a hidden repo's section, dimmed, and
+    /// choosing it again takes the section away. A hidden repo chosen in the
+    /// repo filter shows with the toggle off, rather than leaving the outline
+    /// without a section. The toolbar controller is the app's, built over
+    /// the same `AppState`.
+    @Test func toolbarShowHiddenReposRowReFiltersTheOutline() throws {
+        let h = OutlineHarness("toolbarShowHiddenRepos")
+        defer { h.tearDown() }
+        let shown = Repo(path: "/tmp/acme-shown", displayName: "shown")
+        let hidden = Repo(path: "/tmp/acme-hidden", displayName: "hidden", hidden: true)
+        let shownRow = Self.row("work", shown)
+        let hiddenRow = Self.row("secret", hidden)
+        h.state.repos = [shown, hidden]
+        h.state.worktrees = [shown.id: [shownRow], hidden.id: [hiddenRow]]
+        h.mount()
+        try #require(!h.shownIDs.contains(.repoHeader(hidden.id)), "The hidden repo must start out of the outline")
+
+        let split = Self.plainSplit()
+        let toolbar = MainToolbarController(
+            appState: h.state, split: split, titleView: NSView(), requestRemoteStop: { _ in })
+        toolbar.showHiddenReposChosen(nil)
+        h.controller.flushPendingRebuild()
+        #expect(h.shownIDs.contains(.repoHeader(hidden.id)), h.evidence())
+        let hiddenModel = try #require(Self.worktreeModel(h.controller.tree, hiddenRow.id))
+        #expect(hiddenModel.isInHiddenSection)
+
+        toolbar.showHiddenReposChosen(nil)
+        h.controller.flushPendingRebuild()
+        #expect(!h.shownIDs.contains(.repoHeader(hidden.id)), h.evidence())
+        #expect(h.shownIDs.contains(.repoHeader(shown.id)))
+
+        h.state.repoFilter = hidden.id
+        h.controller.flushPendingRebuild()
+        let headers = h.shownIDs.filter { id in
+            if case .repoHeader = id { return true }
+            return false
+        }
+        let expectedHeaders: [SidebarNodeID] = [.repoHeader(hidden.id)]
+        #expect(headers == expectedHeaders, h.evidence())
+        #expect(h.shownIDs.contains(.worktree(hiddenRow.id)))
+    }
+
     // MARK: Diffs replayed on a real outline
 
     // `SidebarTreeDiffTests` replays the diff on `OutlineSimulator`, a model of
@@ -1032,5 +1078,15 @@ struct SidebarOutlineControllerTests {
     static func worktreeModel(_ tree: SidebarTree, _ id: UUID) -> WorktreeRowModel? {
         guard case .worktree(let model)? = tree.node(.worktree(id))?.kind else { return nil }
         return model
+    }
+
+    /// A main-window split over two plain panes, which saves nothing, for a
+    /// toolbar controller that never goes on a window.
+    static func plainSplit() -> MainSplitViewController {
+        let sidebar = NSViewController()
+        sidebar.view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        let content = NSViewController()
+        content.view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        return MainSplitViewController(sidebar: sidebar, content: content, autosaveName: nil)
     }
 }

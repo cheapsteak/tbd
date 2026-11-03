@@ -106,9 +106,10 @@ Nothing in the window uses SwiftUI's `.toolbar`. Items, left to right:
    which would move it after the separator.
 2. **Flexible space.**
 3. **Repo filter** – an icon button the size of back and forward, whose click
-   pops up a menu of "All Repos" and each repo with the current choice checked
-   (see "The repo filter"). It is removed from the toolbar while the sidebar is
-   collapsed and put back when it expands.
+   pops up a menu of "All Repos" and each repo with the current choice
+   checked, then the Show Hidden Repos toggle (see "The repo filter"). It is
+   the sidebar's only filter control. It is removed from the toolbar while the
+   sidebar is collapsed and put back when it expands.
 4. **Tracking separator** – an `NSTrackingSeparatorToolbarItem` that the
    toolbar creates under an identifier of its own, bound to the split's first
    divider and never changed afterwards. Everything before it sits over the
@@ -138,7 +139,9 @@ Which items are present and in what order is a pure function of a small state
 value: whether the sidebar is collapsed, what is selected, the remote session's
 state. The controller observes `AppState` with
 `withObservationTracking` and applies a changed result on the next main-actor
-turn, never during a SwiftUI update, which can re-enter layout.
+turn, never during a SwiftUI update, which can re-enter layout. The one input
+Observation cannot see, the repo filter's Show Hidden Repos key, reaches it
+through a watch on `AppState.userDefaults` (see "The repo filter").
 
 ### Compact buttons
 
@@ -228,7 +231,9 @@ repo's name, so a long name never widens the sidebar's part of the toolbar.
   regular weight and medium scale, with the same hover square and hit area.
 - **Colour** – the other icons' colour while no repo filter is set, and system
   blue while one is. A filter naming a repo that is gone still filters the
-  sidebar, to no repo at all, so it stays blue.
+  sidebar, to no repo at all, so it stays blue. The Show Hidden Repos toggle
+  does not colour it: showing hidden repos widens the sidebar rather than
+  narrowing it.
 - **Text** – the tool tip reads "Filter sidebar by repository" with no filter,
   "Filtering by" the repo's name with one, and "Filtering by a removed
   repository" when the repo is gone. The accessibility label is "Filter", and
@@ -236,13 +241,28 @@ repo's name, so a long name never widens the sidebar's part of the toolbar.
   VoiceOver reads the choice without opening the menu.
 - **Menu** – a click pops up one menu the toolbar controller keeps, its top
   leading corner 4 pt below the button's bottom leading corner: "All Repos", a
-  separator, then each repo, the current choice checked, or none when the
-  filter names a repo that is gone. Choosing
-  a row sets `AppState.repoFilter`. Each apply keeps the menu in step: it
-  rebuilds the rows only when the options change, sets a check, the tint, the
-  tool tip and the accessibility value only when they differ, and changes
-  nothing while the menu or the overflow row's submenu is open, whose close
-  schedules an apply that catches up.
+  separator, then each repo, hidden ones included and unmarked, the current
+  choice checked, or none when the filter names a repo that is gone; then a
+  separator and the Show Hidden Repos toggle. Choosing a repo row sets
+  `AppState.repoFilter`. Each apply keeps the menu in step: it rebuilds the
+  rows only when the options change, sets a check, the toggle's title, the
+  tint, the tool tip and the accessibility value only when they differ, and
+  changes nothing while the menu or the overflow row's submenu is open, whose
+  close schedules an apply that catches up.
+- **Show Hidden Repos** – the menu's last row, titled "Show Hidden Repos",
+  followed by the number of hidden repos in parentheses while there are any.
+  It is checked while `SidebarBuildOptions.showHiddenReposKey` is on, and
+  choosing it flips that key in `AppState.userDefaults`, the store the
+  sidebar's outline reads and re-filters from. Observation does not track a
+  defaults key, so the snapshot carries the toggle's state and the hidden
+  count, and the controller watches that store's `didChangeNotification`: a
+  change that leaves the key other than the last apply showed queues an
+  apply, which updates the row.
+- **Which repos the sidebar shows** – one rule,
+  `AppState.sidebarShownRepos(showHiddenRepos:)`. A repo chosen in the filter
+  shows alone, hidden or not, since choosing it asks to see it, and a hidden
+  one draws dimmed as every hidden repo's section does. With no repo chosen,
+  every repo shows, less the hidden ones unless Show Hidden Repos is on.
 
 ### The overflow menu
 
@@ -257,8 +277,8 @@ every item but one has an explicit form:
   autoenable; back and forward are disabled, as their buttons are, when
   history has nowhere to go.
 - **Repo filter** – "Filter", with a submenu of "All Repos" and each repo, the
-  current choice checked, the same rows as the button's menu and kept in step
-  with it.
+  current choice checked, then the Show Hidden Repos toggle: the same rows as
+  the button's menu and kept in step with it.
 - **Title cluster** – an inert row showing the title, or "No Selection" when
   nothing is selected. It is never hidden: with nothing selected the title
   item still holds its minimum width, so it can be the only item that
@@ -352,15 +372,24 @@ No durable resource is added.
   its size; the button's menu, read through the accessor its click pops up,
   since a test cannot pop a menu up, mirrors the options with the current one
   checked, or none for a repo that is gone, changes a check only when it
-  differs, and sets the filter when a row is chosen; the menu sits 4 pt below
-  the button, flipped or not and right to left; the tint is none with no
-  filter and system blue with one, and the tool tip and accessibility value
-  name the repo; the item stays 28 pt wide for an 80-character repo name; a
-  filter item made after an apply starts from it.
+  differs, and sets the filter when a row is chosen; the Show Hidden Repos
+  row carries the hidden count only when there is one, taking a new count in
+  place, is checked exactly while the key is on, flips the key both ways in
+  the injected store, and follows a change to the key made anywhere through
+  the defaults watch, which ignores a change to any other key; the menu sits
+  4 pt below the button, flipped or not and right to left; the tint is none
+  with no filter and system blue with one, whatever the toggle says, and the
+  tool tip and accessibility value name the repo; the item stays 28 pt wide
+  for an 80-character repo name; a filter item made after an apply starts
+  from it.
+- **Which repos show:** with Show Hidden Repos off, a hidden repo chosen in
+  the filter shows, dimmed; with it on, it shows too; with no repo chosen,
+  hidden repos show only while it is on.
 - **Overflow rows:** every item's menu form, or AppKit's default where it has
   none, sends its action from a menu item without raising, the leading item's
   "Navigation" submenu row by row with Toggle Sidebar checked rather than
-  sent; the filter's form mirrors the button's menu and sets the filter.
+  sent; the filter's form mirrors the button's menu, Show Hidden Repos
+  included, and sets the filter.
 - **Title width:** the title item keeps its frame as the title goes from short
   to long and back, and starts at or after the divider; a fitting measurement
   of the title view gives its constant ideal width whatever the text.

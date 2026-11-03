@@ -190,6 +190,24 @@ extension AppState {
         if kept != expandedSidebarGroups { expandedSidebarGroups = kept }
     }
 
+    /// The repos whose sections the sidebar shows, in `repos` order: the one
+    /// place that decides it.
+    ///
+    /// - **A repo chosen in the toolbar's repo filter** shows alone, hidden
+    ///   or not, since choosing it asks to see it. A hidden one draws dimmed,
+    ///   as every hidden repo's section does. A filter naming a repo that is
+    ///   gone shows none.
+    /// - **With no repo chosen** every repo shows, less the hidden ones
+    ///   unless `showHiddenRepos` is on: the filter menu's Show Hidden Repos
+    ///   toggle, `SidebarBuildOptions.showHiddenReposKey`, which `AppState`
+    ///   does not read, so its reader passes it in.
+    func sidebarShownRepos(showHiddenRepos: Bool) -> [Repo] {
+        if let repoFilter {
+            return repos.filter { $0.id == repoFilter }
+        }
+        return showHiddenRepos ? repos : repos.filter { !$0.hidden }
+    }
+
     /// A repository's active and creating top-level rows, local and remote
     /// alike, in their stored order: the ungrouped section's inline rows.
     func sidebarTopLevelWorktrees(repoID: UUID) -> [Worktree] {
@@ -347,10 +365,16 @@ extension AppState {
         sidebarGroupReveal(worktreeIDs: selectedWorktreeIDs, selection: selectedRemoteSession)
     }
 
+    /// The groups to open so the selection has a row. It spans every repo
+    /// whose section can show, `sidebarShownRepos` with the hidden ones in:
+    /// `AppState` does not read the Show Hidden Repos toggle, and a group
+    /// opened in a section the sidebar does not show changes nothing on
+    /// screen.
     func sidebarGroupReveal(worktreeIDs: Set<UUID>, selection: RemoteSessionSelection?) -> SidebarGroupReveal {
         let remoteID = selection.map { RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID) }
+        let revealable = sidebarShownRepos(showHiddenRepos: true)
         var groups: Set<SidebarGroupID> = []
-        for repo in repos where repoFilter == nil || repoFilter == repo.id {
+        for repo in revealable {
             groups.formUnion(sidebarRemoteGroups(repoID: repo.id).revealGroups(
                 owner: .repository(repo.id), worktreeIDs: worktreeIDs, remoteID: remoteID))
             if !sidebarHibernation(repoID: repo.id).hibernatedWorktreeIDs.isDisjoint(with: worktreeIDs) {
@@ -364,9 +388,8 @@ extension AppState {
         if !sidebarScratchHibernation.hibernatedWorktreeIDs.isDisjoint(with: worktreeIDs) {
             groups.insert(.init(owner: .scratch, kind: .hibernated))
         }
-        let visibleRepoIDs = Set(repos.filter { repoFilter == nil || repoFilter == $0.id }.map(\.id))
         groups.formUnion(sidebarRemoteSnapshot.parentRevealGroups(
-            worktreeIDs: worktreeIDs, remoteID: remoteID, repoIDs: visibleRepoIDs))
+            worktreeIDs: worktreeIDs, remoteID: remoteID, repoIDs: Set(revealable.map(\.id))))
         return SidebarGroupReveal(generation: sidebarSelectionGeneration,
                                   worktreeIDs: worktreeIDs, remoteID: remoteID, groups: groups)
     }
