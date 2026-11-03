@@ -169,9 +169,19 @@ func copyToPasteboard(_ string: String) {
     NSPasteboard.general.setString(string, forType: .string)
 }
 
+/// The slice of `NSWorkspace` that reveals files in Finder, so a test can
+/// record the call instead of opening a Finder window.
+@MainActor
+protocol FileRevealing {
+    func activateFileViewerSelecting(_ fileURLs: [URL])
+}
+
+extension NSWorkspace: FileRevealing {}
+
 /// Reveal the file at `path` in Finder with it selected.
-func revealInFinder(path: String) {
-    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+@MainActor
+func revealInFinder(path: String, workspace: any FileRevealing = NSWorkspace.shared) {
+    workspace.activateFileViewerSelecting([URL(fileURLWithPath: path)])
 }
 
 /// Open the file at `path` with the application bundle at `appURL`.

@@ -378,9 +378,9 @@ struct TranscriptImageAttachmentTests {
     /// a key window this process does not have.
     private func withStubbedPanel(_ body: (PanelShows) throws -> Void) rethrows {
         let shows = PanelShows()
-        let previous = TranscriptQuickLook.shared.showPanel
-        TranscriptQuickLook.shared.showPanel = { shows.count += 1 }
-        defer { TranscriptQuickLook.shared.showPanel = previous }
+        let previous = QuickLookPresenter.shared.showPanel
+        QuickLookPresenter.shared.showPanel = { shows.count += 1 }
+        defer { QuickLookPresenter.shared.showPanel = previous }
         try body(shows)
     }
 
@@ -405,7 +405,7 @@ struct TranscriptImageAttachmentTests {
         try withStubbedPanel { shows in
             #expect(view.accessibilityPerformPress())
             #expect(shows.count == 1)
-            #expect(TranscriptQuickLook.shared.previewURL?.path == path)
+            #expect(QuickLookPresenter.shared.previewURL?.path == path)
         }
         #expect(view.accessibilityHelp() == "Quick Look preview")
     }
@@ -435,7 +435,7 @@ struct TranscriptImageAttachmentTests {
         try withStubbedPanel { shows in
             #expect(view.accessibilityPerformPress())
             #expect(shows.count == 1)
-            #expect(TranscriptQuickLook.shared.previewURL?.path == path)
+            #expect(QuickLookPresenter.shared.previewURL?.path == path)
         }
     }
 
