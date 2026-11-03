@@ -106,10 +106,11 @@ private struct ViewportSwitchRoot: View {
 }
 
 /// `FilePreviewView` mounted offscreen: a playable audio file gets one paused
-/// player framed to its control bar, a source file whose extension looks up
-/// as a playable type gets none, an audio file that does not load falls back
-/// to the "Cannot preview" screen, and a player stays the same view when the
-/// selection goes from one file to several.
+/// player framed to its control bar, an audio file that does not load falls
+/// back to the "Cannot preview" screen, and a player stays the same view when
+/// the selection goes from one file to several. A source file whose extension
+/// looks up as a playable type is covered by `FilePreviewTextTests`, which
+/// reads the accessibility tree.
 @MainActor
 @Suite("FilePreviewView", .fastPassBounded)
 struct FilePreviewViewTests {
@@ -139,33 +140,6 @@ struct FilePreviewViewTests {
         let playerHeight = mediaHost.playerView.frame.height
         #expect(playerHeight == AudioPreviewCard.controlBarHeight)
         #expect(coordinator.registeredCount == 1)
-    }
-
-    /// `ts` looks up as an MPEG transport stream, a playable movie type, so
-    /// only the text-first order keeps this file off the player.
-    @Test func aTypeScriptFileMountsNoPlayer() async throws {
-        let fixtures = try PreviewFixtures()
-        defer { fixtures.remove() }
-        let url = try fixtures.text("export const x = 1\n", named: "index.ts")
-        let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
-        #expect(kind == .text)
-        let host = OffscreenHost(
-            root: PreviewRoot(
-                path: url.path, worktreePath: fixtures.directory.path,
-                coordinator: MediaPlaybackCoordinator()),
-            size: Self.paneSize)
-        defer { host.tearDown() }
-
-        // Highlighted text is a SwiftUI `Text`, which puts no AppKit view in
-        // the tree to wait on. So this spends the whole window that
-        // `aWavFileMountsOnePausedPlayer`, the positive control, mounts its
-        // player within: a player this file was given would be up by now.
-        await host.pump(times: OffscreenHostDefaults.maxPumps)
-
-        let avPlayers = host.descendants(AVPlayerView.self).count
-        let mediaHosts = host.descendants(MediaPlayerHostView.self).count
-        #expect(avPlayers == 0, "a TypeScript file mounted \(avPlayers) AVPlayerView(s)")
-        #expect(mediaHosts == 0)
     }
 
     @Test func anUnplayableWavFallsBack() async throws {
@@ -263,4 +237,91 @@ struct FilePreviewViewTests {
         #expect(AudioPreviewCard.formattedDuration(seconds: .nan) == "")
         #expect(AudioPreviewCard.formattedDuration(seconds: .infinity) == "")
     }
+}
+
+extension AccessibilityBridgeSerialized {
+    /// A source file whose extension looks up as a playable type shows its
+    /// text and no player. The evidence that the text rendered is the file's
+    /// own words in the accessibility tree, which needs the process-global
+    /// bridge switch, so this suite is nested here to run serialized with the
+    /// others that flip it.
+    @MainActor
+    @Suite("FilePreviewView text", .fastPassBounded)
+    struct FilePreviewTextTests {
+        private static let paneSize = NSSize(width: 600, height: 400)
+
+        /// `ts` looks up as an MPEG transport stream, a playable movie type,
+        /// so only the text-first order keeps this file off the player.
+        @Test func aTypeScriptFileShowsItsTextAndMountsNoPlayer() async throws {
+            try await withAccessibilityBridge {
+                let fixtures = try PreviewFixtures()
+                defer { fixtures.remove() }
+                let url = try fixtures.text("export const x = 1\n", named: "index.ts")
+                let kind = await FilePreviewClassifier.shared.kind(forPath: url.path, rendersMarkdown: false)
+                #expect(kind == .text)
+                let host = OffscreenHost(
+                    root: PreviewRoot(
+                        path: url.path, worktreePath: fixtures.directory.path,
+                        coordinator: MediaPlaybackCoordinator()),
+                    size: Self.paneSize)
+                defer { host.tearDown() }
+
+                // Until classification lands the view is a 1 pt placeholder,
+                // which holds no player either, so the assertions below would
+                // pass on a blank view. Wait for the file's own text first.
+                // Highlighting runs on its own queue and can take seconds on a
+                // loaded runner, so the wait is bounded in time, not in pumps.
+                let rendered = await pollUntilTrue(
+                    timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+                ) { @Sendable in
+                    await host.pump()
+                    return await accessibilityTree(of: host, contains: "export const")
+                }
+                let tree = host.accessibilityTreeDescription()
+                try #require(
+                    rendered == .satisfied,
+                    Comment(rawValue: "the file's text never rendered (\(rendered)); accessibility tree:\n\(tree)"))
+
+                let avPlayers = host.descendants(AVPlayerView.self).count
+                let mediaHosts = host.descendants(MediaPlayerHostView.self).count
+                #expect(avPlayers == 0, "a TypeScript file mounted \(avPlayers) AVPlayerView(s)")
+                #expect(mediaHosts == 0)
+            }
+        }
+    }
+}
+
+/// Whether any accessibility label or value in `host`'s tree contains
+/// `needle`. Reads both, because `accessibilityTreeDescription()` prints only
+/// labels and a SwiftUI `Text` may carry its string in either. Walks the tree
+/// the way `OffscreenHost` does, by selector and over declared children plus
+/// subviews. Meaningful only inside `withAccessibilityBridge`.
+@MainActor
+private func accessibilityTree<Root: View>(of host: OffscreenHost<Root>, contains needle: String) -> Bool {
+    var seen = Set<ObjectIdentifier>()
+
+    func attribute(_ node: NSObject, _ name: String) -> Any? {
+        guard node.responds(to: Selector((name))) else { return nil }
+        return node.value(forKey: name)
+    }
+
+    func string(_ value: Any?) -> String? {
+        (value as? String) ?? (value as? NSAttributedString)?.string
+    }
+
+    func search(_ element: Any) -> Bool {
+        guard let node = element as? NSObject, seen.insert(ObjectIdentifier(node)).inserted else {
+            return false
+        }
+        for name in ["accessibilityLabel", "accessibilityValue"] {
+            if let text = string(attribute(node, name)), text.contains(needle) { return true }
+        }
+        let declared = attribute(node, "accessibilityChildren") as? [Any] ?? []
+        for child in declared + ((node as? NSView)?.subviews ?? []) where search(child) {
+            return true
+        }
+        return false
+    }
+
+    return search(host.contentView)
 }
