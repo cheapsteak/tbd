@@ -149,6 +149,20 @@ public enum TranscriptParser {
         }
     }
 
+    /// Whether `itemID` comes from a line with no `uuid`, whose stable ID is a
+    /// positional fallback: `line-<n>` in the full parse (and
+    /// `IncrementalTranscript`), `tail-<n>` in a tail read, with an item's
+    /// `#<block>` suffix when it has one. `<n>` counts lines in whatever was
+    /// read, so a tail read numbers its window from zero each time, and the
+    /// same such ID can name different lines in two reads. Real Claude lines
+    /// always carry a `uuid`, so their items never match.
+    public static func isPositionalFallbackID(_ itemID: String) -> Bool {
+        let lineID = itemID.prefix(while: { $0 != "#" })
+        guard let prefix = ["line-", "tail-"].first(where: { lineID.hasPrefix($0) }) else { return false }
+        let position = lineID.dropFirst(prefix.count)
+        return !position.isEmpty && position.allSatisfy { ("0"..."9").contains($0) }
+    }
+
     /// Parse a decoded tail window (a suffix of the file's lines, each line
     /// whole) into transcript items. Builds a window-local `toolResultsByID` so
     /// a tool_use+tool_result pair within the window folds together; a tool_use

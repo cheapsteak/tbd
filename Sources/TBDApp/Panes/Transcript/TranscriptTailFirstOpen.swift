@@ -40,11 +40,17 @@ enum TranscriptTailFirstOpen {
     ///
     /// The key is the table's own SwiftUI identity (its `.id`): the session ID
     /// in Session History, the terminal and session in the live pane. Each
-    /// pane outlives the tables it rebuilds, and a key that names the table
-    /// cannot match a newly built one, so a new table mounts windowed in the
-    /// very pass that builds it, whatever the store already holds. Each pane
-    /// also clears its widened key whenever a table of the same identity can
-    /// be built again (a change of selection, or the table leaving the body).
+    /// pane outlives the tables it rebuilds, and a widen recorded for one
+    /// table does not match a table built under another identity, so that
+    /// table mounts windowed in the very pass that builds it, whatever the
+    /// store already holds. A table can also be built again under an identity
+    /// that widened before, so each pane clears its widened key too:
+    ///
+    /// - **The live pane** (`TableTranscriptPaneView.shownTableKey`) whenever
+    ///   the shown table's identity changes or the table leaves its body.
+    /// - **Session History** (`SessionTranscriptView`) on every selection
+    ///   change. A remount while the same session stays selected keeps the
+    ///   key, and is not covered.
     static func mountedNodes<Node, Key: Equatable>(
         _ nodes: [Node],
         mountKey: Key,
