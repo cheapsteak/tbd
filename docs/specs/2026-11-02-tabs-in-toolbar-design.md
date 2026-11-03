@@ -132,8 +132,9 @@ Left to right:
    a help tag, and it keeps its popover. Each line keeps its menu. A worktree
    with no project (a scratch space) shows the title alone, centred on the
    midline, with the notes button following that line at the title's 13 pt.
-3. **Session tabs**, then the + button straight after the last tab
-   (`TabsThenAddLayout`, unchanged), in the pill style below.
+3. **Session tabs**, then the + button 4 pt after the last tab
+   (`TabsThenAddLayout`), so its hover square clears the pill, in the pill
+   style below.
 4. **Drag gap,** at least 24 pt, taking all spare width (see "Dragging the
    window").
 5. **Session History,** and while the side region is hidden, the transcript,

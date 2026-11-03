@@ -53,6 +53,8 @@ enum MainTabRowMetrics {
     static let pillHoverOpacity: Double = 0.045
     /// Between two pill tabs.
     static let pillSpacing: CGFloat = 2
+    /// Between the last pill tab and the + button's hover square.
+    static let pillToAddSpacing: CGFloat = 4
 
     /// The row's height: the content pane's top safe-area inset, the
     /// toolbar's height over the pane, never less than the tab row's own

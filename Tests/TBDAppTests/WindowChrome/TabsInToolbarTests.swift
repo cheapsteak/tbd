@@ -129,6 +129,7 @@ struct TabsInToolbarTests {
         #expect(MainTabRowMetrics.pillHeight == 28)
         #expect(MainTabRowMetrics.pillCornerRadius == 7)
         #expect(MainTabRowMetrics.pillSpacing == 2)
+        #expect(MainTabRowMetrics.pillToAddSpacing == 4)
     }
 
     // MARK: - Overflow

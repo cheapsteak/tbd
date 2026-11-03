@@ -250,10 +250,11 @@ struct TabBar: View {
         }
     }
 
-    /// The tabs, a horizontal scroll view, then the + button straight after
-    /// the last one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs
-    /// in the toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing`
-    /// apart, centred on the row's midline.
+    /// The tabs, a horizontal scroll view, then the + button after the last
+    /// one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs in the
+    /// toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing` apart,
+    /// centred on the row's midline, and the + button sits
+    /// `MainTabRowMetrics.pillToAddSpacing` after the last pill.
     private func tabsThenAdd(pills: Bool) -> some View {
         TabsThenAddLayout {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -287,6 +288,8 @@ struct TabBar: View {
                 onChooseAccount: onChooseAccount,
                 onAddCodex: onAddCodex
             )
+            // Outside the button, so its hover square stays 28 x 28.
+            .padding(.leading, pills ? MainTabRowMetrics.pillToAddSpacing : 0)
             // On the button alone: the tabs' context menus must stay outside
             // the style (`RowIconButtonStyle`).
             .buttonStyle(RowIconButtonStyle())
