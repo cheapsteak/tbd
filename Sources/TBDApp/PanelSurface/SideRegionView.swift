@@ -73,14 +73,16 @@ enum SideStripMetrics {
     static let trailingSlotCount = 5
 
     /// The width the strip's fixed controls need, in points: the history
-    /// buttons with their inset, and a full trailing group of
-    /// `TabRowMetrics.controlWidth` buttons. The panel tabs between them need
+    /// buttons with their inset, a full trailing group of
+    /// `TabRowMetrics.controlWidth` buttons, and the strip's trailing inset
+    /// (`MainTabRowMetrics.trailingInset`). The panel tabs between them need
     /// none, since they scroll. The side region is kept at least this wide
     /// (`PanelSurfaceWorkspaceView.minimumSideShare`).
     static var fixedControlsWidth: CGFloat {
         historyLeadingInset
             + CGFloat(historyButtonCount) * historyButtonWidth
             + CGFloat(trailingSlotCount) * TabRowMetrics.controlWidth
+            + MainTabRowMetrics.trailingInset
     }
 }
 
