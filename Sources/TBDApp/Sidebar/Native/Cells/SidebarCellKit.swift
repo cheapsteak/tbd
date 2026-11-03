@@ -304,8 +304,9 @@ final class SuffixSlot {
     func place(atX x: CGFloat, midY: CGFloat) {
         switch indicator {
         case .working?:
-            // `.frame(width: 14, height: 12).padding(.leading, -3).offset(y: 2)`.
-            typingDots?.frame = NSRect(x: x - 3, y: midY - 6 + 2, width: 14, height: 12)
+            // `.frame(width: 14, height: 12).padding(.leading, -3)`, centred
+            // on the midline like the glyph it stands in for.
+            typingDots?.frame = NSRect(x: x - 3, y: midY - 6, width: 14, height: 12)
         case .some:
             imageView.frame = NSRect(x: x, y: midY - 6, width: 12, height: 12)
         case nil:

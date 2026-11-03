@@ -117,25 +117,28 @@ final class ProviderHeaderCell: NSTableCellView {
         let plusRoom = plusButton.isHidden ? 0 : SidebarHeaderMetrics.headerSpacing + plusSide
         let x = leadingInset
         let textWidth = max(bounds.width - x - healthRoom - plusRoom - 4, 0)
-        // Bottom-aligned in a 22 pt box centred in the row; with the issue
-        // line the stack fills the row.
+        // The name alone centres on the row's midline, and the health glyph
+        // and `+` centre on that midline with it. With the issue line the
+        // stack fills the row, and the glyphs centre on the name's line.
         let stackHeight = nameSize.height + (issueField.isHidden ? 0 : issueSize.height - 1)
-        let boxBottom = issueField.isHidden ? (bounds.height + 22) / 2 : bounds.height
-        let top = (boxBottom - stackHeight).rounded()
+        let top = issueField.isHidden
+            ? ((bounds.height - stackHeight) / 2).rounded()
+            : (bounds.height - stackHeight).rounded()
         nameField.frame = NSRect(x: x, y: top, width: min(nameSize.width, textWidth), height: nameSize.height)
         if !issueField.isHidden {
             issueField.frame = NSRect(
                 x: x, y: top + nameSize.height - 1, width: min(issueSize.width, textWidth), height: issueSize.height)
         }
+        let glyphMidY = issueField.isHidden ? bounds.height / 2 : nameField.frame.midY
         // Name, health glyph, `+`, in that order.
         let trailing = bounds.width - 4
         if !plusButton.isHidden {
             plusButton.frame = NSRect(
-                x: trailing - plusSide, y: (nameField.frame.midY - plusSide / 2).rounded(),
+                x: trailing - plusSide, y: (glyphMidY - plusSide / 2).rounded(),
                 width: plusSide, height: plusSide)
         }
         let healthFrame = NSRect(
-            x: trailing - plusRoom - healthSide, y: (nameField.frame.midY - healthSide / 2).rounded(),
+            x: trailing - plusRoom - healthSide, y: (glyphMidY - healthSide / 2).rounded(),
             width: healthSide, height: healthSide)
         healthImageView.frame = healthFrame
         authButton.frame = healthFrame

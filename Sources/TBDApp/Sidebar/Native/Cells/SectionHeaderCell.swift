@@ -176,9 +176,12 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         super.layout()
         let chevronSide = SidebarHeaderMetrics.chevronColumnWidth
         let spacing = SidebarHeaderMetrics.headerSpacing
-        // The repo header's 22 pt band sits centred in the row with its items
-        // bottom-aligned in a 20 pt stack; the Scratch header centres its stack.
-        let midY = style == .repo ? bounds.height / 2 + 1 : bounds.height / 2
+        // Every item, in both styles, centres on the row's midline: the
+        // chevron and `+` squares, the title, the missing badge and Locate….
+        // Each origin rounds to a whole point, so no square or label straddles
+        // device pixels.
+        let midY = bounds.height / 2
+        let chevronY = (midY - chevronSide / 2).rounded()
         var x = leadingInset
 
         let titleSize = SidebarCellKit.size(of: titleField)
@@ -191,7 +194,7 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         if !missingField.isHidden { after += spacing + missingSize.width + spacing + locateSize.width }
 
         if chevronBeforeTitle {
-            chevronButton.frame = NSRect(x: x, y: midY - chevronSide / 2, width: chevronSide, height: chevronSide)
+            chevronButton.frame = NSRect(x: x, y: chevronY, width: chevronSide, height: chevronSide)
             x += chevronSide + spacing + SidebarHeaderMetrics.nameLeadingClawback
         }
         let titleWidth = min(titleSize.width, max(bounds.width - x - after - reserved, 0))
@@ -203,11 +206,10 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         }
         x += titleWidth
         if !chevronBeforeTitle {
-            // `.padding(.leading, -3).offset(y: 2)`: tucked against the title,
-            // on its baseline. It keeps its square while hidden.
+            // Tucked 3 pt into the spacing against the title, on the same
+            // midline. It keeps its square while hidden.
             x += spacing - 3
-            chevronButton.frame = NSRect(
-                x: x, y: midY - chevronSide / 2 + 2, width: chevronSide, height: chevronSide)
+            chevronButton.frame = NSRect(x: x, y: chevronY, width: chevronSide, height: chevronSide)
             x += chevronSide
         }
         if !missingField.isHidden {
@@ -219,6 +221,6 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
                 x: x, y: (midY - locateSize.height / 2).rounded(), width: locateSize.width, height: locateSize.height)
         }
         // The `+` after the `Spacer()`, at the trailing edge.
-        plusButton.frame = NSRect(x: bounds.width - 20 - 4, y: midY - 10, width: 20, height: 20)
+        plusButton.frame = NSRect(x: bounds.width - 20 - 4, y: (midY - 10).rounded(), width: 20, height: 20)
     }
 }
