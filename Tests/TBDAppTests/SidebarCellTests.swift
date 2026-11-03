@@ -280,3 +280,152 @@ struct SidebarCellTests {
         return rep
     }
 }
+
+/// Every item in a sidebar header or row centres on the row's midline, and a
+/// header's frames start on whole points, so a hover square never sits low in
+/// the highlight band or straddles device pixels. Cells are laid out directly,
+/// off any window, as `SidebarCellTests` does.
+@MainActor
+@Suite("Sidebar cell vertical centring")
+struct SidebarCellCentringTests {
+    static let styles: [SectionHeaderCell.Style] = [.repo, .scratch]
+
+    /// A configured header, revealed so its `+` and trailing chevron show,
+    /// laid out in a row `height` tall.
+    static func layOutHeader(
+        style: SectionHeaderCell.Style, chevronBeforeTitle: Bool, missing: Bool = false,
+        height: CGFloat = SectionHeaderCell.rowHeight
+    ) -> SectionHeaderCell {
+        let cell = SectionHeaderCell()
+        cell.style = style
+        cell.chevronBeforeTitle = chevronBeforeTitle
+        cell.frame = NSRect(x: 0, y: 0, width: 260, height: height)
+        cell.configure(SectionHeaderModel(
+            title: style == .scratch ? "Scratch" : "tbd", isExpanded: true, isHidden: false,
+            isMissing: missing, isSelected: false))
+        cell.setHovered(true)
+        cell.layout()
+        return cell
+    }
+
+    /// The frames a revealed header lays out, by name.
+    static func headerFrames(_ cell: SectionHeaderCell) -> [(name: String, frame: NSRect)] {
+        var frames: [(name: String, frame: NSRect)] = [
+            ("chevron", cell.chevronButton.frame),
+            ("+", cell.plusButton.frame),
+            ("title", cell.titleField.frame),
+        ]
+        if !cell.missingField.isHidden {
+            frames.append(("missing badge", cell.missingField.frame))
+            frames.append(("Locate…", cell.locateButton.frame))
+        }
+        return frames
+    }
+
+    @Test func headerSquaresCentreOnTheRowMidline() throws {
+        for style in Self.styles {
+            for chevronBeforeTitle in [false, true] {
+                let cell = Self.layOutHeader(style: style, chevronBeforeTitle: chevronBeforeTitle)
+                let label = "\(style), chevron before title \(chevronBeforeTitle)"
+                try #require(!cell.plusButton.isHidden, "\(label): the + is hidden, so this checks nothing")
+                try #require(!cell.chevronButton.isHidden, "\(label): the chevron is hidden, so this checks nothing")
+                let midY = cell.bounds.midY
+                let plusMidY = cell.plusButton.frame.midY
+                let chevronMidY = cell.chevronButton.frame.midY
+                let titleOffset = abs(cell.titleField.frame.midY - midY)
+                #expect(plusMidY == midY, "\(label): the + centres at \(plusMidY), not the row's \(midY)")
+                #expect(chevronMidY == midY, "\(label): the chevron centres at \(chevronMidY), not the row's \(midY)")
+                #expect(titleOffset <= 0.5, "\(label): the title centres \(titleOffset) pt off the row's midline")
+                for (name, frame) in Self.headerFrames(cell) {
+                    let minY = frame.minY
+                    let isWhole = minY == minY.rounded()
+                    #expect(isWhole, "\(label): the \(name) starts at y \(minY), between whole points")
+                }
+            }
+        }
+    }
+
+    /// A missing repo's badge and Locate… centre on the same midline.
+    @Test func missingBadgeCentresOnTheRowMidline() throws {
+        for chevronBeforeTitle in [false, true] {
+            let cell = Self.layOutHeader(style: .repo, chevronBeforeTitle: chevronBeforeTitle, missing: true)
+            try #require(!cell.missingField.isHidden, "The missing badge is hidden, so this checks nothing")
+            let midY = cell.bounds.midY
+            let badgeOffset = abs(cell.missingField.frame.midY - midY)
+            let locateOffset = abs(cell.locateButton.frame.midY - midY)
+            #expect(badgeOffset <= 0.5, "The missing badge centres \(badgeOffset) pt off the row's midline")
+            #expect(locateOffset <= 0.5, "Locate… centres \(locateOffset) pt off the row's midline")
+            for (name, frame) in Self.headerFrames(cell) {
+                let minY = frame.minY
+                let isWhole = minY == minY.rounded()
+                #expect(isWhole, "Chevron before title \(chevronBeforeTitle): the \(name) starts at y \(minY)")
+            }
+        }
+    }
+
+    /// In a row of odd height the midline falls between whole points: every
+    /// frame still starts on one, at most half a point off centre.
+    @Test func headerFramesStayOnWholePointsInAnOddHeightRow() {
+        for style in Self.styles {
+            for chevronBeforeTitle in [false, true] {
+                let cell = Self.layOutHeader(style: style, chevronBeforeTitle: chevronBeforeTitle, height: 27)
+                let label = "\(style), chevron before title \(chevronBeforeTitle)"
+                let midY = cell.bounds.midY
+                for (name, frame) in Self.headerFrames(cell) {
+                    let minY = frame.minY
+                    let isWhole = minY == minY.rounded()
+                    let offset = abs(frame.midY - midY)
+                    #expect(isWhole, "\(label): the \(name) starts at y \(minY), between whole points")
+                    #expect(offset <= 0.5, "\(label): the \(name) centres \(offset) pt off the row's midline")
+                }
+            }
+        }
+    }
+
+    /// A provider header's name alone, its health glyph and its `+` centre on
+    /// the row's midline.
+    @Test func providerHeaderGlyphsCentreOnTheRowMidline() throws {
+        let cell = ProviderHeaderCell()
+        cell.frame = NSRect(x: 0, y: 0, width: 260, height: ProviderHeaderCell.singleHeight)
+        cell.configure(ProviderHeaderModel(
+            name: "acme", health: .error, issueSummary: nil, isSelected: false,
+            canCreate: true, isCreateEnabled: true))
+        cell.layout()
+        try #require(!cell.plusButton.isHidden, "The + is hidden, so this checks nothing")
+        let midY = cell.bounds.midY
+        let plusMidY = cell.plusButton.frame.midY
+        let healthMidY = cell.healthImageView.frame.midY
+        let nameOffset = abs(cell.nameField.frame.midY - midY)
+        #expect(plusMidY == midY, "The provider + centres at \(plusMidY), not the row's \(midY)")
+        #expect(healthMidY == midY, "The health glyph centres at \(healthMidY), not the row's \(midY)")
+        #expect(nameOffset <= 0.5, "The provider name centres \(nameOffset) pt off the row's midline")
+    }
+
+    /// A working row's typing dots centre on the midline, where the status
+    /// glyph they stand in for does.
+    @Test func typingDotsCentreOnTheRowMidline() throws {
+        let row = WorktreeRowCell()
+        row.frame = NSRect(x: 0, y: 0, width: 300, height: SidebarNativeMetrics.rowHeight)
+        row.configure(SidebarCellTests.worktree(name: "alpha", suffix: .working))
+        row.layout()
+        let rowDots = try #require(row.suffix.typingDots, "A working row made no typing dots")
+        let rowMidY = row.bounds.midY
+        let rowDotsMidY = rowDots.frame.midY
+        #expect(rowDotsMidY == rowMidY, "A worktree row's dots centre at \(rowDotsMidY), not \(rowMidY)")
+
+        row.configure(SidebarCellTests.worktree(name: "alpha", suffix: .attention))
+        row.layout()
+        let glyphMidY = row.suffix.imageView.frame.midY
+        #expect(glyphMidY == rowMidY, "A worktree row's status glyph centres at \(glyphMidY), not \(rowMidY)")
+
+        let session = RemoteSessionRowCell()
+        session.frame = NSRect(x: 0, y: 0, width: 300, height: SidebarNativeMetrics.rowHeight)
+        session.configure(SidebarCellTests.session(title: "lane", suffix: .working))
+        session.layout()
+        let sessionDots = try #require(session.suffix.typingDots, "A working session made no typing dots")
+        let sessionMidY = session.bounds.midY
+        let sessionDotsMidY = sessionDots.frame.midY
+        #expect(sessionDotsMidY == sessionMidY,
+                "A remote session row's dots centre at \(sessionDotsMidY), not \(sessionMidY)")
+    }
+}

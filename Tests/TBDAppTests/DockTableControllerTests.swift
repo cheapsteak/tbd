@@ -222,7 +222,7 @@ struct DockTableControllerTests {
         let rowHeight = PinnedDockMetrics.rowHeight
 
         // A tall sidebar: seven pins want 196 pt, and 40% of the list above
-        // the divider would allow about 171, so five rows cap it.
+        // the dock would allow about 171, so five rows cap it.
         let tall = DockHarness("height.tall")
         defer { tall.tearDown() }
         tall.state.repos = [repo]
@@ -231,19 +231,26 @@ struct DockTableControllerTests {
         #expect(tall.table.numberOfRows == 7)
         #expect(tall.dockHeight == 5 * rowHeight, tall.evidence())
         // The column keeps its width: nothing in the container may pull the
-        // window narrower, as a divider made at a zero frame once did.
+        // window narrower, as a separator `NSBox` made at a zero frame would
+        // (`Sources/TBDApp/CLAUDE.md`, "AppKit traps").
         let windowWidth = tall.host?.window.contentView?.frame.width
         #expect(windowWidth == 320, tall.evidence())
         let dockWidth = tall.dock.view.frame.width
         #expect(dockWidth == 320, tall.evidence())
         // The dock is that tall and scrolls the rest; the outline keeps the
-        // column above the divider.
+        // rest of the column, its bottom edge on the dock's top with no gap.
         let dockFrame = tall.dock.view.frame.height
         #expect(dockFrame == 5 * rowHeight)
         let contentHeight = tall.table.rect(ofRow: 6).maxY
         #expect(contentHeight == 7 * rowHeight)
         let outlineFrame = tall.outlineController.view.frame.height
-        #expect(outlineFrame == 600 - SidebarContainerController.dividerThickness - 5 * rowHeight)
+        let outlineExpected = 600 - 5 * rowHeight
+        #expect(outlineFrame == outlineExpected, tall.evidence())
+        // The container's view is not flipped, so the outline's bottom edge
+        // is its `minY` and the dock's top edge its `maxY`.
+        let outlineBottom = tall.outlineController.view.frame.minY
+        let dockTop = tall.dock.view.frame.maxY
+        #expect(outlineBottom == dockTop, tall.evidence())
 
         // Fewer pins than the cap: the dock fits them exactly.
         for index in 2..<7 {
@@ -252,14 +259,17 @@ struct DockTableControllerTests {
         tall.flush()
         #expect(tall.dockHeight == 2 * rowHeight, tall.evidence())
 
-        // No pins: no dock.
+        // No pins: no dock, and the outline fills the whole column.
         tall.state.worktrees[repo.id]?[0].pinnedAt = nil
         tall.state.worktrees[repo.id]?[1].pinnedAt = nil
         tall.flush()
         #expect(tall.dockHeight == 0, tall.evidence())
+        let emptyDockOutline = tall.outlineController.view.frame.height
+        let wholeColumn: CGFloat = 600
+        #expect(emptyDockOutline == wholeColumn, tall.evidence())
 
         // A short sidebar: 40% binds before five rows do, and the dock
-        // settles where 40% of the list above the divider puts it, as laid
+        // settles where 40% of the list above it puts it, as laid
         // out, in one pass. Within a point, since a frame
         // may land on a pixel boundary.
         let short = DockHarness("height.short")

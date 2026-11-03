@@ -67,8 +67,9 @@ struct ContentView: View {
             }
 
             // The window's split and its `NSToolbar`, all AppKit. The split
-            // reaches up under the toolbar; each pane's hosted content keeps
-            // its own safe area.
+            // reaches up under the toolbar and down to the window's bottom
+            // edge; each pane's hosted content keeps its own safe area. The
+            // status bar is the content pane's, in `MainDetailArea`.
             MainWindowSplitView(
                 requestRemoteStop: { remoteStopConfirm = $0 }, appStorage: hostedAppStorage)
                 .ignoresSafeArea(.container, edges: .top)
@@ -81,8 +82,6 @@ struct ContentView: View {
                     guard appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first else { return }
                     await appState.refreshDevServers(worktreeID: id, trigger: .selection)
                 }
-
-            StatusBarView()
         }
         .frame(minWidth: 800, minHeight: 500)
         .overlay(alignment: .bottomTrailing) { ToastOverlay() }
