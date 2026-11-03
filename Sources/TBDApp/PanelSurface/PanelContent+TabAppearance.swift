@@ -13,7 +13,7 @@ extension PanelKind {
         switch self {
         case .file: return "doc.text"
         case .web: return "globe"
-        case .note: return "note.text"
+        case .note: return "doc.text"
         case .transcript: return "text.bubble"
         case .changes: return "plus.forwardslash.minus"
         }

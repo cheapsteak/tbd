@@ -120,7 +120,7 @@ struct PanelSurfaceContentMappingTests {
 
         #expect(file.kind.tabSystemImage == "doc.text")
         #expect(web.kind.tabSystemImage == "globe")
-        #expect(note.kind.tabSystemImage == "note.text")
+        #expect(note.kind.tabSystemImage == "doc.text")
         #expect(transcript.kind.tabSystemImage == "text.bubble")
         #expect(changes.kind.tabSystemImage == "plus.forwardslash.minus")
 
