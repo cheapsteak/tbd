@@ -82,6 +82,21 @@ enum MainWindowCommand: CaseIterable {
         case .toggleChanges: [.command, .shift]
         }
     }
+
+    /// The shortcut as the menu bar writes it: modifier glyphs in macOS
+    /// order (control, option, shift, command), then the upper-cased key,
+    /// e.g. "⌘[" or "⇧⌘E".
+    var shortcutDisplay: String {
+        let glyphs: [(EventModifiers, String)] = [
+            (.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘"),
+        ]
+        let prefix = glyphs.filter { modifiers.contains($0.0) }.map(\.1).joined()
+        return prefix + String(key.character).uppercased()
+    }
+
+    /// The title with its shortcut, e.g. "Back (⌘[)", for a tool tip. An
+    /// accessibility label stays the bare `title`.
+    var toolTip: String { "\(title) (\(shortcutDisplay))" }
 }
 
 /// Menu commands providing keyboard shortcuts for the app.
