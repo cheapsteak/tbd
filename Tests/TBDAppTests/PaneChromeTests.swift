@@ -177,23 +177,25 @@ struct PaneChromeTests {
         }
     }
 
-    @Test("the transcript toggle fills and takes the accent colour while its panel is open, and offers to hide it only in front")
+    @Test("the transcript toggle's icon button draws a plain bubble in the row's grey in every state, and offers to hide its panel only in front")
     func transcriptControlFollowsItsState() {
         let front = PaneChromeControl.transcript(state: .front, isEnabled: true)
         let behind = PaneChromeControl.transcript(state: .behind, isEnabled: true)
         let off = PaneChromeControl.transcript(state: .off, isEnabled: true)
 
-        #expect(front.systemImage == "bubble.fill")
-        #expect(front.tint == .accent)
+        // The icon button shows only while no panel is in view, so neither a
+        // filled symbol nor a colour marks the panel open
+        // (`RowIconButtonStyle`'s grey is nil).
+        let symbols = [front.systemImage, behind.systemImage, off.systemImage]
+        let expectedSymbols = ["bubble", "bubble", "bubble"]
+        #expect(symbols == expectedSymbols)
+        let tints = [front.tint, behind.tint, off.tint]
+        let expectedTints: [PaneChromeControl.Tint?] = [nil, nil, nil]
+        #expect(tints == expectedTints)
         #expect(front.help == "Hide the chat-style live transcript pane")
         #expect(front.isEnabled)
         // Behind, a press brings it forward, so the tooltip offers to show it.
-        #expect(behind.systemImage == "bubble.fill")
-        #expect(behind.tint == .accent)
         #expect(behind.help == "Show the chat-style live transcript pane")
-        #expect(off.systemImage == "bubble")
-        // Off, it takes the row's own grey (`RowIconButtonStyle`).
-        #expect(off.tint == nil)
         #expect(off.help == "Show the chat-style live transcript pane")
         #expect(off.isEnabled)
         let states: [SidePanelPillState?] = [front.pillState, behind.pillState, off.pillState]
@@ -201,7 +203,7 @@ struct PaneChromeTests {
         #expect(states == expectedStates)
     }
 
-    @Test("the Changes toggle draws the Changes symbol, accent while its panel is open, and is always enabled")
+    @Test("the Changes toggle draws plusminus in the row's grey in every state, and is always enabled")
     func changesControlFollowsItsState() {
         let front = PaneChromeControl.changes(state: .front)
         let behind = PaneChromeControl.changes(state: .behind)
@@ -209,11 +211,13 @@ struct PaneChromeTests {
         let shortcut = MainWindowCommand.toggleChanges.shortcutDisplay
 
         let symbols = [front.systemImage, behind.systemImage, off.systemImage]
-        let expectedSymbols = Array(repeating: PanelKind.changesSystemImage, count: 3)
+        let expectedSymbols = ["plusminus", "plusminus", "plusminus"]
         #expect(symbols == expectedSymbols)
-        #expect(front.tint == .accent)
-        #expect(behind.tint == .accent)
-        #expect(off.tint == nil)
+        let tabSymbol = PanelKind.changes.tabSystemImage
+        #expect(tabSymbol == "plusminus", "the Changes tab and toggle share a symbol")
+        let tints = [front.tint, behind.tint, off.tint]
+        let expectedTints: [PaneChromeControl.Tint?] = [nil, nil, nil]
+        #expect(tints == expectedTints)
         #expect(front.help == "Hide Changes (\(shortcut))")
         #expect(behind.help == "Show Changes (\(shortcut))")
         #expect(off.help == "Show Changes (\(shortcut))")

@@ -66,10 +66,6 @@ enum SidePanelPillMetrics {
     static let iconToLabelSpacing: CGFloat = 4
     /// After the label, to the pill's trailing end.
     static let trailingPadding: CGFloat = 8
-    /// A behind pill's outline: the primary colour at this opacity.
-    static let outlineOpacity: Double = 0.2
-    /// A behind pill's outline width.
-    static let outlineWidth: CGFloat = 1
 
     /// Before the icon's slot: what centres the slot where the square centres
     /// the icon of a pill that is off.
@@ -109,7 +105,8 @@ enum SidePanelPillMetrics {
     /// is on at its labelled width fit with no room left for a tab. The tabs
     /// scroll, so they give up their room first; only when even that leaves
     /// too little do the labels go, all together, and each pill that is on
-    /// keeps its fill or outline (`SidePanelPillButton`).
+    /// keeps its label colour, and the one in front its fill
+    /// (`SidePanelPillButton`).
     ///
     /// The fixed controls count the strip's full trailing group, not the
     /// items drawn now, so the labels do not come and go as the active panel
@@ -156,17 +153,19 @@ enum SidePanelPillMetrics {
 
 /// One of the side region's strip's pills (`TabRowEdgeItem`):
 ///
-/// - **Off:** its icon alone, in the row icon button's square.
+/// - **Off:** its icon alone, in the row icon button's square, in the row's
+///   grey.
 /// - **On, in front:** filled as a selected pill tab is (`TabPillShape`), its
 ///   icon and label in the label colour.
-/// - **On, behind** another panel or with the region collapsed: outlined, with
-///   no fill, in the row's grey.
+/// - **On, behind** another panel or with the region collapsed: its icon and
+///   label in the label colour, with no fill and no outline.
 ///
 /// An on pill shows its label while `showsLabel` says so
-/// (`SidePanelPillMetrics.showsLabel`), and keeps its fill or outline without
-/// it. Its hover and press feedback are `RowIconButtonStyle`'s, sized to the
-/// pill (`RowIconSquare.Size.pill`), so they cover the shape it draws; the
-/// fill and outline are drawn in that same shape (`RowIconSquareShape`).
+/// (`SidePanelPillMetrics.showsLabel`), and keeps its colour, and in front its
+/// fill, without it, so a narrow strip still tells on from off. Its hover and
+/// press feedback are `RowIconButtonStyle`'s, sized to the pill
+/// (`RowIconSquare.Size.pill`), so they cover the shape it draws; the fill is
+/// drawn in that same shape (`RowIconSquareShape`).
 ///
 /// It sets its own style on the button, and the strip hangs its right-click
 /// menu outside it, so the menu's content still sits in the style's
@@ -185,7 +184,7 @@ struct SidePanelPillButton: View {
         let control = item.control
         let size = Self.size(for: item, showsLabel: showsLabel)
         Button(action: action) {
-            label(control: control, size: size)
+            label(size: size)
         }
         .buttonStyle(RowIconButtonStyle(size))
         .disabled(!control.isEnabled)
@@ -195,10 +194,10 @@ struct SidePanelPillButton: View {
     }
 
     @ViewBuilder
-    private func label(control: PaneChromeControl, size: RowIconSquare.Size) -> some View {
+    private func label(size: RowIconSquare.Size) -> some View {
         let shape = RowIconSquareShape(size: size)
         let content = HStack(spacing: SidePanelPillMetrics.iconToLabelSpacing) {
-            Image(systemName: control.systemImage)
+            Image(systemName: item.pillSystemImage)
                 .frame(width: SidePanelPillMetrics.iconSlotWidth)
             if showsLabel {
                 Text(item.pillLabel)
@@ -212,10 +211,10 @@ struct SidePanelPillButton: View {
         .frame(width: Self.width(of: size), height: RowIconSquare.standardSide,
                alignment: showsLabel ? .leading : .center)
 
+        // A concrete colour for a pill that is on: a hierarchical `.primary`
+        // would be a level of the style's grey (`RowIconButtonStyle`).
         switch item.state {
         case .front:
-            // A concrete colour: a hierarchical `.primary` would be a level
-            // of the style's grey (`RowIconButtonStyle`).
             content
                 .foregroundStyle(Color(nsColor: .labelColor))
                 .background {
@@ -223,11 +222,7 @@ struct SidePanelPillButton: View {
                 }
         case .behind:
             content
-                .background {
-                    shape.strokeBorder(
-                        Color.primary.opacity(SidePanelPillMetrics.outlineOpacity),
-                        lineWidth: SidePanelPillMetrics.outlineWidth)
-                }
+                .foregroundStyle(Color(nsColor: .labelColor))
         case .off:
             content
         }

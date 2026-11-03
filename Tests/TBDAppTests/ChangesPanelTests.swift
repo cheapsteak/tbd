@@ -681,6 +681,91 @@ struct ChangesPanelTests {
         }
     }
 
+    @Test("a load records whether the worktree's list is empty, for the Changes toggle, and forgetting the list drops it")
+    func loadRecordsWhetherTheListIsEmpty() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let loads = PanelEventLog()
+            let withFile = Self.snapshot(unstaged: "a.swift")
+            let empty = ChangesSnapshot(statuses: [], branch: [])
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                return loads.events.count == 1 ? withFile : empty
+            }
+            let beforeAny = state.changesListIsEmpty[worktree.id]
+            #expect(beforeAny == nil, "nothing loaded yet")
+
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let afterFiles = state.changesListIsEmpty[worktree.id]
+            #expect(afterFiles == false)
+
+            dates.advance(by: 1)
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let afterEmpty = state.changesListIsEmpty[worktree.id]
+            #expect(afterEmpty == true)
+
+            state.forgetChangesSnapshot(worktreeID: worktree.id)
+            let afterForget = state.changesListIsEmpty[worktree.id]
+            #expect(afterForget == nil)
+        }
+    }
+
+    @Test("a load counts as in flight while it reads git, and the poller waits for it")
+    func loadCountsAsInFlight() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let gate = PanelCallGate()
+            let loaded = Self.snapshot(unstaged: "a.swift")
+            state.changesLoader = { @MainActor _, _ in
+                await gate.wait()
+                return loaded
+            }
+            let inFlightBefore = state.changesLoadInFlight(worktreeID: worktree.id)
+            let pollLoadsBefore = state.changesPollNeedsLoad(worktreeID: worktree.id)
+            #expect(!inFlightBefore)
+            #expect(pollLoadsBefore, "nothing cached: a poll loads")
+
+            let load = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the load is in flight")
+            let inFlight = state.changesLoadInFlight(worktreeID: worktree.id)
+            let pollLoadsWhileReading = state.changesPollNeedsLoad(worktreeID: worktree.id)
+            #expect(inFlight)
+            #expect(!pollLoadsWhileReading, "no second load starts while one reads git")
+
+            gate.release()
+            _ = await load.value
+            let inFlightAfter = state.changesLoadInFlight(worktreeID: worktree.id)
+            #expect(!inFlightAfter)
+        }
+    }
+
+    @Test("the poller polls the selected worktree only while exactly one is selected, and a state made while TBD is inactive does not poll")
+    func pollWorktreeIsTheSingleSelection() async {
+        await Fixture.withState { state in
+            let repoID = UUID()
+            let first = Self.worktree(id: UUID(), repoID: repoID)
+            let second = Self.worktree(id: UUID(), repoID: repoID)
+            state.worktrees[repoID] = [first, second]
+
+            let pollingAtStart = state.changesListPoller.isPolling
+            #expect(!pollingAtStart, "TBD is not active under test, so nothing polls")
+
+            state.selectedWorktreeIDs = [first.id]
+            let one = state.changesPollWorktreeIDs
+            state.selectedWorktreeIDs = [first.id, second.id]
+            let two = state.changesPollWorktreeIDs
+            state.selectedWorktreeIDs = []
+            let none = state.changesPollWorktreeIDs
+
+            #expect(one == [first.id])
+            #expect(two.isEmpty, "a multiple selection draws no tab bar or side region")
+            #expect(none.isEmpty)
+        }
+    }
+
     // MARK: - The retired column's keys
 
     @Test("the retired column's keys are removed, and nothing else")

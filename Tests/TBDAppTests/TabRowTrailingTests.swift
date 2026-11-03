@@ -40,8 +40,9 @@ struct TabRowTrailingTests {
     // MARK: - Fixtures
 
     /// A worktree in the copy holding a Claude terminal and a plain one, with
-    /// its notes listed and empty, and the four primaries one workspace tab of
-    /// it switches between.
+    /// its notes listed and empty, its Changes list loaded with files in it,
+    /// so the Changes toggle is drawn (`TabRowEdgeControls.showsChanges`), and
+    /// the four primaries one workspace tab of it switches between.
     private struct World {
         let worktreeID: UUID
         let tabID: UUID
@@ -76,6 +77,7 @@ struct TabRowTrailingTests {
         let plain = plainTerminal(worktreeID: worktreeID)
         state.terminals[worktreeID] = [claude, plain]
         state.notes[worktreeID] = []
+        state.changesListIsEmpty[worktreeID] = false
         return World(
             worktreeID: worktreeID,
             tabID: tabID,
@@ -290,6 +292,12 @@ struct TabRowTrailingTests {
         let expectedWithoutTranscript: [TabRowEdgeItem] = [.changes(changes), .notes(notes)]
         #expect(withoutTranscript.items == expectedWithoutTranscript)
 
+        let withoutChanges = TabRowEdgeControls(
+            changes: nil, onChanges: {}, transcript: transcript, transcriptTerminalID: UUID(),
+            onTranscript: {}, notes: notes, onNotes: {})
+        let expectedWithoutChanges: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
+        #expect(withoutChanges.items == expectedWithoutChanges)
+
         // Each pill reads its panel's name, the Notes pill whatever the note
         // is titled.
         let labels = withTranscript.items.map(\.pillLabel)
@@ -378,6 +386,14 @@ struct TabRowTrailingTests {
         let bare = SideStripTrailingItem.items(activePanelControl: nil, edgeItems: withoutTranscript)
         let expectedBare: [SideStripTrailingItem] = [.edge(.changes(changes)), .edge(.notes(notes)), .collapse]
         #expect(bare == expectedBare)
+
+        // No Changes pill: the transcript follows the active panel's control.
+        let withoutChanges: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
+        let noChanges = SideStripTrailingItem.items(activePanelControl: refresh, edgeItems: withoutChanges)
+        let expectedNoChanges: [SideStripTrailingItem] = [
+            .activePanelControl(refresh), .edge(.transcript(transcript)), .edge(.notes(notes)), .collapse,
+        ]
+        #expect(noChanges == expectedNoChanges)
 
         // At most five slots, so the strip's fixed controls stay 240 pt.
         let slotCount = full.count
@@ -718,6 +734,72 @@ struct TabRowTrailingTests {
             let tabIDs: [UUID] = envelopes.envelopes.map(\.tabID)
             let expectedTabIDs: [UUID] = [world.tabID]
             #expect(tabIDs == expectedTabIDs)
+        }
+    }
+
+    // MARK: - Whether the Changes toggle is drawn
+
+    @Test("the Changes toggle is drawn while the list has files or its panel is open, and not while the list is empty or unloaded with the panel closed")
+    func showsChangesPerBranch() {
+        let unloadedClosed = TabRowEdgeControls.showsChanges(listIsEmpty: nil, panelOpen: false)
+        let emptyClosed = TabRowEdgeControls.showsChanges(listIsEmpty: true, panelOpen: false)
+        let filesClosed = TabRowEdgeControls.showsChanges(listIsEmpty: false, panelOpen: false)
+        let unloadedOpen = TabRowEdgeControls.showsChanges(listIsEmpty: nil, panelOpen: true)
+        let emptyOpen = TabRowEdgeControls.showsChanges(listIsEmpty: true, panelOpen: true)
+        let filesOpen = TabRowEdgeControls.showsChanges(listIsEmpty: false, panelOpen: true)
+
+        #expect(!unloadedClosed, "hidden before any load has finished")
+        #expect(!emptyClosed, "hidden while the last load found no change")
+        #expect(filesClosed)
+        #expect(unloadedOpen, "an open panel can always be closed")
+        #expect(emptyOpen, "an open panel can always be closed")
+        #expect(filesOpen)
+    }
+
+    @Test("a worktree whose list is empty or not loaded yet draws no Changes toggle, in the strip or at the bar's end")
+    func noChangesDrawsNoToggle() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let hiddenBar: [TabBarTrailingItem] = [
+                .sessionHistory, .edge(.transcript(Self.transcriptLive)), .edge(.notes(Self.notesOff)), .expand,
+            ]
+            let shownStrip: [SideStripTrailingItem] = [
+                .activePanelControl(Self.copyAddress), .edge(.transcript(Self.transcriptLive)),
+                .edge(.notes(Self.notesOff)), .collapse,
+            ]
+            let lists: [(isEmpty: Bool?, name: String)] = [(true, "empty"), (nil, "not loaded")]
+            for list in lists {
+                state.changesListIsEmpty[world.worktreeID] = list.isEmpty
+                let row = Self.row(state, world, primary: world.claude)
+                #expect(row.hiddenBar == hiddenBar, "\(list.name)")
+                #expect(row.shownStrip == shownStrip, "\(list.name)")
+            }
+        }
+    }
+
+    @Test("an open Changes panel keeps its toggle, in front or behind, whatever its list holds")
+    func openChangesPanelKeepsItsToggle() async {
+        await Fixture.withState { state in
+            let world = Self.world(state)
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let web = ViewerPanel(id: UUID(), content: .web(Self.pageURL))
+            let inFront = Self.surface(
+                world, side: SideRegion(panels: [web], activePanelID: changes.id, recency: [web.id]),
+                worktreePanels: [changes])
+            let behind = Self.surface(
+                world, side: SideRegion(panels: [web], activePanelID: web.id, recency: [web.id]),
+                worktreePanels: [changes])
+            let expectedFront: TabRowEdgeItem? = .changes(.changes(state: .front))
+            let expectedBehind: TabRowEdgeItem? = .changes(.changes(state: .behind))
+
+            let lists: [(isEmpty: Bool?, name: String)] = [(true, "empty"), (nil, "not loaded")]
+            for list in lists {
+                state.changesListIsEmpty[world.worktreeID] = list.isEmpty
+                let frontFirst = Self.edge(state, world, primary: world.claude, surface: inFront).items.first
+                let behindFirst = Self.edge(state, world, primary: world.claude, surface: behind).items.first
+                #expect(frontFirst == expectedFront, "\(list.name)")
+                #expect(behindFirst == expectedBehind, "\(list.name)")
+            }
         }
     }
 

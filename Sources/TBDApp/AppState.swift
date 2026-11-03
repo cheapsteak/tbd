@@ -389,6 +389,9 @@ final class AppState {
             }
             // Skip the write entirely when nothing moved.
             if newOrder != selectionOrder { selectionOrder = newOrder }
+            // Another worktree on screen: load its Changes list now if the
+            // cache's is missing or old, so its Changes toggle is current.
+            changesListPoller.worktreesOnScreenChanged()
             // When a single worktree becomes the focused selection, the user is
             // now viewing its active tab — clear that tab's unread-completion
             // bold. Single-select only: tab bars only render in single-select.
@@ -1007,6 +1010,20 @@ final class AppState {
     /// (`forgetChangesSnapshot`). A cache no view observes: the list reads it
     /// when it is made and when it appears.
     @ObservationIgnored var changesSnapshots: [UUID: ChangesSnapshotCache.Entry] = [:]
+    /// Worktree → whether its last loaded Changes list had no file in it;
+    /// absent before any load of it has finished. Observed, unlike
+    /// `changesSnapshots`, so the Changes toggle comes and goes with it
+    /// (`TabRowEdgeControls.showsChanges`), and written only when the answer
+    /// changes, so a poll that finds what the last one found redraws nothing.
+    var changesListIsEmpty: [UUID: Bool] = [:]
+    /// Worktree → how many loads of its Changes list are reading git now
+    /// (`loadChangesSnapshot`), so the poller never starts a second one
+    /// (`changesPollNeedsLoad`).
+    @ObservationIgnored var changesLoadsInFlight: [UUID: Int] = [:]
+    /// Keeps the Changes list of the worktree on screen fresh while TBD is
+    /// active, so the Changes toggle shows whether it has changes
+    /// (`ChangesListPoller`). Its host is this state, set in `init`.
+    @ObservationIgnored let changesListPoller = ChangesListPoller()
     /// The current time, as `loadChangesSnapshot` stamps a load as it begins
     /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
     /// Injectable so a test can set how old a cached list is and the order
@@ -2870,6 +2887,10 @@ final class AppState {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        changesListPoller.host = self
+        if isAppActive() {
+            changesListPoller.appBecameActive()
+        }
         // A card retired on its timeout is never reported settled, so its
         // drafts and delivery state are dropped here instead.
         promptCardRetention.onRetire = { [weak self] promptID in
@@ -2961,6 +2982,7 @@ final class AppState {
             // is Sendable from Swift 6's view — hop via assumeIsolated.
             MainActor.assumeIsolated {
                 self.macNotificationManager.dismissDelivered(worktreeIDs: self.visibleWorktreeIDs)
+                self.changesListPoller.appBecameActive()
             }
             Task { [weak self] in
                 guard let self else { return }
@@ -2977,6 +2999,9 @@ final class AppState {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            MainActor.assumeIsolated {
+                self.changesListPoller.appResignedActive()
+            }
             Task { [weak self] in
                 guard let self else { return }
                 do {

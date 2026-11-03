@@ -24,7 +24,7 @@ extension PanelKind {
     static let noteSystemImage = "doc.text"
 
     /// The Changes tab's symbol, which the Changes toggle shows too.
-    static let changesSystemImage = "plus.forwardslash.minus"
+    static let changesSystemImage = "plusminus"
 }
 
 extension PanelContent {

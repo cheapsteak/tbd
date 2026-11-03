@@ -230,7 +230,7 @@ struct NotesButtonTests {
 
     // MARK: - The button
 
-    @Test("the toggle draws doc.text: accent while its note's panel is open, the row's grey while off, secondary and disabled while loading")
+    @Test("the toggle draws doc.text in the row's grey whatever its note's panel's state, and secondary and disabled while loading")
     func notesControlAppearance() {
         let front = PaneChromeControl.notes(state: .front, isEnabled: true)
         let behind = PaneChromeControl.notes(state: .behind, isEnabled: true)
@@ -239,11 +239,13 @@ struct NotesButtonTests {
 
         #expect(front.systemImage == "doc.text")
         #expect(front.systemImage == PanelKind.note.tabSystemImage)
-        #expect(front.tint == .accent)
+        // The icon button draws no colour of its own, open or not: it shows
+        // only while no panel is in view.
+        #expect(front.tint == nil)
         #expect(front.help == "Hide notes")
         #expect(front.isEnabled)
         #expect(behind.systemImage == "doc.text")
-        #expect(behind.tint == .accent)
+        #expect(behind.tint == nil)
         #expect(behind.help == "Show notes", "behind, a press brings it forward")
         #expect(off.systemImage == "doc.text")
         #expect(off.tint == nil)

@@ -4,10 +4,11 @@ import TBDShared
 // MARK: - TabRowEdgeControls
 
 /// The three toggles at the window's right edge, just before the button that
-/// hides or shows the side region: Changes, the transcript and Notes, in that
-/// order (`items`). They act on the workspace tab as a whole, not on whatever
-/// column they sit over, so they keep to the edge: in the side region's strip
-/// while the region shows, as pills (`SideStripTrailingItem`,
+/// hides or shows the side region: Changes while the worktree has changes or
+/// its Changes panel is open (`showsChanges`), the transcript and Notes, in
+/// that order (`items`). They act on the workspace tab as a whole, not on
+/// whatever column they sit over, so they keep to the edge: in the side
+/// region's strip while the region shows, as pills (`SideStripTrailingItem`,
 /// `SidePanelPillButton`), and at the end of the workspace tab bar while it
 /// is hidden, as icon buttons (`TabBarTrailingItem`, `TabRowEdgeButton`).
 ///
@@ -18,8 +19,9 @@ import TBDShared
 /// them for the strip from the same plain inputs, so no view hands another a
 /// struct of closures SwiftUI cannot compare.
 struct TabRowEdgeControls {
-    /// The Changes toggle (`PanelSurfaceWorkspaceView.changesControl`).
-    let changes: PaneChromeControl
+    /// The Changes toggle (`PanelSurfaceWorkspaceView.changesControl`), or
+    /// nil while `showsChanges` hides it.
+    let changes: PaneChromeControl?
     /// What a press of the Changes toggle does
     /// (`AppState.toggleChangesPanel(worktreeID:tabID:)`).
     let onChanges: @MainActor () -> Void
@@ -39,16 +41,29 @@ struct TabRowEdgeControls {
     /// What a press of the Notes toggle does (`AppState.toggleNotesPanel`).
     let onNotes: @MainActor () -> Void
 
-    /// The toggles, left to right: Changes, the transcript while it is drawn,
-    /// then Notes. The one place their order is decided; the bar and the
-    /// strip both take it from here.
+    /// The toggles, left to right: Changes and the transcript while each is
+    /// drawn, then Notes. The one place their order is decided; the bar and
+    /// the strip both take it from here.
     var items: [TabRowEdgeItem] {
-        var items: [TabRowEdgeItem] = [.changes(changes)]
+        var items: [TabRowEdgeItem] = []
+        if let changes {
+            items.append(.changes(changes))
+        }
         if let transcript {
             items.append(.transcript(transcript))
         }
         items.append(.notes(notes))
         return items
+    }
+
+    /// Whether the Changes toggle is drawn: while the worktree's Changes list
+    /// has a file in it, from its last load (`listIsEmpty` false), or while
+    /// its Changes panel is open in this tab (`panelOpen`), so an open panel
+    /// can always be closed. Hidden while the last load found no change, and
+    /// before any load has finished (`listIsEmpty` nil): a toggle that opens
+    /// an empty list would offer nothing. ⌘⇧E opens the list either way.
+    static func showsChanges(listIsEmpty: Bool?, panelOpen: Bool) -> Bool {
+        panelOpen || listIsEmpty == false
     }
 
     /// What a press of `item`'s toggle does.
@@ -70,7 +85,10 @@ struct TabRowEdgeControls {
     /// - **Changes** is in the state of the worktree's Changes panel in this
     ///   tab (`PaneActions.changesToggleDecision`), and a press opens,
     ///   selects or closes it in this tab, whichever tab is on screen
-    ///   (`AppState.toggleChangesPanel(worktreeID:tabID:)`).
+    ///   (`AppState.toggleChangesPanel(worktreeID:tabID:)`). It is drawn
+    ///   while `showsChanges` says so, from whether the worktree's last
+    ///   loaded Changes list was empty (`AppState.changesListIsEmpty`, which
+    ///   `ChangesListPoller` keeps fresh for the worktree on screen).
     /// - **The transcript** is the toggle
     ///   `WorkspaceTabBarChrome.transcriptControl` decides, in the state of a
     ///   Claude terminal's transcript panel
@@ -109,8 +127,13 @@ struct TabRowEdgeControls {
             transcriptTerminalID = terminalID
         }
 
+        let changes = PanelSurfaceWorkspaceView.changesControl(surface: surface)
+        let changesShown = showsChanges(
+            listIsEmpty: appState.changesListIsEmpty[worktreeID],
+            panelOpen: changes.pillState?.isOn == true)
+
         return TabRowEdgeControls(
-            changes: PanelSurfaceWorkspaceView.changesControl(surface: surface),
+            changes: changesShown ? changes : nil,
             onChanges: {
                 appState.toggleChangesPanel(worktreeID: worktreeID, tabID: tabID)
             },
@@ -172,6 +195,16 @@ enum TabRowEdgeItem: Equatable, Identifiable {
         control.pillState ?? .off
     }
 
+    /// The symbol the toggle's pill draws: the control's
+    /// (`PaneChromeControl.systemImage`), except the transcript's, which
+    /// fills while its panel is open.
+    var pillSystemImage: String {
+        if case .transcript = self, state.isOn {
+            return "bubble.fill"
+        }
+        return control.systemImage
+    }
+
     /// What the toggle's pill reads while its panel is open: the panel's name.
     /// The Notes pill reads "Notes" whatever its note is titled.
     var pillLabel: String {
@@ -187,10 +220,10 @@ enum TabRowEdgeItem: Equatable, Identifiable {
 
 /// One of the three toggles at the window's right edge as the workspace tab
 /// bar draws it while the side region is hidden: `item`'s control as an icon
-/// button, tinted while its panel is open (`PaneChromeControl.tint`), with no
-/// label, since no panel is in view. Pressing it does what `edge` says for
-/// it. The strip draws the same toggles as pills instead
-/// (`SidePanelPillButton`).
+/// button in the row's grey, open or not, with a plain symbol and no label
+/// (`PaneChromeControl.tint`, `PaneChromeControl.systemImage`), since no
+/// panel is in view. Pressing it does what `edge` says for it. The strip
+/// draws the same toggles as pills instead (`SidePanelPillButton`).
 struct TabRowEdgeButton: View {
     let item: TabRowEdgeItem
     let edge: TabRowEdgeControls

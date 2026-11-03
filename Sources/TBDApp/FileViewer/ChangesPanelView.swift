@@ -246,7 +246,9 @@ extension AppState {
     /// Loads the worktree's Changes list through `changesLoader`, against its
     /// repo's default branch ("main" when the repo is not known), stores it
     /// in `changesSnapshots` stamped with `now()` as the load begins and as
-    /// it finishes, and returns it.
+    /// it finishes, records whether it is empty in `changesListIsEmpty` when
+    /// that answer changes, and returns it. While it reads git it counts in
+    /// `changesLoadsInFlight`.
     ///
     /// When its git reads return, a load stores nothing and returns nil if
     /// the cache already holds a list from a load that began at or after
@@ -262,7 +264,9 @@ extension AppState {
     func loadChangesSnapshot(worktree: LocalWorktree) async -> ChangesSnapshot? {
         let defaultBranch = repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
         let startedAt = now()
+        changesLoadsInFlight[worktree.id, default: 0] += 1
         let snapshot = await changesLoader(worktree, defaultBranch)
+        endChangesLoad(worktreeID: worktree.id)
         let finishedAt = now()
         if let stored = changesSnapshots[worktree.id],
            stored.startedAt >= startedAt, stored.startedAt <= finishedAt {
@@ -270,13 +274,31 @@ extension AppState {
         }
         changesSnapshots[worktree.id] = ChangesSnapshotCache.Entry(
             snapshot: snapshot, startedAt: startedAt, loadedAt: finishedAt)
+        if changesListIsEmpty[worktree.id] != snapshot.isEmpty {
+            changesListIsEmpty[worktree.id] = snapshot.isEmpty
+        }
         return snapshot
+    }
+
+    /// Whether a load of the worktree's Changes list is reading git now.
+    func changesLoadInFlight(worktreeID: UUID) -> Bool {
+        changesLoadsInFlight[worktreeID] != nil
+    }
+
+    /// Counts one of the worktree's loads out of `changesLoadsInFlight`,
+    /// dropping its entry with the last.
+    private func endChangesLoad(worktreeID: UUID) {
+        let remaining = (changesLoadsInFlight[worktreeID] ?? 1) - 1
+        changesLoadsInFlight[worktreeID] = remaining > 0 ? remaining : nil
     }
 
     /// Drops a worktree's cached Changes list when the worktree leaves app
     /// state: archived, or removed with its repo.
     func forgetChangesSnapshot(worktreeID: UUID) {
         changesSnapshots.removeValue(forKey: worktreeID)
+        if changesListIsEmpty[worktreeID] != nil {
+            changesListIsEmpty.removeValue(forKey: worktreeID)
+        }
     }
 }
 

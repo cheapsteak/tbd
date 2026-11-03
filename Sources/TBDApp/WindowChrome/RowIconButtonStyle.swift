@@ -169,13 +169,11 @@ private struct RowIconSquareHost<Content: View>: View {
 /// shorter side for a full square, which fills the button's frame, the
 /// longer side plus the outset on each side for an `outset` one, and for a
 /// `pill` the rect less `RowIconSquare.pillInset` at each end. Corners are
-/// circular, as `ToolbarIconButton` draws them. Insettable, so a view that
-/// draws its own fill or outline in the same shape as the hover square
-/// (`SidePanelPillButton`) can stroke inside it.
-struct RowIconSquareShape: InsettableShape {
+/// circular, as `ToolbarIconButton` draws them. Not private, so a view that
+/// draws its own fill in the same shape as the hover square
+/// (`SidePanelPillButton`) can use it.
+struct RowIconSquareShape: Shape {
     let size: RowIconSquare.Size
-    /// How far `strokeBorder` has inset the shape.
-    var insetAmount: CGFloat = 0
 
     func path(in rect: CGRect) -> Path {
         func centredSquare(side: CGFloat) -> CGRect {
@@ -190,14 +188,6 @@ struct RowIconSquareShape: InsettableShape {
         case .pill:
             outline = rect.insetBy(dx: RowIconSquare.pillInset, dy: 0)
         }
-        let inset = outline.insetBy(dx: insetAmount, dy: insetAmount)
-        let radius = max(0, RowIconSquare.cornerRadius(for: size) - insetAmount)
-        return Path(roundedRect: inset, cornerRadius: radius)
-    }
-
-    func inset(by amount: CGFloat) -> RowIconSquareShape {
-        var shape = self
-        shape.insetAmount += amount
-        return shape
+        return Path(roundedRect: outline, cornerRadius: RowIconSquare.cornerRadius(for: size))
     }
 }

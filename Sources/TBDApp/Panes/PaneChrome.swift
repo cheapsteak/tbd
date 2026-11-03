@@ -215,17 +215,21 @@ enum PaneChromeControl: Equatable {
 
     /// The symbol's colour.
     enum Tint {
-        case accent
         case primary
         case secondary
     }
 
+    /// The symbol the icon button draws (`PaneChromeControlButton`). Each of
+    /// the three toggles draws one symbol whatever its panel's state: the
+    /// icon button shows them only while no panel is in view, so a filled
+    /// symbol there would read as a panel showing. Their pills draw their
+    /// own (`TabRowEdgeItem.pillSystemImage`).
     var systemImage: String {
         switch self {
         case .changes:
             return PanelKind.changesSystemImage
-        case .transcript(let state, _):
-            return state.isOn ? "bubble.fill" : "bubble"
+        case .transcript:
+            return "bubble"
         case .notes:
             return PanelKind.noteSystemImage
         case .renderToggle:
@@ -251,19 +255,19 @@ enum PaneChromeControl: Equatable {
 
     /// Nil leaves the symbol in the button style's own colour: the row's
     /// secondary grey (`RowIconButtonStyle`). The Changes, transcript and
-    /// Notes toggles take the accent colour while their panel is open, in
-    /// front or behind, and the row's grey while it is not. The render
+    /// Notes toggles stay in that grey whatever their panel's state, and a
+    /// disabled one is secondary: the icon button draws them only at the
+    /// workspace tab bar's end while the side region is hidden, where no
+    /// panel is in view, so a colour there would read as one showing. Their
+    /// pills draw their state themselves (`SidePanelPillButton`). The render
     /// toggle's primary marks it showing source.
     var tint: Tint? {
         switch self {
-        case .changes(let state):
-            return state.isOn ? .accent : nil
-        case .transcript(let state, let isEnabled), .notes(let state, let isEnabled):
-            guard isEnabled else { return .secondary }
-            return state.isOn ? .accent : nil
+        case .transcript(_, let isEnabled), .notes(_, let isEnabled):
+            return isEnabled ? nil : .secondary
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
-        case .copyAddress, .refresh:
+        case .changes, .copyAddress, .refresh:
             return nil
         }
     }
@@ -334,8 +338,6 @@ struct PaneChromeControlButton: View {
         let image = Image(systemName: control.systemImage)
             .font(.system(size: 11))
         switch control.tint {
-        case .accent?:
-            image.foregroundStyle(Color.accentColor)
         case .primary?:
             image.foregroundStyle(Color(nsColor: .labelColor))
         case .secondary?, nil:

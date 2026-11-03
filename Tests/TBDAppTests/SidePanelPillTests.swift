@@ -40,6 +40,20 @@ struct SidePanelPillTests {
         #expect(onStates == [false, true, true])
     }
 
+    @Test("the transcript pill fills its bubble while its panel is open; every other pill draws its icon button's symbol")
+    func pillSymbols() {
+        let items: [TabRowEdgeItem] = [
+            .transcript(.transcript(state: .front, isEnabled: true)),
+            .transcript(.transcript(state: .behind, isEnabled: true)),
+            .transcript(.transcript(state: .off, isEnabled: true)),
+            .changes(.changes(state: .front)),
+            .notes(.notes(state: .behind, isEnabled: true)),
+        ]
+        let symbols = items.map(\.pillSystemImage)
+        let expected = ["bubble.fill", "bubble.fill", "bubble", "plusminus", "doc.text"]
+        #expect(symbols == expected)
+    }
+
     // MARK: - The label rule
 
     @Test("the labels show at the width that fits every pill that is on, and not a point narrower")

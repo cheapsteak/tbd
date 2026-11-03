@@ -70,9 +70,11 @@ enum SideStripMetrics {
     /// The most buttons the trailing group holds: the active panel's control,
     /// the Changes, transcript and Notes pills at their icon-only width, and
     /// collapse. The most, not the current count, so the region's minimum
-    /// width stays put as the active panel or the transcript setting
-    /// changes. A pill's label is not counted: the labels show only while
-    /// the strip has room for them (`SidePanelPillMetrics.labelsFit`).
+    /// width stays put as the active panel, the transcript setting or the
+    /// worktree's changes come and go; a pill that is not drawn, such as
+    /// Changes for a worktree with none, only leaves the tabs more room. A
+    /// pill's label is not counted: the labels show only while the strip has
+    /// room for them (`SidePanelPillMetrics.labelsFit`).
     static let trailingSlotCount = 5
 
     /// The width the strip's fixed controls need, in points: the history
@@ -282,11 +284,13 @@ enum SideRegionStrip {
 ///   Changes panel, the first note's and the transcript's get no tab: their
 ///   pills stand for them.
 /// - **The active panel's own control** (`SideRegionStrip.trailingControl`).
-/// - **The pills**: Changes, the transcript while the workspace tab bar would
-///   draw its toggle, and Notes (`SidePanelPillButton`). Each opens, selects
-///   or closes its panel, and shows the panel's name while it is open and the
-///   strip has room (`SidePanelPillMetrics.labelsFit`, from the strip's
-///   measured width, `labelRuleWidth`). The transcript pill's right-click
+/// - **The pills**: Changes while the worktree has changes or its panel is
+///   open (`TabRowEdgeControls.showsChanges`), the transcript while the
+///   workspace tab bar would draw its toggle, and Notes
+///   (`SidePanelPillButton`). Each opens, selects or closes its panel, and
+///   shows the panel's name while it is open and the strip has room
+///   (`SidePanelPillMetrics.labelsFit`, from the strip's measured width,
+///   `labelRuleWidth`). The transcript pill's right-click
 ///   offers the session file's menu, and the Notes pill's Delete Note… and,
 ///   when the worktree has other notes with no panel, Open Other Note.
 /// - **Collapse**, which carries `⌘\` while the region shows.
