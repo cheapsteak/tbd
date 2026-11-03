@@ -90,8 +90,8 @@ window's bottom edge:
 - **The bottom bars line up.** The sidebar's footer and the status bar share
   one height, `WindowBottomBarMetrics.height` (32 pt), and each centres its
   content in it. Both sit on the window's bottom edge, so their tops and centre
-  lines meet across the divider. The status bar keeps that height whatever is
-  selected.
+  lines meet across the split between the sidebar column and the content
+  pane. The status bar keeps that height whatever is selected.
 
 ## The toolbar
 

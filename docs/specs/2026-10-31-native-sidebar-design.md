@@ -108,10 +108,12 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   rest). The builder takes its row models from it, and so does the dock, which
   builds no tree.
 - **`SidebarContainerController`** – the native sidebar's root: the outline's
-  scroll view filling the column, then a divider and the dock along the bottom
-  edge, above the SwiftUI footer. It sets the dock's height in closed form,
+  scroll view filling the column, then the dock along the bottom edge, above
+  the SwiftUI footer. No line separates them: the outline ends where the dock
+  begins, and the dock and the footer share one `.bar` backdrop from the
+  dock's top edge down. It sets the dock's height in closed form,
   `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
-  five rows and 40% of the list above the divider — on every layout and
+  five rows and 40% of the list above the dock — on every layout and
   whenever the dock's row count changes. It hands the outline and the dock one
   sheet presenter and one `+` menu, and gives the dock the outline's answers
   about scratch directories, so the dock never reads the disk.
