@@ -4,6 +4,13 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+SelectionArchive")
 
+/// One bulk-run archive call that has ended: the row as it was when the call
+/// started, and the error, if the call failed.
+private struct BulkArchiveCall: Sendable {
+    let worktree: Worktree
+    let error: (any Error)?
+}
+
 /// Archiving the sidebar selection: the row menu's Archive Selection and the
 /// archive shortcut. The decisions are `SelectionArchive`'s; this wires them
 /// to live state. `selectedWorktreeIDs` is the one selection source: the
@@ -115,9 +122,9 @@ extension AppState {
 
     /// Run a selection's archive. One row takes `archiveWorktree(id:)`
     /// unchanged, so it gets the same prompts and alert as the row's own
-    /// Archive; several take `archiveInBulk`. `.nothing` and `.refuse`
-    /// archive nothing: a refusal's beep is the gesture's, played before any
-    /// task starts (`startArchive`).
+    /// Archive; several take `archiveInBulk`, which runs their calls side by
+    /// side. `.nothing` and `.refuse` archive nothing: a refusal's beep is the
+    /// gesture's, played before any task starts (`startArchive`).
     func runArchive(_ route: SelectionArchive.Route) async {
         switch route {
         case .nothing, .refuse:
@@ -146,9 +153,19 @@ extension AppState {
         return true
     }
 
-    /// Archive several rows in turn, in the order given, with no prompt and
-    /// no per-row alert. `archive` makes one row's archive call: production
-    /// passes `worktreeArchiver`, tests a fake.
+    /// Archive several rows with no prompt and no per-row alert, up to
+    /// `SelectionArchive.maxConcurrentArchives` calls at once. `targetIDs`
+    /// come in run order (`selectionArchiveTargets`). `archive` makes one
+    /// row's call: production passes `worktreeArchiver`, tests a fake. The
+    /// calls overlap because each one gives up the main actor while it waits
+    /// for the daemon.
+    ///
+    /// `SelectionArchive.BulkSchedule` decides what each row does and when,
+    /// and a task group runs the calls: the run starts every row whose turn
+    /// has come while a slot is free, waits for the next call to end, settles
+    /// it, and then starts whatever that made ready. A row's turn comes once
+    /// its selected children before it in run order are done, so a parent's
+    /// call starts only after theirs end, and ready rows start in run order.
     ///
     /// One bulk run at a time: while one runs (`selectionArchiveInFlight`),
     /// another call archives nothing and plays `refusalBeep`, so the row menu
@@ -157,26 +174,32 @@ extension AppState {
     /// While a run goes, the rows it has yet to finish are in
     /// `selectionArchivePendingIDs`, and the single-row archives refuse them
     /// (`refuseArchiveOwnedBySelectionRun`), so no other path archives a row
-    /// the run still owns.
+    /// the run still owns. A row leaves the set when its own call ends, when
+    /// it is skipped or found gone at its turn, or when the run gives up on
+    /// it.
     ///
     /// Each success gets the single-row path's settlement,
-    /// `removeArchivedWorktreeFromState`, and the Scratch section's Archived
-    /// tab is refreshed once at the end if a scratch row went. Each failure
-    /// goes through `handleConnectionError`, as on the single-row path, and is
-    /// collected; there is no bulk Archive anyway or discard offer. A row
-    /// that was not archived holds back its parent: when the parent's turn
-    /// comes it is skipped without an RPC, since the daemon would refuse it
-    /// for its active child, and collected with a reason naming that child
+    /// `removeArchivedWorktreeFromState`, as soon as its call returns, so rows
+    /// leave the sidebar as their calls end, and the Scratch section's
+    /// Archived tab is refreshed once at the end if a scratch row went. Each
+    /// failure goes through `handleConnectionError`, as on the single-row
+    /// path, and is collected; there is no bulk Archive anyway or discard
+    /// offer. A row that was not archived holds back its parent: the parent
+    /// is skipped without an RPC, since the daemon would refuse it for its
+    /// active child, and collected with a reason naming that child
     /// (`SelectionArchive.nestedNotArchivedReason`), which in turn holds back
     /// the grandparent. A failure that is a lost connection to the daemon
-    /// stops the run: the rows after it are counted as not attempted, and the
-    /// Archived tab is not refreshed, since that call would fail too. When
-    /// everything is done, and only if something failed, one alert sums it up
-    /// (`SelectionArchive.summary`). A row that has left the state since the
-    /// run's targets were resolved is not attempted and not counted.
+    /// stops new rows from starting: the calls already in flight finish and
+    /// are counted, archived or failed, the rows never started are counted as
+    /// not attempted, and the Archived tab is not refreshed, since that call
+    /// would fail too. When everything is done, and only if something failed,
+    /// one alert sums it up (`SelectionArchive.summary`), listing the failures
+    /// in run order rather than the order the calls ended in, so the same
+    /// outcome always reads the same. A row that has left the state by its
+    /// turn is not attempted and not counted.
     func archiveInBulk(
         _ targetIDs: [UUID],
-        archive: @MainActor (Worktree) async throws -> Void
+        archive: @escaping @Sendable @MainActor (Worktree) async throws -> Void
     ) async {
         guard !selectionArchiveInFlight else {
             logger.info("Refused a selection archive while another is running")
@@ -187,62 +210,95 @@ extension AppState {
         selectionArchivePendingIDs.formUnion(targetIDs)
         defer {
             selectionArchiveInFlight = false
-            // The rows a lost connection left unattempted.
+            // Whatever the run did not settle row by row.
             selectionArchivePendingIDs.subtract(targetIDs)
         }
 
+        var schedule = SelectionArchive.BulkSchedule(targetIDs.map { id in
+            SelectionArchive.BulkSchedule.Target(id: id, parentID: findWorktree(id: id)?.parentWorktreeID)
+        })
         var archived = 0
         var total = 0
         var notAttempted = 0
         var archivedScratch = false
         var lostConnection = false
-        var failures: [SelectionArchive.Failure] = []
-        // A parent's ID → the display name of its first nested worktree that
-        // was not archived.
-        var heldBackBy: [UUID: String] = [:]
-        for (index, id) in targetIDs.enumerated() {
-            // The row's turn is over when this pass ends, however it ends.
-            defer { selectionArchivePendingIDs.remove(id) }
-            guard let worktree = findWorktree(id: id) else { continue }
-            total += 1
-            let reason: String
-            if let nestedName = heldBackBy[id] {
-                reason = SelectionArchive.nestedNotArchivedReason(nestedName)
-                logger.info(
-                    "Skipped \(worktree.displayName, privacy: .public) with the selection: \(nestedName, privacy: .public) was not archived")
-            } else {
-                do {
-                    try await archive(worktree)
-                    removeArchivedWorktreeFromState(id: id)
-                    archived += 1
-                    if worktree.isScratch { archivedScratch = true }
-                    logger.info("Archived \(worktree.displayName, privacy: .public) with the selection")
-                    continue
-                } catch {
+        // Keyed by row, and listed in run order at the end.
+        var failures: [UUID: SelectionArchive.Failure] = [:]
+
+        await withTaskGroup(of: BulkArchiveCall.self) { group in
+            while true {
+                // Act on every row whose turn has come: start it while a slot
+                // is free, or skip it if a nested worktree stayed.
+                while !lostConnection, let turn = schedule.nextTurn() {
+                    let id = turn.id
+                    guard let worktree = findWorktree(id: id) else {
+                        schedule.record(id, .vanished)
+                        selectionArchivePendingIDs.remove(id)
+                        continue
+                    }
+                    total += 1
+                    switch turn {
+                    case .start:
+                        schedule.begin(id)
+                        group.addTask {
+                            do {
+                                try await archive(worktree)
+                                return BulkArchiveCall(worktree: worktree, error: nil)
+                            } catch {
+                                return BulkArchiveCall(worktree: worktree, error: error)
+                            }
+                        }
+                    case .skip(_, let nestedName):
+                        logger.info(
+                            "Skipped \(worktree.displayName, privacy: .public) with the selection: \(nestedName, privacy: .public) was not archived")
+                        failures[id] = SelectionArchive.Failure(
+                            name: worktree.displayName,
+                            reason: SelectionArchive.nestedNotArchivedReason(nestedName))
+                        schedule.record(id, .notArchived(name: worktree.displayName))
+                        selectionArchivePendingIDs.remove(id)
+                    }
+                }
+
+                // Settle the next call to end.
+                guard let call = await group.next() else { break }
+                let worktree = call.worktree
+                if let error = call.error {
                     logger.error(
                         "Failed to archive \(worktree.displayName, privacy: .public) with the selection: \(error, privacy: .public)")
                     handleConnectionError(error)
-                    reason = SelectionArchive.failureReason(error)
-                    lostConnection = Self.isDisconnectError(error)
+                    failures[worktree.id] = SelectionArchive.Failure(
+                        name: worktree.displayName, reason: SelectionArchive.failureReason(error))
+                    schedule.record(worktree.id, .notArchived(name: worktree.displayName))
+                    if Self.isDisconnectError(error), !lostConnection {
+                        // Start nothing more. The calls in flight still end
+                        // here and count; the rows never started are given up.
+                        lostConnection = true
+                        let givenUp = schedule.unstarted
+                        notAttempted = givenUp.filter { findWorktree(id: $0) != nil }.count
+                        total += notAttempted
+                        selectionArchivePendingIDs.subtract(givenUp)
+                        logger.error(
+                            "Stopped the selection archive: lost the connection to the daemon, \(notAttempted, privacy: .public) row(s) not attempted")
+                    }
+                } else {
+                    removeArchivedWorktreeFromState(id: worktree.id)
+                    archived += 1
+                    if worktree.isScratch { archivedScratch = true }
+                    schedule.record(worktree.id, .archived)
+                    logger.info("Archived \(worktree.displayName, privacy: .public) with the selection")
                 }
-            }
-            failures.append(SelectionArchive.Failure(name: worktree.displayName, reason: reason))
-            if let parentID = worktree.parentWorktreeID, heldBackBy[parentID] == nil {
-                heldBackBy[parentID] = worktree.displayName
-            }
-            if lostConnection {
-                notAttempted = targetIDs[(index + 1)...].filter { findWorktree(id: $0) != nil }.count
-                total += notAttempted
-                break
+                selectionArchivePendingIDs.remove(worktree.id)
             }
         }
+
         if archivedScratch && !lostConnection {
             await refreshArchivedScratch()
         }
-        guard !failures.isEmpty else { return }
+        let failuresInRunOrder = schedule.order.compactMap { failures[$0] }
+        guard !failuresInRunOrder.isEmpty else { return }
         showAlert(
             SelectionArchive.summary(
-                archived: archived, total: total, failures: failures, notAttempted: notAttempted),
+                archived: archived, total: total, failures: failuresInRunOrder, notAttempted: notAttempted),
             isError: true)
     }
 }
