@@ -102,7 +102,8 @@ struct CodeViewerPaneView: View {
                     worktreePath: worktreePath,
                     showSourceCode: showSourceCode,
                     rendersMarkdown: true,
-                    onOpenFile: { openLinkedFile($0) }
+                    onOpenFile: { openLinkedFile($0) },
+                    fillsViewport: true
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -126,7 +127,8 @@ struct CodeViewerPaneView: View {
                                         worktreePath: worktreePath,
                                         showSourceCode: showSourceCode,
                                         rendersMarkdown: false,
-                                        onOpenFile: { openLinkedFile($0) }
+                                        onOpenFile: { openLinkedFile($0) },
+                                        fillsViewport: selectedFiles.count == 1
                                     )
                                 }
                             }
@@ -199,27 +201,23 @@ struct CodeViewerPaneView: View {
     }
 }
 
-// MARK: - File Type Detection
-
-private let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "ico", "svg"]
-
-private func isImageFile(_ path: String) -> Bool {
-    let ext = (path as NSString).pathExtension.lowercased()
-    return imageExtensions.contains(ext)
-}
-
-private func isTextFile(_ path: String) -> Bool {
-    // Try reading a small chunk as UTF-8 to detect binary
-    guard let fh = FileHandle(forReadingAtPath: path) else { return false }
-    defer { fh.closeFile() }
-    let sample = fh.readData(ofLength: 8192)
-    return String(data: sample, encoding: .utf8) != nil
-}
-
 // MARK: - FilePreviewView
 
-/// Routes to the appropriate preview based on file type:
-/// images → native NSImage, text → syntax-highlighted code, binary → "Open in Finder" fallback.
+/// Routes a file to its preview, in this order: rendered markdown (when the
+/// pane asks for it) → `RenderedContentView`, images → native NSImage, text →
+/// syntax-highlighted code, audio or video the system can play →
+/// `MediaPreviewView`, anything else → `BinaryFallbackView`, with Quick Look
+/// and Reveal in Finder.
+///
+/// `FilePreviewClassifier` makes that decision in a `.task` keyed on the path,
+/// the revision and whether markdown renders, never in `body`: the text sniff
+/// reads the file and the media check queries Launch Services. The result is
+/// kept with the path it was made for, and `body` uses it only while that path
+/// is still the one shown; until then it shows a 1 pt placeholder rather than
+/// the previous file's view. It deliberately does not compare the revision. A
+/// rewrite keeps the previous kind until the new one arrives, so the same
+/// branch, and with it the same `RenderedContentView` or `MediaPlayerView`,
+/// stays mounted and reloads in place instead of being rebuilt on every write.
 ///
 /// File-watching plumbing intentionally avoids `@StateObject` /
 /// `ObservableObject` / `@Published` — see the doc-comment on
@@ -228,36 +226,73 @@ private func isTextFile(_ path: String) -> Bool {
 /// when the task is cancelled (path change, view teardown) the stream's
 /// `onTermination` cancels the dispatch source, closing the FD via its
 /// cancel handler. SwiftUI just observes the `revision` Int.
-private struct FilePreviewView: View {
+struct FilePreviewView: View {
     let filePath: String
     /// Trust boundary for local image inlining in the rendered markdown path.
     let worktreePath: String
     let showSourceCode: Bool
     /// Decided by the pane: only the pane knows whether this preview owns the
-    /// full height the markdown webview needs. When false, a markdown file
-    /// falls through to its highlighted source.
+    /// full height the markdown webview needs. When false, a markdown file is
+    /// classified like any other file, so a text one shows its highlighted
+    /// source.
     let rendersMarkdown: Bool
     /// Where a repo-local markdown link goes. Only the rendered path raises it.
     let onOpenFile: (URL) -> Void
+    /// True when this is the only file in the pane, so a video or the audio
+    /// card sizes itself to the pane's visible area. False in a multi-file
+    /// stack, where a video takes a 16:9 frame and the card its own height.
+    let fillsViewport: Bool
 
     @State private var revision: Int = 0
+    @State private var classified: Classified?
     private let watcher = FileWatcher()
+
+    /// A classification and the path it was made for.
+    private struct Classified: Equatable {
+        let path: String
+        let kind: FilePreviewKind
+    }
 
     var body: some View {
         Group {
-            if rendersMarkdown && !showSourceCode && isRenderableFile(filePath) {
-                RenderedContentView(
-                    filePath: filePath,
-                    worktreePath: worktreePath,
-                    revision: revision,
-                    onOpenFile: onOpenFile
-                )
-            } else if isImageFile(filePath) {
-                ImagePreviewView(filePath: filePath, revision: revision)
-            } else if isTextFile(filePath) {
-                HighlightedCodeView(filePath: filePath, revision: revision)
+            if let classified, classified.path == filePath {
+                switch classified.kind {
+                case .renderedMarkdown:
+                    RenderedContentView(
+                        filePath: filePath,
+                        worktreePath: worktreePath,
+                        revision: revision,
+                        onOpenFile: onOpenFile
+                    )
+                case .image:
+                    ImagePreviewView(filePath: filePath, revision: revision)
+                case .text:
+                    HighlightedCodeView(filePath: filePath, revision: revision)
+                case .audio, .video:
+                    MediaPreviewView(
+                        filePath: filePath,
+                        revision: revision,
+                        isVideo: classified.kind == .video,
+                        fillsViewport: fillsViewport
+                    )
+                case .unpreviewable:
+                    BinaryFallbackView(filePath: filePath)
+                }
             } else {
-                BinaryFallbackView(filePath: filePath)
+                // Not classified yet, or classified for the previous path.
+                Color.clear.frame(height: 1)
+            }
+        }
+        .task(id: "\(filePath)#\(revision)#\(rendersMarkdown && !showSourceCode)") {
+            let kind = FilePreviewClassifier.shared.kind(
+                forPath: filePath,
+                rendersMarkdown: rendersMarkdown && !showSourceCode
+            )
+            let next = Classified(path: filePath, kind: kind)
+            // Assigned only on a change, so a rewrite that keeps the kind
+            // costs no update of this view.
+            if next != classified {
+                classified = next
             }
         }
         .task(id: filePath) {
@@ -415,32 +450,6 @@ private struct ImagePreviewView: View {
         .task(id: "\(filePath)#\(revision)") {
             image = NSImage(contentsOfFile: filePath)
         }
-    }
-}
-
-// MARK: - BinaryFallbackView
-
-private struct BinaryFallbackView: View {
-    let filePath: String
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.questionmark")
-                .font(.system(size: 40))
-                .foregroundStyle(.tertiary)
-            Text("Cannot preview binary file")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-            Text(URL(fileURLWithPath: filePath).lastPathComponent)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            Button("Open in Finder") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: filePath))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
