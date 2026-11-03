@@ -81,18 +81,21 @@ struct CLILaunchCheck {
     }
 
     /// Record the identity of the file at the install path when it is a
-    /// current link to `target`, and say whether it was. Touches nothing
-    /// otherwise. The coordinator calls it on every daemon reconnect, because
-    /// `scripts/restart.sh --daemon` re-links the CLI while the app keeps
-    /// running, and a record left on the old file would later read as
-    /// someone else's.
-    @discardableResult
-    func recordIfInstalled(target: String) -> Bool {
+    /// current link to `target`; touch nothing otherwise. The coordinator
+    /// calls it each time a new daemon first answers
+    /// (`CLIInstallerCoordinator.recordCurrentInstall`), so a re-link made
+    /// while the app keeps running is recorded, not left to read later as
+    /// someone else's file. `scripts/restart.sh` re-links before it hands
+    /// over to the new daemon, so that daemon's first answer finds the
+    /// install current. `scripts/update.sh` re-links after its handover, so
+    /// with the app left open (`tbd update --no-app`) this can run first and
+    /// miss the new file. The next launch then records it if it is still
+    /// current, or prompts if a rebuild has made it stale.
+    func recordIfInstalled(target: String) {
         guard case .installed = installer.currentState(expectedTarget: target) else {
-            return false
+            return
         }
         recordInstalledIdentity()
-        return true
     }
 
     /// Record the identity of the file now at the install path. Called after

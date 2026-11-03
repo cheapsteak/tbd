@@ -395,13 +395,13 @@ struct CLILaunchCheckTests {
         try FileManager.default.linkItem(atPath: scratch.target, toPath: scratch.installPath)
         let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
-        let recordedNow = check.recordIfInstalled(target: scratch.target)
+        check.recordIfInstalled(target: scratch.target)
 
         let recorded = check.recordedIdentity
         let source = CLIFileIdentity(regularFileAt: scratch.target)
-        #expect(recordedNow)
         #expect(source != nil)
         #expect(recorded == source)
+        #expect(recorded != old)
     }
 
     @Test func recordIfInstalledLeavesTheRecordAloneForAStaleInstall() throws {
@@ -414,11 +414,10 @@ struct CLILaunchCheckTests {
         record(earlier, in: suite.defaults)
         let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
-        let recordedNow = check.recordIfInstalled(target: scratch.target)
+        check.recordIfInstalled(target: scratch.target)
 
         let recorded = check.recordedIdentity
         let contents = try scratch.installedContents()
-        #expect(!recordedNow)
         #expect(recorded == earlier)
         #expect(contents == "old build")
     }
@@ -432,11 +431,10 @@ struct CLILaunchCheckTests {
         record(earlier, in: suite.defaults)
         let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
-        let recordedNow = check.recordIfInstalled(target: scratch.target)
+        check.recordIfInstalled(target: scratch.target)
 
         let recorded = check.recordedIdentity
         let installPathExists = FileManager.default.fileExists(atPath: scratch.installPath)
-        #expect(!recordedNow)
         #expect(recorded == earlier)
         #expect(!installPathExists)
     }

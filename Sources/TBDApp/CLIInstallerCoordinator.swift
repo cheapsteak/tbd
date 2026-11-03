@@ -83,10 +83,15 @@ final class CLIInstallerCoordinator {
     /// Record the installed CLI's identity when it is current, and nothing
     /// else: never a refresh, never a prompt. Called whenever the daemon
     /// answers a new delta subscription, the sign of a possibly new daemon,
-    /// because `scripts/restart.sh --daemon` re-links the CLI while the app
-    /// keeps running, and a record left on the old file would later read as
-    /// someone else's. Does nothing until `checkOnLaunch` has run, which
-    /// records at launch itself, so it adds no RPC before the initial load.
+    /// because a script can re-link the CLI while the app keeps running, and
+    /// a record left on the old file would later read as someone else's.
+    /// `scripts/restart.sh` re-links before it hands over to the new daemon,
+    /// so this finds the install current. `scripts/update.sh` re-links after
+    /// its handover, so with the app left open (`tbd update --no-app`) this
+    /// can run first and miss it; the next launch then records it if it is
+    /// still current, or prompts if a rebuild has made it stale. Does nothing
+    /// until `checkOnLaunch` has run, which records at launch itself, so it
+    /// adds no RPC before the initial load.
     func recordCurrentInstall() async {
         guard hasCheckedThisSession, let target = await fetchExpectedTarget() else { return }
         launchCheck.recordIfInstalled(target: target)

@@ -156,7 +156,7 @@ public enum CLILaunchAction: Equatable, Sendable {
 public extension CLIInstallState {
     /// What a prompt about this install would say, given who owns the file.
     /// This is the one mapping from install state to prompt; the menu shows it
-    /// as is, and ``launchAction(installedFile:recorded:userPreviouslyDismissed:)``
+    /// as is, and ``launchAction(installedFile:recorded:userPreviouslyDismissed:allowsSilentRefresh:)``
     /// derives the launch check from it.
     ///
     /// - Parameters:
