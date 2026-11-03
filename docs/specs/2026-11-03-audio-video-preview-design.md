@@ -121,7 +121,9 @@ Files with no view of their own keep this screen, with two buttons:
 
 - **Quick Look** opens the floating Quick Look panel on the file. Through it
   the user reaches PDF, office documents and anything else Quick Look can show,
-  without TBD embedding Quick Look.
+  without TBD embedding Quick Look. If the system has no Quick Look panel to
+  give, the button reveals the file in Finder instead, so neither button ever
+  hands the file to its default app.
 - **Reveal in Finder** selects the file in a Finder window, as "Reveal in
   Finder" in the pane header's menu already does.
 
@@ -148,6 +150,10 @@ New files live in `Sources/TBDApp/Panes/MediaPreview/`, so
     the app's rules keep out of SwiftUI bodies. So the media decision is cached
     per lowercased extension, and the whole classification runs when the path
     or revision changes, never in `body`.
+  - **The text read:** it runs off the main actor and opens only a regular
+    file. Opening a FIFO for reading blocks until a writer appears, and a read
+    error on a directory raises an exception Swift cannot catch, so neither
+    may reach it. A path that is not a regular file is not text.
 - **`MediaPlayerView`**
   - **What it is:** an `NSViewRepresentable` around a plain `NSView` subclass
     that owns one `AVPlayerView` and its `AVPlayer`.
@@ -234,6 +240,8 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - invalid UTF-8 does not
   - a file whose 8 KB sample ends partway through a multi-byte character
     reads as text
+  - a directory and a FIFO are not text, and the FIFO check returns without
+    blocking
 - **`MediaPlayerView`**, in an offscreen window, with a short wav the test
   writes with `AVAudioFile`:
   - after load, `rate == 0`
@@ -247,6 +255,8 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
     the test sees which was called.
   - Quick Look reaches `QuickLookPresenter` through its `showPanel` seam, so no
     panel appears during the run.
+  - Quick Look with no panel available reveals the file rather than opening
+    it.
 
 Live verification after `scripts/restart.sh`, with cua-driver window captures:
 
