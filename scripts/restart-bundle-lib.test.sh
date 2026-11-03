@@ -1709,6 +1709,21 @@ file_inode() {
     ls -di "${1-}" 2>/dev/null | awk '{print $1}'
 }
 
+# The hidden sibling relink_installed_cli stages through, spelled out rather
+# than derived: it must stay the name CLIInstaller.stagingPath uses, which
+# CLIInstallerTests pins the same way.
+relink_staging() {
+    printf '%s\n' "$1/bin/.tbd.tbd-install"
+}
+
+assert_no_staging() {
+    if [ -e "$(relink_staging "$2")" ] || [ -L "$(relink_staging "$2")" ]; then
+        fail "$1: $(relink_staging "$2") was left behind"
+    else
+        pass "$1"
+    fi
+}
+
 test_relink_points_an_installed_regular_file_at_the_new_cli() {
     local d out
     d="$(relink_fixture regular)"
@@ -1717,6 +1732,30 @@ test_relink_points_an_installed_regular_file_at_the_new_cli() {
     assert_eq "relink makes an installed regular file the new CLI's inode" \
         "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
     assert_eq "relink says what it refreshed" "refreshed $d/bin/tbd" "$out"
+    assert_no_staging "relink leaves no staging link after a refresh" "$d"
+}
+
+test_relink_leaves_an_already_current_link_alone() {
+    local d out before
+    d="$(relink_fixture current)"
+    ln "$d/build/TBDCLI" "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink keeps a link that is already the new CLI" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink says nothing when the link is already current" "" "$out"
+    assert_no_staging "relink stages nothing when the link is already current" "$d"
+}
+
+test_relink_replaces_a_leftover_staging_link() {
+    local d out
+    d="$(relink_fixture leftover)"
+    printf 'old\n' > "$d/bin/tbd"
+    printf 'leftover\n' > "$(relink_staging "$d")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink refreshes past a leftover staging link" \
+        "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink reports that refresh" "refreshed $d/bin/tbd" "$out"
+    assert_no_staging "relink leaves no leftover staging link" "$d"
 }
 
 test_relink_leaves_a_symlink_alone() {
@@ -1760,21 +1799,53 @@ test_relink_skips_a_non_executable_new_cli() {
     assert_eq "relink says nothing when the new CLI is not executable" "" "$out"
 }
 
-# restart.sh runs under set -e, so a failed ln must come back as a warning and
-# a zero status, not end the restart. A stub ln first on PATH fails every call.
-test_relink_warns_and_succeeds_when_ln_fails() {
-    local d out rc
-    d="$(relink_fixture lnfails)"
+# restart.sh runs under set -e, so a failed relink must come back as a warning
+# and a zero status, not end the restart, and it must leave the installed file
+# exactly as it was. Each case puts one stub first on PATH and runs the relink
+# in a set -e shell.
+#
+#   run_relink_with_stub <dir> <stub name> <stub body>
+run_relink_with_stub() {
+    local d="$1"
     mkdir -p "$d/stub"
-    printf '#!/bin/sh\nexit 1\n' > "$d/stub/ln"
-    chmod +x "$d/stub/ln"
-    printf 'old\n' > "$d/bin/tbd"
-    out="$(PATH="$d/stub:/usr/bin:/bin" bash -c \
+    printf '#!/bin/sh\n%s\n' "$3" > "$d/stub/$2"
+    chmod +x "$d/stub/$2"
+    PATH="$d/stub:/usr/bin:/bin" bash -c \
         'set -e; source "$1"; relink_installed_cli "$2" "$3"; echo survived' \
-        _ "$HELPER" "$d/bin/tbd" "$d/build/TBDCLI" 2>/dev/null)"; rc=$?
+        _ "$HELPER" "$d/bin/tbd" "$d/build/TBDCLI" 2>/dev/null
+}
+
+# The stub ln does what BSD `ln -f` does when the link itself fails, as across
+# volumes: it unlinks its target first. Aimed at the install path, as a bare
+# `ln -f` would be, that deletes the operator's tbd.
+test_relink_warns_and_keeps_the_file_when_ln_fails() {
+    local d out rc before
+    d="$(relink_fixture lnfails)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(run_relink_with_stub "$d" ln 'for last; do :; done; rm -f "$last"; exit 1')"; rc=$?
     assert_eq "relink returns 0 to a set -e caller when ln fails" "0" "$rc"
     assert_contains "relink warns when ln fails" "WARNING: could not refresh $d/bin/tbd" "$out"
-    assert_contains "a set -e caller carries on after a failed relink" "survived" "$out"
+    assert_contains "a set -e caller carries on after a failed ln" "survived" "$out"
+    assert_eq "a failed ln leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "a failed ln leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
+    assert_no_staging "a failed ln leaves no staging link" "$d"
+}
+
+# The real ln has made the staging link by the time mv fails, so this is the
+# case that proves the cleanup.
+test_relink_warns_and_keeps_the_file_when_mv_fails() {
+    local d out rc before
+    d="$(relink_fixture mvfails)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(run_relink_with_stub "$d" mv 'exit 1')"; rc=$?
+    assert_eq "relink returns 0 to a set -e caller when mv fails" "0" "$rc"
+    assert_contains "relink warns when mv fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "a set -e caller carries on after a failed mv" "survived" "$out"
+    assert_eq "a failed mv leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "a failed mv leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
+    assert_no_staging "a failed mv removes the staging link" "$d"
 }
 
 # restart.sh cannot be run here (it builds and launches the real app), so this
@@ -1853,10 +1924,13 @@ test_seed_keeps_a_symlinked_tmux_path
 test_seed_ignores_a_non_absolute_command_v
 test_seed_rejects_a_missing_argument
 test_relink_points_an_installed_regular_file_at_the_new_cli
+test_relink_leaves_an_already_current_link_alone
+test_relink_replaces_a_leftover_staging_link
 test_relink_leaves_a_symlink_alone
 test_relink_never_creates_an_install
 test_relink_skips_a_non_executable_new_cli
-test_relink_warns_and_succeeds_when_ln_fails
+test_relink_warns_and_keeps_the_file_when_ln_fails
+test_relink_warns_and_keeps_the_file_when_mv_fails
 test_restart_relinks_the_cli_only_after_starting_a_daemon
 
 # A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a

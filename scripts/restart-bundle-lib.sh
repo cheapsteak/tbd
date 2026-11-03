@@ -1136,7 +1136,17 @@ app_process_pid() {
 # here would be a gesture they never made, and a symlink there is theirs (or a
 # legacy install the app offers to replace). A hard link for the same reason
 # the app uses one: the target keeps working when a build directory goes away.
-# Nothing happens when <new_cli> is not executable.
+# Nothing happens when <new_cli> is not executable, or when <install_path> is
+# already a link to it.
+#
+# Never destructive. A bare `ln -f` over <install_path> unlinks the old file
+# before it links the new one, so a link that then fails (a build on another
+# volume, say) would delete a working `tbd` on every restart. Instead the new
+# link goes to a hidden sibling first, and `mv` renames it over the install
+# path in one step; on any failure the sibling is removed and the old file
+# stays as it was. The sibling's name is fixed, `.<name>.tbd-install`, the same
+# one CLIInstaller.stagingPath (TBDShared) uses, so a leftover from a crash
+# here or in the app is replaced by the next install from either side.
 #
 # Prints one line saying what it did, for the caller to print or log, and
 # nothing when it did nothing. Always returns 0: a CLI it could not re-link
@@ -1145,13 +1155,21 @@ app_process_pid() {
 #
 #   relink_installed_cli <install_path> <new_cli>
 relink_installed_cli() {
-    local install_path="${1-}" new_cli="${2-}"
+    local install_path="${1-}" new_cli="${2-}" staging
     if [ ! -f "$install_path" ] || [ -L "$install_path" ] || [ ! -x "$new_cli" ]; then
         return 0
     fi
-    if ln -f "$new_cli" "$install_path" 2>/dev/null; then
+    # Already current. Besides saving the work, this keeps the rename below
+    # from ever seeing two links to one file, which mv refuses and rename(2)
+    # treats as nothing to do, leaving the sibling behind.
+    if [ "$install_path" -ef "$new_cli" ]; then
+        return 0
+    fi
+    staging="$(dirname "$install_path")/.$(basename "$install_path").tbd-install"
+    if ln -f "$new_cli" "$staging" 2>/dev/null && mv -f "$staging" "$install_path" 2>/dev/null; then
         printf 'refreshed %s\n' "$install_path"
     else
+        rm -f "$staging" 2>/dev/null || true
         printf 'WARNING: could not refresh %s; reinstall it with Install Command-Line Tool in the TBD menu\n' "$install_path"
     fi
     return 0
