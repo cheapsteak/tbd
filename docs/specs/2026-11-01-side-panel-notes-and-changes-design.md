@@ -31,9 +31,9 @@ else in the side panel.
 - Notes and the Changes list are side-panel tabs.
 - They belong to the worktree: once open, they show in the side panel of every
   workspace tab in that worktree.
-- Nothing opens a note by itself. A Notes button at the window's right edge
-  shows and hides the worktree's first note, as the transcript button does for
-  a transcript.
+- Nothing opens a note by itself. A worktree has one note, and a Notes pill at
+  the window's right edge shows and hides it, as the transcript pill does for
+  a transcript (see [`2026-11-03-side-panel-toggle-pills-design.md`](2026-11-03-side-panel-toggle-pills-design.md)).
 - Agents show and hide them with `tbd panel`, and can find a worktree's notes
   without the app.
 - The Changes column, its toolbar button and the notes in the workspace tab bar
@@ -107,16 +107,17 @@ revision guard needs nothing new.
   promote leaves the notes themselves with the archived scratch worktree, and
   a note's content file is keyed by that worktree; the cascade covers a
   deleted row. Archiving keeps the notes, and a revive opens no panel: the
-  notes are reached from the Notes button and the strip's + menu.
+  note is reached from the Notes pill, and a legacy extra note from the pill's
+  menu.
 - **Notes follow their panels.** `note.delete` deletes the note's worktree panel
   in the same transaction and broadcasts the change.
 - **New worktrees.** Worktree creation makes the starter "Notes" note as
   before, carryover seed included, and opens no panel for it and no longer
-  appends it to the tab order. The note opens from the Notes button. The
+  appends it to the tab order. The note opens from the Notes pill. The
   config column `auto_create_notes_enabled` keeps its meaning; its Settings
   label becomes "Create a starter note for new worktrees", and its help text
-  says the note opens from the Notes button.
-- **`note.create`** takes an optional title, so the Notes button can name the
+  says the note opens from the Notes pill.
+- **`note.create`** takes an optional title, so the Notes pill can name the
   note it creates "Notes". Without one, the default "Note N" title stays.
 - **Migration.** Existing notes leave the workspace tab bar and keep their
   content. For every note row, the migration:
@@ -128,7 +129,7 @@ revision guard needs nothing new.
     that had one in front brings its most recent remaining panel forward.
 
   It opens no worktree panel, so it narrows no terminal: the notes are reached
-  from the Notes button and the strip's + menu. It creates the `worktree_panel`
+  from the Notes pill and its menu. It creates the `worktree_panel`
   table itself when the table is missing, skips and logs a row it cannot
   read, and changes nothing when run again.
 
@@ -139,29 +140,35 @@ revision guard needs nothing new.
 
 - **Notes leave the tab bar.** `reconcileNoteTabs` goes, and with it the note
   branch of `closeTab`. The workspace bar's + menu loses "Note": a note is made
-  from the side strip's + menu or the Notes button, so it is born where it
-  lives. `.note` stays
+  by the Notes pill, so it is born where it lives. `.note` stays
   a `PrimaryContent` case for decoding, and nothing creates one.
-- **The strip.** It reads: history buttons, then the worktree panels, then the
-  tab's own panels, then a **+** menu, the active panel's own control, the
-  transcript button, the Notes button, and collapse. The + menu offers New
-  Note, Changes, and every note of the worktree that has no panel.
-- **The Notes button.** It sits at the window's right edge, right after the
-  transcript button while that is drawn, and just before the button that hides
+- **The strip.** It reads: history buttons, then the tabs (files, web pages and
+  any legacy extra note), then the active panel's own control, then the
+  Changes, transcript and Notes pills, then collapse. It has no + menu. The
+  transcript panel, the first note's panel and the Changes panel have no tabs:
+  their pills stand for them. Details:
+  [`2026-11-03-side-panel-toggle-pills-design.md`](2026-11-03-side-panel-toggle-pills-design.md).
+- **The Notes pill.** It sits at the window's right edge, right after the
+  transcript pill while that is drawn, and just before the button that hides
   or shows the side region: in the strip, before collapse, while the region
-  shows, and at the end of the workspace tab bar, before ◫, while it is hidden.
-  Session History stays at the bar's trailing end either way. The button
-  follows the transcript button's rule for the worktree's first note, the
-  oldest by creation:
+  shows, and at the end of the workspace tab bar, before ◫, while it is hidden
+  (there as an icon). Session History stays at the bar's trailing end either
+  way. A worktree has one note, the first, oldest by creation, and the pill
+  follows the transcript pill's rule for it:
   - no panel for it: open one, worktree-wide, in front in this tab;
   - open but not in front, or the region collapsed: select it;
   - in front and visible: `close` it, which keeps the note.
 
   With no note in the worktree, it creates one titled "Notes" and opens it.
-  The worktree's other notes stay in the strip's + menu.
+  Nothing else makes a note. Its right-click menu has Delete Note…, and, for a
+  legacy extra note with no panel, Open Other Note.
+- **Legacy extra notes.** A worktree created before this design can have more
+  than one note. An open extra note shows as a tab with its ×, which deletes
+  it; one with no panel is listed in the Notes pill's menu. Nothing merges or
+  deletes them.
 - **Closing a note's tab** works as the panel tabs spec says: the app asks
   first when the note has content, then deletes it. The `close` operation alone
-  keeps it, so a note an agent closed stays in the + menu.
+  keeps it, so a note an agent closed stays reachable from the Notes pill.
 - **Renaming a note's tab** writes the note's title (panel tabs spec).
 - **Changes.**
   - **What it shows:** the Changes panel shows today's `FileViewerPanel` list:
@@ -199,12 +206,11 @@ revision guard needs nothing new.
 ## Rollout
 
 No flag. Panel tabs ship to everyone without one, and this moves existing items
-by the same decision of the owner's, the Notes button's place included: at the
+by the same decision of the owner's, the Notes pill's place included: at the
 window's right edge, beside the side panel's collapse or expand button. The
 way back is a revert and a release.
 Neither a revert nor a downgrade makes the moved notes reappear as workspace
-tabs, so they are reached through the Notes button and the side panel's +
-menu until one does.
+tabs, so they are reached through the Notes pill until one does.
 
 ## Testing
 
@@ -230,10 +236,11 @@ menu until one does.
 - **App:**
   - No note becomes a workspace tab.
   - The workspace bar's + menu has no Note item.
-  - The side strip's + menu lists exactly the notes without a panel.
+  - The side strip has no + menu, and the Notes pill's menu lists exactly the
+    extra notes without a panel.
   - ◫ opens Changes on an empty region and expands a collapsed one.
   - ⌘⇧E's three states each send the right operation.
-  - The Notes button's three states each send the right operation for the
+  - The Notes pill's three states each send the right operation for the
     worktree's first note, and with no note it creates "Notes" and opens it.
   - A file click in Changes sends `open(.file)`, and Shift-click sends it with
     `newPanel`.
@@ -262,8 +269,6 @@ menu until one does.
   workspace tabs hides them, though neither belongs to one tab.
 - **One side panel shared by the whole worktree.** It reverses the per-tab model
   that keeps each agent's transcript and opened files beside its own terminal.
-- **Only the worktree's first note in the side panel.** Notes would have two
-  homes.
 - **Reusing a note panel with history, as files do.** A note is a document the
   user keeps open; stepping it through other notes hides one to show another.
 - **Opening the starter note in every worktree.** It narrows every terminal for

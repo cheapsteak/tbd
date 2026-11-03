@@ -173,8 +173,9 @@ Both rows draw their tabs the same way:
 ## The side panel's row
 
 The side region's strip draws at the row's height with pill tabs: search, back
-and forward, its tabs, then its + menu, the active panel's control, transcript,
-Notes and collapse, as today. It starts at the split divider and follows it
+and forward, its tabs, the active panel's control, then the Changes, transcript
+and Notes pills and collapse (see
+[`2026-11-03-side-panel-toggle-pills-design.md`](2026-11-03-side-panel-toggle-pills-design.md)). It starts at the split divider and follows it
 while the divider is dragged, because it is part of the side region. The
 divider runs up to the window's top edge.
 
