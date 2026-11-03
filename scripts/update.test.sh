@@ -1759,8 +1759,13 @@ test_dry_run_prints_the_summary() {
 
 # MARK: - The CLI hard link
 
+# The rule itself — which installs are re-linked, and that a failure never
+# fails the caller — is relink_installed_cli's, tested in
+# scripts/restart-bundle-lib.test.sh. What is update.sh's own is the stage
+# around it: that it passes CLI_INSTALL_PATH and the new CLI through, and that
+# the outcome reaches the update log.
 test_cli_refresh_only_touches_an_existing_install() {
-    local new_cli target
+    local new_cli target log_file
     new_cli="$TEST_TMP/newcli"
     printf '#!/bin/sh\nexit 0\n' > "$new_cli"
     chmod +x "$new_cli"
@@ -1779,14 +1784,18 @@ test_cli_refresh_only_touches_an_existing_install() {
 
     mkdir -p "$TEST_TMP/bin-existing"
     target="$TEST_TMP/bin-existing/tbd"
+    log_file="$TEST_TMP/cli-refresh.log"
     printf 'old\n' > "$target"
     (
         CLI_INSTALL_PATH="$target"
+        UPDATE_LOG="$log_file"
         OPT_AUTO=true
         refresh_installed_cli "$new_cli"
     )
     assert_eq "an existing CLI install is relinked to the new build" \
         "$(file_inode "$new_cli")" "$(file_inode "$target")"
+    assert_contains_literal "the refresh is written to the update log" \
+        "refreshed $target" "$(cat "$log_file" 2>/dev/null)"
 }
 
 # MARK: - Installing a published build

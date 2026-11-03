@@ -3333,6 +3333,21 @@ final class AppState {
                         self?.resendLastProgramStatusReports()
                         self?.pushComposerDrafts()
                     }
+                    // An answered subscription may come from a new daemon,
+                    // and the app may never have seen a disconnect. Record the
+                    // CLI install if it is current; this never prompts.
+                    // `scripts/restart.sh` re-links the CLI before it hands
+                    // over to the new daemon, so this finds it current.
+                    // `scripts/update.sh` re-links after its handover, so with
+                    // the app left open (`tbd update --no-app`) this can miss
+                    // it; the next launch records it, or prompts if a rebuild
+                    // has made it stale by then. Not in a test process, where
+                    // init skips the CLI check too and a stubbed subscription
+                    // answers with no daemon.
+                    Task { @MainActor [weak self] in
+                        guard !AppState.isRunningUnderTests else { return }
+                        await self?.cliInstallerCoordinator.recordCurrentInstall()
+                    }
                 },
                 { [weak self] delta in
                     Task { @MainActor [weak self] in

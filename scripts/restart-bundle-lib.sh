@@ -48,8 +48,9 @@ BUILD_IDENTITY_PATHSPECS=(
 #                  daemon's sibling copy as TBD_CLI_PATH and its hooks run that
 #                  one, swallowing the error when it is missing
 #                  (AgentProcessEnvironment, ClaudeHookOverlay,
-#                  CodexHomeManager). update.sh also re-links an existing
-#                  ~/.local/bin/tbd hard link to it.
+#                  CodexHomeManager). restart.sh and update.sh both
+#                  re-link an existing ~/.local/bin/tbd hard link to it
+#                  (relink_installed_cli).
 #   TBDHolder      the pty holder the daemon spawns for a holder-backed session
 #                  (HolderSpawner.locateSiblingExecutable). Missing, the daemon
 #                  reports ptyHolderSupported=false: the Settings toggle greys
@@ -1121,6 +1122,93 @@ app_process_pid() {
     pid="$(pgrep -f "^${pattern}\$" 2>/dev/null | head -1)"
     [ -n "$pid" ] || return 1
     printf '%s\n' "$pid"
+}
+
+# MARK: - The CLI hard link
+
+# Where an operator's `tbd` lives: the one install path restart.sh and update.sh
+# re-link, and the default CLIInstaller (TBDShared) installs to from the app.
+default_cli_install_path() {
+    printf '%s\n' "$HOME/.local/bin/tbd"
+}
+
+# True when <tbd_home> is TBD's default home for <home>: empty (TBD_HOME
+# unset); equal to <home>/tbd once one trailing slash is stripped; or, by
+# `-ef`, the same file as <home>/tbd, such as a symlink to it. Any other
+# TBD_HOME is a sandboxed instance, whose builds must not re-point the
+# developer's global `tbd`.
+#
+#   is_default_tbd_home <tbd_home> <home>
+is_default_tbd_home() {
+    local tbd_home="${1-}" default_home="${2-}/tbd"
+    [ -z "$tbd_home" ] && return 0
+    [ "${tbd_home%/}" = "$default_home" ] && return 0
+    [ "$tbd_home" -ef "$default_home" ]
+}
+
+# Re-link an existing <install_path> (default_cli_install_path for both
+# callers) to <new_cli>, the TBDCLI beside the daemon the caller just started.
+# The app compares the install against that same file at launch, so after this
+# it finds the CLI current and has nothing to ask. restart.sh and update.sh
+# both call it, each right after starting a daemon from a build.
+#
+# Only when the operator already installed one, as a regular file: creating it
+# here would be a gesture they never made, and a symlink there is theirs (or a
+# legacy install the app offers to replace). A hard link for the same reason
+# the app uses one: the target keeps working when a build directory goes away.
+# Nothing happens when <new_cli> is not executable, or when <install_path> is
+# already a link to it.
+#
+# Never destructive. A bare `ln -f` over <install_path> unlinks the old file
+# before it links the new one, so a link that then fails (a build on another
+# volume, say) would delete a working `tbd` on every restart. Instead the new
+# link goes to a hidden sibling first, and `mv` renames it over the install
+# path in one step; on any failure the sibling is removed and the old file
+# stays as it was. A directory at the sibling's name is left alone and stops
+# the relink. The sibling's name is fixed, `.<name>.tbd-install`, the same
+# one CLIInstaller.stagingPath (TBDShared) uses, so a leftover from a crash
+# here or in the app is replaced by the next install from either side.
+#
+# Prints one line saying what it did, for the caller to print or log, and
+# nothing when it did nothing. A failure's line carries the error ln or mv
+# gave, because that is the fix: a cross-volume link fails the same way from
+# the app's installer. Always returns 0: a CLI it could not re-link must not
+# fail an install that otherwise succeeded, and the app checks the CLI again
+# at its next launch.
+#
+#   relink_installed_cli <install_path> <new_cli>
+relink_installed_cli() {
+    local install_path="${1-}" new_cli="${2-}" staging reason
+    if [ ! -f "$install_path" ] || [ -L "$install_path" ] || [ ! -x "$new_cli" ]; then
+        return 0
+    fi
+    # Already current. Besides saving the work, this keeps the rename below
+    # from ever seeing two links to one file, which mv refuses and rename(2)
+    # treats as nothing to do, leaving the sibling behind.
+    if [ "$install_path" -ef "$new_cli" ]; then
+        return 0
+    fi
+    staging="$(dirname "$install_path")/.$(basename "$install_path").tbd-install"
+    # Clear a leftover sibling first, and link only to a name that is then
+    # free: `ln` given an existing directory, or a symlink to one, puts the
+    # link inside it. `rm -f` removes a file or a symlink without following
+    # it and leaves a directory, which then stops the relink here.
+    rm -f "$staging" 2>/dev/null || true
+    if [ -e "$staging" ] || [ -L "$staging" ]; then
+        printf 'WARNING: could not refresh %s, left it as it was: %s is in the way\n' "$install_path" "$staging"
+        return 0
+    fi
+    if ! reason="$(ln "$new_cli" "$staging" 2>&1 >/dev/null)"; then
+        reason="${reason:-ln failed}"
+    elif ! reason="$(mv -f "$staging" "$install_path" 2>&1 >/dev/null)"; then
+        reason="${reason:-mv failed}"
+    else
+        printf 'refreshed %s\n' "$install_path"
+        return 0
+    fi
+    rm -f "$staging" 2>/dev/null || true
+    printf 'WARNING: could not refresh %s, left it as it was: %s\n' "$install_path" "${reason//$'\n'/ }"
+    return 0
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

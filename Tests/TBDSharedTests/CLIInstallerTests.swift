@@ -31,6 +31,18 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
     return (st.st_dev, st.st_ino)
 }
 
+/// Rewrite the file at `path` in place, as `cp` onto an existing file does:
+/// truncate and write through an open handle, so the inode stays. Then set its
+/// modification time to `modified`, so the test never depends on the clock
+/// having moved since the first write.
+private func rewriteInPlace(_ path: String, contents: Data, modified: Date) throws {
+    let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+    try handle.truncate(atOffset: 0)
+    try handle.write(contentsOf: contents)
+    try handle.close()
+    try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: path)
+}
+
 // MARK: - cliPath(forDaemonExecutable:)
 
 @Test func cliPathDerivedFromSiblingOfDaemon() {
@@ -98,9 +110,9 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
 }
 
 @Test func currentStateStaleForLegacySymlinkTriggersLaunchTimeRefresh() throws {
-    // Pre-PR installs created a symlink. Detecting that as `.stale` lets
-    // the launch-time CLIInstallerCoordinator prompt re-install as a hard
-    // link on the next refresh.
+    // Installs from before the hard-link scheme created a symlink. Detecting
+    // that as `.stale` lets the launch-time check offer to re-install it as
+    // a hard link.
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli-target"
@@ -142,34 +154,258 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
     }
 }
 
-// MARK: - launchPromptKind
+// MARK: - launchAction
 
-@Test func launchPromptKindIsNilWhenInstalled() {
+private let recordedIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 4_242, modifiedSeconds: 1_700_000_000, modifiedNanoseconds: 5
+)
+private let otherIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 9_999, modifiedSeconds: 1_700_000_000, modifiedNanoseconds: 5
+)
+/// The recorded file after an in-place rewrite: same device and inode, a new
+/// modification time.
+private let rewrittenIdentity = CLIFileIdentity(
+    device: 16_777_232, inode: 4_242, modifiedSeconds: 1_700_000_100, modifiedNanoseconds: 5
+)
+
+@Test func launchActionIsNoneWhenInstalled() {
     let state: CLIInstallState = .installed(target: "/bin/tbd")
-    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == nil)
-    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == nil)
+    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: nil, userPreviouslyDismissed: true, allowsSilentRefresh: true)
+    #expect(notDismissed == CLILaunchAction.none)
+    #expect(dismissed == CLILaunchAction.none)
 }
 
-@Test func launchPromptKindMissingWhenNotInstalledAndNotDismissed() {
+@Test func launchActionPromptsMissingWhenNotInstalledAndNotDismissed() {
     let state: CLIInstallState = .notInstalled
-    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .missing)
+    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    #expect(action == .prompt(.missing))
 }
 
-@Test func launchPromptKindNilWhenNotInstalledAndPreviouslyDismissed() {
+@Test func launchActionIsNoneWhenNotInstalledAndPreviouslyDismissed() {
     let state: CLIInstallState = .notInstalled
-    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == nil)
+    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
+    #expect(action == CLILaunchAction.none)
 }
 
-@Test func launchPromptKindStaleAlwaysSurfacedRegardlessOfDismissal() {
-    let state: CLIInstallState = .stale(currentTarget: "/old/tbd")
-    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .stale(current: "/old/tbd"))
-    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .stale(current: "/old/tbd"))
+@Test func launchActionRefreshesSilentlyWhenTheStaleFileIsTheRecordedOne() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    // The Not-Now flag belongs to the missing prompt and changes nothing here.
+    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
+    #expect(notDismissed == .refreshSilently)
+    #expect(dismissed == .refreshSilently)
 }
 
-@Test func launchPromptKindUnexpectedFileTypeAlwaysSurfacedRegardlessOfDismissal() {
+@Test func launchActionAsksAboutTheRecordedStaleFileOnASandboxedHome() {
+    // A sandbox shares the install path and the record with the developer's
+    // own installation, so it asks, and the file really is an older TBD CLI.
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    #expect(action == .prompt(.stale(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionOnASandboxedHomeChangesOnlyTheRecordedStaleCase() {
+    let stale: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let unrecognized = stale.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let installed = CLIInstallState.installed(target: "/bin/tbd")
+        .launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let missing = CLIInstallState.notInstalled
+        .launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let dismissedMissing = CLIInstallState.notInstalled
+        .launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: false)
+    #expect(unrecognized == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+    #expect(installed == CLILaunchAction.none)
+    #expect(missing == .prompt(.missing))
+    #expect(dismissedMissing == CLILaunchAction.none)
+}
+
+@Test func launchActionPromptsUnrecognizedWhenTheStaleFileIsNotTheRecordedOne() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionPromptsUnrecognizedWhenTheRecordedFileWasRewrittenInPlace() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: rewrittenIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionPromptsUnrecognizedWhenNothingIsRecorded() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: otherIdentity, recorded: nil, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionPromptsUnrecognizedForASymlink() {
+    // A symlink has no regular-file identity, so it never matches a record,
+    // not even an absent one.
+    let state: CLIInstallState = .stale(currentTarget: "/old/TBDCLI")
+    let withRecord = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let withoutRecord = state.launchAction(installedFile: nil, recorded: nil, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    #expect(withRecord == .prompt(.unrecognized(current: "/old/TBDCLI")))
+    #expect(withoutRecord == .prompt(.unrecognized(current: "/old/TBDCLI")))
+}
+
+@Test func launchActionPromptsUnexpectedFileTypeRegardlessOfDismissal() {
     let state: CLIInstallState = .unexpectedFileType
-    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .unexpectedFileType)
-    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .unexpectedFileType)
+    let notDismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
+    #expect(notDismissed == .prompt(.unexpectedFileType))
+    #expect(dismissed == .prompt(.unexpectedFileType))
+}
+
+// MARK: - menuPromptKind
+
+@Test func menuPromptKindCallsTheRecordedStaleFileAnOlderVersion() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let kind = state.menuPromptKind(installedFile: recordedIdentity, recorded: recordedIdentity)
+    #expect(kind == .stale(current: "/home/.local/bin/tbd"))
+}
+
+@Test func menuPromptKindCallsAnUnrecordedStaleFileUnrecognized() {
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let mismatch = state.menuPromptKind(installedFile: otherIdentity, recorded: recordedIdentity)
+    let rewritten = state.menuPromptKind(installedFile: rewrittenIdentity, recorded: recordedIdentity)
+    let noRecord = state.menuPromptKind(installedFile: otherIdentity, recorded: nil)
+    let symlink = state.menuPromptKind(installedFile: nil, recorded: recordedIdentity)
+    #expect(mismatch == .unrecognized(current: "/home/.local/bin/tbd"))
+    #expect(rewritten == .unrecognized(current: "/home/.local/bin/tbd"))
+    #expect(noRecord == .unrecognized(current: "/home/.local/bin/tbd"))
+    #expect(symlink == .unrecognized(current: "/home/.local/bin/tbd"))
+}
+
+@Test func menuPromptKindCoversTheOtherStates() {
+    let installed = CLIInstallState.installed(target: "/bin/tbd")
+        .menuPromptKind(installedFile: recordedIdentity, recorded: recordedIdentity)
+    let missing = CLIInstallState.notInstalled
+        .menuPromptKind(installedFile: nil, recorded: recordedIdentity)
+    let unexpected = CLIInstallState.unexpectedFileType
+        .menuPromptKind(installedFile: nil, recorded: recordedIdentity)
+    #expect(installed == nil)
+    #expect(missing == .missing)
+    #expect(unexpected == .unexpectedFileType)
+}
+
+// MARK: - CLIFileIdentity
+
+@Test func fileIdentityRoundTripsThroughItsStorageString() {
+    // An inode above Int64.max is why the identity is stored as a string.
+    let identity = CLIFileIdentity(
+        device: -3, inode: UInt64.max, modifiedSeconds: -1, modifiedNanoseconds: 999_999_999
+    )
+    let stored = identity.storageString
+    #expect(stored == "-3:18446744073709551615:-1:999999999")
+    #expect(CLIFileIdentity(storageString: stored) == identity)
+}
+
+@Test func fileIdentityRejectsTheFormWithoutAModificationTime() {
+    // Device and inode alone would match a file rewritten in place, so such a
+    // record must read as no record at all.
+    #expect(CLIFileIdentity(storageString: "16777232:4242") == nil)
+}
+
+@Test func fileIdentityRejectsMalformedStorageStrings() {
+    let malformed = [
+        "", "1", "1:2", "1:2:3", "1:2:3:4:5", ":2:3:4", "1::3:4", "1:2::4", "1:2:3:",
+        "a:2:3:4", "1:-2:3:4", "1:2:x:4", "1:2:3:4 ",
+    ]
+    for text in malformed {
+        #expect(CLIFileIdentity(storageString: text) == nil, "accepted \(text)")
+    }
+}
+
+@Test func fileIdentityEqualityIncludesTheModificationTime() {
+    let sameNanoseconds = CLIFileIdentity(
+        device: 1, inode: 2, modifiedSeconds: 3, modifiedNanoseconds: 4
+    )
+    let otherNanoseconds = CLIFileIdentity(
+        device: 1, inode: 2, modifiedSeconds: 3, modifiedNanoseconds: 5
+    )
+    #expect(sameNanoseconds != otherNanoseconds)
+    #expect(recordedIdentity != rewrittenIdentity)
+}
+
+@Test func installedFileIdentityIsEqualForTwoHardLinksToOneFile() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/cli-target"
+    try makeFile(target, contents: Data("one".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try FileManager.default.createDirectory(
+        atPath: (installPath as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.linkItem(atPath: target, toPath: installPath)
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    #expect(installed != nil)
+    #expect(installed == source)
+}
+
+@Test func installedFileIdentityDiffersForTwoSeparateFiles() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/cli-target"
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(target, contents: Data("same".utf8))
+    try makeFile(installPath, contents: Data("same".utf8))
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    #expect(installed != nil)
+    #expect(source != nil)
+    #expect(installed != source)
+}
+
+@Test func installedFileIdentityChangesWhenTheFileIsRewrittenInPlace() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("tbd".utf8))
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    let before = try #require(installer.installedFileIdentity())
+
+    try rewriteInPlace(installPath, contents: Data("my own".utf8), modified: Date(timeIntervalSince1970: 1_000_000_000))
+
+    let after = try #require(installer.installedFileIdentity())
+    #expect(after.device == before.device)
+    #expect(after.inode == before.inode)
+    #expect(after != before)
+}
+
+@Test func installedFileIdentityIsNilForASymlinkAndForAMissingPath() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/cli-target"
+    try makeFile(target)
+    let installPath = home.path + "/.local/bin/tbd"
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    #expect(installer.installedFileIdentity() == nil)
+
+    try FileManager.default.createDirectory(
+        atPath: (installPath as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true
+    )
+    try FileManager.default.createSymbolicLink(atPath: installPath, withDestinationPath: target)
+    // The symlink names a regular file; lstat must not follow it there.
+    #expect(CLIFileIdentity(regularFileAt: target) != nil)
+    #expect(installer.installedFileIdentity() == nil)
+}
+
+@Test func installedFileIdentityIsNilForADirectory() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let installPath = home.path + "/.local/bin/tbd"
+    try FileManager.default.createDirectory(atPath: installPath, withIntermediateDirectories: true)
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    #expect(installer.installedFileIdentity() == nil)
 }
 
 // MARK: - install
@@ -442,6 +678,192 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
         let lower = msg.lowercased()
         #expect(lower.contains("permission") || lower.contains("denied"))
     }
+}
+
+// MARK: - Replacing a file atomically
+
+/// The names in the install path's directory: what an install left there.
+private func entriesBeside(_ installPath: String) throws -> [String] {
+    let directory = (installPath as NSString).deletingLastPathComponent
+    return try FileManager.default.contentsOfDirectory(atPath: directory).sorted()
+}
+
+@Test func stagingPathIsAHiddenSiblingOfTheInstallPath() {
+    let staging = CLIInstaller.stagingPath(forInstallPath: "/x/.local/bin/tbd")
+    #expect(staging == "/x/.local/bin/.tbd.tbd-install")
+}
+
+/// The launch check refreshes without asking, so a refresh that fails must
+/// leave the user's working `tbd` exactly as it was, and leave nothing beside
+/// it.
+@Test(arguments: [EXDEV, EACCES])
+func aFailedLinkLeavesTheExistingFileIntact(linkError: Int32) async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    let original = Data("#!/bin/sh\necho old\n".utf8)
+    try makeFile(installPath, contents: original)
+    let before = try #require(CLIFileIdentity(regularFileAt: installPath))
+
+    let installer = CLIInstaller(
+        installPath: installPath,
+        homeDir: home.path,
+        pathProbe: { nil },
+        linkFunc: { _, _ in linkError }
+    )
+    await #expect(throws: CLIInstallerError.self) {
+        _ = try await installer.install(target: target)
+    }
+
+    let after = CLIFileIdentity(regularFileAt: installPath)
+    let contents = try Data(contentsOf: URL(fileURLWithPath: installPath))
+    let entries = try entriesBeside(installPath)
+    #expect(after == before)
+    #expect(contents == original)
+    #expect(entries == ["tbd"])
+}
+
+@Test func installReplacesAnExistingRegularFileAndLeavesNoStagingLink() async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    #expect(installed != nil)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+}
+
+@Test func reinstallingACurrentInstallLeavesNoStagingLink() async throws {
+    // The second install renames a link to `target` over another link to the
+    // same file, which rename(2) may treat as nothing to do.
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("binary".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
+    _ = try await installer.install(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+}
+
+@Test func replaceLinkLinksWithoutRunningThePathProbe() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+
+    let installer = CLIInstaller(
+        installPath: installPath,
+        homeDir: home.path,
+        pathProbe: {
+            Issue.record("replaceLink ran the PATH probe")
+            return nil
+        }
+    )
+    try installer.replaceLink(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    #expect(installed != nil)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+}
+
+/// unlink(2) refuses a directory, so a directory at the staging name stops
+/// the install before link(2) runs; nothing is linked into it and the
+/// installed file is untouched.
+@Test func replaceLinkRefusesADirectoryAtTheStagingName() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+    let before = try #require(CLIFileIdentity(regularFileAt: installPath))
+    let staging = CLIInstaller.stagingPath(forInstallPath: installPath)
+    try FileManager.default.createDirectory(atPath: staging, withIntermediateDirectories: true)
+    try makeFile(staging + "/keep", contents: Data("keep".utf8))
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    #expect(throws: CLIInstallerError.self) {
+        try installer.replaceLink(target: target)
+    }
+
+    let after = CLIFileIdentity(regularFileAt: installPath)
+    let contents = try Data(contentsOf: URL(fileURLWithPath: installPath))
+    let insideStaging = try FileManager.default.contentsOfDirectory(atPath: staging)
+    #expect(after == before)
+    #expect(contents == Data("old".utf8))
+    #expect(insideStaging == ["keep"])
+}
+
+/// A symlink at the staging name is removed, not followed, so a symlink to a
+/// directory never gets the new link put inside the directory.
+@Test func replaceLinkRemovesASymlinkAtTheStagingName() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+    let elsewhere = home.path + "/elsewhere"
+    try FileManager.default.createDirectory(atPath: elsewhere, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+        atPath: CLIInstaller.stagingPath(forInstallPath: installPath),
+        withDestinationPath: elsewhere
+    )
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    try installer.replaceLink(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    let insideElsewhere = try FileManager.default.contentsOfDirectory(atPath: elsewhere)
+    #expect(installed != nil)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
+    #expect(insideElsewhere.isEmpty)
+}
+
+@Test func installRemovesAStagingLinkLeftByAnInterruptedInstall() async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("binary".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+    try makeFile(installPath, contents: Data("old".utf8))
+    try makeFile(CLIInstaller.stagingPath(forInstallPath: installPath), contents: Data("leftover".utf8))
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
+
+    let installed = installer.installedFileIdentity()
+    let source = CLIFileIdentity(regularFileAt: target)
+    let entries = try entriesBeside(installPath)
+    #expect(installed == source)
+    #expect(entries == ["tbd"])
 }
 
 @Test func pathProbeReturningNilTreatedAsOffPath() async throws {

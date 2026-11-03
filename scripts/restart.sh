@@ -392,6 +392,27 @@ DAEMON_HANDOVER_TIMEOUT=60
 DAEMON_PROBE_TIMEOUT=5
 
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
+    # The app checks the installed CLI (~/.local/bin/tbd) against the TBDCLI
+    # beside the daemon it talks to. Re-link an existing hard link there to
+    # this build's TBDCLI, which is already in $BUILD_DIR, BEFORE the handover:
+    # the app records the install whenever a new daemon first answers it, and
+    # a re-link made after that answer would leave the record on the old file.
+    # If the handover then fails, the CLI is a build ahead of the daemon and
+    # the app asks about it at its next check. Only in this branch, which
+    # starts a daemon from $BUILD_DIR — --daemon and --quick included, the
+    # latter from the binaries already there. --app starts no daemon, and a WIP
+    # build that skips the daemon restart leaves the shared daemon on another
+    # build's CLI. Only for the default TBD_HOME, too: a sandboxed instance
+    # (TBD_HOME pointing anywhere else) must not re-point the developer's
+    # global `tbd`. Never fails the restart (relink_installed_cli,
+    # restart-bundle-lib.sh).
+    if is_default_tbd_home "${TBD_HOME:-}" "$HOME"; then
+        cli_outcome="$(relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI")"
+        [ -z "$cli_outcome" ] || echo "  CLI: $cli_outcome"
+    else
+        echo "  CLI: not re-linked; TBD_HOME is not the default home"
+    fi
+
     # The daemon is replaced by a handover, as `tbd update` replaces it: the
     # new daemon starts with TBD_HANDOVER_FROM_PID naming the old one, writes
     # its own pid over the pid file, retires the old daemon, and binds its

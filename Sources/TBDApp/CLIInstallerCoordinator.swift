@@ -9,10 +9,13 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
 final class CLIInstallerCoordinator {
     private let daemonClient: DaemonClient
     private let userDefaults: UserDefaults
-    private let installer = CLIInstaller()
+    private let installer: CLIInstaller
+    /// The decisions and the identity record; this class only presents them.
+    private let launchCheck: CLILaunchCheck
 
-    /// Set after `checkOnLaunch` runs, so daemon reconnects within the same
-    /// app session don't keep re-prompting for stale/unexpectedFileType states.
+    /// Set once `checkOnLaunch` gets a target, so daemon reconnects within the
+    /// same app session don't refresh or prompt again. `recordCurrentInstall`
+    /// waits for it.
     private var hasCheckedThisSession = false
 
     /// Persists across launches. Set when the user clicks "Not Now" on the
@@ -26,52 +29,76 @@ final class CLIInstallerCoordinator {
     }
 
     init(daemonClient: DaemonClient, userDefaults: UserDefaults = .standard) {
+        let installer = CLIInstaller()
         self.daemonClient = daemonClient
         self.userDefaults = userDefaults
+        self.installer = installer
+        // The install path and the record belong to the developer's own
+        // installation, so only an app on the default TBD home refreshes them
+        // without asking. Decided once: TBD_HOME does not change under a
+        // running app.
+        self.launchCheck = CLILaunchCheck(
+            installer: installer,
+            userDefaults: userDefaults,
+            allowsSilentRefresh: TBDConstants.isDefaultConfigDir(environment: ProcessInfo.processInfo.environment)
+        )
     }
 
-    /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
-    /// prompt if the CLI install is missing or stale. Silent if everything's healthy
-    /// or if the user previously dismissed the missing-CLI prompt. No-op on
-    /// subsequent calls within the same app session — daemon reconnects
-    /// shouldn't re-prompt for stale/unexpectedFileType.
+    /// Called once per connect, at the end of `connectAndLoadInitialState`;
+    /// does its work once per app session. Silent when the install is
+    /// healthy (its identity is recorded), and when it is stale but still the
+    /// file TBD installed, which is re-linked without asking on the default
+    /// TBD home. Otherwise it surfaces a one-click prompt, except for a
+    /// missing CLI the user already declined to install.
     func checkOnLaunch() async {
         guard !hasCheckedThisSession else { return }
-        guard let target = await fetchExpectedTarget() else {
-            // Don't latch the flag — a later reconnect with a healthy daemon
-            // status response should still get its first chance to check.
+        // Don't latch when the target is unavailable: a later reconnect with
+        // a healthy daemon status response should still get its first chance
+        // to check. Re-check the latch after the wait, in case another call
+        // took it meanwhile.
+        guard let target = await fetchExpectedTarget(), !hasCheckedThisSession else {
             return
         }
         hasCheckedThisSession = true
-        let state = installer.currentState(expectedTarget: target)
 
-        if case .installed = state {
-            logger.debug("CLI installed and current at \(self.installer.installPath, privacy: .public)")
-            if notInstalledDismissed {
-                logger.info("CLI install healthy — clearing prior dismissal")
-                notInstalledDismissed = false
-            }
-            return
-        }
-
-        guard let kind = state.launchPromptKind(userPreviouslyDismissed: notInstalledDismissed) else {
+        let outcome = launchCheck.run(target: target, userPreviouslyDismissed: notInstalledDismissed)
+        switch outcome {
+        case .upToDate, .refreshedSilently:
+            // A healthy install now. No alert after a silent refresh, not even
+            // the PATH reminder: TBD installed this `tbd` before, and showed
+            // that reminder then if it was needed.
+            clearDismissalAfterHealthyInstall()
+        case .silentRefreshFailed(let error):
+            // Never fail silently. Not the Refresh prompt either: it would
+            // only retry the link that just failed.
+            presentInstallFailedAlert(title: "Couldn't refresh tbd", error: error)
+        case .nothing:
             logger.debug("Skipping CLI install prompt — user previously dismissed Not Now")
-            return
+        case .prompt(let kind):
+            logger.info("CLI install at \(self.installer.installPath, privacy: .public) needs the user: \(String(describing: kind), privacy: .public); expected=\(target, privacy: .public)")
+            await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
         }
-
-        switch kind {
-        case .missing:
-            logger.info("CLI install missing — prompting to install")
-        case .stale(let current):
-            logger.info("CLI install stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
-        case .unexpectedFileType:
-            logger.info("Unexpected file at \(self.installer.installPath, privacy: .public) — prompting to replace")
-        }
-        await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
     }
 
-    /// Called from the menu item. Routes through the same prompt as the
-    /// launch-time check (so verb/wording stays accurate per state) but
+    /// Record the installed CLI's identity when it is current, and nothing
+    /// else: never a refresh, never a prompt. Called whenever the daemon
+    /// answers a new delta subscription, the sign of a possibly new daemon,
+    /// because a script can re-link the CLI while the app keeps running, and
+    /// a record left on the old file would later read as someone else's.
+    /// `scripts/restart.sh` re-links before it hands over to the new daemon,
+    /// so this finds the install current. `scripts/update.sh` re-links after
+    /// its handover, so with the app left open (`tbd update --no-app`) this
+    /// can run first and miss it; the next launch then records it if it is
+    /// still current, or prompts if a rebuild has made it stale. Does nothing
+    /// until `checkOnLaunch` has run, which records at launch itself, so it
+    /// adds no RPC before the initial load.
+    func recordCurrentInstall() async {
+        guard hasCheckedThisSession, let target = await fetchExpectedTarget() else { return }
+        launchCheck.recordIfInstalled(target: target)
+    }
+
+    /// Called from the menu item. Always asks, through the same prompt as the
+    /// launch-time check (so verb/wording stays accurate per state), but
     /// doesn't record a Not-Now dismissal — the user explicitly invoked us.
     func runFromMenu() async {
         guard let target = await fetchExpectedTarget() else {
@@ -79,22 +106,26 @@ final class CLIInstallerCoordinator {
             return
         }
         let state = installer.currentState(expectedTarget: target)
-        let kind: CLILaunchPromptKind
-        switch state {
-        case .installed:
+        guard let kind = state.menuPromptKind(
+            installedFile: installer.installedFileIdentity(),
+            recorded: launchCheck.recordedIdentity
+        ) else {
+            launchCheck.recordInstalledIdentity()
             await presentAlreadyInstalledAlert(target: target)
             return
-        case .notInstalled:
-            kind = .missing
-        case .stale(let current):
-            kind = .stale(current: current)
-        case .unexpectedFileType:
-            kind = .unexpectedFileType
         }
         await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: false)
     }
 
     // MARK: - Private
+
+    /// A healthy install re-arms the missing-CLI prompt, so a later deletion
+    /// is noticed even if the user once declined it.
+    private func clearDismissalAfterHealthyInstall() {
+        guard notInstalledDismissed else { return }
+        logger.info("CLI install healthy — clearing prior dismissal")
+        notInstalledDismissed = false
+    }
 
     private func fetchExpectedTarget() async -> String? {
         let status: DaemonStatusResult
@@ -138,6 +169,10 @@ final class CLIInstallerCoordinator {
             alert.messageText = "Refresh the tbd command-line tool?"
             alert.informativeText = "Your `tbd` at \(installPath) is an older version of TBD's CLI. Update it to match this TBD?"
             primaryButton = "Refresh"
+        case .unrecognized:
+            alert.messageText = "Replace the tbd command-line tool?"
+            alert.informativeText = "TBD has no record of installing the `tbd` at \(installPath). Replace it with this TBD's CLI?"
+            primaryButton = "Replace"
         case .unexpectedFileType:
             alert.messageText = "Replace the file at \(installPath)?"
             alert.informativeText = "A file already exists at \(installPath). TBD can replace it with a link to this TBD's CLI."
@@ -152,10 +187,11 @@ final class CLIInstallerCoordinator {
         } else if recordDismissalOnDecline, case .missing = kind {
             // User declined the auto-launch missing-CLI prompt. Suppress on
             // future launches until they install — manually, via menu, or
-            // after we observe a healthy `.installed` state. Stale/unexpectedFileType
-            // dismissals are NOT remembered: those are broken-install states
-            // they opted into. Menu-invoked declines also aren't remembered
-            // (the user explicitly opened the dialog themselves).
+            // after we observe a healthy `.installed` state. Declines of the
+            // stale, unrecognized and unexpectedFileType prompts are NOT
+            // remembered: a file is already there, so the user once wanted a
+            // `tbd`. Menu-invoked declines also aren't remembered (the user
+            // explicitly opened the dialog themselves).
             logger.info("User dismissed install prompt — not auto-prompting next launch")
             notInstalledDismissed = true
         }
@@ -171,16 +207,13 @@ final class CLIInstallerCoordinator {
             result = try await installer.install(target: target)
         } catch {
             logger.error("CLI install failed: \(error.localizedDescription, privacy: .public)")
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Couldn't install tbd"
-            alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
+            presentInstallFailedAlert(title: "Couldn't install tbd", error: error)
             return
         }
 
         logger.info("CLI installed: \(result.installPath, privacy: .public) -> \(result.target, privacy: .public) onPath=\(result.onPath, privacy: .public)")
+        // TBD put this file here, so a later rebuild may refresh it silently.
+        launchCheck.recordInstalledIdentity()
         // Re-arm the launch prompt for any future unintended deletion.
         notInstalledDismissed = false
 
@@ -210,6 +243,15 @@ final class CLIInstallerCoordinator {
             pb.clearContents()
             pb.setString(line, forType: .string)
         }
+    }
+
+    private func presentInstallFailedAlert(title: String, error: any Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func presentAlreadyInstalledAlert(target: String) async {

@@ -46,6 +46,44 @@ import Foundation
         #expect(url.path.hasSuffix("/tbd"))
     }
 
+    @Test func noTBDHomeIsTheDefaultConfigDir() {
+        let unset = TBDConstants.isDefaultConfigDir(environment: [:])
+        let empty = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": ""])
+        #expect(unset)
+        #expect(empty)
+    }
+
+    /// The default is a directory, not a spelling: the same path, with a
+    /// trailing slash or through a symlink, still counts. Every path here is
+    /// in a scratch directory standing in for the default one.
+    @Test func isDefaultConfigDirComparesTheDirectoryNotTheSpelling() throws {
+        let fm = FileManager.default
+        let scratch = fm.temporaryDirectory.appendingPathComponent("tbd-default-home-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: scratch) }
+        let home = scratch.appendingPathComponent("tbd", isDirectory: true)
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        let link = scratch.appendingPathComponent("link-to-tbd")
+        try fm.createSymbolicLink(at: link, withDestinationURL: home)
+        let sandbox = scratch.appendingPathComponent("sandbox", isDirectory: true)
+        try fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        let absentHome = scratch.appendingPathComponent("absent-tbd", isDirectory: true)
+
+        let same = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": home.path], defaultConfigDir: home)
+        let trailingSlash = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": home.path + "/"], defaultConfigDir: home)
+        let viaSymlink = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": link.path], defaultConfigDir: home)
+        let absentWithSlash = TBDConstants.isDefaultConfigDir(
+            environment: ["TBD_HOME": absentHome.path + "/"], defaultConfigDir: absentHome
+        )
+        let other = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": sandbox.path], defaultConfigDir: home)
+        let missing = TBDConstants.isDefaultConfigDir(environment: ["TBD_HOME": absentHome.path], defaultConfigDir: home)
+        #expect(same)
+        #expect(trailingSlash)
+        #expect(viaSymlink)
+        #expect(absentWithSlash)
+        #expect(!other)
+        #expect(!missing)
+    }
+
     @Test func derivedPathsFollowTBDHome() {
         let env = ["TBD_HOME": "/tmp/tbd-derived"]
         #expect(TBDConstants.databasePath(environment: env) == "/tmp/tbd-derived/state.db")

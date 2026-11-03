@@ -15,6 +15,34 @@ public enum TBDConstants {
     /// or empty, preserving production behavior.
     public static var configDir: URL { configDir(environment: ProcessInfo.processInfo.environment) }
 
+    /// Whether `environment` puts TBD on its default home, `defaultConfigDir`
+    /// (`~/tbd`, the config directory with no `TBD_HOME`). True when
+    /// `TBD_HOME` is unset or empty; when its path, standardized, equals the
+    /// standardized default path (so a trailing slash counts); or when both
+    /// exist and `stat` reports the same device and inode for them (so a
+    /// symlink to the default counts). Any other `TBD_HOME` is a sandboxed
+    /// instance, which must not change what the developer's own installation
+    /// shares, such as `~/.local/bin/tbd`.
+    public static func isDefaultConfigDir(
+        environment: [String: String],
+        defaultConfigDir: URL = TBDConstants.configDir(environment: [:])
+    ) -> Bool {
+        guard let override = environment["TBD_HOME"], !override.isEmpty else {
+            return true
+        }
+        let overridePath = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL.path
+        let defaultPath = defaultConfigDir.standardizedFileURL.path
+        if overridePath == defaultPath {
+            return true
+        }
+        var overrideStat = stat()
+        var defaultStat = stat()
+        guard stat(overridePath, &overrideStat) == 0, stat(defaultPath, &defaultStat) == 0 else {
+            return false
+        }
+        return overrideStat.st_dev == defaultStat.st_dev && overrideStat.st_ino == defaultStat.st_ino
+    }
+
     /// File containing the user-selected tmux executable fallback. Honors
     /// `TBD_HOME` so the app and daemon share the same configured value.
     public static func tmuxExecutablePathFile(environment: [String: String]) -> URL {

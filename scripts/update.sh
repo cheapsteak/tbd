@@ -116,7 +116,10 @@ DAEMON_LOG="/tmp/tbdd.log"
 APP_LOG="/tmp/tbdapp.log"
 INSTALLED_BUNDLE="/Applications/TBD.app"
 PREVIOUS_BUNDLE="$UPDATE_HOME/previous/TBD.app"
-CLI_INSTALL_PATH="$HOME/.local/bin/tbd"
+# Where an existing CLI install is re-linked. Empty means
+# default_cli_install_path from restart-bundle-lib.sh, which main sources and
+# restart.sh shares; a test points it at a scratch path instead.
+CLI_INSTALL_PATH=""
 PREBUILT_HOME="$UPDATE_HOME/prebuilt"
 UPDATE_SOURCE_FILE="$UPDATE_HOME/update-source"
 # The ref the daemon's update check compares against. Written by this script
@@ -1211,23 +1214,17 @@ restart_app() {
     launch_installed_app
 }
 
-# Re-point an existing ~/.local/bin/tbd at the CLI we just built. Only when the
-# operator already installed one: creating it here would be a gesture they
-# never made. A hard link for the same reason the app uses one — the target
-# keeps working when a build directory goes away.
+# Re-point an existing ~/.local/bin/tbd at the CLI this run built. The rule —
+# only an existing regular file, never created, never destructive, never a
+# failure — is relink_installed_cli in restart-bundle-lib.sh, which restart.sh
+# runs too; this stage picks the install path and writes the outcome to the
+# update log. Its own name, not the library's, so main sourcing the library
+# cannot replace a stand-in a test defines for this stage.
 refresh_installed_cli() {
-    local new_cli="${1-}"
-    if [ ! -f "$CLI_INSTALL_PATH" ] || [ -L "$CLI_INSTALL_PATH" ]; then
-        return 0
-    fi
-    if [ ! -x "$new_cli" ]; then
-        return 0
-    fi
-    if ln -f "$new_cli" "$CLI_INSTALL_PATH" 2>/dev/null; then
-        log "refreshed $CLI_INSTALL_PATH"
-    else
-        log "WARNING: could not refresh $CLI_INSTALL_PATH — run tbd from the app's CLI installer"
-    fi
+    local outcome
+    outcome="$(relink_installed_cli "${CLI_INSTALL_PATH:-$(default_cli_install_path)}" "${1-}")"
+    [ -z "$outcome" ] || log "$outcome"
+    return 0
 }
 
 # MARK: - Waking what the reconcile parked

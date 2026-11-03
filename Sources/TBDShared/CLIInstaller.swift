@@ -17,9 +17,15 @@ import os
 //
 // Trade-off: a subsequent `swift build` in any worktree writes a *new* inode
 // at its `.build/.../TBDCLI`. Our existing install path still points at the
-// older inode (an older version of TBDCLI, but still runs). The launch-time
-// `CLIInstallerCoordinator` notices the inode mismatch and offers to
-// "Refresh" — same UX the symlink-staleness check already provided.
+// older inode (an older version of TBDCLI, but still runs). `scripts/restart.sh`
+// and `scripts/update.sh` re-link an existing hard link to the TBDCLI beside
+// the daemon they start, so their builds never leave it behind. After any
+// other rebuild the launch-time check (`CLILaunchCheck` in TBDApp) notices the
+// inode mismatch. While the file at the install path is still the one TBD
+// installed — its `CLIFileIdentity` (device, inode and modification time)
+// matches the one TBD recorded — the check re-links it without asking, unless
+// the app runs on a sandboxed `TBD_HOME`. Any other file there may be the
+// user's, so the check asks before replacing it.
 //
 // This is the same trick `scripts/restart.sh` applies to the `.app` bundle
 // binary (see lines 57–67 of that file) for the same fragility reason:
@@ -40,32 +46,184 @@ public enum CLIInstallState: Equatable, Sendable {
     case unexpectedFileType
 }
 
-/// What the launch-time check should prompt the user about, if anything.
+/// A file's identity on disk: the device, inode and modification time `lstat`
+/// reports for it. Hard links share all three, so two paths with equal
+/// identities are links to one unmodified file.
+///
+/// TBD records the identity of the `tbd` it installs. A rebuild gives the
+/// daemon's TBDCLI a new inode, so the install goes stale, but while the file
+/// at the install path keeps the recorded identity it is the one TBD put
+/// there, and TBD may replace it without asking. The modification time is what
+/// catches a file rewritten in place, such as `cp mytbd ~/.local/bin/tbd`,
+/// which keeps the inode but is no longer TBD's to replace. Linking, renaming
+/// and unlinking leave it alone. An inode number can in principle be reused
+/// once its file is deleted; that risk is accepted. The change time is
+/// deliberately not part of the identity: a hard link's ctime changes whenever
+/// its link count does, which every rebuild and every worktree removal causes.
+public struct CLIFileIdentity: Equatable, Sendable {
+    public let device: Int64
+    public let inode: UInt64
+    /// `st_mtimespec`: whole seconds since the epoch, and the nanoseconds past
+    /// them.
+    public let modifiedSeconds: Int64
+    public let modifiedNanoseconds: Int64
+
+    public init(device: Int64, inode: UInt64, modifiedSeconds: Int64, modifiedNanoseconds: Int64) {
+        self.device = device
+        self.inode = inode
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+    }
+
+    /// The identity of the regular file at `path`, or nil when nothing is
+    /// there or the entry is a symlink, a directory or anything else that is
+    /// not a regular file. `lstat`, so a symlink is never followed.
+    public init?(regularFileAt path: String) {
+        var st = stat()
+        guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
+            return nil
+        }
+        self.init(
+            device: Int64(st.st_dev),
+            inode: UInt64(st.st_ino),
+            modifiedSeconds: Int64(st.st_mtimespec.tv_sec),
+            modifiedNanoseconds: Int64(st.st_mtimespec.tv_nsec)
+        )
+    }
+
+    /// The ownership rule: the file at the install path is the one TBD
+    /// installed exactly when it is a regular file (`installedFile` is not
+    /// nil) whose identity equals the recorded one. No record, or no regular
+    /// file, is never TBD's.
+    static func isRecognizedInstall(installedFile: CLIFileIdentity?, recorded: CLIFileIdentity?) -> Bool {
+        guard let installedFile, let recorded else { return false }
+        return installedFile == recorded
+    }
+
+    /// `"<device>:<inode>:<seconds>:<nanoseconds>"`, the form the identity is
+    /// stored in. A string rather than numbers, because an inode is a `UInt64`
+    /// and a stored integer is an `Int`, which cannot hold every inode.
+    public var storageString: String {
+        "\(device):\(inode):\(modifiedSeconds):\(modifiedNanoseconds)"
+    }
+
+    /// Parse a ``storageString``. Nil for anything else, including a string
+    /// without the modification time, which then counts as no record.
+    public init?(storageString: String) {
+        let parts = storageString.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              let device = Int64(parts[0]),
+              let inode = UInt64(parts[1]),
+              let modifiedSeconds = Int64(parts[2]),
+              let modifiedNanoseconds = Int64(parts[3]) else {
+            return nil
+        }
+        self.init(
+            device: device,
+            inode: inode,
+            modifiedSeconds: modifiedSeconds,
+            modifiedNanoseconds: modifiedNanoseconds
+        )
+    }
+}
+
+/// What a prompt about the CLI install should say.
 public enum CLILaunchPromptKind: Equatable, Sendable {
     case missing
+    /// The `tbd` at the install path is the one TBD installed — its identity
+    /// matches the recorded one — and is now an older build than the
+    /// daemon's. The menu asks about this, and so does the launch check of an
+    /// app on a sandboxed `TBD_HOME`; otherwise launch refreshes it without
+    /// asking.
     case stale(current: String)
+    /// Something TBD has no record of installing is at the install path: a
+    /// regular file whose identity differs from the recorded one (another
+    /// file, or TBD's rewritten in place), any file when nothing is recorded,
+    /// or a symlink. It may be the user's own, so nothing may call it an older
+    /// version of TBD's CLI.
+    case unrecognized(current: String)
     case unexpectedFileType
 }
 
+/// What the launch-time check should do about the CLI install.
+public enum CLILaunchAction: Equatable, Sendable {
+    case none
+    /// Re-link the install path to the daemon's TBDCLI without asking.
+    case refreshSilently
+    case prompt(CLILaunchPromptKind)
+}
+
 public extension CLIInstallState {
-    /// Decide whether the launch-time check should surface a prompt.
+    /// What a prompt about this install would say, given who owns the file.
+    /// This is the one mapping from install state to prompt; the menu shows it
+    /// as is, and ``launchAction(installedFile:recorded:userPreviouslyDismissed:allowsSilentRefresh:)``
+    /// derives the launch check from it.
     ///
-    /// `userPreviouslyDismissed` should be true if the user clicked "Not Now"
-    /// on a previous `.notInstalled` prompt — in which case we suppress the
-    /// re-prompt to avoid nagging. `.stale` and `.unexpectedFileType` are
-    /// always surfaced because they represent a broken install the user
-    /// likely wants fixed (and they explicitly opted in by installing once
-    /// before).
-    func launchPromptKind(userPreviouslyDismissed: Bool) -> CLILaunchPromptKind? {
+    /// - Parameters:
+    ///   - installedFile: the identity of the regular file at the install
+    ///     path (``CLIInstaller/installedFileIdentity()``); nil when nothing
+    ///     is there or the entry is not a regular file.
+    ///   - recorded: the identity TBD recorded when it last installed the CLI
+    ///     or saw a healthy install; nil when it has none.
+    ///
+    /// Nil for `.installed`, which the menu answers with its "already
+    /// installed" alert. A stale install with the recorded identity really is
+    /// an older version of TBD's CLI and is described as one. Every other
+    /// stale install — a different file, the same file rewritten in place, no
+    /// record, or a symlink — is `.unrecognized`, because TBD cannot tell it
+    /// from the user's own.
+    func menuPromptKind(
+        installedFile: CLIFileIdentity?,
+        recorded: CLIFileIdentity?
+    ) -> CLILaunchPromptKind? {
         switch self {
         case .installed:
             return nil
         case .notInstalled:
-            return userPreviouslyDismissed ? nil : .missing
+            return .missing
         case .stale(let current):
-            return .stale(current: current)
+            if CLIFileIdentity.isRecognizedInstall(installedFile: installedFile, recorded: recorded) {
+                return .stale(current: current)
+            }
+            return .unrecognized(current: current)
         case .unexpectedFileType:
             return .unexpectedFileType
+        }
+    }
+
+    /// Decide what the launch-time check does: the menu's prompt, except that
+    /// TBD's own stale install is refreshed without asking when
+    /// `allowsSilentRefresh` is true, and a missing CLI the user already
+    /// declined is left alone. Recording the identity of an `.installed` file
+    /// is the caller's job.
+    ///
+    /// - Parameters:
+    ///   - userPreviouslyDismissed: true if the user clicked "Not Now" on an
+    ///     earlier `.missing` prompt. It suppresses that prompt so it does not
+    ///     nag; nothing else reads it.
+    ///   - allowsSilentRefresh: false for an app on a sandboxed `TBD_HOME`
+    ///     (``TBDConstants/isDefaultConfigDir(environment:defaultConfigDir:)``).
+    ///     The install path and the record are the developer's, shared with
+    ///     their own installation, so a sandbox asks before re-pointing them,
+    ///     with the `.stale` prompt, which is accurate there.
+    ///
+    /// The other parameters are ``menuPromptKind(installedFile:recorded:)``'s.
+    func launchAction(
+        installedFile: CLIFileIdentity?,
+        recorded: CLIFileIdentity?,
+        userPreviouslyDismissed: Bool,
+        allowsSilentRefresh: Bool
+    ) -> CLILaunchAction {
+        guard let kind = menuPromptKind(installedFile: installedFile, recorded: recorded) else {
+            return .none
+        }
+        switch kind {
+        case .stale where allowsSilentRefresh:
+            return .refreshSilently
+        case .missing where userPreviouslyDismissed:
+            return .none
+        case .missing, .stale, .unrecognized, .unexpectedFileType:
+            return .prompt(kind)
         }
     }
 }
@@ -150,9 +308,9 @@ public struct CLIInstaller: Sendable {
     /// our install is a hard link, so two paths sharing the same `(st_dev,
     /// st_ino)` mean the kernel sees them as the same file.
     ///
-    /// Legacy symlinks (installed by versions of TBD before this PR) are
-    /// reported as `.stale` so the launch-time `CLIInstallerCoordinator`
-    /// prompt re-installs them as hard links on the next refresh.
+    /// Legacy symlinks (installed by versions of TBD before the hard-link
+    /// scheme) are reported as `.stale`. A symlink has no recorded identity,
+    /// so the launch-time check asks before replacing it with a hard link.
     public func currentState(expectedTarget: String?) -> CLIInstallState {
         var st = stat()
         guard lstat(installPath, &st) == 0 else {
@@ -163,8 +321,8 @@ public struct CLIInstaller: Sendable {
         if mode == S_IFLNK {
             // Legacy install from before hard-link migration (or someone
             // replaced our hard link). Surface as stale so the launch-time
-            // prompt re-installs as a hard link on the next refresh —
-            // intentional upgrade path for users crossing the migration.
+            // check offers to re-install it as a hard link — the upgrade
+            // path for users crossing the migration.
             let dest = (try? FileManager.default.destinationOfSymbolicLink(atPath: installPath)) ?? installPath
             let resolved = Self.absolutize(
                 dest,
@@ -198,9 +356,43 @@ public struct CLIInstaller: Sendable {
         return .stale(currentTarget: installPath)
     }
 
-    /// Create or replace the install path as a hard link to `target`.
-    /// Idempotent.
+    /// The identity of the regular file at the install path, or nil when
+    /// nothing is there or the entry is a symlink, a directory or anything
+    /// else that is not a regular file.
+    public func installedFileIdentity() -> CLIFileIdentity? {
+        CLIFileIdentity(regularFileAt: installPath)
+    }
+
+    /// The hidden sibling `replaceLink(target:)` links to before renaming it
+    /// over `installPath`: `.<name>.tbd-install` in the same directory, so the
+    /// rename never crosses a filesystem. `relink_installed_cli` in
+    /// `scripts/restart-bundle-lib.sh` stages through the same name, so either
+    /// one clears a leftover from the other.
+    static func stagingPath(forInstallPath installPath: String) -> String {
+        let directory = (installPath as NSString).deletingLastPathComponent
+        let name = (installPath as NSString).lastPathComponent
+        return (directory as NSString).appendingPathComponent(".\(name).tbd-install")
+    }
+
+    /// Create or replace the install path as a hard link to `target`, then
+    /// report whether its directory is on the login shell's PATH. The second
+    /// step runs `pathProbe`, which by default starts the user's login shell.
     public func install(target: String) async throws -> CLIInstallResult {
+        try replaceLink(target: target)
+        let pathInfo = await pathStatus()
+        return CLIInstallResult(
+            installPath: installPath,
+            target: target,
+            onPath: pathInfo.onPath,
+            suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
+            exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
+        )
+    }
+
+    /// Create or replace the install path as a hard link to `target`, and
+    /// nothing else: no PATH probe. Idempotent. A failure leaves whatever was
+    /// at the install path as it was.
+    public func replaceLink(target: String) throws {
         let fm = FileManager.default
         let parent = (installPath as NSString).deletingLastPathComponent
         if !fm.fileExists(atPath: parent) {
@@ -211,32 +403,42 @@ public struct CLIInstaller: Sendable {
             }
         }
 
-        // Remove any existing entry (symlink, hard link, or file). Use lstat
-        // so we don't follow a broken symlink and miss the removal. Refuse
-        // to recurse into a directory: FileManager.removeItem deletes
-        // directories recursively, and the "Replace the file at …" alert
-        // doesn't signal that scope. A directory at this path is improbable
-        // in practice, but the safer behavior is to surface the situation to
-        // the user.
+        // Refuse a directory at the install path. rename(2) below would
+        // refuse it too, but with a bare EISDIR; this names the fix. A
+        // directory here is improbable in practice, and the "Replace the
+        // file at …" alert doesn't signal that a whole directory is at stake.
         var st = stat()
-        if lstat(installPath, &st) == 0 {
-            if (st.st_mode & S_IFMT) == S_IFDIR {
-                throw CLIInstallerError.linkCreationFailed(
-                    "a directory exists at \(installPath); remove it manually before installing"
-                )
-            }
-            do {
-                try fm.removeItem(atPath: installPath)
-            } catch {
-                throw CLIInstallerError.linkCreationFailed("remove existing: \(error.localizedDescription)")
-            }
+        if lstat(installPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
+            throw CLIInstallerError.linkCreationFailed(
+                "a directory exists at \(installPath); remove it manually before installing"
+            )
+        }
+
+        // Link to a hidden sibling, then rename(2) it over the install path.
+        // rename replaces a regular file or a symlink in one step and does not
+        // follow a symlink, so when either step fails the `tbd` already there
+        // is untouched. That matters because the launch check refreshes
+        // without asking: a failed refresh must not delete a working `tbd`.
+        // The sibling's name is fixed rather than unique, so a crash between
+        // the two steps leaves at most one leftover, and the next install
+        // removes it here first. unlink(2) removes a leftover file or symlink
+        // (without following it) and refuses a directory, so a directory
+        // there stops the install here, before anything is linked.
+        let stagingPath = Self.stagingPath(forInstallPath: installPath)
+        if unlink(stagingPath) != 0, errno != ENOENT {
+            let msg = String(cString: strerror(errno))
+            throw CLIInstallerError.linkCreationFailed(
+                "remove the leftover \(stagingPath) beside \(installPath): \(msg)"
+            )
         }
 
         // Direct link(2) instead of FileManager.linkItem so we can read errno
         // cleanly and distinguish EXDEV (cross-filesystem) from generic
         // failures. Argument order matches link(2): first is the **existing**
-        // source, second is the new name.
-        let linkErr = linkFunc(target, installPath)
+        // source, second is the new name. The sibling is on the install
+        // path's filesystem, so EXDEV still means target and install path
+        // are on different volumes, and the error names the install path.
+        let linkErr = linkFunc(target, stagingPath)
         if linkErr != 0 {
             if linkErr == EXDEV {
                 throw CLIInstallerError.crossDeviceLink(target: target, installPath: installPath)
@@ -245,14 +447,16 @@ public struct CLIInstaller: Sendable {
             throw CLIInstallerError.linkCreationFailed(msg)
         }
 
-        let pathInfo = await pathStatus()
-        return CLIInstallResult(
-            installPath: installPath,
-            target: target,
-            onPath: pathInfo.onPath,
-            suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
-            exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
-        )
+        if rename(stagingPath, installPath) != 0 {
+            let msg = String(cString: strerror(errno))
+            unlink(stagingPath)
+            throw CLIInstallerError.linkCreationFailed("replace \(installPath): \(msg)")
+        }
+        // When the install path was already a link to `target` (a reinstall
+        // of a current install), the two names are one file, and rename(2)
+        // may succeed without removing the sibling. Remove it; after a real
+        // rename this finds nothing.
+        unlink(stagingPath)
     }
 
     /// Compute current path status (whether the install path's parent dir is

@@ -1693,6 +1693,262 @@ test_seed_rejects_a_missing_argument() {
     assert_fail "seed requires tbd_home" seed_tmux_fallback
 }
 
+test_default_cli_install_path_is_under_home() {
+    assert_eq "the CLI installs to ~/.local/bin/tbd, as CLIInstaller's default does" \
+        "/x home/.local/bin/tbd" "$(HOME="/x home" default_cli_install_path)"
+}
+
+# relink_installed_cli cases. Each builds its own dir (with a space in the
+# name, on purpose) holding an executable new CLI at build/TBDCLI and the
+# install path's directory, bin/.
+relink_fixture() {
+    local d="$TEST_TMP/relink $1"
+    mkdir -p "$d/build" "$d/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$d/build/TBDCLI"
+    chmod +x "$d/build/TBDCLI"
+    echo "$d"
+}
+
+# `ls -di` rather than `stat`, whose BSD and GNU dialects disagree.
+file_inode() {
+    ls -di "${1-}" 2>/dev/null | awk '{print $1}'
+}
+
+# The hidden sibling relink_installed_cli stages through, spelled out rather
+# than derived: it must stay the name CLIInstaller.stagingPath uses, which
+# CLIInstallerTests pins the same way.
+relink_staging() {
+    printf '%s\n' "$1/bin/.tbd.tbd-install"
+}
+
+assert_no_staging() {
+    if [ -e "$(relink_staging "$2")" ] || [ -L "$(relink_staging "$2")" ]; then
+        fail "$1: $(relink_staging "$2") was left behind"
+    else
+        pass "$1"
+    fi
+}
+
+test_relink_points_an_installed_regular_file_at_the_new_cli() {
+    local d out
+    d="$(relink_fixture regular)"
+    printf 'old\n' > "$d/bin/tbd"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink makes an installed regular file the new CLI's inode" \
+        "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink says what it refreshed" "refreshed $d/bin/tbd" "$out"
+    assert_no_staging "relink leaves no staging link after a refresh" "$d"
+}
+
+test_relink_leaves_an_already_current_link_alone() {
+    local d out before
+    d="$(relink_fixture current)"
+    ln "$d/build/TBDCLI" "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink keeps a link that is already the new CLI" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink says nothing when the link is already current" "" "$out"
+    assert_no_staging "relink stages nothing when the link is already current" "$d"
+}
+
+test_relink_replaces_a_leftover_staging_link() {
+    local d out
+    d="$(relink_fixture leftover)"
+    printf 'old\n' > "$d/bin/tbd"
+    printf 'leftover\n' > "$(relink_staging "$d")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink refreshes past a leftover staging link" \
+        "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink reports that refresh" "refreshed $d/bin/tbd" "$out"
+    assert_no_staging "relink leaves no leftover staging link" "$d"
+}
+
+# `ln` given a directory links into it, so a directory at the sibling's name
+# must stop the relink with nothing created inside it.
+test_relink_refuses_a_directory_at_the_staging_name() {
+    local d out before staging
+    d="$(relink_fixture stagingdir)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    staging="$(relink_staging "$d")"
+    mkdir -p "$staging"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_contains "relink warns about a directory at the staging name" \
+        "WARNING: could not refresh $d/bin/tbd, left it as it was: $staging is in the way" "$out"
+    assert_eq "relink keeps the installed file past a directory at the staging name" \
+        "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink links nothing into a directory at the staging name" "" "$(ls -A "$staging")"
+}
+
+# A symlink to a directory is removed, not followed: the relink then succeeds,
+# the install is a regular file again, and nothing lands in the directory.
+test_relink_removes_a_symlink_at_the_staging_name() {
+    local d out
+    d="$(relink_fixture stagingsymlink)"
+    printf 'old\n' > "$d/bin/tbd"
+    mkdir -p "$d/elsewhere"
+    ln -s "$d/elsewhere" "$(relink_staging "$d")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink refreshes past a symlink at the staging name" "refreshed $d/bin/tbd" "$out"
+    if [ -f "$d/bin/tbd" ] && [ ! -L "$d/bin/tbd" ]; then
+        pass "the install stays a regular file"
+    else
+        fail "the install stays a regular file"
+    fi
+    assert_eq "the install is the new CLI" "$(file_inode "$d/build/TBDCLI")" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink links nothing into the directory the symlink named" "" "$(ls -A "$d/elsewhere")"
+    assert_no_staging "relink leaves no staging link after removing a symlink there" "$d"
+}
+
+test_relink_leaves_a_symlink_alone() {
+    local d out
+    d="$(relink_fixture symlink)"
+    printf 'theirs\n' > "$d/theirs"
+    ln -s "$d/theirs" "$d/bin/tbd"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    if [ -L "$d/bin/tbd" ]; then
+        pass "relink leaves a symlink at the install path a symlink"
+    else
+        fail "relink leaves a symlink at the install path a symlink"
+    fi
+    assert_eq "relink leaves the symlink's destination alone" "$d/theirs" "$(readlink "$d/bin/tbd")"
+    assert_eq "relink leaves the file the symlink names alone" "theirs" "$(cat "$d/theirs")"
+    assert_eq "relink says nothing when it leaves a symlink" "" "$out"
+}
+
+test_relink_never_creates_an_install() {
+    local d out
+    d="$(relink_fixture absent)"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    if [ -e "$d/bin/tbd" ] || [ -L "$d/bin/tbd" ]; then
+        fail "relink does not install a CLI the operator never installed"
+    else
+        pass "relink does not install a CLI the operator never installed"
+    fi
+    assert_eq "relink says nothing when there is no install" "" "$out"
+}
+
+test_relink_skips_a_non_executable_new_cli() {
+    local d out before
+    d="$(relink_fixture nonexec)"
+    chmod 644 "$d/build/TBDCLI"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(relink_installed_cli "$d/bin/tbd" "$d/build/TBDCLI")"
+    assert_eq "relink keeps the installed file when the new CLI is not executable" \
+        "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "relink leaves that file's contents alone" "old" "$(cat "$d/bin/tbd")"
+    assert_eq "relink says nothing when the new CLI is not executable" "" "$out"
+}
+
+# restart.sh runs under set -e, so a failed relink must come back as a warning
+# and a zero status, not end the restart, and it must leave the installed file
+# exactly as it was. Each case puts one stub first on PATH and runs the relink
+# in a set -e shell.
+#
+#   run_relink_with_stub <dir> <stub name> <stub body>
+run_relink_with_stub() {
+    local d="$1"
+    mkdir -p "$d/stub"
+    printf '#!/bin/sh\n%s\n' "$3" > "$d/stub/$2"
+    chmod +x "$d/stub/$2"
+    PATH="$d/stub:/usr/bin:/bin" bash -c \
+        'set -e; source "$1"; relink_installed_cli "$2" "$3"; echo survived' \
+        _ "$HELPER" "$d/bin/tbd" "$d/build/TBDCLI" 2>/dev/null
+}
+
+# The stub ln does what BSD `ln -f` does when the link itself fails, as across
+# volumes: it unlinks its target first, then reports EXDEV. Aimed at the
+# install path, as a bare `ln -f` would be, that deletes the operator's tbd.
+test_relink_warns_and_keeps_the_file_when_ln_fails() {
+    local d out rc before
+    d="$(relink_fixture lnfails)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(run_relink_with_stub "$d" ln \
+        'for last; do :; done; rm -f "$last"; echo "ln: $last: Cross-device link" >&2; exit 1')"; rc=$?
+    assert_eq "relink returns 0 to a set -e caller when ln fails" "0" "$rc"
+    assert_contains "relink warns when ln fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "the warning carries ln's own error" "Cross-device link" "$out"
+    assert_eq "the warning is one line" "1" "$(grep -c WARNING <<< "$out")"
+    assert_contains "a set -e caller carries on after a failed ln" "survived" "$out"
+    assert_eq "a failed ln leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "a failed ln leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
+    assert_no_staging "a failed ln leaves no staging link" "$d"
+}
+
+# The real ln has made the staging link by the time mv fails, so this is the
+# case that proves the cleanup.
+test_relink_warns_and_keeps_the_file_when_mv_fails() {
+    local d out rc before
+    d="$(relink_fixture mvfails)"
+    printf 'old\n' > "$d/bin/tbd"
+    before="$(file_inode "$d/bin/tbd")"
+    out="$(run_relink_with_stub "$d" mv \
+        'echo "mv: rename failed:" >&2; echo "Permission denied" >&2; exit 1')"; rc=$?
+    assert_eq "relink returns 0 to a set -e caller when mv fails" "0" "$rc"
+    assert_contains "relink warns when mv fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "the warning carries mv's own error, joined onto one line" \
+        "mv: rename failed: Permission denied" "$out"
+    assert_contains "a set -e caller carries on after a failed mv" "survived" "$out"
+    assert_eq "a failed mv leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
+    assert_eq "a failed mv leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
+    assert_no_staging "a failed mv removes the staging link" "$d"
+}
+
+# restart.sh cannot be run here (it builds and launches the real app), so this
+# reads it. The relink must sit in the branch that starts a daemon from
+# $BUILD_DIR, and before that daemon's handover: the app records the install
+# when a new daemon first answers it, so a relink after the handover could
+# land after that answer and leave the record on the old file. --app skips the
+# whole branch, so it never relinks, and --dry-run exits long before it.
+# Within the branch it must sit in the then-arm of the default-TBD_HOME guard,
+# so a sandboxed instance never re-points the developer's tbd: the guard comes
+# first, and no `else` or `fi` falls between the guard and the relink.
+# shellcheck disable=SC2016 # literal restart.sh text, not expansions
+test_restart_relinks_the_cli_before_starting_a_daemon() {
+    local restart="$HERE/restart.sh" branch guard relink handover skip between
+    local order="wrong"
+    branch="$(grep -nF 'if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then' "$restart" | head -1 | cut -d: -f1)"
+    guard="$(grep -nF 'if is_default_tbd_home "${TBD_HOME:-}" "$HOME"; then' "$restart" | head -1 | cut -d: -f1)"
+    relink="$(grep -nF 'relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
+    handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
+    skip="$(grep -nF 'elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then' "$restart" | head -1 | cut -d: -f1)"
+    if [[ -n "$branch" && -n "$guard" && -n "$relink" && -n "$handover" && -n "$skip" ]] \
+        && (( branch < guard && guard < relink && relink < handover && handover < skip )); then
+        between="$(sed -n "$((guard + 1)),$((relink - 1))p" "$restart" | grep -cE '^[[:space:]]*(else|elif|fi)([[:space:]]|;|$)')"
+        [ "$between" = 0 ] && order="right"
+    fi
+    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) inside the default-TBD_HOME guard (${guard:-?}), before the handover (${handover:-?}), in the daemon branch (${branch:-?} to ${skip:-?})" \
+        "right" "$order"
+    # A second call elsewhere would relink on --app, or for a sandbox, too.
+    assert_eq "restart.sh calls relink_installed_cli once" \
+        "1" "$(grep -cF 'relink_installed_cli "' "$restart")"
+}
+
+test_is_default_tbd_home_wants_the_default_or_nothing() {
+    assert_ok "an unset TBD_HOME is the default home" is_default_tbd_home "" "/x home"
+    assert_ok "HOME/tbd is the default home" is_default_tbd_home "/x home/tbd" "/x home"
+    assert_ok "HOME/tbd/ is the default home, even before it exists" is_default_tbd_home "/x home/tbd/" "/x home"
+    assert_fail "another TBD_HOME is a sandbox" is_default_tbd_home "/tmp/sandbox/tbd" "/x home"
+    assert_fail "a TBD_HOME under the default is a sandbox" is_default_tbd_home "/x home/tbd/sub" "/x home"
+}
+
+# The same directory under another name, against a scratch HOME whose tbd
+# exists: a symlink to it, or the path with a trailing slash, is the default.
+test_is_default_tbd_home_follows_the_directory() {
+    local home="$TEST_TMP/default home"
+    mkdir -p "$home/tbd" "$TEST_TMP/sandbox home/tbd"
+    ln -s "$home/tbd" "$TEST_TMP/link to tbd"
+    assert_ok "a symlink to HOME/tbd is the default home" \
+        is_default_tbd_home "$TEST_TMP/link to tbd" "$home"
+    assert_ok "HOME/tbd/ is the default home" is_default_tbd_home "$home/tbd/" "$home"
+    assert_ok "a symlink with a trailing slash is the default home" \
+        is_default_tbd_home "$TEST_TMP/link to tbd/" "$home"
+    assert_fail "another existing tbd is a sandbox" \
+        is_default_tbd_home "$TEST_TMP/sandbox home/tbd" "$home"
+}
+
 test_build_identity_describes_the_tree
 test_build_identity_marks_a_dirty_tree
 test_build_identity_ignores_dirt_outside_the_build
@@ -1745,6 +2001,20 @@ test_seed_warns_and_succeeds_without_tmux
 test_seed_keeps_a_symlinked_tmux_path
 test_seed_ignores_a_non_absolute_command_v
 test_seed_rejects_a_missing_argument
+test_default_cli_install_path_is_under_home
+test_relink_points_an_installed_regular_file_at_the_new_cli
+test_relink_leaves_an_already_current_link_alone
+test_relink_replaces_a_leftover_staging_link
+test_relink_refuses_a_directory_at_the_staging_name
+test_relink_removes_a_symlink_at_the_staging_name
+test_relink_leaves_a_symlink_alone
+test_relink_never_creates_an_install
+test_relink_skips_a_non_executable_new_cli
+test_relink_warns_and_keeps_the_file_when_ln_fails
+test_relink_warns_and_keeps_the_file_when_mv_fails
+test_restart_relinks_the_cli_before_starting_a_daemon
+test_is_default_tbd_home_wants_the_default_or_nothing
+test_is_default_tbd_home_follows_the_directory
 
 # A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. A child that bash forks for a
 # background job keeps a copy of this harness's EXIT trap until it execs, so a
