@@ -8,6 +8,48 @@ import TBDShared
 @Suite("ProfileCommands")
 struct ProfileCommandsTests {
 
+    @Test func keychainCheckPrefersLoginAccountEvenWhenOtherAccountIsNewer() {
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let check = ProfileCredentialCheck(items: [
+            ProfileCredentialItem(account: "unknown", createdAt: old, modifiedAt: recent),
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: old),
+        ], account: "alice")
+        #expect(check.selected?.account == "alice")
+        #expect(check.matchingAccountCount == 1)
+        #expect(check.staleAccounts.map(\.account) == ["unknown"])
+    }
+
+    @Test func keychainCheckFlagsSameAccountDuplicatesAcrossKeychains() {
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let check = ProfileCredentialCheck(items: [
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: old),
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: recent),
+        ], account: "alice")
+        #expect(check.matchingAccountCount == 2)
+        #expect(check.selected?.modifiedAt == recent)
+        #expect(check.staleAccounts.isEmpty)
+    }
+
+    @Test func keychainCheckDoesNotTreatOtherAccountAsSelected() {
+        let check = ProfileCredentialCheck(items: [
+            ProfileCredentialItem(account: "unknown", createdAt: nil, modifiedAt: nil),
+        ], account: "alice")
+        #expect(check.selected == nil)
+        #expect(check.staleAccounts.count == 1)
+    }
+
+    @Test func keychainCheckCannotCallTiedItemsNewest() {
+        let date = Date(timeIntervalSince1970: 200)
+        let check = ProfileCredentialCheck(items: [
+            ProfileCredentialItem(account: "alice", createdAt: date, modifiedAt: date),
+            ProfileCredentialItem(account: "alice", createdAt: date, modifiedAt: date),
+        ], account: "alice")
+        #expect(check.matchingAccountCount == 2)
+        #expect(check.selected == nil)
+    }
+
     private func entry(
         name: String,
         kind: CredentialKind = .oauth,

@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Security
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "profileUsageFetcher")
@@ -43,16 +44,37 @@ public func parseClaudeCredentialsAccessToken(_ data: Data) -> String? {
     return token
 }
 
-/// Live token reader: `/usr/bin/security find-generic-password -s <service> -w`
+/// Live token reader: `/usr/bin/security find-generic-password -s <service> -a <account> -w`
 /// with the service name derived from the config dir path (same derivation
 /// Claude Code uses — see `ClaudeCodeCredentialsKeychain`). Falls back to
 /// `<configDir>/.credentials.json` when the keychain item is absent.
 public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
-    public init() {}
+    private let account: String?
+    private let securityExecutable: URL
+    private let metadataLookup: (@Sendable (String) -> [KeychainCredentialCandidate]?)?
+
+    public init() {
+        self.init(account: ClaudeCredentialAccount.current())
+    }
+
+    init(
+        account: String? = ClaudeCredentialAccount.current(),
+        securityExecutable: URL = URL(fileURLWithPath: "/usr/bin/security"),
+        metadataLookup: (@Sendable (String) -> [KeychainCredentialCandidate]?)? = nil
+    ) {
+        self.account = account
+        self.securityExecutable = securityExecutable
+        self.metadataLookup = metadataLookup
+    }
 
     public func accessToken(forConfigDirPath path: String) async throws -> String? {
         let service = ClaudeCodeCredentialsKeychain.serviceName(forConfigDirPath: path)
-        let outcome = try await Self.runSecurityFindGenericPassword(service: service)
+        guard let account, ClaudeCredentialAccount.valid(account) else {
+            throw ClaudeOAuthTokenReadError("macOS account unavailable; refusing an ambiguous keychain read")
+        }
+        let outcome = try await Self.runSecurityFindGenericPassword(
+            service: service, account: account, executableURL: securityExecutable,
+            metadataLookup: metadataLookup)
         switch outcome {
         case .found(let data):
             guard let token = parseClaudeCredentialsAccessToken(data) else {
@@ -73,13 +95,44 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
         case notFound
     }
 
-    /// Run `security find-generic-password -s <service> -w` and capture the
+    /// The keychain path lets `security` select one item when the search list
+    /// contains the same service and account in more than one keychain.
+    struct KeychainCredentialCandidate: Sendable {
+        let account: String
+        let modifiedAt: Date?
+        let keychainPath: String?
+    }
+
+    /// Run `security find-generic-password -s <service> -a <account> -w` and capture the
     /// secret bytes from stdout. Exit code 44 (errSecItemNotFound) maps to
     /// `.notFound`; other non-zero exits throw. Never routes through a shell.
-    static func runSecurityFindGenericPassword(service: String) async throws -> SecurityOutcome {
+    static func runSecurityFindGenericPassword(
+        service: String, account: String,
+        executableURL: URL = URL(fileURLWithPath: "/usr/bin/security"),
+        metadataLookup: (@Sendable (String) -> [KeychainCredentialCandidate]?)? = nil
+    ) async throws -> SecurityOutcome {
+        guard ClaudeCredentialAccount.valid(account) else {
+            throw ClaudeOAuthTokenReadError("macOS account unavailable; refusing an ambiguous keychain read")
+        }
+        let candidates = metadataLookup?(service) ?? (metadataLookup == nil ? keychainCandidates(service: service) : nil)
+        if let candidates, candidates.count > 1 {
+            logger.warning("\(candidates.count) keychain items share this profile's credential service. Run tbd profile keychain for account and date details.")
+        }
+        let matching = candidates?.filter { $0.account == account } ?? []
+        if matching.count > 1 && (
+            matching.contains(where: { $0.keychainPath == nil || $0.modifiedAt == nil })
+            || Set(matching.compactMap(\.modifiedAt)).count != matching.count
+        ) {
+            throw ClaudeOAuthTokenReadError(
+                "multiple keychain items match the macOS account, but no unique newest item can be selected")
+        }
+        let selectedPath = matching.max {
+            ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast)
+        }?.keychainPath
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        process.executableURL = executableURL
+        process.arguments = ["find-generic-password", "-s", service, "-a", account, "-w"]
+        if let selectedPath { process.arguments?.append(selectedPath) }
         process.environment = [:]  // no env needed; never inherit shell state
         let stdout = Pipe()
         process.standardOutput = stdout
@@ -108,6 +161,48 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
                     "failed to launch /usr/bin/security: \(error.localizedDescription)"))
             }
         }
+    }
+
+    /// Attribute and item-reference query only. The item reference identifies
+    /// its keychain; no secret bytes are requested from the Security framework.
+    private static func keychainCandidates(service: String) -> [KeychainCredentialCandidate]? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+            kSecReturnRef as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return nil }
+        var candidates: [KeychainCredentialCandidate] = []
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String else { return nil }
+            let path: String?
+            if let ref = item[kSecValueRef as String],
+               CFGetTypeID(ref as CFTypeRef) == SecKeychainItemGetTypeID() {
+                let keychainItem = ref as! SecKeychainItem
+                var keychain: SecKeychain?
+                if SecKeychainItemCopyKeychain(keychainItem, &keychain) == errSecSuccess,
+                   let keychain {
+                    var length: UInt32 = 4096
+                    var bytes = [CChar](repeating: 0, count: Int(length))
+                    path = SecKeychainGetPath(keychain, &length, &bytes) == errSecSuccess
+                        ? String(cString: bytes) : nil
+                } else {
+                    path = nil
+                }
+            } else {
+                path = nil
+            }
+            candidates.append(KeychainCredentialCandidate(
+                account: account,
+                modifiedAt: item[kSecAttrModificationDate as String] as? Date,
+                keychainPath: path))
+        }
+        return candidates
     }
 }
 
