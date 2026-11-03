@@ -114,18 +114,26 @@ struct WorktreeTitleColumn: View {
     }
 }
 
-/// The worktree's notes button, with its popover and its hover label.
+/// The worktree's notes button, with its popover and its hover label. In
+/// either style it draws the tab rows' hover square
+/// (`RowIconButtonStyle`) at its small size: a square
+/// `MainTabRowMetrics.notesHitOutset` past its symbol on each side, which is
+/// its hit area too and leaves the button's size, and the layout around it,
+/// as they are. A full 28 pt square would dwarf the line of text it leads.
 struct WorktreeNotesButton: View {
     /// How the button draws.
     enum Style: Equatable {
-        /// The toolbar's inline cluster: a borderless button, with a hover
-        /// label drawn under it.
+        /// The toolbar's inline cluster: the symbol at the default size, with
+        /// a hover label drawn under it.
         case toolbar
         /// Leading a line of text in the main row's title column: the symbol
-        /// at the line's point size, in the secondary colour, its hit area a
-        /// little larger than the symbol, and its help tag as its hover label.
+        /// at the line's point size, in the secondary colour, and its help tag
+        /// as its hover label.
         case inline(fontSize: CGFloat)
     }
+
+    /// The hover square both styles draw.
+    private static let squareStyle = RowIconButtonStyle(.outset(MainTabRowMetrics.notesHitOutset))
 
     let worktree: Worktree
     let style: Style
@@ -145,6 +153,8 @@ struct WorktreeNotesButton: View {
         button
             .popover(isPresented: $showNotes, arrowEdge: .bottom) {
                 NotepadPopoverView(scope: NotesScope.resolve(for: worktree))
+                    // The main row's icon-button style stops at the popover.
+                    .buttonStyle(.automatic)
             }
     }
 
@@ -157,7 +167,7 @@ struct WorktreeNotesButton: View {
             } label: {
                 Image(systemName: "square.and.pencil")
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(Self.squareStyle)
             .onHover { hoveringNotes = $0 }
             .overlay(alignment: .top) {
                 if hoveringNotes && !showNotes {
@@ -179,9 +189,8 @@ struct WorktreeNotesButton: View {
                 Image(systemName: "square.and.pencil")
                     .font(.system(size: fontSize))
                     .foregroundStyle(.secondary)
-                    .contentShape(Rectangle().inset(by: -MainTabRowMetrics.notesHitOutset))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Self.squareStyle)
             .help(notesTooltip)
         }
     }

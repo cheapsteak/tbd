@@ -83,12 +83,12 @@ private struct TabDropDelegate: DropDelegate {
 /// share one row across the window, so both take their height from here.
 enum TabRowMetrics {
     static let height: CGFloat = 30
-    /// The width of one icon button at a tab row's trailing end: a
-    /// `PaneChromeControlButton`, the refresh control's slot
-    /// (`PaneRefreshControl`), the strip's + menu and the side panel toggle
-    /// (`SidePanelToggleButton`). The side region's minimum width is built
-    /// from it (`SideStripMetrics.fixedControlsWidth`).
-    static let controlWidth: CGFloat = 28
+    /// The width of one icon button in a tab row: the side of the square
+    /// `RowIconButtonStyle` frames each one in (`RowIconSquare.standardSide`).
+    /// The refresh control's spinner (`PaneRefreshControl`) takes a slot this
+    /// wide too. The side region's minimum width is built from it
+    /// (`SideStripMetrics.fixedControlsWidth`).
+    static let controlWidth: CGFloat = RowIconSquare.standardSide
 }
 
 // MARK: - TabBarTrailingItems
@@ -219,7 +219,8 @@ struct TabBar: View {
         proxy.scrollTo(selectedTabID)
     }
 
-    /// The tabs, the + button and the trailing group, in one row.
+    /// The tabs, the + button and the trailing group, in one row. Its icon
+    /// buttons take the row's `RowIconButtonStyle`.
     private var row: some View {
         HStack(spacing: 0) {
             tabsThenAdd(pills: false)
@@ -237,6 +238,9 @@ struct TabBar: View {
                 .layoutPriority(1)
         }
         .padding(.horizontal, 0)
+        // The row's icon buttons draw the toolbar's hover square; a tab sets
+        // its own style.
+        .buttonStyle(RowIconButtonStyle())
         .frame(height: TabRowMetrics.height)
         .background(Color(nsColor: .windowBackgroundColor))
         // Catch-all so dropping a tab on the +/history button or empty
@@ -297,7 +301,8 @@ struct TabBar: View {
     /// item sits over the pane (`MainTabRowMetrics.leadingInset`), and is the
     /// toolbar's height (`MainTabRowMetrics.height`), both as the toolbar
     /// controller measured them (`WindowChromeState`). A worktree the app
-    /// cannot find shows no title.
+    /// cannot find shows no title. Its icon buttons take the row's
+    /// `RowIconButtonStyle`.
     private var topRow: some View {
         let chrome = appState.windowChrome
         let worktree = appState.findWorktree(id: worktreeID)
@@ -315,6 +320,9 @@ struct TabBar: View {
             trailingGroup
                 .fixedSize(horizontal: true, vertical: false)
         }
+        // The row's icon buttons draw the toolbar's hover square; a tab and
+        // the title's menus set their own style.
+        .buttonStyle(RowIconButtonStyle())
         .padding(.leading, MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge))
         .frame(height: MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset))
         .background(Color(nsColor: .windowBackgroundColor))
@@ -434,8 +442,9 @@ struct TabsThenAddLayout: Layout {
 
 // MARK: - AddTabButton
 
-/// Plain Button that shows an NSMenu on click. SwiftUI's Menu + borderlessButton
-/// swallows hover events, making custom hover styling impossible. Using NSMenu
+/// A button that shows an NSMenu on click, in the row's `RowIconButtonStyle`,
+/// which draws its hover square. SwiftUI's Menu + borderlessButton swallows
+/// hover events, making custom hover styling impossible. Using NSMenu
 /// directly sidesteps this entirely.
 private struct AddTabButton: View {
     let profiles: [ModelProfileWithUsage]
@@ -462,22 +471,18 @@ private struct AddTabButton: View {
     @State private var availability = AgentExecutableAvailability.allAvailable
 
     var body: some View {
-        Image(systemName: "plus")
-            .font(.caption)
-            .foregroundStyle(isHovering ? .primary : .secondary)
-            .frame(width: 20, height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovering ? Color.primary.opacity(0.08) : Color.clear)
-            )
-            .padding(6)
-            .contentShape(Rectangle())
-            .onHover { hovering in isHovering = hovering }
-            .onTapGesture { showMenu() }
-            .help("New Tab")
-            .task {
-                availability = AgentExecutableAvailability.detect()
-            }
+        Button {
+            showMenu()
+        } label: {
+            Image(systemName: "plus")
+                .font(.caption)
+                .foregroundStyle(isHovering ? .primary : .secondary)
+        }
+        .onHover { hovering in isHovering = hovering }
+        .help("New Tab")
+        .task {
+            availability = AgentExecutableAvailability.detect()
+        }
     }
 
     private func showMenu() {
@@ -1579,6 +1584,9 @@ private struct TabBarItem: View {
 
 // MARK: - HistoryTabButton
 
+/// Session History, in the row's `RowIconButtonStyle`, which draws its hover
+/// square. While it is open its label fills the same square, so the two
+/// coincide.
 private struct HistoryTabButton: View {
     let isSelected: Bool
     let action: () -> Void
@@ -1593,13 +1601,12 @@ private struct HistoryTabButton: View {
                         ? AnyShapeStyle(.primary)
                         : AnyShapeStyle(isHovering ? .secondary : .tertiary)
                 )
-                .frame(width: 28, height: 28)
+                .frame(width: RowIconSquare.standardSide, height: RowIconSquare.standardSide)
                 .background(
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: MainToolbarMetrics.iconButtonCornerRadius)
                         .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
                 )
         }
-        .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .help("Session History")
     }

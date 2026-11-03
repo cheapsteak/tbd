@@ -29,6 +29,8 @@ Each of these looks right in review and fails only when it runs or builds.
 
 The main window's toolbar is an AppKit `NSToolbar` that `MainToolbarController` owns (`WindowChrome/`); the app declares no SwiftUI `.toolbar`. On macOS 26 and later, toolbar items render on **Liquid Glass capsules**, and **adjacent glass items fuse onto one shared capsule**. Why the window is AppKit rather than a SwiftUI `NavigationSplitView` with `.toolbar` items is in `docs/specs/2026-11-01-appkit-window-chrome-design.md`.
 
+- **A new icon button in the panes' top rows needs no style of its own.** The main pane's tab row (`TabBar`) and the side region's strip (`SideRegionView`) apply `RowIconButtonStyle` (`WindowChrome/RowIconButtonStyle.swift`) at their root, so every `Button` in them that sets no style draws the leading toolbar buttons' hover and pressed square, 28 × 28, tiling edge to edge, with the setting on or off. A control that is not a `Button`, such as a `Menu`, takes `.rowIconHoverSquare()` on its outside. A control with its own look (a tab, the title's menus) sets its style explicitly so the row's default never reaches it, and a popover the row presents resets it with `.buttonStyle(.automatic)`.
+
 ### `NSToolbarItem`: which items get glass
 
 `NSToolbarItem` forwards most getters and setters, `isBordered` among them, to its view when the view answers them, so whether an item gets glass depends on its view:

@@ -61,8 +61,9 @@ struct SideStripHistoryButtons: Equatable {
 enum SideStripMetrics {
     /// The inset before the history buttons.
     static let historyLeadingInset: CGFloat = 4
-    /// Each history button's width: search, back and forward.
-    static let historyButtonWidth: CGFloat = 22
+    /// Each history button's width: search, back and forward, each a row
+    /// icon button's square (`RowIconButtonStyle`).
+    static let historyButtonWidth: CGFloat = TabRowMetrics.controlWidth
     /// Search, back and forward.
     static let historyButtonCount = 3
     /// The most buttons the trailing group holds: the + menu, the active
@@ -423,7 +424,9 @@ struct SideRegionView: View {
 
     /// The strip's row, without its scrolling. Its trailing end draws
     /// `SideStripTrailingItem.items` in the order they come, `edge`'s
-    /// buttons among them.
+    /// buttons among them. Its icon buttons take the row's
+    /// `RowIconButtonStyle`, and the + menu, which is not a button, the same
+    /// square (`rowIconHoverSquare`).
     private func stripRow(tabs: [SideRegionTab], active: ActivePanel?, edge: TabRowEdgeControls) -> some View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
@@ -472,6 +475,9 @@ struct SideRegionView: View {
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
         }
+        // The strip's icon buttons draw the toolbar's hover square; a tab
+        // sets its own style.
+        .buttonStyle(RowIconButtonStyle())
         .frame(height: tabsInToolbar
             ? MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset)
             : TabRowMetrics.height)
@@ -542,11 +548,7 @@ struct SideRegionView: View {
             // weight the three bars crowd into a smudge.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 10, weight: .regular))
-                .frame(width: SideStripMetrics.historyButtonWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .help("Search panel history")
         .accessibilityLabel(Text("Search panel history"))
         .popover(isPresented: $showHistoryPalette, arrowEdge: .bottom) {
@@ -554,12 +556,14 @@ struct SideRegionView: View {
                 PaneHistoryPaletteView(history: history) { index in
                     active.actions.historyStep(paneContent, .jump(index))
                 }
+                // The strip's icon-button style stops at the palette.
+                .buttonStyle(.automatic)
             }
         }
     }
 
-    /// A back or forward chevron, `SideStripMetrics.historyButtonWidth` wide at
-    /// the row's full height.
+    /// A back or forward chevron, in the strip's `RowIconButtonStyle`,
+    /// `SideStripMetrics.historyButtonWidth` square.
     private func historyStepButton(
         icon: String,
         help: String,
@@ -568,11 +572,7 @@ struct SideRegionView: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 9, weight: .bold))
-                .frame(width: SideStripMetrics.historyButtonWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(Text(help))
     }
@@ -720,7 +720,9 @@ struct SideRegionView: View {
     /// The + menu (`SideRegionStrip.addMenuItems`): New Note and Changes,
     /// then, below a divider, the worktree's notes that no panel shows. It is
     /// keyed by its items, so a changed note list always reaches the menu
-    /// AppKit builds.
+    /// AppKit builds. Not being a button, it takes the row icon buttons'
+    /// square from outside (`rowIconHoverSquare`): AppKit lays out a
+    /// borderless menu's label itself.
     private var addMenu: some View {
         let items = SideRegionStrip.addMenuItems(
             notes: appState.notes[worktree.id] ?? [], worktreePanels: surface.worktreePanels)
@@ -743,8 +745,7 @@ struct SideRegionView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: TabRowMetrics.controlWidth)
-        .frame(maxHeight: .infinity)
+        .rowIconHoverSquare()
         .help("Add a side panel")
         .accessibilityLabel(Text("Add a side panel"))
         .id(items)
@@ -839,14 +840,11 @@ struct SidePanelToggleButton: View {
     }
 
     var body: some View {
+        // Sized, with its hover square, by the row's `RowIconButtonStyle`.
         Button(action: action) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 11))
-                .frame(width: TabRowMetrics.controlWidth)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
         .keyboardShortcut("\\", modifiers: .command)
         .help(Self.help(collapsed: collapsed))
     }

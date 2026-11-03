@@ -32,8 +32,9 @@ enum MainTabRowMetrics {
     static let titleLineSpacing: CGFloat = 3
     /// Between the notes button and the text after it on the line it leads.
     static let notesToProjectSpacing: CGFloat = 4
-    /// How far the notes button's hit area reaches past its symbol on each
-    /// side. It changes the hit area only, not the button's size.
+    /// How far the notes button's hover square, which is its hit area too,
+    /// reaches past its symbol on each side (`RowIconSquare.Size.outset`).
+    /// It changes neither the button's size nor the line's layout.
     static let notesHitOutset: CGFloat = 3
 
     /// A pill tab's height.

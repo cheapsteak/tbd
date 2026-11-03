@@ -654,13 +654,13 @@ struct PanelSurfaceRenderBranchTests {
 
     /// The strip's controls are measured in points and the model's width in
     /// shares, so the app turns one into the other for the space at hand.
-    @Test("the strip's fixed controls need 210 pt, and the side's smallest share is theirs, within the model's range")
+    @Test("the strip's fixed controls need 228 pt, and the side's smallest share is theirs, within the model's range")
     func minimumSideShareFitsTheFixedControls() {
-        #expect(SideStripMetrics.fixedControlsWidth == 210)
+        #expect(SideStripMetrics.fixedControlsWidth == 228)
 
         let lowerBound = CGFloat(SideRegion.widthRange.lowerBound)
         let upperBound = CGFloat(SideRegion.widthRange.upperBound)
-        let controlsShareAt1400: CGFloat = 210 / 1400
+        let controlsShareAt1400: CGFloat = 228 / 1400
         // A 1,400 pt main area: the controls' own share, above the floor.
         #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 1400) == controlsShareAt1400)
         // A wide one: the controls need less than the floor, so the floor.
