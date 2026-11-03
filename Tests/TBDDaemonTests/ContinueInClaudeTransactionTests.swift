@@ -1146,7 +1146,6 @@ struct ContinueInClaudeTransactionTests {
         router.codexHomeEnsurer = {
             root.appendingPathComponent("codex-home", isDirectory: true)
         }
-        router.codexProfileFlagResolver = { (_: String) -> String in "--profile" }
         let created = try await db.terminals.create(
             id: terminalID,
             worktreeID: worktree.id,

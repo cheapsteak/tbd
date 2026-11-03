@@ -418,16 +418,8 @@ import TestSupport
 
     @Test func codexSpawnCommandUsesFileBackedProfileOverlay() {
         #expect(
-            CodexSpawnCommandBuilder.profileFlag(
-                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
-                codexVersionOutput: nil
-            ) == "--profile-v2"
-        )
-        #expect(
-            CodexSpawnCommandBuilder.profileFlag(
-                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
-                codexVersionOutput: nil
-            ) == "--profile"
+            CodexSpawnCommandBuilder.build(initialPrompt: nil, executablePath: "codex")
+                .contains("'codex' --profile \(CodexPlugin.profileName) ")
         )
     }
 }

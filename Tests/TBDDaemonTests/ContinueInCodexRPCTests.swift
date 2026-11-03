@@ -77,10 +77,6 @@ struct ContinueInCodexRPCTests {
             recorder.event("profile")
             return root.appendingPathComponent("codex-home", isDirectory: true)
         }
-        router.codexProfileFlagResolver = { _ in
-            recorder.event("profile-flag")
-            return "--profile"
-        }
         router.codexSessionImport = { executable, home, transcript, cwd, title in
             recorder.event("import:\(executable):\(home.path):\(transcript):\(cwd):\(title ?? "nil")")
             return "thread-native-123"
@@ -143,11 +139,11 @@ struct ContinueInCodexRPCTests {
         #expect(target.isCodexTerminal)
         #expect(target.worktreeID == source.worktreeID)
         #expect(try await fixture.db.terminals.get(id: source.id) == source)
-        #expect(Array(fixture.recorder.events.prefix(3)) == [
-            "resolve", "profile", "profile-flag",
+        #expect(Array(fixture.recorder.events.prefix(2)) == [
+            "resolve", "profile",
         ])
-        #expect(fixture.recorder.events.count == 4)
-        #expect(fixture.recorder.events[3].hasPrefix("import:"))
+        #expect(fixture.recorder.events.count == 3)
+        #expect(fixture.recorder.events[2].hasPrefix("import:"))
 
         let newWindows = fixture.recorder.commands.filter {
             $0.contains("new-window")

@@ -161,11 +161,6 @@ public final class RPCRouter: Sendable {
         ProcessIdentity.of(pid: pid, signaller: ProductionProcessSignaller())
     }
     nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
-    nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
-        CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
-            CodexSpawnCommandBuilder.commandOutput(arguments: arguments, timeout: 3)
-        }
-    }
     nonisolated(unsafe) var codexSessionImport: @Sendable (
         _ executablePath: String,
         _ codexHome: URL,

@@ -137,9 +137,9 @@ shell-escapes the whole `model="<id>"` assignment as one argument. `-c` is
 used rather than Codex's `-m` so the override is expressed in the same
 configuration layer the profile uses.
 
-When the model is `nil` or empty, the builder emits exactly the string it
-emits today: the same executable quoting, detected profile flag, argument
-order, and prompt placement.
+When the model is `nil` or empty, the builder emits the command with no `-c`
+override: the same executable quoting, `--profile tbd`, argument order, and
+prompt placement.
 
 ### Documentation
 

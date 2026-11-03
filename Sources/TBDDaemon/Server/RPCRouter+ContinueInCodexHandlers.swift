@@ -98,7 +98,6 @@ extension RPCRouter {
                 executableResolver: codexExecutableResolver,
                 homeEnsurer: codexHomeEnsurer)
         }
-        let profileFlag = codexProfileFlagResolver(preparation.executablePath)
 
         let threadID = try await actuating(actuationID) {
             try await codexSessionImport(
@@ -134,8 +133,7 @@ extension RPCRouter {
         let command = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
             resumeThreadID: threadID,
-            executablePath: preparation.executablePath,
-            profileFlag: profileFlag)
+            executablePath: preparation.executablePath)
 
         // The transport gate, the same one every other spawn path asks.
         let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
