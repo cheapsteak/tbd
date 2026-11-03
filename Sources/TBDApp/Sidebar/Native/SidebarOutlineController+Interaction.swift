@@ -6,8 +6,8 @@ import TBDShared
 /// (spec "Hover", "Rename", "Context menus, popovers and sheets", "Keyboard and
 /// accessibility"): the hover tracker's reports applied to cells and row views,
 /// the row and header controls, the `+` menu, inline rename, the context menus,
-/// sheets and popovers, and the tooltip bubble. Every action calls what the
-/// SwiftUI sidebar's views call.
+/// sheets and popovers, and the tooltip bubble. Every action calls the same
+/// `AppState` method the menus and keyboard shortcuts call.
 extension SidebarOutlineController: SidebarMenuHost {
     func installInteractions() {
         outline.contextMenuProvider = { [weak self] row in self?.contextMenu(forRow: row) }
@@ -86,9 +86,9 @@ extension SidebarOutlineController: SidebarMenuHost {
     }
 
     /// A worktree or session row in the section whose chevron is hovered.
-    /// Group headers and the header itself keep their opacity, as in
-    /// `RepoSectionView` and `ScratchSectionView`. The row's cell dims, not
-    /// its row view, so the selection tint and guide lines keep theirs.
+    /// Group headers and the header itself keep their opacity. The row's cell
+    /// dims, not its row view, so the selection tint and guide lines keep
+    /// theirs.
     func isDimmedByChevron(_ id: SidebarNodeID) -> Bool {
         guard let section = hoverState.dimmedSection else { return false }
         switch id {
@@ -168,8 +168,8 @@ extension SidebarOutlineController: SidebarMenuHost {
         tooltipOverlay.show(text, below: tooltipOverlay.convert(anchor.bounds, from: anchor))
     }
 
-    /// `WorktreeRowView.leadingIcon`'s tooltips: the PR's reference, state
-    /// and freshness, or why nobody could find out.
+    /// The leading glyph's tooltip: the PR's reference, state and
+    /// freshness, or why nobody could find out.
     private func prTooltip(_ worktreeID: UUID, leading: WorktreeLeadingSlot?) -> String? {
         let observation = appState.prObservations[worktreeID]
         switch leading {
@@ -208,7 +208,7 @@ extension SidebarOutlineController: SidebarMenuHost {
         }
     }
 
-    /// `WorktreeRowView.suffixIcon`'s help for the badge `indicator`: the
+    /// A worktree row's help for the badge `indicator`: the
     /// badge's words, or the OSC session states behind it. The pinned dock
     /// asks it for its rows too.
     static func worktreeSuffixHelp(_ worktreeID: UUID, indicator: SuffixRowIndicator,
@@ -232,7 +232,7 @@ extension SidebarOutlineController: SidebarMenuHost {
             genericHelp: SidebarCellKit.spokenStatus(indicator))
     }
 
-    /// `RemoteSessionRowView`'s suffix help: the working dots' words, or the
+    /// A remote session row's suffix help: the working dots' words, or the
     /// agent's own reason for wanting a look.
     static func remoteSuffixHelp(_ sessionID: UUID, indicator: SuffixRowIndicator,
                                  appState: AppState) -> String? {
@@ -292,10 +292,10 @@ extension SidebarOutlineController: SidebarMenuHost {
     }
 
     /// Opens the pull request a worktree row's leading glyph stands for —
-    /// the worst-state binding, as `WorktreeRowView.openPR` picks it — when a
-    /// click on the row lands on the glyph. The glyph is not a button, so a
-    /// press on it can still start a drag; the outline's click action, which
-    /// runs on mouse-up, is what opens the page.
+    /// the worst-state binding, as `PRBindingPresentation.iconBinding` picks
+    /// it — when a click on the row lands on the glyph. The glyph is not a
+    /// button, so a press on it can still start a drag; the outline's click
+    /// action, which runs on mouse-up, is what opens the page.
     ///
     /// - Parameter point: the click, in the outline's coordinates.
     /// - Returns: whether the click opened a pull request.
@@ -315,7 +315,7 @@ extension SidebarOutlineController: SidebarMenuHost {
         return true
     }
 
-    /// `RemoteProviderHeaderRow`'s `+`: the create sheet with no repo prefill.
+    /// A provider header's `+`: the create sheet with no repo prefill.
     @objc func providerPlusClicked(_ sender: NSView) {
         guard case .providerHeader(let name)? = nodeID(for: sender), let status = provider(named: name) else { return }
         present(.remoteCreate(NativeSidebarRemoteCreate(provider: status)))
@@ -354,7 +354,7 @@ extension SidebarOutlineController: SidebarMenuHost {
         sheets.present(sheet)
     }
 
-    /// `RepoSectionView`'s confirmation dialog, as an alert sheet.
+    /// Remove from List…'s confirmation, as an alert sheet.
     func confirmRemove(_ repo: Repo) {
         guard let window = view.window else { return }
         let active = (appState.worktrees[repo.id] ?? [])
@@ -399,8 +399,7 @@ extension SidebarOutlineController: SidebarMenuHost {
     }
 
     /// `editingWorktreeID`, consumed once its row is shown in the tree the
-    /// apply is about to show — as the SwiftUI row consumes it from
-    /// `onChange` only once mounted. A row not shown yet (a hold keeps it out,
+    /// apply is about to show. A row not shown yet (a hold keeps it out,
     /// its section is collapsed) leaves the request pending until it is.
     ///
     /// The exception is the creating placeholder swapped for its real row
@@ -483,9 +482,8 @@ extension SidebarOutlineController: SidebarMenuHost {
         endHold(.rename)
     }
 
-    /// The editor for the row `id` names, committing where the SwiftUI row's
-    /// `RenameableLabel` commits. The pinned dock renames its rows with it
-    /// too.
+    /// The editor for the row `id` names, committing through the rename
+    /// method for its kind. The pinned dock renames its rows with it too.
     static func makeRenameEditor(for id: SidebarNodeID, kind: SidebarNodeKind, seed: String?,
                                  appState: AppState) -> SidebarRenameEditor? {
         let state = appState

@@ -2,8 +2,7 @@ import AppKit
 import Testing
 @testable import TBDApp
 
-/// `MainSplitViewController`, the AppKit main window's split, and how the
-/// sidebar lock treats it. Spec:
+/// `MainSplitViewController`, the main window's split. Spec:
 /// docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window structure".
 ///
 /// Splits are built with `autosaveName: nil`: a saved divider position would
@@ -144,43 +143,6 @@ struct MainSplitViewControllerTests {
         let allThisWindow = received.allSatisfy { $0 == target }
         #expect(received.isEmpty == false)
         #expect(allThisWindow)
-    }
-
-    // MARK: - The sidebar lock
-
-    /// The flag-on branch. Mounted exactly as the plain split below is, whose
-    /// test proves the lock's search reaches a split hosted this way, so this
-    /// one cannot pass by the search missing the controller.
-    @Test func lockSidebarOpenLeavesTheAppKitSplitAlone() {
-        let split = Self.makeSplit()
-        let window = Self.mount(split)
-        defer { Self.unmount(window) }
-
-        AppDelegate.lockSidebarOpen(in: window)
-
-        #expect(split.sidebarItem.canCollapse == true)
-        #expect(split.sidebarItem.canCollapseFromWindowResize == false)
-    }
-
-    /// The flag-off branch: a split that is not the AppKit chrome's, standing
-    /// in for SwiftUI's, is still locked open.
-    @Test func lockSidebarOpenStillLocksAPlainSidebarSplit() throws {
-        let plain = NSSplitViewController()
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: Self.makePane(width: 320))
-        // `canCollapse` first: on a sidebar it resets the other flag.
-        sidebarItem.canCollapse = true
-        sidebarItem.canCollapseFromWindowResize = true
-        plain.addSplitViewItem(sidebarItem)
-        plain.addSplitViewItem(NSSplitViewItem(viewController: Self.makePane(width: 580)))
-        let window = Self.mount(plain)
-        defer { Self.unmount(window) }
-        try #require(sidebarItem.canCollapse == true)
-        try #require(sidebarItem.canCollapseFromWindowResize == true)
-
-        AppDelegate.lockSidebarOpen(in: window)
-
-        #expect(sidebarItem.canCollapse == false)
-        #expect(sidebarItem.canCollapseFromWindowResize == false)
     }
 
     // MARK: - Fixtures

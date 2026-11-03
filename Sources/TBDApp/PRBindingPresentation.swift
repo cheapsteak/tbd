@@ -13,11 +13,10 @@ struct MenuRow: Identifiable, Equatable {
 }
 
 /// Pure presentation helpers for rendering a worktree's set of `PRBinding`s —
-/// the toolbar split-button label, its icon, the status-bar chip row, and the
-/// dropdown menu rows. Every function here is a plain value transform: no
-/// `AppState`, no SwiftUI `@Environment`, no daemon calls. That is deliberate —
-/// it lets the toolbar dropdown (Task 11) and status-bar chips (Task 12) be
-/// tested without a running app.
+/// the icon that summarizes them, the status-bar chip row, and the menu rows.
+/// Every function here is a plain value transform: no `AppState`, no SwiftUI
+/// `@Environment`, no daemon calls. That is deliberate — it lets the chips and
+/// their menus be tested without a running app.
 ///
 /// Two different orderings are used on purpose:
 /// - `iconBinding` picks the WORST state (via `PRBinding.worst(of:)`), because
@@ -37,22 +36,22 @@ enum PRBindingPresentation {
     /// repo, so the bindings table stays permanently empty — and on first
     /// launch after upgrade the same holds transiently until the first
     /// successful poll. Without this, a user's last-known PR state simply
-    /// disappears from the toolbar and the sidebar.
+    /// disappears from the status bar and the sidebar.
     ///
     /// `detachedCount` is what keeps that fallback from overriding the user.
     /// `tbd pr detach` tombstones a binding rather than deleting it, and
     /// tombstones are excluded from `bindings` — so detaching a worktree's last
     /// PR lands in the same empty list as never having bound one, while nothing
-    /// ever clears `Worktree.prStatus`. Without this the toolbar, sidebar dot
-    /// and status-bar chip would keep showing the detached PR forever. A
+    /// ever clears `Worktree.prStatus`. Without this the sidebar dot and the
+    /// status-bar chip would keep showing the detached PR forever. A
     /// non-zero count means the user has expressed an opinion about this
     /// worktree's PRs, and it outranks a stale cached status.
     ///
     /// Neither bindings nor a status → empty, and no control renders.
     ///
     /// The synthetic binding is built to be VALUE-STABLE across body
-    /// evaluations, because it feeds `ForEach` identity in the menu/chip rows,
-    /// the split button's `.id` key, and SwiftUI's own view-value diffing. So
+    /// evaluations, because it feeds `ForEach` identity in the menu/chip rows
+    /// and SwiftUI's own view-value diffing. So
     /// `id` is the worktree's own UUID and `boundAt` a fixed sentinel, rather
     /// than the initializer's `UUID()` / `Date()` defaults, which would mint a
     /// different value on every render. The sentinel is also the honest answer:
@@ -88,18 +87,7 @@ enum PRBindingPresentation {
         )]
     }
 
-    /// The toolbar split-button's label text. `nil` when there is nothing to
-    /// show, `"#412"` for exactly one binding (matching the pre-multi-PR
-    /// single-PR label), `"3 PRs"` for more.
-    static func buttonLabel(_ bindings: [PRBinding]) -> String? {
-        switch bindings.count {
-        case 0: return nil
-        case 1: return "#\(bindings[0].number)"
-        default: return "\(bindings.count) PRs"
-        }
-    }
-
-    /// The binding whose state the toolbar icon should reflect — the one
+    /// The binding whose state one summarizing icon should reflect — the one
     /// needing the most attention. Delegates entirely to
     /// `PRBinding.worst(of:)` in TBDShared; this file must not reimplement
     /// worst-state selection.
@@ -176,8 +164,7 @@ enum PRBindingPresentation {
     ///
     /// A row describes ONE binding, so it takes the per-binding wording rule
     /// rather than the neutral aggregate one: `refLabel` reads the forge from
-    /// that binding's own URL, exactly as the split button's help text does for
-    /// a lone binding. A bare `#412` would name a merge request in GitHub's
+    /// that binding's own URL. A bare `#412` would name a merge request in GitHub's
     /// syntax — `#412` is an issue reference on GitLab, whose own syntax for
     /// this row's subject is `!412`.
     static func menuRows(_ bindings: [PRBinding]) -> [MenuRow] {
@@ -228,7 +215,7 @@ enum PRBindingPresentation {
     /// The reference is the binding's own `refLabel`, in its forge's syntax:
     /// a finished PR has no chip drawing a bare `#930` for it to agree with.
     /// The state is `PRStatusPresentation.stateDescription`, the sentence the
-    /// `+N` menu and the toolbar compose with, dropped when blank so the line
+    /// `+N` menu composes with, dropped when blank so the line
     /// never ends in a dangling separator.
     static func doneReference(_ binding: PRBinding) -> String {
         let reference = binding.refLabel
@@ -260,8 +247,8 @@ enum PRBindingPresentation {
     /// branch reads as the reference alone. A lead longer than
     /// `doneMenuLeadLimit` is cut short with an ellipsis.
     ///
-    /// A done-chip builder of its own rather than `menuRows`, so the `+N` menu
-    /// and the toolbar dropdown keep sharing one row shape.
+    /// A done-chip builder of its own rather than `menuRows`, so the rows the
+    /// `+N` menu shows keep their shape.
     static func doneMenuRows(_ bindings: [PRBinding]) -> [MenuRow] {
         bindings.map { binding in
             let reference = doneReference(binding)
@@ -281,9 +268,8 @@ enum PRBindingPresentation {
     /// Tooltip for the status bar's `+N` overflow chip.
     ///
     /// The chip is labelled by how many PRs did NOT fit, but its menu lists
-    /// EVERY binding it covers — the same rows the toolbar dropdown shows,
-    /// deliberately, so the two surfaces cannot describe one worktree
-    /// differently. The wording therefore has to lead with the whole list and
+    /// EVERY binding it covers, so it never describes the worktree as fewer
+    /// PRs than it has. The wording therefore has to lead with the whole list and
     /// mention the overflow count second; "\(overflow) more pull requests"
     /// described a menu this one has never shown.
     ///

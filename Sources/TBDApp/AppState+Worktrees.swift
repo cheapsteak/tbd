@@ -1191,7 +1191,7 @@ extension AppState {
     }
 
     /// User-facing label for the repo-less scratch section. Single source for
-    /// the sidebar section header (`ScratchSectionView`) and the jump menu's
+    /// the sidebar section header and the jump menu's
     /// pseudo-repo label (`JumpMenuController.worktreeSnapshots`).
     nonisolated static let scratchSectionLabel = "Scratch"
 
@@ -1199,8 +1199,8 @@ extension AppState {
     /// (Archived/Instructions/Settings tabs) in the content pane. Mirrors
     /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
     /// (documented scope cut — the Scratch section header has no natural UUID
-    /// identity for `List`'s native selection or the navigation history's
-    /// worktree/repo entries to key off).
+    /// identity for the navigation history's worktree/repo entries to key
+    /// off).
     func selectScratchSection() {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
@@ -1515,58 +1515,6 @@ extension AppState {
         selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
     }
 
-    // MARK: - Reorder top-level
-
-    /// Reorder ONLY the top-level worktrees of a repo (parentWorktreeID == nil),
-    /// triggered by SwiftUI `.onMove` whose indices index the top-level ForEach.
-    /// Nested children stay attached to their parents — only top-level sortOrders change.
-    /// Updates locally first (optimistic), then persists via RPC; rolls back on error.
-    func reorderTopLevelWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int,
-                                  visibleIDs: [UUID]? = nil) {
-        let previous = worktrees[repoID]
-        var rows = (worktrees[repoID] ?? [])
-        // Snapshot the top-level order BEFORE the move (matches the ForEach).
-        var topLevel = Self.topLevelWorktrees(rows)
-        logger.debug("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
-        // guard: source/destination can outlive the snapshot they were captured against
-        if topLevel.isEmpty || source.contains(where: { $0 >= topLevel.count }) || destination > topLevel.count {
-            logger.warning("reorderTopLevel skipped: stale indices (topLevel.count=\(topLevel.count, privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public))")
-            return
-        }
-        if let visibleIDs {
-            guard let orderedIDs = SidebarSubsetOrder.moved(
-                all: topLevel.map(\.id), visible: visibleIDs, source: source, destination: destination
-            ) else { return }
-            let byID = Dictionary(uniqueKeysWithValues: topLevel.map { ($0.id, $0) })
-            topLevel = orderedIDs.compactMap { byID[$0] }
-        } else {
-            topLevel.move(fromOffsets: source, toOffset: destination)
-        }
-        logger.debug("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
-
-        // Optimistic local update: reassign sortOrders for the new top-level order.
-        for (i, wt) in topLevel.enumerated() {
-            if let idx = rows.firstIndex(where: { $0.id == wt.id }) {
-                rows[idx].sortOrder = i
-            }
-        }
-        worktrees[repoID] = rows
-
-        // Persist via the bulk reorder RPC. Daemon renumbers all listed worktrees
-        // to contiguous sortOrders matching the new top-level order, avoiding
-        // gappy/non-contiguous values from prior individual moves.
-        let orderedIDs = topLevel.map(\.id)
-        Task {
-            do {
-                logger.debug("RPC worktree.reorder ids=\(orderedIDs.map { $0.uuidString.prefix(8) }.joined(separator: ","), privacy: .public)")
-                try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: orderedIDs)
-            } catch {
-                logger.error("reorderTopLevelWorktrees RPC failed: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run { self.worktrees[repoID] = previous }
-            }
-        }
-    }
-
     // MARK: - Nested worktrees
 
     /// All worktrees whose parentWorktreeID == parentID, across all repos, in sortOrder.
@@ -1608,7 +1556,7 @@ extension AppState {
     func setAutoArchive(worktreeID: UUID, enabled: Bool) async {
         do {
             try await daemonClient.setWorktreeAutoArchive(id: worktreeID, enabled: enabled)
-            // Optimistic local update so the toolbar reflects it immediately.
+            // Optimistic local update so local state reflects it immediately.
             for (key, list) in worktrees {
                 if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
                     worktrees[key]?[idx].autoArchiveOnMerge = enabled
@@ -1637,9 +1585,9 @@ extension AppState {
         }
     }
 
-    /// Reorder the sidebar dock's pinned worktrees, triggered by SwiftUI
-    /// `.onMove` whose indices address the dock's PINNED ROOTS (the outer
-    /// ForEach), not the flattened row list.
+    /// Reorder the sidebar dock's pinned worktrees. `source` and
+    /// `destination` address the dock's PINNED ROOTS, not the flattened row
+    /// list (`DockTableController` maps a drop to them).
     ///
     /// Optimistic, unlike `setPinned`: the client knows the entire resulting
     /// order rather than depending on a daemon-assigned timestamp, so the row
@@ -1708,7 +1656,7 @@ extension AppState {
     func setAutoHibernate(worktreeID: UUID, enabled: Bool) async {
         do {
             try await daemonClient.setWorktreeAutoHibernate(id: worktreeID, enabled: enabled)
-            // Optimistic local update so the toolbar reflects it immediately.
+            // Optimistic local update so local state reflects it immediately.
             for (key, list) in worktrees {
                 if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
                     worktrees[key]?[idx].autoHibernateOnMerge = enabled
@@ -1778,7 +1726,7 @@ extension AppState {
     /// children or after them as `order` says. Used by `sidebarWalk` to match
     /// sidebar order, and by `selectionArchiveRunOrder` for the rows that walk
     /// leaves out. Caps recursion at 50 to mirror
-    /// `WorktreeSubtreeView.kMaxSubtreeDepth` in case a cyclic parent chain
+    /// `SidebarTreeBuilder.maxSubtreeDepth` in case a cyclic parent chain
     /// ever makes it into the in-memory state (DB-side cycle guards make this
     /// unlikely, but the keyboard-nav path shouldn't blow the stack while the
     /// renderer gracefully degrades).

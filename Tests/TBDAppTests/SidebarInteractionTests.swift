@@ -61,7 +61,7 @@ struct SidebarInteractionTests {
         h.controller.finishRename(commitPending: false)
         #expect(!h.controller.isHoldingStructure)
 
-        // Rows with no menu in the SwiftUI sidebar have none here either.
+        // Provider headers, group headers and the scratch prompt have no menu.
         let provider = try #require(h.controller.tree.node(.providerHeader("acme")))
         #expect(h.controller.menus.menu(for: provider) == nil)
     }
@@ -135,7 +135,7 @@ struct SidebarInteractionTests {
 
         // Five rows scroll under the still pointer: no tracking-area event
         // arrives, yet the row under it is the hovered one.
-        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 5 * WorktreeRowView.rowHeight))
+        h.clip.scroll(to: NSPoint(x: 0, y: h.clip.bounds.minY + 5 * SidebarNativeMetrics.rowHeight))
         h.controller.scrollView.reflectScrolledClipView(h.clip)
         let scrolledTo = try #require(Self.rowID(at: point, in: h))
         #expect(scrolledTo != first)
@@ -228,7 +228,7 @@ struct SidebarInteractionTests {
         #expect(h.controller.hoverState.dimmedSection == header)
 
         // The row's content dims; its row view — the selection tint and the
-        // guide lines — keeps its opacity, as in the SwiftUI row.
+        // guide lines — keeps its opacity.
         for id in [parent.id, child.id] {
             let cellAlpha = try #require(Self.cell(.worktree(id), in: h)).alphaValue
             #expect(abs(cellAlpha - 0.7) < 0.001, "A row of the hovered chevron's section is not dimmed")
@@ -297,7 +297,7 @@ struct SidebarInteractionTests {
 
         h.state.editingWorktreeID = row.id
         h.controller.flushPendingRebuild()
-        #expect(h.state.editingWorktreeID == nil, "The request is consumed, as the SwiftUI row consumes it")
+        #expect(h.state.editingWorktreeID == nil, "The request is consumed")
         #expect(h.controller.renamingID == id)
         #expect(h.controller.isHoldingStructure)
         let cell = try #require(Self.cell(id, in: h) as? WorktreeRowCell)
@@ -330,8 +330,8 @@ struct SidebarInteractionTests {
         #expect(editor.view.superview == nil)
         #expect(h.shownIDs.contains(.worktree(added.id)))
 
-        // The main row's request is consumed but never edited, as
-        // `WorktreeRowView.startRename` refuses it.
+        // The main row's request is consumed but never edited: the main
+        // worktree has no rename.
         h.state.editingWorktreeID = main.id
         h.controller.flushPendingRebuild()
         #expect(h.state.editingWorktreeID == nil)

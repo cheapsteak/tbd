@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Layer-backed dancing-dots ("typing…") indicator. The pulse is driven by
 /// `CAKeyframeAnimation`s committed once to the render server, so it costs no
@@ -10,7 +9,7 @@ final class TypingDotsNSView: NSView {
     private static let dotSpacing: CGFloat = 2
     private static let pulseKey = "typingPulse"
     private let dotLayers: [CALayer]
-    private var dotColor: NSColor
+    private let dotColor: NSColor
     // nonisolated(unsafe): Swift 6 deinit is nonisolated; NSView deinit
     // always runs on the main thread in practice, so this is safe.
     nonisolated(unsafe) private var occlusionObserver: (any NSObjectProtocol)?
@@ -76,11 +75,6 @@ final class TypingDotsNSView: NSView {
         return NSSize(width: width, height: Self.dotDiameter)
     }
 
-    func updateColor(_ color: NSColor) {
-        dotColor = color
-        applyDotColor()
-    }
-
     private func applyDotColor() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             for dot in dotLayers { dot.backgroundColor = dotColor.cgColor }
@@ -142,18 +136,5 @@ final class TypingDotsNSView: NSView {
             let timeSincePause = layer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
             layer.beginTime = timeSincePause
         }
-    }
-}
-
-/// SwiftUI wrapper for `TypingDotsNSView`.
-struct TypingDotsView: NSViewRepresentable {
-    let color: Color
-
-    func makeNSView(context: Context) -> TypingDotsNSView {
-        TypingDotsNSView(dotColor: NSColor(color))
-    }
-
-    func updateNSView(_ nsView: TypingDotsNSView, context: Context) {
-        nsView.updateColor(NSColor(color))
     }
 }

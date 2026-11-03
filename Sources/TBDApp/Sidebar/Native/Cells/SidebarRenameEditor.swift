@@ -3,11 +3,11 @@ import SwiftUI
 
 /// One inline rename in the native sidebar.
 ///
-/// It hosts the SwiftUI path's own `RenameableLabel` in an `NSHostingView`, so
-/// the native cell gets the very same editor: `InlineTextField`, the `:emoji:`
-/// autocomplete panel anchored to the field, Return to commit, Escape to
-/// cancel, commit on focus loss, and the re-asserted focus that wins the race
-/// with the terminal views. Nothing of that is reimplemented here.
+/// It hosts `RenameableLabel` — the editor the tab bar and the side region use
+/// too — in an `NSHostingView`, so the native cell gets the very same editor:
+/// `InlineTextField`, the `:emoji:` autocomplete panel anchored to the field,
+/// Return to commit, Escape to cancel, commit on focus loss, and the
+/// re-asserted focus that wins the race with the terminal views. Nothing of that is reimplemented here.
 ///
 /// The cell shows `view` in place of its name label for as long as the edit
 /// runs. However the edit ends — Return, Escape, focus loss, or `close` from

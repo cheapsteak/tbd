@@ -508,7 +508,7 @@ public struct WorktreeStore: Sendable {
     ///    once all its children are archived; if the user later revives the
     ///    child but not the parent, the child's `parentWorktreeID` still points
     ///    at an archived row. The sidebar's `topLevelWorktrees` filter excludes
-    ///    children-of-anything, and `WorktreeSubtreeView` never visits an
+    ///    children-of-anything, and the sidebar's subtree walk never visits an
     ///    archived parent's subtree — so the revived child becomes invisible.
     ///    Promoting it to top-level here matches the "if parent disappears,
     ///    null the pointer" pattern.

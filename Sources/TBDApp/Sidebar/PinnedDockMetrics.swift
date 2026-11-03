@@ -4,11 +4,9 @@ import CoreGraphics
 /// are testable without instantiating any view — the view just applies the
 /// number this returns.
 enum PinnedDockMetrics {
-    /// One dock row is exactly one `WorktreeRowView`. Sourced from the row
-    /// itself, NOT from `SidebarView`'s `defaultMinListRowHeight` (26) — that is
-    /// only a floor and the row overrides it, so computing from it clips the last
-    /// row and shows a scrollbar at three pins.
-    static let rowHeight: CGFloat = WorktreeRowView.rowHeight
+    /// One dock row is exactly one sidebar row, so the dock reads the row's own
+    /// fixed height rather than keeping a copy that could drift from it.
+    static let rowHeight: CGFloat = SidebarNativeMetrics.rowHeight
 
     /// Hard ceiling on visible dock rows before it scrolls internally.
     static let maxRows: Int = 5

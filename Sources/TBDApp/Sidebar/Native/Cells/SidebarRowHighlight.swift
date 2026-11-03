@@ -37,7 +37,7 @@ enum SidebarRowHighlight {
         var selectedHovered: CGFloat
     }
 
-    /// Over the light sidebar. Selected is the SwiftUI row's 0.2.
+    /// Over the light sidebar.
     static let light = Alphas(hovered: 0.075, selected: 0.20, selectedHovered: 0.28)
 
     /// Over the dark sidebar, where a faint accent wash reads weaker, so the

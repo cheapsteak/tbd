@@ -1,10 +1,9 @@
 import AppKit
 
-/// A worktree row, drawn from a `WorktreeRowModel` as `WorktreeRowView` draws
-/// it: the leading slot (PR glyph, PR-unknown mark, pending glyph or remote
-/// globe), the name with its subtitles, then the status suffix or typing dots,
-/// the dev-server dot and the cross-repo suffix, packed against the name as
-/// the SwiftUI `HStack` packs them.
+/// A worktree row, drawn from a `WorktreeRowModel`: the leading slot (PR
+/// glyph, PR-unknown mark, pending glyph or remote globe), the name with its
+/// subtitles, then the status suffix or typing dots, the dev-server dot and
+/// the cross-repo suffix, packed against the name.
 ///
 /// The cell never reads `AppState`. Its frame starts at the row's depth (the
 /// outline's `frameOfCell` places it); `leadingInset` is the row inset every
@@ -23,16 +22,13 @@ import AppKit
 final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamableCell {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.worktreeRow")
 
-    /// The row with a subtitle line. `WorktreeRowView` pins
-    /// `.frame(height: rowHeight)` for every variant — the dock's height
-    /// arithmetic counts on it — so the subtitle row is the same 28 pt, with
-    /// the name and subtitle stacked at -2 pt spacing inside it.
-    /// `SidebarCellTests.heightMatchesClass` measures the SwiftUI row against
-    /// this value.
+    /// The row with a subtitle line: the same 28 pt as every other row — the
+    /// dock's height arithmetic counts on one row height — with the name and
+    /// subtitle stacked at -2 pt spacing inside it.
     static let subtitleRowHeight: CGFloat = 28
 
-    /// `WorktreeRowView.pinButtonGutter`: the pin's 20 pt square sits that far
-    /// left of the row content, clearing the leading glyph exactly.
+    /// The pin's 20 pt square sits this far left of the row content, clearing
+    /// the leading glyph exactly.
     static let pinGutter: CGFloat = 20
 
     static let pinActionName = "Pin to dock"
@@ -42,7 +38,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
 
     static func height(for model: WorktreeRowModel) -> CGFloat {
         switch model.heightClass {
-        case .single: WorktreeRowView.rowHeight
+        case .single: SidebarNativeMetrics.rowHeight
         case .withSubtitle: subtitleRowHeight
         }
     }
@@ -75,7 +71,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     /// The row's section chevron is hovered: the cell draws at
     /// `SidebarCellKit.chevronHoverOpacity` of its own opacity. The cell dims,
     /// not the row view, so the selection tint and the guide lines keep
-    /// theirs, as in the SwiftUI row.
+    /// theirs.
     private(set) var isDimmedByChevron = false
     /// The name is wider than the room it has: hovering the row shows it in
     /// the tooltip bubble.
@@ -206,8 +202,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
     }
 
     /// Whether `point`, in the cell's coordinates, lands on a PR glyph — the
-    /// click that opens the pull request, as the SwiftUI row's glyph button
-    /// does.
+    /// click that opens the pull request.
     func isPullRequestGlyph(at point: NSPoint) -> Bool {
         guard case .prStatus? = model?.leading, !leadingImageView.isHidden else { return false }
         return leadingImageView.frame.contains(point)
@@ -286,7 +281,7 @@ final class WorktreeRowCell: NSTableCellView, SidebarHoverTarget, SidebarRenamab
         case .prStatus(let presentation)?:
             switch presentation.glyph {
             case .asset(let name):
-                leadingImageView.image = WorktreeRowView.loadIcon(name)
+                leadingImageView.image = WorktreeRowPresentation.loadIcon(name)
                 leadingImageView.contentTintColor = presentation.nsColor
             case .emoji:
                 // Full colour, never tinted.

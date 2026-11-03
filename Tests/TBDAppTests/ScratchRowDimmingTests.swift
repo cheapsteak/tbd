@@ -3,7 +3,7 @@ import Foundation
 @testable import TBDApp
 @testable import TBDShared
 
-/// Direct, falsifiable proof of `WorktreeRowView`'s scratch-row dimming rule,
+/// Direct, falsifiable proof of the sidebar's scratch-row dimming rule,
 /// mirroring `ScratchSectionVisibleTests`'s pattern of testing the extracted
 /// pure function instead of live view behavior. Exercises
 /// `AppState.scratchRowIsDimmed` in isolation — no SwiftUI render, no

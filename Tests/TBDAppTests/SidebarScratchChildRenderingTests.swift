@@ -34,18 +34,6 @@ private struct ScratchChildFixture {
     }
 }
 
-private struct ScratchParentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat { 0 }
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-@MainActor
-private final class ScratchParentGeometry {
-    var height: CGFloat = 0
-}
-
 @MainActor
 @Suite("Reparented Scratch rows retain one flat render location")
 struct SidebarScratchChildRenderingTests {
@@ -68,48 +56,56 @@ struct SidebarScratchChildRenderingTests {
         }
     }
 
-    @Test func reparentingScratchDoesNotAddASecondRenderedRow() async throws {
-        let fixture = ScratchChildFixture(remoteParent: false)
-        defer { fixture.cleanUp() }
-        let state = fixture.state
-        let geometry = ScratchParentGeometry()
-        let host = OffscreenHost(
-            root: VStack(alignment: .leading, spacing: 0) {
-                ScratchSectionView()
-                WorktreeSubtreeView(worktree: fixture.parent, depth: 0, sectionRepoID: fixture.parent.repoID!)
-            }
-            .frame(width: 320)
-            .fixedSize(horizontal: false, vertical: true)
-            .background(GeometryReader { proxy in
-                Color.clear.preference(key: ScratchParentHeightKey.self, value: proxy.size.height)
-            })
-            .onPreferenceChange(ScratchParentHeightKey.self) { height in
-                Task { @MainActor in geometry.height = height }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .environment(state).defaultAppStorage(state.userDefaults),
-            size: NSSize(width: 320, height: 300))
-        defer { host.tearDown() }
-        let mounted = await host.settle { geometry.height > 0 }
-        try #require(mounted, "The Scratch section and parent subtree must lay out")
-        await host.pump(times: 5)
-        let flatHeight = geometry.height
+    /// The outline after a CLI reparent: the Scratch row stays where it was,
+    /// once, and the parent gains no row. The rebuild count proves the write
+    /// reached the outline's observation, and a repo-backed child added the
+    /// same way does appear under the parent, so the outline would show a
+    /// second row if the build made one.
+    @Test func reparentingScratchDoesNotAddASecondRenderedRow() throws {
+        let h = OutlineHarness("scratchReparent")
+        defer { h.tearDown() }
+        h.defaults.set(true, forKey: AppState.scratchSectionExpandedKey)
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = SidebarGroupFixtures.row("parent", repoID: repo.id)
+        var scratch = SidebarGroupFixtures.row("scratch", repoID: repo.id)
+        scratch.repoID = nil
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [parent]]
+        h.state.scratchWorktrees = [scratch]
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+        h.state.remoteSessions = [SidebarGroupFixtures.session("parent", state: .exited)]
+        h.mount()
+        let flatRows = h.shownIDs
+        let flatScratchRows = flatRows.filter { $0 == .worktree(scratch.id) }.count
+        try #require(flatScratchRows == 1, "The Scratch row must show before the reparent: \(h.evidence().rawValue)")
+        let flatBuilds = h.controller.buildCount
 
-        state.scratchWorktrees[0].parentWorktreeID = fixture.parent.id
-        let rendered = await host.settle { state.sidebarParentRemoteGroupsCache[fixture.parent.id] != nil }
-        try #require(rendered, "The source mutation must reach the real parent renderer")
-        await host.pump(times: 10)
-        #expect(abs(geometry.height - flatHeight) < 0.5,
-                "Reparenting Scratch must not render its row again beneath the parent")
+        h.state.scratchWorktrees[0].parentWorktreeID = parent.id
+        h.controller.flushPendingRebuild()
+        let rebuilt = h.controller.buildCount > flatBuilds
+        try #require(rebuilt, "The reparent must reach the outline's observation")
+        let reparentedRows = h.shownIDs
+        let reparentedScratchRows = reparentedRows.filter { $0 == .worktree(scratch.id) }.count
+        #expect(reparentedScratchRows == 1, h.evidence())
+        #expect(reparentedRows.count == flatRows.count,
+                "Reparenting Scratch must not show its row again beneath the parent: \(h.evidence().rawValue)")
+        #expect(Self.shownParent(of: .worktree(scratch.id), in: h) == .scratchHeader, h.evidence())
 
-        // Positive control: a repo-backed child still reaches this same native
-        // subtree and adds a row, proving the geometry can detect duplication.
-        let child = SidebarGroupFixtures.row("local child", repoID: fixture.parent.repoID!, parent: fixture.parent.id)
-        state.worktrees[fixture.parent.repoID!]?.append(child)
-        let added = await host.settle {
-            abs(geometry.height - flatHeight - WorktreeRowView.rowHeight) < 0.5
-        }
-        #expect(added, "A real local child must still add exactly one rendered row")
-        #expect(state.sidebarScratchHibernation.workingRoots.map(\.id) == [fixture.scratch.id])
+        // Positive control: a repo-backed child reaches the same parent and
+        // adds a row, proving the count can detect duplication.
+        let child = SidebarGroupFixtures.row("local child", repoID: repo.id, parent: parent.id)
+        h.state.worktrees[repo.id]?.append(child)
+        h.controller.flushPendingRebuild()
+        let expectedCount = reparentedRows.count + 1
+        #expect(h.shownIDs.count == expectedCount, "A real local child must add exactly one row: \(h.evidence().rawValue)")
+        #expect(Self.shownParent(of: .worktree(child.id), in: h) == .worktree(parent.id), h.evidence())
+        #expect(h.state.sidebarScratchHibernation.workingRoots.map(\.id) == [scratch.id])
+    }
+
+    /// The outline row `id` hangs under, by what the outline shows.
+    private static func shownParent(of id: SidebarNodeID, in h: OutlineHarness) -> SidebarNodeID? {
+        guard let item = h.controller.item(for: id) else { return nil }
+        return (h.outline.parent(forItem: item) as? SidebarItem)?.id
     }
 }

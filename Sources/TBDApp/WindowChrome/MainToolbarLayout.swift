@@ -1,8 +1,8 @@
 import AppKit
 import Foundation
 
-/// Identifiers of the main window's `NSToolbar` items. The PR button and the
-/// file-panel toggle are deliberately absent from the AppKit toolbar.
+/// Identifiers of the main window's `NSToolbar` items. A PR button and a
+/// file-panel toggle are deliberately absent (spec, "Goals").
 enum MainToolbarItemID {
     /// One item holding the sidebar toggle, Back and Forward side by side
     /// (`LeadingToolbarButtonsHost`). One item rather than three, because
@@ -275,8 +275,7 @@ enum MainToolbarMetrics {
     /// filter, around the flexible space, which is empty at this width but
     /// still spaced on both sides; the filter's slot; and the margin before
     /// the separator. 256 pt, of which the two spacings are the estimate, so
-    /// the thickness grows with it. It stays above the SwiftUI sidebar's
-    /// 220 pt minimum.
+    /// the thickness grows with it.
     static let sidebarMinimumThickness: CGFloat =
         firstItemLeadingInset + leadingButtonsWidth + 2 * interItemSpacing + filterSlotWidth + sectionPadding
     static let sidebarMaximumThickness: CGFloat = 400

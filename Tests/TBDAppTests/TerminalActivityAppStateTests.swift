@@ -224,7 +224,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityState == .idle)
     #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
-    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+    #expect(!WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 @MainActor
@@ -482,7 +482,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityState == .idle)
     #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
-    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+    #expect(!WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 @MainActor
@@ -531,7 +531,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == idleAt)
     #expect(terminal.activityStateOrderObservedAt == newerOrder)
-    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+    #expect(!WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 /// The source is part of the fact: a newer snapshot with the cached state but
@@ -765,7 +765,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityState == .working)
     #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 30))
-    #expect(WorktreeRowView.isForegroundWorking(terminal))
+    #expect(WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 @MainActor
@@ -784,7 +784,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityState == .idle)
     #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 20))
-    #expect(!WorktreeRowView.isForegroundWorking(terminal))
+    #expect(!WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 @MainActor
@@ -803,7 +803,7 @@ func appState_outOfOrderActivityDeltasLeaveTheNewerValue(kind: TerminalKind) {
     #expect(terminal.activityState == .working)
     #expect(terminal.activityStateSource == nil)
     #expect(terminal.activityStateObservedAt == nil)
-    #expect(WorktreeRowView.isForegroundWorking(terminal))
+    #expect(WorktreeRowPresentation.isForegroundWorking(terminal))
 }
 
 @MainActor
@@ -869,5 +869,5 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
     #expect(state.terminals[worktreeID]?[0].activityState == .working)
     #expect(state.terminals[worktreeID]?[0].activityStateSource == .programStatus)
     #expect(state.terminals[worktreeID]?[0].activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 0))
-    #expect(WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
+    #expect(WorktreeRowPresentation.isForegroundWorking(state.terminals[worktreeID]![0]))
 }

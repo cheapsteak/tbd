@@ -61,7 +61,7 @@ extension SidebarOutlineController {
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        guard let item = item as? SidebarItem, let node = tree.node(item.id) else { return WorktreeRowView.rowHeight }
+        guard let item = item as? SidebarItem, let node = tree.node(item.id) else { return SidebarNativeMetrics.rowHeight }
         return rowHeight(for: node.kind)
     }
 

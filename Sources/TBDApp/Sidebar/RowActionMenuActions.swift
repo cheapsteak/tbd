@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// The dispatcher behind the worktree-row right-click menu
-/// (`SidebarContextMenu`). Holding `appState + worktree + onRename`, it exposes:
+/// The dispatcher behind the worktree-row right-click menu (`SidebarMenus`)
+/// and the title menu (`WorktreeTitleView`). Holding
+/// `appState + worktree + onRename`, it exposes:
 ///
 /// - `context()` — build the pure `RowActionMenu.Context` from live `AppState`.
 /// - `run(_:)` — the single place every side-effecting closure lives, keyed by
@@ -83,8 +84,7 @@ struct RowActionMenuActions {
     }
 
     /// Capabilities the row's provider has declared, keyed by provider name —
-    /// the same idiom `AppState.pushRemoteRenameIfSupported` and
-    /// `RemoteSectionView` use. Empty for a local row or one whose provider
+    /// the same idiom `AppState.pushRemoteRenameIfSupported` uses. Empty for a local row or one whose provider
     /// hasn't answered `describe` yet.
     private var providerCapabilities: Set<String> {
         guard let provider = worktree.providerBinding?.provider else { return [] }
@@ -128,8 +128,7 @@ struct RowActionMenuActions {
         terminals.filter { $0.isManuallyHibernatable() }
     }
 
-    /// Build the pure model context from live `AppState`. Mirrors exactly the
-    /// inputs the old `SidebarContextMenu` read inline.
+    /// Build the pure model context from live `AppState`.
     ///
     /// A menu acting on the selection gets a context carrying the selection
     /// alone: whether any selected row is archivable, judged over the
@@ -327,7 +326,7 @@ struct RowActionMenuActions {
 
 /// SwiftUI rendering of `RowActionMenu.Item`s into `Button`/`Divider`/`Text`,
 /// dispatching each action through `RowActionMenuActions`. Used by the
-/// right-click `SidebarContextMenu`.
+/// worktree title menu (`WorktreeTitleView`).
 struct RowActionMenuItemsView: View {
     let actions: RowActionMenuActions
 

@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// The native sidebar's tooltip bubble: today's `RowTooltipBubble`, hosted, in
-/// a view laid over the whole outline (spec "Hover"). It shows a truncated row
-/// name and a PR glyph's description below the hovered element, at once, as
-/// `SidebarView`'s `RowTooltipPreferenceKey` overlay does, rather than after
-/// AppKit's tooltip delay.
+/// The native sidebar's tooltip bubble: `RowTooltipBubble`, hosted, in a view
+/// laid over the whole outline (spec "Hover"). It shows a truncated row name
+/// and a PR glyph's description below the hovered element at once, rather
+/// than after AppKit's tooltip delay.
 ///
 /// It never takes a click: `hitTest` returns nil for it and everything inside
 /// it, so a press under the bubble reaches the row and can start a drag.
@@ -44,5 +43,21 @@ final class RowTooltipOverlay: NSView {
     func hide() {
         text = nil
         bubble.isHidden = true
+    }
+}
+
+/// The bubble `RowTooltipOverlay` hosts: the caption-sized text on a material
+/// rounded rectangle, sized to fit.
+struct RowTooltipBubble: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
+            .fixedSize()
     }
 }

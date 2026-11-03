@@ -1,7 +1,6 @@
 import AppKit
 
-/// A repo or Scratch section header, drawn from a `SectionHeaderModel` as
-/// `RepoSectionView.headerRow` and `ScratchSectionView`'s header draw it: the
+/// A repo or Scratch section header, drawn from a `SectionHeaderModel`: the
 /// title, the disclosure chevron on whichever side
 /// `AppState.chevronBeforeProjectNameKey` puts it, and a missing repo's
 /// "[missing]" badge with its Locate… link.
@@ -24,8 +23,8 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
 
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.sectionHeader")
 
-    /// The SwiftUI headers are 22 pt (`RepoSectionView`'s `.frame(height: 22)`)
-    /// or shorter, raised to the `List`'s `defaultMinListRowHeight` of 26.
+    /// A header's content is 22 pt or shorter, raised to the sidebar's 26 pt
+    /// minimum row height.
     static let rowHeight: CGFloat = 26
 
     static func height(for model: SectionHeaderModel) -> CGFloat {
@@ -108,7 +107,7 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         missingField.isHidden = !showsMissing
         locateButton.isHidden = !showsMissing
 
-        // A hidden repo's whole section draws at 0.55 in the SwiftUI sidebar.
+        // A hidden repo's whole section draws at 0.55.
         alphaValue = model.isHidden ? 0.55 : 1
         setAccessibilityLabel(model.isMissing ? "\(model.title), missing" : model.title)
         needsLayout = true
@@ -133,8 +132,7 @@ final class SectionHeaderCell: NSTableCellView, SidebarHoverTarget, SidebarRenam
         plusButton.showsHoverWash = part == .plus
     }
 
-    /// `SidebarHeaderMetrics.chevronMounted` over `HoverMenuModel`'s gate, as
-    /// `RepoSectionView.chevronMounted` composes them.
+    /// `SidebarHeaderMetrics.chevronMounted` over `HoverMenuModel`'s gate.
     private func updateControls() {
         let shown = HoverMenuModel.shouldShowPlus(hovered: isRevealed, menuOpen: isMenuOpen)
         plusButton.isHidden = !shown

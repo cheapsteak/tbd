@@ -3,13 +3,10 @@ import SwiftUI
 import TBDShared
 
 /// The sidebar's footer row: the Add Repository split button and the filter
-/// menu, with the clone sheet the split button presents. Shared by both
-/// sidebar paths, so the SwiftUI `List` and the native outline offer the same
-/// footer.
+/// menu, with the clone sheet the split button presents.
 ///
-/// The filter menu binds `SidebarBuildOptions.showHiddenReposKey`, the key
-/// `SidebarView` and the native outline read, so flipping it here re-filters
-/// whichever list is showing.
+/// The filter menu binds `SidebarBuildOptions.showHiddenReposKey`, the key the
+/// native outline reads, so flipping it here re-filters the outline.
 struct SidebarFooter: View {
     @Environment(AppState.self) var appState
     @AppStorage(SidebarBuildOptions.showHiddenReposKey) private var showHiddenRepos: Bool = false

@@ -779,14 +779,6 @@ actor DaemonClient {
         )
     }
 
-    /// Reorder worktrees within a repo.
-    func reorderWorktrees(repoID: UUID, worktreeIDs: [UUID]) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeReorder,
-            params: WorktreeReorderParams(repoID: repoID, worktreeIDs: worktreeIDs)
-        )
-    }
-
     /// Move a worktree to a new parent (or top-level) and sortOrder.
     func moveWorktree(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
         try await callVoidAsync(

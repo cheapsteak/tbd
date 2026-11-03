@@ -15,7 +15,7 @@ import TBDShared
 ///
 /// Archived parents are rejected because the sidebar's `topLevelWorktrees`
 /// filter excludes children (regardless of the child's own status), and
-/// `WorktreeSubtreeView` never descends into an archived parent's subtree —
+/// the sidebar's subtree walk never descends into an archived parent's subtree —
 /// so a newly-created child of an archived row would be invisible until a
 /// reconcile pass nulls its parent pointer.
 public enum ParentResolver {

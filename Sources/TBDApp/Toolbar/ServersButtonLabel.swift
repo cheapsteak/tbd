@@ -2,31 +2,12 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// The Servers split button's label: one baked icon (green when something
-/// runs) and one string. See `Sources/TBDApp/CLAUDE.md` for why the colour is
-/// baked and why there is exactly one image.
-struct ServersButtonLabel: View {
-    let list: DevServerListResult
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var runningCount: Int { Self.runningCount(list) }
-
-    nonisolated static func runningCount(_ list: DevServerListResult) -> Int {
+/// The Servers toolbar item's wording and icon: its title, its accessibility
+/// label, its menu's titles, and one baked icon (green when something runs),
+/// for `MainToolbarSnapshot`, `ServersToolbarMenu` and the toolbar's item.
+enum ServersButtonLabel {
+    static func runningCount(_ list: DevServerListResult) -> Int {
         list.servers.filter { $0.state == .running }.count
-    }
-
-    var body: some View {
-        // A `Label` so the toolbar `Menu`'s `.labelStyle(.titleAndIcon)`
-        // applies: macOS 27 otherwise draws the item icon-only.
-        Label {
-            Text(verbatim: Self.title(runningCount: runningCount))
-                .font(.caption)
-                .fontWeight(.medium)
-        } icon: {
-            Image(nsImage: Self.bakedIcon(running: runningCount > 0, colorScheme: colorScheme))
-                .renderingMode(.original)
-        }
-        .accessibilityLabel(Self.accessibilityLabel(runningCount: runningCount))
     }
 
     static func accessibilityLabel(runningCount: Int) -> String {
@@ -37,7 +18,7 @@ struct ServersButtonLabel: View {
         runningCount > 0 ? "\(runningCount) running" : "Servers"
     }
 
-    nonisolated static func menuTitle(for server: DevServerInfo) -> String {
+    static func menuTitle(for server: DevServerInfo) -> String {
         let state: String
         switch server.state {
         case .running: state = "running"
@@ -54,7 +35,7 @@ struct ServersButtonLabel: View {
     /// or not, which the daemon clears by closing that tab. Without it, an
     /// exited server whose declaration is gone could not be cleared from the
     /// menu at all. A live running file always reads as running.
-    nonisolated static func stopItemTitle(for server: DevServerInfo) -> String? {
+    static func stopItemTitle(for server: DevServerInfo) -> String? {
         switch server.state {
         case .running, .unknown: return "Stop"
         case .exited, .stopped: return server.terminalID != nil ? "Close" : nil
@@ -63,39 +44,22 @@ struct ServersButtonLabel: View {
 
     /// The servers "Stop all" acts on: every server that offers a stop item.
     /// Empty disables the item.
-    nonisolated static func stopAllNames(_ list: DevServerListResult) -> [String] {
+    static func stopAllNames(_ list: DevServerListResult) -> [String] {
         list.servers.filter { stopItemTitle(for: $0) != nil }.map { $0.name }
     }
 
-    /// Everything the label and the menu render, as a String — AppKit
-    /// rebuilds the menu only when this changes (`Sources/TBDApp/CLAUDE.md`).
-    static func splitButtonID(
-        worktreeID: UUID, list: DevServerListResult, messages: [String], colorScheme: ColorScheme
-    ) -> String {
-        let servers = list.servers.map { server in
-            [server.name, server.label, server.state.rawValue,
-             server.exitCode.map { String($0) } ?? "-", server.source ?? "-",
-             server.endpoints.map { "\($0.name)=\($0.url)" }.joined(separator: ","),
-             // "Show last output" enables on either, and targets the entry first (D2).
-             server.lastOutputID?.uuidString ?? "-", server.terminalID?.uuidString ?? "-"]
-                .joined(separator: ":")
-        }.joined(separator: ";")
-        let errors = list.parseErrors.map { "\($0.path):\($0.message)" }.joined(separator: ";")
-        return "servers-split-\(worktreeID.uuidString)-\(servers)-\(errors)"
-            + "-\(messages.joined(separator: "|"))-\(colorScheme)"
-    }
-
     /// The menu's first item (decision D4): present whenever a running
-    /// server has reported a main URL, in both toolbar shapes.
-    nonisolated static func leadItemTitle(primaryURL: String?) -> String? {
+    /// server has reported a main URL.
+    static func leadItemTitle(primaryURL: String?) -> String? {
         primaryURL.map { "Open \($0)" }
     }
 
     @MainActor private static var bakedIconCache: [String: NSImage] = [:]
 
     /// `server.rack`, tinted green when a server runs and secondary-label
-    /// otherwise; the same bake `PRButtonLabel.coloredIcon` performs — draw,
-    /// `color.set()`, fill with `.sourceAtop`, `isTemplate = false`.
+    /// otherwise, baked into a non-template image — draw, `color.set()`, fill
+    /// with `.sourceAtop`, `isTemplate = false` — so a toolbar control that
+    /// tints template images keeps the color.
     @MainActor static func bakedIcon(running: Bool, colorScheme: ColorScheme) -> NSImage {
         let key = "\(running)-\(colorScheme)"
         if let cached = bakedIconCache[key] { return cached }

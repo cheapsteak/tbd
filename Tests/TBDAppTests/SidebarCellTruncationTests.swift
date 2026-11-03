@@ -23,7 +23,7 @@ struct SidebarCellTruncationTests {
         for name in Self.names {
             for bold in [false, true] {
                 let cell = WorktreeRowCell()
-                cell.frame = NSRect(x: 0, y: 0, width: 400, height: WorktreeRowView.rowHeight)
+                cell.frame = NSRect(x: 0, y: 0, width: 400, height: SidebarNativeMetrics.rowHeight)
                 cell.configure(SidebarCellTests.worktree(name: name, bold: bold, suffix: .attention))
                 cell.layout()
                 let cut = Self.cutsText(cell.nameField)
@@ -38,7 +38,7 @@ struct SidebarCellTruncationTests {
         for bold in [false, true] {
             let cell = WorktreeRowCell()
             cell.leadingInset = 0
-            cell.frame = NSRect(x: 0, y: 0, width: 90, height: WorktreeRowView.rowHeight)
+            cell.frame = NSRect(x: 0, y: 0, width: 90, height: SidebarNativeMetrics.rowHeight)
             cell.configure(SidebarCellTests.worktree(name: "Toolbar Glass Regression", bold: bold, suffix: .attention))
             cell.layout()
             let cut = Self.cutsText(cell.nameField)
@@ -60,7 +60,7 @@ struct SidebarCellTruncationTests {
             let nameCell = try #require(cell.nameField.cell)
             let need = nameCell.cellSize.width
             for (width, fits) in [(need, true), (need - 0.25, false)] {
-                cell.frame = NSRect(x: 0, y: 0, width: width, height: WorktreeRowView.rowHeight)
+                cell.frame = NSRect(x: 0, y: 0, width: width, height: SidebarNativeMetrics.rowHeight)
                 cell.layout()
                 let cut = Self.cutsText(cell.nameField)
                 #expect(cut == !fits, "\(Self.describe(cell.nameField)) in a \(width) pt row: cut \(cut)")
@@ -74,7 +74,7 @@ struct SidebarCellTruncationTests {
     /// it is reconfigured in place or handed out again after reuse.
     @Test func reconfiguredCellDrawsItsLongerNameWhole() {
         let cell = WorktreeRowCell()
-        cell.frame = NSRect(x: 0, y: 0, width: 400, height: WorktreeRowView.rowHeight)
+        cell.frame = NSRect(x: 0, y: 0, width: 400, height: SidebarNativeMetrics.rowHeight)
         cell.configure(SidebarCellTests.worktree(name: "ab"))
         cell.layout()
         let shortWidth = cell.nameField.frame.width
@@ -126,7 +126,7 @@ struct SidebarCellTruncationTests {
 
     @Test func remoteSessionNameIsCutOnlyWithoutRoom() {
         let wide = RemoteSessionRowCell()
-        wide.frame = NSRect(x: 0, y: 0, width: 400, height: WorktreeRowView.rowHeight)
+        wide.frame = NSRect(x: 0, y: 0, width: 400, height: SidebarNativeMetrics.rowHeight)
         wide.configure(SidebarCellTests.session(title: "Panel 3b App Rendering", suffix: .attention))
         wide.layout()
         let wideCut = Self.cutsText(wide.nameField)
@@ -135,7 +135,7 @@ struct SidebarCellTruncationTests {
 
         let narrow = RemoteSessionRowCell()
         narrow.leadingInset = 0
-        narrow.frame = NSRect(x: 0, y: 0, width: 90, height: WorktreeRowView.rowHeight)
+        narrow.frame = NSRect(x: 0, y: 0, width: 90, height: SidebarNativeMetrics.rowHeight)
         narrow.configure(SidebarCellTests.session(title: "Panel 3b App Rendering", suffix: .attention))
         narrow.layout()
         let narrowCut = Self.cutsText(narrow.nameField)
@@ -147,7 +147,7 @@ struct SidebarCellTruncationTests {
     /// room, each draws its whole text.
     @Test func everyOtherLabelDrawsWholeWithRoom() throws {
         let session = RemoteSessionRowCell()
-        session.frame = NSRect(x: 0, y: 0, width: 400, height: WorktreeRowView.rowHeight)
+        session.frame = NSRect(x: 0, y: 0, width: 400, height: SidebarNativeMetrics.rowHeight)
         session.configure(SidebarCellTests.session(title: "lane", caption: "running"))
         session.layout()
 

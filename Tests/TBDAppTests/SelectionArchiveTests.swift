@@ -394,9 +394,9 @@ struct SelectionArchiveDecisionTests {
 
 // MARK: - Both surfaces, built from live AppState
 
-/// Through `RowActionMenuActions` with `followsSelection` on, as the SwiftUI
-/// `SidebarContextMenu` and the native `SidebarMenus` both build it, and
-/// through `SidebarMenus` itself for the native outline and dock. The
+/// Through `RowActionMenuActions` with `followsSelection` on, as
+/// `SidebarMenus` builds it, and through `SidebarMenus` itself for the native
+/// outline and dock. The
 /// selection lives in `AppState.selectedWorktreeIDs`, which both native
 /// tables sync into.
 @MainActor
@@ -431,7 +431,7 @@ struct ArchiveSelectionCallSiteTests {
         try body(state, suite.defaults, fixture)
     }
 
-    /// The menu `SidebarContextMenu` and `SidebarMenus` build for a row.
+    /// The menu `SidebarMenus` builds for a row.
     private func rowMenu(_ state: AppState, _ worktree: Worktree) -> RowActionMenuActions {
         RowActionMenuActions(appState: state, worktree: worktree, onRename: {}, followsSelection: true)
     }

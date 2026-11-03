@@ -241,3 +241,34 @@ struct ProgramStatusSuffixTests {
         #expect(SuffixRowIndicator.turnFailed.systemImage == "exclamationmark.triangle.fill")
     }
 }
+
+/// `RowStatusIndicator.leading(isPending:hasPRStatus:isRemote:)`'s `.remote`
+/// case and its precedence in the leading slot.
+@Suite("RowStatusIndicator.leading: remote")
+struct RemoteLeadingRowIndicatorTests {
+    @Test func leading_remoteWhenNeitherPendingNorPRStatus() {
+        #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: false, isRemote: true) == .remote)
+    }
+
+    @Test func leading_pendingBeatsRemote() {
+        #expect(RowStatusIndicator.leading(isPending: true, hasPRStatus: false, isRemote: true) == .pending)
+    }
+
+    @Test func leading_prStatusBeatsRemote() {
+        #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: true, isRemote: true) == .prStatus)
+    }
+
+    @Test func leading_prStatusBeatsPendingAndRemote() {
+        #expect(RowStatusIndicator.leading(isPending: true, hasPRStatus: true, isRemote: true) == .prStatus)
+    }
+
+    @Test func leading_nilWhenNothingApplies() {
+        #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: false) == nil)
+    }
+
+    @Test func leading_defaultsIsRemoteToFalse() {
+        // Existing (local-row) call sites don't pass `isRemote` — confirm
+        // the default keeps them at `nil`, not `.remote`.
+        #expect(RowStatusIndicator.leading(isPending: false, hasPRStatus: false) == nil)
+    }
+}

@@ -1,16 +1,16 @@
 import AppKit
 import SwiftUI
 
-/// Drives the hover-to-open worktree menu shared by the repo `+`
-/// (`RepoSectionView`) and the per-row nested `+` (`WorktreeRowView`).
+/// Drives the hover-to-open worktree menu shared by a repo header's `+` and
+/// a worktree row's nested `+` (`SidebarPlusMenu`).
 ///
 /// Owns two timings: a hover-intent delay before opening (so scrubbing the
 /// pointer across the sidebar doesn't flash menus open) and a close grace that
-/// bridges the pixel gap between the `+` button and its `.popover`. The popover
-/// renders in a separate window, so moving the pointer into it flips the
-/// button's `onHover` to false; the grace, plus a second `onHover` on the
-/// popover content (`menuHover`), keeps the menu open while the pointer is over
-/// EITHER surface.
+/// bridges the pixel gap between the `+` button and its menu. The menu renders
+/// in a separate window, so moving the pointer into it ends the button's
+/// hover; the grace, plus a second hover signal from the menu content
+/// (`menuHover`), keeps the menu open while the pointer is over EITHER
+/// surface.
 @MainActor
 final class HoverMenuModel: ObservableObject {
     @Published private(set) var isOpen = false
@@ -37,9 +37,9 @@ final class HoverMenuModel: ObservableObject {
     // nonisolated(unsafe): written in `init` on the main actor and read in
     // `deinit`, which is nonisolated and runs wherever ARC drops the last
     // strong reference. What keeps that single-threaded is an ownership
-    // invariant, not a language guarantee: every owner holds the model via
-    // `@StateObject` (`RepoSectionView`, `WorktreeRowView`), and SwiftUI
-    // releases those on the main actor. Releasing a `HoverMenuModel` reference
+    // invariant, not a language guarantee: its one owner,
+    // `SidebarPlusMenu`, is a main-actor class, and the sidebar controllers
+    // that own it release it on the main actor. Releasing a `HoverMenuModel` reference
     // off the main actor would break it. Same precedent, and same caveat, as
     // `ThemeDirectoryWatcher`.
     nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
@@ -58,7 +58,7 @@ final class HoverMenuModel: ObservableObject {
         self.notificationCenter = notificationCenter
 
         // WHY the menu must close on app deactivation, rather than relying on
-        // hover alone: `.onHover` is an active-app tracking-area concept. Cmd-Tab
+        // hover alone: hover is an active-app tracking-area concept. Cmd-Tab
         // (or any other app taking over) moves no pointer, so AppKit delivers no
         // exit event and both hover flags keep whatever value they had. If the
         // pointer happened to be parked over the menu, `overMenu` stays true
@@ -92,7 +92,7 @@ final class HoverMenuModel: ObservableObject {
         reconcile()
     }
 
-    /// Pointer entered/left the popover content.
+    /// Pointer entered/left the menu content.
     func menuHover(_ inside: Bool) {
         overMenu = inside
         reconcile()
@@ -104,7 +104,7 @@ final class HoverMenuModel: ObservableObject {
         setOpen(true)
     }
 
-    /// A row was chosen, or the popover was dismissed by an outside click.
+    /// A row was chosen, or the menu was dismissed by an outside click.
     func closeNow() {
         cancelTasks()
         isTriggerHovered = false
@@ -112,10 +112,10 @@ final class HoverMenuModel: ObservableObject {
         setOpen(false)
     }
 
-    /// Flip `isOpen` without the popover's present/dismiss animation — the menu
-    /// should snap in and out, not fade/scale. SwiftUI's `.popover` (AppKit
-    /// `NSPopover`) animates by default; a transaction with `disablesAnimations`
-    /// around the state change is the public lever to turn that off.
+    /// Flip `isOpen` without animation — the menu should snap in and out, not
+    /// fade or scale — so a SwiftUI view bound to it never animates the
+    /// change; a transaction with `disablesAnimations` around the state change
+    /// is the public lever for that.
     private func setOpen(_ value: Bool) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -171,8 +171,8 @@ final class HoverMenuModel: ObservableObject {
     }
 
     /// The `+` shows while its section/row is hovered OR its menu is open — so
-    /// moving the pointer into the popover (which drops the row/section hover)
-    /// doesn't unmount the popover's own anchor and slam it shut.
+    /// moving the pointer into the menu (which drops the row/section hover)
+    /// doesn't hide the menu's own anchor and slam it shut.
     static func shouldShowPlus(hovered: Bool, menuOpen: Bool) -> Bool {
         hovered || menuOpen
     }

@@ -117,7 +117,7 @@ struct SidebarRemoteGroupsTests {
         var local = SidebarGroupFixtures.row("local copy", repoID: repo)
         local.origin = WorktreeOrigin(provider: "acme", sessionID: "origin")
         let mirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
-        let remainder = RepoSectionView.matchedRemoteSessions([mirror], repoID: repo, worktrees: [local])
+        let remainder = MatchedSessionFixtures.matched([mirror], repoID: repo, worktrees: [local])
         let groups = SidebarGroupFixtures.groups(
             roots: [local], remainder: remainder, rows: [local], sessions: [mirror])
         #expect(groups.localRoots == [local])
@@ -139,7 +139,7 @@ struct SidebarRemoteGroupsTests {
         let originMirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
         let inventory = [parentMirror, originMirror]
         let rows = [parent, local]
-        let remainder = RepoSectionView.matchedRemoteSessions(inventory, repoID: repo, worktrees: rows)
+        let remainder = MatchedSessionFixtures.matched(inventory, repoID: repo, worktrees: rows)
         #expect(remainder.map(\.id) == [originMirror.id])
         let groups = SidebarGroupFixtures.groups(
             roots: [parent], remainder: remainder, rows: rows, sessions: inventory)
@@ -219,28 +219,5 @@ struct SidebarRemoteGroupsTests {
         let owner = SidebarGroupID.Owner.provider("acme")
         #expect(groups.revealGroups(owner: owner, worktreeIDs: [], remoteID: session.id).count == 2)
         #expect(groups.revealGroups(owner: owner, worktreeIDs: [UUID()], remoteID: nil).isEmpty)
-    }
-}
-
-@Suite("Sidebar visible subset reorder")
-struct SidebarSubsetOrderTests {
-    @Test func reordersOnlyTheVisibleSlots() {
-        let ids = (0..<5).map { _ in UUID() }
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: [ids[0], ids[2], ids[4]],
-            source: [0], destination: 3) == [ids[2], ids[1], ids[4], ids[3], ids[0]])
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: [ids[0], ids[2], ids[4]],
-            source: [0, 2], destination: 1) == [ids[0], ids[1], ids[4], ids[3], ids[2]])
-    }
-
-    @Test func rejectsStaleDuplicateAndMissingIdentitiesAndBadIndices() {
-        let ids = (0..<3).map { _ in UUID() }
-        let invalid = [[ids[0], ids[0]], [UUID()], [ids[2], ids[0]], []]
-        for visible in invalid {
-            #expect(SidebarSubsetOrder.moved(all: ids, visible: visible, source: [0], destination: 1) == nil)
-        }
-        #expect(SidebarSubsetOrder.moved(all: [ids[0], ids[0]], visible: [ids[0]], source: [0], destination: 1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [3], destination: 1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [0], destination: -1) == nil)
-        #expect(SidebarSubsetOrder.moved(all: ids, visible: ids, source: [0], destination: 4) == nil)
     }
 }

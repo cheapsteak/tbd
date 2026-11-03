@@ -801,7 +801,7 @@ struct SidebarOutlineControllerTests {
         #expect(h.controller.appStateSelectionWriteCount == 1, h.evidence(names))
         #expect(h.outline.selectedRowIndexes == IndexSet(integer: h.row(.worktree(second.id))), h.evidence(names))
 
-        // A selected row that is only out of view stays selected, as in the List.
+        // A selected row that is only out of view stays selected.
         h.state.repos[0].expanded = false
         h.controller.flushPendingRebuild()
         #expect(!h.shownIDs.contains(.worktree(second.id)))

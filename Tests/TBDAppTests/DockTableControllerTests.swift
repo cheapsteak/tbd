@@ -259,8 +259,8 @@ struct DockTableControllerTests {
         #expect(tall.dockHeight == 0, tall.evidence())
 
         // A short sidebar: 40% binds before five rows do, and the dock
-        // settles where the SwiftUI dock does — 40% of the list above the
-        // divider, as laid out, in one pass. Within a point, since a frame
+        // settles where 40% of the list above the divider puts it, as laid
+        // out, in one pass. Within a point, since a frame
         // may land on a pixel boundary.
         let short = DockHarness("height.short")
         defer { short.tearDown() }

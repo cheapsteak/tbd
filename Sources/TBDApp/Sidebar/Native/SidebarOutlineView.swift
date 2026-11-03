@@ -3,20 +3,22 @@ import AppKit
 /// Geometry the native sidebar's outline, row views and cells share, so a
 /// header, a row and the guide lines beneath it agree on where a column is.
 ///
-/// The insets are `SidebarHeaderMetrics`' values — the `listRowInsets` the
-/// SwiftUI rows carry — measured from `listEdgeInset`, which stands in for the
-/// SwiftUI `List`'s own leading margin. That margin is an estimate; the render
-/// harness that draws both paths side by side is where it gets tuned. When the
-/// row highlight is inset from the row's edges, every column moves right
-/// together to clear it (`leadingShift(highlightInset:)`), and every cell ends
-/// short of the row's trailing edge (`trailingCellInset(highlightInset:)`);
-/// edge to edge, neither moves anything.
+/// The insets are `SidebarHeaderMetrics`' values, measured from
+/// `listEdgeInset`, the sidebar's own leading margin. When the row highlight is
+/// inset from the row's edges, every column moves right together to clear it
+/// (`leadingShift(highlightInset:)`), and every cell ends short of the row's
+/// trailing edge (`trailingCellInset(highlightInset:)`); edge to edge, neither
+/// moves anything.
 enum SidebarNativeMetrics {
-    /// Each nesting level adds this much, as `WorktreeRowView`'s
-    /// `indentLevel * 16` does.
+    /// Fixed height of one worktree or remote-session row, in the outline and
+    /// in the pinned dock. `PinnedDockMetrics` reads it, so the dock's height
+    /// arithmetic cannot drift from the rows it holds.
+    static let rowHeight: CGFloat = 28
+
+    /// Each nesting level adds this much.
     static let indentation: CGFloat = 16
 
-    /// Where the SwiftUI list's row content starts before any row inset.
+    /// Where a row's content starts before any row inset.
     static let listEdgeInset: CGFloat = 8
 
     /// A guide line's offset into its owner's indentation step: the owner's
@@ -76,10 +78,10 @@ enum SidebarNativeMetrics {
 /// outline level minus one. `frameOfCell(atColumn:row:)` places every level
 /// from 1 down one indentation step to the left of where `NSOutlineView` would
 /// put it — level `L` at `(L - 1) * 16`, level 0 at the column's edge — and
-/// each cell then insets its own content the way the SwiftUI row's
-/// `listRowInsets` do. Every cell ends `SidebarNativeMetrics.trailingCellInset`
-/// short of the row's trailing edge. The native disclosure triangle is hidden;
-/// headers draw the SwiftUI path's chevrons themselves.
+/// each cell then insets its own content by `SidebarHeaderMetrics`' values.
+/// Every cell ends `SidebarNativeMetrics.trailingCellInset` short of the row's
+/// trailing edge. The native disclosure triangle is hidden; headers draw their
+/// own chevrons.
 final class SidebarOutlineView: NSOutlineView {
     /// Kept alive as long as the outline: the tracker owns the outline's one
     /// tracking area, and a tracking area does not retain its owner.

@@ -15,19 +15,11 @@ Each of these looks right in review and fails only when it runs or builds.
 - **Between `beginUpdates` and `endUpdates`, `NSOutlineView.child(_:ofItem:)` asks the data source**, which already serves the new tree. Never infer the old tree from outline lookups during an update; keep your own copy of it.
 - **Don't capture a `Notification` or `NSEvent` into `MainActor.assumeIsolated` from a `nonisolated` delegate method.** Neither is `Sendable`, so Swift 6 rejects the capture as a data race. Extract what you need first, such as the sender's `ObjectIdentifier`.
 
-## macOS 26 (Tahoe) Liquid Glass toolbars — grouping rules
+## Toolbars
 
-macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **adjacent toolbar items are automatically fused onto one shared capsule**. Getting items onto *separate* capsules is non-obvious and cost a long trial-and-error loop — here is what actually works (verified against WWDC25 session 323 "Build a SwiftUI app with the new design" and confirmed live in this app). The working example is the PR split button in `ContentView.swift`.
+The main window's toolbar is an AppKit `NSToolbar` that `MainToolbarController` owns (`WindowChrome/`); the app declares no SwiftUI `.toolbar`. On macOS 26 and later, toolbar items render on **Liquid Glass capsules**, and **adjacent glass items fuse onto one shared capsule**. Why the window is AppKit rather than a SwiftUI `NavigationSplitView` with `.toolbar` items is in `docs/specs/2026-11-01-appkit-window-chrome-design.md`.
 
-### What separates vs. fuses
-
-- **`ToolbarItemGroup` FUSES its children by design** — it is a shared-background cluster, NOT a separator. Wrapping each segment in its own single-child `ToolbarItemGroup` does **not** put them on separate capsules.
-- **`ControlGroup` is the reliable capsule BOUNDARY.** It lowers to an `NSToolbarItemGroup` (a first-class grouped item with a hard glass boundary), so its content never fuses with outside neighbors. **To isolate one control into its own capsule, make it the *sole child* of a `ControlGroup`** — single child means no internal gap. (A `ControlGroup` with *two* children separates correctly too, but its inter-member spacing is system-controlled with no public API, so it looks too gappy.)
-- **`ToolbarSpacer` separates two items _only_ when it carries the same `placement` as them** and sits directly between them in source order. `ToolbarSpacer(.fixed, placement: .primaryAction)` between two `.primaryAction` items splits the capsule; a placement-less `ToolbarSpacer(.fixed)` lands in a different bucket and silently does nothing. `.fixed` = snug gap, `.flexible` = pushes items to opposite edges. `ToolbarSpacer` is **macOS 26.0+** — guard with `if #available(macOS 26.0, *)`.
-- A bare `Menu` / `Menu(primaryAction:)` toolbar item (an `NSMenuToolbarItem`) is greedy: it tends to fuse with an adjacent bordered item even with a spacer. Putting it inside a `ControlGroup` (boundary) is what reliably isolates it.
-- Last-resort escape hatches if SwiftUI keeps fusing: `.sharedBackgroundVisibility(.hidden)` (removes an item's glass entirely — separate grouping but no background), or drop to a custom `NSToolbar` + `NSToolbarDelegate` with `NSMenuToolbarItem` and explicit space items.
-
-### AppKit `NSToolbarItem`: which items get glass
+### `NSToolbarItem`: which items get glass
 
 `NSToolbarItem` forwards most getters and setters, `isBordered` among them, to its view when the view answers them, so whether an item gets glass depends on its view:
 
@@ -38,30 +30,4 @@ macOS 26 redesigned toolbars: items render on **Liquid Glass capsules**, and **a
 - **AppKit gives each separate unbordered view item a fixed 44 pt slot**, centred on its view, whatever the view's width (measured on macOS 27: views 8, 20 and 32 pt wide all sat 44 pt apart). Buttons that must sit closer share one item whose view lays them out, as `LeadingToolbarButtonsHost` puts the toggle, back and forward 28 pt apart.
 - **An accessory-bar button's hover highlight is smaller than its frame**: the bezel `showsBorderOnlyWhileMouseInside` reveals does not fill the button. For a hover square that fills the button and a hit area that matches it, as a macOS 27 toolbar's icon buttons show, draw the square in a borderless button: `ToolbarIconButton` in `WindowChrome/` does.
 - **A toolbar draws its buttons at large control size, which scales up a symbol whose configuration names no scale** (measured: about 1.25 times). Name it: `NSImage.SymbolConfiguration(pointSize:weight:scale: .medium)`, as `iconGlyph` in `MainToolbarController+Items.swift` does.
-
-### Split button (primary action + dropdown)
-
-`Menu(content:label:primaryAction:)` is the toolbar **split button**: the label is the primary click; an attached **chevron** opens the menu. Per Apple's HIG this chevron is the correct affordance for a labeled action with options (an ellipsis "More" is discouraged for discoverability, and there is no native vertical-ellipsis SF Symbol).
-
-### Colored icon inside a toolbar Menu / split-button label
-
-A toolbar `Menu` label renders **template** images monochrome (AppKit tints them with the control color and ignores SwiftUI `.foregroundStyle`). To show a status-colored icon (see `PRButtonLabel` + `PRStatusPresentation.nsColor`):
-
-1. Bake the color into a **non-template** `NSImage` (draw the template, then `NSColor.set()` + `rect.fill(using: .sourceAtop)`; set `isTemplate = false`).
-2. Render it with `Image(nsImage:).renderingMode(.original)`.
-3. Re-bake on light/dark changes by reading `@Environment(\.colorScheme)` in the view body. **Re-baking alone is not enough**: AppKit materializes the toolbar item's label ONCE (see "Split-button label flattening & stale menu state" below), so the fresh image only reaches AppKit when the toolbar item is recreated — appearance must also be part of the item's `.id(...)` key (as the PR split button's `PRButtonLabel.prSplitButtonID` does).
-4. Use `.tint(.primary)` on the `Menu` to keep adjacent label text neutral (the split button otherwise accent-tints it); `.renderingMode(.original)` images ignore the tint, so the baked color survives.
-
-### macOS 27: toolbar menus default to icon-only
-
-Verified on macOS 27.0.1 with a standalone toolbar harness: a toolbar `Menu` **without** `primaryAction:` (and a `.menu`-style `Picker`) draws only its label's image — the title is dropped, and a text-only label becomes an empty capsule. Split buttons (`Menu` with `primaryAction:`) still draw both. Two rules follow:
-
-- **Apply `.labelStyle(.titleAndIcon)` to the `Menu` / `Picker` itself** — on the label view inside the closure it has no effect — and build the label as a `Label { Text } icon: { Image }`, not an `HStack`.
-- **Never make a baked label image `.resizable()`.** AppKit flattens the label to the `NSImage` and ignores the SwiftUI `.frame`, so a resizable image is stretched to fill the toolbar's icon slot. Give the `NSImage` its exact point size when baking and render it unmodified.
-
-### Split-button label flattening & stale menu state
-
-Two more empirically verified constraints (verified live in this app, July 2026, macOS 26):
-
-- **AppKit flattens the split-button label to exactly ONE image + ONE plain text string.** A second/conditional `Image` in the label `HStack` is silently dropped (its only visible effect is width truncation of the text), and inline `Text(Image(...))` attachments are stripped entirely. Any badge or indicator must be **composited into the single baked `NSImage`** — see `PRButtonLabel.coloredIcon` in `ContentView.swift`, which draws the `archivebox` badge into the same bitmap as the status icon.
-- **AppKit materializes the split button's NSMenu and label ONCE.** Later SwiftUI state changes — a `Toggle` checkmark inside the menu, or structural changes to the label — do NOT propagate to the already-materialized item, even though SwiftUI re-evaluates the `content`/`label` closures with the correct values. The fix is to force recreation with `.id(...)` keyed on that state — and the key must include EVERYTHING the label/menu render (worktree + whether its row has loaded, menu toggle state, the full `PRStatus`, colorScheme) — see `PRButtonLabel.prSplitButtonID`.
+- **A toolbar draws a template image monochrome, in the control colour**, so a status-coloured icon is baked into a non-template `NSImage`: draw the template, `NSColor.set()`, fill with `.sourceAtop`, set `isTemplate = false`. Resolve the colour inside the image's draw handler, so a dynamic colour follows the appearance, and key any cache of baked images on the appearance too. `ServersButtonLabel.bakedIcon` bakes the Servers item's icon this way.

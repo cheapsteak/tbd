@@ -7,8 +7,8 @@ struct PinnedDockRow: Identifiable, Equatable {
     let worktree: Worktree
     /// 0 = a pinned row; 1+ = an expanded descendant.
     let depth: Int
-    /// The repo of this row's top-level ancestor, driving `WorktreeRowView`'s
-    /// muted `(repo-name)` suffix. `nil` at depth 0 — a top-level dock row sits
+    /// The repo of this row's top-level ancestor, driving the row's muted
+    /// `(repo-name)` suffix. `nil` at depth 0 — a top-level dock row sits
     /// under no section, so a suffix there would label a section that does not
     /// exist. At depth 1+ the pinned parent *is* the section, so a child from
     /// another repo gets the same suffix it carries in the list.
@@ -19,9 +19,8 @@ struct PinnedDockRow: Identifiable, Equatable {
 
 /// One rendered line in the pinned dock's remote group: a pinned remote
 /// session. Deliberately a SEPARATE row type from `PinnedDockRow` rather than
-/// an enum case inside it, because the two render into two different
-/// `ForEach`es — only the worktree one carries `.onMove` (see
-/// `PinnedDockView`). A remote session also has none of the nesting context a
+/// an enum case inside it, because only worktree rows reorder by drag (see
+/// `DockTableController`). A remote session also has none of the nesting context a
 /// worktree row needs: the mirror is flat, so there is no depth and no
 /// section repo to inherit.
 struct PinnedDockRemoteRow: Identifiable, Equatable {
@@ -66,8 +65,8 @@ enum PinnedDockContent {
             }
 
         // Emit-once, which both prevents a worktree from appearing twice and
-        // makes a cyclic parentWorktreeID chain terminate — so unlike
-        // WorktreeSubtreeView this needs no depth cap.
+        // makes a cyclic parentWorktreeID chain terminate — so unlike the
+        // sidebar's subtree walk this needs no depth cap.
         //
         // Pre-seeded with EVERY pinned id before the loop, not filled in as
         // roots are visited: a pinned worktree that is also a descendant of an
@@ -121,10 +120,10 @@ enum PinnedDockContent {
     /// worktrees in the same dock.
     ///
     /// Grouped rather than interleaved with worktree pins by `pinnedAt`, for
-    /// two reasons. Structurally, `.onMove` addresses one `ForEach`'s own
-    /// elements, and only worktrees carry a persisted `pinSortOrder` to drag
-    /// against — interleaving would put unmovable rows inside the movable
-    /// `ForEach` and make every drag index ambiguous. Behaviourally, the
+    /// two reasons. Structurally, a drag reorders pinned roots, and only
+    /// worktrees carry a persisted `pinSortOrder` to drag against —
+    /// interleaving would put unmovable rows among the movable ones and make
+    /// every drag index ambiguous. Behaviourally, the
     /// grouping is predictable: dock order stays "worktrees you arranged,
     /// then remote sessions in the order you pinned them".
     ///
@@ -140,8 +139,8 @@ enum PinnedDockContent {
     /// provider stopped reporting, which self-heals the moment it reappears in
     /// a snapshot (`RemoteSessionStore.applySnapshot` clears the flag), and an
     /// exited session is still the thing the user pinned — both keep their
-    /// slot and render with `RemoteSessionRowView`'s existing dimmed /
-    /// secondary styling, the same way an archived WORKTREE keeps its pin
+    /// slot and render with the remote row's existing dimmed / secondary
+    /// styling, the same way an archived WORKTREE keeps its pin
     /// (see `rows`' `archivedAt` note — the difference is that a remote
     /// session has no archived state to hide behind).
     ///
@@ -161,34 +160,16 @@ enum PinnedDockContent {
             }
             .map(PinnedDockRemoteRow.init)
     }
-
-    /// The contiguous run of rows belonging to one pinned root: the root itself
-    /// plus any expanded descendants beneath it.
-    ///
-    /// `PinnedDockView` renders a nested `ForEach` — outer over pinned roots,
-    /// inner over each root's rows — so that `.onMove`'s indices address ROOTS
-    /// rather than the flattened row list. Attaching `.onMove` to a flat
-    /// `ForEach` over `rows(...)` would move the wrong worktree whenever a
-    /// subtree was expanded.
-    static func subtree(of rootID: UUID, in rows: [PinnedDockRow]) -> [PinnedDockRow] {
-        guard let start = rows.firstIndex(where: { $0.worktree.id == rootID }) else { return [] }
-        var end = rows.index(after: start)
-        while end < rows.endIndex, rows[end].depth > rows[start].depth {
-            end = rows.index(after: end)
-        }
-        return Array(rows[start..<end])
-    }
 }
 
 /// Index maths for a dock drag, split out from `AppState` so the stale-index
 /// guard is testable without a live app.
 enum PinnedDockReorder {
-    /// The new root order after a `.onMove`, or nil when the offsets are stale.
+    /// The new root order after a drag, or nil when the offsets are stale.
     ///
-    /// `source`/`destination` are captured against the `ForEach`'s snapshot and
-    /// can outlive it — a pin can be removed by another surface mid-drag. The
-    /// existing `reorderTopLevelWorktrees` guards the same way; this is not
-    /// theoretical.
+    /// `source`/`destination` are captured against the dock's snapshot and
+    /// can outlive it — a pin can be removed by another surface mid-drag; this
+    /// is not theoretical.
     static func reordered(roots: [UUID],
                           fromOffsets source: IndexSet,
                           toOffset destination: Int) -> [UUID]? {

@@ -186,15 +186,4 @@ struct SidebarHibernationAppStateTests {
             #expect(state.sidebarScratchHibernation.hibernatedCount == 0)
         }
     }
-
-    @Test func reorderingEitherShelfPreservesTheOtherShelfsSlots() {
-        let workingA = UUID(), parkedA = UUID(), remote = UUID(), parkedB = UUID(), workingB = UUID()
-        let all = [workingA, parkedA, remote, parkedB, workingB]
-        #expect(SidebarSubsetOrder.moved(
-            all: all, visible: [workingA, workingB], source: [0], destination: 2
-        ) == [workingB, parkedA, remote, parkedB, workingA])
-        #expect(SidebarSubsetOrder.moved(
-            all: all, visible: [parkedA, parkedB], source: [1], destination: 0
-        ) == [workingA, parkedB, remote, parkedA, workingB])
-    }
 }

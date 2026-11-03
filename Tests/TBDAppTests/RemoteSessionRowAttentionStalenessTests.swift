@@ -18,7 +18,7 @@ struct RemoteSessionRowAttentionStalenessTests {
 
     @Test("a resumed session loses the hand a past waiting_input left behind")
     func workingClearsALatchedHand() {
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .working, unreadType: .attentionNeeded) == .working)
     }
 
@@ -27,11 +27,11 @@ struct RemoteSessionRowAttentionStalenessTests {
         // `tool_result`, an idle turn, a session whose state simply stopped
         // being reported — none of them is "a human must act", and each
         // arrived in the live failure.
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .idle, unreadType: .attentionNeeded) == nil)
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .unknown, unreadType: .attentionNeeded) == nil)
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .exited, unreadType: .attentionNeeded) == nil)
     }
 
@@ -39,9 +39,9 @@ struct RemoteSessionRowAttentionStalenessTests {
     func stillWaitingKeepsTheHand() {
         // The one correct hand on screen must survive the fix, with or
         // without an unread entry behind it.
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .waitingInput, unreadType: .attentionNeeded) == .attention)
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .waitingInput, unreadType: nil) == .attention)
     }
 
@@ -49,26 +49,26 @@ struct RemoteSessionRowAttentionStalenessTests {
     func unreadStillAddsWhatItAloneKnows() {
         // The unread map's job: an exited session's nonzero exit has no
         // steady mapping at all, and must not be swept up by this gate.
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .exited, unreadType: .error) == .error)
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .working, unreadType: .error) == .error)
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .working, unreadType: .responseComplete) == .working)
     }
 
     @Test("the contribution gate names exactly the two types that render as a hand")
     func gateCoversBothAttentionTypes() {
         for type: NotificationType in [.attentionNeeded, .focusRequest] {
-            #expect(RemoteSessionRowView.suffixContribution(
+            #expect(RemoteSessionRowPresentation.suffixContribution(
                 of: type, agentState: .working) == nil)
-            #expect(RemoteSessionRowView.suffixContribution(
+            #expect(RemoteSessionRowPresentation.suffixContribution(
                 of: type, agentState: .waitingInput) == type)
         }
         // Everything else passes through untouched.
-        #expect(RemoteSessionRowView.suffixContribution(
+        #expect(RemoteSessionRowPresentation.suffixContribution(
             of: .error, agentState: .working) == .error)
-        #expect(RemoteSessionRowView.suffixContribution(
+        #expect(RemoteSessionRowPresentation.suffixContribution(
             of: nil, agentState: .working) == nil)
     }
 
@@ -80,13 +80,13 @@ struct RemoteSessionRowAttentionStalenessTests {
         // rewritten by any of what follows — so every step here shares it.
         let latched: NotificationType = .attentionNeeded
 
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .waitingInput, unreadType: latched) == .attention)
         // Still blocked while a credential rotates: still a hand.
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .waitingInput, unreadType: latched) == .attention)
         // Resumed: the hand goes, without anyone having to click the row.
-        #expect(RemoteSessionRowView.suffixIndicator(
+        #expect(RemoteSessionRowPresentation.suffixIndicator(
             agentState: .working, unreadType: latched) == .working)
     }
 
@@ -94,9 +94,9 @@ struct RemoteSessionRowAttentionStalenessTests {
     func pollingRefreshClearsIt() {
         // What the daemon's next `list` produces is a new agent state on the
         // same row, with the unread map untouched. That must be enough.
-        let beforeRefresh = RemoteSessionRowView.suffixIndicator(
+        let beforeRefresh = RemoteSessionRowPresentation.suffixIndicator(
             agentState: .waitingInput, unreadType: .attentionNeeded)
-        let afterRefresh = RemoteSessionRowView.suffixIndicator(
+        let afterRefresh = RemoteSessionRowPresentation.suffixIndicator(
             agentState: .working, unreadType: .attentionNeeded)
 
         #expect(beforeRefresh == .attention)
@@ -109,10 +109,10 @@ struct RemoteSessionRowAttentionStalenessTests {
         // the row is then rendered with a nil unread type. The suffix must
         // read the same either way — the glyph follows the agent axis, and
         // selection is not evidence about it.
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .working, unreadType: nil)
-            == RemoteSessionRowView.suffixIndicator(agentState: .working, unreadType: .attentionNeeded))
-        #expect(RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: nil)
-            == RemoteSessionRowView.suffixIndicator(agentState: .waitingInput, unreadType: .attentionNeeded))
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .working, unreadType: nil)
+            == RemoteSessionRowPresentation.suffixIndicator(agentState: .working, unreadType: .attentionNeeded))
+        #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: nil)
+            == RemoteSessionRowPresentation.suffixIndicator(agentState: .waitingInput, unreadType: .attentionNeeded))
     }
 
     @Test("a relaunch starts with no unread entries and reaches the same verdict")
@@ -122,8 +122,8 @@ struct RemoteSessionRowAttentionStalenessTests {
         // with. Before it, reopening the app was the only reliable way to
         // clear a stale hand.
         for state: RemoteAgentState in [.working, .idle, .unknown, .exited, .waitingInput] {
-            #expect(RemoteSessionRowView.suffixIndicator(agentState: state, unreadType: nil)
-                == RemoteSessionRowView.suffixIndicator(agentState: state, unreadType: .attentionNeeded),
+            #expect(RemoteSessionRowPresentation.suffixIndicator(agentState: state, unreadType: nil)
+                == RemoteSessionRowPresentation.suffixIndicator(agentState: state, unreadType: .attentionNeeded),
                 "reopening the app must not be what fixes the glyph for \(state)")
         }
     }

@@ -1,14 +1,15 @@
 import AppKit
 
 /// "Click to create scratch space", standing where the first pad would while
-/// there is none, as `ScratchSectionView` draws it: a secondary caption 2 pt
-/// past the row inset, with 2 pt above and 4 pt below. The controller runs
-/// the create action from the outline's click action.
+/// there is none: a secondary caption 2 pt past the row inset, with 2 pt above
+/// and 4 pt below. The controller runs the create action from the outline's
+/// click action.
 final class ScratchPromptCell: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.scratchPrompt")
     static let title = "Click to create scratch space"
 
-    /// A caption line with its insets, raised to the `List`'s 26 pt minimum.
+    /// A caption line with its insets, raised to the sidebar's 26 pt minimum
+    /// row height.
     static let rowHeight: CGFloat = 26
 
     var leadingInset: CGFloat = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false) + 2 {
@@ -46,7 +47,7 @@ final class ScratchPromptCell: NSTableCellView {
     /// balanced as the pointer and the rows move.
     func setHovered(_ hovered: Bool) {}
 
-    /// `ScratchSectionView`'s prompt pushes the pointing hand while hovered.
+    /// The prompt pushes the pointing hand while hovered.
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .pointingHand)

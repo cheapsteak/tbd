@@ -1,17 +1,15 @@
 import AppKit
 
-/// A remote session row, drawn from a `RemoteSessionRowModel` as
-/// `RemoteSessionRowView` draws it: the pending glyph or the globe, the name
-/// (bold when unread, secondary once exited) with its state caption, then the
-/// status suffix or typing dots. A session the provider no longer reports draws
+/// A remote session row, drawn from a `RemoteSessionRowModel`: the pending
+/// glyph or the globe, the name (bold when unread, secondary once exited) with
+/// its state caption, then the status suffix or typing dots. A session the provider no longer reports draws
 /// at half opacity. The name can be swapped for the inline rename editor.
 final class RemoteSessionRowCell: NSTableCellView, SidebarRenamableCell {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.remoteSessionRow")
 
-    /// `RemoteSessionRowView` pins `.frame(height: 28)` with or without its
-    /// caption, as the worktree row does.
+    /// One fixed height with or without its caption, as the worktree row has.
     static func height(for model: RemoteSessionRowModel) -> CGFloat {
-        WorktreeRowView.rowHeight
+        SidebarNativeMetrics.rowHeight
     }
 
     var leadingInset: CGFloat = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: false) {

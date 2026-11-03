@@ -1,12 +1,13 @@
 import AppKit
 import TBDShared
 
-/// Header actions, chevrons and the reveals `SidebarView` runs, mirrored.
+/// Header actions, chevrons and the sidebar's reveals.
 extension SidebarOutlineController {
     // MARK: Header actions and chevrons
 
-    /// The outline's click action: a header runs what the SwiftUI header's tap
-    /// runs, and a click on a worktree row's PR glyph opens the pull request.
+    /// The outline's click action: a section header selects its section, a
+    /// group header toggles, the scratch prompt starts a scratch space, and a
+    /// click on a worktree row's PR glyph opens the pull request.
     /// Row clicks otherwise select through the outline and need nothing here.
     @objc func outlineClicked(_ sender: Any?) {
         // A click is not a drag: a press recorded as a drag's origin that
@@ -68,7 +69,7 @@ extension SidebarOutlineController {
         }
     }
 
-    /// A missing repo's Locate… link: the SwiftUI header's panel and relocate.
+    /// A missing repo's Locate… link: an open panel, then relocate the repo.
     @objc func locateClicked(_ sender: NSView) {
         let row = outline.row(for: sender)
         guard row >= 0, let item = outline.item(atRow: row) as? SidebarItem,
@@ -87,10 +88,9 @@ extension SidebarOutlineController {
 
     // MARK: Reveal
 
-    /// `SidebarView`'s three `onChange` handlers, run at the top of every
-    /// rebuild: the pending scroll's reveal, the selection reveal with its
-    /// baseline rule, and the Ended reveal. They call the same `AppState`
-    /// methods, so the two paths reveal alike.
+    /// The sidebar's three reveals, run at the top of every rebuild: the
+    /// pending scroll's reveal, the selection reveal with its baseline rule,
+    /// and the Ended reveal.
     func performReveals(options: SidebarBuildOptions) {
         let grouped = options.workflowGroups
         if let target = appState.pendingScrollToWorktreeID {
@@ -135,7 +135,7 @@ extension SidebarOutlineController {
     /// Centres the pending scroll target in the apply that expanded its
     /// section. While structure is held the section may not be shown yet, so
     /// the target waits for the apply that ends the hold. A target with no
-    /// row by then is dropped, as the `List` drops it.
+    /// row by then is dropped.
     func scrollPendingTargetToCenter() {
         guard let target = pendingScrollTarget, !isHoldingStructure else { return }
         pendingScrollTarget = nil

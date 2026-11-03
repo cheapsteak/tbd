@@ -8,14 +8,13 @@ import TestSupport
 // Tier 2: the whole `ContentView` hosted in an offscreen window. Waits are
 // bounded: pump counts for the mount, `pollUntilTrue` for main-queue work.
 
-/// `ContentView` built with each `MainWindowChrome`. The AppKit chrome mounts
-/// a `MainSplitViewController` and puts a `MainToolbarController`'s toolbar on
-/// the window; the SwiftUI chrome mounts neither. Unlike the toolbar
+/// `ContentView` mounts a `MainSplitViewController` and puts a
+/// `MainToolbarController`'s toolbar on the window. Unlike the toolbar
 /// controller's own suite, which builds the split into a window by hand, this
 /// is the production hosting path: the split inside SwiftUI's hosting view,
 /// reached through `MainWindowSplitView`. Spec:
-/// docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window structure",
-/// "Switching" and "Testing".
+/// docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window structure"
+/// and "Testing".
 ///
 /// The toolbar is applied through `DispatchQueue.main.async`, so waits on it
 /// suspend (`waitForMainActorCondition`, over `pollUntilTrue`) rather than pump
@@ -23,10 +22,10 @@ import TestSupport
 @MainActor
 @Suite("Main window chrome mount")
 struct MainWindowChromeMountTests {
-    // MARK: - Each chrome's structure
+    // MARK: - Structure
 
-    @Test func appKitChromeMountsTheSplitAndToolbar() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "appKitMounts")
+    @Test func mountsTheSplitAndToolbar() async throws {
+        let mount = ChromeMount(label: "mounts")
         defer { mount.tearDown() }
         let controller = try await mount.appKitReady()
 
@@ -46,6 +45,13 @@ struct MainWindowChromeMountTests {
         // autosaves nowhere.
         let split = try #require(mount.mountedSplit)
         #expect(split.splitView.autosaveName == nil)
+
+        // The sidebar pane holds exactly one native sidebar.
+        let sidebarPane = split.sidebarItem.viewController.view
+        let nativeSidebar = try await waitForMainActorCondition("the hosted sidebar to mount the native outline") {
+            ChromeMount.nativeSidebarRoots(in: sidebarPane).count == 1
+        }
+        #expect(nativeSidebar)
 
         // The detail starts below the toolbar. Asserted on that outcome, the
         // detail's top edge against the window's content layout rect, rather
@@ -77,48 +83,45 @@ struct MainWindowChromeMountTests {
         #expect(suiteName == nil)
     }
 
-    @Test func swiftUIChromeMountsNoAppKitSplit() async throws {
-        let mount = ChromeMount(chrome: .swiftUI, label: "swiftUIMounts")
-        defer { mount.tearDown() }
-
-        // Positive control: `NavigationSplitView` lowers to an `NSSplitView`.
-        let splitMounted = await mount.host.settle { !mount.host.descendants(NSSplitView.self).isEmpty }
-        try #require(splitMounted, "The NavigationSplitView never mounted; the negatives below would be vacuous")
-
-        #expect(mount.splitRoots.isEmpty)
-        #expect(mount.toolbarController == nil)
-    }
-
     // MARK: - Hosted panes' storage
 
-    /// The hosted panes read `@AppStorage` from the store `ContentView` was
-    /// given for them, which here mirrors the root's `.defaultAppStorage`,
-    /// not from `.standard`: a hosted tree starts from a fresh environment.
-    /// Observed through the sidebar, whose `@AppStorage(appKitSidebarKey)`
-    /// picks the native outline or the `List`. The suite is flipped both
-    /// ways, so the test discriminates whatever `.standard` holds for that
-    /// key on the machine running it.
-    @Test func hostedPanesReadTheRootsStore() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "hostedStore")
+    /// Each pane the split hosts, the sidebar, the detail and the title,
+    /// reads `@AppStorage` from the store `ContentView` was given for them,
+    /// which here mirrors the root's `.defaultAppStorage`, not from
+    /// `.standard`: a hosted tree starts from a fresh environment. Observed
+    /// through the probe the split draws behind each real pane's root, inside
+    /// the environment it gives that root (`\.hostedPaneProbe`), on a key
+    /// `.standard` never holds, written two different values in turn, so a
+    /// pane's probe follows the writes only by reading the suite. A pane built
+    /// without that environment draws no probe and fails the first wait.
+    @Test func hostedPanesReadTheGivenStore() async throws {
+        let reads = PaneStoreReads()
+        let mount = ChromeMount(label: "hostedStore", hostedPaneProbe: { pane in
+            AnyView(PaneStoreProbe(pane: pane, reads: reads))
+        })
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
-        let split = try #require(mount.mountedSplit)
-        let sidebarPane = split.sidebarItem.viewController.view
+        // The title draws nothing, so nothing behind it, until a worktree is
+        // selected.
+        mount.state.selectedWorktreeIDs = [mount.worktrees[0].id]
 
-        mount.suite.defaults.set(true, forKey: AppState.appKitSidebarKey)
-        let native = try await waitForMainActorCondition(
-            "the hosted sidebar to mount the native outline from the suite"
-        ) {
-            !ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
+        let allPanes = Set(MainWindowSplitView.HostedPane.allCases)
+        _ = try await waitForMainActorCondition("a store probe to evaluate in every hosted pane") {
+            reads.panes == allPanes
         }
-        #expect(native)
+        let probed = reads.panes
+        try #require(probed == allPanes, "A pane with no probe would make the reads below vacuous for it")
 
-        mount.suite.defaults.set(false, forKey: AppState.appKitSidebarKey)
-        let list = try await waitForMainActorCondition("the hosted sidebar to mount the List from the suite") {
-            ChromeMount.nativeSidebarRoots(in: sidebarPane).isEmpty
-                && !OffscreenHost<AnyView>.descendants(NSTableView.self, of: sidebarPane).isEmpty
+        for value in ["acme-one", "acme-two"] {
+            mount.suite.defaults.set(value, forKey: storeProbeKey)
+            let expected = PaneStoreReads.everyPane(reading: value)
+            _ = try await waitForMainActorCondition("every hosted pane to read \(value) from the suite") {
+                reads.values == expected
+            }
+            // A pane still at "unset" read `.standard`.
+            let observed = reads.values
+            try #require(observed == expected)
         }
-        #expect(list)
     }
 
     /// The app builds `ContentView` without the seam, so its hosted panes get
@@ -127,8 +130,8 @@ struct MainWindowChromeMountTests {
     @Test func hostedStoreIsNilWithoutTheSeam() {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.seam")
         defer { suite.tearDown() }
-        let app = ContentView(chrome: .appKit)
-        let seamed = ContentView(chrome: .appKit, hostedAppStorage: suite.defaults)
+        let app = ContentView()
+        let seamed = ContentView(hostedAppStorage: suite.defaults)
         #expect(app.hostedAppStorage == nil)
         #expect(seamed.hostedAppStorage === suite.defaults)
     }
@@ -138,18 +141,25 @@ struct MainWindowChromeMountTests {
     /// Positive control for `toolbarSurvivesAnAppStateChange`: in this
     /// harness, a root hosting view given `.all` does bridge the scene, so
     /// SwiftUI puts a toolbar on the window for a tree that declares one.
-    /// The root hosting view is a subview of the host's ground, not the
-    /// window's content view; without this, the survival test could pass
-    /// only because SwiftUI never reached the window's toolbar.
-    @Test func swiftUIChromeBridgesItsToolbarOntoTheWindow() async throws {
-        let mount = ChromeMount(chrome: .swiftUI, label: "bridges", sceneBridgingOptions: .all)
-        defer { mount.tearDown() }
+    /// The root is a test-only view whose one job is to declare a toolbar
+    /// item, mounted in the same titled window at the same size as
+    /// `ChromeMount`'s. The root hosting view is a subview of the host's
+    /// ground, not the window's content view; without this, the survival test
+    /// could pass only because SwiftUI never reached the window's toolbar.
+    @Test func harnessBridgesASceneToolbarOntoTheWindow() async throws {
+        let host = OffscreenHost(
+            root: ToolbarDeclaringRoot(), size: ChromeMount.size, styleMask: ChromeMount.styleMask,
+            sceneBridgingOptions: .all)
+        defer {
+            host.window.toolbar = nil
+            host.tearDown()
+        }
 
         let bridged = try await waitForMainActorCondition("SwiftUI to put the scene's toolbar on the window") {
-            mount.host.window.toolbar != nil
+            host.window.toolbar != nil
         }
         try #require(bridged)
-        let swiftUIOwned = !(mount.host.window.toolbar?.delegate is MainToolbarController)
+        let swiftUIOwned = !(host.window.toolbar?.delegate is MainToolbarController)
         #expect(swiftUIOwned)
     }
 
@@ -157,10 +167,10 @@ struct MainWindowChromeMountTests {
     /// the AppKit toolbar on the window, or the next apply must put it back.
     /// The root hosting view bridges the scene, as the app window's root does,
     /// so SwiftUI is free to claim the window's toolbar; that the bridging is
-    /// live in this harness is `swiftUIChromeBridgesItsToolbarOntoTheWindow`'s
+    /// live in this harness is `harnessBridgesASceneToolbarOntoTheWindow`'s
     /// job, and this test proves nothing without it passing.
     @Test func toolbarSurvivesAnAppStateChange() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "survives", sceneBridgingOptions: .all)
+        let mount = ChromeMount(label: "survives", sceneBridgingOptions: .all)
         defer { mount.tearDown() }
         let controller = try await mount.appKitReady()
         let toolbar = controller.toolbar
@@ -195,8 +205,8 @@ struct MainWindowChromeMountTests {
     /// a test built. It is the item the toolbar made for TBD's own identifier,
     /// and no item for the standard `.sidebarTrackingSeparator`, which AppKit
     /// would build and bind itself, is on the toolbar beside it.
-    @Test func appKitChromeBindsTheTrackingSeparatorToTheHostedSplit() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "trackingSeparator")
+    @Test func bindsTheTrackingSeparatorToTheHostedSplit() async throws {
+        let mount = ChromeMount(label: "trackingSeparator")
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
 
@@ -246,7 +256,7 @@ struct MainWindowChromeMountTests {
     /// fetch answers an empty list, so no Servers item comes and goes beside
     /// it.
     @Test func titleStaysPutAsTheTitleChanges() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "titleStaysPut")
+        let mount = ChromeMount(label: "titleStaysPut")
         defer { mount.tearDown() }
         mount.state.devServerListFetcher = { worktreeID, _ in
             DevServerListResult(worktreeID: worktreeID, servers: [], parseErrors: [], runningFileDiagnostics: [])
@@ -279,13 +289,12 @@ struct MainWindowChromeMountTests {
         #expect(dividerX <= longFrame.minX)
     }
 
-    // MARK: - The selection's server refresh, on both chromes
+    // MARK: - The selection's server refresh
 
-    /// The `.task(id:)` that fetches a selected worktree's servers hangs on
-    /// the container of both chromes. On the AppKit one, the Servers item
-    /// appearing is what that fetch is for.
-    @Test func appKitChromeRefreshesTheSelectedWorktreesServers() async throws {
-        let mount = ChromeMount(chrome: .appKit, label: "serversAppKit")
+    /// `ContentView`'s `.task(id:)` fetches a selected worktree's servers, and
+    /// the Servers item appearing is what that fetch is for.
+    @Test func selectionRefreshesTheSelectedWorktreesServers() async throws {
+        let mount = ChromeMount(label: "servers")
         defer { mount.tearDown() }
         let fetches = mount.recordServerFetches()
         _ = try await mount.appKitReady()
@@ -302,22 +311,6 @@ struct MainWindowChromeMountTests {
             mount.toolbarIdentifiers.contains(MainToolbarItemID.servers)
         }
         #expect(shown)
-    }
-
-    @Test func swiftUIChromeRefreshesTheSelectedWorktreesServers() async throws {
-        let mount = ChromeMount(chrome: .swiftUI, label: "serversSwiftUI")
-        defer { mount.tearDown() }
-        let fetches = mount.recordServerFetches()
-        let splitMounted = await mount.host.settle { !mount.host.descendants(NSSplitView.self).isEmpty }
-        try #require(splitMounted, "The NavigationSplitView never mounted")
-
-        let worktreeID = mount.worktrees[1].id
-        mount.state.selectedWorktreeIDs = [worktreeID]
-
-        let fetched = try await waitForMainActorCondition("the selection's server fetch") {
-            fetches.worktreeIDs.contains(worktreeID)
-        }
-        #expect(fetched)
     }
 
     // MARK: - Dismantling
@@ -388,8 +381,8 @@ struct MainWindowChromeMountTests {
 
 // MARK: - Fixture
 
-/// `ContentView` with one chrome, its `AppState` holding a repo and two
-/// worktrees, hosted offscreen in a titled window at the app's default size.
+/// `ContentView`, its `AppState` holding a repo and two worktrees, hosted
+/// offscreen in a titled window at the app's default size.
 @MainActor
 private final class ChromeMount {
     static let size = NSSize(width: 1200, height: 800)
@@ -405,9 +398,15 @@ private final class ChromeMount {
     /// `tearDown()` reaches it even when another toolbar is on the window.
     private weak var readyController: MainToolbarController?
 
-    /// - Parameter sceneBridgingOptions: for the root hosting view; `nil`
-    ///   keeps `NSHostingView`'s default.
-    init(chrome: MainWindowChrome, label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil) {
+    /// - Parameters:
+    ///   - sceneBridgingOptions: for the root hosting view; `nil` keeps
+    ///     `NSHostingView`'s default.
+    ///   - hostedPaneProbe: set on the root as `\.hostedPaneProbe`, for the
+    ///     split to draw behind each pane it hosts.
+    init(
+        label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil,
+        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
+    ) {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
         self.suite = suite
         let state = AppState(userDefaults: suite.defaults)
@@ -437,7 +436,8 @@ private final class ChromeMount {
                 .appendingPathComponent("TBDAppTests.MainWindowChromeMount.\(UUID().uuidString)"))
         // The hosted panes get the suite too: they do not inherit the root's
         // `.defaultAppStorage` below.
-        let root = ContentView(chrome: chrome, hostedAppStorage: suite.defaults)
+        let root = ContentView(hostedAppStorage: suite.defaults)
+            .environment(\.hostedPaneProbe, hostedPaneProbe)
             .environment(state)
             .environmentObject(appearance)
             .environmentObject(TranscriptOverlayCoordinator())
@@ -458,11 +458,11 @@ private final class ChromeMount {
         suite.tearDown()
     }
 
-    /// Waits for the AppKit split to mount and for its appearance to install
-    /// the toolbar and apply it once, and returns the toolbar's controller.
+    /// Waits for the split to mount and for its appearance to install the
+    /// toolbar and apply it once, and returns the toolbar's controller.
     func appKitReady() async throws -> MainToolbarController {
         let splitMounted = await host.settle { !self.splitRoots.isEmpty }
-        try #require(splitMounted, "The AppKit split never mounted with the AppKit chrome")
+        try #require(splitMounted, "The AppKit split never mounted")
         let installed = try await waitForMainActorCondition("the AppKit toolbar to be installed and applied") {
             self.toolbarController?.appliedSnapshot != nil
         }
@@ -577,4 +577,56 @@ private final class ChromeMount {
 @MainActor
 private final class ServerFetchLog {
     var worktreeIDs: [UUID] = []
+}
+
+/// What each hosted pane's `PaneStoreProbe` last read.
+@MainActor
+private final class PaneStoreReads {
+    private(set) var values: [MainWindowSplitView.HostedPane: String] = [:]
+
+    /// The panes whose probe has evaluated at least once.
+    var panes: Set<MainWindowSplitView.HostedPane> {
+        Set(values.keys)
+    }
+
+    func note(_ value: String, in pane: MainWindowSplitView.HostedPane) {
+        values[pane] = value
+    }
+
+    /// `values` once every pane has read `value`.
+    static func everyPane(reading value: String) -> [MainWindowSplitView.HostedPane: String] {
+        Dictionary(uniqueKeysWithValues: MainWindowSplitView.HostedPane.allCases.map { ($0, value) })
+    }
+}
+
+/// A key no real store holds, so `.standard` reads `PaneStoreProbe`'s
+/// default. Kept free of dots, which key-value observation of a defaults key
+/// reads as key path separators.
+private let storeProbeKey = "mainWindowChromeMountTestsStoreProbe"
+
+/// Reads one `@AppStorage` key and records what it read, for its pane, on
+/// every evaluation. It draws nothing, so it changes nothing behind the
+/// pane's root.
+private struct PaneStoreProbe: View {
+    let pane: MainWindowSplitView.HostedPane
+    let reads: PaneStoreReads
+    @AppStorage(storeProbeKey) private var value: String = "unset"
+
+    var body: some View {
+        let _ = reads.note(value, in: pane)
+        Color.clear
+    }
+}
+
+/// A root that declares one toolbar item and nothing else, standing in for a
+/// SwiftUI tree that would claim its window's toolbar.
+private struct ToolbarDeclaringRoot: View {
+    var body: some View {
+        Color.clear
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Probe") {}
+                }
+            }
+    }
 }

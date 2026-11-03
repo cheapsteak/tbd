@@ -593,8 +593,8 @@ struct PreSessionAppStateTests {
     }
 
     @Test func creatingSubtitleCoversBothBranches() {
-        #expect(WorktreeRowView.creatingSubtitle(hasPreSessionTerminal: true) == "Running setup…")
-        #expect(WorktreeRowView.creatingSubtitle(hasPreSessionTerminal: false) == "Creating worktree…")
+        #expect(WorktreeRowPresentation.creatingSubtitle(hasPreSessionTerminal: true) == "Running setup…")
+        #expect(WorktreeRowPresentation.creatingSubtitle(hasPreSessionTerminal: false) == "Creating worktree…")
     }
 
     // MARK: - Banner gating

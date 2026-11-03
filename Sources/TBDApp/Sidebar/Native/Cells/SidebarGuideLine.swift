@@ -52,7 +52,7 @@ enum SidebarGuideLine {
         static let none = Alphas(rest: 0, active: 0, restOnHighlight: 0, activeOnHighlight: 0)
     }
 
-    /// The lines' strengths. Active is close to the SwiftUI row's
+    /// The lines' strengths. Active is close to
     /// `Color.secondary.opacity(0.25)`, and rest about half of it. Set this
     /// to `.none` to see the sidebar without guide lines.
     static let alphas = Alphas(rest: 0.12, active: 0.24, restOnHighlight: 0.30, activeOnHighlight: 0.55)
@@ -324,13 +324,12 @@ enum SidebarGuideLine {
     }
 
     /// The height of every row that owns a line. Only worktree rows own
-    /// lines, and a worktree row is `WorktreeRowView.rowHeight` tall in both
-    /// its height classes: the SwiftUI row pins that height for every
-    /// variant, so the subtitle variant stacks its two lines inside it
-    /// (`WorktreeRowCell.subtitleRowHeight`). How far an owner's fade
-    /// carries into its first child is therefore one constant, not a lookup
-    /// of the owner's row.
-    static let ownerRowHeight: CGFloat = WorktreeRowView.rowHeight
+    /// lines, and a worktree row is `SidebarNativeMetrics.rowHeight` tall in
+    /// both its height classes: the subtitle variant stacks its two lines
+    /// inside that height (`WorktreeRowCell.subtitleRowHeight`). How far an
+    /// owner's fade carries into its first child is therefore one constant,
+    /// not a lookup of the owner's row.
+    static let ownerRowHeight: CGFloat = SidebarNativeMetrics.rowHeight
 
     /// Where a parent's fade-in starts, down from the top of its first
     /// child's row: above it, by the length of the stub the parent's own row

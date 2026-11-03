@@ -1,10 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The main window's split and toolbar when it is built with the AppKit
-/// chrome (`MainWindowChrome.appKit`). `ContentView` mounts it between the
-/// banners and the status bar, where the SwiftUI chrome has its
-/// `NavigationSplitView`.
+/// The main window's split and toolbar. `ContentView` mounts it between the
+/// banners and the status bar.
 ///
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
 ///   `SidebarView` and `MainDetailArea`.
@@ -28,6 +26,9 @@ import SwiftUI
 ///   reads `.standard`, and the hosted panes must read the same store.
 ///   `appState.userDefaults` is not that store under `TBD_MOCK`. The
 ///   controllers' `sizingOptions` are `[]`: the split items size the panes.
+/// - **The probe.** `\.hostedPaneProbe`, which the app never sets, draws a
+///   test's view behind each hosted root inside the environment the split
+///   gives it, so a test reads what the real pane reads.
 ///
 /// `updateNSViewController` refreshes only the Stop confirmation's closure.
 /// The panes and the toolbar follow `AppState` themselves, so no AppKit
@@ -36,6 +37,14 @@ import SwiftUI
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "Window
 /// structure".
 struct MainWindowSplitView: NSViewControllerRepresentable {
+    /// The SwiftUI trees the split hosts, each in a hosting controller or
+    /// view of its own.
+    enum HostedPane: CaseIterable, Sendable {
+        case sidebar
+        case detail
+        case title
+    }
+
     /// Raises the toolbar Stop's confirmation, which `ContentView` owns.
     let requestRemoteStop: (RemoteSessionSelection) -> Void
     /// The hosted trees' `@AppStorage` store: the one the window's root sets
@@ -46,6 +55,7 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+    @Environment(\.hostedPaneProbe) var hostedPaneProbe
 
     /// Keeps the toolbar controller alive for as long as SwiftUI keeps the
     /// split.
@@ -60,10 +70,11 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
     func makeNSViewController(context: Context) -> MainSplitViewController {
         let split = MainSplitViewController(
-            sidebar: hostingController(SidebarView()),
-            content: hostingController(MainDetailArea()),
+            sidebar: hostingController(SidebarView(), pane: .sidebar),
+            content: hostingController(MainDetailArea(), pane: .detail),
             autosaveName: Self.splitAutosaveName(for: appState.userDefaults))
-        let titleView = Self.makeTitleView(withAppEnvironment(ToolbarTitleCluster(appState: appState)))
+        let titleView = Self.makeTitleView(
+            withAppEnvironment(ToolbarTitleCluster(appState: appState), pane: .title))
         let toolbarController = MainToolbarController(
             appState: appState, split: split, titleView: titleView, requestRemoteStop: requestRemoteStop)
         // Weak both ways: this closure holds the controller weakly, as the
@@ -133,10 +144,13 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
 
     /// `root` with the environment every hosted tree needs. The `@AppStorage`
     /// store is set only when `appStorage` names one; otherwise the tree
-    /// keeps `.standard`, as the window's root does.
+    /// keeps `.standard`, as the window's root does. A test's probe for
+    /// `pane`, when one is set, sits behind `root` inside that environment.
     @ViewBuilder
-    private func withAppEnvironment<Root: View>(_ root: Root) -> some View {
+    private func withAppEnvironment<Root: View>(_ root: Root, pane: HostedPane) -> some View {
+        let probe = hostedPaneProbe?(pane)
         let hosted = root
+            .background { probe }
             .environment(appState)
             .environmentObject(appearance)
             .environmentObject(overlayCoordinator)
@@ -147,11 +161,27 @@ struct MainWindowSplitView: NSViewControllerRepresentable {
         }
     }
 
-    private func hostingController<Root: View>(_ root: Root) -> NSViewController {
-        let controller = NSHostingController(rootView: withAppEnvironment(root))
+    private func hostingController<Root: View>(_ root: Root, pane: HostedPane) -> NSViewController {
+        let controller = NSHostingController(rootView: withAppEnvironment(root, pane: pane))
         controller.sceneBridgingOptions = []
         controller.sizingOptions = []
         return controller
+    }
+}
+
+/// A test seam: given a pane, the view `MainWindowSplitView` draws behind that
+/// pane's hosted root, inside the environment the split gives the root. A
+/// hosted tree does not inherit its host's environment, so this is how a test
+/// observes what each real pane reads, such as its `@AppStorage` store. The
+/// split reads it once, when it builds the panes. Nothing in the app sets it.
+private struct HostedPaneProbeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
+}
+
+extension EnvironmentValues {
+    var hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? {
+        get { self[HostedPaneProbeKey.self] }
+        set { self[HostedPaneProbeKey.self] = newValue }
     }
 }
 
@@ -170,11 +200,12 @@ private struct TrailingEdgeClip: Shape {
     }
 }
 
-/// The detail area in the AppKit split's content pane. The tab choice is
-/// resolved here, in a real `body`, so Observation tracks the three inputs
-/// and a selection change brings the right tab forward; see the matching
-/// call site in `ContentView.body` for why `DetailSectionHostPager` cannot
-/// read them itself.
+/// The detail area in the split's content pane. The tab choice is resolved
+/// here, in a real `body`, and handed to `DetailSectionHostPager` as a value.
+/// Reading the three inputs inside `updateNSViewController` instead would
+/// register no dependency — Observation tracks what a `body` evaluation
+/// reads — so a selection change that touched nothing else this body reads
+/// would leave the detail area on the previous tab.
 struct MainDetailArea: View {
     @Environment(AppState.self) private var appState
 

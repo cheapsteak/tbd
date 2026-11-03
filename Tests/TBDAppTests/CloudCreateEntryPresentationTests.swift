@@ -131,22 +131,21 @@ struct CloudCreateEntryPresentationTests {
 //
 // Five owned create entries carry the compiled cloud provider — the repo
 // header `+` picker's cloud row and the nested `+` picker's cloud row
-// (`WorktreeProfilePickerView.cloudLaneEntry`), `RepoSectionView`'s
-// context-menu item (`cloudSessionMenuEntry`), `WorktreeRowView`'s
-// context-menu item (its own `cloudSessionMenuEntry`), and
-// `RemoteSectionView`'s provider header `+` (`RemoteProviderHeaderRow
-// .canCreate`) — and all five must reach the same "is the cloud entry shown?"
+// (`WorktreeProfilePickerView.cloudLaneEntry`), the repo header menu's item
+// (`CloudCreateEntryPresentation.cloudEntry`), a worktree row's
+// context-menu item (`worktreeRowCloudEntry`), and a provider header's `+`
+// (`offersCreate`) — and all five must reach the same "is the cloud entry shown?"
 // verdict for a given (providers, claudeCloudEnabled, staleness) input. There
 // is no documented divergence: staleness shows the entry disabled everywhere.
 //
-// `WorktreeRowView`'s item carries one extra gate of its own — the main row
+// The worktree row's item carries one extra gate of its own — the main row
 // offers nothing, because the main worktree is not a parent to nest under —
 // which is orthogonal to the cloud question and so is pinned in
 // `WorktreeRowRemoteSessionMenuTests` rather than here. Every call below
 // passes `isMain: false` so this suite reads only the cloud verdict.
 //
-// Each test below calls the actual `nonisolated static` functions the view
-// bodies call — not a re-implementation of their logic — so a future edit
+// Each test below calls the actual functions the sidebar's menus, tree
+// builder and pickers call — not a re-implementation of their logic — so a future edit
 // that re-derives the gate inline in one surface, drops a filter, or stops
 // routing through `CloudCreateEntryPresentation` reddens this suite even
 // without a rendered view. That is the gap the pure
@@ -187,9 +186,9 @@ struct CloudCreateEntryPresentationParityTests {
             ("nested + picker", WorktreeProfilePickerView.cloudLaneEntry(
                 providers: providers, claudeCloudEnabled: claudeCloudEnabled,
                 parentWorktreeID: UUID()) != nil),
-            ("repo context menu", RepoSectionView.cloudSessionMenuEntry(
-                providers: providers, claudeCloudEnabled: claudeCloudEnabled) != nil),
-            ("worktree row context menu", WorktreeRowView.cloudSessionMenuEntry(
+            ("repo header menu", CloudCreateEntryPresentation.cloudEntry(
+                providers, claudeCloudEnabled: claudeCloudEnabled) != nil),
+            ("worktree row context menu", CloudCreateEntryPresentation.worktreeRowCloudEntry(
                 providers: providers, claudeCloudEnabled: claudeCloudEnabled,
                 isMain: false) != nil),
         ]
@@ -200,7 +199,7 @@ struct CloudCreateEntryPresentationParityTests {
         for (surface, shown) in entriesShown(both, claudeCloudEnabled: false) {
             #expect(!shown, "\(surface) still offers the cloud entry with the flag off")
         }
-        #expect(!RemoteProviderHeaderRow.canCreate(
+        #expect(!CloudCreateEntryPresentation.offersCreate(
             provider: cloudStatus(in: both), claudeCloudEnabled: false))
     }
 
@@ -209,7 +208,7 @@ struct CloudCreateEntryPresentationParityTests {
         for (surface, shown) in entriesShown(both, claudeCloudEnabled: true) {
             #expect(shown, "\(surface) hides the cloud entry with the flag on and healthy")
         }
-        #expect(RemoteProviderHeaderRow.canCreate(
+        #expect(CloudCreateEntryPresentation.offersCreate(
             provider: cloudStatus(in: both), claudeCloudEnabled: true))
     }
 
@@ -224,10 +223,10 @@ struct CloudCreateEntryPresentationParityTests {
                 #expect(!shown, "\(surface) invented a cloud entry for an unregistered provider")
             }
         }
-        // No header assertion here: `RemoteSectionView` only ever renders a
-        // header for a provider present in `appState.remoteProviders`
-        // (`ForEach(appState.remoteProviders, ...)`), so there is no
-        // `RemoteProviderStatus` to call `canCreate` with in this state.
+        // No header assertion here: the sidebar builds a provider header
+        // only for a provider present in `appState.remoteProviders`
+        // (`SidebarTreeBuilder.providerSections`), so there is no
+        // `RemoteProviderStatus` to call `offersCreate` with in this state.
     }
 
     /// Staleness converges: every surface SHOWS the entry and renders it
@@ -243,7 +242,7 @@ struct CloudCreateEntryPresentationParityTests {
                 + "instead of showing it disabled"
             #expect(shown, "\(why)")
         }
-        #expect(RemoteProviderHeaderRow.canCreate(
+        #expect(CloudCreateEntryPresentation.offersCreate(
             provider: cloudStatus(in: stale), claudeCloudEnabled: true),
                 "the header's + still renders for a stale provider — it disables the button instead")
     }
@@ -251,11 +250,11 @@ struct CloudCreateEntryPresentationParityTests {
     /// A registry provider is unaffected by the flag in every state.
     @Test func aRegistryProviderIsUnaffectedByTheCloudFlag() {
         for flag in [true, false] {
-            #expect(RepoSectionView.remoteSessionMenuProviders(providers: both)
+            #expect(CloudCreateEntryPresentation.registryProviders(both)
                 .map(\.config.name) == ["acme"])
-            #expect(WorktreeRowView.remoteSessionMenuProviders(providers: both, isMain: false)
+            #expect(CloudCreateEntryPresentation.worktreeRowProviders(providers: both, isMain: false)
                 .map(\.config.name) == ["acme"])
-            #expect(RemoteProviderHeaderRow.canCreate(
+            #expect(CloudCreateEntryPresentation.offersCreate(
                 provider: status("acme"), claudeCloudEnabled: flag))
         }
     }
@@ -266,9 +265,9 @@ struct CloudCreateEntryPresentationParityTests {
     @Test func theCloudProviderNeverAppearsInAGenericEnumeration() {
         #expect(!WorktreeProfilePickerView.registryLaneProviders(both)
             .contains { $0.config.name == ClaudeCloudProvider.name })
-        #expect(!RepoSectionView.remoteSessionMenuProviders(providers: both)
+        #expect(!CloudCreateEntryPresentation.registryProviders(both)
             .contains { $0.config.name == ClaudeCloudProvider.name })
-        #expect(!WorktreeRowView.remoteSessionMenuProviders(providers: both, isMain: false)
+        #expect(!CloudCreateEntryPresentation.worktreeRowProviders(providers: both, isMain: false)
             .contains { $0.config.name == ClaudeCloudProvider.name })
         #expect(!CloudCreateEntryPresentation.registryProviders(both)
             .contains { $0.config.name == ClaudeCloudProvider.name })

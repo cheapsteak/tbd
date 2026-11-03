@@ -105,14 +105,13 @@ struct OpenInEditorButton: View {
     /// App icons keyed by app path. The NSImage must be identity-stable
     /// across body evaluations — `Image(nsImage:)` diffs by object identity,
     /// so a fresh `NSWorkspace.icon(forFile:)` per render rebuilt every
-    /// pinned editor's icon layer on each hover toggle. Same rationale as
-    /// `WorktreeRowView.iconCache`. MainActor confinement (SwiftUI body runs
-    /// on main) makes this safe without locks.
+    /// pinned editor's icon layer on each hover toggle. MainActor confinement
+    /// (SwiftUI body runs on main) makes this safe without locks.
     @MainActor
     private static var iconCache: [String: NSImage] = [:]
 
     // Internal (not private) so OpenInEditorIconCacheTests can assert the
-    // identity-stability invariant, mirroring WorktreeRowView.loadIcon.
+    // identity-stability invariant, mirroring `WorktreeRowPresentation.loadIcon`.
     @MainActor
     static func appIcon(forPath path: String) -> NSImage {
         if let cached = iconCache[path] { return cached }

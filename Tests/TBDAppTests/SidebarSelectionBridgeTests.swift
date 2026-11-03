@@ -11,10 +11,9 @@ import TBDShared
 /// "Selection".
 @Suite("Sidebar selection bridge")
 struct SidebarSelectionBridgeTests {
-    /// The `List` tags worktree rows with the worktree's ID and remote session
-    /// rows with the session's ID, and nothing else; the outline writes the
-    /// same set for the same rows.
-    @Test func outlineSelectionWritesSameIDsListTagsWould() {
+    /// The outline writes worktree rows as the worktree's ID and remote session
+    /// rows as the session's ID, and nothing else.
+    @Test func outlineSelectionWritesWorktreeAndSessionIDs() {
         let repo = UUID()
         let worktree = UUID()
         let lane = RemoteSessionIdentity.uuid(provider: "acme", sessionID: "lane")

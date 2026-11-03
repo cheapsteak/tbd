@@ -95,20 +95,6 @@ private struct CacheTrapProbe: View {
     }
 }
 
-/// Reads only `@AppStorage`. Used as the vacuity guard in the cache suite: it
-/// proves a defaults flip really did invalidate the views that read that key,
-/// so a passing cache assertion cannot be one where nothing re-evaluated.
-private struct AppStorageProbe: View {
-    let counter: BodyEvaluationCounter
-    @AppStorage(AppState.chevronBeforeProjectNameKey)
-    private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
-
-    var body: some View {
-        let _ = counter.bump()
-        Text(chevronBeforeProjectName ? "before" : "after")
-    }
-}
-
 // MARK: - Harness
 
 @MainActor
@@ -304,67 +290,48 @@ struct AppStatePerPropertyTrackingTests {
 @Suite("The real sidebar subtree renders through the memo cache")
 struct AppStateCacheDependencyTests {
 
-    /// End-to-end shape: the production sidebar composition —
-    /// `WorktreeSubtreeView`, which renders `WorktreeRowView` and recurses
-    /// through `AppState.children(of:)` — grows a row when a child is added
-    /// through the memo cache. Asserted on rendered height, because the bug
-    /// class this guards against is stale UI and height is what a user sees.
+    /// End-to-end shape: the native sidebar's outline, whose builder recurses
+    /// through `AppState.children(of:)` inside its observation tracking, shows
+    /// a row for a child added through the memo cache after the cache was
+    /// warmed. Asserted on the rows the outline shows, because the bug class
+    /// this guards against is stale UI and the rows are what a user sees.
     ///
-    /// `WorktreeSubtreeView` is the interesting subject because `children(of:)`
-    /// is its *only* route to `worktrees`; `RepoSectionView`, by contrast,
-    /// indexes `appState.worktrees` directly in four computed properties, so it
-    /// re-registers that dependency whatever the cache does.
+    /// The parent's subtree is the interesting subject because
+    /// `children(of:)` is its *only* route to `worktrees`.
     ///
-    /// It does NOT discriminate against the missing `_ = worktrees` touch: the
-    /// `@AppStorage` flip below is included as the unrelated re-evaluation the
-    /// trap needs, and measurably does not force one on this view — the test
-    /// passes either way. The discriminating assertion lives in
-    /// ``AppStateWarmCacheDependencySourceTests``, which forces the
-    /// re-evaluation through a tracked property and proves it happened.
+    /// It does NOT discriminate against the missing `_ = worktrees` touch on
+    /// its own: the builder reads `worktrees` directly for the repo section
+    /// too, so it keeps that dependency whatever the cache does. The
+    /// discriminating assertion lives in ``AppStateWarmCacheDependencySourceTests``,
+    /// which forces the re-evaluation through a tracked property and proves it
+    /// happened.
     @Test("the real sidebar subtree renders a child added after its cache was warmed")
-    func realSidebarSubtreeRendersAChildAddedThroughTheCache() {
-        let storageCounter = BodyEvaluationCounter()
-        let repoID = UUID()
+    func realSidebarSubtreeRendersAChildAddedThroughTheCache() throws {
+        let h = OutlineHarness("cacheDependency")
+        defer { h.tearDown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let parentID = UUID()
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [makeWorktree(id: parentID, repoID: repo.id, name: "parent")]]
+        h.mount()
+        let coldRows = h.shownIDs
+        try #require(coldRows.contains(.worktree(parentID)), "the parent never showed; nothing is being measured")
 
-        withHostedProbe({ state in
-            state.worktrees = [repoID: [
-                makeWorktree(id: parentID, repoID: repoID, name: "parent")
-            ]]
-            return AnyView(
-                VStack(alignment: .leading, spacing: 0) {
-                    WorktreeSubtreeView(worktree: state.worktrees[repoID]![0],
-                                        depth: 0,
-                                        sectionRepoID: repoID)
-                    AppStorageProbe(counter: storageCounter)
-                }
-                .frame(width: 420, alignment: .leading)
-                .environment(state)
-            )
-        }, { probe in
-            let coldHeight = probe.host.fittingSize.height
-            #expect(coldHeight > 0, "the subtree never laid out; the harness is not measuring anything")
+        // (2) Rebuild while the cache is warm, for a reason that has nothing
+        // to do with `worktrees`.
+        let beforeWarm = h.controller.buildCount
+        h.state.unreadByWorktree[parentID] = UnreadSummary(type: .responseComplete, mostRecentAt: Date())
+        h.controller.flushPendingRebuild()
+        let warmed = h.controller.buildCount > beforeWarm
+        try #require(warmed, "the unrelated write rebuilt nothing, so the cache was never re-served")
 
-            // (2) Re-evaluate while the cache is warm, for a reason that has
-            // nothing to do with `worktrees`.
-            let beforeFlip = storageCounter.count
-            probe.defaults.set(
-                !AppState.chevronBeforeProjectNameDefault,
-                forKey: AppState.chevronBeforeProjectNameKey
-            )
-            probe.pump(until: { storageCounter.count > beforeFlip })
-            #expect(storageCounter.count > beforeFlip,
-                    "the defaults flip invalidated nothing, so the cache was never re-served")
+        // (3) A real change to the source the cache is derived from.
+        let child = makeWorktree(repoID: repo.id, parentWorktreeID: parentID, name: "child")
+        h.state.worktrees[repo.id]?.append(child)
+        h.controller.flushPendingRebuild()
 
-            // (3) A real change to the source the cache is derived from.
-            probe.state.worktrees[repoID]?.append(
-                makeWorktree(repoID: repoID, parentWorktreeID: parentID, name: "child")
-            )
-            probe.pump(until: { probe.host.fittingSize.height > coldHeight })
-
-            #expect(probe.host.fittingSize.height > coldHeight,
-                    "the new child row never appeared: the warm cache severed the worktrees dependency")
-        })
+        #expect(h.shownIDs.contains(.worktree(child.id)),
+                "the new child row never appeared: the warm cache severed the worktrees dependency")
     }
 }
 

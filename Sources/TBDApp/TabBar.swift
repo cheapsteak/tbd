@@ -994,7 +994,7 @@ private struct TabBarItem: View {
     /// Bold this tab's label when its terminal fired a `.responseComplete`
     /// while in the background. Never bold the active/selected tab — activating
     /// it clears the unread state, but guard here too so the active tab can
-    /// never render bold even for a frame. Mirrors WorktreeRowView's bold.
+    /// never render bold even for a frame. Mirrors the sidebar row's bold.
     private var hasUnreadCompletion: Bool {
         guard !isSelected else { return false }
         let tids = appState.terminalIDs(in: tab)

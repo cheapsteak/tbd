@@ -70,4 +70,32 @@ enum CloudCreateEntryPresentation {
     ) -> Bool {
         provider.config.name != ClaudeCloudProvider.name || claudeCloudEnabled
     }
+
+    // MARK: A worktree row's context menu
+
+    /// The providers a worktree row's "New Remote Session…" item lists:
+    /// `registryProviders`, behind the row's own `isMain` gate.
+    ///
+    /// `isMain` is a gate here and not on the repo header because the main
+    /// worktree is the repo's checkout, not a parent to nest under: the nested
+    /// `+` is withheld from that row for the same reason, and this item is that
+    /// button's always-opens-the-form twin. The two gates are independent —
+    /// the registry filter answers "which providers", `isMain` answers "does
+    /// this row offer nesting at all".
+    static func worktreeRowProviders(
+        providers: [RemoteProviderStatus], isMain: Bool
+    ) -> [RemoteProviderStatus] {
+        guard !isMain else { return [] }
+        return registryProviders(providers)
+    }
+
+    /// The compiled cloud provider a worktree row's "New Cloud Session…" item
+    /// offers, or nil when there is none: `cloudEntry`, behind the same
+    /// `isMain` gate as `worktreeRowProviders`. The main row offers neither.
+    static func worktreeRowCloudEntry(
+        providers: [RemoteProviderStatus], claudeCloudEnabled: Bool, isMain: Bool
+    ) -> RemoteProviderStatus? {
+        guard !isMain else { return nil }
+        return cloudEntry(providers, claudeCloudEnabled: claudeCloudEnabled)
+    }
 }

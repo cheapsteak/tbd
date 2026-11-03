@@ -2,8 +2,8 @@ import Foundation
 import TBDShared
 
 // The values each native sidebar cell draws. One stored property per input
-// the matching SwiftUI view reads today, computed once per rebuild by
-// `SidebarRowModelFactory`; a cell never reads `AppState`. Text shown only on
+// the row shows, computed once per rebuild by `SidebarRowModelFactory`; a
+// cell never reads `AppState`. Text shown only on
 // hover — PR freshness, status-badge tooltips, a provider's summary, a remote
 // session's attention reason, a cross-repo row's full repo name — is not
 // here: it is computed when the pointer arrives, so a clock tick or a
@@ -19,9 +19,10 @@ enum RowHeightClass: Equatable {
     case withSubtitle
 }
 
-/// What a worktree row's leading slot draws (`WorktreeRowView.leadingIcon`).
+/// What a worktree row's leading slot draws.
 enum WorktreeLeadingSlot: Equatable {
-    /// The worst-state PR's glyph, as the toolbar icon picks it.
+    /// The worst-state PR's glyph, as `PRBindingPresentation.iconBinding`
+    /// picks it.
     case prStatus(PRStatusPresentation)
     /// No cached PR, and the last attempt to learn one came back undetermined.
     case prUnknown
@@ -31,12 +32,12 @@ enum WorktreeLeadingSlot: Equatable {
     case remote
 }
 
-/// Everything a worktree row draws. Mirrors `WorktreeRowView`; each property
-/// names the input it stands for.
+/// Everything a worktree row draws. Each property names the input it stands
+/// for.
 struct WorktreeRowModel: Equatable {
     /// `worktree.displayName`.
     var name: String
-    /// `leadingIcon()`: PR glyph, PR-unknown mark, pending spinner, remote
+    /// The leading slot: PR glyph, PR-unknown mark, pending spinner, remote
     /// globe, or nothing. The main row never shows a PR.
     var leading: WorktreeLeadingSlot?
     /// `RowStatusIndicator.shouldBoldName`: an unread notification that asks
@@ -51,7 +52,8 @@ struct WorktreeRowModel: Equatable {
     /// The green dev-server dot.
     var showsDevServerDot: Bool
     /// The muted "(repo)" suffix on a row nested under another repo's
-    /// section, with the repo name shortened as the SwiftUI row shortens it.
+    /// section, with the repo name shortened to five characters and an
+    /// ellipsis.
     var crossRepoLabel: String?
     /// `worktree.repoID`: the repo the row belongs to, nil for a scratch row.
     /// The cell does not draw it; `SidebarDropPolicy` compares it with a
@@ -61,13 +63,13 @@ struct WorktreeRowModel: Equatable {
     var isPinned: Bool
     /// The row's visual depth — its outline level below the section header —
     /// which places its content and its hierarchy guide lines. Group headers
-    /// count, as their padding does in the SwiftUI sidebar.
+    /// count.
     var depth: Int
     /// `AppState.scratchRowIsDimmed`: an unpromoted scratch row whose
     /// directory is missing draws at 0.5 opacity.
     var isDimmed: Bool
     /// The row sits in a hidden repo's section, which draws at 0.55 opacity
-    /// (`SidebarView` applies it to the whole `RepoSectionView`).
+    /// as a whole.
     var isInHiddenSection: Bool
     /// The repo's main checkout: no PR glyph, no pin, no nested `+`, no rename.
     var isMain: Bool
@@ -84,8 +86,7 @@ struct WorktreeRowModel: Equatable {
     var isPlaceholder: Bool = false
 }
 
-/// A repo or Scratch section header (`RepoSectionView.headerRow`,
-/// `ScratchSectionView`'s header). The title carries any emoji the user put
+/// A repo or Scratch section header. The title carries any emoji the user put
 /// in the name; `Repo` has no separate emoji field.
 struct SectionHeaderModel: Equatable {
     var title: String
@@ -100,7 +101,7 @@ struct SectionHeaderModel: Equatable {
     var isSelected: Bool
 }
 
-/// One remote session row (`RemoteSessionRowView`).
+/// One remote session row.
 struct RemoteSessionRowModel: Equatable {
     /// `remoteSessionDisplayName`: the user's rename, else the provider's
     /// title, else the raw ID.
@@ -127,7 +128,7 @@ struct RemoteSessionRowModel: Equatable {
     var heightClass: RowHeightClass { caption == nil ? .single : .withSubtitle }
 }
 
-/// One provider header in the Remote section (`RemoteProviderHeaderRow`).
+/// One provider section's header.
 struct ProviderHeaderModel: Equatable {
     /// `RemoteProviderIdentityPresentation.headline`.
     var name: String
@@ -146,7 +147,7 @@ struct ProviderHeaderModel: Equatable {
     var heightClass: RowHeightClass { issueSummary == nil ? .single : .withSubtitle }
 }
 
-/// A Remote, Exited, Ended or Hibernated disclosure (`SidebarGroupHeader`).
+/// A Remote, Exited, Ended or Hibernated disclosure.
 struct GroupHeaderModel: Equatable {
     var kind: SidebarGroupID.Kind
     /// The Hibernated group's row count, shown in its title; nil for the

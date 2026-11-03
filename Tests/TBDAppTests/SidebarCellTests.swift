@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -8,7 +7,7 @@ import TestSupport
 
 // Cells are configured and drawn directly, off any window; the bitmap probe
 // draws one row view into a bitmap. One test mounts the outline offscreen to
-// check the cells it hands out, and one hosts the SwiftUI row to measure it.
+// check the cells it hands out.
 
 /// The native sidebar's cells and row view: every model input reaches the
 /// cell, reuse cannot leak opacity, each cell reuses by identifier, the row
@@ -35,7 +34,7 @@ struct SidebarCellTests {
         #expect(cell.nameField.stringValue == "alpha")
         #expect(cell.nameField.font == SidebarCellKit.boldNameFont)
         #expect(!cell.leadingImageView.isHidden)
-        #expect(cell.leadingImageView.image === WorktreeRowView.loadIcon(iconName))
+        #expect(cell.leadingImageView.image === WorktreeRowPresentation.loadIcon(iconName))
         #expect(cell.subtitleFields.filter { !$0.isHidden }.map(\.stringValue) == ["Creating worktree…"])
         #expect(cell.suffix.indicator == .attention)
         #expect(!cell.suffix.imageView.isHidden)
@@ -206,16 +205,17 @@ struct SidebarCellTests {
     }
 
     @Test func heightMatchesClass() throws {
-        #expect(WorktreeRowCell.height(for: Self.worktree(name: "a")) == WorktreeRowView.rowHeight)
+        #expect(WorktreeRowCell.height(for: Self.worktree(name: "a")) == SidebarNativeMetrics.rowHeight)
         let subtitled = Self.worktree(name: "a", subtitles: ["Creating worktree…"])
         #expect(subtitled.heightClass == .withSubtitle)
-        let measured = try Self.measuredSwiftUIRowHeight()
-        #expect(abs(WorktreeRowCell.height(for: subtitled) - measured) < 0.5,
-                "The SwiftUI row with a subtitle measured \(measured) pt")
+        #expect(WorktreeRowCell.height(for: subtitled) == WorktreeRowCell.subtitleRowHeight)
+        // Every worktree row is one height, so the dock's arithmetic, which
+        // counts rows of `SidebarNativeMetrics.rowHeight`, holds for both.
+        #expect(WorktreeRowCell.subtitleRowHeight == SidebarNativeMetrics.rowHeight)
 
-        #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane")) == WorktreeRowView.rowHeight)
+        #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane")) == SidebarNativeMetrics.rowHeight)
         #expect(RemoteSessionRowCell.height(for: Self.session(title: "lane", caption: "running"))
-                == WorktreeRowView.rowHeight)
+                == SidebarNativeMetrics.rowHeight)
         #expect(GroupHeaderCell.height(for: Self.group()) == GroupHeaderCell.singleHeight)
         #expect(GroupHeaderCell.height(for: Self.group(summary: "1 running")) == GroupHeaderCell.summaryHeight)
         #expect(GroupHeaderCell.singleHeight < GroupHeaderCell.summaryHeight)
@@ -278,19 +278,5 @@ struct SidebarCellTests {
         let rep = try #require(rowView.bitmapImageRepForCachingDisplay(in: rowView.bounds))
         rowView.cacheDisplay(in: rowView.bounds, to: rep)
         return rep
-    }
-
-    /// The SwiftUI row with a "Creating worktree…" subtitle, laid out by
-    /// SwiftUI at sidebar width.
-    static func measuredSwiftUIRowHeight() throws -> CGFloat {
-        let suite = TestDefaultsSuite("SidebarCellTests.measure")
-        defer { suite.tearDown() }
-        let state = AppState(userDefaults: suite.defaults)
-        let repo = Repo(path: "/tmp/acme", displayName: "acme")
-        let creating = SidebarGroupFixtures.row("creating", repoID: repo.id, status: .creating)
-        state.repos = [repo]
-        state.worktrees = [repo.id: [creating]]
-        let hosting = NSHostingController(rootView: WorktreeRowView(worktree: creating).environment(state))
-        return hosting.sizeThatFits(in: CGSize(width: 320, height: 1000)).height
     }
 }

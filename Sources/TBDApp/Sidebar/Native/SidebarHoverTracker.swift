@@ -3,18 +3,16 @@ import AppKit
 /// What the pointer is over in the native sidebar, from one tracking area on
 /// a list — the outline, or the pinned dock (spec "Hover").
 ///
-/// It answers three things the SwiftUI rows each learned from their own
-/// `onHover`:
+/// It answers three things:
 /// - **the hovered row**, and the control or glyph inside it (`part`), which
 ///   the hovered cell reports through `SidebarHoverTarget`;
 /// - **the revealed sections**, whose header shows its `+` and trailing
 ///   chevron. A repo section is revealed while the pointer is over its header
-///   or any of its worktree and session rows, as `RepoSectionView`'s
-///   `onSectionHoverChange` gathers them, and stays revealed for 80 ms after
+///   or any of its worktree and session rows, and stays revealed for 80 ms after
 ///   the pointer leaves, its debounce; moving straight into another section
 ///   reveals that one at once, so for those 80 ms both are. The Scratch
 ///   section is revealed only while its header itself is hovered, with no
-///   delay, as `ScratchSectionView` gates its `+`.
+///   delay.
 ///
 /// A tracking area gets no exit event when content scrolls under a still
 /// pointer, so the pointer's last window position is kept and the hovered row
@@ -44,7 +42,7 @@ final class SidebarHoverTracker: NSResponder {
         var dimmedSection: SidebarNodeID? { part == .chevron ? row : nil }
     }
 
-    /// `RepoSectionView`'s hover-out debounce.
+    /// A repo section's hover-out debounce.
     static let sectionLinger: Duration = .milliseconds(80)
 
     private(set) var state = State()

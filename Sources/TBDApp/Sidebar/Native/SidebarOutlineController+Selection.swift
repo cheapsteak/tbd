@@ -35,7 +35,7 @@ extension SidebarOutlineController {
     /// Tells `AppState`, once, when a selected worktree left the model during
     /// the apply — the daemon dropped it without `AppState` pruning the
     /// selection. A row merely out of view (a collapsed section, a filter)
-    /// stays selected, as it does in the `List`.
+    /// stays selected.
     func reconcileVanishedSelection() {
         let selected = appState.selectedWorktreeIDs
         let unshown = selected.filter { !tree.contains(.worktree($0)) }
@@ -58,8 +58,8 @@ extension SidebarOutlineController {
         return SidebarSelectionBridge.isSelectable(item.id)
     }
 
-    /// A user's selection: written to `AppState.selectedWorktreeIDs` as the
-    /// `List`'s tags would write it, then mirrored straight back, since the
+    /// A user's selection: written to `AppState.selectedWorktreeIDs` through
+    /// `SidebarSelectionBridge`, then mirrored straight back, since the
     /// `didSet` may route it — a remote row's ID never rests in that set. A
     /// ⌘- or ⇧-click extends the selection, so selected rows the outline does
     /// not show — inside a collapsed section, or only in the dock — stay

@@ -2,19 +2,18 @@ import AppKit
 import SwiftUI
 
 /// What the native sidebar's cells share: label and image factories, the
-/// fonts the SwiftUI rows use, a symbol cache, and the suffix glyph's look and
-/// spoken words.
+/// row fonts, a symbol cache, and the suffix glyph's look and spoken words.
 @MainActor
 enum SidebarCellKit {
-    /// `HStack(spacing: 6)` in `WorktreeRowView` and `RemoteSessionRowView`.
+    /// The gap between a row's glyph, name and trailing marks.
     static let rowSpacing: CGFloat = 6
-    /// The leading and suffix glyph slot: `.frame(width: 12, height: 12)`.
+    /// The leading and suffix glyph slot: a 12 pt square.
     static let glyphSide: CGFloat = 12
     /// A row's share of its own opacity while its section's chevron is
-    /// hovered, as `RepoSectionView` dims the rows the gesture would hide.
+    /// hovered: the rows the gesture would hide dim.
     static let chevronHoverOpacity: CGFloat = 0.7
 
-    // MARK: Fonts — the SwiftUI rows' text styles on macOS
+    // MARK: Fonts — the sidebar's text styles on macOS
 
     static let nameFont = NSFont.systemFont(ofSize: 13)
     static let boldNameFont = NSFont.systemFont(ofSize: 13, weight: .bold)
@@ -63,9 +62,8 @@ enum SidebarCellKit {
         return button
     }
 
-    /// A 20 pt square hover affordance in `HoverPressButtonStyle`'s look: a
-    /// secondary glyph that gains a wash while the pointer is over it and a
-    /// deeper one while pressed. The section `+`, the worktree row's nested
+    /// A 20 pt square hover affordance: a secondary glyph that gains a wash
+    /// while the pointer is over it and a deeper one while pressed. The section `+`, the worktree row's nested
     /// `+` and its gutter pin.
     static func hoverButton(symbol name: String = "plus", size: CGFloat = 10) -> SidebarHoverButton {
         let button = SidebarHoverButton(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
@@ -127,8 +125,8 @@ enum SidebarCellKit {
 
     // MARK: Suffix glyph
 
-    /// The suffix glyph's tint and the opacity it draws at, as
-    /// `SuffixRowIndicator.color` gives them to the SwiftUI rows.
+    /// The suffix glyph's tint and the opacity it draws at, from
+    /// `SuffixRowIndicator.color`.
     static func suffixTint(_ indicator: SuffixRowIndicator) -> (color: NSColor, alpha: CGFloat) {
         switch indicator {
         case .error: (color: NSColor.systemRed, alpha: 1)
@@ -140,7 +138,7 @@ enum SidebarCellKit {
     }
 
     /// What a sighted user reads from the suffix glyph, for the row's
-    /// accessibility label: the badge's help text in the SwiftUI row.
+    /// accessibility label: the badge's help text.
     static func spokenStatus(_ indicator: SuffixRowIndicator) -> String {
         switch indicator {
         case .error: "Error"
@@ -176,15 +174,14 @@ protocol SidebarHoverTarget: AnyObject {
     func hoverPart(at point: NSPoint) -> SidebarHoverPart
 }
 
-/// A borderless glyph button that draws `HoverPressButtonStyle`'s wash: the
-/// primary colour at 0.08 while the pointer is over it, 0.15 while pressed.
+/// A borderless glyph button that draws a hover wash: the primary colour at
+/// 0.08 while the pointer is over it, 0.15 while pressed.
 /// The hover tracker, not a tracking area of its own, says when it is hovered.
 final class SidebarHoverButton: NSButton {
     var showsHoverWash = false {
         didSet { if showsHoverWash != oldValue { needsDisplay = true } }
     }
-    /// Off for the chevron leading a title, which the SwiftUI path draws
-    /// plain.
+    /// Off for the chevron leading a title, which draws plain.
     var drawsWash = true {
         didSet { if drawsWash != oldValue { needsDisplay = true } }
     }

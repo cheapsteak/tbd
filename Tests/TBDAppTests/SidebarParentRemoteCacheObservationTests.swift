@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDShared
 
 @MainActor
 private final class ParentProjectionRenderRecord {
@@ -28,19 +29,6 @@ private struct ParentProjectionProbe: View {
             Text("\(groups.remoteRoots.count) active roots; \(groups.exitedRoots.count) exited roots")
         }
     }
-}
-
-private struct ParentSubtreeHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat { 0 }
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-@MainActor
-private final class ParentSubtreeGeometry {
-    var height: CGFloat = 0
 }
 
 @MainActor
@@ -74,99 +62,106 @@ struct SidebarParentRemoteCacheObservationTests {
         #expect(changed, "A \(input) mutation did not reach the warm-cache SwiftUI body")
     }
 
-    @Test func renderedSubtreeRemovesExitedDisclosureWhenProviderBecomesStale() async throws {
-        let fixture = ParentGroupCacheFixture()
-        defer { fixture.cleanUp() }
-        let state = fixture.state
-        state.expandedSidebarGroups = [
-            .init(owner: .parent(fixture.parent.id), kind: .remote),
-            .init(owner: .parent(fixture.parent.id), kind: .exited)
-        ]
-        // The actual renderer mounts against an already-warm projection.
-        _ = state.sidebarRemoteGroups(parentID: fixture.parent.id)
-        let geometry = ParentSubtreeGeometry()
-        let host = OffscreenHost(
-            root: VStack(alignment: .leading, spacing: 0) {
-                WorktreeSubtreeView(worktree: fixture.parent, depth: 0, sectionRepoID: fixture.parent.repoID!)
-            }
-            .frame(width: 320)
-            .fixedSize(horizontal: false, vertical: true)
-            .background(GeometryReader { proxy in
-                Color.clear.preference(key: ParentSubtreeHeightKey.self, value: proxy.size.height)
-            })
-            .onPreferenceChange(ParentSubtreeHeightKey.self) { height in
-                Task { @MainActor in geometry.height = height }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .environment(state).defaultAppStorage(state.userDefaults),
-            size: NSSize(width: 320, height: 300))
-        defer { host.tearDown() }
-        let mounted = await host.settle { geometry.height > 0 }
-        try #require(mounted, "The inner subtree must lay out before measuring")
-        await host.pump(times: 5)
-        let initialHeight = geometry.height
-        fixture.mutate(.providers)
-        let changed = await host.settle { geometry.height < initialHeight }
-        try #require(changed, "The stale provider must remove the Exited header")
-        await host.pump(times: 5)
-        let expandedHeight = geometry.height
-        #expect(state.sidebarRemoteGroups(parentID: fixture.parent.id).remoteRoots.map(\.id) == [fixture.worker.id])
+    /// The outline drawn against an already-warm projection drops the Exited
+    /// disclosure once the provider goes stale, and the worker stays under
+    /// Remote. Collapsing Remote then removes exactly that one row, which
+    /// checks the outline independently of the model assertion.
+    @Test func outlineRemovesExitedDisclosureWhenProviderBecomesStale() throws {
+        let fixture = ParentOutlineFixture("parentStale", workflowGroups: true)
+        defer { fixture.h.tearDown() }
+        let h = fixture.h
+        let remote = SidebarGroupID(owner: .parent(fixture.parent.id), kind: .remote)
+        let exited = SidebarGroupID(owner: .parent(fixture.parent.id), kind: .exited)
+        h.state.expandedSidebarGroups = [remote, exited]
+        _ = h.state.sidebarRemoteGroups(parentID: fixture.parent.id)
+        h.mount()
+        try #require(fixture.shownParent(of: .worktree(fixture.worker.id)) == .group(exited), h.evidence())
+        try #require(fixture.shownParent(of: .group(exited)) == .group(remote), h.evidence())
+        try #require(fixture.shownParent(of: .group(remote)) == .worktree(fixture.parent.id), h.evidence())
 
-        // One worker is still mounted under Remote. Collapsing that group
-        // must remove exactly its row, independently of the model assertion.
-        state.toggleSidebarGroup(.init(owner: .parent(fixture.parent.id), kind: .remote))
-        let collapsed = await host.settle {
-            abs(expandedHeight - geometry.height - WorktreeRowView.rowHeight) < 0.5
-        }
-        #expect(collapsed, "Remote must retain the worker row after its Exited subgroup disappears")
+        h.state.remoteProviders = [SidebarGroupFixtures.provider(health: .stale)]
+        h.controller.flushPendingRebuild()
+        let staleRows = h.shownIDs
+        #expect(!staleRows.contains(.group(exited)), "The stale provider must remove the Exited header")
+        #expect(fixture.shownParent(of: .worktree(fixture.worker.id)) == .group(remote), h.evidence())
+        let remoteRoots = h.state.sidebarRemoteGroups(parentID: fixture.parent.id).remoteRoots.map(\.id)
+        #expect(remoteRoots == [fixture.worker.id])
+
+        h.state.toggleSidebarGroup(remote)
+        h.controller.flushPendingRebuild()
+        let collapsedRows = h.shownIDs
+        let expectedCount = staleRows.count - 1
+        #expect(collapsedRows.count == expectedCount,
+                "Remote must have held exactly the worker row after its Exited subgroup went: \(h.evidence().rawValue)")
+        #expect(!collapsedRows.contains(.worktree(fixture.worker.id)), h.evidence())
+        #expect(collapsedRows.contains(.group(remote)), h.evidence())
     }
 
-    /// With the sidebar-groups toggle off, a parent's remote worker renders
-    /// inline as a plain child row, as it did before parent groups existed:
-    /// no Remote or Exited header, and the grouped projection is never read.
-    @Test func groupsOffRendersRemoteChildrenInlineWithoutParentHeaders() async throws {
-        let fixture = ParentGroupCacheFixture(workflowGroups: false)
-        defer { fixture.cleanUp() }
-        let state = fixture.state
-        let geometry = ParentSubtreeGeometry()
-        let host = OffscreenHost(
-            root: VStack(alignment: .leading, spacing: 0) {
-                WorktreeSubtreeView(worktree: fixture.parent, depth: 0, sectionRepoID: fixture.parent.repoID!)
-            }
-            .frame(width: 320)
-            .fixedSize(horizontal: false, vertical: true)
-            .background(GeometryReader { proxy in
-                Color.clear.preference(key: ParentSubtreeHeightKey.self, value: proxy.size.height)
-            })
-            .onPreferenceChange(ParentSubtreeHeightKey.self) { height in
-                Task { @MainActor in geometry.height = height }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .environment(state).defaultAppStorage(state.userDefaults),
-            size: NSSize(width: 320, height: 300))
-        defer { host.tearDown() }
-        let mounted = await host.settle { geometry.height > 0 }
-        try #require(mounted, "The inner subtree must lay out before measuring")
-        await host.pump(times: 5)
-        #expect(state.expandedSidebarGroups.isEmpty)
-        #expect(state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil,
-                "The ungrouped subtree must not read the parent group projection")
-        let inlineHeight = geometry.height
+    /// With the sidebar-groups toggle off, a parent's remote worker shows
+    /// inline as a plain child row: no Remote or Exited header under the
+    /// parent, and the grouped projection is never read.
+    @Test func groupsOffShowsRemoteChildrenInlineWithoutParentHeaders() throws {
+        let fixture = ParentOutlineFixture("parentInline", workflowGroups: false)
+        defer { fixture.h.tearDown() }
+        let h = fixture.h
+        h.mount()
+        #expect(h.state.expandedSidebarGroups.isEmpty)
+        #expect(fixture.parentGroupRows.isEmpty, h.evidence())
+        #expect(fixture.shownParent(of: .worktree(fixture.worker.id)) == .worktree(fixture.parent.id), h.evidence())
+        #expect(h.state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil,
+                "The ungrouped outline must not read the parent group projection")
 
-        // The worker is a plain row: moving it to another parent removes
-        // exactly one row height, where a collapsed Remote group would have
-        // hidden it behind a header.
-        fixture.mutate(.worktrees)
-        let moved = await host.settle {
-            abs(inlineHeight - geometry.height - WorktreeRowView.rowHeight) < 0.5
+        // The worker is a plain row: moving it to another parent moves that
+        // one row there, where a collapsed Remote group would have hidden it
+        // behind a header.
+        h.state.worktrees[fixture.parent.repoID!]?[2].parentWorktreeID = fixture.other.id
+        h.controller.flushPendingRebuild()
+        #expect(fixture.shownParent(of: .worktree(fixture.worker.id)) == .worktree(fixture.other.id), h.evidence())
+        #expect(fixture.parentGroupRows.isEmpty, h.evidence())
+        #expect(h.state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil)
+
+        // Positive control: turning the toggle on reaches the grouped build
+        // through the same outline, so the off-branch assertions above are live.
+        h.defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        h.controller.flushPendingRebuild()
+        #expect(h.state.sidebarParentRemoteGroupsCache[fixture.parent.id] != nil,
+                "Turning sidebar groups on must build the parent projection")
+    }
+}
+
+/// `ParentGroupCacheFixture`'s rows in an outline harness's state, under a
+/// repo the outline draws a section for.
+@MainActor
+private struct ParentOutlineFixture {
+    let h: OutlineHarness
+    let parent: Worktree
+    let other: Worktree
+    let worker: Worktree
+
+    init(_ label: String, workflowGroups: Bool) {
+        h = OutlineHarness("parentRemote.\(label)")
+        h.defaults.set(workflowGroups, forKey: AppState.sidebarWorkflowGroupsKey)
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        parent = SidebarGroupFixtures.row("director", repoID: repo.id)
+        other = SidebarGroupFixtures.row("other", repoID: repo.id)
+        worker = SidebarGroupFixtures.row("worker", repoID: repo.id, remote: "worker", parent: parent.id)
+        h.state.repos = [repo]
+        h.state.worktrees = [repo.id: [parent, other, worker]]
+        h.state.remoteSessions = [SidebarGroupFixtures.session("worker", state: .exited)]
+        h.state.remoteProviders = [SidebarGroupFixtures.provider()]
+    }
+
+    /// The outline row `id` hangs under, by what the outline shows.
+    func shownParent(of id: SidebarNodeID) -> SidebarNodeID? {
+        guard let item = h.controller.item(for: id) else { return nil }
+        return (h.outline.parent(forItem: item) as? SidebarItem)?.id
+    }
+
+    /// The shown group headers a worktree row owns.
+    var parentGroupRows: [SidebarNodeID] {
+        h.shownIDs.filter { id in
+            guard case .group(let group) = id, case .parent = group.owner else { return false }
+            return true
         }
-        #expect(moved, "The remote worker must render inline while groups are off")
-        #expect(state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil)
-
-        // Positive control: turning the toggle on reaches the grouped renderer
-        // through the same host, so the off-branch assertions above are live.
-        state.userDefaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
-        let grouped = await host.settle { state.sidebarParentRemoteGroupsCache[fixture.parent.id] != nil }
-        #expect(grouped, "Turning sidebar groups on must render the parent projection")
     }
 }

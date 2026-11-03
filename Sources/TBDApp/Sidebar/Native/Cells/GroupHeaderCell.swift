@@ -2,7 +2,7 @@ import AppKit
 import TBDShared
 
 /// A Remote, Exited, Ended or Hibernated disclosure, drawn from a
-/// `GroupHeaderModel` as `SidebarGroupHeader` draws it: the small chevron, the
+/// `GroupHeaderModel`: the small chevron, the
 /// title with its summary line beneath, and on the trailing edge the attention
 /// glyph or, failing one, the uncertainty mark. The whole row is the toggle;
 /// the controller runs it from the outline's click action.
@@ -10,7 +10,7 @@ final class GroupHeaderCell: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.groupHeader")
 
     /// Title alone: a 16 pt line plus 4 pt above and below, raised to the
-    /// `List`'s 26 pt minimum.
+    /// sidebar's 26 pt minimum row height.
     static let singleHeight: CGFloat = 26
     /// Title, 1 pt, a 10 pt summary line, and the same 4 pt padding.
     static let summaryHeight: CGFloat = 36

@@ -813,10 +813,9 @@ extension AppState {
     // MARK: - Reorder
 
     /// Reorder model profiles, triggered by SwiftUI `.onMove` in the settings
-    /// profile list. Mirrors `AppState.reorderTopLevelWorktrees`: updates
-    /// locally first (optimistic), then persists via RPC; rolls back on error.
-    /// Unlike worktrees, profiles are a flat global list — no nesting/repo
-    /// scoping to filter around.
+    /// profile list: updates locally first (optimistic), then persists via
+    /// RPC; rolls back on error. Profiles are a flat global list — no
+    /// nesting or repo scoping to filter around.
     func reorderModelProfiles(fromOffsets source: IndexSet, toOffset destination: Int) {
         let previous = modelProfiles
         var rows = modelProfiles

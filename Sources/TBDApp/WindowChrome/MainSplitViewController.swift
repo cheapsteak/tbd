@@ -3,14 +3,12 @@ import os
 
 private let splitLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
 
-/// The main window's split when it is built with the AppKit chrome
-/// (`MainWindowChrome.appKit`): a sidebar item over the sidebar and a content
-/// item over the detail area, in place of SwiftUI's `NavigationSplitView`.
+/// The main window's split: a sidebar item over the sidebar and a content
+/// item over the detail area.
 ///
 /// Collapse belongs to the sidebar item. `canCollapse` is on and
 /// `canCollapseFromWindowResize` off, the guard against #119, and both are set
-/// once, here: nothing on this path resets them, so
-/// `AppDelegate.lockSidebarOpen(in:)` leaves this controller alone.
+/// once, here: nothing resets them.
 ///
 /// The toolbar hangs off two hooks: `onViewDidAppear` hands over the window
 /// once the split is in one, and `onSidebarCollapsedChange` reports each

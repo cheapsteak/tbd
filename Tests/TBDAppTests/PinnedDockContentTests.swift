@@ -255,7 +255,7 @@ struct PinnedDockContentTests {
 
     /// The counterpart choice: a session the provider stopped reporting keeps
     /// its slot (it self-heals when the provider lists it again) and renders
-    /// with `RemoteSessionRowView`'s existing dimmed styling.
+    /// with the remote row's existing dimmed styling.
     @Test("a gone remote session keeps its pin and its dock slot")
     func remoteGoneStaysPinned() {
         let rows = PinnedDockContent.remoteRows(
@@ -273,7 +273,7 @@ struct PinnedDockContentTests {
     }
 
     /// Two providers can mint the same session id; the dock rows must still
-    /// be distinct, because `List`/`ForEach` identity is the row `id`.
+    /// be distinct, because the dock's row identity is the row `id`.
     @Test("same session id on two providers yields two distinct dock rows")
     func remoteRowsAreKeyedByProviderAndSession() {
         let rows = PinnedDockContent.remoteRows(allRemoteSessions: [
@@ -303,36 +303,5 @@ struct PinnedDockContentTests {
             allRemoteSessions: [Self.remote("r", pinnedAt: Self.at(5))])
         #expect(remoteRows.map(\.session.payload.id) == ["r"])
         #expect(wtRows.count == 2)   // the remote pin added no worktree row
-    }
-
-    // MARK: subtree
-
-    @Test("subtree returns just the root when collapsed")
-    func subtreeCollapsed() {
-        let root = Self.wt("root", pinnedAt: Self.at(0), pinSortOrder: 0)
-        let rows = PinnedDockContent.rows(allWorktrees: [root],
-                                          selectedIDs: [], children: Self.noChildren)
-        #expect(PinnedDockContent.subtree(of: root.id, in: rows).map(\.worktree.name) == ["root"])
-    }
-
-    @Test("subtree returns the root plus its descendants, and nothing from a sibling")
-    func subtreeExpanded() {
-        let aID = UUID(), bID = UUID()
-        let a = Self.wt("a", id: aID, pinnedAt: Self.at(0), pinSortOrder: 0)
-        let aKid = Self.wt("aKid", parent: aID)
-        let b = Self.wt("b", id: bID, pinnedAt: Self.at(10), pinSortOrder: 1)
-        let all = [a, aKid, b]
-        let rows = PinnedDockContent.rows(allWorktrees: all, selectedIDs: [aID],
-                                          children: Self.childLookup(all))
-        #expect(PinnedDockContent.subtree(of: aID, in: rows).map(\.worktree.name) == ["a", "aKid"])
-        #expect(PinnedDockContent.subtree(of: bID, in: rows).map(\.worktree.name) == ["b"])
-    }
-
-    @Test("subtree of an id not in the rows is empty")
-    func subtreeMissing() {
-        let root = Self.wt("root", pinnedAt: Self.at(0))
-        let rows = PinnedDockContent.rows(allWorktrees: [root],
-                                          selectedIDs: [], children: Self.noChildren)
-        #expect(PinnedDockContent.subtree(of: UUID(), in: rows).isEmpty)
     }
 }

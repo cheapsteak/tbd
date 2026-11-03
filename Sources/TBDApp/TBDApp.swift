@@ -314,57 +314,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // State transition — SwiftUI either hadn't applied the chrome yet or just reverted it.
             windowChromeLogger.info("Applied chrome to \(window.title, privacy: .public) (transparent: \(wasTransparent, privacy: .public)->\(window.titlebarAppearsTransparent, privacy: .public), fullSize: \(hadFullSize, privacy: .public)->\(window.styleMask.contains(.fullSizeContentView), privacy: .public))")
         }
-
-        Self.lockSidebarOpen(in: window)
-    }
-
-    /// Walks the window's view hierarchy to find SwiftUI's internal NSSplitViewController
-    /// and clears both collapse flags on its sidebar item. SwiftUI's NavigationSplitView
-    /// auto-collapses the sidebar on narrow widths and on wake-from-sleep transients;
-    /// this is the AppKit-level escape hatch. Source: Apple Dev Forums thread 727968.
-    /// Idempotent — safe to call repeatedly.
-    @MainActor
-    static func lockSidebarOpen(in window: NSWindow) {
-        guard let contentView = window.contentView,
-              let splitVC = findSplitViewController(in: contentView) else {
-            return
-        }
-        // The AppKit split sets its own collapse flags once (spec, "Window structure").
-        if splitVC is MainSplitViewController { return }
-        guard let sidebarItem = splitVC.splitViewItems.first,
-              sidebarItem.behavior == .sidebar else {
-            // .sidebar guard: if the detail pane ever hosts its own
-            // NSSplitViewController (nested NavigationSplitView, NavigationView),
-            // the DFS could return the inner one and we'd lock the wrong pane.
-            return
-        }
-        let wasCollapsible = sidebarItem.canCollapse
-        let wasResizeCollapsible = sidebarItem.canCollapseFromWindowResize
-        sidebarItem.canCollapse = false
-        sidebarItem.canCollapseFromWindowResize = false
-        if wasCollapsible || wasResizeCollapsible {
-            // State transition — SwiftUI rebuilt the controller or hadn't been touched yet.
-            windowChromeLogger.info("Locked sidebar open on \(String(describing: type(of: splitVC)), privacy: .public) (canCollapse: \(wasCollapsible, privacy: .public)->false, canCollapseFromWindowResize: \(wasResizeCollapsible, privacy: .public)->false)")
-        }
-    }
-
-    /// Depth-first search for an NSSplitViewController in the responder chain of any
-    /// descendant view. SwiftUI places its NSSplitViewController as the nextResponder
-    /// of the NSSplitView it owns; we walk subviews looking for that backing chain.
-    @MainActor
-    private static func findSplitViewController(in root: NSView) -> NSSplitViewController? {
-        var stack: [NSView] = [root]
-        while let view = stack.popLast() {
-            var responder: NSResponder? = view.nextResponder
-            while let current = responder {
-                if let splitVC = current as? NSSplitViewController {
-                    return splitVC
-                }
-                responder = current.nextResponder
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        return nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -502,16 +451,6 @@ struct TBDAppMain: App {
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
 
-    /// The main window's split and toolbar, read from the native sidebar flag
-    /// once per launch, in the store `appState` reads. The structure is
-    /// chosen when the window is created: flipping the Settings toggle swaps
-    /// the sidebar's contents at once and the chrome at the next launch
-    /// (docs/specs/2026-11-01-appkit-window-chrome-design.md, "Switching").
-    /// Read live, a flip would tear down the window's split and toolbar
-    /// mid-session. It rests on the same "`App.main()` instantiates this
-    /// once" as `appState` above.
-    private let windowChrome: MainWindowChrome = MainWindowChrome.resolve(TBDAppMain.resolveUserDefaults())
-
     /// Choose the UserDefaults domain for this app instance. The mock harness
     /// (`TBD_MOCK`) routes `AppState` — which persists window frame and layout
     /// state — to an isolated suite so a mock run never writes those back into
@@ -538,7 +477,7 @@ struct TBDAppMain: App {
 
     var body: some Scene {
         Window("TBD", id: "main") {
-            ContentView(chrome: windowChrome)
+            ContentView()
                 .environment(appState)
                 .environmentObject(appearance)
                 .environmentObject(overlayCoordinator)

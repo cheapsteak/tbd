@@ -9,7 +9,7 @@ import AppKit
 /// bounds, with the indentation inside it. Its colour and shape are
 /// `SidebarRowHighlight`'s.
 ///
-/// The guide lines follow depth, in the SwiftUI row's terms: a row's content
+/// The guide lines follow depth: a row's content
 /// sits at the row inset plus `level * 16`, and an owner's line runs under its
 /// leading icon, `SidebarNativeMetrics.guideLineOffset` into its level. The
 /// configuration names each line the row draws a part of (`guides`) by its
@@ -255,8 +255,7 @@ final class SidebarRowView: NSTableRowView {
         path.stroke()
     }
 
-    /// The guide lines go over the highlight, as the SwiftUI row overlays
-    /// them on its tint. The pieces are in flipped coordinates, so an
+    /// The guide lines go over the highlight. The pieces are in flipped coordinates, so an
     /// unflipped row draws them through a flip. Each style's alpha
     /// multiplies its colour's own, as `Color.secondary.opacity(_:)` does.
     override func draw(_ dirtyRect: NSRect) {

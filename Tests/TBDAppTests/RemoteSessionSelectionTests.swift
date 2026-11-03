@@ -341,7 +341,7 @@ struct RemoteSessionSelectionTests {
         }
     }
 
-    /// `RenameableLabel`'s `allowsEmptyCommit` (wired in `RemoteSessionRowView`)
+    /// `RenameableLabel`'s `allowsEmptyCommit` (wired in the sidebar's rename editor)
     /// commits `""` to clear an override back to the provider's title — the
     /// same "clear to default" affordance a blank tab rename has. Renaming
     /// to blank must REMOVE the key (not store `""`), or `remoteSessionDisplayName`
@@ -371,15 +371,14 @@ struct RemoteSessionSelectionTests {
         }
     }
 
-    // MARK: - Task 9d: selection unification (remote rows tagged into
-    // `selectedWorktreeIDs` for List-native keyboard nav / focus ring)
+    // MARK: - Selection unification (remote rows written into
+    // `selectedWorktreeIDs` by the sidebar's selection bridge)
 
-    /// Simulates what happens when arrow-key navigation (not a click) lands
-    /// on a remote row: SwiftUI's `List(selection:)` writes the row's tag
-    /// directly into `selectedWorktreeIDs` — `RemoteSessionRowView.onTapGesture`
-    /// never fires for a keyboard-only move. The `didSet` must still route
-    /// this into `selectRemoteSession` so the row's own highlight and
-    /// `selectedRemoteSession` end up correct exactly as a click would.
+    /// Simulates what happens when the sidebar selects a remote row, by click
+    /// or by arrow key: its selection bridge writes the row's ID directly into
+    /// `selectedWorktreeIDs`. The `didSet` must route this into
+    /// `selectRemoteSession` so the row's own highlight and
+    /// `selectedRemoteSession` end up correct.
     @Test func remoteSessionTagEnteringSelectedWorktreeIDsRoutesThroughSelectRemoteSession() {
         withState { state in
             let session = RemoteSessionInfo(
@@ -387,8 +386,8 @@ struct RemoteSessionSelectionTests {
                 gone: false, dismissed: false, lastSeen: Date())
             state.remoteSessions = [session]
 
-            // Simulate the List binding writing the tag straight in (what
-            // arrow-key traversal does), not `selectRemoteSession` itself.
+            // Simulate the selection bridge writing the ID straight in, not
+            // `selectRemoteSession` itself.
             state.selectedWorktreeIDs = [session.id]
 
             #expect(state.selectedRemoteSession == RemoteSessionSelection(provider: "acme", sessionID: "s1"))
@@ -476,7 +475,7 @@ struct RemoteSessionSelectionTests {
             state.remoteSessions = [session]
 
             // Simulates a shift+↓ range extending FROM the local worktree
-            // row ONTO the remote row: the List binding writes both tags in
+            // row ONTO the remote row: the selection bridge writes both IDs in
             // a single assignment.
             state.selectedWorktreeIDs = [wtID, session.id]
 

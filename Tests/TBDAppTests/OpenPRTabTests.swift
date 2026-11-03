@@ -4,13 +4,12 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
-/// Tier 1. The rule the TOOLBAR's PR surfaces share: clicking a PR opens an
-/// in-app webview tab, and clicking the SAME PR again focuses the tab that is
-/// already there instead of piling up duplicates.
+/// Tier 1. The in-app PR tab rule: opening a PR opens an in-app webview tab,
+/// and opening the SAME PR again focuses the tab that is already there instead
+/// of piling up duplicates.
 ///
-/// `AppState.openPR` is the single helper behind the toolbar split button and
-/// its multi-PR dropdown rows, so asserting it here covers both. The status-bar
-/// chips and the sidebar row indicator are deliberately NOT callers — they open
+/// `AppState.openPR` opens a PR as an in-app tab. The status-bar chips and the
+/// sidebar row indicator are deliberately NOT callers — they open
 /// the default browser directly, which is the user's stated preference for those
 /// two surfaces. Every case passes `inBrowser: false` explicitly — the production
 /// default reads `NSEvent.modifierFlags` at the call site, which a test must not

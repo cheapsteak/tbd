@@ -207,8 +207,8 @@ extension AppState {
     }
 
     /// The repository section's rows under the current grouping setting.
-    /// `matchedSessions` is the view's memoized
-    /// `RepoSectionView.matchedRemoteSessions`, evaluated only when ungrouped.
+    /// `matchedSessions` is `sidebarMatchedRemoteSessions(repoID:)`, evaluated
+    /// only when ungrouped.
     func sidebarRepositoryLayout(
         repoID: UUID, grouped: Bool, collapseEnded: Bool,
         matchedSessions: @autoclosure () -> [RemoteSessionInfo]
@@ -225,9 +225,9 @@ extension AppState {
     func sidebarProviderLayout(provider: String, grouped: Bool, collapseEnded: Bool) -> SidebarSectionLayout {
         .provider(
             grouped: grouped, collapseEnded: collapseEnded, unread: unreadByRemoteSession,
-            sessions: RemoteSectionView.sessions(
+            sessions: SidebarSessionPlacement.sessions(
                 in: remoteSessions, forProvider: provider,
-                knownRepoIDs: RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)),
+                knownRepoIDs: SidebarSessionPlacement.knownRepoIDs(repos: repos, repoFilter: repoFilter)),
             remoteGroups: sidebarRemoteGroups(provider: provider))
     }
 
@@ -256,12 +256,12 @@ extension AppState {
     }
 
     /// The repo's remote sessions as the sidebar shows them: filtered and sorted
-    /// by `RepoSectionView.matchedRemoteSessionIndices`, memoized per repo.
+    /// by `SidebarSessionPlacement.matchedRemoteSessionIndices`, memoized per repo.
     ///
     /// The memo stores positions into `remoteSessions`, not values, so a hit
     /// returns the CURRENT elements: `state`, `agentState`, `gone` and `lastSeen`
     /// are never stale on a hit. Positions stay valid because any change to the
-    /// per-element match inputs (`RepoSectionView.sameMatchInputs`), including a
+    /// per-element match inputs (`SidebarSessionPlacement.sameMatchInputs`), including a
     /// change in count, order or identity, clears the cache in the
     /// `remoteSessions` `didSet`. Equal inputs elementwise therefore mean the
     /// same sessions sit at the same positions.
@@ -270,11 +270,11 @@ extension AppState {
     /// for the warm-cache dependency reason in `AppState.swift`.
     func sidebarMatchedRemoteSessions(repoID: UUID) -> [RemoteSessionInfo] {
         let sessions = remoteSessions
-        let adopted = RepoSectionView.adoptedLocations(worktrees[repoID] ?? [])
+        let adopted = SidebarSessionPlacement.adoptedLocations(worktrees[repoID] ?? [])
         if let memo = sidebarMatchedSessionsCache[repoID], memo.adopted == adopted {
             return memo.indices.map { sessions[$0] }
         }
-        let indices = RepoSectionView.matchedRemoteSessionIndices(
+        let indices = SidebarSessionPlacement.matchedRemoteSessionIndices(
             sessions, repoID: repoID, adopted: adopted)
         sidebarMatchedSessionsSortCount += 1
         sidebarMatchedSessionsCache[repoID] = SidebarMatchedSessionsMemo(adopted: adopted, indices: indices)
@@ -292,10 +292,10 @@ extension AppState {
 
     func sidebarRemoteGroups(provider: String) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
-        let known = RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: repos, repoFilter: repoFilter)
         return SidebarRemoteGroups(
             roots: [],
-            remainder: RemoteSectionView.sessions(
+            remainder: SidebarSessionPlacement.sessions(
                 in: snapshot.sessionsByProvider[provider] ?? [], forProvider: provider, knownRepoIDs: known),
             snapshot: snapshot,
             unread: unreadByRemoteSession)
@@ -384,10 +384,10 @@ extension AppState {
         guard let session = remoteSessions.first(where: { $0.id == id }),
               !session.dismissed, !session.payload.isArchived, SidebarEndedSessions.isEnded(session)
         else { return [] }
-        let known = RemoteSectionView.knownRepoIDs(repos: repos, repoFilter: repoFilter)
+        let known = SidebarSessionPlacement.knownRepoIDs(repos: repos, repoFilter: repoFilter)
         if let repoID = session.resolvedRepoID, known.contains(repoID) {
             let location = WorktreeLocation.remote(provider: session.provider, sessionID: session.payload.id)
-            guard !RepoSectionView.adoptedLocations(worktrees[repoID] ?? []).contains(location) else { return [] }
+            guard !SidebarSessionPlacement.adoptedLocations(worktrees[repoID] ?? []).contains(location) else { return [] }
             return [.init(owner: .repository(repoID), kind: .ended)]
         }
         return [.init(owner: .provider(session.provider), kind: .ended)]

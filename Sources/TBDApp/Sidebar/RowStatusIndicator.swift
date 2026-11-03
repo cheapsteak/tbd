@@ -35,7 +35,7 @@ enum SuffixRowIndicator: Equatable {
     case turnFailed
 
     /// SF Symbol for glyph-based suffixes. `.working` is `nil` because it is
-    /// rendered as an animated `TypingDotsView`, not a static symbol.
+    /// rendered as an animated `TypingDotsNSView`, not a static symbol.
     var systemImage: String? {
         switch self {
         case .error:      return "exclamationmark.octagon.fill"
@@ -49,7 +49,7 @@ enum SuffixRowIndicator: Equatable {
     }
 
     /// Tint for the suffix glyph. `.working` reuses Claude's coral; the
-    /// `TypingDotsView` reads this same value for its dots.
+    /// `TypingDotsNSView` reads this same value for its dots.
     var color: Color {
         switch self {
         case .error:

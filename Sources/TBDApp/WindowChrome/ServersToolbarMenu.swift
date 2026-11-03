@@ -21,8 +21,10 @@ enum ServersMenuEntry: Equatable {
     case separator
 }
 
-/// The Servers menu the AppKit toolbar builds each time it opens, mirroring
-/// `ContentView.serversMenu(worktreeID:list:)` item for item.
+/// The Servers menu the toolbar builds each time it opens: the main URL first
+/// (D4), then each server with its state, its URLs and its actions; then Start
+/// all / Stop all / Refresh status; then parse errors and the last action's
+/// failures.
 enum ServersToolbarMenu {
     nonisolated static func entries(list: DevServerListResult, messages: [String]) -> [ServersMenuEntry] {
         var result: [ServersMenuEntry] = []

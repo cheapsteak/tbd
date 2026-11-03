@@ -26,6 +26,18 @@ enum MatchedSessionFixtures {
             gone: gone, dismissed: dismissed, lastSeen: lastSeen,
             resolvedRepoID: repo, pinnedAt: pinnedAt)
     }
+
+    /// The sessions a repo section shows, in order: the production
+    /// composition `AppState.sidebarMatchedRemoteSessions(repoID:)` memoizes —
+    /// `matchedRemoteSessionIndices` over the section's adopted locations,
+    /// mapped back to the sessions.
+    static func matched(
+        _ all: [RemoteSessionInfo], repoID: UUID, worktrees: [Worktree]
+    ) -> [RemoteSessionInfo] {
+        SidebarSessionPlacement.matchedRemoteSessionIndices(
+            all, repoID: repoID, adopted: SidebarSessionPlacement.adoptedLocations(worktrees))
+            .map { all[$0] }
+    }
 }
 
 /// A fixed-seed generator, so the corpus is the same on every run and every
@@ -42,8 +54,8 @@ private struct SplitMix64: RandomNumberGenerator {
     }
 }
 
-@Suite("RepoSectionView — matched sessions: order, parse-once")
-struct RepoSectionMatchedSessionsTests {
+@Suite("SidebarSessionPlacement — matched sessions: order, parse-once")
+struct SidebarSessionPlacementMatchOrderTests {
     static let repoID = UUID()
 
     /// About 800 sessions for one repo, drawn from every timestamp shape the
@@ -119,8 +131,8 @@ struct RepoSectionMatchedSessionsTests {
     @Test func sortOrderMatchesThePreFixAlgorithm() {
         let (all, adopted) = Self.corpus()
         let expected = Self.referenceIDs(
-            all, repoID: Self.repoID, adopted: RepoSectionView.adoptedLocations(adopted))
-        let actual = RepoSectionView.matchedRemoteSessions(
+            all, repoID: Self.repoID, adopted: SidebarSessionPlacement.adoptedLocations(adopted))
+        let actual = MatchedSessionFixtures.matched(
             all, repoID: Self.repoID, worktrees: adopted).map(\.id)
         #expect(actual == expected)
         #expect(expected.count > 500, "the corpus should leave most of the 800 sessions in play")
@@ -130,9 +142,9 @@ struct RepoSectionMatchedSessionsTests {
         let (all, adopted) = Self.corpus()
         var rng = SplitMix64(state: 0xABCD_1234)
         let shuffled = all.shuffled(using: &rng)
-        let forward = RepoSectionView.matchedRemoteSessions(
+        let forward = MatchedSessionFixtures.matched(
             all, repoID: Self.repoID, worktrees: adopted).map(\.id)
-        let backward = RepoSectionView.matchedRemoteSessions(
+        let backward = MatchedSessionFixtures.matched(
             shuffled, repoID: Self.repoID, worktrees: adopted).map(\.id)
         #expect(forward == backward)
     }
@@ -140,10 +152,10 @@ struct RepoSectionMatchedSessionsTests {
     @Test func parsesEachSurvivingSessionExactlyOnce() {
         let (all, adopted) = Self.corpus()
         let survivors = Self.referenceIDs(
-            all, repoID: Self.repoID, adopted: RepoSectionView.adoptedLocations(adopted)).count
+            all, repoID: Self.repoID, adopted: SidebarSessionPlacement.adoptedLocations(adopted)).count
         var parseCalls = 0
-        let indices = RepoSectionView.matchedRemoteSessionIndices(
-            all, repoID: Self.repoID, adopted: RepoSectionView.adoptedLocations(adopted),
+        let indices = SidebarSessionPlacement.matchedRemoteSessionIndices(
+            all, repoID: Self.repoID, adopted: SidebarSessionPlacement.adoptedLocations(adopted),
             parse: { raw in
                 parseCalls += 1
                 return RemoteTimestamp.parse(raw)
@@ -159,30 +171,30 @@ struct RepoSectionMatchedSessionsTests {
         let base = MatchedSessionFixtures.info("s", createdAt: "2026-03-01T10:00:00Z", repo: repo)
 
         // Each field the filter or the sort reads must flip the answer.
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", provider: "other", createdAt: "2026-03-01T10:00:00Z", repo: repo)))
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "t", createdAt: "2026-03-01T10:00:00Z", repo: repo)))
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-02T10:00:00Z", repo: repo)))
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", archived: true, repo: repo)))
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", dismissed: true, repo: repo)))
-        #expect(!RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(!SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: UUID())))
 
         // Fields that change on every sighting or drive row state must not.
-        #expect(RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: repo,
             lastSeen: Date(timeIntervalSince1970: 9_999))))
-        #expect(RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: repo, gone: true)))
-        #expect(RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: repo, state: .exited)))
-        #expect(RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: repo, agent: .waitingInput)))
-        #expect(RepoSectionView.sameMatchInputs(base, MatchedSessionFixtures.info(
+        #expect(SidebarSessionPlacement.sameMatchInputs(base, MatchedSessionFixtures.info(
             "s", createdAt: "2026-03-01T10:00:00Z", repo: repo,
             pinnedAt: Date(timeIntervalSince1970: 500))))
     }

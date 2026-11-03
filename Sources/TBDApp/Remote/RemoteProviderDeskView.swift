@@ -357,7 +357,7 @@ struct RemoteProviderDeskView: View {
     /// emptiness is a fact about the provider or about TBD's knowledge of it.
     private var emptyStateGuidance: String {
         // Don't send the user to a control this provider's own state has
-        // disabled: `RemoteProviderHeaderRow` gates `+` on `hasStaleSnapshot`
+        // disabled: the provider header gates `+` on `hasStaleSnapshot`
         // until a full inventory recovers.
         if provider.hasStaleSnapshot {
             return "Creating sessions is unavailable until a refresh succeeds."
@@ -477,7 +477,7 @@ private struct ProviderSessionLedgerRow: View {
     /// conforming provider may legally emit, which silently dropped the
     /// "Created …" line for those rows — see `parsedCreatedAt`'s own comment.
     private var createdDate: Date? {
-        RepoSectionView.parsedCreatedAt(session.payload.createdAt)
+        SidebarSessionPlacement.parsedCreatedAt(session.payload.createdAt)
     }
 
     var body: some View {

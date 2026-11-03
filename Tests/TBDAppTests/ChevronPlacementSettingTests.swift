@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import TBDApp
@@ -13,36 +14,46 @@ struct ChevronPlacementSettingTests {
 }
 
 /// Direct proof of the one behavior the two chevron placements disagree
-/// about — whether the button is mounted when nothing is hovered. Tests the
-/// extracted pure function rather than a live view, the same way
-/// `ScratchSectionVisibleTests` does, so an inverted or dropped gate fails
-/// here instead of only in the running app.
+/// about — whether the button is mounted when nothing is hovered. Drives a
+/// repo header cell rather than re-deriving the gate, so an inverted or
+/// dropped gate fails here instead of only in the running app.
 @MainActor
 @Suite("chevronMounted gate")
 struct ChevronMountedTests {
+    /// Whether a repo header cell shows its chevron in this state.
+    static func chevronShown(beforeName: Bool, hovered: Bool, menuOpen: Bool) -> Bool {
+        let cell = SectionHeaderCell()
+        cell.chevronBeforeTitle = beforeName
+        cell.configure(SectionHeaderModel(
+            title: "acme", isExpanded: true, isHidden: false, isMissing: false, isSelected: false))
+        cell.setHovered(hovered)
+        cell.setMenuOpen(menuOpen)
+        return !cell.chevronButton.isHidden
+    }
+
     @Test("setting on, leading the name: mounted with no pointer in the section")
     func leadingUnhoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(beforeName: true, hovered: false, menuOpen: false))
+        #expect(ChevronMountedTests.chevronShown(beforeName: true, hovered: false, menuOpen: false))
     }
 
     @Test("setting on, leading the name: still mounted while hovered")
     func leadingHoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(beforeName: true, hovered: true, menuOpen: false))
+        #expect(ChevronMountedTests.chevronShown(beforeName: true, hovered: true, menuOpen: false))
     }
 
     @Test("default, trailing the name: hidden with no pointer in the section")
     func trailingUnhoveredHidden() {
-        #expect(!RepoSectionView.chevronMounted(beforeName: false, hovered: false, menuOpen: false))
+        #expect(!ChevronMountedTests.chevronShown(beforeName: false, hovered: false, menuOpen: false))
     }
 
     @Test("default, trailing the name: revealed on hover")
     func trailingHoveredMounted() {
-        #expect(RepoSectionView.chevronMounted(beforeName: false, hovered: true, menuOpen: false))
+        #expect(ChevronMountedTests.chevronShown(beforeName: false, hovered: true, menuOpen: false))
     }
 
     @Test("default, trailing the name: stays mounted while the + menu is open off-hover")
     func trailingMenuOpenMounted() {
-        #expect(RepoSectionView.chevronMounted(beforeName: false, hovered: false, menuOpen: true))
+        #expect(ChevronMountedTests.chevronShown(beforeName: false, hovered: false, menuOpen: true))
     }
 }
 
@@ -149,7 +160,7 @@ struct SectionChevronMountTests {
 @MainActor
 @Suite("default placement changes nothing")
 struct DefaultSidebarGeometryTests {
-    /// What `ScratchSectionView` and `RemoteProviderHeaderRow` used before the
+    /// What the chevron-less Scratch and provider headers used before the
     /// setting existed: no inset, titles flush with the row's leading edge.
     private let historicalTitleInset: CGFloat = 0
     /// What every child row hardcoded before the setting existed.
@@ -175,7 +186,7 @@ struct DefaultSidebarGeometryTests {
     @Test("the project chevron keeps its hover gate")
     func chevronStillHoverGated() {
         let byDefault = AppState.chevronBeforeProjectNameDefault
-        #expect(!RepoSectionView.chevronMounted(beforeName: byDefault, hovered: false, menuOpen: false))
-        #expect(RepoSectionView.chevronMounted(beforeName: byDefault, hovered: true, menuOpen: false))
+        #expect(!ChevronMountedTests.chevronShown(beforeName: byDefault, hovered: false, menuOpen: false))
+        #expect(ChevronMountedTests.chevronShown(beforeName: byDefault, hovered: true, menuOpen: false))
     }
 }

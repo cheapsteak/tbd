@@ -10,7 +10,7 @@ import TestSupport
 // That cache was measured lying — "Ready to merge" for pull requests merged days
 // earlier — so every surface that shows it must show how old it is, and must
 // distinguish "nobody could find out" from "there is no pull request". These are
-// assertions on the COMPOSED strings the row and the toolbar actually render,
+// assertions on the COMPOSED strings the row and the status bar actually render,
 // not on the inputs, because a helper that computed the right words and a view
 // that dropped them would be the same bug.
 
@@ -49,11 +49,8 @@ struct PRFreshnessTests {
         #expect(PRFreshness.checkedLabel(observedAt: Self.ago(3 * 3600), now: Self.now) == "checked 3h ago")
     }
 
-    @Test("a five-minute bucket is stable between steps, so the toolbar item is not rebuilt per minute")
+    @Test("a five-minute bucket is stable between steps, so the words do not change every minute")
     func minuteBucketsAreStable() {
-        // AppKit materializes the split button once and only rebuilds it when
-        // its `.id` changes — and the id includes these words. A per-minute
-        // label would rebuild the item (and its NSMenu) every minute.
         let early = PRFreshness.checkedLabel(observedAt: Self.ago(21 * 60), now: Self.now)
         let later = PRFreshness.checkedLabel(observedAt: Self.ago(24 * 60), now: Self.now)
         #expect(early == later)
@@ -174,28 +171,5 @@ struct PRFreshnessTests {
         #expect(state.prStatuses[noValue] == nil)
         #expect(state.prObservations[noValue]?.outcome == PRObservation.Outcome.none)
         #expect(state.prObservations[noValue]?.outcome != state.prObservations[withValue]?.outcome)
-    }
-
-    // MARK: - The toolbar carries it too
-
-    @Test("the toolbar split button rebuilds when the rendered age changes")
-    @MainActor
-    func toolbarIDTracksTheRenderedAge() {
-        // AppKit materializes the label once, so an id that ignored these words
-        // would freeze the help string at whatever age it was first built with.
-        let pr = Self.status(observedAt: Self.ago(3 * 86_400))
-        let worktreeID = UUID()
-        func key(_ clauses: [String]) -> String {
-            PRButtonLabel.prSplitButtonID(
-                worktreeID: worktreeID, worktreeFound: true, armed: false, hibernateArmed: false,
-                blocked: false,
-                bindings: [PRBinding(
-                    worktreeID: worktreeID, owner: "acme", repo: "acme-prod",
-                    number: pr.number, url: pr.url, status: pr, source: .hook)],
-                freshnessClauses: clauses, colorScheme: .light)
-        }
-        #expect(key(["checked 3d ago"]) != key(["checked 4d ago"]))
-        #expect(key(["checked 3d ago"]) != key(["checked 3d ago", "last check did not resolve (x)"]))
-        #expect(key(["checked 3d ago"]) == key(["checked 3d ago"]))
     }
 }

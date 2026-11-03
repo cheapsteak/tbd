@@ -14,13 +14,6 @@ struct PRBindingPresentationTests {
                          source: .hook)
     }
 
-    private func binding(_ n: Int, url: String) -> PRBinding {
-        PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
-                  number: n, url: url,
-                  status: PRStatus(number: n, url: url, state: .mergeable),
-                  source: .hook)
-    }
-
     // MARK: - The `+N` overflow chip's wording
 
     /// The chip is labelled by how many PRs did NOT fit, but its menu lists
@@ -60,42 +53,6 @@ struct PRBindingPresentationTests {
                     == "Show all 4 pull requests (2 not shown here)")
     }
 
-    // MARK: - The toolbar's primary-action branch
-
-    /// A lone binding with an unparseable URL used to fall into the several-PR
-    /// shape while the menu still gated its rows on `count > 1` — the label read
-    /// `#412` and nothing anywhere offered that PR. It now has no primary
-    /// action, which routes it through the menu shape and drops the "Open"
-    /// promise from the tooltip.
-    @Test("one binding with a usable url gets a primary action")
-    func primaryActionForOneUsableURL() {
-        let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412")]
-        #expect(ContentView.prPrimaryActionURL(bindings)?.absoluteString
-                    == "https://github.com/acme/acme-prod/pull/412")
-        #expect(ContentView.prSplitButtonHelp(
-            bindings: bindings, armed: false, hibernateArmed: false, blocked: false)
-            .hasPrefix("Open PR #412"))
-    }
-
-    /// `URL(string:)` is lenient — it percent-encodes almost anything — so the
-    /// reachable failure is an EMPTY url string, which is what a legacy
-    /// `PRStatus` lifted by `effectiveBindings` carries when the daemon never
-    /// recorded one.
-    @Test("one binding with an unparseable url gets no primary action and no Open promise")
-    func noPrimaryActionForUnparseableURL() {
-        let bindings = [binding(412, url: "")]
-        #expect(ContentView.prPrimaryActionURL(bindings) == nil)
-        let help = ContentView.prSplitButtonHelp(
-            bindings: bindings, armed: false, hibernateArmed: false, blocked: false)
-        #expect(help.hasPrefix("PR #412"))
-        #expect(!help.contains("Open"))
-        // It still renders as one PR — the fix changes the click target, not
-        // the label.
-        #expect(PRBindingPresentation.buttonLabel(bindings) == "#412")
-        // And the menu shape it now takes lists that PR as a row.
-        #expect(PRBindingPresentation.menuRows(bindings).map(\.number) == [412])
-    }
-
     // MARK: - Per-binding wording versus aggregate wording
 
     private func gitLabBinding(_ n: Int) -> PRBinding {
@@ -107,30 +64,13 @@ struct PRBindingPresentationTests {
                          source: .hook)
     }
 
-    @Test("a lone GitLab binding is described in GitLab's own syntax")
-    func gitLabSplitButtonHelp() {
-        let help = ContentView.prSplitButtonHelp(
-            bindings: [gitLabBinding(412)], armed: false, hibernateArmed: false, blocked: false)
-        #expect(help.hasPrefix("Open MR !412"))
-        #expect(!help.contains("PR #"))
-    }
-
     /// The reason aggregates stay neutral: one worktree can hold a GitHub PR
     /// and a GitLab MR at once, and no single vocabulary is true of both.
     @Test("a worktree spanning both forges keeps neutral aggregate wording")
     func mixedForgeAggregateStaysNeutral() {
-        let help = ContentView.prSplitButtonHelp(
-            bindings: [binding(412, .mergeable), gitLabBinding(7)],
-            armed: false, hibernateArmed: false, blocked: false)
-        #expect(help.hasPrefix("2 pull requests"))
-        #expect(!help.contains("MR !"))
-        // And the count label, which the same set feeds.
-        #expect(PRBindingPresentation.buttonLabel(
-            [binding(412, .mergeable), gitLabBinding(7)]) == "2 PRs")
-
-        // The `+N` chip counts a set too, so its wording keeps the neutral noun
-        // for the same reason — it has no single binding to take a forge from,
-        // and its signature carries none.
+        // The `+N` chip counts a set, so its wording keeps the neutral noun —
+        // it has no single binding to take a forge from, and its signature
+        // carries none.
         let tooltip = PRBindingPresentation.overflowChipTooltip(total: 2, overflow: 1)
         let announced = PRBindingPresentation.overflowChipAccessibilityLabel(
             total: 2, overflow: 1)
@@ -154,8 +94,8 @@ struct PRBindingPresentationTests {
         // The GitLab row borrows nothing from the forge beside it.
         #expect(!rows[1].title.contains("#7"))
         #expect(!rows[1].title.contains(Forge.github.refNoun))
-        // …and it is the same wording the split button's help gives a lone
-        // binding, rather than a second vocabulary beside it.
+        // …and it is the binding's own `refLabel`, rather than a second
+        // vocabulary beside it.
         #expect(rows[1].title.hasPrefix(gitLabBinding(7).refLabel))
     }
 
@@ -168,29 +108,9 @@ struct PRBindingPresentationTests {
         #expect(chips.map(\.label) == ["#412", "#7"])
     }
 
-    @Test("several bindings never get a primary action")
-    func noPrimaryActionForSeveral() {
-        let bindings = [binding(412, url: "https://github.com/acme/acme-prod/pull/412"),
-                        binding(413, url: "https://github.com/acme/acme-prod/pull/413")]
-        #expect(ContentView.prPrimaryActionURL(bindings) == nil)
-    }
-
-    @Test("no bindings renders no control")
+    @Test("no bindings has no icon binding")
     func zero() {
-        #expect(PRBindingPresentation.buttonLabel([]) == nil)
         #expect(PRBindingPresentation.iconBinding([]) == nil)
-    }
-
-    @Test("one binding shows its number, as today")
-    func one() {
-        #expect(PRBindingPresentation.buttonLabel([binding(412, .mergeable)]) == "#412")
-    }
-
-    @Test("several bindings show a count")
-    func many() {
-        let label = PRBindingPresentation.buttonLabel(
-            [binding(412, .mergeable), binding(413, .checksFailed), binding(414, .draft)])
-        #expect(label == "3 PRs")
     }
 
     @Test("the icon follows the worst state at any count")
@@ -390,7 +310,7 @@ struct PRBindingPresentationTests {
                 == "\(String(repeating: "b", count: limit - 1))\u{2026}  PR #2 · Merged")
     }
 
-    @Test("the done menu's rows do not change the shared +N / toolbar rows")
+    @Test("the done menu's rows do not change the shared +N rows")
     func doneMenuRowsLeaveMenuRowsAlone() {
         let b = finished(930, title: "Fix the login timeout", headBranch: "fix-login")
         #expect(PRBindingPresentation.menuRows([b])[0].title == "PR #930  Merged  fix-login")

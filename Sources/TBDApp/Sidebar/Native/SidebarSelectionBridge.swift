@@ -2,8 +2,8 @@ import AppKit
 
 /// Maps the native outline's selection to `AppState` and back.
 ///
-/// Outline to `AppState`: the same IDs the SwiftUI `List`'s row tags write into
-/// `selectedWorktreeIDs` — worktree IDs and remote session IDs, never a header.
+/// Outline to `AppState`: the IDs it writes into `selectedWorktreeIDs` are
+/// worktree IDs and remote session IDs, never a header.
 /// That property's `didSet` stays the one place selection is routed: it strips
 /// a remote ID back out, sends a pure-remote selection to
 /// `selectRemoteSession`, and keeps a mixed selection's local rows.
