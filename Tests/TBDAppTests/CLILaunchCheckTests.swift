@@ -34,7 +34,7 @@ private func rewriteInPlace(_ path: String, contents: Data, modified: Date) thro
     try handle.truncate(atOffset: 0)
     try handle.write(contentsOf: contents)
     try handle.close()
-    try FileManager.default.setAttributes([.modificationDate: modified], ofItemPath: path)
+    try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: path)
 }
 
 /// The launch-time CLI check: what it records, when it refreshes without
