@@ -110,8 +110,6 @@ private func containsCodexProfileLaunch(_ body: String) -> Bool {
     let executable = shellEscape(codexDryRunExecutable)
     return body.contains(
         "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox")
-        || body.contains(
-            "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile-v2 tbd --no-daemon --dangerously-bypass-approvals-and-sandbox")
 }
 
 /// Points `TBD_TEST_CODEX_HOME` at a fresh temp dir for one test, and returns

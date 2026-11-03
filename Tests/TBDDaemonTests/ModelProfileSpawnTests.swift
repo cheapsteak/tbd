@@ -449,7 +449,6 @@ struct ModelProfileSpawnTests {
         #expect(response.success)
         #expect(recorder.shellBodies.contains("'/opt/TBD Codex/bin/codex'"))
         #expect(!recorder.shellBodies.contains("; codex --profile"))
-        #expect(!recorder.shellBodies.contains("; codex --profile-v2"))
     }
 
     @Test("terminal.recreate prepares Codex home before killing the old window")

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import TBDDaemonLib
+import TBDShared
 
 @Suite("CodexExecutableResolver")
 struct CodexExecutableResolverTests {
@@ -195,96 +196,27 @@ struct CodexExecutableResolverTests {
 
 @Suite("CodexSpawnCommandBuilder")
 struct CodexSpawnCommandBuilderTests {
-    @Test("Codex 0.134 and newer use the renamed --profile flag")
-    func modernCodexUsesProfileFlag() {
+    @Test("every launch selects the tbd profile with --profile")
+    func launchUsesProfileFlag() {
         #expect(
-            CodexSpawnCommandBuilder.build(
-                initialPrompt: nil,
-                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
-                codexVersionOutput: "codex-cli 0.134.0"
-            )
+            CodexSpawnCommandBuilder.build(initialPrompt: nil, executablePath: "codex")
                 == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
         )
         #expect(
-            CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.135.0-alpha.1")
-                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+            CodexSpawnCommandBuilder.command(executablePath: "/opt/bin/codex")
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
         )
     }
 
-    @Test("profile-v2 help takes precedence because older Codex uses --profile for legacy profiles")
-    func helpWithProfileV2UsesProfileV2EvenWhenProfileAlsoExists() {
+    @Test("the bare command reapplies the options a tab was launched with")
+    func bareCommandReappliesLaunchOptions() {
         #expect(
-            CodexSpawnCommandBuilder.build(
-                initialPrompt: nil,
-                codexHelpOutput: """
-                  -p, --profile <CONFIG_PROFILE>
-                      --profile-v2 <CONFIG_PROFILE_V2>
-                """,
-                codexVersionOutput: nil
-            )
-                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+            CodexSpawnCommandBuilder.command(
+                executablePath: "/opt/bin/codex",
+                launchOptions: CodexLaunchOptions(
+                    model: "acme-model", disabledFeatures: ["computer_use"]))
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --disable 'computer_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"#
         )
-    }
-
-    @Test("Codex before 0.134 uses the legacy --profile-v2 flag")
-    func olderCodexUsesProfileV2Flag() {
-        #expect(
-            CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: "codex-cli 0.133.0")
-                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile-v2 tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
-        )
-    }
-
-    @Test("missing Codex version output falls back to the current --profile flag")
-    func missingVersionFallsBackToProfileFlag() {
-        #expect(
-            CodexSpawnCommandBuilder.build(initialPrompt: nil, codexVersionOutput: nil)
-                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
-        )
-    }
-
-    @Test("runtime detection skips version probe when help identifies the profile flag")
-    func detectionSkipsVersionProbeWhenHelpIsEnough() {
-        var probedArguments: [[String]] = []
-
-        let flag = CodexSpawnCommandBuilder.detectProfileFlag { arguments in
-            probedArguments.append(arguments)
-            return "  -p, --profile <CONFIG_PROFILE_V2>"
-        }
-
-        #expect(flag == "--profile")
-        #expect(probedArguments == [["codex", "--help"]])
-    }
-
-    @Test("runtime detection uses version probe only when help is inconclusive")
-    func detectionUsesVersionProbeWhenHelpIsInconclusive() {
-        var probedArguments: [[String]] = []
-
-        let flag = CodexSpawnCommandBuilder.detectProfileFlag { arguments in
-            probedArguments.append(arguments)
-            if arguments == ["codex", "--version"] {
-                return "codex-cli 0.133.0"
-            }
-            return "Codex CLI"
-        }
-
-        #expect(flag == "--profile-v2")
-        #expect(probedArguments == [["codex", "--help"], ["codex", "--version"]])
-    }
-
-    @Test("runtime detection probes the resolved absolute executable")
-    func detectionUsesResolvedExecutable() {
-        var probedArguments: [[String]] = []
-        let executable = "/Applications/ChatGPT.app/Contents/Resources/codex"
-
-        let flag = CodexSpawnCommandBuilder.detectProfileFlag(
-            executablePath: executable
-        ) { arguments in
-            probedArguments.append(arguments)
-            return "  -p, --profile <CONFIG_PROFILE_V2>"
-        }
-
-        #expect(flag == "--profile")
-        #expect(probedArguments == [[executable, "--help"]])
     }
 
     @Test("resolved executable is shell escaped in the spawn command")
@@ -292,7 +224,6 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: nil,
-                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
                 executablePath: "/Applications/ChatGPT Preview.app/Contents/Resources/codex"
             )
                 == "unset CODEX_CI CODEX_THREAD_ID; '/Applications/ChatGPT Preview.app/Contents/Resources/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
@@ -304,7 +235,7 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: "fix the failing test",
-                codexVersionOutput: "codex-cli 0.134.0"
+                executablePath: "codex"
             )
                 == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'fix the failing test'"
         )
@@ -315,7 +246,6 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: nil,
-                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
                 resumeThreadID: "thread-123",
                 executablePath: "/opt/bin/codex"
             )
@@ -327,11 +257,9 @@ struct CodexSpawnCommandBuilderTests {
     func nilResumePreservesLaunch() {
         let ordinary = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
-            codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
             executablePath: "/opt/bin/codex")
         let explicitNil = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
-            codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
             resumeThreadID: nil,
             executablePath: "/opt/bin/codex")
 
@@ -340,17 +268,16 @@ struct CodexSpawnCommandBuilderTests {
 
     @Test("no model override is byte-identical to the existing launch command")
     func nilModelIsByteIdentical() {
-        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
         let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
         #expect(CodexSpawnCommandBuilder.build(
-            initialPrompt: "ship it", codexHelpOutput: help,
+            initialPrompt: "ship it",
             executablePath: "/opt/bin/codex") == expected)
         #expect(CodexSpawnCommandBuilder.build(
-            initialPrompt: "ship it", codexHelpOutput: help,
+            initialPrompt: "ship it",
             executablePath: "/opt/bin/codex", model: nil) == expected)
         // An empty identifier is no override, never `-c 'model=""'`.
         #expect(CodexSpawnCommandBuilder.build(
-            initialPrompt: "ship it", codexHelpOutput: help,
+            initialPrompt: "ship it",
             executablePath: "/opt/bin/codex", model: "") == expected)
     }
 
@@ -359,7 +286,6 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: "ship it",
-                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
                 executablePath: "/opt/bin/codex",
                 model: "acme-model"
             )
@@ -368,12 +294,11 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: nil,
-                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
                 resumeThreadID: "thread-123",
                 executablePath: "/opt/bin/codex",
                 model: "acme-model"
             )
-                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile-v2 tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123'"#
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123'"#
         )
     }
 
@@ -393,19 +318,17 @@ struct CodexSpawnCommandBuilderTests {
 
     @Test("no disabled features is byte-identical to the existing launch command")
     func emptyDisabledFeaturesIsByteIdentical() {
-        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
         let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
         #expect(CodexSpawnCommandBuilder.build(
-            initialPrompt: "ship it", codexHelpOutput: help,
+            initialPrompt: "ship it",
             executablePath: "/opt/bin/codex", disabledFeatures: []) == expected)
     }
 
     @Test("each disabled feature is its own --disable argument, before the bypass flag and the prompt")
     func disabledFeaturePlacement() {
-        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
         #expect(
             CodexSpawnCommandBuilder.build(
-                initialPrompt: "ship it", codexHelpOutput: help,
+                initialPrompt: "ship it",
                 executablePath: "/opt/bin/codex",
                 disabledFeatures: ["computer_use", "browser_use"])
                 == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --disable 'computer_use' --disable 'browser_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
@@ -413,7 +336,7 @@ struct CodexSpawnCommandBuilderTests {
         // With a model: the model override comes first, then the features.
         #expect(
             CodexSpawnCommandBuilder.build(
-                initialPrompt: nil, codexHelpOutput: help,
+                initialPrompt: nil,
                 executablePath: "/opt/bin/codex", model: "acme-model",
                 disabledFeatures: ["apps"])
                 == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --disable 'apps' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"#
@@ -425,11 +348,10 @@ struct CodexSpawnCommandBuilderTests {
         #expect(
             CodexSpawnCommandBuilder.build(
                 initialPrompt: nil,
-                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
                 resumeThreadID: "thread-123",
                 executablePath: "/opt/bin/codex",
                 disabledFeatures: ["computer_use"])
-                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile-v2 tbd --disable 'computer_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123'"
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --disable 'computer_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123'"
         )
     }
 
@@ -440,36 +362,10 @@ struct CodexSpawnCommandBuilderTests {
         let command = CodexSpawnCommandBuilder.build(
             initialPrompt: nil,
             resumeThreadID: "thread-1",
-            executablePath: "/opt/bin/codex",
-            profileFlag: "--profile")
+            executablePath: "/opt/bin/codex")
         #expect(command.contains(" --no-daemon "))
         let noDaemon = try #require(command.range(of: " --no-daemon "))
         let resume = try #require(command.range(of: " resume "))
         #expect(noDaemon.lowerBound < resume.lowerBound)
-    }
-
-    @Test("command output helper returns stdout and stderr")
-    func commandOutputCapturesStdoutAndStderr() {
-        let output = CodexSpawnCommandBuilder.commandOutput(
-            executable: "/bin/sh",
-            arguments: ["-c", "printf stdout; printf stderr >&2"],
-            timeout: 1
-        )
-
-        #expect(output?.contains("stdout") == true)
-        #expect(output?.contains("stderr") == true)
-    }
-
-    @Test("command output helper times out instead of blocking indefinitely")
-    func commandOutputTimesOut() {
-        let start = Date()
-        let output = CodexSpawnCommandBuilder.commandOutput(
-            executable: "/bin/sh",
-            arguments: ["-c", "sleep 5"],
-            timeout: 0.1
-        )
-
-        #expect(output == nil)
-        #expect(Date().timeIntervalSince(start) < 2)
     }
 }

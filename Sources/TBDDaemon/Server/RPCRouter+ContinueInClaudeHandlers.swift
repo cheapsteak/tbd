@@ -333,7 +333,6 @@ extension RPCRouter {
             guardedHome: recordedCodexHome,
             executableResolver: codexExecutableResolver,
             sharedHomeEnsurer: codexHomeEnsurer)
-        let profileFlag = codexProfileFlagResolver(codexPreparation.executablePath)
 
         let repo: Repo? = if let repoID = worktree.repoID {
             try await db.repos.get(id: repoID)
@@ -432,7 +431,6 @@ extension RPCRouter {
             initialPrompt: nil,
             resumeThreadID: sourceThreadID,
             executablePath: codexPreparation.executablePath,
-            profileFlag: profileFlag,
             model: source.codexLaunchOptions?.model,
             disabledFeatures: source.codexLaunchOptions?.disabledFeatures ?? [])
 
@@ -663,7 +661,6 @@ extension RPCRouter {
             initialPrompt: nil,
             resumeThreadID: sourceThreadID,
             executablePath: codexPreparation.executablePath,
-            profileFlag: codexProfileFlagResolver(codexPreparation.executablePath),
             model: candidate.codexLaunchOptions?.model,
             disabledFeatures: candidate.codexLaunchOptions?.disabledFeatures ?? [])
 

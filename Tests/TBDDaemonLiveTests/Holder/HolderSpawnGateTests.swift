@@ -1234,7 +1234,6 @@ private final class GateFixture {
         router.codexHomeEnsurer = {
             URL(fileURLWithPath: home).appendingPathComponent("codex-home", isDirectory: true)
         }
-        router.codexProfileFlagResolver = { _ in "--profile" }
         router.codexSessionImport = { _, _, _, _, _ in "thread-gate-1" }
 
         return GateFixture(

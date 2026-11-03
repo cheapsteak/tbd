@@ -470,91 +470,29 @@ struct CodexLaunchPreparation: Sendable {
 }
 
 enum CodexSpawnCommandBuilder {
-    private static let detectedProfileFlag = detectProfileFlag { arguments in
-        commandOutput(arguments: arguments, timeout: 3)
-    }
-
-    static var command: String {
-        baseCommand(profileFlag: detectedProfileFlag)
-    }
-
-    static func build(initialPrompt: String?) -> String {
-        build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
-    }
-
     /// The bare Codex command, with the options a tab was launched with (see
     /// `Terminal.codexLaunchOptions`) reapplied when there are any.
     static func command(
         executablePath: String, launchOptions: CodexLaunchOptions? = nil
     ) -> String {
-        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
-            commandOutput(arguments: arguments, timeout: 3)
-        }
-        return baseCommand(
+        baseCommand(
             executablePath: executablePath,
-            profileFlag: profileFlag,
             model: launchOptions?.model,
             disabledFeatures: launchOptions?.disabledFeatures ?? [])
     }
 
+    /// The Codex launch command: the bare command, then `resume <thread>`
+    /// when `resumeThreadID` names one, then the initial prompt as a
+    /// trailing argument when there is one.
     static func build(
         initialPrompt: String?,
         resumeThreadID: String? = nil,
         executablePath: String,
-        model: String? = nil,
-        disabledFeatures: [String] = []
-    ) -> String {
-        let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
-            commandOutput(arguments: arguments, timeout: 3)
-        }
-        return build(
-            initialPrompt: initialPrompt,
-            resumeThreadID: resumeThreadID,
-            executablePath: executablePath,
-            profileFlag: profileFlag,
-            model: model,
-            disabledFeatures: disabledFeatures
-        )
-    }
-
-    static func build(
-        initialPrompt: String?,
-        codexHelpOutput: String? = nil,
-        codexVersionOutput: String? = nil,
-        resumeThreadID: String? = nil,
-        executablePath: String = "codex",
-        model: String? = nil,
-        disabledFeatures: [String] = []
-    ) -> String {
-        build(
-            initialPrompt: initialPrompt,
-            resumeThreadID: resumeThreadID,
-            executablePath: executablePath,
-            profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput),
-            model: model,
-            disabledFeatures: disabledFeatures
-        )
-    }
-
-    private static func build(initialPrompt: String?, profileFlag: String) -> String {
-        let command = baseCommand(profileFlag: profileFlag)
-        guard let initialPrompt, !initialPrompt.isEmpty else {
-            return command
-        }
-        return "\(command) \(shellEscape(initialPrompt))"
-    }
-
-    static func build(
-        initialPrompt: String?,
-        resumeThreadID: String?,
-        executablePath: String,
-        profileFlag: String,
         model: String? = nil,
         disabledFeatures: [String] = []
     ) -> String {
         let command = baseCommand(
             executablePath: executablePath,
-            profileFlag: profileFlag,
             resumeThreadID: resumeThreadID,
             model: model,
             disabledFeatures: disabledFeatures)
@@ -586,13 +524,12 @@ enum CodexSpawnCommandBuilder {
     private static let executionModeFlags =
         "--no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
 
-    private static func baseCommand(profileFlag: String) -> String {
-        return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd \(executionModeFlags)"
-    }
-
+    /// `--profile tbd` selects the profile `CodexProfileWriter` keeps in the
+    /// Codex home. It is the flag the current Codex release takes, and TBD
+    /// supports only that release, so the command never asks the executable
+    /// which flags it understands.
     private static func baseCommand(
         executablePath: String,
-        profileFlag: String,
         resumeThreadID: String? = nil,
         model: String? = nil,
         disabledFeatures: [String] = []
@@ -607,7 +544,7 @@ enum CodexSpawnCommandBuilder {
         let featureOverrides = disabledFeatures
             .map { " --disable \(shellEscape($0))" }
             .joined()
-        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride)\(featureOverrides) \(executionModeFlags)"
+        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd\(modelOverride)\(featureOverrides) \(executionModeFlags)"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
         return "\(base) resume \(shellEscape(resumeThreadID))"
     }
@@ -640,147 +577,5 @@ enum CodexSpawnCommandBuilder {
             }
         }
         return "\"\(escaped)\""
-    }
-
-    static func profileFlag(codexHelpOutput: String?, codexVersionOutput: String?) -> String {
-        if let codexHelpOutput {
-            if codexHelpOutput.contains("--profile-v2") {
-                return "--profile-v2"
-            }
-            if codexHelpOutput.contains("--profile") {
-                return "--profile"
-            }
-        }
-
-        if let version = codexVersion(from: codexVersionOutput) {
-            return version >= CodexVersion(major: 0, minor: 134, patch: 0) ? "--profile" : "--profile-v2"
-        }
-
-        return "--profile"
-    }
-
-    static func detectProfileFlag(commandOutput: ([String]) -> String?) -> String {
-        let helpOutput = commandOutput(["codex", "--help"])
-        if let helpOutput, helpOutput.contains("--profile-v2") || helpOutput.contains("--profile") {
-            return profileFlag(codexHelpOutput: helpOutput, codexVersionOutput: nil)
-        }
-
-        return profileFlag(
-            codexHelpOutput: helpOutput,
-            codexVersionOutput: commandOutput(["codex", "--version"])
-        )
-    }
-
-    static func detectProfileFlag(
-        executablePath: String,
-        commandOutput: ([String]) -> String?
-    ) -> String {
-        let helpOutput = commandOutput([executablePath, "--help"])
-        if let helpOutput, helpOutput.contains("--profile-v2") || helpOutput.contains("--profile") {
-            return profileFlag(codexHelpOutput: helpOutput, codexVersionOutput: nil)
-        }
-
-        return profileFlag(
-            codexHelpOutput: helpOutput,
-            codexVersionOutput: commandOutput([executablePath, "--version"])
-        )
-    }
-
-    private struct CodexVersion: Comparable {
-        let major: Int
-        let minor: Int
-        let patch: Int
-
-        static func < (lhs: CodexVersion, rhs: CodexVersion) -> Bool {
-            (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
-        }
-    }
-
-    private static func codexVersion(from output: String?) -> CodexVersion? {
-        guard let output else { return nil }
-        let scanner = Scanner(string: output)
-        scanner.charactersToBeSkipped = CharacterSet(charactersIn: " \n\t")
-
-        while !scanner.isAtEnd {
-            _ = scanner.scanUpToCharacters(from: .decimalDigits)
-            guard let major = scanner.scanInt(),
-                  scanner.scanString(".") != nil,
-                  let minor = scanner.scanInt(),
-                  scanner.scanString(".") != nil,
-                  let patch = scanner.scanInt()
-            else {
-                continue
-            }
-            return CodexVersion(major: major, minor: minor, patch: patch)
-        }
-
-        return nil
-    }
-
-    private final class LockedOutput: @unchecked Sendable {
-        private let lock = NSLock()
-        private var data = Data()
-
-        func append(_ newData: Data) {
-            lock.lock()
-            data.append(newData)
-            lock.unlock()
-        }
-
-        func snapshot() -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return data
-        }
-    }
-
-    static func commandOutput(
-        executable: String = "/usr/bin/env",
-        arguments: [String],
-        timeout: TimeInterval
-    ) -> String? {
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        let output = LockedOutput()
-        let terminated = DispatchSemaphore(value: 0)
-
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        let appendOutput: @Sendable (FileHandle) -> Void = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            output.append(data)
-        }
-        stdout.fileHandleForReading.readabilityHandler = appendOutput
-        stderr.fileHandleForReading.readabilityHandler = appendOutput
-        process.terminationHandler = { _ in
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
-            appendOutput(stdout.fileHandleForReading)
-            appendOutput(stderr.fileHandleForReading)
-            terminated.signal()
-        }
-
-        do {
-            try process.run()
-        } catch {
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
-            return nil
-        }
-
-        if terminated.wait(timeout: .now() + timeout) == .timedOut {
-            process.terminate()
-            _ = terminated.wait(timeout: .now() + 1)
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
-            return nil
-        }
-
-        return String(data: output.snapshot(), encoding: .utf8)
     }
 }
