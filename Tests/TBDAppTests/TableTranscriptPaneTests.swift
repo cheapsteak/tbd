@@ -7,13 +7,16 @@ import TestSupport
 
 /// Headless tests of the NSTableView transcript pane (#129).
 ///
-/// Each builds the production `TableTranscriptView.Coordinator` inside an
+/// Most build the production `TableTranscriptView.Coordinator` inside an
 /// offscreen 680x600 `NSScrollView` + `NSTableView` (`TableTranscriptScene`,
-/// below) and drives it the way the live pane does: asking it for heights and
+/// below) and drive it the way the live pane does: asking it for heights and
 /// cells, and feeding it updates. They pin render == measure for chat bubbles,
 /// the per-block height cache, cell dispatch, the disclosure and prepend
 /// anchors, tail-follow, cache bounds, the near-top signal, and the arithmetic
-/// estimate's image term.
+/// estimate's image term. The jump-to-bottom test instead hosts the whole
+/// `TableTranscriptView` in an `OffscreenHost`, under a pane-shaped view
+/// whose state is real (`JumpPane`), because what it pins is a SwiftUI state
+/// write.
 ///
 /// The visual harness that shares the scene — real-session oracle runs,
 /// fixed-versus-unfixed proofs and PNG snapshots — is `TableTranscriptHarness`,
@@ -878,8 +881,12 @@ struct TableTranscriptPaneTests {
         #expect(scene.coordinator.pendingPrependAnchor == nil, "a reader scroll left the prepend anchor held")
     }
 
+    /// The bounds observer reports on the next main-queue turn
+    /// (`scheduleViewportStateReport()`), so each scroll is followed by
+    /// `drainMainQueue()`: the report is already queued, and suspending is
+    /// what lets it run.
     @Test("near-top reports transitions only")
-    func nearTopReportsTransitions() throws {
+    func nearTopReportsTransitions() async throws {
         let suite = TestDefaultsSuite("table-harness-neartop")
         let defaults = suite.defaults
         defer { suite.tearDown() }
@@ -898,14 +905,108 @@ struct TableTranscriptPaneTests {
         scene.coordinator.onNearTop = { recorder.values.append($0) }
 
         scene.scroll(toY: 0)
+        await drainMainQueue()
         #expect(recorder.values == [true])
-        scene.scroll(toY: scene.tableView.rect(ofRow: 3).minY + 1)
+        let rowThreeTop = scene.tableView.rect(ofRow: 3).minY
+        scene.scroll(toY: rowThreeTop + 1)
+        await drainMainQueue()
         #expect(recorder.values == [true], "row 3 at the top is still near the top")
         scene.scroll(toY: .greatestFiniteMagnitude)
+        await drainMainQueue()
         #expect(recorder.values == [true, false])
         scene.scroll(toY: 0)
+        await drainMainQueue()
         #expect(recorder.values == [true, false, true])
         #expect(TableTranscriptView.Coordinator.nearTopRowThreshold == 5)
+    }
+
+    // MARK: - Jump-to-bottom flag
+
+    /// The panes' jump-to-bottom button only bumps the token. The table scrolls
+    /// to the end in `updateNSView`, so the clip-bounds observer runs inside
+    /// SwiftUI's update, where a write to the pane's `atBottom` is dropped and
+    /// the button would stay on screen after its own jump. Hosted through
+    /// `JumpPane`, whose `atBottom` and token are real `@State`: a `.constant`
+    /// binding ignores every write, so it cannot show a dropped one.
+    @Test("a jump to the bottom sets the pane's at-bottom flag")
+    func jumpToBottomSetsAtBottom() async throws {
+        let suite = TestDefaultsSuite("table-jump-to-bottom")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let appState = AppState(userDefaults: defaults)
+
+        let (nodes, _) = Self.prependArrays()
+        let box = JumpPaneBox()
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: nil,
+            appState: appState,
+            linkResolver: nil,
+            onLinkClicked: nil)
+        let host = OffscreenHost(
+            root: JumpPane(box: box, context: context, nodes: nodes),
+            size: NSSize(width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight))
+        defer { host.tearDown() }
+
+        // The open's two deferred scrolls to the end have run, so neither can
+        // undo the scroll to the top below.
+        try await Self.waitOnMain(
+            "the table's open to settle",
+            observed: { "openSettled=\(box.openSettled), jump action=\(box.jump != nil)" },
+            until: { box.openSettled && box.jump != nil })
+        let container = try #require(host.firstDescendant(TranscriptContainerView.self))
+        let tableView = try #require(container.coordinator?.tableView)
+        let scrollView = container.scrollView
+        let clip = scrollView.contentView
+        let travel = tableView.frame.height - clip.bounds.height
+        try #require(travel > 1000,
+                     Comment(rawValue: "precondition: the document must scroll well past the button's "
+                         + "400pt threshold (travel=\(travel))"))
+        try #require(box.renderedAtBottom == true, "precondition: the pane opens at the bottom")
+
+        // A reader's scroll to the top, made outside any SwiftUI update.
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: 0))
+        scrollView.reflectScrolledClipView(clip)
+        try await Self.waitOnMain(
+            "the pane's at-bottom flag to clear after a scroll to the top",
+            observed: { "renderedAtBottom=\(String(describing: box.renderedAtBottom)), clip y=\(clip.bounds.minY)" },
+            until: { box.renderedAtBottom == false })
+
+        // The button's action. The scroll it asks for happens in `updateNSView`.
+        let jump = try #require(box.jump)
+        jump()
+        try await Self.waitOnMain(
+            "the jump to land within the button's 400pt threshold",
+            observed: { "gap to bottom=\(tableView.frame.height - clip.bounds.maxY)" },
+            until: { tableView.frame.height - clip.bounds.maxY <= 400 })
+        try await Self.waitOnMain(
+            "the pane's at-bottom flag to set after the jump landed",
+            observed: {
+                "renderedAtBottom=\(String(describing: box.renderedAtBottom)), "
+                    + "gap to bottom=\(tableView.frame.height - clip.bounds.maxY)"
+            },
+            until: { box.renderedAtBottom == true })
+    }
+
+    /// Polls `condition` on the main actor through `pollUntilTrue`, and throws
+    /// `BoundedWaitTimeout` with `observed()` when it never holds, so the
+    /// failure line says what the wait saw.
+    private static func waitOnMain(
+        _ what: String,
+        observed: @escaping @MainActor @Sendable () -> String,
+        until condition: @escaping @MainActor @Sendable () -> Bool
+    ) async throws {
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            await MainActor.run { condition() }
+        }
+        switch outcome {
+        case .satisfied:
+            return
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(what: what, observed: observed(), deadline: TestDeadlines.saturatedPass)
+        }
     }
 
     // MARK: - Image-attachment height estimate
@@ -982,6 +1083,51 @@ struct TableTranscriptPaneTests {
 
     private enum FixtureError: Error {
         case couldNotMakePNG
+    }
+}
+
+// MARK: - Jump pane
+
+/// What `jumpToBottomSetsAtBottom` reads `JumpPane` through and drives it
+/// with: the `atBottom` its body last rendered, its button's action, and
+/// whether the table's open has settled. Not `@Observable`, so the pane's
+/// writes to it from view callbacks never re-render the pane.
+@MainActor
+private final class JumpPaneBox {
+    var renderedAtBottom: Bool?
+    var jump: (@MainActor () -> Void)?
+    var openSettled = false
+}
+
+/// The jump-to-bottom shape the three transcript panes share: `atBottom` and
+/// the scroll token are the pane's own `@State`, its body reads `atBottom` as
+/// the panes' button does, and the button's action bumps the token.
+private struct JumpPane: View {
+    let box: JumpPaneBox
+    let context: TranscriptCardContext
+    let nodes: [TranscriptRenderNode]
+    @State private var atBottom = true
+    @State private var scrollToBottomToken = 0
+
+    init(box: JumpPaneBox, context: TranscriptCardContext, nodes: [TranscriptRenderNode]) {
+        self.box = box
+        self.context = context
+        self.nodes = nodes
+    }
+
+    var body: some View {
+        let box = self.box
+        let nodes = self.nodes
+        TableTranscriptView(
+            context: context,
+            atBottom: $atBottom,
+            scrollToBottomToken: scrollToBottomToken,
+            activityToggleToken: 0,
+            linkRoot: "",
+            nodesProvider: { nodes },
+            onOpenSettled: { box.openSettled = true })
+            .onAppear { box.jump = { scrollToBottomToken &+= 1 } }
+            .onChange(of: atBottom, initial: true) { _, value in box.renderedAtBottom = value }
     }
 }
 

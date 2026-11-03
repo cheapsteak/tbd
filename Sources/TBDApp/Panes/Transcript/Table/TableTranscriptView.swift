@@ -56,8 +56,10 @@ struct TableTranscriptView: NSViewRepresentable {
     var prependToken: Int = 0
     /// Called with whether the table is scrolled near its top — the first
     /// visible row index is at most `Coordinator.nearTopRowThreshold` — on each
-    /// transition of that answer, whether a scroll or an update caused it. Nil
-    /// where nobody loads earlier history.
+    /// transition of that answer, whether a scroll or an update caused it. The
+    /// call comes a main-queue turn later, outside any SwiftUI update
+    /// (`Coordinator.scheduleViewportStateReport()`). Nil where nobody loads
+    /// earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
     /// The prompt rail to mount. `makeNSView` fixes the container's gutter
     /// from it for the life of the view and installs the rail and its card;
@@ -153,8 +155,8 @@ struct TableTranscriptView: NSViewRepresentable {
         // first `updateNSView` does not read as a transition.
         coordinator.lastLinkRoot = linkRoot
         coordinator.atBottomBinding = $atBottom
-        // Track the live scroll position so the jump-to-bottom button hides the
-        // moment the viewport reaches the bottom — by the button OR a manual
+        // Track the live scroll position so the jump-to-bottom button hides
+        // once the viewport reaches the bottom — by the button OR a manual
         // scroll. Without this the flag only updated on node changes, so a
         // scroll-to-bottom left the button stuck on screen.
         coordinator.startObservingScroll()
@@ -514,8 +516,14 @@ struct TableTranscriptView: NSViewRepresentable {
 
         /// Live binding driving the floating jump-to-bottom button. Held so the
         /// clip-bounds observer can keep it in sync with the ACTUAL scroll
-        /// position — not just on node updates. Refreshed every `update(...)`.
+        /// position — not just on node updates. Refreshed every `update(...)`;
+        /// written only by `reportViewportState()`, a main-queue turn after the
+        /// scroll or update that moved it.
         var atBottomBinding: Binding<Bool>?
+        /// Whether a `scheduleViewportStateReport()` report is queued and has
+        /// not run yet. A live scroll posts a bounds change per frame, and they
+        /// all share the one report.
+        private var viewportStateReportQueued = false
 
         /// Explicit per-row height cache, keyed by `(id, contentVersion, width)`.
         /// A re-poll that leaves a row's id+version unchanged reuses the cached
@@ -2214,15 +2222,13 @@ struct TableTranscriptView: NSViewRepresentable {
             // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
-            // Whatever this update does to the rows or the clip, report a changed
-            // near-top answer once it has landed. Deferred rather than called
-            // here because `update` runs inside SwiftUI's `updateNSView`, where a
-            // pane writing state from the callback would be a mid-update mutation.
-            defer {
-                if onNearTop != nil {
-                    DispatchQueue.main.async { [weak self] in self?.reportNearTopIfChanged() }
-                }
-            }
+            // Whatever this update does to the rows or the clip, report the
+            // jump-to-bottom flag and the near-top answer once it has landed, on
+            // the next main-queue turn: `update` runs inside SwiftUI's
+            // `updateNSView`, where the flag's write, or the state a pane writes
+            // from `onNearTop`, is a mid-update mutation SwiftUI drops (see
+            // `scheduleViewportStateReport()`).
+            defer { scheduleViewportStateReport() }
             let step = TranscriptStreamPlan.step(previous: previousNodes, next: newNodes)
             // A held anchor describes the array it was restored into: rows that
             // change again (or a new prepend) supersede it. A `.noop` — SwiftUI
@@ -2282,7 +2288,6 @@ struct TableTranscriptView: NSViewRepresentable {
                 precomputeBottomWindow()
                 tableView.reloadData()
                 refreshPromptOutline()
-                recomputeAtBottom(atBottom)
                 return
             }
 
@@ -2420,13 +2425,15 @@ struct TableTranscriptView: NSViewRepresentable {
                 refreshPromptOutline()
             }
 
+            // The deferred report above reads the clip this update left. A
+            // tail-follow moves the clip a turn later, so it asks for a report
+            // once it has moved; a report still queued by then is shared, and
+            // reads the followed clip.
             if followsTail {
                 DispatchQueue.main.async { [weak self] in
                     self?.runQueuedTailFollow(decidedAt: tailFollowGeneration)
-                    self?.recomputeAtBottom(atBottom)
+                    self?.scheduleViewportStateReport()
                 }
-            } else {
-                recomputeAtBottom(atBottom)
             }
         }
 
@@ -2502,9 +2509,19 @@ struct TableTranscriptView: NSViewRepresentable {
 
         /// Subscribe to clip-bounds changes so `atBottom` reflects the LIVE scroll
         /// position. AppKit posts this on the main thread during every scroll
-        /// (button-driven or manual), so the jump-to-bottom button hides as soon
-        /// as the viewport reaches the bottom and reappears when the user scrolls
+        /// (button-driven or manual), so the jump-to-bottom button hides once
+        /// the viewport reaches the bottom and reappears when the user scrolls
         /// away — instead of only re-evaluating on a node update.
+        ///
+        /// AppKit posts the notification synchronously, from inside whatever
+        /// moved the clip. When that is the coordinator scrolling during
+        /// `updateNSView` — a jump-to-bottom token, a scroll-to-row request, a
+        /// reload that clamps the clip — the observer runs inside SwiftUI's
+        /// update. So it never writes SwiftUI state directly: the `atBottom`
+        /// flag and the `onNearTop` report go through
+        /// `scheduleViewportStateReport()`. Its AppKit-side work — releasing
+        /// held anchors, superseding a queued tail-follow, moving the prompt
+        /// rail's active notch — stays synchronous.
         func startObservingScroll() {
             guard let clip = scrollView?.contentView else { return }
             clip.postsBoundsChangedNotifications = true
@@ -2535,15 +2552,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 releaseJumpAnchor(.readerScroll)
                 supersedeQueuedTailFollow()
             }
-            reportNearTopIfChanged()
-            if let binding = atBottomBinding {
-                let value = isViewportAtBottomForButton()
-                // Only write on a transition so a scroll gesture flips the flag at
-                // most twice (entering/leaving the bottom), not once per frame.
-                if binding.wrappedValue != value {
-                    binding.wrappedValue = value
-                }
-            }
+            scheduleViewportStateReport()
+            // AppKit only: the rail's and card's views, never SwiftUI state.
             refreshActivePrompt()
         }
 
@@ -2806,10 +2816,37 @@ struct TableTranscriptView: NSViewRepresentable {
             scrollGeneration &+= 1
         }
 
-        private func recomputeAtBottom(_ atBottom: Binding<Bool>) {
+        /// Reports the viewport's state to SwiftUI on the next main-queue turn:
+        /// the jump-to-bottom flag through `atBottomBinding` and the near-top
+        /// answer through `onNearTop`. Calls made before the report runs share
+        /// it, so a live scroll's per-frame bounds changes queue one report.
+        ///
+        /// Never written in place, because both callers can run inside SwiftUI's
+        /// update: `update(...)` always does, and the clip-bounds observer does
+        /// whenever the coordinator scrolls during `updateNSView`. SwiftUI drops
+        /// a state write made there ("Modifying state during view update"), and
+        /// nothing writes the flag again until the next scroll, so the
+        /// jump-to-bottom button would stay on screen after its own jump.
+        func scheduleViewportStateReport() {
+            guard !viewportStateReportQueued else { return }
+            viewportStateReportQueued = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                atBottom.wrappedValue = self.isViewportAtBottomForButton()
+                self.viewportStateReportQueued = false
+                self.reportViewportState()
+            }
+        }
+
+        /// Writes each value only when it changed, so a scroll gesture writes
+        /// the flag at most twice, entering and leaving the bottom. Reads the
+        /// binding and callback `update(...)` stored last, and the clip as it
+        /// is now rather than as it was when the report was asked for.
+        private func reportViewportState() {
+            reportNearTopIfChanged()
+            guard let binding = atBottomBinding else { return }
+            let value = isViewportAtBottomForButton()
+            if binding.wrappedValue != value {
+                binding.wrappedValue = value
             }
         }
     }
