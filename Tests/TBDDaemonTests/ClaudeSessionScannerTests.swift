@@ -207,30 +207,65 @@ struct ClaudeSessionScannerTests {
         #expect(resolved?.lastPathComponent == encoded)
     }
 
-    /// Tier 3 (the cwd content scan) enumerates the projects base, and a
-    /// model profile's `projects` slot IS a symlink into the host store —
-    /// `contentsOfDirectory` lists such a URL as empty, so the scan used to
-    /// come up dry for every profile-bound session whose path had moved.
-    /// Tiers 1 and 2 are unaffected (`fileExists` follows the symlink).
-    @Test("directory resolution: cwd scan follows a symlinked projects root")
-    func cwdScanThroughSymlinkedProjectsBase() throws {
+    /// Claude Code names a project folder by replacing every character that
+    /// is not an ASCII letter or digit with `-`, one for one. For a path
+    /// holding `_` and a `/.` pair, tier 1 keeps the `_`
+    /// (`-Users-test-my_app-<id>--cfg`) and tier 2 collapses the `/.` run
+    /// (`-Users-test-my-app-<id>-cfg`), so only tier 3 names the folder.
+    ///
+    /// Also run through a symlinked projects base: a model profile's
+    /// `projects` slot IS a symlink into the host store, and the lookup's
+    /// `fileExists` must follow it.
+    @Test("directory resolution: Claude Code's encoding resolves a folder tiers 1 and 2 miss",
+          arguments: [false, true])
+    func claudeCodeEncodingResolves(throughSymlinkedBase: Bool) throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let worktreePath = "/Users/test/symlink-scan-\(UUID().uuidString.prefix(8))"
-        let hostBase = tmp.appendingPathComponent("host-projects", isDirectory: true)
-        // Slug deliberately unrelated to the worktree path so tiers 1 and 2 miss.
-        let staleSlug = "-moved-elsewhere-\(UUID().uuidString.prefix(8))"
-        let dir = hostBase.appendingPathComponent(staleSlug, isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let id = String(UUID().uuidString.prefix(8))
+        let worktreePath = "/Users/test/my_app-\(id)/.cfg"
+        let folderName = "-Users-test-my-app-\(id)--cfg"
+        let realBase = tmp.appendingPathComponent("host-projects", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: realBase.appendingPathComponent(folderName, isDirectory: true),
+            withIntermediateDirectories: true)
+
+        let base: URL
+        if throughSymlinkedBase {
+            base = tmp.appendingPathComponent("profile-projects")
+            try FileManager.default.createSymbolicLink(at: base, withDestinationURL: realBase)
+            // `attributesOfItem` does not follow a symlink, so this reads the
+            // link itself.
+            let fileType = try FileManager.default.attributesOfItem(atPath: base.path)[.type]
+                as? FileAttributeType
+            #expect(fileType == .typeSymbolicLink)
+        } else {
+            base = realBase
+        }
+        ClaudeProjectDirectory.clearCache()
+
+        let resolved = ClaudeProjectDirectory.resolve(worktreePath: worktreePath, projectsBase: base)
+
+        #expect(resolved?.lastPathComponent == folderName)
+    }
+
+    /// The lookup never reads a transcript. A folder whose name no tier
+    /// derives from the worktree path does not resolve, even when its only
+    /// transcript's first line records that path as its `cwd`.
+    @Test("directory resolution: a transcript's cwd does not resolve a folder named for another path")
+    func transcriptCWDDoesNotResolve() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let worktreePath = "/Users/test/cwd-only-\(UUID().uuidString.prefix(8))"
+        let unrelated = tmp.appendingPathComponent(
+            "-moved-elsewhere-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: true)
         try "{\"type\":\"user\",\"cwd\":\"\(worktreePath)\",\"message\":{\"content\":\"hi\"}}\n"
-            .write(to: dir.appendingPathComponent("sess.jsonl"), atomically: true, encoding: .utf8)
-        let profileBase = tmp.appendingPathComponent("profile-projects", isDirectory: true)
-        try FileManager.default.createSymbolicLink(at: profileBase, withDestinationURL: hostBase)
+            .write(to: unrelated.appendingPathComponent("sess.jsonl"), atomically: true, encoding: .utf8)
+        ClaudeProjectDirectory.clearCache()
 
-        let resolved = ClaudeProjectDirectory.resolve(
-            worktreePath: worktreePath, projectsBase: profileBase)
+        let resolved = ClaudeProjectDirectory.resolve(worktreePath: worktreePath, projectsBase: tmp)
 
-        #expect(resolved?.lastPathComponent == staleSlug)
+        #expect(resolved == nil)
     }
 
     // MARK: - isSessionBlank

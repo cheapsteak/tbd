@@ -7,15 +7,24 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "session-scan
 // MARK: - ClaudeProjectDirectory
 
 /// Resolves the ~/.claude/projects/<encoded-cwd>/ directory for a worktree path.
-/// Three-tier lookup: exact encoding → regex fallback → full content scan.
-/// Results are cached after first resolution.
+///
+/// Claude Code names a project folder after its cwd, with every character
+/// that is not an ASCII letter or digit replaced by `-`. The lookup tries
+/// three encodings of the worktree path in order, one `fileExists` each, and
+/// returns the first folder that exists:
+/// 1. exact: `/` and `.` → `-`, the name TBD itself writes to when it syncs
+///    a transcript (`TranscriptProjectDirSync.derivedProjectDir`);
+/// 2. every run of non-alphanumerics → one `-`;
+/// 3. Claude Code's own rule (`claudeCodeEncode`).
+/// It never reads a transcript, so a path that none of the three names
+/// resolves to nil. Results are cached (see `CacheEntry`).
 enum ClaudeProjectDirectory {
     /// Cache entry stores the resolved URL (or nil for miss) and when it was cached.
     /// Positive entries (resolved URLs) are re-validated against the filesystem,
     /// while negative entries (misses) expire after 30 seconds to catch newly-created
     /// project directories (e.g., when a Claude session first writes to disk after
-    /// worktree creation). Caching negatives with TTL avoids the tier-3 scan (which
-    /// reads the first line of every session JSONL) while staying fresh for new dirs.
+    /// worktree creation). A miss costs at most three `fileExists` calls; within
+    /// those 30 seconds a repeat lookup returns nil without making them again.
     private struct CacheEntry {
         let url: URL?
         let cachedAt: ContinuousClock.Instant
@@ -56,7 +65,7 @@ enum ClaudeProjectDirectory {
                 // Negative entry: check if still fresh
                 let age = now - cached.cachedAt
                 if age < .seconds(30) {
-                    // Still fresh, return nil without re-scanning
+                    // Still fresh, return nil without re-resolving
                     lock.unlock()
                     return nil
                 }
@@ -117,8 +126,18 @@ enum ClaudeProjectDirectory {
             }
         }
 
-        // Tier 3: scan all project dirs for a matching cwd field
-        return scanForCWD(worktreePath: worktreePath, projectsBase: projectsBase)
+        // Tier 3: Claude Code's own rule. Tiers 1 and 2 only approximate it:
+        // `/x/my_app/.cfg` is `-x-my_app--cfg` to tier 1, `-x-my-app-cfg` to
+        // tier 2, and `-x-my-app--cfg` to Claude Code.
+        let claudeCode = claudeCodeEncode(worktreePath)
+        if claudeCode != exact && claudeCode != regex {
+            let tier3 = projectsBase.appendingPathComponent(claudeCode)
+            if FileManager.default.fileExists(atPath: tier3.path) {
+                logger.debug("Session dir via Claude Code encoding: \(tier3.path, privacy: .public)")
+                return tier3
+            }
+        }
+        return nil
     }
 
     private static func regexEncode(_ path: String) -> String {
@@ -136,39 +155,29 @@ enum ClaudeProjectDirectory {
         return result
     }
 
-    private static func scanForCWD(worktreePath: String, projectsBase: URL) -> URL? {
-        // Symlink-following listing: a profile's `projects` root IS a symlink
-        // into the host store, and listing it directly yields zero entries.
-        // Tiers 1 and 2 above need no such treatment — `fileExists` follows a
-        // symlinked parent. See SymlinkedDirectoryListing.
-        guard let dirs = SymlinkedDirectoryListing.entries(of: projectsBase) else { return nil }
-
-        for dir in dirs where dir.hasDirectoryPath {
-            guard
-                let firstJSONL = (try? FileManager.default.contentsOfDirectory(
-                    at: dir, includingPropertiesForKeys: nil
-                ))?.first(where: { $0.pathExtension == "jsonl" }),
-                let firstLine = readFirstNonEmptyLine(of: firstJSONL),
-                let data = firstLine.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let cwd = json["cwd"] as? String
-            else { continue }
-
-            if cwd == worktreePath {
-                logger.debug("Session dir via scan: \(dir.path, privacy: .public)")
-                return dir
+    /// Claude Code's folder name for `path`: every character outside ASCII
+    /// `A–Z`, `a–z` and `0–9` becomes `-`, one for one, with no collapsing.
+    /// Characters are counted in UTF-16 code units, the way JavaScript strings
+    /// count them, so a character outside the Basic Multilingual Plane
+    /// becomes `--`. The test is explicitly ASCII: `Character.isLetter` and
+    /// `isNumber` accept non-ASCII letters and digits, which Claude Code
+    /// replaces.
+    ///
+    /// Not covered: a path long enough that Claude Code shortens its folder
+    /// name and appends a hash. This encoding does not reproduce that name.
+    private static func claudeCodeEncode(_ path: String) -> String {
+        let hyphen = UInt16(UInt8(ascii: "-"))
+        let units = path.utf16.map { unit -> UInt16 in
+            switch unit {
+            case 0x30...0x39, // 0-9
+                 0x41...0x5A, // A-Z
+                 0x61...0x7A: // a-z
+                return unit
+            default:
+                return hyphen
             }
         }
-        return nil
-    }
-
-    private static func readFirstNonEmptyLine(of url: URL) -> String? {
-        guard let handle = FileHandle(forReadingAtPath: url.path) else { return nil }
-        defer { try? handle.close() }
-        let chunk = handle.readData(ofLength: 1024)
-        return String(data: chunk, encoding: .utf8)?
-            .components(separatedBy: "\n")
-            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+        return String(decoding: units, as: UTF16.self)
     }
 }
 

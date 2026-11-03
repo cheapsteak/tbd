@@ -228,17 +228,14 @@ extension RPCRouter {
         //
         // Only run this enrichment when the caller explicitly asked for the
         // archived list. The default (status=nil) listing is hit by the app's
-        // 2s poll, and `ClaudeProjectDirectory.resolve` can fall through to a
-        // full scan of `~/.claude/projects/*` (reading the first line of every
-        // session JSONL) when the tier-1/2 path-encoding lookups miss — which
-        // they do on every archived worktree whose project directory has been
-        // cleaned up. Negative scan results are not cached, so without this
-        // guard the poll re-scans the entire projects directory every 2s,
-        // pegging the daemon at ~95% CPU.
+        // 2s poll, and counting session files for every row there is wasted
+        // work. Each row costs up to three `fileExists` calls to resolve its
+        // project directory, plus a listing of that directory when one is
+        // found.
         //
         // The deep-link archived lookup opts out via `includeSessionCounts ==
         // false`: it only needs the target row's identity, not its session
-        // count, and enriching all archived rows made that lookup take ~19s.
+        // count.
         if params.status == .archived && (params.includeSessionCounts ?? true) {
             for i in worktrees.indices where worktrees[i].status == .archived {
                 if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].localPath) {
