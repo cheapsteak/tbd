@@ -71,8 +71,8 @@ through an `NSViewControllerRepresentable`, `MainWindowSplitView`:
   `SidebarView`, the native outline and dock with the footer beneath. Its
   minimum thickness fits every item in the sidebar's part of the toolbar (see
   "Width").
-- **The content item** hosts the detail area, `DetailSectionHostPager`, in
-  `MainDetailArea`.
+- **The content item** hosts `MainDetailArea`: the detail area,
+  `DetailSectionHostPager`, with the status bar, `StatusBarView`, beneath it.
 - **Collapse** is the split item's: `canCollapse` is true and
   `canCollapseFromWindowResize` false, the guard against #119. They are set once,
   because nothing resets them.
@@ -80,8 +80,18 @@ through an `NSViewControllerRepresentable`, `MainWindowSplitView`:
   that this is the line's source; if it is the scroll-edge effect instead, that
   effect is turned off for the sidebar's scroll view.
 
-The banners above the split and the status bar below it stay where they are in
-`ContentView`.
+The banners sit above the split in `ContentView`, and the split reaches the
+window's bottom edge:
+
+- **The status bar** sits at the foot of the content pane, under the detail
+  area only, so the sidebar column runs to the window's bottom edge beside it.
+  While the sidebar is collapsed the content pane fills the window, and the
+  status bar spans it.
+- **The bottom bars line up.** The sidebar's footer and the status bar share
+  one height, `WindowBottomBarMetrics.height` (32 pt), and each centres its
+  content in it. Both sit on the window's bottom edge, so their tops and centre
+  lines meet across the divider. The status bar keeps that height whatever is
+  selected.
 
 ## The toolbar
 
@@ -310,7 +320,9 @@ No durable resource is added.
   the hierarchy leaves that toolbar on the window, checked against a positive
   control in which a test-only root that declares a toolbar does get SwiftUI's
   toolbar bridged onto the same kind of window. The hosted panes read
-  `@AppStorage` from the store the window's root gives them.
+  `@AppStorage` from the store the window's root gives them. The split reaches
+  the window's bottom edge, and the content pane ends its detail area one
+  bottom-bar height above the pane's own foot, the band the status bar fills.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
   only while shown, the leading item first and before the separator in both;
   each conditional item against the state that shows it.
@@ -359,7 +371,8 @@ No durable resource is added.
   with no glass behind them, a hover square filling each icon button's frame
   and clickable across it, the filter's menu opening under its button and its
   icon blue while a filter is set, the title staying put across back and
-  forward, and no collapse after waking from sleep.
+  forward, the sidebar's footer and the status bar lined up across the
+  divider, and no collapse after waking from sleep.
 
 ## Risks
 

@@ -3,7 +3,8 @@ import SwiftUI
 import TBDShared
 
 /// The sidebar's footer row: the Add Repository split button and the filter
-/// menu, with the clone sheet the split button presents.
+/// menu, with the clone sheet the split button presents. It is
+/// `WindowBottomBarMetrics.height` tall, as the status bar beside it is.
 ///
 /// The filter menu binds `SidebarBuildOptions.showHiddenReposKey`, the key the
 /// native outline reads, so flipping it here re-filters the outline.
@@ -36,8 +37,9 @@ struct SidebarFooter: View {
             CloneRepositorySheet()
         }
         .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
+        // The status bar's height, so the footer lines up with it across the
+        // split; the content is centred in it.
+        .frame(height: WindowBottomBarMetrics.height)
     }
 
     private var hiddenCount: Int {

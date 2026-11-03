@@ -1,11 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// The main window's split and toolbar. `ContentView` mounts it between the
-/// banners and the status bar.
+/// The main window's split and toolbar. `ContentView` mounts it below the
+/// banners, and it reaches the window's bottom edge.
 ///
 /// - **The split.** A `MainSplitViewController` over two hosting controllers,
-///   `SidebarView` and `MainDetailArea`.
+///   `SidebarView` and `MainDetailArea`. The status bar is the content pane's,
+///   at the foot of `MainDetailArea`.
 /// - **The toolbar.** A `MainToolbarController` made for the split, which it
 ///   serves for its whole life, with the title cluster in a hosting view
 ///   (`makeTitleView(_:)`). It is installed on the window the main-actor
@@ -200,22 +201,32 @@ private struct TrailingEdgeClip: Shape {
     }
 }
 
-/// The detail area in the split's content pane. The tab choice is resolved
-/// here, in a real `body`, and handed to `DetailSectionHostPager` as a value.
-/// Reading the three inputs inside `updateNSViewController` instead would
-/// register no dependency — Observation tracks what a `body` evaluation
-/// reads — so a selection change that touched nothing else this body reads
-/// would leave the detail area on the previous tab.
+/// The split's content pane: the detail area over the status bar.
+///
+/// - **The detail area.** The tab choice is resolved here, in a real `body`,
+///   and handed to `DetailSectionHostPager` as a value. Reading the three
+///   inputs inside `updateNSViewController` instead would register no
+///   dependency — Observation tracks what a `body` evaluation reads — so a
+///   selection change that touched nothing else this body reads would leave
+///   the detail area on the previous tab.
+/// - **The status bar.** `StatusBarView` sits at the pane's foot, so it runs
+///   under the content pane only and the sidebar column reaches the window's
+///   bottom edge beside it. It reads only `AppState`, which the split gives
+///   this pane. With the sidebar collapsed the pane fills the window, and so
+///   does the bar.
 struct MainDetailArea: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        DetailSectionHostPager(
-            targetTab: DetailSectionHostPager.targetTab(
-                isConnected: appState.isConnected,
-                selectedRemoteSession: appState.selectedRemoteSession,
-                selectedRemoteProvider: appState.selectedRemoteProvider
+        VStack(spacing: 0) {
+            DetailSectionHostPager(
+                targetTab: DetailSectionHostPager.targetTab(
+                    isConnected: appState.isConnected,
+                    selectedRemoteSession: appState.selectedRemoteSession,
+                    selectedRemoteProvider: appState.selectedRemoteProvider
+                )
             )
-        )
+            StatusBarView()
+        }
     }
 }

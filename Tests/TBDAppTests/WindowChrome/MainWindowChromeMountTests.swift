@@ -72,6 +72,31 @@ struct MainWindowChromeMountTests {
         #expect(detailBelowToolbar)
     }
 
+    /// The status bar is the content pane's, not the window's. The split
+    /// reaches the bottom of the window's root, so the sidebar column runs to
+    /// the window's bottom edge, and the content pane ends its detail area one
+    /// bottom-bar height above the pane's foot: the band `StatusBarView`
+    /// fills. With the bar below the split instead, the split would end above
+    /// the root's bottom and the detail would reach the pane's foot. Nothing
+    /// is selected, so the band is the bar's fixed height, not its content's.
+    ///
+    /// The content pane is the hosting controller's own view, the root the
+    /// SwiftUI pane lays out in, so the band is measured inside the pane
+    /// whatever frame the split gives it.
+    @Test func statusBarSitsAtTheFootOfTheContentPane() async throws {
+        let mount = ChromeMount(label: "statusBar")
+        defer { mount.tearDown() }
+        _ = try await mount.appKitReady()
+        let split = try #require(mount.mountedSplit)
+
+        _ = try await waitForMainActorCondition("the split to reach the window's foot over a status bar band") {
+            mount.bottomEdges(in: split)?.placeTheStatusBarInTheContentPane == true
+        }
+        let edges = try #require(mount.bottomEdges(in: split), "The content pane never laid out its detail area")
+        #expect(abs(edges.splitAboveRoot) < 0.5)
+        #expect(abs(edges.bandBelowDetail - WindowBottomBarMetrics.height) < 0.5)
+    }
+
     /// The divider autosaves only into the real store, where `NSSplitView`
     /// writes it: never into a test's suite or `TBD_MOCK`'s.
     @Test func dividerAutosavesOnlyForTheStandardStore() {
@@ -556,6 +581,25 @@ private final class ChromeMount {
         return frame.height > 0 && frame.maxY <= host.window.contentLayoutRect.maxY + 0.5
     }
 
+    /// Where the split and the content pane's detail area end, once the
+    /// detail's tab view is laid out; nil before.
+    func bottomEdges(in split: MainSplitViewController) -> PaneBottomEdges? {
+        let pane = split.contentItem.viewController.view
+        guard let tabView = OffscreenHost<AnyView>.descendants(NSTabView.self, of: pane).first,
+              tabView.frame.height > 0 else { return nil }
+        let rootBottom = Self.bottomInWindow(host.hostingView)
+        let paneBottom = Self.bottomInWindow(pane)
+        return PaneBottomEdges(
+            splitAboveRoot: Self.bottomInWindow(split.view) - rootBottom,
+            bandBelowDetail: Self.bottomInWindow(tabView) - paneBottom)
+    }
+
+    /// `view`'s bottom edge in window coordinates, which put the origin at the
+    /// bottom left.
+    private static func bottomInWindow(_ view: NSView) -> CGFloat {
+        view.convert(view.bounds, to: nil).minY
+    }
+
     /// The native sidebar's root views under `pane`.
     static func nativeSidebarRoots(in pane: NSView) -> [NSView] {
         OffscreenHost<AnyView>.descendants(NSView.self, of: pane).filter {
@@ -570,6 +614,22 @@ private final class ChromeMount {
             return item as? NSTrackingSeparatorToolbarItem
         }
         return nil
+    }
+}
+
+/// The bottom of the window's split and of the content pane's detail area,
+/// in points.
+private struct PaneBottomEdges {
+    /// The split's bottom above the bottom of the window's root.
+    let splitAboveRoot: CGFloat
+    /// The detail area's bottom above the content pane's: the band beneath
+    /// the detail area.
+    let bandBelowDetail: CGFloat
+
+    /// The split on the root's bottom, with one bottom-bar height between
+    /// the content pane's foot and its detail area.
+    var placeTheStatusBarInTheContentPane: Bool {
+        abs(splitAboveRoot) < 0.5 && abs(bandBelowDetail - WindowBottomBarMetrics.height) < 0.5
     }
 }
 
