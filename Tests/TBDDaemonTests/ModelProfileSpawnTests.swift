@@ -639,7 +639,7 @@ struct ModelProfileSpawnTests {
         )
 
         #expect(recorder.shellBodies.contains(
-            #"tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox"#))
+            #"tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
         // Recorded on the primary's row, so a relaunch in that tab keeps it.
         let codexRow = try await db.terminals.list(worktreeID: wt.id)
             .first { $0.kind == .codex }
@@ -667,7 +667,7 @@ struct ModelProfileSpawnTests {
         )
 
         #expect(recorder.shellBodies.contains(
-            " tbd --dangerously-bypass-approvals-and-sandbox"))
+            " tbd --no-daemon --dangerously-bypass-approvals-and-sandbox"))
         #expect(!recorder.shellBodies.contains("model="))
         let codexRow = try await db.terminals.list(worktreeID: wt.id)
             .first { $0.kind == .codex }
@@ -711,7 +711,7 @@ struct ModelProfileSpawnTests {
 
         #expect(response.success)
         #expect(recorder.shellBodies.contains(
-            #"tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox"#))
+            #"tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
     }
 
     @Test("terminal.create gives only the requested Codex tab its guarded home")
@@ -738,7 +738,7 @@ struct ModelProfileSpawnTests {
         #expect(launch.contains("CODEX_HOME=\(home.path)"))
         #expect(!launch.contains("/synthetic/elsewhere"))
         #expect(recorder.shellBodies.contains(
-            #"-c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'synthetic prompt'"#))
+            #"-c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'synthetic prompt'"#))
         #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("tbd.config.toml").path))
         let terminal = try response.decodeResult(Terminal.self)
         #expect(try await db.terminals.get(id: terminal.id)?.codexLaunchOptions
@@ -944,7 +944,7 @@ struct ModelProfileSpawnTests {
 
         #expect(response.success)
         #expect(recorder.shellBodies.contains(
-            "tbd --disable 'computer_use' --disable 'apps' --dangerously-bypass-approvals-and-sandbox"))
+            "tbd --disable 'computer_use' --disable 'apps' --no-daemon --dangerously-bypass-approvals-and-sandbox"))
     }
 
     @Test("terminal.create refuses disabled features for non-Codex terminals",
@@ -1026,7 +1026,7 @@ struct ModelProfileSpawnTests {
             model: "acme-model", disabledFeatures: ["computer_use", "browser_use"])
         #expect(before.codexLaunchOptions == options)
         #expect(relaunch.contains(
-            #"tbd -c 'model="acme-model"' --disable 'computer_use' --disable 'browser_use' --dangerously-bypass-approvals-and-sandbox"#))
+            #"tbd -c 'model="acme-model"' --disable 'computer_use' --disable 'browser_use' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
         // Kept for the next relaunch as well.
         #expect(after.codexLaunchOptions == options)
     }
@@ -1036,7 +1036,7 @@ struct ModelProfileSpawnTests {
         let (relaunch, before, after) = try await createThenRecreateCodex()
 
         #expect(before.codexLaunchOptions == nil)
-        #expect(relaunch.contains(" tbd --dangerously-bypass-approvals-and-sandbox"))
+        #expect(relaunch.contains(" tbd --no-daemon --dangerously-bypass-approvals-and-sandbox"))
         #expect(!relaunch.contains("model="))
         #expect(!relaunch.contains("--disable"))
         #expect(after.codexLaunchOptions == nil)
