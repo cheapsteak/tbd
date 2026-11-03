@@ -4,11 +4,14 @@ import TBDShared
 
 private let nativeSidebarLogger = Logger(subsystem: "com.tbd.app", category: "native-sidebar")
 
-/// The sidebar settings that shape the tree. Each lives in `UserDefaults`,
-/// bound by `@AppStorage` in Settings and the sidebar footer; the controller
-/// reads them with `init(defaults:)` and rebuilds when they change.
+/// The sidebar settings that shape the tree. Each lives in `UserDefaults`:
+/// the toolbar's repo filter writes `showHiddenRepos`, and the rest are
+/// Settings toggles or remembered state. The controller reads them with
+/// `init(defaults:)` and rebuilds when they change.
 struct SidebarBuildOptions: Equatable {
-    /// `sidebar.showHiddenRepos`: hidden repos' sections are shown, dimmed.
+    /// `sidebar.showHiddenRepos`: hidden repos' sections are shown, dimmed,
+    /// while no repo is chosen in the repo filter. A chosen repo shows
+    /// whatever this says (`AppState.sidebarShownRepos(showHiddenRepos:)`).
     var showHiddenRepos: Bool
     /// `AppState.showScratchSectionKey`.
     var showScratchSection: Bool
@@ -21,8 +24,15 @@ struct SidebarBuildOptions: Equatable {
     /// record of its own, so its state is a setting like the others here.
     var scratchExpanded: Bool
 
-    /// The key `SidebarFooter` binds for the hidden-repos filter.
+    /// The key the toolbar's repo filter flips from its Show Hidden Repos
+    /// row (`MainToolbarController.showHiddenReposChosen(_:)`), in the store
+    /// the outline reads, `AppState.userDefaults`.
     static let showHiddenReposKey = "sidebar.showHiddenRepos"
+
+    /// `showHiddenReposKey` in `defaults`: false while unset.
+    static func storedShowHiddenRepos(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: showHiddenReposKey) as? Bool ?? false
+    }
 
     init(showHiddenRepos: Bool, showScratchSection: Bool, workflowGroups: Bool,
          collapseEnded: Bool, scratchExpanded: Bool) {
@@ -38,7 +48,7 @@ struct SidebarBuildOptions: Equatable {
     @MainActor
     init(defaults: UserDefaults) {
         self.init(
-            showHiddenRepos: defaults.object(forKey: Self.showHiddenReposKey) as? Bool ?? false,
+            showHiddenRepos: Self.storedShowHiddenRepos(defaults),
             showScratchSection: defaults.object(forKey: AppState.showScratchSectionKey) as? Bool ?? true,
             workflowGroups: AppState.sidebarWorkflowGroupsEnabled(defaults: defaults),
             collapseEnded: AppState.sidebarCollapseEndedSessionsEnabled(defaults: defaults),
@@ -87,17 +97,6 @@ enum SidebarTreeBuilder {
         return SidebarTree(roots: pass.roots())
     }
 
-    /// The repos whose sections render, in order: `SidebarView.filteredRepos`.
-    static func filteredRepos(_ appState: AppState, showHiddenRepos: Bool) -> [Repo] {
-        let base: [Repo]
-        if let filterID = appState.repoFilter {
-            base = appState.repos.filter { $0.id == filterID }
-        } else {
-            base = appState.repos
-        }
-        return showHiddenRepos ? base : base.filter { !$0.hidden }
-    }
-
     /// IDs already reported, so a rebuild after every change does not log
     /// the same corrupt row again.
     private static var reportedRows: Set<UUID> = []
@@ -143,7 +142,7 @@ private struct BuildPass {
         if AppState.scratchSectionVisible(setting: options.showScratchSection, spaces: appState.scratchWorktrees) {
             roots.append(scratchSection())
         }
-        for repo in SidebarTreeBuilder.filteredRepos(appState, showHiddenRepos: options.showHiddenRepos) {
+        for repo in appState.sidebarShownRepos(showHiddenRepos: options.showHiddenRepos) {
             if let section = repoSection(repo) { roots.append(section) }
         }
         // Below the repos, not above, as in `SidebarView`.

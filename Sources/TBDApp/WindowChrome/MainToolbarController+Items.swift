@@ -381,9 +381,10 @@ extension MainToolbarController {
 
     /// Shows `filter` on the filter button, setting each value only when it
     /// differs: tinted `activeFilterTint` while a repo filter is set and
-    /// untinted, the other icons' colour, while none is; `help` as its tool
-    /// tip; and `accessibilityValue` as its accessibility value. `nil`,
-    /// before any apply, shows no filter.
+    /// untinted, the other icons' colour, while none is, whatever the Show
+    /// Hidden Repos toggle says; `help` as its tool tip; and
+    /// `accessibilityValue` as its accessibility value. `nil`, before any
+    /// apply, shows no filter.
     private static func showFilter(_ filter: RepoFilterPresentation?, on button: NSButton) {
         let tint: NSColor? = filter?.isActive == true ? activeFilterTint : nil
         if button.contentTintColor != tint {
@@ -412,14 +413,16 @@ extension MainToolbarController {
     }
 
     /// The filter's overflow row: "Filter", with a submenu of the same rows
-    /// as `filterMenu`, each choosing its repo through `filterChosen(_:)`,
-    /// and the row `filter` names checked, or none when it names a repo that
-    /// is gone. Empty without a filter. Without it, AppKit's default row
-    /// would be an inert "Filter": the item has no action, as its host
-    /// answers none. The row carries `filter` as its represented object, so
-    /// `updateFilterForm` can tell whether it is current. The submenu reports
-    /// its opening to `filterMenuTracker`, so it is not replaced under the
-    /// pointer.
+    /// as `filterMenu`, each repo row choosing its repo through
+    /// `filterChosen(_:)` and the Show Hidden Repos row flipping the toggle
+    /// through `showHiddenReposChosen(_:)`, the row `filter` names checked,
+    /// or none when it names a repo that is gone, and the toggle's row
+    /// checked while hidden repos show. Empty without a filter. Without it,
+    /// AppKit's default row would be an inert "Filter": the item has no
+    /// action, as its host answers none. The row carries `filter` as its
+    /// represented object, so `updateFilterForm` can tell whether it is
+    /// current. The submenu reports its opening to `filterMenuTracker`, so it
+    /// is not replaced under the pointer.
     private func makeFilterForm(_ filter: RepoFilterPresentation?) -> NSMenuItem {
         let form = NSMenuItem(title: Self.filterLabel, action: nil, keyEquivalent: "")
         form.representedObject = filter
@@ -427,7 +430,7 @@ extension MainToolbarController {
         rows.autoenablesItems = false
         rows.delegate = filterMenuTracker
         if let filter {
-            fillFilterRows(rows, options: filter.options)
+            fillFilterRows(rows, for: filter)
             Self.checkFilterRow(in: rows, for: filter)
         }
         form.submenu = rows
@@ -641,21 +644,23 @@ extension MainToolbarController {
 
     /// Brings `filterMenu`, the filter button and the filter item's overflow
     /// row to `filter`. The menu's rows are rebuilt only when the options
-    /// change, and the menu and the row are built from the same options, so
-    /// their rows match. Never while one of the filter's menus is open: its
-    /// close schedules an apply that catches up. An item whose view is not
-    /// the filter's host, or a host missing its button, is logged and its
-    /// button skipped.
+    /// change; the repo check and the Show Hidden Repos row's title and check
+    /// are set in place, each only when it differs. The menu and the row are
+    /// built from the same presentation, so their rows match. Never while
+    /// one of the filter's menus is open: its close schedules an apply that
+    /// catches up. An item whose view is not the filter's host, or a host
+    /// missing its button, is logged and its button skipped.
     private func updateFilter(_ item: NSToolbarItem, _ filter: RepoFilterPresentation) {
         guard !filterMenuTracker.isOpen else { return }
         if filter.options != builtFilterOptions {
-            fillFilterRows(filterMenu, options: filter.options)
+            fillFilterRows(filterMenu, for: filter)
             builtFilterOptions = filter.options
         }
         if Self.checkFilterRow(in: filterMenu, for: filter) {
             filterSelectionCount += 1
             itemsLogger.debug("Main toolbar filter selection \(self.filterSelectionCount, privacy: .public)")
         }
+        Self.updateShowHiddenReposRow(in: filterMenu, for: filter)
         if let button = (item.view as? FilterToolbarButtonHost)?.button {
             Self.showFilter(filter, on: button)
         } else {
@@ -666,9 +671,9 @@ extension MainToolbarController {
     }
 
     /// Gives the filter item a fresh overflow row for `filter` when its row
-    /// was built for other options or another choice, or for none. A fresh
-    /// row rather than an edit: AppKit may build the overflow menu from a
-    /// copy of the row.
+    /// was built for other options, another choice, another hidden count or
+    /// toggle state, or for none. A fresh row rather than an edit: AppKit may
+    /// build the overflow menu from a copy of the row.
     private func updateFilterForm(_ item: NSToolbarItem, _ filter: RepoFilterPresentation) {
         let shown = item.menuFormRepresentation?.representedObject as? RepoFilterPresentation
         guard shown != filter else { return }
@@ -677,31 +682,41 @@ extension MainToolbarController {
 
     /// Replaces `menu`'s rows with "All Repos", a separator, then each repo,
     /// each row carrying its repo's ID, or none for "All Repos", and choosing
-    /// it through `filterChosen(_:)`. Rows are added to the menu directly:
-    /// `addItem(withTitle:)` drops a row whose title repeats, and two repos
-    /// can share a display name.
-    private func fillFilterRows(_ menu: NSMenu, options: [RepoFilterPresentation.Option]) {
+    /// it through `filterChosen(_:)`; then a separator and the Show Hidden
+    /// Repos row, titled and checked for `filter`, which flips the toggle
+    /// through `showHiddenReposChosen(_:)`. Hidden repos keep their rows,
+    /// with no marker: choosing one shows its section, dimmed. Rows are added
+    /// to the menu directly: `addItem(withTitle:)` drops a row whose title
+    /// repeats, and two repos can share a display name.
+    private func fillFilterRows(_ menu: NSMenu, for filter: RepoFilterPresentation) {
         menu.removeAllItems()
-        for (index, option) in options.enumerated() {
+        for (index, option) in filter.options.enumerated() {
             let row = NSMenuItem(title: option.title, action: #selector(filterChosen(_:)), keyEquivalent: "")
             row.target = self
             row.representedObject = option.id
             menu.addItem(row)
             if index == 0 { menu.addItem(.separator()) }
         }
+        menu.addItem(.separator())
+        let toggle = NSMenuItem(
+            title: filter.showHiddenReposRowTitle, action: #selector(showHiddenReposChosen(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = filter.showsHiddenRepos ? .on : .off
+        menu.addItem(toggle)
     }
 
-    /// Checks the row `filter` names and no other, or none when it names a
-    /// repo that is gone, as the SwiftUI `Picker` shows it, rather than a
-    /// false "All Repos". Only a row whose check differs is set, so a menu
-    /// already showing the filter is left alone.
+    /// Checks the repo row `filter` names and no other, or none when it names
+    /// a repo that is gone, as the SwiftUI `Picker` shows it, rather than a
+    /// false "All Repos". Only the rows choosing a repo are touched, so the
+    /// Show Hidden Repos row keeps its own check, and only a row whose check
+    /// differs is set, so a menu already showing the filter is left alone.
     ///
     /// - Returns: whether any row's check changed.
     @discardableResult
     private static func checkFilterRow(in menu: NSMenu, for filter: RepoFilterPresentation) -> Bool {
         let target = filterRow(in: menu.items, for: filter)
         var changed = false
-        for (index, row) in menu.items.enumerated() where !row.isSeparatorItem {
+        for (index, row) in menu.items.enumerated() where isRepoRow(row) {
             let state: NSControl.StateValue = index == target ? .on : .off
             if row.state != state {
                 row.state = state
@@ -711,12 +726,35 @@ extension MainToolbarController {
         return changed
     }
 
-    /// The index among `rows` of the row `filter` names, or `nil` when it
-    /// names a repo that is gone.
+    /// The index among `rows` of the repo row `filter` names, or `nil` when
+    /// it names a repo that is gone.
     private static func filterRow(in rows: [NSMenuItem], for filter: RepoFilterPresentation) -> Int? {
         guard filter.selectedIsKnown else { return nil }
         return rows.firstIndex { row in
-            !row.isSeparatorItem && (row.representedObject as? UUID) == filter.selected
+            isRepoRow(row) && (row.representedObject as? UUID) == filter.selected
+        }
+    }
+
+    /// Whether `row` is one of a filter menu's rows that choose a repo, "All
+    /// Repos" among them.
+    private static func isRepoRow(_ row: NSMenuItem) -> Bool {
+        !row.isSeparatorItem && row.action == #selector(MainToolbarController.filterChosen(_:))
+    }
+
+    /// Sets the Show Hidden Repos row of `menu` to `filter`'s title and
+    /// check, each only when it differs. The title changes with the hidden
+    /// repos' count, which is not one of the options, so the row is set in
+    /// place rather than the menu rebuilt.
+    private static func updateShowHiddenReposRow(in menu: NSMenu, for filter: RepoFilterPresentation) {
+        let action = #selector(MainToolbarController.showHiddenReposChosen(_:))
+        guard let row = menu.items.first(where: { $0.action == action }) else { return }
+        let title = filter.showHiddenReposRowTitle
+        if row.title != title {
+            row.title = title
+        }
+        let state: NSControl.StateValue = filter.showsHiddenRepos ? .on : .off
+        if row.state != state {
+            row.state = state
         }
     }
 
@@ -857,12 +895,26 @@ extension MainToolbarController {
 
     /// Sets the filter to the row chosen, from `filterMenu` or the overflow
     /// row's submenu. Its repo ID, or none for "All Repos", is the row's
-    /// represented object. A sender that is not a menu item changes nothing.
+    /// represented object. A hidden repo chosen here shows, whatever the Show
+    /// Hidden Repos toggle says (`AppState.sidebarShownRepos(showHiddenRepos:)`).
+    /// A sender that is not a menu item changes nothing.
     @objc func filterChosen(_ sender: Any?) {
         guard let row = sender as? NSMenuItem else { return }
         let chosen = row.representedObject as? UUID
         guard appState.repoFilter != chosen else { return }
         appState.repoFilter = chosen
+    }
+
+    /// Flips whether hidden repos' sections show, from the Show Hidden Repos
+    /// row of `filterMenu` or of the overflow row's submenu. It writes
+    /// `SidebarBuildOptions.showHiddenReposKey` to `appState.userDefaults`,
+    /// the store the sidebar's outline reads and re-filters from; the
+    /// controller's watch on that store then checks the row. It reads nothing
+    /// from its sender, so any sender flips it.
+    @objc func showHiddenReposChosen(_ sender: Any?) {
+        let defaults = appState.userDefaults
+        let shown = SidebarBuildOptions.storedShowHiddenRepos(defaults)
+        defaults.set(!shown, forKey: SidebarBuildOptions.showHiddenReposKey)
     }
 
     @objc func openPrimaryServerURL(_ sender: Any?) {

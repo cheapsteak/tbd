@@ -30,7 +30,7 @@ struct SidebarTreeBuilderTests {
         let state = AppState(userDefaults: suite.defaults)
         let one = Repo(path: "/tmp/acme-one", displayName: "one")
         let two = Repo(path: "/tmp/acme-two", displayName: "two")
-        // `filteredRepos` keeps `repos` order, whatever it is.
+        // `AppState.sidebarShownRepos` keeps `repos` order, whatever it is.
         state.repos = [two, one]
         state.worktrees = [
             one.id: [Self.row("main", repo: one.id, status: .main)],
@@ -96,6 +96,56 @@ struct SidebarTreeBuilderTests {
         // As in `SidebarSessionPlacement.knownRepoIDs`: while filtered, another
         // repo's sessions fall through to their provider rather than vanish.
         #expect(filtered.parent(of: .remoteSession(session.id)) == .providerHeader("acme"))
+    }
+
+    /// A repo chosen in the filter shows whatever Show Hidden Repos says:
+    /// a hidden one chosen with the toggle off shows alone, dimmed, rather
+    /// than leaving the sidebar empty, and with the toggle on it shows the
+    /// same. A chosen repo that is not hidden shows undimmed with the toggle
+    /// off. With no repo chosen the toggle decides: hidden repos are left out
+    /// while it is off and shown, dimmed, while it is on. A filter naming a
+    /// repo that is gone shows no repo at all.
+    @Test func aChosenRepoShowsWhateverTheHiddenToggleSays() throws {
+        let suite = TestDefaultsSuite("SidebarTreeBuilderTests.chosenHidden")
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: suite.defaults)
+        let shown = Repo(path: "/tmp/acme-shown", displayName: "shown")
+        let hidden = Repo(path: "/tmp/acme-hidden", displayName: "hidden", hidden: true)
+        let shownRow = Self.row("work", repo: shown.id)
+        let hiddenRow = Self.row("work", repo: hidden.id)
+        state.repos = [shown, hidden]
+        state.worktrees = [shown.id: [shownRow], hidden.id: [hiddenRow]]
+
+        state.repoFilter = hidden.id
+        for showHidden in [false, true] {
+            let tree = Self.build(state, Self.options(hidden: showHidden))
+            let headers = Self.repoHeaders(tree)
+            #expect(headers == [hidden.id], "toggle \(showHidden)")
+            guard case .repoHeader(let header)? = tree.node(.repoHeader(hidden.id))?.kind else {
+                Issue.record("The chosen hidden repo's header is missing with the toggle \(showHidden)")
+                continue
+            }
+            #expect(header.isHidden, "toggle \(showHidden)")
+            let row = try #require(Self.worktreeModel(tree, hiddenRow.id), "toggle \(showHidden)")
+            #expect(row.isInHiddenSection, "toggle \(showHidden)")
+        }
+
+        state.repoFilter = shown.id
+        let chosenShown = Self.build(state, Self.options(hidden: false))
+        #expect(Self.repoHeaders(chosenShown) == [shown.id])
+        let shownModel = try #require(Self.worktreeModel(chosenShown, shownRow.id))
+        #expect(shownModel.isInHiddenSection == false)
+
+        state.repoFilter = nil
+        let unfilteredOff = Self.build(state, Self.options(hidden: false))
+        #expect(Self.repoHeaders(unfilteredOff) == [shown.id])
+        #expect(!unfilteredOff.contains(.worktree(hiddenRow.id)))
+        let unfilteredOn = Self.build(state, Self.options(hidden: true))
+        #expect(Self.repoHeaders(unfilteredOn) == [shown.id, hidden.id])
+
+        state.repoFilter = UUID()
+        let gone = Self.build(state, Self.options(hidden: true))
+        #expect(Self.repoHeaders(gone).isEmpty)
     }
 
     /// Providers are first-class selectable places: a registered provider keeps

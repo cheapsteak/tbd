@@ -146,8 +146,9 @@ struct SidebarSessionPlacementProviderTests {
     }
 
     /// The hidden-repo half of the decision: a hidden repo's id counts as
-    /// "known" even though `SidebarTreeBuilder.filteredRepos` doesn't render a
-    /// section for it (when "show hidden repos" is off) — so a session
+    /// "known" even though `AppState.sidebarShownRepos` doesn't render a
+    /// section for it (when no filter chooses it and Show Hidden Repos is
+    /// off) — so a session
     /// matched to it is excluded from THIS section too, by analogy with a
     /// hidden repo's local worktrees vanishing from the sidebar entirely.
     /// This function deliberately never consults the hidden flag: hiding a

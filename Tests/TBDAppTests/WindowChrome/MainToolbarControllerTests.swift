@@ -714,13 +714,13 @@ struct MainToolbarControllerTests {
     }
 
     /// The menu the filter button pops up, `filterMenu`, holds "All Repos",
-    /// a separator and each repo, the current choice checked and no other.
-    /// Its rows stay enabled, its opening is reported to `filterMenuTracker`,
-    /// and each row carries its repo's ID, or none for "All Repos", and
-    /// chooses it through `filterChosen(_:)`: choosing one sets the filter,
-    /// and the next apply checks it. A test cannot pop the menu up, which
-    /// blocks in the menu's tracking loop, so this reads the menu the click
-    /// pops up.
+    /// a separator and each repo, the current choice checked and no other,
+    /// then a separator and the Show Hidden Repos row. Its rows stay enabled,
+    /// its opening is reported to `filterMenuTracker`, and each repo row
+    /// carries its repo's ID, or none for "All Repos", and chooses it through
+    /// `filterChosen(_:)`: choosing one sets the filter, and the next apply
+    /// checks it. A test cannot pop the menu up, which blocks in the menu's
+    /// tracking loop, so this reads the menu the click pops up.
     @Test func filterMenuShowsAndSetsTheFilter() async throws {
         let fixture = ToolbarFixture(label: "filterMenuShowsAndSetsTheFilter")
         defer { fixture.tearDown() }
@@ -732,7 +732,7 @@ struct MainToolbarControllerTests {
         fixture.state.repoFilter = fixture.repos[1].id
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         let titles = Self.describeFilterRows(menu)
-        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets", "-", "Show Hidden Repos"]
         #expect(titles == expectedTitles)
         let checkedWidgets = Self.checkedTitles(menu)
         let expectedWidgets: [String] = ["widgets"]
@@ -740,8 +740,11 @@ struct MainToolbarControllerTests {
         #expect(menu.autoenablesItems == false)
         let tracked = menu.delegate === controller.filterMenuTracker
         #expect(tracked)
+        let rows = menu.items.filter { !$0.isSeparatorItem }
+        let allEnabled = rows.allSatisfy { $0.isEnabled }
+        #expect(allEnabled)
 
-        let choosable = menu.items.filter { !$0.isSeparatorItem }
+        let choosable = Self.repoRows(menu)
         try #require(choosable.count == 3)
         let ids = choosable.map { $0.representedObject as? UUID }
         let expectedIDs: [UUID?] = [nil, fixture.repos[0].id, fixture.repos[1].id]
@@ -786,7 +789,7 @@ struct MainToolbarControllerTests {
         let checkedMissing = Self.checkedTitles(menu)
         #expect(checkedMissing.isEmpty)
         let titles = Self.describeFilterRows(menu)
-        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets", "-", "Show Hidden Repos"]
         #expect(titles == expectedTitles)
     }
 
@@ -1014,10 +1017,13 @@ struct MainToolbarControllerTests {
         }
 
         #expect(unsent.isEmpty)
-        // The Back and Forward rows, three filter rows, Transcript, Reconnect
-        // and Stop at least.
-        #expect(sent >= 8)
+        // The Back and Forward rows, three filter rows, Show Hidden Repos,
+        // Transcript, Reconnect and Stop at least.
+        #expect(sent >= 9)
         #expect(fixture.state.repoFilter == fixture.repos[1].id)
+        // Show Hidden Repos, sent once from the unset key, turned it on.
+        let showsHidden = SidebarBuildOptions.storedShowHiddenRepos(fixture.suite.defaults)
+        #expect(showsHidden)
         let expectedStops: [RemoteSessionSelection] = [selection]
         #expect(fixture.stopRequests == expectedStops)
     }
@@ -1046,13 +1052,13 @@ struct MainToolbarControllerTests {
         #expect(rows.autoenablesItems == false)
         #expect(rows.delegate === controller.filterMenuTracker)
         let titles = Self.describeFilterRows(rows)
-        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets", "-", "Show Hidden Repos"]
         #expect(titles == expectedTitles)
         let checkedWidgets = Self.checkedTitles(rows)
         let expectedWidgets: [String] = ["widgets"]
         #expect(checkedWidgets == expectedWidgets)
 
-        let choosable = rows.items.filter { !$0.isSeparatorItem }
+        let choosable = Self.repoRows(rows)
         try #require(choosable.count == 3)
         let ids = choosable.map { $0.representedObject as? UUID }
         let expectedIDs: [UUID?] = [nil, fixture.repos[0].id, fixture.repos[1].id]
@@ -1085,7 +1091,7 @@ struct MainToolbarControllerTests {
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         let grownRows = try #require(Self.filterOverflowRows(of: controller))
         let grownTitles = Self.describeFilterRows(grownRows)
-        let expectedGrown: [String] = ["All Repos", "-", "acme", "widgets", "gadgets"]
+        let expectedGrown: [String] = ["All Repos", "-", "acme", "widgets", "gadgets", "-", "Show Hidden Repos"]
         #expect(grownTitles == expectedGrown)
         let checkedGadgets = Self.checkedTitles(grownRows)
         let expectedGadgets: [String] = ["gadgets"]
@@ -1202,7 +1208,7 @@ struct MainToolbarControllerTests {
         let filterItem = try #require(fixture.controller.makeItem(MainToolbarItemID.repoFilter, willBeInserted: false))
         let rows = try #require(filterItem.menuFormRepresentation?.submenu)
         let titles = Self.describeFilterRows(rows)
-        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets"]
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets", "-", "Show Hidden Repos"]
         #expect(titles == expectedTitles)
         let checked = Self.checkedTitles(rows)
         let expectedChecked: [String] = ["widgets"]
@@ -1223,7 +1229,8 @@ struct MainToolbarControllerTests {
     }
 
     /// While one of the filter's menus is open, neither its overflow row nor
-    /// the button's menu is rebuilt under the pointer; the close catches both
+    /// the button's menu is rebuilt under the pointer, and neither's Show
+    /// Hidden Repos row takes a new count or check; the close catches both
     /// up, with no apply but the one it schedules. The button's menu is the
     /// one opened here; the overflow submenu reports to the same tracker.
     @Test func filterOverflowRowsWaitForAnOpenMenuToClose() async throws {
@@ -1237,21 +1244,34 @@ struct MainToolbarControllerTests {
         let before = Self.describeFilterRows(openRows)
         let menuBefore = Self.describeFilterRows(menu)
         try #require(menuBefore == before)
+        let toggleBefore = Self.showHiddenReposState(menu)
+        let plain = ShowHiddenReposRowState(title: "Show Hidden Repos", checked: false)
+        try #require(toggleBefore == plain)
 
         controller.filterMenuTracker.menuWillOpen(menu)
-        fixture.state.repos.append(Repo(path: "/tmp/gadgets", displayName: "gadgets"))
+        fixture.state.repos.append(Repo(path: "/tmp/gadgets", displayName: "gadgets", hidden: true))
+        fixture.suite.defaults.set(true, forKey: SidebarBuildOptions.showHiddenReposKey)
         controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         #expect(controller.item(MainToolbarItemID.repoFilter)?.menuFormRepresentation === openForm)
         let whileOpen = Self.describeFilterRows(openRows)
         #expect(whileOpen == before)
         let menuWhileOpen = Self.describeFilterRows(menu)
         #expect(menuWhileOpen == menuBefore)
+        let toggleWhileOpen = Self.showHiddenReposState(menu)
+        #expect(toggleWhileOpen == plain)
+        let overflowToggleWhileOpen = Self.showHiddenReposState(openRows)
+        #expect(overflowToggleWhileOpen == plain)
 
         controller.filterMenuTracker.menuDidClose(menu)
+        let caughtUpToggle = ShowHiddenReposRowState(title: "Show Hidden Repos (1)", checked: true)
         let caughtUp = try await waitForMainActorCondition("the filter's menu and overflow row to catch up once it closes") {
             let rows = MainToolbarControllerTests.filterOverflowRows(of: controller)
-            let rowCaughtUp = rows.map { MainToolbarControllerTests.describeFilterRows($0).contains("gadgets") } ?? false
+            let rowCaughtUp = rows.map {
+                MainToolbarControllerTests.describeFilterRows($0).contains("gadgets")
+                    && MainToolbarControllerTests.showHiddenReposState($0) == caughtUpToggle
+            } ?? false
             let menuCaughtUp = MainToolbarControllerTests.describeFilterRows(controller.filterMenu).contains("gadgets")
+                && MainToolbarControllerTests.showHiddenReposState(controller.filterMenu) == caughtUpToggle
             return rowCaughtUp && menuCaughtUp
         }
         #expect(caughtUp)
@@ -1285,6 +1305,177 @@ struct MainToolbarControllerTests {
         let fromBareRow = NSApplication.shared.sendAction(action, to: controller, from: bare)
         #expect(fromBareRow)
         #expect(fixture.state.repoFilter == nil)
+    }
+
+    // MARK: - Show Hidden Repos
+
+    /// The Show Hidden Repos row closes both filter menus, the button's and
+    /// the overflow row's submenu, after a separator. It reads "Show Hidden
+    /// Repos" with no repo hidden and carries the count once one is, is
+    /// checked exactly while the key is on, stays enabled, and sends
+    /// `showHiddenReposChosen(_:)` to the controller. Hiding a repo leaves
+    /// the options as they were, hidden repos keeping their rows, so the
+    /// button's menu keeps its rows and takes the new title in place. The
+    /// key leaves the repo check alone and never tints the button. Every
+    /// apply here is direct and nothing suspends between it and its checks.
+    @Test func showHiddenReposRowShowsTheCountAndTheKey() async throws {
+        let fixture = ToolbarFixture(label: "showHiddenReposRowShowsTheCountAndTheKey")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let menu = controller.filterMenu
+        let toggleAction = #selector(MainToolbarController.showHiddenReposChosen(_:))
+
+        let plain = ShowHiddenReposRowState(title: "Show Hidden Repos", checked: false)
+        let menuPlain = Self.showHiddenReposState(menu)
+        #expect(menuPlain == plain)
+        let plainRows = try #require(Self.filterOverflowRows(of: controller))
+        let overflowPlain = Self.showHiddenReposState(plainRows)
+        #expect(overflowPlain == plain)
+        let toggle = try #require(Self.showHiddenReposRow(menu))
+        let targetsTheController = toggle.target === controller
+        #expect(targetsTheController)
+        #expect(toggle.action == toggleAction)
+        #expect(toggle.isEnabled)
+        let closing = Array(Self.describeFilterRows(menu).suffix(2))
+        let expectedClosing: [String] = ["-", "Show Hidden Repos"]
+        #expect(closing == expectedClosing)
+        let overflowClosing = Array(Self.describeFilterRows(plainRows).suffix(2))
+        #expect(overflowClosing == expectedClosing)
+
+        // A repo hidden: its row stays, unmarked, and the count follows.
+        let acmeRowBefore = Self.repoRows(menu).first { $0.title == "acme" }
+        let widgetsHidden = fixture.state.repos[1].id
+        fixture.state.repos[1].hidden = true
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let counted = ShowHiddenReposRowState(title: "Show Hidden Repos (1)", checked: false)
+        let menuCounted = Self.showHiddenReposState(menu)
+        #expect(menuCounted == counted)
+        let countedRows = try #require(Self.filterOverflowRows(of: controller))
+        let overflowCounted = Self.showHiddenReposState(countedRows)
+        #expect(overflowCounted == counted)
+        let acmeRowAfter = Self.repoRows(menu).first { $0.title == "acme" }
+        let keptItsRows = acmeRowBefore != nil && acmeRowAfter === acmeRowBefore
+        #expect(keptItsRows)
+        let repoIDs = Self.repoRows(menu).map { $0.representedObject as? UUID }
+        let expectedIDs: [UUID?] = [nil, fixture.repos[0].id, widgetsHidden]
+        #expect(repoIDs == expectedIDs)
+        let titles = Self.describeFilterRows(menu)
+        let expectedTitles: [String] = ["All Repos", "-", "acme", "widgets", "-", "Show Hidden Repos (1)"]
+        #expect(titles == expectedTitles)
+
+        // The key on: both rows checked, the repo check and the button as
+        // they were.
+        fixture.suite.defaults.set(true, forKey: SidebarBuildOptions.showHiddenReposKey)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let checked = ShowHiddenReposRowState(title: "Show Hidden Repos (1)", checked: true)
+        let menuChecked = Self.showHiddenReposState(menu)
+        #expect(menuChecked == checked)
+        let checkedRows = try #require(Self.filterOverflowRows(of: controller))
+        let overflowChecked = Self.showHiddenReposState(checkedRows)
+        #expect(overflowChecked == checked)
+        let checkedTitles = Self.checkedTitles(menu)
+        let expectedChecked: [String] = ["All Repos", "Show Hidden Repos (1)"]
+        #expect(checkedTitles == expectedChecked)
+        let button = try #require(fixture.filterButton)
+        let tint = button.contentTintColor
+        #expect(tint == nil)
+        #expect(button.toolTip == "Filter sidebar by repository")
+        let value = button.accessibilityValue() as? String
+        #expect(value == "All Repos")
+
+        // The key off again: unchecked.
+        fixture.suite.defaults.set(false, forKey: SidebarBuildOptions.showHiddenReposKey)
+        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
+        let menuOff = Self.showHiddenReposState(menu)
+        #expect(menuOff == counted)
+        let offRows = try #require(Self.filterOverflowRows(of: controller))
+        let overflowOff = Self.showHiddenReposState(offRows)
+        #expect(overflowOff == counted)
+    }
+
+    /// Choosing Show Hidden Repos flips the key both ways in `AppState`'s
+    /// store, the one the app hands the sidebar's outline: on from the
+    /// button's menu, off from the overflow row's submenu. No test applies
+    /// after either: the defaults watch queues the apply that checks or
+    /// unchecks both rows.
+    @Test func showHiddenReposChosenFlipsTheKeyBothWays() async throws {
+        let fixture = ToolbarFixture(label: "showHiddenReposChosenFlipsTheKeyBothWays")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let defaults = fixture.suite.defaults
+        let sharesTheStore = defaults === fixture.state.userDefaults
+        try #require(sharesTheStore)
+        let action = #selector(MainToolbarController.showHiddenReposChosen(_:))
+        let unset = SidebarBuildOptions.storedShowHiddenRepos(defaults)
+        try #require(unset == false)
+
+        let menuRow = try #require(Self.showHiddenReposRow(controller.filterMenu))
+        let sentOn = NSApplication.shared.sendAction(action, to: controller, from: menuRow)
+        #expect(sentOn)
+        let on = SidebarBuildOptions.storedShowHiddenRepos(defaults)
+        #expect(on)
+        let checkedOn = try await waitForMainActorCondition("the defaults watch's apply to check both rows") {
+            let menuChecked = MainToolbarControllerTests.showHiddenReposState(controller.filterMenu)?.checked
+            let rows = MainToolbarControllerTests.filterOverflowRows(of: controller)
+            let overflowChecked = rows.flatMap { MainToolbarControllerTests.showHiddenReposState($0) }?.checked
+            return menuChecked == true && overflowChecked == true
+        }
+        #expect(checkedOn)
+
+        let overflowRows = try #require(Self.filterOverflowRows(of: controller))
+        let overflowRow = try #require(Self.showHiddenReposRow(overflowRows))
+        let sentOff = NSApplication.shared.sendAction(action, to: controller, from: overflowRow)
+        #expect(sentOff)
+        let off = SidebarBuildOptions.storedShowHiddenRepos(defaults)
+        #expect(off == false)
+        let uncheckedOff = try await waitForMainActorCondition("the defaults watch's apply to uncheck both rows") {
+            let menuChecked = MainToolbarControllerTests.showHiddenReposState(controller.filterMenu)?.checked
+            let rows = MainToolbarControllerTests.filterOverflowRows(of: controller)
+            let overflowChecked = rows.flatMap { MainToolbarControllerTests.showHiddenReposState($0) }?.checked
+            return menuChecked == false && overflowChecked == false
+        }
+        #expect(uncheckedOff)
+    }
+
+    /// The defaults watch's gate, driven directly so the test does not
+    /// depend on when the notification arrives. A change to another key in
+    /// the store queues nothing, since the store holds many keys the toolbar
+    /// never shows. A change to the Show Hidden Repos key queues the apply
+    /// that compares first, which then checks the row. A controller that is
+    /// not installed queues nothing.
+    @Test func defaultsWatchQueuesAnApplyOnlyForTheShowHiddenReposKey() async throws {
+        let fixture = ToolbarFixture(label: "defaultsWatchQueuesAnApplyOnlyForTheShowHiddenReposKey")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let defaults = fixture.suite.defaults
+
+        try await fixture.withNoApplyQueued("before the store changes") {
+            defaults.set("acme", forKey: "MainToolbarControllerTests.unrelatedKey")
+            controller.defaultsChanged()
+            let queuedForAnotherKey = controller.applyScheduled
+            #expect(queuedForAnotherKey == false)
+
+            defaults.set(true, forKey: SidebarBuildOptions.showHiddenReposKey)
+            controller.defaultsChanged()
+            let queuedForTheKey = controller.applyScheduled
+            #expect(queuedForTheKey)
+            let runsInFull = controller.queuedApplyRunsInFull
+            #expect(runsInFull == false)
+        }
+        let checked = try await waitForMainActorCondition("the queued apply to check the row") {
+            MainToolbarControllerTests.showHiddenReposState(controller.filterMenu)?.checked == true
+        }
+        #expect(checked)
+
+        let uninstalled = MainToolbarController(
+            appState: fixture.state, split: ToolbarFixture.makeSplit(), titleView: NSView(),
+            requestRemoteStop: { _ in })
+        defaults.set(false, forKey: SidebarBuildOptions.showHiddenReposKey)
+        uninstalled.defaultsChanged()
+        #expect(uninstalled.applyScheduled == false)
     }
 
     /// `serversMenuItemChosen(_:)` runs only a row that carries a command: a
@@ -2317,6 +2508,25 @@ struct MainToolbarControllerTests {
         menu.items.filter { $0.state == .on }.map(\.title)
     }
 
+    /// The rows of a filter menu that choose a repo, "All Repos" among them,
+    /// found by their action.
+    static func repoRows(_ menu: NSMenu) -> [NSMenuItem] {
+        let action = #selector(MainToolbarController.filterChosen(_:))
+        return menu.items.filter { $0.action == action }
+    }
+
+    /// A filter menu's Show Hidden Repos row, found by its action.
+    static func showHiddenReposRow(_ menu: NSMenu) -> NSMenuItem? {
+        let action = #selector(MainToolbarController.showHiddenReposChosen(_:))
+        return menu.items.first { $0.action == action }
+    }
+
+    /// The Show Hidden Repos row of a filter menu as its title and whether it
+    /// is checked, or `nil` when the menu has none.
+    fileprivate static func showHiddenReposState(_ menu: NSMenu) -> ShowHiddenReposRowState? {
+        showHiddenReposRow(menu).map { ShowHiddenReposRowState(title: $0.title, checked: $0.state == .on) }
+    }
+
     /// A Servers menu row as text: kind, title, enablement and command.
     private static func describeRow(_ row: NSMenuItem) -> String {
         if row.isSeparatorItem { return "separator" }
@@ -2950,6 +3160,13 @@ private struct LeadingEnablement: Equatable {
     var item: Bool
     var buttons: [Bool]
     var rows: [Bool]
+}
+
+/// A filter menu's Show Hidden Repos row: its title and whether it is
+/// checked.
+private struct ShowHiddenReposRowState: Equatable {
+    var title: String
+    var checked: Bool
 }
 
 /// What the overflow menu shows for one toolbar item: its row's title,

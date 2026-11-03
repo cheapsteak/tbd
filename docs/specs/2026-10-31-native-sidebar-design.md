@@ -62,9 +62,8 @@ never re-nests a lane the user placed. `AppState.moveWorktree` has no caller.
 - Dragging unadopted remote sessions or any header.
 - Reordering repos. `Repo` has no stored order.
 - Collapsible worktree subtrees. They stay always expanded.
-- AppKit versions of the footer (Add Repository, the filter menu), the profile
-  picker panel, the emoji panel, popovers or sheets. None is a list; all are
-  SwiftUI.
+- AppKit versions of the footer (Add Repository), the profile picker panel,
+  the emoji panel, popovers or sheets. None is a list; all are SwiftUI.
 
 ## Scope
 
@@ -83,6 +82,15 @@ The native sidebar renders every kind of sidebar row:
 
 `SidebarSectionLayout` and its flags (`sidebarWorkflowGroupsKey`,
 `sidebarCollapseEndedSessionsKey`) decide which rows appear.
+
+Which repo sections appear is one rule,
+`AppState.sidebarShownRepos(showHiddenRepos:)`, which the builder follows. The
+repo chosen in the toolbar's repo filter shows alone, hidden or not. With none
+chosen, every repo shows, less the hidden ones unless the filter menu's Show
+Hidden Repos toggle (`SidebarBuildOptions.showHiddenReposKey`) is on. A hidden
+repo's section draws dimmed wherever it shows. The footer beneath the sidebar
+holds only the Add Repository split button; the window chrome spec describes
+the filter.
 
 ## Architecture
 
@@ -805,9 +813,9 @@ Most coverage is pure:
 
 - **`SidebarTreeBuilder`** – `AppState` fixtures map to expected trees for each
   section kind, with workflow groups on and off, collapse-ended on and off,
-  hidden repos, the repo filter, the scratch prompt and cross-repo children. One
-  test per row-model input proves that changing it changes the tree, which guards
-  parity item 8.
+  hidden repos, the repo filter (a hidden repo chosen in it included), the
+  scratch prompt and cross-repo children. One test per row-model input proves
+  that changing it changes the tree, which guards parity item 8.
 - **Tree diff** – old and new trees map to the expected insert, remove, move and
   reconfigure operations, and held structural changes apply at drag end.
 - **`SidebarDropPolicy`** – a case per rule above, including the end-of-subtree

@@ -30,6 +30,13 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   snapshot, the collapse and the color scheme are what the last apply
 ///   showed and it would not put the toolbar back on the window, as during a
 ///   cooldown it would not. Every other apply runs in full.
+/// - **Defaults.** The filter's Show Hidden Repos row reads
+///   `SidebarBuildOptions.showHiddenReposKey` from `appState.userDefaults`,
+///   the store the sidebar's outline reads, and Observation does not track
+///   it. So the controller watches that store's `didChangeNotification`, from
+///   init to deinit, and while installed a change that leaves the key other
+///   than the last apply showed queues the apply that compares first, as an
+///   observed change does (`defaultsChanged()`).
 /// - **Apply.** Re-installs the toolbar if something replaced it on the
 ///   window (see "Replacement"), diffs the items against `MainToolbarLayout.identifiers(for:)`
 ///   through `ToolbarLayoutSync`, with inserts and removes only, so the items
@@ -116,10 +123,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// found nothing to do is not counted.
     private(set) var applyCount = 0
     /// Applies run that compared first, for tests: those only observed
-    /// changes and the appearance watch asked for. Every other source asks
-    /// through `scheduleApply()`, which makes the apply run in full, so only
-    /// those two move this count. An apply that compared and found nothing
-    /// to do is not counted.
+    /// changes, the appearance watch and the defaults watch asked for. Every
+    /// other source asks through `scheduleApply()`, which makes the apply run
+    /// in full, so only those three move this count. An apply that compared
+    /// and found nothing to do is not counted.
     private(set) var comparedApplyCount = 0
     /// Observed `AppState` changes that scheduled an apply, for the debug log
     /// and for tests: a stale registration's change is not counted.
@@ -129,8 +136,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// apply; `applyNow()` clears it.
     private(set) var applyScheduled = false
     /// Whether the queued apply runs in full. `scheduleApply()` sets it; an
-    /// apply only observed changes and the appearance watch asked for leaves
-    /// it clear. Readable for tests.
+    /// apply only observed changes, the appearance watch and the defaults
+    /// watch asked for leaves it clear. Readable for tests.
     private(set) var queuedApplyRunsInFull = false
     /// What the last apply whose layout landed showed. An apply that compares
     /// first, finding all of it as it was, has nothing to do.
@@ -151,6 +158,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     private var layoutSync = ToolbarLayoutSync()
     private var appearanceObservation: NSKeyValueObservation?
     private var toolbarObservation: NSKeyValueObservation?
+    /// The watch on `appState.userDefaults`, registered in init and removed
+    /// in deinit (see "Defaults").
+    nonisolated(unsafe) private var defaultsObserver: (any NSObjectProtocol)?
 
     /// When each replacement happened, for the count over
     /// `replacementWindow`. A date seam rather than the clock's instants: the
@@ -182,11 +192,13 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// rebuilt under the pointer.
     let filterMenuTracker: FilterMenuTracker
     /// The menu the filter button pops up: "All Repos", a separator, then
-    /// each repo, the current choice checked. One menu for whichever filter
-    /// item the toolbar holds, so an item re-inserted after a collapse finds
-    /// it built. Each apply keeps it in step with the snapshot's filter, and
-    /// it reports its opening to `filterMenuTracker`. Its rows stay enabled
-    /// whatever validation would say; every row is a valid choice.
+    /// each repo, the current choice checked, then a separator and the Show
+    /// Hidden Repos row, checked while hidden repos show. One menu for
+    /// whichever filter item the toolbar holds, so an item re-inserted after
+    /// a collapse finds it built. Each apply keeps it in step with the
+    /// snapshot's filter, and it reports its opening to `filterMenuTracker`.
+    /// Its rows stay enabled whatever validation would say; every row is a
+    /// valid choice.
     let filterMenu: NSMenu
     /// The options `filterMenu`'s rows were last built from.
     var builtFilterOptions: [RepoFilterPresentation.Option] = []
@@ -228,6 +240,21 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         toolbar.delegate = self
         filterMenuTracker.onClose = { [weak self] in self?.scheduleApply() }
         Self.prepareTitleView(titleView)
+        // The notification arrives on whichever thread wrote the defaults,
+        // and is not read. The weak reference is read on the main thread, so
+        // the controller is never retained, and so never released, anywhere
+        // else.
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: appState.userDefaults, queue: nil
+        ) { [weak self] _ in
+            MainToolbarController.performOnMain { self?.defaultsChanged() }
+        }
+    }
+
+    deinit {
+        if let defaultsObserver {
+            NotificationCenter.default.removeObserver(defaultsObserver)
+        }
     }
 
     // MARK: Install
@@ -325,6 +352,18 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         enqueueApply()
     }
 
+    /// `appState.userDefaults` changed. Queues the apply that compares first,
+    /// as an observed change does, when the Show Hidden Repos key differs
+    /// from what the last apply showed, or no apply has run: the store
+    /// changes for many keys the toolbar does not show. Internal so a test
+    /// can drive it.
+    func defaultsChanged() {
+        guard isInstalled else { return }
+        let stored = SidebarBuildOptions.storedShowHiddenRepos(appState.userDefaults)
+        guard stored != appliedSnapshot?.filter.showsHiddenRepos else { return }
+        enqueueApply()
+    }
+
     /// The window's `toolbar` changed. On a visible window, a change from ours
     /// to another toolbar or to none is a replacement, and counts toward the
     /// cooldown; a change from one other toolbar to another does not.
@@ -404,9 +443,10 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// whatever it finds; further calls before it runs are covered by it.
     /// Install, a replaced toolbar, the cooldown's end, a collapse change and
     /// the filter menu's close all come through here, since each asks for
-    /// something the snapshot does not hold. The appearance watch does not
-    /// (see `appearanceChanged()`). Does nothing while the toolbar is not
-    /// installed, such as after `uninstall`.
+    /// something the snapshot does not hold. The appearance and defaults
+    /// watches do not (see `appearanceChanged()` and `defaultsChanged()`).
+    /// Does nothing while the toolbar is not installed, such as after
+    /// `uninstall`.
     func scheduleApply() {
         guard isInstalled else { return }
         queuedApplyRunsInFull = true
