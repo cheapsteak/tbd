@@ -168,7 +168,7 @@ struct TabsInToolbarTests {
     }
 
     /// The layout's parts sit left to right: the notes button, the title
-    /// column 6 pt after it, the tabs 8 pt after that, the drag gap taking
+    /// column 8 pt after it, the tabs 14 pt after that, the drag gap taking
     /// the spare width, and the trailing items at the row's end. The gap's
     /// ideal width is ignored.
     @Test func theLayoutPlacesItsPartsLeftToRight() {
@@ -176,9 +176,9 @@ struct TabsInToolbarTests {
         let slots = MainTabRowLayout.slots(idealWidths: [20, 150, 200, 999, 60], available: 600)
         let expected: [Slot] = [
             Slot(x: 0, width: 20),
-            Slot(x: 26, width: 150),
-            Slot(x: 184, width: 200),
-            Slot(x: 384, width: 156),
+            Slot(x: 28, width: 150),
+            Slot(x: 192, width: 200),
+            Slot(x: 392, width: 148),
             Slot(x: 540, width: 60),
         ]
         #expect(slots == expected)
@@ -193,7 +193,7 @@ struct TabsInToolbarTests {
         let gap = slots[MainTabRowLayout.Part.gap.rawValue]
         let trailing = slots[MainTabRowLayout.Part.trailing.rawValue]
         #expect(title.width == 110)
-        #expect(tabs.width == 172)
+        #expect(tabs.width == 164)
         #expect(gap.width == MainTabRowMetrics.minimumDragGap)
         let trailingEnd = trailing.x + trailing.width
         #expect(trailingEnd == 400)

@@ -57,7 +57,7 @@ struct WorktreeTitleColumn: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: MainTabRowMetrics.titleLineSpacing) {
             WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
                 Text(worktree.displayName)
                     .font(.system(size: MainTabRowMetrics.titleFontSize, weight: .semibold))

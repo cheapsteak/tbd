@@ -22,15 +22,16 @@ enum MainTabRowMetrics {
     static let titleFloor: CGFloat = 110
     /// The narrowest the main row's drag gap gets.
     static let minimumDragGap: CGFloat = 24
-    /// Between the notes button and the title column, as the toolbar's
-    /// inline cluster spaces them.
-    static let notesToTitleSpacing: CGFloat = 6
+    /// Between the notes button and the title column.
+    static let notesToTitleSpacing: CGFloat = 8
     /// Between the title column and the first tab.
-    static let titleToTabsSpacing: CGFloat = 8
+    static let titleToTabsSpacing: CGFloat = 14
     /// The worktree title's point size in the row.
     static let titleFontSize: CGFloat = 13
     /// The project name's point size in the row.
     static let projectFontSize: CGFloat = 11
+    /// Between the worktree title and the project name under it.
+    static let titleLineSpacing: CGFloat = 3
 
     /// A pill tab's height.
     static let pillHeight: CGFloat = 28
