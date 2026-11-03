@@ -1898,27 +1898,28 @@ test_relink_warns_and_keeps_the_file_when_mv_fails() {
 
 # restart.sh cannot be run here (it builds and launches the real app), so this
 # reads it. The relink must sit in the branch that starts a daemon from
-# $BUILD_DIR, after that daemon's handover and before the branch that skips the
-# daemon for a WIP build. --app skips the whole branch, so it never relinks,
-# and --dry-run exits long before it. Within that branch it must sit in the
-# then-arm of the default-TBD_HOME guard, so a sandboxed instance never
-# re-points the developer's tbd: the guard comes first, and no `else` or `fi`
-# falls between the guard and the relink.
+# $BUILD_DIR, and before that daemon's handover: the app records the install
+# when a new daemon first answers it, so a relink after the handover could
+# land after that answer and leave the record on the old file. --app skips the
+# whole branch, so it never relinks, and --dry-run exits long before it.
+# Within the branch it must sit in the then-arm of the default-TBD_HOME guard,
+# so a sandboxed instance never re-points the developer's tbd: the guard comes
+# first, and no `else` or `fi` falls between the guard and the relink.
 # shellcheck disable=SC2016 # literal restart.sh text, not expansions
-test_restart_relinks_the_cli_only_after_starting_a_daemon() {
-    local restart="$HERE/restart.sh" branch handover guard relink skip between
+test_restart_relinks_the_cli_before_starting_a_daemon() {
+    local restart="$HERE/restart.sh" branch guard relink handover skip between
     local order="wrong"
     branch="$(grep -nF 'if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then' "$restart" | head -1 | cut -d: -f1)"
-    handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
     guard="$(grep -nF 'if is_default_tbd_home "${TBD_HOME:-}" "$HOME"; then' "$restart" | head -1 | cut -d: -f1)"
     relink="$(grep -nF 'relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
+    handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
     skip="$(grep -nF 'elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then' "$restart" | head -1 | cut -d: -f1)"
-    if [[ -n "$branch" && -n "$handover" && -n "$guard" && -n "$relink" && -n "$skip" ]] \
-        && (( branch < handover && handover < guard && guard < relink && relink < skip )); then
+    if [[ -n "$branch" && -n "$guard" && -n "$relink" && -n "$handover" && -n "$skip" ]] \
+        && (( branch < guard && guard < relink && relink < handover && handover < skip )); then
         between="$(sed -n "$((guard + 1)),$((relink - 1))p" "$restart" | grep -cE '^[[:space:]]*(else|elif|fi)([[:space:]]|;|$)')"
         [ "$between" = 0 ] && order="right"
     fi
-    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) inside the default-TBD_HOME guard (${guard:-?}), after the handover (${handover:-?}), in the daemon branch (${branch:-?} to ${skip:-?})" \
+    assert_eq "restart.sh relinks the CLI (line ${relink:-?}) inside the default-TBD_HOME guard (${guard:-?}), before the handover (${handover:-?}), in the daemon branch (${branch:-?} to ${skip:-?})" \
         "right" "$order"
     # A second call elsewhere would relink on --app, or for a sandbox, too.
     assert_eq "restart.sh calls relink_installed_cli once" \
@@ -2011,7 +2012,7 @@ test_relink_never_creates_an_install
 test_relink_skips_a_non_executable_new_cli
 test_relink_warns_and_keeps_the_file_when_ln_fails
 test_relink_warns_and_keeps_the_file_when_mv_fails
-test_restart_relinks_the_cli_only_after_starting_a_daemon
+test_restart_relinks_the_cli_before_starting_a_daemon
 test_is_default_tbd_home_wants_the_default_or_nothing
 test_is_default_tbd_home_follows_the_directory
 

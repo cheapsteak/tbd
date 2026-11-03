@@ -1132,11 +1132,11 @@ default_cli_install_path() {
     printf '%s\n' "$HOME/.local/bin/tbd"
 }
 
-# True when <tbd_home> is TBD's default home for <home>: empty (TBD_HOME unset)
-# or the directory <home>/tbd, however it is spelled — with a trailing slash,
-# or through a symlink to it. Any other TBD_HOME is a sandboxed instance, whose
-# builds must not re-point the developer's global `tbd`. The app decides the
-# same way (TBDConstants.isDefaultConfigDir).
+# True when <tbd_home> is TBD's default home for <home>: empty (TBD_HOME
+# unset); equal to <home>/tbd once one trailing slash is stripped; or, by
+# `-ef`, the same file as <home>/tbd, such as a symlink to it. Any other
+# TBD_HOME is a sandboxed instance, whose builds must not re-point the
+# developer's global `tbd`.
 #
 #   is_default_tbd_home <tbd_home> <home>
 is_default_tbd_home() {
