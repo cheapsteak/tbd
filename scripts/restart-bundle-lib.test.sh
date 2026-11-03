@@ -1693,6 +1693,11 @@ test_seed_rejects_a_missing_argument() {
     assert_fail "seed requires tbd_home" seed_tmux_fallback
 }
 
+test_default_cli_install_path_is_under_home() {
+    assert_eq "the CLI installs to ~/.local/bin/tbd, as CLIInstaller's default does" \
+        "/x home/.local/bin/tbd" "$(HOME="/x home" default_cli_install_path)"
+}
+
 # relink_installed_cli cases. Each builds its own dir (with a space in the
 # name, on purpose) holding an executable new CLI at build/TBDCLI and the
 # install path's directory, bin/.
@@ -1816,16 +1821,19 @@ run_relink_with_stub() {
 }
 
 # The stub ln does what BSD `ln -f` does when the link itself fails, as across
-# volumes: it unlinks its target first. Aimed at the install path, as a bare
-# `ln -f` would be, that deletes the operator's tbd.
+# volumes: it unlinks its target first, then reports EXDEV. Aimed at the
+# install path, as a bare `ln -f` would be, that deletes the operator's tbd.
 test_relink_warns_and_keeps_the_file_when_ln_fails() {
     local d out rc before
     d="$(relink_fixture lnfails)"
     printf 'old\n' > "$d/bin/tbd"
     before="$(file_inode "$d/bin/tbd")"
-    out="$(run_relink_with_stub "$d" ln 'for last; do :; done; rm -f "$last"; exit 1')"; rc=$?
+    out="$(run_relink_with_stub "$d" ln \
+        'for last; do :; done; rm -f "$last"; echo "ln: $last: Cross-device link" >&2; exit 1')"; rc=$?
     assert_eq "relink returns 0 to a set -e caller when ln fails" "0" "$rc"
     assert_contains "relink warns when ln fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "the warning carries ln's own error" "Cross-device link" "$out"
+    assert_eq "the warning is one line" "1" "$(grep -c WARNING <<< "$out")"
     assert_contains "a set -e caller carries on after a failed ln" "survived" "$out"
     assert_eq "a failed ln leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
     assert_eq "a failed ln leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
@@ -1839,9 +1847,12 @@ test_relink_warns_and_keeps_the_file_when_mv_fails() {
     d="$(relink_fixture mvfails)"
     printf 'old\n' > "$d/bin/tbd"
     before="$(file_inode "$d/bin/tbd")"
-    out="$(run_relink_with_stub "$d" mv 'exit 1')"; rc=$?
+    out="$(run_relink_with_stub "$d" mv \
+        'echo "mv: rename failed:" >&2; echo "Permission denied" >&2; exit 1')"; rc=$?
     assert_eq "relink returns 0 to a set -e caller when mv fails" "0" "$rc"
     assert_contains "relink warns when mv fails" "WARNING: could not refresh $d/bin/tbd" "$out"
+    assert_contains "the warning carries mv's own error, joined onto one line" \
+        "mv: rename failed: Permission denied" "$out"
     assert_contains "a set -e caller carries on after a failed mv" "survived" "$out"
     assert_eq "a failed mv leaves the installed file's inode" "$before" "$(file_inode "$d/bin/tbd")"
     assert_eq "a failed mv leaves the installed file's contents" "old" "$(cat "$d/bin/tbd" 2>/dev/null)"
@@ -1858,7 +1869,7 @@ test_restart_relinks_the_cli_only_after_starting_a_daemon() {
     local restart="$HERE/restart.sh" branch handover relink skip order="wrong"
     branch="$(grep -nF 'if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then' "$restart" | head -1 | cut -d: -f1)"
     handover="$(grep -nF 'restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}"' "$restart" | head -1 | cut -d: -f1)"
-    relink="$(grep -nF 'relink_installed_cli "$HOME/.local/bin/tbd" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
+    relink="$(grep -nF 'relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI"' "$restart" | head -1 | cut -d: -f1)"
     skip="$(grep -nF 'elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then' "$restart" | head -1 | cut -d: -f1)"
     if [[ -n "$branch" && -n "$handover" && -n "$relink" && -n "$skip" ]] \
         && (( branch < handover && handover < relink && relink < skip )); then
@@ -1923,6 +1934,7 @@ test_seed_warns_and_succeeds_without_tmux
 test_seed_keeps_a_symlinked_tmux_path
 test_seed_ignores_a_non_absolute_command_v
 test_seed_rejects_a_missing_argument
+test_default_cli_install_path_is_under_home
 test_relink_points_an_installed_regular_file_at_the_new_cli
 test_relink_leaves_an_already_current_link_alone
 test_relink_replaces_a_leftover_staging_link

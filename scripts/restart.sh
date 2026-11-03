@@ -411,15 +411,15 @@ if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
         "$DAEMON_HANDOVER_TIMEOUT" "$DAEMON_PROBE_TIMEOUT" "$BUILD_DIR/TBDCLI" daemon status --json \
         || exit 1
 
-    # The running daemon is now this build's, and the app checks
-    # ~/.local/bin/tbd against the TBDCLI beside it. Re-link an existing hard
+    # The running daemon is now this build's, and the app checks the
+    # installed CLI (~/.local/bin/tbd) against the TBDCLI beside it. Re-link an existing hard
     # link there, as `tbd update` does, so a dev build never leaves the app a
     # stale CLI to ask about. Only in this branch, where a daemon was started
     # from $BUILD_DIR — --daemon and --quick included, the latter from the
     # binaries already there. --app starts no daemon, and a WIP build that
     # skips the daemon restart leaves the shared daemon on another build's
     # CLI. Never fails the restart (relink_installed_cli, restart-bundle-lib.sh).
-    cli_outcome="$(relink_installed_cli "$HOME/.local/bin/tbd" "$BUILD_DIR/TBDCLI")"
+    cli_outcome="$(relink_installed_cli "$(default_cli_install_path)" "$BUILD_DIR/TBDCLI")"
     [ -z "$cli_outcome" ] || echo "  CLI: $cli_outcome"
 elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
     echo "(Skipping daemon restart for WIP worktree)"
