@@ -12,6 +12,8 @@ import TBDShared
 ///   `AppState.selectionArchiveRunOrder` takes from the sidebar's own walk.
 /// - `route` – one row takes the single-row archive, prompts included;
 ///   several take the bulk run; none is refused.
+/// - `BulkSchedule` and `maxConcurrentArchives` – which of the bulk run's
+///   rows start, which are skipped, and how many calls run at once.
 /// - `failureReason`, `nestedNotArchivedReason` and `summary` – the bulk
 ///   run's one alert.
 ///
@@ -151,8 +153,9 @@ enum SelectionArchive {
         /// One archivable row: the single-row `archiveWorktree(id:)`, with its
         /// prompts, exactly as the row's own Archive.
         case single(UUID)
-        /// Several: each is archived in turn with no prompt and no per-row
-        /// alert, then one alert sums up any failures.
+        /// Several: the bulk run archives them with no prompt and no per-row
+        /// alert, up to `maxConcurrentArchives` at once and each parent after
+        /// its selected children, then one alert sums up any failures.
         case bulk([UUID])
     }
 
@@ -161,6 +164,154 @@ enum SelectionArchive {
     static func route(_ targetIDs: [UUID]) -> Route {
         guard let only = targetIDs.first else { return .refuse }
         return targetIDs.count == 1 ? .single(only) : .bulk(targetIDs)
+    }
+
+    // MARK: - The bulk run's schedule
+
+    /// The most `worktree.archive` calls the bulk run has in flight at once.
+    /// While a call waits for its reply it blocks a thread of the shared
+    /// thread pool, which has one thread per core, so a larger number starves
+    /// the rest of the app. Each call also opens its own connection to the
+    /// daemon's socket, and on darwin a connect to a listener whose accept
+    /// queue is full is refused at once, which the app would read as a lost
+    /// daemon.
+    static let maxConcurrentArchives = 4
+
+    /// The bulk run's scheduling decisions (`AppState.archiveInBulk`): which
+    /// rows may start now, which are skipped without a call, and what became
+    /// of each. Built from the targets in run order with their parent IDs,
+    /// and pure, so the rules below are testable without `AppState` or a
+    /// daemon.
+    ///
+    /// - **A row's turn** comes once every target whose parent it is, and
+    ///   that comes before it in the run order, has an outcome. Every outcome
+    ///   a row depends on is then settled before it acts, as if the rows ran
+    ///   one by one in run order. A row waits only for earlier rows, so a loop
+    ///   in the parent links cannot deadlock the run.
+    /// - **A row whose turn has come** is skipped when one of those children
+    ///   was not archived, naming the first such child in run order, since
+    ///   the daemon would refuse it for that active child. Otherwise it
+    ///   starts, in run order, while fewer than `maxConcurrent` calls are in
+    ///   flight. A skip makes no call, so it takes no slot.
+    /// - **Outcomes.** A skipped row is not archived, so the hold passes on to
+    ///   its own parent. A row that has left the state by its turn is
+    ///   `.vanished`: it is not counted, and it holds back no parent.
+    ///
+    /// The driver answers every turn: `begin` for a start, `record` for a
+    /// skip or a vanished row, and `record` again when a started call ends.
+    /// A turn left unanswered is offered again.
+    struct BulkSchedule {
+        /// One target: its ID and its parent's, if it has one.
+        struct Target: Equatable, Sendable {
+            let id: UUID
+            let parentID: UUID?
+        }
+
+        /// What became of a row.
+        enum Outcome: Equatable, Sendable {
+            case archived
+            /// Its call failed, or it was skipped. `name` is the row's display
+            /// name, which the reason for skipping its parent gives.
+            case notArchived(name: String)
+            /// It had left the state by its turn.
+            case vanished
+        }
+
+        /// What to do next with one row.
+        enum Turn: Equatable, Sendable {
+            /// Send its archive call.
+            case start(UUID)
+            /// Skip it without a call: its nested worktree `nestedName` was
+            /// not archived.
+            case skip(UUID, nestedName: String)
+
+            var id: UUID {
+                switch self {
+                case .start(let id), .skip(let id, _): id
+                }
+            }
+        }
+
+        let maxConcurrent: Int
+        /// The targets' IDs in run order. An ID listed twice is kept at its
+        /// first place.
+        let order: [UUID]
+        /// Each target's children among the targets before it in run order,
+        /// in run order. Its turn waits for these alone.
+        private let earlierChildren: [UUID: [UUID]]
+        /// The rows whose call has started and not yet ended.
+        private(set) var inFlight: Set<UUID> = []
+        private(set) var outcomes: [UUID: Outcome] = [:]
+
+        init(_ targets: [Target], maxConcurrent: Int = SelectionArchive.maxConcurrentArchives) {
+            self.maxConcurrent = maxConcurrent
+            var seen = Set<UUID>()
+            var order: [UUID] = []
+            var earlierChildren: [UUID: [UUID]] = [:]
+            for target in targets where seen.insert(target.id).inserted {
+                order.append(target.id)
+                // A parent not seen yet comes later in run order, so it
+                // waits for this row. One seen already, or the row itself,
+                // comes no later and does not wait for it.
+                if let parentID = target.parentID, !seen.contains(parentID) {
+                    earlierChildren[parentID, default: []].append(target.id)
+                }
+            }
+            self.order = order
+            self.earlierChildren = earlierChildren
+        }
+
+        /// Whether every row has an outcome.
+        var isFinished: Bool { outcomes.count == order.count }
+
+        /// The rows that have neither started nor got an outcome, in run
+        /// order: what a run that stops starting rows leaves not attempted.
+        var unstarted: [UUID] {
+            order.filter { outcomes[$0] == nil && !inFlight.contains($0) }
+        }
+
+        /// Whether `id`'s turn can come: each of its children before it in
+        /// run order has an outcome.
+        func isReady(_ id: UUID) -> Bool {
+            earlierChildren[id, default: []].allSatisfy { outcomes[$0] != nil }
+        }
+
+        /// The display name of the first of `id`'s children before it in run
+        /// order that was not archived, or nil when none was.
+        private func nestedNotArchived(_ id: UUID) -> String? {
+            for child in earlierChildren[id, default: []] {
+                if case .notArchived(let name)? = outcomes[child] { return name }
+            }
+            return nil
+        }
+
+        /// The next turn: the first row of `unstarted` that is ready
+        /// (`isReady`) and can act now. A row a child held back
+        /// (`nestedNotArchived`) can always act, as a skip; any other row only
+        /// while a slot is free, as a start. Nil when no row can act until a
+        /// call in flight ends, or when none is left.
+        func nextTurn() -> Turn? {
+            let slotFree = inFlight.count < maxConcurrent
+            for id in unstarted where isReady(id) {
+                if let nestedName = nestedNotArchived(id) {
+                    return .skip(id, nestedName: nestedName)
+                }
+                if slotFree { return .start(id) }
+            }
+            return nil
+        }
+
+        /// `id`'s call has started.
+        mutating func begin(_ id: UUID) {
+            inFlight.insert(id)
+        }
+
+        /// What became of `id`: its call ended, or it was skipped or found
+        /// gone at its turn.
+        mutating func record(_ id: UUID, _ outcome: Outcome) {
+            inFlight.remove(id)
+            outcomes[id] = outcome
+        }
     }
 
     // MARK: - The summary alert
@@ -217,7 +368,7 @@ enum SelectionArchive {
     /// rows were archived out of the `total` the run covered, then one line
     /// per failed or skipped worktree with its reason, up to
     /// `summaryFailureLineLimit` of them and then one line counting the rest.
-    /// `notAttempted` counts the rows the run never reached because it lost
+    /// `notAttempted` counts the rows the run never started because it lost
     /// the connection to the daemon, the one thing that stops it early; they
     /// share one closing line rather than one each.
     static func summary(archived: Int, total: Int, failures: [Failure], notAttempted: Int = 0) -> String {

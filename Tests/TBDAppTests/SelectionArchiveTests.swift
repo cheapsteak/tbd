@@ -89,6 +89,99 @@ private final class ArchiveRecorder {
     }
 }
 
+/// One entry in an `ArchiveGate`'s log.
+private enum ArchiveCallEvent: Hashable {
+    case start(UUID)
+    case end(UUID)
+}
+
+/// A fake archive call that holds each call until the test releases it, so a
+/// test sees which calls are in flight together and ends them in the order
+/// it chooses. It logs each call's start and end as they happen; a released
+/// call fails with its row's error in `failures`, if it has one. `open()`
+/// releases every held call and lets every later one through at once, so a
+/// run always finishes, whatever the test saw.
+@MainActor
+private final class ArchiveGate {
+    private(set) var events: [ArchiveCallEvent] = []
+    /// The error each row's call fails with once released.
+    var failures: [UUID: any Error] = [:]
+    private var held: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var isOpen = false
+
+    /// The rows whose call has started, in the order they started.
+    var started: [UUID] {
+        events.compactMap { event -> UUID? in
+            guard case .start(let id) = event else { return nil }
+            return id
+        }
+    }
+
+    /// The rows whose call has ended, in the order they ended.
+    var ended: [UUID] {
+        events.compactMap { event -> UUID? in
+            guard case .end(let id) = event else { return nil }
+            return id
+        }
+    }
+
+    /// The most calls in flight at once, over the whole log.
+    var peakInFlight: Int {
+        var inFlight = 0
+        var peak = 0
+        for event in events {
+            switch event {
+            case .start:
+                inFlight += 1
+                peak = max(peak, inFlight)
+            case .end:
+                inFlight -= 1
+            }
+        }
+        return peak
+    }
+
+    func archive(_ worktree: Worktree) async throws {
+        let id = worktree.id
+        if isOpen {
+            events.append(.start(id))
+        } else {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                events.append(.start(id))
+                held[id] = continuation
+            }
+        }
+        events.append(.end(id))
+        if let error = failures[id] { throw error }
+    }
+
+    /// Lets the held call for `id` end.
+    func release(_ id: UUID, sourceLocation: SourceLocation = #_sourceLocation) {
+        guard let continuation = held.removeValue(forKey: id) else {
+            Issue.record("no archive call is held for \(id)", sourceLocation: sourceLocation)
+            return
+        }
+        continuation.resume()
+    }
+
+    func open() {
+        isOpen = true
+        let waiting = Array(held.values)
+        held.removeAll()
+        for continuation in waiting { continuation.resume() }
+    }
+
+    /// Waits until `count` calls have started. False, with the timeout
+    /// recorded, when they do not.
+    func waitForStarts(_ count: Int, sourceLocation: SourceLocation = #_sourceLocation) async throws -> Bool {
+        try await waitFor("\(count) archive call(s) to start", observed: {
+            await MainActor.run { "\(self.started.count) started" }
+        }, sourceLocation: sourceLocation) {
+            await MainActor.run { self.started.count >= count }
+        }
+    }
+}
+
 // MARK: - Pure decisions
 
 @Suite("SelectionArchive — decisions")
@@ -389,6 +482,205 @@ struct SelectionArchiveDecisionTests {
     @Test func aHeldBackRowNamesTheNestedWorktreeThatStayed() {
         let reason = SelectionArchive.nestedNotArchivedReason("acme-child")
         #expect(reason == "Not archived, because its nested worktree \"acme-child\" was not archived.")
+    }
+}
+
+// MARK: - The bulk run's schedule
+
+/// `SelectionArchive.BulkSchedule`, driven as `AppState.archiveInBulk` drives
+/// it, with no app state and no calls.
+@Suite("SelectionArchive — bulk schedule")
+struct SelectionArchiveBulkScheduleTests {
+    private typealias Schedule = SelectionArchive.BulkSchedule
+    private typealias Turn = SelectionArchive.BulkSchedule.Turn
+
+    /// A schedule over `targets`, each an ID and its parent's, in run order.
+    private static func schedule(_ targets: [(id: UUID, parentID: UUID?)]) -> Schedule {
+        Schedule(targets.map { Schedule.Target(id: $0.id, parentID: $0.parentID) })
+    }
+
+    /// Takes every turn `schedule` offers now, as the bulk run does: it
+    /// begins each start, and records each skip as not archived under the
+    /// row's name in `names`.
+    private static func takeTurns(
+        _ schedule: inout Schedule, names: [UUID: String] = [:],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> [Turn] {
+        var turns: [Turn] = []
+        // Each row acts once, so a turn past the row count is one offered
+        // again after it was answered; stop there rather than loop forever.
+        for _ in 0...schedule.order.count {
+            guard let turn = schedule.nextTurn() else { return turns }
+            turns.append(turn)
+            switch turn {
+            case .start(let id):
+                schedule.begin(id)
+            case .skip(let id, _):
+                schedule.record(id, .notArchived(name: names[id] ?? "unnamed"))
+            }
+        }
+        Issue.record("the schedule offered more turns than it has rows: \(turns)", sourceLocation: sourceLocation)
+        return turns
+    }
+
+    @Test func independentRowsStartInRunOrderFourAtATime() {
+        #expect(SelectionArchive.maxConcurrentArchives == 4)
+        let ids = (0..<6).map { _ in UUID() }
+        var schedule = Schedule(ids.map { Schedule.Target(id: $0, parentID: nil) })
+        #expect(schedule.maxConcurrent == SelectionArchive.maxConcurrentArchives)
+
+        let opening = Self.takeTurns(&schedule)
+        let firstFour = ids[0..<4].map { Turn.start($0) }
+        #expect(opening == firstFour)
+        #expect(schedule.inFlight == Set(ids[0..<4]))
+        let waiting = Array(ids[4...])
+        #expect(schedule.unstarted == waiting)
+
+        // Whichever call ends, its slot goes to the next row in run order.
+        schedule.record(ids[2], .archived)
+        let afterOne = Self.takeTurns(&schedule)
+        #expect(afterOne == [Turn.start(ids[4])])
+        schedule.record(ids[0], .notArchived(name: "acme-0"))
+        let afterTwo = Self.takeTurns(&schedule)
+        #expect(afterTwo == [Turn.start(ids[5])])
+        #expect(schedule.unstarted.isEmpty)
+
+        for id in [ids[1], ids[3], ids[4], ids[5]] {
+            schedule.record(id, .archived)
+        }
+        let afterAll = Self.takeTurns(&schedule)
+        #expect(afterAll.isEmpty)
+        #expect(schedule.isFinished)
+    }
+
+    @Test func aParentWaitsForEverySelectedChildBeforeIt() {
+        let parent = UUID(), first = UUID(), second = UUID(), other = UUID()
+        var schedule = Self.schedule([
+            (id: first, parentID: parent), (id: second, parentID: parent),
+            (id: parent, parentID: nil), (id: other, parentID: nil),
+        ])
+        let opening = Self.takeTurns(&schedule)
+        let expected: [Turn] = [.start(first), .start(second), .start(other)]
+        #expect(opening == expected)
+        #expect(!schedule.isReady(parent))
+
+        schedule.record(first, .archived)
+        let afterFirst = Self.takeTurns(&schedule)
+        #expect(afterFirst.isEmpty)
+        #expect(!schedule.isReady(parent))
+
+        schedule.record(second, .archived)
+        let afterSecond = Self.takeTurns(&schedule)
+        #expect(afterSecond == [Turn.start(parent)])
+    }
+
+    @Test func aRowNotArchivedHoldsBackItsParentAndTheSkipHoldsBackTheGrandparent() {
+        let grandparent = UUID(), parent = UUID(), child = UUID()
+        let names = [grandparent: "acme-grandparent", parent: "acme-parent", child: "acme-child"]
+        var schedule = Self.schedule([
+            (id: child, parentID: parent), (id: parent, parentID: grandparent),
+            (id: grandparent, parentID: nil),
+        ])
+        let opening = Self.takeTurns(&schedule, names: names)
+        #expect(opening == [Turn.start(child)])
+
+        schedule.record(child, .notArchived(name: "acme-child"))
+        let held = Self.takeTurns(&schedule, names: names)
+        let expected: [Turn] = [
+            .skip(parent, nestedName: "acme-child"),
+            .skip(grandparent, nestedName: "acme-parent"),
+        ]
+        #expect(held == expected)
+        #expect(schedule.isFinished)
+        #expect(schedule.inFlight.isEmpty)
+    }
+
+    @Test func theHoldNamesTheFirstChildInRunOrderNotTheFirstToEnd() {
+        let parent = UUID(), first = UUID(), second = UUID(), third = UUID()
+        var schedule = Self.schedule([
+            (id: first, parentID: parent), (id: second, parentID: parent),
+            (id: third, parentID: parent), (id: parent, parentID: nil),
+        ])
+        let opening = Self.takeTurns(&schedule)
+        #expect(opening.count == 3)
+
+        // The calls end in reverse run order; the parent waits for all three.
+        schedule.record(third, .notArchived(name: "acme-third"))
+        let afterThird = Self.takeTurns(&schedule)
+        #expect(afterThird.isEmpty)
+        schedule.record(second, .notArchived(name: "acme-second"))
+        let afterSecond = Self.takeTurns(&schedule)
+        #expect(afterSecond.isEmpty)
+        schedule.record(first, .archived)
+        let afterFirst = Self.takeTurns(&schedule)
+        #expect(afterFirst == [Turn.skip(parent, nestedName: "acme-second")])
+    }
+
+    /// A skip makes no call, so a row held back is skipped even while every
+    /// slot is taken.
+    @Test func aSkipTakesNoSlot() {
+        let parent = UUID(), child = UUID()
+        let others = (0..<4).map { _ in UUID() }
+        let targets = [Schedule.Target(id: child, parentID: parent)]
+            + others.map { Schedule.Target(id: $0, parentID: nil) }
+            + [Schedule.Target(id: parent, parentID: nil)]
+        var schedule = Schedule(targets)
+        let opening = Self.takeTurns(&schedule)
+        let expected = [child, others[0], others[1], others[2]].map { Turn.start($0) }
+        #expect(opening == expected)
+
+        // The child's slot goes to the last other row, and the parent is
+        // skipped with all four slots taken.
+        schedule.record(child, .notArchived(name: "acme-child"))
+        let afterChild = Self.takeTurns(&schedule)
+        let then: [Turn] = [.start(others[3]), .skip(parent, nestedName: "acme-child")]
+        #expect(afterChild == then)
+        #expect(schedule.inFlight == Set(others))
+    }
+
+    /// A row waits only for the children before it in run order, so a loop
+    /// in the parent links leaves a row free to go first.
+    @Test func aLoopInTheParentLinksStillFinishes() {
+        // `first` and `second` name each other; `looped` names itself.
+        let first = UUID(), second = UUID(), looped = UUID()
+        var schedule = Self.schedule([
+            (id: first, parentID: second), (id: second, parentID: first), (id: looped, parentID: looped),
+        ])
+        let opening = Self.takeTurns(&schedule)
+        let expected: [Turn] = [.start(first), .start(looped)]
+        #expect(opening == expected)
+
+        schedule.record(first, .archived)
+        schedule.record(looped, .archived)
+        let next = Self.takeTurns(&schedule)
+        #expect(next == [Turn.start(second)])
+        schedule.record(second, .archived)
+        let last = Self.takeTurns(&schedule)
+        #expect(last.isEmpty)
+        #expect(schedule.isFinished)
+    }
+
+    @Test func aRowGoneAtItsTurnHoldsBackNoParent() {
+        let parent = UUID(), child = UUID()
+        var schedule = Self.schedule([(id: child, parentID: parent), (id: parent, parentID: nil)])
+        let turn = schedule.nextTurn()
+        #expect(turn == Turn.start(child))
+
+        // The run finds the child gone and records it so, without a call.
+        schedule.record(child, .vanished)
+        let next = Self.takeTurns(&schedule)
+        #expect(next == [Turn.start(parent)])
+    }
+
+    @Test func anIDListedTwiceKeepsItsFirstPlace() {
+        let first = UUID(), second = UUID()
+        let schedule = Self.schedule([
+            (id: first, parentID: nil), (id: second, parentID: nil), (id: first, parentID: second),
+        ])
+        let order = [first, second]
+        #expect(schedule.order == order)
+        // The repeat's parent link is dropped with it, so `second` waits for nothing.
+        #expect(schedule.isReady(second))
     }
 }
 
@@ -833,8 +1125,10 @@ struct ArchiveSelectionCallSiteTests {
         state.selectedWorktreeIDs = [child.id, sibling.id]
         actions.run(.archiveSelection)
         await recorder.waitForWorktreeCalls(2)
-        let archived = [child.id, sibling.id]
-        #expect(recorder.worktreeCalls == archived)
+        // Neither waits for the other, so their calls run side by side.
+        let archived: Set<UUID> = [child.id, sibling.id]
+        #expect(Set(recorder.worktreeCalls) == archived)
+        #expect(recorder.worktreeCalls.count == 2)
         #expect(state.findWorktree(id: parent.id) != nil)
         #expect(recorder.beeps == 0)
     }
@@ -937,8 +1231,13 @@ struct ArchiveSelectionCallSiteTests {
 /// `archiveInBulk` with a fake archive call. The fake is the run's only way
 /// to archive, and it takes no flags, so a prompt accepted on the run's
 /// behalf would show up as a second call for the same row.
+///
+/// `FakeArchiver` returns at once, so its calls run side by side in an order
+/// no test relies on; those tests check the outcome and which calls were
+/// made. `ArchiveGate` holds each call until the test releases it, so a test
+/// can see which calls are in flight together and in what order they start.
 @MainActor
-@Suite("Archive Selection — bulk run")
+@Suite("Archive Selection — bulk run", .fastPassBounded)
 struct ArchiveSelectionBulkRunTests {
     /// Records each archive call, failing the rows it was told to.
     @MainActor
@@ -948,9 +1247,6 @@ struct ArchiveSelectionBulkRunTests {
         /// `selectionArchiveInFlight` as each call saw it, for the tests
         /// that record it.
         var inFlightSeen: [Bool] = []
-        /// `selectionArchivePendingIDs` as each call saw it, for the tests
-        /// that record it.
-        var pendingSeen: [Set<UUID>] = []
 
         func archive(_ worktree: Worktree) throws {
             calls.append(worktree.id)
@@ -968,8 +1264,31 @@ struct ArchiveSelectionBulkRunTests {
         return (state, recorder, { suite.tearDown() })
     }
 
+    /// One repo with a row for each name, in sidebar order, none nested.
+    private func independentRows(_ state: AppState, _ names: [String]) -> [Worktree] {
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let rows = names.enumerated().map { row($0.element, repoID: repo.id, order: $0.offset) }
+        state.repos = [repo]
+        state.worktrees = [repo.id: rows]
+        return rows
+    }
+
+    /// Waits until the run has settled `id`: its call ended, or the run
+    /// skipped it or gave up on it. False, with the timeout recorded, when it
+    /// does not.
+    private func waitUntilSettled(
+        _ id: UUID, _ name: String, in state: AppState,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws -> Bool {
+        try await waitFor("the run to settle \(name)", observed: {
+            await MainActor.run { "\(state.selectionArchivePendingIDs.count) row(s) still pending" }
+        }, sourceLocation: sourceLocation) {
+            await MainActor.run { !state.selectionArchivePendingIDs.contains(id) }
+        }
+    }
+
     @Test("every row is tried children first, failures make one summary, and nothing is retried")
-    func aMixOfSuccessesAndRefusals() async {
+    func aMixOfSuccessesAndRefusals() async throws {
         let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
@@ -995,7 +1314,12 @@ struct ArchiveSelectionBulkRunTests {
 
         await state.archiveInBulk(targets) { try fake.archive($0) }
 
-        #expect(fake.calls == runOrder)
+        // Every row was sent once, and the parent only after its child.
+        #expect(Set(fake.calls) == Set(runOrder))
+        #expect(fake.calls.count == runOrder.count)
+        let childCall = try #require(fake.calls.firstIndex(of: child.id))
+        let parentCall = try #require(fake.calls.firstIndex(of: parent.id))
+        #expect(childCall < parentCall)
         let summary = """
             Archived 2 of 4 worktrees.
 
@@ -1033,7 +1357,8 @@ struct ArchiveSelectionBulkRunTests {
             fake.inFlightSeen.append(state.selectionArchiveInFlight)
         }
 
-        #expect(fake.calls == targets)
+        #expect(Set(fake.calls) == Set(targets))
+        #expect(fake.calls.count == targets.count)
         #expect(state.alertMessage == nil)
         #expect(state.worktrees[repo.id]?.isEmpty == true)
         // The run held the in-flight flag throughout and let it go at the end.
@@ -1059,8 +1384,9 @@ struct ArchiveSelectionBulkRunTests {
         let gone = UUID()
         await state.archiveInBulk([first.id, gone, second.id]) { try fake.archive($0) }
 
-        let attempted = [first.id, second.id]
-        #expect(fake.calls == attempted)
+        let attempted: Set<UUID> = [first.id, second.id]
+        #expect(Set(fake.calls) == attempted)
+        #expect(fake.calls.count == attempted.count)
         #expect(state.alertMessage == "Archived 1 of 2 worktrees.\n\nacme-second: Refused.")
     }
 
@@ -1079,8 +1405,9 @@ struct ArchiveSelectionBulkRunTests {
         fake.failures[child.id] = DaemonClientError.rpcError("Refused.", code: nil)
         await state.archiveInBulk([child.id, parent.id, sibling.id]) { try fake.archive($0) }
 
-        let sent = [child.id, sibling.id]
-        #expect(fake.calls == sent)
+        let sent: Set<UUID> = [child.id, sibling.id]
+        #expect(Set(fake.calls) == sent)
+        #expect(fake.calls.count == sent.count)
         let summary = """
             Archived 1 of 3 worktrees.
 
@@ -1121,65 +1448,251 @@ struct ArchiveSelectionBulkRunTests {
         #expect(state.alertMessage == summary)
     }
 
-    @Test("a dropped connection stops the run, and the rows left share one line")
-    func aConnectionFailureStopsTheRun() async {
+    // MARK: Calls in flight together
+
+    /// Each call holds a slot until it ends. A run that awaited each call
+    /// before starting the next would show one call in flight, not four.
+    @Test("six independent rows put four calls in flight before any returns, and the fifth starts when one ends")
+    func fourCallsRunAtOnce() async throws {
+        let (state, _, teardown) = makeState()
+        defer { teardown() }
+        let rows = independentRows(state, ["acme-1", "acme-2", "acme-3", "acme-4", "acme-5", "acme-6"])
+        let ids = rows.map(\.id)
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        let run = Task { await state.archiveInBulk(ids) { try await gate.archive($0) } }
+
+        guard try await gate.waitForStarts(4) else { return }
+        let opening = Set(ids[0..<4])
+        #expect(Set(gate.started) == opening)
+        #expect(gate.started.count == 4)
+        #expect(gate.ended.isEmpty)
+
+        // A slot frees only when a call ends, and it goes to the next row in
+        // run order.
+        gate.release(ids[1])
+        guard try await gate.waitForStarts(5) else { return }
+        let afterSecond: [ArchiveCallEvent] = [.end(ids[1]), .start(ids[4])]
+        #expect(Array(gate.events.dropFirst(4)) == afterSecond)
+
+        gate.release(ids[3])
+        guard try await gate.waitForStarts(6) else { return }
+        let afterFourth: [ArchiveCallEvent] = [.end(ids[3]), .start(ids[5])]
+        #expect(Array(gate.events.dropFirst(6)) == afterFourth)
+
+        gate.open()
+        await run.value
+        #expect(gate.peakInFlight == SelectionArchive.maxConcurrentArchives)
+        let remaining = rows.filter { state.findWorktree(id: $0.id) != nil }
+        #expect(remaining.isEmpty)
+        #expect(state.alertMessage == nil)
+        #expect(state.selectionArchivePendingIDs.isEmpty)
+        #expect(!state.selectionArchiveInFlight)
+    }
+
+    /// Unrelated rows behind the parent in run order take the free slots
+    /// while it waits.
+    @Test("a parent's call starts only once both its selected children's calls have ended")
+    func aParentStartsAfterBothChildren() async throws {
         let (state, _, teardown) = makeState()
         defer { teardown() }
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
-        let first = row("acme-first", repoID: repo.id, order: 0)
-        let second = row("acme-second", repoID: repo.id, order: 1)
-        let third = row("acme-third", repoID: repo.id, order: 2)
-        let fourth = row("acme-fourth", repoID: repo.id, order: 3)
+        let parent = row("acme-parent", repoID: repo.id, order: 0)
+        let first = row("acme-first-child", repoID: repo.id, parent: parent.id, order: 0)
+        let second = row("acme-second-child", repoID: repo.id, parent: parent.id, order: 1)
+        let others = [1, 2, 3].map { row("acme-other-\($0)", repoID: repo.id, order: $0) }
         state.repos = [repo]
-        state.worktrees = [repo.id: [first, second, third, fourth]]
-        state.isConnected = true
+        state.worktrees = [repo.id: [parent, first, second] + others]
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        let targets = [first.id, second.id, parent.id] + others.map(\.id)
+        let run = Task { await state.archiveInBulk(targets) { try await gate.archive($0) } }
 
-        let fake = FakeArchiver()
-        fake.failures[second.id] = DaemonClientError.daemonNotRunning
-        // A row gone before the run reaches it is not counted among the rows
-        // left, as it is not counted when the run does reach it.
-        let gone = UUID()
-        await state.archiveInBulk([first.id, second.id, third.id, gone, fourth.id]) { try fake.archive($0) }
+        guard try await gate.waitForStarts(4) else { return }
+        let opening: Set<UUID> = [first.id, second.id, others[0].id, others[1].id]
+        #expect(Set(gate.started) == opening)
 
-        let sent = [first.id, second.id]
-        #expect(fake.calls == sent)
-        #expect(!state.isConnected)
+        // One child's end frees a slot, and the parent, still waiting for
+        // the other child, is passed over for the next row.
+        gate.release(first.id)
+        guard try await gate.waitForStarts(5) else { return }
+        let afterFirst: [ArchiveCallEvent] = [.end(first.id), .start(others[2].id)]
+        #expect(Array(gate.events.dropFirst(4)) == afterFirst)
+
+        gate.release(second.id)
+        guard try await gate.waitForStarts(6) else { return }
+        let afterSecond: [ArchiveCallEvent] = [.end(second.id), .start(parent.id)]
+        #expect(Array(gate.events.dropFirst(6)) == afterSecond)
+
+        gate.open()
+        await run.value
+        #expect(state.alertMessage == nil)
+        #expect(state.findWorktree(id: parent.id) == nil)
+    }
+
+    /// The parent is skipped as soon as its child fails, while an unrelated
+    /// call is still in flight, and it leaves the run then.
+    @Test("a failed child's parent gets no call and is listed with the nested reason")
+    func aFailedChildSkipsItsParent() async throws {
+        let (state, _, teardown) = makeState()
+        defer { teardown() }
+        let repo = Repo(path: "/tmp/acme", displayName: "acme")
+        let parent = row("acme-parent", repoID: repo.id, order: 0)
+        let child = row("acme-child", repoID: repo.id, parent: parent.id)
+        let sibling = row("acme-sibling", repoID: repo.id, order: 1)
+        state.repos = [repo]
+        state.worktrees = [repo.id: [parent, child, sibling]]
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        gate.failures[child.id] = DaemonClientError.rpcError("Refused.", code: nil)
+        let targets = [child.id, parent.id, sibling.id]
+        let run = Task { await state.archiveInBulk(targets) { try await gate.archive($0) } }
+
+        guard try await gate.waitForStarts(2) else { return }
+        let sent: Set<UUID> = [child.id, sibling.id]
+        #expect(Set(gate.started) == sent)
+
+        gate.release(child.id)
+        guard try await waitUntilSettled(parent.id, "acme-parent", in: state) else { return }
+        let stillOwned: Set<UUID> = [sibling.id]
+        #expect(state.selectionArchivePendingIDs == stillOwned)
+
+        gate.release(sibling.id)
+        await run.value
+        #expect(Set(gate.started) == sent)
+        #expect(gate.started.count == sent.count)
         let summary = """
-            Archived 1 of 4 worktrees.
+            Archived 1 of 3 worktrees.
+
+            acme-child: Refused.
+            acme-parent: Not archived, because its nested worktree "acme-child" was not archived.
+            """
+        #expect(state.alertMessage == summary)
+        let remaining = Set((state.worktrees[repo.id] ?? []).map(\.id))
+        let kept: Set<UUID> = [parent.id, child.id]
+        #expect(remaining == kept)
+    }
+
+    @Test("a lost connection starts nothing more; the calls in flight end and count, and the rows left share one line")
+    func aConnectionFailureStopsTheRun() async throws {
+        let (state, _, teardown) = makeState()
+        defer { teardown() }
+        let rows = independentRows(
+            state, ["acme-first", "acme-second", "acme-third", "acme-fourth", "acme-fifth", "acme-sixth"])
+        let ids = rows.map(\.id)
+        state.isConnected = true
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        gate.failures[ids[1]] = DaemonClientError.daemonNotRunning
+        gate.failures[ids[2]] = DaemonClientError.rpcError("Refused.", code: nil)
+        // A row gone before its turn is not counted among the rows left, as
+        // it is not counted when its turn comes.
+        let gone = UUID()
+        let targets = Array(ids[0..<5]) + [gone, ids[5]]
+        let run = Task { await state.archiveInBulk(targets) { try await gate.archive($0) } }
+
+        guard try await gate.waitForStarts(4) else { return }
+        let inFlight = Set(ids[0..<4])
+        #expect(Set(gate.started) == inFlight)
+
+        gate.release(ids[1])
+        guard try await waitUntilSettled(ids[1], "acme-second", in: state) else { return }
+        #expect(!state.isConnected)
+        // Nothing more started, and the rows never started are no longer the
+        // run's; the calls still in flight are.
+        #expect(gate.started.count == 4)
+        let stillOwned: Set<UUID> = [ids[0], ids[2], ids[3]]
+        #expect(state.selectionArchivePendingIDs == stillOwned)
+
+        for id in [ids[0], ids[2], ids[3]] {
+            gate.release(id)
+        }
+        await run.value
+        #expect(Set(gate.started) == inFlight)
+        #expect(gate.started.count == 4)
+        let summary = """
+            Archived 2 of 6 worktrees.
 
             acme-second: TBD daemon is not running
+            acme-third: Refused.
             2 more not attempted: lost the connection to the daemon.
             """
         #expect(state.alertMessage == summary)
-        // The rows it never reached are no longer the run's.
+        // The calls in flight finished, and their successes left the sidebar.
+        let remaining = Set((state.worktrees.values.first ?? []).map(\.id))
+        let kept: Set<UUID> = [ids[1], ids[2], ids[4], ids[5]]
+        #expect(remaining == kept)
         #expect(state.selectionArchivePendingIDs.isEmpty)
     }
 
     /// The other branch: a refusal that is not a lost connection leaves the
-    /// run going, and a lost connection on the last row leaves nothing to
-    /// count.
-    @Test("a refusal does not stop the run, and a lost connection on the last row adds no line")
-    func aRefusalDoesNotStopTheRun() async {
+    /// run starting rows, and a lost connection with no row left to start
+    /// leaves nothing to count.
+    @Test("a refusal does not stop new starts, and a lost connection with nothing left to start adds no line")
+    func aRefusalDoesNotStopTheRun() async throws {
         let (state, _, teardown) = makeState()
         defer { teardown() }
-        let repo = Repo(path: "/tmp/acme", displayName: "acme")
-        let first = row("acme-first", repoID: repo.id, order: 0)
-        let second = row("acme-second", repoID: repo.id, order: 1)
-        state.repos = [repo]
-        state.worktrees = [repo.id: [first, second]]
+        let rows = independentRows(state, ["acme-first", "acme-second", "acme-third", "acme-fourth", "acme-fifth"])
+        let ids = rows.map(\.id)
+        state.isConnected = true
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        gate.failures[ids[0]] = DaemonClientError.rpcError("Refused.", code: nil)
+        gate.failures[ids[4]] = DaemonClientError.connectionFailed("socket closed")
+        let run = Task { await state.archiveInBulk(ids) { try await gate.archive($0) } }
 
-        let fake = FakeArchiver()
-        fake.failures[first.id] = DaemonClientError.rpcError("Refused.", code: nil)
-        fake.failures[second.id] = DaemonClientError.connectionFailed("socket closed")
-        await state.archiveInBulk([first.id, second.id]) { try fake.archive($0) }
+        guard try await gate.waitForStarts(4) else { return }
+        // The refusal's slot goes to the fifth row.
+        gate.release(ids[0])
+        guard try await gate.waitForStarts(5) else { return }
+        #expect(gate.started.last == ids[4])
 
-        let sent = [first.id, second.id]
-        #expect(fake.calls == sent)
+        gate.release(ids[4])
+        guard try await waitUntilSettled(ids[4], "acme-fifth", in: state) else { return }
+        #expect(!state.isConnected)
+        for id in ids[1..<4] {
+            gate.release(id)
+        }
+        await run.value
         let summary = """
-            Archived 0 of 2 worktrees.
+            Archived 3 of 5 worktrees.
 
             acme-first: Refused.
-            acme-second: Connection failed: socket closed
+            acme-fifth: Connection failed: socket closed
+            """
+        #expect(state.alertMessage == summary)
+    }
+
+    /// The calls end in reverse run order, and each is settled before the
+    /// next is released.
+    @Test("failures that end in reverse run order are listed in run order")
+    func failuresAreListedInRunOrder() async throws {
+        let (state, _, teardown) = makeState()
+        defer { teardown() }
+        let rows = independentRows(state, ["acme-first", "acme-second", "acme-third"])
+        let ids = rows.map(\.id)
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        for (id, reason) in zip(ids, ["First refused.", "Second refused.", "Third refused."]) {
+            gate.failures[id] = DaemonClientError.rpcError(reason, code: nil)
+        }
+        let run = Task { await state.archiveInBulk(ids) { try await gate.archive($0) } }
+
+        guard try await gate.waitForStarts(3) else { return }
+        for row in rows.reversed() {
+            gate.release(row.id)
+            guard try await waitUntilSettled(row.id, row.displayName, in: state) else { return }
+        }
+        await run.value
+
+        let endedInReverse = [ids[2], ids[1], ids[0]]
+        #expect(gate.ended == endedInReverse)
+        let summary = """
+            Archived 0 of 3 worktrees.
+
+            acme-first: First refused.
+            acme-second: Second refused.
+            acme-third: Third refused.
             """
         #expect(state.alertMessage == summary)
     }
@@ -1208,8 +1721,9 @@ struct ArchiveSelectionBulkRunTests {
             }
         }
 
-        let sent = [first.id, second.id]
-        #expect(fake.calls == sent)
+        let sent: Set<UUID> = [first.id, second.id]
+        #expect(Set(fake.calls) == sent)
+        #expect(fake.calls.count == sent.count)
         #expect(nested.calls.isEmpty)
         #expect(recorder.beeps == 1)
         #expect(state.findWorktree(id: other.id) != nil)
@@ -1242,36 +1756,38 @@ struct ArchiveSelectionBulkRunTests {
     /// While a run goes, the rows it has yet to finish are its own. A
     /// single-row archive of one, from the row's own menu or the shortcut,
     /// is refused with a beep and sends nothing, and the run archives the row
-    /// in its turn, once.
-    @Test("the run owns each row until its turn ends, and a single-row archive of one is refused")
-    func theRunOwnsEachRowUntilItsTurnEnds() async {
+    /// once. A row leaves the run when its own call ends, whatever the calls
+    /// beside it are doing.
+    @Test("the run owns each row until its own call ends, and a single-row archive of one is refused")
+    func theRunOwnsEachRowUntilItsCallEnds() async throws {
         let (state, recorder, teardown) = makeState()
         defer { teardown() }
-        let repo = Repo(path: "/tmp/acme", displayName: "acme")
-        let first = row("acme-first", repoID: repo.id, order: 0)
-        let second = row("acme-second", repoID: repo.id, order: 1)
-        let third = row("acme-third", repoID: repo.id, order: 2)
-        state.repos = [repo]
-        state.worktrees = [repo.id: [first, second, third]]
+        let rows = independentRows(state, ["acme-first", "acme-second", "acme-third"])
+        let ids = rows.map(\.id)
+        let gate = ArchiveGate()
+        defer { gate.open() }
+        let run = Task { await state.archiveInBulk(ids) { try await gate.archive($0) } }
 
-        let fake = FakeArchiver()
-        let firstID = first.id
-        let thirdID = third.id
-        await state.archiveInBulk([first.id, second.id, third.id]) { worktree in
-            fake.pendingSeen.append(state.selectionArchivePendingIDs)
-            if worktree.id == firstID {
-                await state.archiveWorktree(id: thirdID)
-            }
-            try fake.archive(worktree)
-        }
-
-        let sent = [first.id, second.id, third.id]
-        #expect(fake.calls == sent)
-        // The single-row archive of the third row sent nothing.
+        guard try await gate.waitForStarts(3) else { return }
+        #expect(state.selectionArchivePendingIDs == Set(ids))
+        await state.archiveWorktree(id: ids[2])
         #expect(recorder.worktreeCalls.isEmpty)
         #expect(recorder.beeps == 1)
-        let pendingSeen: [Set<UUID>] = [[first.id, second.id, third.id], [second.id, third.id], [third.id]]
-        #expect(fake.pendingSeen == pendingSeen)
+
+        gate.release(ids[0])
+        guard try await waitUntilSettled(ids[0], "acme-first", in: state) else { return }
+        let stillOwned: Set<UUID> = [ids[1], ids[2]]
+        #expect(state.selectionArchivePendingIDs == stillOwned)
+        await state.archiveWorktree(id: ids[1])
+        #expect(recorder.worktreeCalls.isEmpty)
+        #expect(recorder.beeps == 2)
+
+        gate.open()
+        await run.value
+        #expect(Set(gate.started) == Set(ids))
+        #expect(gate.started.count == ids.count)
+        // The single-row archives sent nothing.
+        #expect(recorder.worktreeCalls.isEmpty)
         #expect(state.selectionArchivePendingIDs.isEmpty)
         #expect(state.alertMessage == nil)
     }
@@ -1368,8 +1884,9 @@ struct ArchiveSelectionBulkRunTests {
         fake.failures[lost.id] = DaemonClientError.daemonNotRunning
         await state.archiveInBulk([scratch.id, lost.id]) { try fake.archive($0) }
 
-        let sent = [scratch.id, lost.id]
-        #expect(fake.calls == sent)
+        let sent: Set<UUID> = [scratch.id, lost.id]
+        #expect(Set(fake.calls) == sent)
+        #expect(fake.calls.count == sent.count)
         #expect(recorder.scratchRefreshes == 0)
         #expect(state.findWorktree(id: scratch.id) == nil)
     }
