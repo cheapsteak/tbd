@@ -45,6 +45,11 @@ struct MainToolbarLayoutState: Equatable {
     var showsTranscript: Bool
     var showsReconnect: Bool
     var showsStop: Bool
+    /// The panes draw the window's top row: the Tabs in the toolbar setting
+    /// is on and the detail area shows a worktree's tab bar
+    /// (`AppState.panesDrawTopRow`). The item list then ends at the tracking
+    /// separator, so nothing of the toolbar's covers the row's tabs.
+    var panesDrawTopRow: Bool = false
 }
 
 /// One step turning the toolbar's current item list into the next.
@@ -65,6 +70,13 @@ enum ToolbarEditStop: Equatable {
 
 enum MainToolbarLayout {
     /// The item list, left to right, for `state`.
+    ///
+    /// While the panes draw the top row (`panesDrawTopRow`), nothing follows
+    /// the tracking separator: no title, no flexible space and no right-hand
+    /// item. A click under the toolbar reaches the content only where no item
+    /// sits, and every item's viewer, a flexible space's included, takes the
+    /// clicks over its frame, so any item after the separator would sit over
+    /// the main pane's row.
     static func identifiers(for state: MainToolbarLayoutState) -> [NSToolbarItem.Identifier] {
         var ids: [NSToolbarItem.Identifier] = [MainToolbarItemID.leadingButtons]
         // The leading flexible space only pushes the filter to the sidebar's
@@ -74,6 +86,9 @@ enum MainToolbarLayout {
             ids.append(MainToolbarItemID.repoFilter)
         }
         ids.append(MainToolbarItemID.sidebarSeparator)
+        if state.panesDrawTopRow {
+            return ids
+        }
         ids.append(MainToolbarItemID.title)
         ids.append(.flexibleSpace)
 

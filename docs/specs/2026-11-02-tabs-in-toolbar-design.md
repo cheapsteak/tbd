@@ -49,8 +49,14 @@ the main area carries nothing.
 - **Toggle:** Settings → General → Experimental, "Tabs in the toolbar", whose
   help text says the tabs and title move into the window's top row and the
   Servers button moves to the status bar.
-- **Readers:** the hosted panes read it through `@AppStorage` on the store
-  `MainWindowSplitView` already passes them. The toolbar controller already
+- **Readers:** the panes read it from `AppState.windowChrome`
+  (`WindowChromeState.tabsInToolbar`), which follows the key in
+  `AppState.userDefaults` through that store's change notification, and the
+  Settings toggle writes it there. `@AppStorage` would not serve: the detail
+  area's nested hosting controllers (`DetailSectionHostPager`,
+  `WorktreePager`) do not carry the store `MainWindowSplitView` passes its
+  panes, and the key's dot reads as a key path separator to the key-value
+  observation `@AppStorage` relies on. The toolbar controller already
   watches its defaults store for the Show Hidden Repos key (the window chrome
   spec, "The repo filter"); a change to this key queues the same compare-first
   apply, and other keys queue nothing.
@@ -94,9 +100,11 @@ title bar (`ContentView` lets the split ignore the top safe area):
 
 ## The row's height and alignment
 
-- **Height:** the toolbar's height, read as the hosted pane's top safe-area
-  inset, never a constant. The owner's toolbar measured 52 pt; the probe
-  window's measured 66 pt, so the height depends on the toolbar's contents.
+- **Height:** the toolbar's height, read as the content pane's top safe-area
+  inset, never a constant. The toolbar controller measures it in AppKit after
+  each layout and publishes it on `AppState.windowChrome`, with the leading
+  item's edge. The owner's toolbar measured 52 pt; the probe window's
+  measured 66 pt, so the height depends on the toolbar's contents.
 - **Centre line:** every label, tab and button centres on the row's midline,
   the line the window buttons centre on.
 - **Rule:** the existing divider under the tab row stays, now under the

@@ -35,6 +35,11 @@ final class MainSplitViewController: NSSplitViewController {
     /// Called with the window each time the split appears in one.
     var onViewDidAppear: ((NSWindow) -> Void)?
 
+    /// Called after each layout of the split's view and each resize of its
+    /// panes, so the toolbar controller can measure what the panes' top rows
+    /// read (`MainToolbarController.scheduleChromeGeometryPublish()`).
+    var onLayout: (() -> Void)?
+
     var isSidebarCollapsed: Bool { sidebarItem.isCollapsed }
 
     /// The state last passed to `onSidebarCollapsedChange`. A new sidebar item
@@ -99,9 +104,15 @@ final class MainSplitViewController: NSSplitViewController {
         onViewDidAppear?(window)
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        onLayout?()
+    }
+
     override func splitViewDidResizeSubviews(_ notification: Notification) {
         super.splitViewDidResizeSubviews(notification)
         reportCollapsedStateIfChanged()
+        onLayout?()
     }
 
     /// Calls `onSidebarCollapsedChange` when the sidebar's collapsed state

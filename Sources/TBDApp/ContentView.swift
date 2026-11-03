@@ -454,20 +454,25 @@ private struct OtherSectionContent: View {
             }
     }
 
+    /// Chosen by `MainDetailContent.otherTab`, the function the toolbar's
+    /// choice of whether to keep its title also comes from.
     @ViewBuilder
     private var content: some View {
-        if !appState.isConnected {
+        switch MainDetailContent.otherTab(in: appState) {
+        case .disconnected:
             disconnectedView
-        } else if appState.selectedScratchSection {
+        case .scratchSection:
             ScratchDetailView()
-        } else if appState.repos.isEmpty {
+        case .noRepositories:
             emptyStateView
-        } else if let repoID = appState.selectedRepoID {
+        case .repo(let repoID):
             RepoDetailView(repoID: repoID)
-        } else if appState.selectedWorktreeIDs.isEmpty {
+        case .nothingSelected, .remoteSession, .providerDesk:
+            // `otherTab` never answers either remote case; those are the
+            // pager's other tabs.
             Text("Select a worktree or click + to create one")
                 .foregroundStyle(.secondary)
-        } else {
+        case .multipleWorktrees, .worktree:
             WorktreeDetailAreaView()
         }
     }

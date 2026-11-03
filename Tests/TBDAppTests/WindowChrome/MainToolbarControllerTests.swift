@@ -1479,6 +1479,106 @@ struct MainToolbarControllerTests {
         #expect(uninstalled.applyScheduled == false)
     }
 
+    /// The defaults watch's gate for the Tabs in the toolbar key, driven
+    /// directly as `defaultsWatchQueuesAnApplyOnlyForTheShowHiddenReposKey`
+    /// drives it. With a worktree's tab bar showing, turning the key on
+    /// queues the apply that compares first, and that apply ends the items at
+    /// the tracking separator; turning it off brings the title back. Another
+    /// key queues nothing, and neither does a controller that is not
+    /// installed.
+    @Test func defaultsWatchQueuesAnApplyForTheTabsInToolbarKey() async throws {
+        let fixture = ToolbarFixture(label: "defaultsWatchQueuesAnApplyForTheTabsInToolbarKey")
+        defer { fixture.tearDown() }
+        fixture.state.isConnected = true
+        fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
+        try await fixture.ready()
+        let controller = fixture.controller
+        let defaults = fixture.suite.defaults
+        try #require(fixture.identifiers.contains(MainToolbarItemID.title))
+
+        try await fixture.withNoApplyQueued("before the store changes") {
+            defaults.set("acme", forKey: "MainToolbarControllerTests.unrelatedKey")
+            controller.defaultsChanged()
+            let queuedForAnotherKey = controller.applyScheduled
+            #expect(queuedForAnotherKey == false)
+
+            defaults.set(true, forKey: AppState.tabsInToolbarKey)
+            controller.defaultsChanged()
+            let queuedForTheKey = controller.applyScheduled
+            #expect(queuedForTheKey)
+            let runsInFull = controller.queuedApplyRunsInFull
+            #expect(runsInFull == false)
+        }
+        let ended = try await waitForMainActorCondition("the items to end at the tracking separator") {
+            fixture.identifiers.last == MainToolbarItemID.sidebarSeparator
+                && controller.appliedSnapshot?.tabsInToolbar == true
+        }
+        #expect(ended)
+        let hasTitle = fixture.identifiers.contains(MainToolbarItemID.title)
+        #expect(hasTitle == false)
+
+        try await fixture.withNoApplyQueued("before the key turns off") {
+            defaults.set(false, forKey: AppState.tabsInToolbarKey)
+            controller.defaultsChanged()
+            let queuedForTheKey = controller.applyScheduled
+            #expect(queuedForTheKey)
+        }
+        let restored = try await waitForMainActorCondition("the title to come back") {
+            fixture.identifiers.contains(MainToolbarItemID.title)
+                && controller.appliedSnapshot?.tabsInToolbar == false
+        }
+        #expect(restored)
+
+        let uninstalled = MainToolbarController(
+            appState: fixture.state, split: ToolbarFixture.makeSplit(), titleView: NSView(),
+            requestRemoteStop: { _ in })
+        defaults.set(true, forKey: AppState.tabsInToolbarKey)
+        uninstalled.defaultsChanged()
+        #expect(uninstalled.applyScheduled == false)
+    }
+
+    /// While installed, the controller measures what the panes' top rows
+    /// read: the content pane's top safe-area inset, which the toolbar takes,
+    /// and the leading item's trailing edge from the content pane's leading
+    /// edge, left of it while the sidebar is shown and over the pane once it
+    /// collapses. Uninstalled, it measures nothing.
+    @Test func publishesTheChromeGeometry() async throws {
+        let fixture = ToolbarFixture(label: "publishesTheChromeGeometry")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let chrome = fixture.state.windowChrome
+        let pane = fixture.split.contentItem.viewController.view
+
+        let measured = try await waitForMainActorCondition("the inset and the leading edge to be published") {
+            chrome.topSafeAreaInset > 0 && chrome.topSafeAreaInset == pane.safeAreaInsets.top
+                && chrome.leadingItemTrailingEdge != nil
+        }
+        try #require(measured)
+        let shownEdge = try #require(chrome.leadingItemTrailingEdge)
+        #expect(shownEdge < 0)
+        let shownInset = MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: shownEdge)
+        #expect(shownInset == MainTabRowMetrics.shownSidebarInset)
+
+        fixture.split.sidebarItem.isCollapsed = true
+        let overThePane = try await waitForMainActorCondition("the leading edge to reach over the pane") {
+            (chrome.leadingItemTrailingEdge ?? 0) > 0
+        }
+        try #require(overThePane)
+        let collapsedEdge = try #require(chrome.leadingItemTrailingEdge)
+        let leading = try #require(fixture.controller.item(MainToolbarItemID.leadingButtons)?.view)
+        let leadingEnd = leading.convert(leading.bounds, to: nil).maxX
+        let paneStart = pane.convert(pane.bounds, to: nil).minX
+        let expectedEdge = leadingEnd - paneStart
+        #expect(abs(collapsedEdge - expectedEdge) < 0.5)
+
+        fixture.controller.uninstall()
+        let scheduledAfterUninstall: Bool = {
+            fixture.controller.scheduleChromeGeometryPublish()
+            return fixture.controller.chromeGeometryPublishScheduled
+        }()
+        #expect(scheduledAfterUninstall == false)
+    }
+
     /// `serversMenuItemChosen(_:)` runs only a row that carries a command: a
     /// bare menu item, another control and no sender at all run nothing.
     @Test func serversMenuItemChosenToleratesAnySender() async throws {

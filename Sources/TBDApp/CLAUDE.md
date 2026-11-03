@@ -23,6 +23,7 @@ Each of these looks right in review and fails only when it runs or builds.
   - A pre-sized `Image(nsImage:)` keeps its size, but AppKit still sets its gap and baseline (measured: a 10 pt plus sat 9 pt from the text and 1.5 pt below the middle of the capitals).
 
   To size or place an icon exactly, put it outside the menu, as its own view beside the menu's button. Measure the result on a window capture, because the code does not show where AppKit put it.
+- **A view below the detail area's pagers reads `@AppStorage` from `.standard`, whatever store the split gives its panes.** `DetailSectionHostPager` and `WorktreePager` host each tab in an `NSHostingController` of its own, which starts from a fresh environment and gets `AppState` and a few objects again, but no `defaultAppStorage`. So `SingleWorktreeView`, the tab bar and the side region read `.standard`, which is not `AppState.userDefaults` under `TBD_MOCK` or in a test. A setting the toolbar and those views must agree on is read from `AppState` instead, as `WindowChromeState.tabsInToolbar` is.
 
 ## Toolbars
 

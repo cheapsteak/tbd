@@ -32,11 +32,13 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   cooldown it would not. Every other apply runs in full.
 /// - **Defaults.** The filter's Show Hidden Repos row reads
 ///   `SidebarBuildOptions.showHiddenReposKey` from `appState.userDefaults`,
-///   the store the sidebar's outline reads, and Observation does not track
-///   it. So the controller watches that store's `didChangeNotification`, from
-///   init to deinit, and while installed a change that leaves the key other
-///   than the last apply showed queues the apply that compares first, as an
-///   observed change does (`defaultsChanged()`).
+///   the store the sidebar's outline reads, and the layout reads the Tabs in
+///   the toolbar setting, `AppState.tabsInToolbarKey`, from the same store;
+///   Observation tracks neither. So the controller watches that store's
+///   `didChangeNotification`, from init to deinit, and while installed a
+///   change that leaves either key other than the last apply showed queues
+///   the apply that compares first, as an observed change does
+///   (`defaultsChanged()`).
 /// - **Apply.** Re-installs the toolbar if something replaced it on the
 ///   window (see "Replacement"), diffs the items against `MainToolbarLayout.identifiers(for:)`
 ///   through `ToolbarLayoutSync`, with inserts and removes only, so the items
@@ -68,9 +70,17 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   has nowhere to go.
 /// - **Title.** The title view is shared by every title item, so its width
 ///   constraints are set once, at init (`prepareTitleView(_:)`).
+/// - **Chrome geometry.** With the Tabs in the toolbar setting on, the panes
+///   draw their tab strips in the toolbar row, at the content pane's top
+///   safe-area inset and clear of the leading item. While installed, the
+///   controller measures both in AppKit on the main-actor turn after the
+///   split lays out, the window's content layout rect changes, the sidebar
+///   collapses or expands, or an apply runs, and writes them to
+///   `appState.windowChrome` (`publishChromeGeometry()`).
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
-/// and "Width".
+/// and "Width"; docs/specs/2026-11-02-tabs-in-toolbar-design.md, "Who draws
+/// the row" and "The main row".
 @MainActor
 final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, NSMenuItemValidation {
     /// Each toolbar's identifier is this plus a UUID. Toolbars that share an
@@ -158,6 +168,12 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     private var layoutSync = ToolbarLayoutSync()
     private var appearanceObservation: NSKeyValueObservation?
     private var toolbarObservation: NSKeyValueObservation?
+    /// KVO on the window's `contentLayoutRect`, which moves with the
+    /// toolbar's height, so the panes' top rows follow it.
+    private var contentLayoutObservation: NSKeyValueObservation?
+    /// Whether a chrome geometry measurement is queued
+    /// (`scheduleChromeGeometryPublish()`). Readable for tests.
+    private(set) var chromeGeometryPublishScheduled = false
     /// The watch on `appState.userDefaults`, registered in init and removed
     /// in deinit (see "Defaults").
     nonisolated(unsafe) private var defaultsObserver: (any NSObjectProtocol)?
@@ -280,6 +296,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
             split.onSidebarCollapsedChange = { [weak self] collapsed in
                 self?.sidebarCollapsedChanged(collapsed)
             }
+            split.onLayout = { [weak self] in
+                self?.scheduleChromeGeometryPublish()
+            }
         }
         // Each install tries every item again, including one an earlier
         // layout could not get.
@@ -299,7 +318,11 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         toolbarObservation = window.observe(\.toolbar) { [weak self] _, _ in
             MainToolbarController.performOnMain { self?.windowToolbarChanged() }
         }
+        contentLayoutObservation = window.observe(\.contentLayoutRect) { [weak self] _, _ in
+            MainToolbarController.performOnMain { self?.scheduleChromeGeometryPublish() }
+        }
         scheduleApply()
+        scheduleChromeGeometryPublish()
     }
 
     /// Stops following the window and takes the toolbar off it, if it still
@@ -316,6 +339,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         appearanceObservation = nil
         toolbarObservation?.invalidate()
         toolbarObservation = nil
+        contentLayoutObservation?.invalidate()
+        contentLayoutObservation = nil
         cooldown?.cancel()
         cooldown = nil
         recentReplacements.removeAll()
@@ -323,6 +348,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
             window.toolbar = nil
         }
         split?.onSidebarCollapsedChange = nil
+        split?.onLayout = nil
         window = nil
         windowShowsOurToolbar = false
         // A registration still armed is stale from here on.
@@ -340,6 +366,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     func sidebarCollapsedChanged(_ collapsed: Bool) {
         sidebarCollapsed = collapsed
         scheduleApply()
+        scheduleChromeGeometryPublish()
     }
 
     /// The window's `effectiveAppearance` changed, or was reported as changed.
@@ -353,14 +380,19 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     }
 
     /// `appState.userDefaults` changed. Queues the apply that compares first,
-    /// as an observed change does, when the Show Hidden Repos key differs
-    /// from what the last apply showed, or no apply has run: the store
-    /// changes for many keys the toolbar does not show. Internal so a test
-    /// can drive it.
+    /// as an observed change does, when the Show Hidden Repos key or the Tabs
+    /// in the toolbar key differs from what the last apply showed, or no
+    /// apply has run: the store changes for many keys the toolbar does not
+    /// show. Internal so a test can drive it.
     func defaultsChanged() {
         guard isInstalled else { return }
-        let stored = SidebarBuildOptions.storedShowHiddenRepos(appState.userDefaults)
-        guard stored != appliedSnapshot?.filter.showsHiddenRepos else { return }
+        let defaults = appState.userDefaults
+        let showsHiddenRepos = SidebarBuildOptions.storedShowHiddenRepos(defaults)
+        let tabsInToolbar = AppState.tabsInToolbarEnabled(defaults: defaults)
+        let shown = appliedSnapshot.map {
+            $0.filter.showsHiddenRepos == showsHiddenRepos && $0.tabsInToolbar == tabsInToolbar
+        } ?? false
+        guard !shown else { return }
         enqueueApply()
     }
 
@@ -545,6 +577,47 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         // A layout that stopped short is never taken as shown, so the next
         // apply re-diffs whatever asked for it.
         appliedInputs = landed ? inputs(for: snapshot) : nil
+        // The items may have changed the toolbar's height.
+        scheduleChromeGeometryPublish()
+    }
+
+    // MARK: Chrome geometry
+
+    /// Queues one `publishChromeGeometry()` on the next main-loop turn,
+    /// unless one is queued already. Deferred, so the measurement reads
+    /// AppKit's finished layout and the write never lands inside a layout
+    /// pass. Does nothing while the toolbar is not installed.
+    func scheduleChromeGeometryPublish() {
+        guard isInstalled, !chromeGeometryPublishScheduled else { return }
+        chromeGeometryPublishScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.runScheduledChromeGeometryPublish() }
+        }
+    }
+
+    /// The queued measurement: clears the flag, then publishes.
+    private func runScheduledChromeGeometryPublish() {
+        chromeGeometryPublishScheduled = false
+        publishChromeGeometry()
+    }
+
+    /// Measures what the panes' top rows read and writes it to
+    /// `appState.windowChrome`, which writes only what changed: the content
+    /// pane's top safe-area inset, the toolbar's height over it, and the
+    /// leading item's trailing edge in points from the content pane's leading
+    /// edge, nil while the toolbar shows no leading item in the window.
+    /// Internal so a test can drive it. Does nothing while the toolbar is not
+    /// installed or the split is in no window.
+    func publishChromeGeometry() {
+        guard isInstalled, let window, let split, split.view.window === window else { return }
+        let pane = split.contentItem.viewController.view
+        let paneLeading = pane.convert(pane.bounds, to: nil).minX
+        var leadingEdge: CGFloat?
+        if let leading = item(MainToolbarItemID.leadingButtons)?.view, leading.window === window {
+            leadingEdge = leading.convert(leading.bounds, to: nil).maxX - paneLeading
+        }
+        appState.windowChrome.update(
+            topSafeAreaInset: pane.safeAreaInsets.top, leadingItemTrailingEdge: leadingEdge)
     }
 
     /// Whether an apply puts the toolbar back on its window: it is installed,
