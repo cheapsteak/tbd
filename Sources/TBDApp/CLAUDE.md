@@ -17,6 +17,12 @@ Each of these looks right in review and fails only when it runs or builds.
 - **Between `beginUpdates` and `endUpdates`, `NSOutlineView.child(_:ofItem:)` asks the data source**, which already serves the new tree. Never infer the old tree from outline lookups during an update; keep your own copy of it.
 - **Don't capture a `Notification` or `NSEvent` into `MainActor.assumeIsolated` from a `nonisolated` delegate method.** Neither is `Sendable`, so Swift 6 rejects the capture as a data race. Extract what you need first, such as the sender's `ObjectIdentifier`.
 - **An `NSTextField` label framed at its `intrinsicContentSize` truncates text that fits.** The intrinsic size is the alignment rect, which leaves out the 2 pt the cell keeps clear on each side, so the frame is about 4 pt short and the tail ellipsis eats the last two or three letters (measured: "main" in 13 pt regular is 29 pt intrinsic, but the cell needs 32.98 pt). Size a label by its cell's `cellSize`, as `SidebarCellKit.size(of:)` does, and test whether it is cut with the cell's `expansionFrame(withFrame:in:)`, AppKit's own truncation check.
+- **A SwiftUI `Menu` with `.menuStyle(.borderlessButton)` is laid out by AppKit, which ignores the label's modifiers.**
+  - A `.font` on the label has no effect: the text draws at the 13 pt control font.
+  - A symbol named in the label is sized to that font. A `+` came out 10.5 pt across, as tall as the capitals.
+  - A pre-sized `Image(nsImage:)` keeps its size, but AppKit still sets its gap and baseline (measured: a 10 pt plus sat 9 pt from the text and 1.5 pt below the middle of the capitals).
+
+  To size or place an icon exactly, put it outside the menu, as `SidebarFooter` does with the Add Repository plus. Measure the result on a window capture, because the code does not show where AppKit put it.
 
 ## Toolbars
 
