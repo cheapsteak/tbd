@@ -5,19 +5,6 @@ import TBDShared
 
 private let itemsLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
 
-/// A Servers menu row's command and the worktree it acts on, carried as the
-/// row's `representedObject`.
-final class ServersMenuCommandBox: NSObject {
-    let worktreeID: UUID
-    let command: ServersMenuCommand
-
-    init(worktreeID: UUID, command: ServersMenuCommand) {
-        self.worktreeID = worktreeID
-        self.command = command
-        super.init()
-    }
-}
-
 /// The key a toolbar item's image was last derived from, such as its symbol
 /// name, and the item it was set on: an item rebuilt since then gets its image
 /// whatever the key says.
@@ -811,59 +798,13 @@ extension MainToolbarController {
 
     // MARK: The Servers menu
 
-    /// Rebuilds `menu` from `ServersToolbarMenu.entries` for the one selected
-    /// worktree's current list. Empty when there is no single selection.
+    /// Rebuilds `menu` through the shared `ServersMenu` for the one selected
+    /// worktree's current list, each row sending `serversMenuItemChosen(_:)`
+    /// to this controller. Empty when there is no single selection.
     func rebuildServersMenu(_ menu: NSMenu) {
-        menu.removeAllItems()
-        guard appState.selectedWorktreeIDs.count == 1,
-              let worktreeID = appState.selectedWorktreeIDs.first,
-              let list = appState.devServerLists[worktreeID] else { return }
-        let messages = appState.devServerActionMessages[worktreeID] ?? []
-        for entry in ServersToolbarMenu.entries(list: list, messages: messages) {
-            menu.addItem(menuItem(for: entry, worktreeID: worktreeID))
-        }
-    }
-
-    private func menuItem(for entry: ServersMenuEntry, worktreeID: UUID) -> NSMenuItem {
-        switch entry {
-        case .item(let title, let isEnabled, let command):
-            let row = NSMenuItem(title: title, action: #selector(serversMenuItemChosen(_:)), keyEquivalent: "")
-            row.target = self
-            row.isEnabled = isEnabled
-            row.representedObject = ServersMenuCommandBox(worktreeID: worktreeID, command: command)
-            return row
-        case .header(let title):
-            return NSMenuItem.sectionHeader(title: title)
-        case .note(let text):
-            let row = NSMenuItem(title: text, action: nil, keyEquivalent: "")
-            row.isEnabled = false
-            return row
-        case .separator:
-            return NSMenuItem.separator()
-        }
-    }
-
-    /// Runs `command` through the `AppState` call the SwiftUI menu makes.
-    func runServersCommand(_ command: ServersMenuCommand, worktreeID: UUID) {
-        let appState = self.appState
-        switch command {
-        case .open(let url):
-            appState.openDevServerURL(url)
-        case .showLastOutput(let serverName):
-            guard let server = appState.devServerLists[worktreeID]?.servers.first(where: { $0.name == serverName }) else {
-                itemsLogger.debug("Show last output: \(serverName, privacy: .public) is no longer listed")
-                return
-            }
-            Task { await appState.showDevServerLastOutput(worktreeID: worktreeID, server: server) }
-        case .stop(let names):
-            Task { await appState.performDevServerAction(.stop, worktreeID: worktreeID, names: names) }
-        case .restart(let names):
-            Task { await appState.restartDevServers(worktreeID: worktreeID, names: names) }
-        case .start(let names):
-            Task { await appState.performDevServerAction(.start, worktreeID: worktreeID, names: names) }
-        case .refreshStatus:
-            Task { await appState.refreshDevServerStatus(worktreeID: worktreeID) }
-        }
+        ServersMenu.rebuild(
+            menu, worktreeID: ServersMenu.selectedWorktreeID(in: appState), appState: appState,
+            target: self, action: #selector(serversMenuItemChosen(_:)))
     }
 
     // MARK: Actions
@@ -927,8 +868,7 @@ extension MainToolbarController {
     }
 
     @objc func serversMenuItemChosen(_ sender: Any?) {
-        guard let box = (sender as? NSMenuItem)?.representedObject as? ServersMenuCommandBox else { return }
-        runServersCommand(box.command, worktreeID: box.worktreeID)
+        ServersMenu.runChosen(sender, appState: appState)
     }
 
     // Each remote action reads the selection when it is clicked, so it acts

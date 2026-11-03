@@ -690,6 +690,11 @@ struct StatusBarView: View {
                 AutoArchiveChipView(worktreeID: selected.id, chip: chip)
             }
             Spacer()
+            // The right-hand group opens with the Servers chip, shown only
+            // while Tabs in the toolbar is on, which takes the toolbar's
+            // Servers item away. It reads the setting and the dev-server
+            // lists itself, so their changes re-evaluate the chip alone.
+            ServersStatusChip(worktreeID: ServersMenu.selectedWorktreeID(in: appState))
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
             }
@@ -719,8 +724,9 @@ struct StatusBarView: View {
 /// an `NSCursor.push()` with no matching `pop()` leaves the pointing hand stuck
 /// for the whole application — there is no later event that would balance it.
 /// Every hoverable status-bar label must use this modifier rather than wiring
-/// `onHover` by hand, so the two halves can never drift apart.
-private struct StatusBarHoverAffordance: ViewModifier {
+/// `onHover` by hand, so the two halves can never drift apart. Internal, not
+/// private, so labels in their own files (`ServersStatusChip`) use it too.
+struct StatusBarHoverAffordance: ViewModifier {
     @Binding var isHovering: Bool
 
     func body(content: Content) -> some View {
