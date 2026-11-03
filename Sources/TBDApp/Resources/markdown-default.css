@@ -16,6 +16,9 @@
   --md-bg: #fbf8f0;
   --md-fill: #f4efe2;
   --md-fill-strong: #ebe4d2;
+  --md-code-bg: #f1ebdc;
+  /* Translucent, so a chip shows on every tinted ground (alerts) alike. */
+  --md-code-bg-on-tint: rgba(27, 24, 21, 0.07);
   --md-fg: #1b1815;
   --md-heading: #3a342c;
   --md-fg-2: #494339;
@@ -41,12 +44,17 @@
      token if a user stylesheet overrides it. Change this and the sizes
      stay proportional but stop being integers. */
   --md-size: 14px;
+  /* Lets WebKit draw form controls (task-list checkboxes) and scrollbars
+     dark in dark mode. body sets its own colors, so nothing else moves. */
+  color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --md-bg: #1a1712;
     --md-fill: #15120e;
     --md-fill-strong: #241f18;
+    --md-code-bg: #26211a;
+    --md-code-bg-on-tint: rgba(236, 231, 221, 0.1);
     --md-fg: #ece7dd;
     --md-heading: #d6cfc2;
     --md-fg-2: #c7bfb1;
@@ -84,11 +92,14 @@ body {
 }
 body > :first-child { margin-top: 0; }
 
+/* Spacing groups by proximity. Blocks sit one 12px gap apart; a heading
+   adds space above (32px before h1/h2, 24px before h3, 20px before h4-h6)
+   and takes some away below (8px), so it reads as the start of what follows
+   rather than a divider floating between two sections. The negative margin
+   only trims the body's flex gap; anywhere else (a list item, an alert) it
+   would eat into the content below. */
 h1, h2, h3, h4, h5, h6 {
-  /* Space above a heading, not below it: the doc this palette comes from
-     sets 40px/12px. A uniform gap makes every block equidistant, which
-     reads as drifting rather than grouped. */
-  margin: 26px 0 0;
+  margin: 20px 0 0;
   color: var(--md-heading);
   font-weight: 600;
   text-wrap: balance;
@@ -109,8 +120,21 @@ h2 {
   padding-bottom: 0.25em;
   border-bottom: 1px solid var(--md-rule);
 }
-h3 { font-size: 1em;         /* 14px */ line-height: 1.35; }
-h4, h5, h6 { font-size: 0.929em; /* 13px */ line-height: 1.35; color: var(--md-fg-2); }
+body > :is(h1, h2, h3, h4, h5, h6) { margin-bottom: -4px; }
+h3, h4, h5, h6 { margin-top: 8px; line-height: 1.35; }
+/* h3 and h4 sit above body size: at or below it an h3 matched a bold
+   label paragraph (`**Files:**`) and stopped reading as a heading. */
+h3 { margin-top: 12px; font-size: 1.143em;   /* 16px */ }
+h4 { font-size: 1.071em;   /* 15px */ color: var(--md-fg-2); }
+/* h5/h6 are rare enough to be labels. Uppercase and tracked, they stay
+   apart from body text and bold paragraphs while smaller than both. */
+h5, h6 {
+  font-size: 0.857em;   /* 12px */
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-fg-2);
+}
+h6 { color: var(--md-muted); }
 
 p, ul, ol, blockquote, table, pre, hr { margin: 0; }
 strong { font-weight: 600; }
@@ -122,8 +146,33 @@ ul, ol { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; }
 ul { list-style: disc; }
 ol { list-style: decimal; }
 li::marker { color: var(--md-muted); }
-:is(li, td, th) > * + :is(p, ul, ol, blockquote) { margin-top: 6px; }
+:is(li, td, th) > * + :is(p, ul, ol, blockquote, pre, table) { margin-top: 6px; }
+/* A tight item's code block follows its text with no <p> around the text,
+   so `* + pre` cannot see it. A code block that opens an item gets the 6px
+   too, which is the cheaper miss. */
+li > pre { margin-top: 6px; }
 input[type="checkbox"] { margin-right: 4px; accent-color: var(--md-accent); }
+/* Task items: the checkbox takes the bullet's place in the gutter, so task
+   text lines up with plain items. comrak gives the item no class, hence
+   :has. Out of flow, the box also sits on the first line when a loose item
+   puts a <p> after it, which as an inline box it could not. */
+li:has(> input[type="checkbox"]:first-child) { position: relative; }
+ul > li:has(> input[type="checkbox"]:first-child) { list-style: none; }
+li > input[type="checkbox"]:first-child {
+  /* A control's em is the UA control font (about 11px), not the item's. */
+  font-size: inherit;
+  position: absolute;
+  left: -1.357em;   /* 19px: the marker's slot in the 22px list gutter */
+  top: 0.286em;     /* 4px: centers 13px in the 21px first line */
+  width: 0.929em;
+  height: 0.929em;
+  margin: 0;
+}
+li > input[type="checkbox"]:first-child + p { margin-top: 0; }
+/* An ordered item keeps its number, which carries meaning; the checkbox
+   moves inside, after it. */
+ol > li:has(> input[type="checkbox"]:first-child) { padding-left: 1.357em; }
+ol > li > input[type="checkbox"]:first-child { left: 0; }
 
 blockquote {
   display: flex; flex-direction: column; gap: 10px;
@@ -132,16 +181,31 @@ blockquote {
   color: var(--md-fg-2);
 }
 
+/* Fill only, no border: in code-dense prose a bordered chip on every
+   identifier turned paragraphs into rows of boxes. */
 :not(pre) > code {
-  background: var(--md-fill);
-  border: 1px solid var(--md-rule);
-  padding: 0.08em 0.34em;
+  background: var(--md-code-bg);
+  padding: 0.08em 0.3em;
   border-radius: 3px;
   font-family: var(--md-mono);
   font-size: 0.857em;   /* 12px */
   font-variant-numeric: tabular-nums;
 }
+/* --md-code-bg sits too close to the alert grounds to show on them. :where
+   keeps this at the base rule's weight, so the link, heading and table-cell
+   rules below still win inside an alert. */
+:where(.markdown-alert) :not(pre) > code { background: var(--md-code-bg-on-tint); }
 a > code { background: none; color: inherit; }
+/* In a heading, code is part of the title: no chip, and sized with the
+   heading rather than shrunk to the 12px body chip. 13/14 because mono
+   glyphs run wider than the sans at the same size. */
+:is(h1, h2, h3, h4, h5, h6) code {
+  background: none;
+  padding: 0;
+  font-size: 0.929em;
+  text-transform: none;
+  letter-spacing: 0;
+}
 pre {
   background: var(--md-fill);
   padding: 12px 14px;
@@ -150,7 +214,6 @@ pre {
   font-family: var(--md-mono);
   font-size: 0.857em;   /* 12px */
   line-height: 1.5;
-  margin-block: 4px;
 }
 pre code { background: none; padding: 0; font: inherit; }
 
@@ -177,15 +240,26 @@ th, td {
 th {
   background: var(--md-fill-strong);
   font-family: var(--md-mono);
-  font-size: 0.714em;   /* 10px */
+  /* Against --md-size, not em: the table is already 13px, so an em here
+     would compound (0.714em came out at 9.3px). */
+  font-size: calc(var(--md-size) * 11 / 14);   /* 11px */
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 td { background: var(--md-fill); }
-:is(th, td) :not(pre) > code { background: transparent; padding: 0; }
+/* The cell is already a tile, so its code drops the chip. Not
+   `:is(th, td) :not(pre) > code`: that needs an element between the cell
+   and the code, so it misses code sitting directly in a cell, which is
+   nearly all of it. */
+:is(th, td) code { background: transparent; padding: 0; border-radius: 0; }
+th code { font-size: 1em; }   /* the header is already 11px mono */
 
-hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 12px; }
+/* 20px either side of the rule. A heading right after one drops its own
+   top margin: the rule already ends the section, and the rule's margins,
+   two gaps and the heading's margin would otherwise stack into a hole. */
+hr { border: 0; border-top: 1px solid var(--md-rule-strong); margin-block: 8px; }
+hr + :is(h1, h2, h3, h4, h5, h6) { margin-top: 0; }
 img { max-width: 100%; height: auto; border-radius: 4px; }
 
 .tbd-oversized-image {
@@ -197,6 +271,47 @@ img { max-width: 100%; height: auto; border-radius: 4px; }
   font-family: var(--md-mono);
   font-size: 0.857em;   /* 12px */
 }
+
+/* YAML front matter. TBD lifts it out before rendering (CommonMark would
+   make it an <hr> and a setext <h2>) and shows it as a key/value header:
+   metadata, so quieter than the body, and separated from it by one rule. */
+/* 20px below on top of the 12px gap: the 32px a section gets above an h2,
+   so the header groups as a header and its rule does not crowd the title. */
+.tbd-front-matter {
+  margin: 0 0 20px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--md-rule);
+  color: var(--md-fg-2);
+  font-size: 0.929em;   /* 13px */
+  line-height: 1.45;
+}
+dl.tbd-front-matter {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  gap: 2px 14px;
+  align-items: baseline;
+}
+.tbd-front-matter dt {
+  color: var(--md-muted);
+  font-family: var(--md-mono);
+  /* Against --md-size, not em: the block is already 13px. */
+  font-size: calc(var(--md-size) * 11 / 14);   /* 11px */
+  overflow-wrap: anywhere;
+}
+.tbd-front-matter dd { margin: 0; min-width: 0; }
+.tbd-front-matter dd p + p { margin-top: 4px; }   /* a folded value's paragraphs */
+/* Nested values, block scalars, and a block that is not top-level keys at
+   all keep their lines as written. */
+.tbd-front-matter pre,
+pre.tbd-front-matter {
+  background: none;
+  border-radius: 0;
+  overflow-x: visible;
+  white-space: pre-wrap;
+  font-size: calc(var(--md-size) * 12 / 14);   /* 12px */
+}
+.tbd-front-matter pre { margin: 0; padding: 0; }
+.tbd-front-matter + :is(h1, h2, h3, h4, h5, h6) { margin-top: 0; }
 
 /* Alert accents are semantic (severity), not decorative — they carry the same
    meaning as the keyword GitHub renders them from. The source palette has
