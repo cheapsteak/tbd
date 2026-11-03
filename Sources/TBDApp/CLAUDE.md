@@ -6,6 +6,8 @@ SwiftUI app target. See the repo-root `CLAUDE.md` and the `tbd-project` skill fo
 
 While a purely visual value — a gap, inset, opacity, duration — is being eyeballed, iterate with `scripts/swift-safe build`, the one filtered suite that pins it, and `scripts/restart.sh`; the full `scripts/test.sh` costs ~110s, cannot tell you whether the number looks right, and belongs once on the final tree before pushing.
 
+When the choice is between several looks rather than one number — a colour, an alpha, the shape of a line — a browser mock is faster than a rebuild per try. Draw the few rows in HTML with sliders and the options side by side, reproduce the app's compositing (each alpha over the same background the app draws on), and copy the chosen values back into the constants. Calibrate the mock from a screenshot, and read the screenshot's pixels as Display P3, not sRGB: a screenshot of a wide-gamut display (a MacBook's built-in one is tagged "Color LCD") holds wide-gamut values, and the same numbers read as sRGB look duller. Write them as `color(display-p3 …)` in CSS and `NSColor(displayP3Red:green:blue:alpha:)` in Swift.
+
 ## AppKit traps
 
 Each of these looks right in review and fails only when it runs or builds.
@@ -14,6 +16,7 @@ Each of these looks right in review and fails only when it runs or builds.
 - **An `NSBox` separator made at `.zero` is vertical.** A separator takes its orientation from its frame, and the vertical one's intrinsic width of 1 pt, hugged above the window's size priority, shrank a whole window to 1 pt wide. Make it wider than tall, as `SidebarContainerController` does.
 - **Between `beginUpdates` and `endUpdates`, `NSOutlineView.child(_:ofItem:)` asks the data source**, which already serves the new tree. Never infer the old tree from outline lookups during an update; keep your own copy of it.
 - **Don't capture a `Notification` or `NSEvent` into `MainActor.assumeIsolated` from a `nonisolated` delegate method.** Neither is `Sendable`, so Swift 6 rejects the capture as a data race. Extract what you need first, such as the sender's `ObjectIdentifier`.
+- **An `NSTextField` label framed at its `intrinsicContentSize` truncates text that fits.** The intrinsic size is the alignment rect, which leaves out the 2 pt the cell keeps clear on each side, so the frame is about 4 pt short and the tail ellipsis eats the last two or three letters (measured: "main" in 13 pt regular is 29 pt intrinsic, but the cell needs 32.98 pt). Size a label by its cell's `cellSize`, as `SidebarCellKit.size(of:)` does, and test whether it is cut with the cell's `expansionFrame(withFrame:in:)`, AppKit's own truncation check.
 
 ## Toolbars
 

@@ -1084,6 +1084,24 @@ front.
   to compile, because the macro reads the call as one that can throw.
   Evaluate into a `let` and assert on that. Keep anonymous `$0` closures out
   of `#require` arguments for the same reason.
+- **`needsDisplay` does not read back what you set.** Right after
+  `view.needsDisplay = true`, the property reads `false` — measured with a
+  standalone probe on a plain `NSView` and an `NSTableRowView`, in offscreen
+  and onscreen windows, layer-backed or not — although the view does redraw
+  on the next run-loop turn. And `window.displayIfNeeded()` or `display()`
+  draws nothing in the offscreen host. So a test that reads the flag back
+  fails on correct code. Prove a redraw by its effect instead: turn the run
+  loop with `RunLoopPump.until` until the draw has refilled something it
+  fills, such as a cache, or a draw counter on a test-only view laid over the
+  one under test, as
+  `SidebarGuideLineTests.systemColorsChangeRedrawsTheRowsDrawingTheTint` does.
+- **Don't post an app-wide notification on `NotificationCenter.default`.**
+  Every suite runs in the one test process, so an
+  `NSColor.systemColorsDidChangeNotification` posted there reaches every
+  observer in every suite running at the time. Give the code under test a
+  `NotificationCenter` parameter that defaults to `.default`, and post on a
+  private `NotificationCenter()` of the test's own, as
+  `SidebarGuideLine.HighlightTintCache(center:)` lets its test do.
 
 ## Clock and date seams
 
