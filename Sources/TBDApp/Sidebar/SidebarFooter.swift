@@ -13,33 +13,49 @@ struct SidebarFooter: View {
     @AppStorage(SidebarBuildOptions.showHiddenReposKey) private var showHiddenRepos: Bool = false
     @State private var showingClone = false
 
+    /// The gap between the plus and the label, tuned by eye. The menu button
+    /// adds its own leading inset, so the visible gap is larger than this.
+    static let plusGap: CGFloat = 3
+
+    private var plusImage: some View {
+        Group {
+            if let plus = SidebarCellKit.symbol("plus", size: 10) {
+                Image(nsImage: plus).renderingMode(.template)
+            } else {
+                Image(systemName: "plus")
+            }
+        }
+    }
+
     var body: some View {
         HStack(spacing: 4) {
-            // A split button: a click on the label opens the folder
-            // picker, as it always has; the arrow offers cloning too.
-            Menu {
-                Button("Local Folder…", action: addRepo)
-                Button("Clone from URL…") { showingClone = true }
-            } label: {
-                // The plus is pre-sized because the borderless menu button sizes a
-                // named symbol to its own 13 pt font; it matches the repo header's `+`.
-                Label {
-                    Text("Add Repository")
-                } icon: {
-                    if let plus = SidebarCellKit.symbol("plus", size: 10) {
-                        Image(nsImage: plus).renderingMode(.template)
-                    } else {
-                        Image(systemName: "plus")
-                    }
+            // A split button: a click on the label opens the folder picker, as it
+            // always has; the arrow offers cloning too. The plus sits outside the
+            // menu because the borderless menu button places its label's image
+            // with its own gap and baseline; it runs the same action as clicking
+            // the label, and is the repo header's 10 pt plus.
+            HStack(spacing: SidebarFooter.plusGap) {
+                Button(action: addRepo) {
+                    plusImage
+                        .contentShape(Rectangle())
                 }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } primaryAction: {
-                addRepo()
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Add Repository")
+                Menu {
+                    Button("Local Folder…", action: addRepo)
+                    Button("Clone from URL…") { showingClone = true }
+                } label: {
+                    Text("Add Repository")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } primaryAction: {
+                    addRepo()
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .foregroundStyle(.secondary)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .foregroundStyle(.secondary)
             Spacer()
             filterMenu
         }
