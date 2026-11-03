@@ -21,7 +21,17 @@ struct SidebarFooter: View {
                 Button("Local Folder…", action: addRepo)
                 Button("Clone from URL…") { showingClone = true }
             } label: {
-                Label("Add Repository", systemImage: "plus")
+                // The plus is pre-sized because the borderless menu button sizes a
+                // named symbol to its own 13 pt font; it matches the repo header's `+`.
+                Label {
+                    Text("Add Repository")
+                } icon: {
+                    if let plus = SidebarCellKit.symbol("plus", size: 10) {
+                        Image(nsImage: plus).renderingMode(.template)
+                    } else {
+                        Image(systemName: "plus")
+                    }
+                }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } primaryAction: {
