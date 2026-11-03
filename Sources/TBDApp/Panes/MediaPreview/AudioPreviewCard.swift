@@ -31,16 +31,17 @@ struct AudioPreviewCard: View {
         let text: String
     }
 
+    /// One modifier chain whose arguments follow `fillsViewport`, never an
+    /// `if`/`else` over it. A branch would move `MediaPlayerView` to another
+    /// place in the view tree whenever the selection goes between one file and
+    /// several, and SwiftUI would dismantle it, stopping and resetting
+    /// playback. An empty axis set sizes neither axis, so in a stack
+    /// `containerRelativeFrame` takes its content's size and changes nothing.
     var body: some View {
-        if fillsViewport {
-            card
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .containerRelativeFrame(.vertical)
-        } else {
-            card
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-        }
+        card
+            .frame(maxWidth: .infinity, maxHeight: fillsViewport ? .infinity : nil)
+            .containerRelativeFrame(fillsViewport ? .vertical : [])
+            .padding(.vertical, fillsViewport ? 0 : 16)
     }
 
     private var card: some View {
@@ -48,7 +49,7 @@ struct AudioPreviewCard: View {
             Image(systemName: "music.note")
                 .font(.system(size: 32))
                 .foregroundStyle(.tertiary)
-            Text(URL(fileURLWithPath: filePath).lastPathComponent)
+            Text((filePath as NSString).lastPathComponent)
                 .font(.headline)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -57,7 +58,7 @@ struct AudioPreviewCard: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
             MediaPlayerView(
-                url: URL(fileURLWithPath: filePath),
+                url: URL(filePath: filePath, directoryHint: .notDirectory),
                 revision: revision,
                 onLoadFailure: onLoadFailure
             )
@@ -82,7 +83,7 @@ struct AudioPreviewCard: View {
 
     private func loadDuration() async {
         let path = filePath
-        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        let asset = AVURLAsset(url: URL(filePath: path, directoryHint: .notDirectory))
         let duration = try? await asset.load(.duration)
         guard !Task.isCancelled else { return }
         let text = duration.map { Self.formattedDuration(seconds: CMTimeGetSeconds($0)) } ?? ""

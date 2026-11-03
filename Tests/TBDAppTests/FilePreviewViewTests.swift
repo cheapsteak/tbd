@@ -82,10 +82,34 @@ private struct PreviewRoot: View {
     }
 }
 
+/// One media file in a scroll view, as the viewer stacks files, with
+/// `fillsViewport` chosen by the test. The test flips it by handing the
+/// hosting view a new root of this same type, which updates the tree in place
+/// the way a change in the viewer's selection count does.
+private struct ViewportSwitchRoot: View {
+    let path: String
+    let isVideo: Bool
+    let fillsViewport: Bool
+    let coordinator: MediaPlaybackCoordinator
+
+    var body: some View {
+        ScrollView {
+            MediaPreviewView(
+                filePath: path,
+                revision: 0,
+                isVideo: isVideo,
+                fillsViewport: fillsViewport
+            )
+        }
+        .environment(\.mediaPlaybackCoordinator, coordinator)
+    }
+}
+
 /// `FilePreviewView` mounted offscreen: a playable audio file gets one paused
 /// player framed to its control bar, a source file whose extension looks up
-/// as a playable type gets none, and an audio file that does not load falls
-/// back to the "Cannot preview" screen.
+/// as a playable type gets none, an audio file that does not load falls back
+/// to the "Cannot preview" screen, and a player stays the same view when the
+/// selection goes from one file to several.
 @MainActor
 @Suite("FilePreviewView", .fastPassBounded)
 struct FilePreviewViewTests {
@@ -175,6 +199,59 @@ struct FilePreviewViewTests {
         }
         let remaining = host.descendants(MediaPlayerHostView.self).count
         try #require(fellBack, "the player was still mounted after the load failed: \(remaining) player view(s)")
+    }
+
+    /// Selecting a second file while one plays flips `fillsViewport` from
+    /// true to false. The player must stay the same view through the flip: a
+    /// new one means SwiftUI dismantled the old, which stops and resets
+    /// playback. The video layout is driven with the WAV too, since it plays
+    /// in an `AVPlayerView` as readily as a movie does.
+    @Test(arguments: [false, true])
+    func changingFillsViewportKeepsThePlayer(isVideo: Bool) async throws {
+        let fixtures = try PreviewFixtures()
+        defer { fixtures.remove() }
+        let url = try fixtures.silentWAV()
+        let coordinator = MediaPlaybackCoordinator()
+        let host = OffscreenHost(
+            root: ViewportSwitchRoot(
+                path: url.path, isVideo: isVideo, fillsViewport: true, coordinator: coordinator),
+            size: Self.paneSize)
+        defer { host.tearDown() }
+
+        var seen: MediaPlayerHostView?
+        let mounted = await host.settle {
+            let players = host.descendants(MediaPlayerHostView.self)
+            seen = players.first
+            return players.count == 1 && players[0].frame.height > 0
+        }
+        try #require(mounted, "the player never mounted alone in the pane")
+        let first = try #require(seen)
+        let filledFrame = host.flippedWindowFrame(first)
+
+        host.hostingView.rootView = ViewportSwitchRoot(
+            path: url.path, isVideo: isVideo, fillsViewport: false, coordinator: coordinator)
+
+        // The stack layout has landed once the one player sits somewhere
+        // else: the video's height becomes 9/16 of the pane's width, and the
+        // card moves from the middle of the pane to its top.
+        var after: MediaPlayerHostView?
+        var afterFrame = NSRect.zero
+        let relaidOut = await host.settle {
+            let players = host.descendants(MediaPlayerHostView.self)
+            guard players.count == 1, let player = players.first else { return false }
+            after = player
+            afterFrame = host.flippedWindowFrame(player)
+            return player.frame.height > 0 && afterFrame != filledFrame
+        }
+        try #require(
+            relaidOut,
+            "the stack layout never took effect: the player stayed at \(filledFrame), last seen at \(afterFrame)")
+        let second = try #require(after)
+
+        #expect(second === first, "the flip replaced the player view, so playback would stop and reset")
+        let firstPlayer = first.player
+        #expect(firstPlayer != nil, "the first player view was torn down by the flip")
+        #expect(coordinator.registeredCount == 1)
     }
 
     @Test func durationReadsAsMinutesThenHours() {

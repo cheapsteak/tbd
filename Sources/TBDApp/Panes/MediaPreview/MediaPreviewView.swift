@@ -17,6 +17,9 @@ struct MediaPreviewView: View {
     /// The `path#revision` whose load failed. Keyed on the revision as well as
     /// the path, so a rewrite of the file tries the player again.
     @State private var failedKey: String?
+    /// The video's own width, which is the pane's, so a stacked video can
+    /// take a 16:9 frame as wide as the pane.
+    @State private var videoWidth: CGFloat = 0
 
     private var loadKey: String { "\(filePath)#\(revision)" }
 
@@ -35,18 +38,31 @@ struct MediaPreviewView: View {
         }
     }
 
-    @ViewBuilder
+    /// One modifier chain whose arguments follow `fillsViewport`, never an
+    /// `if`/`else` over it. A branch would move `MediaPlayerView` to another
+    /// place in the view tree whenever the selection goes between one file and
+    /// several, and SwiftUI would dismantle it, stopping and resetting
+    /// playback.
+    ///
+    /// In a stack the height is the measured width times 9/16. A conditional
+    /// `aspectRatio` cannot stand in for it: given no ratio, it takes the
+    /// ratio of the player's ideal size, and an `AVPlayerView` has none. Alone
+    /// in the pane, `containerRelativeFrame` gives it the scroll view's visible
+    /// height; in a stack its axis set is empty, which sizes neither axis, so
+    /// the frame takes its content's size and changes nothing.
     private var video: some View {
-        let player = MediaPlayerView(
-            url: URL(fileURLWithPath: filePath),
+        MediaPlayerView(
+            url: URL(filePath: filePath, directoryHint: .notDirectory),
             revision: revision,
             onLoadFailure: loadFailed
         )
         .frame(maxWidth: .infinity)
-        if fillsViewport {
-            player.containerRelativeFrame(.vertical)
-        } else {
-            player.aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .frame(height: fillsViewport ? nil : videoWidth * 9 / 16)
+        .containerRelativeFrame(fillsViewport ? .vertical : [])
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            videoWidth = width
         }
     }
 

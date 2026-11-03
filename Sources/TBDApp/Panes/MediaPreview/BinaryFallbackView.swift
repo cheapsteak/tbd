@@ -18,7 +18,7 @@ struct BinaryFallbackView: View {
             Text("Cannot preview binary file")
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            Text(URL(fileURLWithPath: filePath).lastPathComponent)
+            Text((filePath as NSString).lastPathComponent)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             HStack(spacing: 8) {

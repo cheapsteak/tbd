@@ -4,6 +4,7 @@ import AVKit
 import CoreMedia
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDApp
 
 /// A temporary directory of media fixtures, removed by `remove()`.
@@ -102,7 +103,7 @@ private final class FailureFlag {
 /// itself, pauses when removed or hidden, reloads paused at the start, and
 /// lets only one player run at a time.
 @MainActor
-@Suite("MediaPlayerView")
+@Suite("MediaPlayerView", .fastPassBounded)
 struct MediaPlayerViewTests {
     @Test func loadLeavesItPaused() throws {
         let fixtures = try MediaFixtures()
