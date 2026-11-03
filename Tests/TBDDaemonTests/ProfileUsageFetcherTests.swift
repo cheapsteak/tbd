@@ -660,7 +660,8 @@ struct ProfileUsageKeychainDerivationTests {
         let store = SecurityCLIClaudeCredentialStore(
             account: "alice", securityExecutable: executable)
         let blob = try await store.readBlob(forConfigDirPath: configDir)
-        #expect(blob.flatMap(parseClaudeCredentialsAccessToken) == "FAKE_LIVE")
+        let blobToken = blob.flatMap(parseClaudeCredentialsAccessToken)
+        #expect(blobToken == "FAKE_LIVE")
         #expect(await store.writeBlob(Data("synthetic".utf8), forConfigDirPath: configDir))
         let writtenAccount = try String(contentsOf: dir.appendingPathComponent("written-account"), encoding: .utf8)
         #expect(writtenAccount.trimmingCharacters(in: .whitespacesAndNewlines) == "alice")
@@ -711,6 +712,50 @@ struct ProfileUsageKeychainDerivationTests {
                     .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
                 ] })
         }
+    }
+
+    /// A refresh must land in the keychain the reader selected, and an ambiguous
+    /// pair of same-account items must refuse the write.
+    @Test func writeTargetsTheKeychainTheReaderSelected() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-keychain-write-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let executable = dir.appendingPathComponent("security")
+        let script = """
+        #!/bin/sh
+        [ "$1" = "add-generic-password" ] || exit 2
+        for last; do :; done
+        printf '%s\\n' "$last" > "$(dirname "$0")/written-last-operand"
+        exit 0
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let marker = dir.appendingPathComponent("written-last-operand")
+
+        let store = SecurityCLIClaudeCredentialStore(
+            account: "alice", securityExecutable: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        #expect(await store.writeBlob(Data("synthetic".utf8), forConfigDirPath: "/synthetic/profile"))
+        let operand = try String(contentsOf: marker, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(operand == "/synthetic/new.keychain")
+
+        try FileManager.default.removeItem(at: marker)
+        let ambiguous = SecurityCLIClaudeCredentialStore(
+            account: "alice", securityExecutable: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        #expect(await ambiguous.writeBlob(Data("synthetic".utf8), forConfigDirPath: "/synthetic/profile") == false)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 
     @Test func unresolvedAccountCannotReadOrWriteKeychain() async throws {

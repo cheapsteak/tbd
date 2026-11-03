@@ -23,6 +23,7 @@ public enum ClaudeCodeCredentialsKeychain {
 /// so a launchd job with no USER or LOGNAME still resolves the real account.
 public enum ClaudeCredentialAccount {
     public static func current() -> String? {
+        // swiftlint:disable:next no_passwd_home_lookup - Read the login account name; no home directory is resolved.
         guard let user = getpwuid(getuid()), let name = user.pointee.pw_name else { return nil }
         let account = String(cString: name)
         return valid(account) ? account : nil

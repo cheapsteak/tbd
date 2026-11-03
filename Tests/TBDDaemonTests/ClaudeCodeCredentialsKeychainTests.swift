@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDDaemonLib
 
 /// Recorder stub — captures requested service names without touching the

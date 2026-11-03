@@ -30,13 +30,22 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
     /// name). Derived from the process UID, not environment variables.
     private let account: String?
     private let securityExecutable: URL
+    private let metadataLookup: (@Sendable (String) -> [SecurityCLIOAuthTokenReader.KeychainCredentialCandidate]?)?
 
     public init(
         account: String? = ClaudeCredentialAccount.current(),
         securityExecutable: URL = URL(fileURLWithPath: "/usr/bin/security")
     ) {
+        self.init(account: account, securityExecutable: securityExecutable, metadataLookup: nil)
+    }
+
+    init(
+        account: String?, securityExecutable: URL,
+        metadataLookup: (@Sendable (String) -> [SecurityCLIOAuthTokenReader.KeychainCredentialCandidate]?)?
+    ) {
         self.account = account
         self.securityExecutable = securityExecutable
+        self.metadataLookup = metadataLookup
     }
 
     // MARK: Read
@@ -47,7 +56,8 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
             throw ClaudeOAuthTokenReadError("macOS account unavailable; refusing an ambiguous keychain read")
         }
         let outcome = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
-            service: service, account: account, executableURL: securityExecutable)
+            service: service, account: account, executableURL: securityExecutable,
+            metadataLookup: metadataLookup)
         switch outcome {
         case .found(let data):
             return data
@@ -69,9 +79,19 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
             logger.error("macOS account unavailable; refusing a keychain write")
             return false
         }
+        // Write to the same keychain the reader selects, so a refresh never lands
+        // in a different item than the one later reads return.
+        let keychainPath: String?
+        do {
+            keychainPath = try SecurityCLIOAuthTokenReader.selectKeychainPath(
+                service: service, account: account, metadataLookup: metadataLookup)
+        } catch {
+            logger.error("ambiguous keychain items for this profile; refusing a keychain write")
+            return false
+        }
         let ok = await Self.runSecurityAddGenericPassword(
             account: account, service: service, secret: secret,
-            executableURL: securityExecutable)
+            keychainPath: keychainPath, executableURL: securityExecutable)
         if !ok {
             logger.warning("keychain write-back denied/failed for service \(service, privacy: .public)")
             // Best-effort: also refresh the on-disk fallback file if it exists,
@@ -91,6 +111,7 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
     /// prompt. Never routes through a shell. Returns true on exit 0.
     static func runSecurityAddGenericPassword(
         account: String, service: String, secret: String,
+        keychainPath: String? = nil,
         executableURL: URL = URL(fileURLWithPath: "/usr/bin/security")
     ) async -> Bool {
         guard ClaudeCredentialAccount.valid(account) else { return false }
@@ -103,6 +124,7 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
             "-w", secret,
             "-U",
         ]
+        if let keychainPath { process.arguments?.append(keychainPath) }
         process.environment = [:]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
