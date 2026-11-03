@@ -35,6 +35,17 @@ struct TableTranscriptPaneView: View {
     @State private var lastSessionID: String?
     @State private var retryToken = 0
 
+    /// The Claude session whose table has mounted and settled its open, and so
+    /// gets every render node. Any other session's table mounts on only the
+    /// last `TranscriptTailFirstOpen.tailLimit`, whatever the store already
+    /// holds: the pane remounts over a populated store when it returns to a
+    /// worktree that left the keep-alive set, or when the pane is moved or
+    /// reopened, and a table mounted holding every row of a long session
+    /// stalls the main thread for 18–21 s (`TranscriptTailFirstOpen`). Cleared
+    /// when the session or the terminal changes, so the next table for this
+    /// pane mounts windowed again.
+    @State private var widenedSessionID: String?
+
     /// Within ~120pt of the bottom. Drives the floating jump-to-bottom button.
     @State private var atBottom: Bool = true
 
@@ -166,8 +177,18 @@ struct TableTranscriptPaneView: View {
         .onChange(of: displayedMessages.count) { _, newCount in
             recordWatchdogContext(count: newCount)
         }
+        // On the outer group, which exists whichever branch shows, so the
+        // widen is cleared even when the new session mounts no table. This
+        // runs in the same update as the new table's `makeNSView`, two
+        // main-queue turns before its `onOpenSettled`.
         .onChange(of: currentSessionID) { _, _ in
             activityGroupExpansion.removeAll()
+            widenedSessionID = nil
+        }
+        // A terminal switch reuses this pane and rebuilds the table, and the
+        // new terminal can carry the same Claude session (`claude --resume`).
+        .onChange(of: terminalID) { _, _ in
+            widenedSessionID = nil
         }
         // Prompt-card bookkeeping, outside any body evaluation: a dialog that
         // closes is held until its tool result lands (the merge's `settled`)
@@ -267,6 +288,13 @@ struct TableTranscriptPaneView: View {
         // closure calls, so the value handed to the table and the value the
         // resolver reads cannot disagree.
         let linkRoot = Self.worktreePath(in: appState, worktreeID: worktreeID)
+        // Never empty here: `body` shows its empty state for a terminal with no
+        // Claude session.
+        let sessionID = currentSessionID ?? ""
+        // Read here, in the body, so the widen re-runs it and the wider list
+        // reaches the table. A read inside `nodesProvider` would happen in
+        // `updateNSView` and leave the body depending on nothing.
+        let widened = widenedSessionID
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
@@ -291,12 +319,27 @@ struct TableTranscriptPaneView: View {
                     scrollToItem: promptScroll,
                     activityToggleToken: activityToggleToken,
                     linkRoot: linkRoot,
-                    nodesProvider: { timedRenderNodes(presentation.nodes) },
+                    // The window applies to what the open-timing markers saw,
+                    // so `table.open.nodesBuilt` still counts every node built;
+                    // the table's own `rows=` markers count what it was handed.
+                    // Only the table is windowed: the index above reads the
+                    // whole presentation. A row streamed in before the widen
+                    // slides the window by one, which the coordinator takes as
+                    // a `.rebuild` and, at the bottom, follows like any append.
+                    nodesProvider: {
+                        TranscriptTailFirstOpen.mountedNodes(
+                            timedRenderNodes(presentation.nodes),
+                            sessionID: sessionID,
+                            widenedSessionID: widened)
+                    },
                     onTableReady: { [appState, terminalID, registeredTable] table in
                         registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
                     },
-                    promptRail: .rail(earlier: nil)
+                    promptRail: .rail(earlier: nil),
+                    // The rest arrives as an update to the table now in the
+                    // window, as the backfill after a tail-first fetch does.
+                    onOpenSettled: { [sessionID] in widenedSessionID = sessionID }
                 )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
@@ -673,6 +716,20 @@ struct TableTranscriptPaneView: View {
         return merged.items
     }
 
+    /// The tail-first open's first write: the tail lands only in a slot that
+    /// holds nothing yet. A pane that remounts over a store still holding the
+    /// whole session would otherwise cut it to the tail and have the full
+    /// fetch restore it straight after, rebuilding an already widened table
+    /// down to the tail and back. The full fetch that follows still refreshes
+    /// whatever the slot holds.
+    static func publishOpeningTail(
+        _ tail: [TranscriptItem], sessionID: String, into state: AppState
+    ) {
+        guard !tail.isEmpty, (state.sessionTranscripts[sessionID] ?? []).isEmpty else { return }
+        state.sessionTranscripts[sessionID] = tail
+        state.touchSessionTranscript(sessionID)
+    }
+
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
 
@@ -701,11 +758,9 @@ struct TableTranscriptPaneView: View {
                 }
                 let tailSID = tail.sessionID ?? sid
                 await MainActor.run {
-                    let prev = appState.sessionTranscripts[tailSID] ?? []
-                    if prev != tail.messages {
-                        appState.sessionTranscripts[tailSID] = tail.messages
-                        appState.touchSessionTranscript(tailSID)
-                    }
+                    Self.publishOpeningTail(tail.messages, sessionID: tailSID, into: appState)
+                    // Latched whether or not the tail was written: a skipped
+                    // write means the store already holds rows to show.
                     if !tail.messages.isEmpty {
                         hasShownInitialMessages = true
                     }
