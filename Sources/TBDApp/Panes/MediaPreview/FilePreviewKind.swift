@@ -25,10 +25,24 @@ enum TextSniff {
         return false
     }
 
+    /// Whether the file at `path` reads as text. Only a regular file is read
+    /// (`stat` follows symlinks, so a link to one counts): opening a FIFO
+    /// blocks until a writer appears, so a FIFO, a directory, a socket or a
+    /// missing path is not text. A read error is not text either.
     nonisolated static func fileReadsAsText(atPath path: String) -> Bool {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return false }
         guard let handle = FileHandle(forReadingAtPath: path) else { return false }
         defer { try? handle.close() }
-        let sample = handle.readData(ofLength: sampleLength)
+        // `read(upToCount:)` throws on a read error, where
+        // `readData(ofLength:)` raises an Objective-C exception Swift cannot
+        // catch. It returns nil at end of file, so an empty file is text.
+        let sample: Data
+        do {
+            sample = try handle.read(upToCount: sampleLength) ?? Data()
+        } catch {
+            return false
+        }
         return readsAsText(sample, sampleIsFull: sample.count == sampleLength)
     }
 }
