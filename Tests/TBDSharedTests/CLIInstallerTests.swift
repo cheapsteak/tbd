@@ -170,48 +170,71 @@ private let rewrittenIdentity = CLIFileIdentity(
 
 @Test func launchActionIsNoneWhenInstalled() {
     let state: CLIInstallState = .installed(target: "/bin/tbd")
-    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
-    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: nil, userPreviouslyDismissed: true)
+    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: nil, userPreviouslyDismissed: true, allowsSilentRefresh: true)
     #expect(notDismissed == CLILaunchAction.none)
     #expect(dismissed == CLILaunchAction.none)
 }
 
 @Test func launchActionPromptsMissingWhenNotInstalledAndNotDismissed() {
     let state: CLIInstallState = .notInstalled
-    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false)
+    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
     #expect(action == .prompt(.missing))
 }
 
 @Test func launchActionIsNoneWhenNotInstalledAndPreviouslyDismissed() {
     let state: CLIInstallState = .notInstalled
-    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true)
+    let action = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
     #expect(action == CLILaunchAction.none)
 }
 
 @Test func launchActionRefreshesSilentlyWhenTheStaleFileIsTheRecordedOne() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
     // The Not-Now flag belongs to the missing prompt and changes nothing here.
-    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
-    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: true)
+    let notDismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
     #expect(notDismissed == .refreshSilently)
     #expect(dismissed == .refreshSilently)
 }
 
+@Test func launchActionAsksAboutTheRecordedStaleFileOnASandboxedHome() {
+    // A sandbox shares the install path and the record with the developer's
+    // own installation, so it asks, and the file really is an older TBD CLI.
+    let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let action = state.launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    #expect(action == .prompt(.stale(current: "/home/.local/bin/tbd")))
+}
+
+@Test func launchActionOnASandboxedHomeChangesOnlyTheRecordedStaleCase() {
+    let stale: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
+    let unrecognized = stale.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let installed = CLIInstallState.installed(target: "/bin/tbd")
+        .launchAction(installedFile: recordedIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let missing = CLIInstallState.notInstalled
+        .launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: false)
+    let dismissedMissing = CLIInstallState.notInstalled
+        .launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: false)
+    #expect(unrecognized == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
+    #expect(installed == CLILaunchAction.none)
+    #expect(missing == .prompt(.missing))
+    #expect(dismissedMissing == CLILaunchAction.none)
+}
+
 @Test func launchActionPromptsUnrecognizedWhenTheStaleFileIsNotTheRecordedOne() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
-    let action = state.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
+    let action = state.launchAction(installedFile: otherIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
     #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
 }
 
 @Test func launchActionPromptsUnrecognizedWhenTheRecordedFileWasRewrittenInPlace() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
-    let action = state.launchAction(installedFile: rewrittenIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false)
+    let action = state.launchAction(installedFile: rewrittenIdentity, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
     #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
 }
 
 @Test func launchActionPromptsUnrecognizedWhenNothingIsRecorded() {
     let state: CLIInstallState = .stale(currentTarget: "/home/.local/bin/tbd")
-    let action = state.launchAction(installedFile: otherIdentity, recorded: nil, userPreviouslyDismissed: false)
+    let action = state.launchAction(installedFile: otherIdentity, recorded: nil, userPreviouslyDismissed: false, allowsSilentRefresh: true)
     #expect(action == .prompt(.unrecognized(current: "/home/.local/bin/tbd")))
 }
 
@@ -219,16 +242,16 @@ private let rewrittenIdentity = CLIFileIdentity(
     // A symlink has no regular-file identity, so it never matches a record,
     // not even an absent one.
     let state: CLIInstallState = .stale(currentTarget: "/old/TBDCLI")
-    let withRecord = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false)
-    let withoutRecord = state.launchAction(installedFile: nil, recorded: nil, userPreviouslyDismissed: false)
+    let withRecord = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let withoutRecord = state.launchAction(installedFile: nil, recorded: nil, userPreviouslyDismissed: false, allowsSilentRefresh: true)
     #expect(withRecord == .prompt(.unrecognized(current: "/old/TBDCLI")))
     #expect(withoutRecord == .prompt(.unrecognized(current: "/old/TBDCLI")))
 }
 
 @Test func launchActionPromptsUnexpectedFileTypeRegardlessOfDismissal() {
     let state: CLIInstallState = .unexpectedFileType
-    let notDismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false)
-    let dismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true)
+    let notDismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: false, allowsSilentRefresh: true)
+    let dismissed = state.launchAction(installedFile: nil, recorded: recordedIdentity, userPreviouslyDismissed: true, allowsSilentRefresh: true)
     #expect(notDismissed == .prompt(.unexpectedFileType))
     #expect(dismissed == .prompt(.unexpectedFileType))
 }

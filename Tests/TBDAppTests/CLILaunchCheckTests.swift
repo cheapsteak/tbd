@@ -100,7 +100,7 @@ struct CLILaunchCheckTests {
         let suite = TestDefaultsSuite(Self.suiteLabel)
         defer { suite.tearDown() }
         try FileManager.default.linkItem(atPath: scratch.target, toPath: scratch.installPath)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
         #expect(check.recordedIdentity == nil)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
@@ -125,7 +125,7 @@ struct CLILaunchCheckTests {
         try scratch.placeStaleFile()
         let stale = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
         record(stale, in: suite.defaults)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -142,6 +142,54 @@ struct CLILaunchCheckTests {
         #expect(recorded != stale)
     }
 
+    /// On a sandboxed TBD_HOME the same recognized file is asked about, with
+    /// the "older version" prompt, and nothing changes until the user says.
+    @Test func aRecognizedStaleFileIsAskedAboutOnASandboxedHome() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        try scratch.placeStaleFile()
+        let stale = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
+        record(stale, in: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: false)
+
+        let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
+
+        guard case .prompt(.stale(let current)) = outcome else {
+            Issue.record("expected .prompt(.stale), got \(outcome)")
+            return
+        }
+        #expect(current == scratch.installPath)
+        let installed = CLIFileIdentity(regularFileAt: scratch.installPath)
+        let contents = try scratch.installedContents()
+        let recorded = check.recordedIdentity
+        #expect(installed == stale)
+        #expect(contents == "old build")
+        #expect(recorded == stale)
+    }
+
+    /// Recording a current install changes no file, so a sandbox records too.
+    @Test func aSandboxedHomeStillRecordsACurrentInstall() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanup() }
+        let suite = TestDefaultsSuite(Self.suiteLabel)
+        defer { suite.tearDown() }
+        try FileManager.default.linkItem(atPath: scratch.target, toPath: scratch.installPath)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: false)
+
+        let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
+
+        guard case .upToDate = outcome else {
+            Issue.record("expected .upToDate, got \(outcome)")
+            return
+        }
+        let recorded = check.recordedIdentity
+        let source = CLIFileIdentity(regularFileAt: scratch.target)
+        #expect(source != nil)
+        #expect(recorded == source)
+    }
+
     @Test func aStaleFileWithADifferentIdentityIsAskedAboutAndLeftAlone() throws {
         let scratch = try Scratch()
         defer { scratch.cleanup() }
@@ -156,7 +204,7 @@ struct CLILaunchCheckTests {
             modifiedNanoseconds: stale.modifiedNanoseconds
         )
         record(someOtherFile, in: suite.defaults)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -190,7 +238,7 @@ struct CLILaunchCheckTests {
         )
         let rewritten = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
         #expect(rewritten.inode == recorded.inode)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -211,7 +259,7 @@ struct CLILaunchCheckTests {
         defer { suite.tearDown() }
         try scratch.placeStaleFile()
         let stale = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -236,7 +284,7 @@ struct CLILaunchCheckTests {
         // identity of its own to match it.
         let source = try #require(CLIFileIdentity(regularFileAt: scratch.target))
         record(source, in: suite.defaults)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -258,7 +306,8 @@ struct CLILaunchCheckTests {
         record(stale, in: suite.defaults)
         let check = CLILaunchCheck(
             installer: scratch.installer(linkFunc: { _, _ in EXDEV }),
-            userDefaults: suite.defaults
+            userDefaults: suite.defaults,
+            allowsSilentRefresh: true
         )
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
@@ -292,7 +341,7 @@ struct CLILaunchCheckTests {
         record(stale, in: suite.defaults)
         let probeCalls = ProbeCalls()
         let installer = scratch.installer(pathProbe: probeCalls.probe)
-        let check = CLILaunchCheck(installer: installer, userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: installer, userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let outcome = check.run(target: scratch.target, userPreviouslyDismissed: false)
 
@@ -315,7 +364,7 @@ struct CLILaunchCheckTests {
         defer { scratch.cleanup() }
         let suite = TestDefaultsSuite(Self.suiteLabel)
         defer { suite.tearDown() }
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let notDismissed = check.run(target: scratch.target, userPreviouslyDismissed: false)
         let dismissed = check.run(target: scratch.target, userPreviouslyDismissed: true)
@@ -344,7 +393,7 @@ struct CLILaunchCheckTests {
         record(old, in: suite.defaults)
         try FileManager.default.removeItem(atPath: scratch.installPath)
         try FileManager.default.linkItem(atPath: scratch.target, toPath: scratch.installPath)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let recordedNow = check.recordIfInstalled(target: scratch.target)
 
@@ -363,7 +412,7 @@ struct CLILaunchCheckTests {
         try scratch.placeStaleFile()
         let earlier = try #require(CLIFileIdentity(regularFileAt: scratch.target))
         record(earlier, in: suite.defaults)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let recordedNow = check.recordIfInstalled(target: scratch.target)
 
@@ -381,7 +430,7 @@ struct CLILaunchCheckTests {
         defer { suite.tearDown() }
         let earlier = try #require(CLIFileIdentity(regularFileAt: scratch.target))
         record(earlier, in: suite.defaults)
-        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: scratch.installer(), userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         let recordedNow = check.recordIfInstalled(target: scratch.target)
 
@@ -403,7 +452,7 @@ struct CLILaunchCheckTests {
         let stale = try #require(CLIFileIdentity(regularFileAt: scratch.installPath))
         record(stale, in: suite.defaults)
         let installer = scratch.installer()
-        let check = CLILaunchCheck(installer: installer, userDefaults: suite.defaults)
+        let check = CLILaunchCheck(installer: installer, userDefaults: suite.defaults, allowsSilentRefresh: true)
 
         _ = try await installer.install(target: scratch.target)
         check.recordInstalledIdentity()

@@ -23,8 +23,9 @@ import os
 // other rebuild the launch-time check (`CLILaunchCheck` in TBDApp) notices the
 // inode mismatch. While the file at the install path is still the one TBD
 // installed — its `CLIFileIdentity` (device, inode and modification time)
-// matches the one TBD recorded — the check re-links it without asking. Any
-// other file there may be the user's, so the check asks before replacing it.
+// matches the one TBD recorded — the check re-links it without asking, unless
+// the app runs on a sandboxed `TBD_HOME`. Any other file there may be the
+// user's, so the check asks before replacing it.
 //
 // This is the same trick `scripts/restart.sh` applies to the `.app` bundle
 // binary (see lines 57–67 of that file) for the same fragility reason:
@@ -131,8 +132,9 @@ public enum CLILaunchPromptKind: Equatable, Sendable {
     case missing
     /// The `tbd` at the install path is the one TBD installed — its identity
     /// matches the recorded one — and is now an older build than the
-    /// daemon's. Only the menu asks about this; at launch it is refreshed
-    /// without asking.
+    /// daemon's. The menu asks about this, and so does the launch check of an
+    /// app on a sandboxed `TBD_HOME`; otherwise launch refreshes it without
+    /// asking.
     case stale(current: String)
     /// Something TBD has no record of installing is at the install path: a
     /// regular file whose identity differs from the recorded one (another
@@ -190,29 +192,37 @@ public extension CLIInstallState {
     }
 
     /// Decide what the launch-time check does: the menu's prompt, except that
-    /// TBD's own stale install is refreshed without asking, and a missing CLI
-    /// the user already declined is left alone. So the launch check never
-    /// asks about `.stale`. Recording the identity of an `.installed` file is
-    /// the caller's job.
+    /// TBD's own stale install is refreshed without asking when
+    /// `allowsSilentRefresh` is true, and a missing CLI the user already
+    /// declined is left alone. Recording the identity of an `.installed` file
+    /// is the caller's job.
     ///
-    /// `userPreviouslyDismissed` is true if the user clicked "Not Now" on an
-    /// earlier `.missing` prompt. It suppresses that prompt so it does not
-    /// nag; nothing else reads it. The other parameters are
-    /// ``menuPromptKind(installedFile:recorded:)``'s.
+    /// - Parameters:
+    ///   - userPreviouslyDismissed: true if the user clicked "Not Now" on an
+    ///     earlier `.missing` prompt. It suppresses that prompt so it does not
+    ///     nag; nothing else reads it.
+    ///   - allowsSilentRefresh: false for an app on a sandboxed `TBD_HOME`
+    ///     (``TBDConstants/isDefaultConfigDir(environment:defaultConfigDir:)``).
+    ///     The install path and the record are the developer's, shared with
+    ///     their own installation, so a sandbox asks before re-pointing them,
+    ///     with the `.stale` prompt, which is accurate there.
+    ///
+    /// The other parameters are ``menuPromptKind(installedFile:recorded:)``'s.
     func launchAction(
         installedFile: CLIFileIdentity?,
         recorded: CLIFileIdentity?,
-        userPreviouslyDismissed: Bool
+        userPreviouslyDismissed: Bool,
+        allowsSilentRefresh: Bool
     ) -> CLILaunchAction {
         guard let kind = menuPromptKind(installedFile: installedFile, recorded: recorded) else {
             return .none
         }
         switch kind {
-        case .stale:
+        case .stale where allowsSilentRefresh:
             return .refreshSilently
         case .missing where userPreviouslyDismissed:
             return .none
-        case .missing, .unrecognized, .unexpectedFileType:
+        case .missing, .stale, .unrecognized, .unexpectedFileType:
             return .prompt(kind)
         }
     }

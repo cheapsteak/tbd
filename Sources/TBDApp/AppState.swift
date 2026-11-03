@@ -3336,14 +3336,12 @@ final class AppState {
                     // An answered subscription may come from a new daemon,
                     // which `scripts/restart.sh --daemon` starts after
                     // re-linking the CLI, and the app may never have seen a
-                    // disconnect. The CLI check records that install on every
-                    // call. Its own task, because the first call of a session
-                    // can still show a modal prompt; never in a test process,
-                    // where init skips the launch-time check for the same
-                    // reason.
+                    // disconnect. Record that install; this never prompts.
+                    // Not in a test process, where init skips the CLI check
+                    // too and a stubbed subscription answers with no daemon.
                     Task { @MainActor [weak self] in
                         guard !AppState.isRunningUnderTests else { return }
-                        await self?.cliInstallerCoordinator.checkOnLaunch()
+                        await self?.cliInstallerCoordinator.recordCurrentInstall()
                     }
                 },
                 { [weak self] delta in

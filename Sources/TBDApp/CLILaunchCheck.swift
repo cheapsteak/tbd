@@ -14,7 +14,9 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
 /// It owns the record: the `CLIFileIdentity` of the `tbd` TBD last installed
 /// or saw healthy at the install path, kept in the injected `UserDefaults`.
 /// While the file at the install path keeps that identity, TBD put it there,
-/// so a rebuild that made it stale is repaired without asking.
+/// so a rebuild that made it stale is repaired without asking — on the
+/// default TBD home only. An app on a sandboxed `TBD_HOME` shares the install
+/// path and the record with the developer's own installation, so it asks.
 @MainActor
 struct CLILaunchCheck {
     /// Where the record lives, as `CLIFileIdentity.storageString`.
@@ -38,6 +40,11 @@ struct CLILaunchCheck {
 
     let installer: CLIInstaller
     let userDefaults: UserDefaults
+    /// Whether a stale install TBD recognizes may be re-linked without asking.
+    /// The coordinator sets it from `TBDConstants.isDefaultConfigDir`: true on
+    /// the default TBD home, false on a sandboxed `TBD_HOME`. Recording a
+    /// current install never depends on it, since that changes no file.
+    let allowsSilentRefresh: Bool
 
     /// The recorded identity, or nil when nothing (or nothing parseable) is
     /// recorded.
@@ -60,7 +67,8 @@ struct CLILaunchCheck {
         let action = state.launchAction(
             installedFile: installer.installedFileIdentity(),
             recorded: recordedIdentity,
-            userPreviouslyDismissed: userPreviouslyDismissed
+            userPreviouslyDismissed: userPreviouslyDismissed,
+            allowsSilentRefresh: allowsSilentRefresh
         )
         switch action {
         case .none:

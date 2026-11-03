@@ -13,9 +13,9 @@ final class CLIInstallerCoordinator {
     /// The decisions and the identity record; this class only presents them.
     private let launchCheck: CLILaunchCheck
 
-    /// Set after `checkOnLaunch` first gets a target, so daemon reconnects
-    /// within the same app session don't refresh or prompt again. Recording
-    /// a current install is not latched.
+    /// Set once `checkOnLaunch` gets a target, so daemon reconnects within the
+    /// same app session don't refresh or prompt again. `recordCurrentInstall`
+    /// waits for it.
     private var hasCheckedThisSession = false
 
     /// Persists across launches. Set when the user clicks "Not Now" on the
@@ -33,36 +33,40 @@ final class CLIInstallerCoordinator {
         self.daemonClient = daemonClient
         self.userDefaults = userDefaults
         self.installer = installer
-        self.launchCheck = CLILaunchCheck(installer: installer, userDefaults: userDefaults)
+        // The install path and the record belong to the developer's own
+        // installation, so only an app on the default TBD home refreshes them
+        // without asking. Decided once: TBD_HOME does not change under a
+        // running app.
+        self.launchCheck = CLILaunchCheck(
+            installer: installer,
+            userDefaults: userDefaults,
+            allowsSilentRefresh: TBDConstants.isDefaultConfigDir(environment: ProcessInfo.processInfo.environment)
+        )
     }
 
-    /// Called at the end of `connectAndLoadInitialState`, and whenever the
-    /// daemon answers a new delta subscription, the sign of a possibly new
-    /// daemon. Every call records the installed CLI's identity when it is
-    /// current, so a re-link made while the app runs
-    /// (`scripts/restart.sh --daemon`) is recorded once the new daemon
-    /// answers. The rest runs once per app session: silent when the install
-    /// is healthy, and when it is stale but still the file TBD installed,
-    /// which is re-linked without asking. Otherwise it surfaces a one-click
-    /// prompt, except for a missing CLI the user already declined to install.
+    /// Called once per connect, at the end of `connectAndLoadInitialState`;
+    /// does its work once per app session. Silent when the install is
+    /// healthy (its identity is recorded), and when it is stale but still the
+    /// file TBD installed, which is re-linked without asking on the default
+    /// TBD home. Otherwise it surfaces a one-click prompt, except for a
+    /// missing CLI the user already declined to install.
     func checkOnLaunch() async {
-        guard let target = await fetchExpectedTarget() else {
-            // Don't latch the flag — a later reconnect with a healthy daemon
-            // status response should still get its first chance to check.
+        guard !hasCheckedThisSession else { return }
+        // Don't latch when the target is unavailable: a later reconnect with
+        // a healthy daemon status response should still get its first chance
+        // to check. Re-check the latch after the wait, in case another call
+        // took it meanwhile.
+        guard let target = await fetchExpectedTarget(), !hasCheckedThisSession else {
             return
         }
-        launchCheck.recordIfInstalled(target: target)
-        guard !hasCheckedThisSession else { return }
         hasCheckedThisSession = true
 
         let outcome = launchCheck.run(target: target, userPreviouslyDismissed: notInstalledDismissed)
         switch outcome {
-        case .upToDate:
-            logger.debug("CLI installed and current at \(self.installer.installPath, privacy: .public)")
-            clearDismissalAfterHealthyInstall()
-        case .refreshedSilently:
-            // No alert, not even the PATH reminder: TBD installed this `tbd`
-            // before, and showed that reminder then if it was needed.
+        case .upToDate, .refreshedSilently:
+            // A healthy install now. No alert after a silent refresh, not even
+            // the PATH reminder: TBD installed this `tbd` before, and showed
+            // that reminder then if it was needed.
             clearDismissalAfterHealthyInstall()
         case .silentRefreshFailed(let error):
             // Never fail silently. Not the Refresh prompt either: it would
@@ -71,12 +75,21 @@ final class CLIInstallerCoordinator {
         case .nothing:
             logger.debug("Skipping CLI install prompt — user previously dismissed Not Now")
         case .prompt(let kind):
-            // `kind` is .missing, .unrecognized or .unexpectedFileType.
-            // launchAction refreshes a stale install TBD recognizes instead of
-            // asking, so it never returns .stale; only the menu asks that.
             logger.info("CLI install at \(self.installer.installPath, privacy: .public) needs the user: \(String(describing: kind), privacy: .public); expected=\(target, privacy: .public)")
             await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
         }
+    }
+
+    /// Record the installed CLI's identity when it is current, and nothing
+    /// else: never a refresh, never a prompt. Called whenever the daemon
+    /// answers a new delta subscription, the sign of a possibly new daemon,
+    /// because `scripts/restart.sh --daemon` re-links the CLI while the app
+    /// keeps running, and a record left on the old file would later read as
+    /// someone else's. Does nothing until `checkOnLaunch` has run, which
+    /// records at launch itself, so it adds no RPC before the initial load.
+    func recordCurrentInstall() async {
+        guard hasCheckedThisSession, let target = await fetchExpectedTarget() else { return }
+        launchCheck.recordIfInstalled(target: target)
     }
 
     /// Called from the menu item. Always asks, through the same prompt as the
