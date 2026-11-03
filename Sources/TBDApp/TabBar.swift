@@ -290,8 +290,8 @@ struct TabBar: View {
     }
 
     /// The main pane's top row, with the Tabs in the toolbar setting on, in
-    /// the window's toolbar row (`MainTabRowLayout`): the notes button and
-    /// the worktree's title over its project name (`WorktreeTitleColumn`),
+    /// the window's toolbar row (`MainTabRowLayout`): the worktree's title
+    /// over the notes button and the project name (`WorktreeTitleColumn`),
     /// the tabs as pills with the + button after them, the drag gap, and the
     /// trailing group. It starts past the toolbar's leading item while that
     /// item sits over the pane (`MainTabRowMetrics.leadingInset`), and is the
@@ -303,11 +303,6 @@ struct TabBar: View {
         let worktree = appState.findWorktree(id: worktreeID)
         let repoName = worktree?.repoID.flatMap { appState.repoName(for: $0) }
         return MainTabRowLayout {
-            if let worktree {
-                WorktreeNotesButton(worktree: worktree)
-            } else {
-                Color.clear.frame(width: 0, height: 0)
-            }
             if let worktree {
                 WorktreeTitleColumn(appState: appState, worktree: worktree, repoName: repoName)
             } else {

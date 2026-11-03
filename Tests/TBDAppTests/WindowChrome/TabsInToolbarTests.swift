@@ -167,33 +167,36 @@ struct TabsInToolbarTests {
         #expect(widths == MainTabRowWidths(title: 110, tabs: 0))
     }
 
-    /// The layout's parts sit left to right: the notes button, the title
-    /// column 8 pt after it, the tabs 14 pt after that, the drag gap taking
-    /// the spare width, and the trailing items at the row's end. The gap's
-    /// ideal width is ignored.
+    /// The layout's parts sit left to right: the title column at the row's
+    /// leading edge, the tabs 14 pt after it, the drag gap taking the spare
+    /// width, and the trailing items at the row's end. The gap's ideal width
+    /// is ignored, and the row's ideal width holds the gap at its minimum.
     @Test func theLayoutPlacesItsPartsLeftToRight() {
         typealias Slot = MainTabRowLayout.Slot
-        let slots = MainTabRowLayout.slots(idealWidths: [20, 150, 200, 999, 60], available: 600)
+        let ideals: [CGFloat] = [150, 200, 999, 60]
+        let slots = MainTabRowLayout.slots(idealWidths: ideals, available: 600)
         let expected: [Slot] = [
-            Slot(x: 0, width: 20),
-            Slot(x: 28, width: 150),
-            Slot(x: 192, width: 200),
-            Slot(x: 392, width: 148),
+            Slot(x: 0, width: 150),
+            Slot(x: 164, width: 200),
+            Slot(x: 364, width: 176),
             Slot(x: 540, width: 60),
         ]
         #expect(slots == expected)
+        let ideal = MainTabRowLayout.idealWidth(idealWidths: ideals)
+        #expect(ideal == 448)
     }
 
     /// Short of room, the title shrinks to its floor, the tabs take the rest
     /// but the gap's minimum, and the gap keeps 24 pt.
     @Test func theLayoutKeepsTheMinimumGapAsTheRowRunsShort() {
-        let slots = MainTabRowLayout.slots(idealWidths: [20, 150, 200, 0, 60], available: 400)
+        let slots = MainTabRowLayout.slots(idealWidths: [150, 200, 0, 60], available: 400)
         let title = slots[MainTabRowLayout.Part.title.rawValue]
         let tabs = slots[MainTabRowLayout.Part.tabs.rawValue]
         let gap = slots[MainTabRowLayout.Part.gap.rawValue]
         let trailing = slots[MainTabRowLayout.Part.trailing.rawValue]
+        #expect(title.x == 0)
         #expect(title.width == 110)
-        #expect(tabs.width == 164)
+        #expect(tabs.width == 192)
         #expect(gap.width == MainTabRowMetrics.minimumDragGap)
         let trailingEnd = trailing.x + trailing.width
         #expect(trailingEnd == 400)
@@ -221,12 +224,33 @@ struct TabsInToolbarTests {
 
     // MARK: - The title column
 
+    /// The notes button leads the project name's line, sized to its 11 pt,
+    /// and with no project the title's own line, sized to its 13 pt.
+    @Test func theNotesButtonLeadsTheBottomLine() {
+        let withProject = WorktreeTitleColumn.notesLine(repoName: "acme")
+        #expect(withProject == .project)
+        let projectSize = withProject.fontSize
+        #expect(projectSize == MainTabRowMetrics.projectFontSize)
+        let scratch = WorktreeTitleColumn.notesLine(repoName: nil)
+        #expect(scratch == .title)
+        let titleSize = scratch.fontSize
+        #expect(titleSize == MainTabRowMetrics.titleFontSize)
+        #expect(MainTabRowMetrics.notesToProjectSpacing == 4)
+    }
+
+    /// The toolbar's inline cluster keeps the notes button's toolbar style,
+    /// the default.
+    @Test func theToolbarsNotesButtonKeepsItsStyle() {
+        let worktree = Worktree(
+            repoID: UUID(), name: "feature", displayName: "feature", branch: "feature",
+            path: "/tmp/acme-feature", tmuxServer: "acme")
+        let style = WorktreeNotesButton(worktree: worktree).style
+        #expect(style == .toolbar)
+    }
+
     /// A worktree with a project shows the title over the project name, two
     /// lines; a scratch space, with none, shows the title alone.
     @Test func aProjectAddsTheSecondLine() {
-        #expect(WorktreeTitleColumn.showsProjectLine(repoName: "acme"))
-        #expect(WorktreeTitleColumn.showsProjectLine(repoName: nil) == false)
-
         withTestDefaults("TabsInToolbarTests.titleColumn") { defaults in
             let state = AppState(userDefaults: defaults)
             let repo = Repo(path: "/tmp/acme", displayName: "acme")

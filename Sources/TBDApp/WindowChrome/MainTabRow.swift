@@ -22,8 +22,6 @@ enum MainTabRowMetrics {
     static let titleFloor: CGFloat = 110
     /// The narrowest the main row's drag gap gets.
     static let minimumDragGap: CGFloat = 24
-    /// Between the notes button and the title column.
-    static let notesToTitleSpacing: CGFloat = 8
     /// Between the title column and the first tab.
     static let titleToTabsSpacing: CGFloat = 14
     /// The worktree title's point size in the row.
@@ -32,6 +30,11 @@ enum MainTabRowMetrics {
     static let projectFontSize: CGFloat = 11
     /// Between the worktree title and the project name under it.
     static let titleLineSpacing: CGFloat = 3
+    /// Between the notes button and the text after it on the line it leads.
+    static let notesToProjectSpacing: CGFloat = 4
+    /// How far the notes button's hit area reaches past its symbol on each
+    /// side. It changes the hit area only, not the button's size.
+    static let notesHitOutset: CGFloat = 3
 
     /// A pill tab's height.
     static let pillHeight: CGFloat = 28
@@ -105,13 +108,13 @@ struct MainTabRowWidths: Equatable {
 
 // MARK: - Main row layout
 
-/// Lays out the main row's five parts, left to right: the notes button, the
-/// title column, the tabs with their + button, the drag gap and the trailing
-/// items, each centred on the row's midline. The notes button and the
-/// trailing items take their ideal widths, the title column and the tabs
-/// what `MainTabRowWidths.make` gives them, and the drag gap the rest, which
-/// is at least `MainTabRowMetrics.minimumDragGap` whenever the title column
-/// is above its floor.
+/// Lays out the main row's four parts, left to right: the title column, which
+/// holds the notes button, the tabs with their + button, the drag gap and the
+/// trailing items, each centred on the row's midline. The trailing items take
+/// their ideal width, the title column and the tabs what
+/// `MainTabRowWidths.make` gives them, and the drag gap the rest, which is at
+/// least `MainTabRowMetrics.minimumDragGap` whenever the title column is above
+/// its floor.
 ///
 /// Each subview's ideal width is measured once, when SwiftUI makes or updates
 /// the cache: an ideal size does not depend on the proposal.
@@ -122,7 +125,7 @@ struct MainTabRowLayout: Layout {
 
     /// The parts, in the order the row's body lists them.
     enum Part: Int, CaseIterable {
-        case notes, title, tabs, gap, trailing
+        case title, tabs, gap, trailing
     }
 
     /// Where a part sits: its leading x from the row's leading edge, and its
@@ -161,37 +164,36 @@ struct MainTabRowLayout: Layout {
     /// at its minimum.
     static func idealWidth(idealWidths: [CGFloat]) -> CGFloat {
         let parts = Self.parts(idealWidths)
-        return parts.notes + MainTabRowMetrics.notesToTitleSpacing + parts.title
-            + MainTabRowMetrics.titleToTabsSpacing + parts.tabs
+        return parts.title + MainTabRowMetrics.titleToTabsSpacing + parts.tabs
             + MainTabRowMetrics.minimumDragGap + parts.trailing
     }
 
     /// Each part's slot, in `Part` order, for parts whose ideal widths are
-    /// `idealWidths` in a row `available` wide. The trailing items end at
-    /// the row's trailing edge; the drag gap fills from the tabs to them.
+    /// `idealWidths` in a row `available` wide. The title column starts at
+    /// the row's leading edge and the trailing items end at its trailing
+    /// edge; the drag gap fills from the tabs to them.
     static func slots(idealWidths: [CGFloat], available: CGFloat) -> [Slot] {
         let parts = Self.parts(idealWidths)
-        let fixed = parts.notes + MainTabRowMetrics.notesToTitleSpacing
-            + MainTabRowMetrics.titleToTabsSpacing + MainTabRowMetrics.minimumDragGap + parts.trailing
+        let fixed = MainTabRowMetrics.titleToTabsSpacing + MainTabRowMetrics.minimumDragGap + parts.trailing
         let widths = MainTabRowWidths.make(
             titleIdeal: parts.title, tabsIdeal: parts.tabs, fixed: fixed, available: available)
 
-        let notes = Slot(x: 0, width: parts.notes)
-        let title = Slot(x: notes.x + notes.width + MainTabRowMetrics.notesToTitleSpacing, width: widths.title)
+        let title = Slot(x: 0, width: widths.title)
         let tabs = Slot(x: title.x + title.width + MainTabRowMetrics.titleToTabsSpacing, width: widths.tabs)
         let trailingX = max(tabs.x + tabs.width, available - parts.trailing)
         let gap = Slot(x: tabs.x + tabs.width, width: max(0, trailingX - (tabs.x + tabs.width)))
         let trailing = Slot(x: trailingX, width: parts.trailing)
-        return [notes, title, tabs, gap, trailing]
+        return [title, tabs, gap, trailing]
     }
 
-    /// The five ideal widths by part; a missing one counts as zero.
+    /// The ideal widths by part, the drag gap's aside; a missing one counts
+    /// as zero.
     private static func parts(_ idealWidths: [CGFloat])
-        -> (notes: CGFloat, title: CGFloat, tabs: CGFloat, trailing: CGFloat) {
+        -> (title: CGFloat, tabs: CGFloat, trailing: CGFloat) {
         func width(_ part: Part) -> CGFloat {
             idealWidths.indices.contains(part.rawValue) ? max(0, idealWidths[part.rawValue]) : 0
         }
-        return (width(.notes), width(.title), width(.tabs), width(.trailing))
+        return (width(.title), width(.tabs), width(.trailing))
     }
 }
 

@@ -27,8 +27,9 @@ the main area carries nothing.
 
 - Each pane's tab strip sits in the toolbar row, so both panes' content starts
   directly under it, 30 pt sooner.
-- The title cluster keeps the notes button, the project name and the worktree
-  title, each with its menu, at full length when there is room.
+- The title cluster keeps the worktree title and the project name, each with
+  its menu, at full length when there is room, and the notes button with its
+  popover.
 - A worktree keeps any number of session tabs; none is hidden while the title
   can still give up room.
 - The window can still be dragged and double-clicked by its top row.
@@ -120,12 +121,15 @@ Left to right:
    trailing edge in window coordinates; the row starts 8 pt past it. While the
    sidebar is shown, the edge lies left of the pane and the row starts 9 pt in,
    where the toolbar's title cluster starts today.
-2. **Title cluster.** The notes button, then a column of two lines: the
-   worktree title in 13 pt semibold, and under it the project name in 11 pt,
-   secondary colour, the way macOS sets a window's subtitle under its title.
-   Each line keeps its menu, and the notes button keeps its popover. A worktree
+2. **Title cluster.** A column of two lines: the worktree title in 13 pt
+   semibold, and under it the project name in 11 pt, secondary colour, the way
+   macOS sets a window's subtitle under its title. The notes button leads the
+   bottom line, 4 pt before the project name, its symbol drawn at the line's
+   11 pt in the same secondary colour, so the line is no taller than its text.
+   Its hit area reaches a little past the symbol, it names itself on hover with
+   a help tag, and it keeps its popover. Each line keeps its menu. A worktree
    with no project (a scratch space) shows the title alone, centred on the
-   midline.
+   midline, with the notes button leading that line at the title's 13 pt.
 3. **Session tabs**, then the + button straight after the last tab
    (`TabsThenAddLayout`, unchanged), in the pill style below.
 4. **Drag gap,** at least 24 pt, taking all spare width (see "Dragging the
@@ -138,8 +142,8 @@ Left to right:
 - With room for everything, the cluster and the tabs take their ideal widths.
 - Short of room, the title column shrinks first, down to a floor of 110 pt.
   Both lines truncate at the column's width, the title in the middle and the
-  project name at the end. Hovering the title shows it in full, and the
-  sidebar's selected row shows it too.
+  project name at the end; the notes button keeps its size. Hovering the
+  title shows it in full, and the sidebar's selected row shows it too.
 - Only once the title is at its floor do the tabs scroll, as they do today.
 
 One pure function decides the two widths from the cluster's ideal width, its
@@ -227,8 +231,9 @@ Each gated behaviour is tested with the setting on and off.
   choice of `SingleWorktreeView` agree for every kind of selection.
 - **Row height:** the row's height equals the hosted pane's top safe-area
   inset.
-- **Title cluster:** a worktree with a project shows two lines; a scratch space
-  shows the title alone.
+- **Title cluster:** a worktree with a project shows two lines, the notes
+  button leading the project's; a scratch space shows the title alone, the
+  notes button leading it.
 - **Overflow, as values:** everything fits; the title shrinks and the tabs
   keep their width; the title at its floor and the tabs scrolling; a title
   already narrower than the floor never grows.

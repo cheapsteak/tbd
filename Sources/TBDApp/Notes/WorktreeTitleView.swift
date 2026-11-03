@@ -39,78 +39,150 @@ struct WorktreeTitleView: View {
 /// The worktree's title set over its project name, the way macOS sets a
 /// window's subtitle under its title, for the main pane's top row with the
 /// Tabs in the toolbar setting on: the title in 13 pt semibold, and under it
-/// the project name in 11 pt, secondary. Each line keeps the menu
-/// `WorktreeTitleView` gives it. A worktree with no project, a scratch space,
-/// shows the title alone, which the row centres on its midline.
+/// the notes button and the project name in 11 pt, secondary. Each line keeps
+/// the menu `WorktreeTitleView` gives it. A worktree with no project, a
+/// scratch space, shows the title alone, which the row centres on its
+/// midline, and the notes button leads that line instead.
 ///
-/// Neither line holds its ideal width: offered less, the title truncates in
-/// the middle and the project name at the end, and hovering the title shows
-/// it whole. `MainTabRowWidths` decides how much the column gets.
+/// The notes button, sized to the line it leads, never shrinks. Neither text
+/// holds its ideal width: offered less, the title truncates in the middle and
+/// the project name at the end, and hovering the title shows it whole.
+/// `MainTabRowWidths` decides how much the column gets.
 struct WorktreeTitleColumn: View {
     let appState: AppState
     let worktree: Worktree
     let repoName: String?
 
-    /// Whether the column shows two lines: the title over a project name.
-    static func showsProjectLine(repoName: String?) -> Bool {
-        repoName != nil
+    /// The line the notes button leads.
+    enum NotesLine: Equatable {
+        /// The project name's line, under the title.
+        case project
+        /// The title's own line, the only one.
+        case title
+
+        /// The point size of the line's text, which the button's symbol
+        /// takes.
+        var fontSize: CGFloat {
+            switch self {
+            case .project: MainTabRowMetrics.projectFontSize
+            case .title: MainTabRowMetrics.titleFontSize
+            }
+        }
+    }
+
+    /// The project name's line when there is a project, else the title's.
+    static func notesLine(repoName: String?) -> NotesLine {
+        repoName == nil ? .title : .project
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: MainTabRowMetrics.titleLineSpacing) {
-            WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
-                Text(worktree.displayName)
-                    .font(.system(size: MainTabRowMetrics.titleFontSize, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .help(worktree.displayName)
-            if Self.showsProjectLine(repoName: repoName), let repoName {
-                WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
-                    Text(repoName)
-                        .font(.system(size: MainTabRowMetrics.projectFontSize))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+        if Self.notesLine(repoName: repoName) == .project, let repoName {
+            VStack(alignment: .leading, spacing: MainTabRowMetrics.titleLineSpacing) {
+                titleMenu
+                HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
+                    notesButton(.project)
+                    WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
+                        Text(repoName)
+                            .font(.system(size: MainTabRowMetrics.projectFontSize))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
             }
+        } else {
+            HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
+                notesButton(.title)
+                titleMenu
+            }
         }
+    }
+
+    private var titleMenu: some View {
+        WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
+            Text(worktree.displayName)
+                .font(.system(size: MainTabRowMetrics.titleFontSize, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .help(worktree.displayName)
+    }
+
+    private func notesButton(_ line: NotesLine) -> some View {
+        WorktreeNotesButton(worktree: worktree, style: .inline(fontSize: line.fontSize))
+            .fixedSize()
     }
 }
 
 /// The worktree's notes button, with its popover and its hover label.
 struct WorktreeNotesButton: View {
+    /// How the button draws.
+    enum Style: Equatable {
+        /// The toolbar's inline cluster: a borderless button, with a hover
+        /// label drawn under it.
+        case toolbar
+        /// Leading a line of text in the main row's title column: the symbol
+        /// at the line's point size, in the secondary colour, its hit area a
+        /// little larger than the symbol, and its help tag as its hover label.
+        case inline(fontSize: CGFloat)
+    }
+
     let worktree: Worktree
+    let style: Style
     @State private var showNotes = false
     @State private var hoveringNotes = false
+
+    init(worktree: Worktree, style: Style = .toolbar) {
+        self.worktree = worktree
+        self.style = style
+    }
 
     private var notesTooltip: String {
         worktree.isScratch ? "Worktree notes" : "Repo notes"
     }
 
     var body: some View {
-        Button {
-            showNotes.toggle()
-        } label: {
-            Image(systemName: "square.and.pencil")
-        }
-        .buttonStyle(.borderless)
-        .onHover { hoveringNotes = $0 }
-        .overlay(alignment: .top) {
-            if hoveringNotes && !showNotes {
-                Text(notesTooltip)
-                    .font(.caption)
-                    .fixedSize()
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
-                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator))
-                    .offset(y: 26)
-                    .allowsHitTesting(false)
+        button
+            .popover(isPresented: $showNotes, arrowEdge: .bottom) {
+                NotepadPopoverView(scope: NotesScope.resolve(for: worktree))
             }
-        }
-        .popover(isPresented: $showNotes, arrowEdge: .bottom) {
-            NotepadPopoverView(scope: NotesScope.resolve(for: worktree))
+    }
+
+    @ViewBuilder
+    private var button: some View {
+        switch style {
+        case .toolbar:
+            Button {
+                showNotes.toggle()
+            } label: {
+                Image(systemName: "square.and.pencil")
+            }
+            .buttonStyle(.borderless)
+            .onHover { hoveringNotes = $0 }
+            .overlay(alignment: .top) {
+                if hoveringNotes && !showNotes {
+                    Text(notesTooltip)
+                        .font(.caption)
+                        .fixedSize()
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator))
+                        .offset(y: 26)
+                        .allowsHitTesting(false)
+                }
+            }
+        case .inline(let fontSize):
+            Button {
+                showNotes.toggle()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: fontSize))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle().inset(by: -MainTabRowMetrics.notesHitOutset))
+            }
+            .buttonStyle(.plain)
+            .help(notesTooltip)
         }
     }
 }
