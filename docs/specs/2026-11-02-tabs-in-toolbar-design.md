@@ -1,6 +1,6 @@
 # Tabs in the toolbar — each pane's tab strip in the window's top row
 
-Status: design
+Status: design, approved for implementation planning
 Date: 2026-11-02
 Pairs with: the AppKit window chrome ([`2026-11-01-appkit-window-chrome-design.md`](2026-11-01-appkit-window-chrome-design.md))
 
