@@ -926,8 +926,11 @@ App:
   observation, which `flushPendingRebuild()` acts on only when it fired, and
   change the rows the outline shows.
 - `ContentView` mounted offscreen holds exactly one native sidebar in the
-  split's sidebar pane, which fills the pane down to the window's bottom edge. Tests that touch defaults use `TestDefaultsSuite`,
-  never `UserDefaults.standard`.
+  split's sidebar pane, and the native sidebar fills the pane down to the
+  pane's foot, with no bar beneath it. The pane's own foot is where AppKit
+  puts the sidebar item: on macOS 26, 8 pt above the window's bottom edge.
+  Tests that touch defaults use `TestDefaultsSuite`, never
+  `UserDefaults.standard`.
 - The env-gated `SidebarRenderHarness` renders `SidebarView` from fixtures as
   images for review. It is not a CI gate.
 

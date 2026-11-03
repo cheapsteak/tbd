@@ -89,8 +89,8 @@ window's bottom edge:
 - **The status bar's height** is `WindowBottomBarMetrics.height` (32 pt),
   whatever is selected, with its content centred in it.
 - **The sidebar column has no bar of its own.** The outline and the dock run
-  to the window's bottom edge beside the status bar, and Add Repository is
-  the outline's last row (the native sidebar spec, "The Add Repository
+  to the foot of the sidebar pane beside the status bar, and Add Repository
+  is the outline's last row (the native sidebar spec, "The Add Repository
   row").
 
 ## The toolbar
@@ -346,7 +346,9 @@ No durable resource is added.
   `@AppStorage` from the store the window's root gives them. The split reaches
   the window's bottom edge, and the content pane ends its detail area one
   bottom-bar height above the pane's own foot, the band the status bar fills.
-  The native sidebar fills the sidebar pane down to that same edge.
+  The native sidebar fills the sidebar pane down to the pane's foot, with no
+  bar beneath it. The pane's own foot is where AppKit puts the sidebar item:
+  on macOS 26, 8 pt above the window's bottom edge.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
   only while shown, the leading item first and before the separator in both;
   each conditional item against the state that shows it.
