@@ -35,6 +35,22 @@ struct TableTranscriptPaneView: View {
     @State private var lastSessionID: String?
     @State private var retryToken = 0
 
+    /// The table, by its identity, that has mounted and settled its open, and
+    /// so gets every render node. Any other table mounts on only the last
+    /// `TranscriptTailFirstOpen.tailLimit`, whatever the store already holds:
+    /// the pane remounts over a populated store when it returns to a worktree
+    /// that left the keep-alive set, or when the pane is moved or reopened,
+    /// and a table mounted holding every row of a long session stalls the
+    /// main thread for 18–21 s (`TranscriptTailFirstOpen`).
+    ///
+    /// Keyed by the table's `.id` (terminal and session), so a table built for
+    /// a new terminal or session does not match it in the pass that builds
+    /// it. Cleared whenever the shown table's identity changes or `body` stops
+    /// showing the table (an error, no session, or the waiting state;
+    /// `shownTableKey`), so a table rebuilt later under an identity that
+    /// widened before mounts windowed again too.
+    @State private var widenedPane: PaneIdentity?
+
     /// Within ~120pt of the bottom. Drives the floating jump-to-bottom button.
     @State private var atBottom: Bool = true
 
@@ -146,15 +162,56 @@ struct TableTranscriptPaneView: View {
         PendingPromptMerge.livePrompts(appState: appState, terminalID: terminalID)
     }
 
+    /// What `body` shows, in its order of precedence.
+    enum Branch: Equatable {
+        case error(String)
+        case noSession
+        case waiting
+        case table
+
+        static func resolve(
+            loadError: String?, sessionID: String?, messagesEmpty: Bool, hasShownInitialMessages: Bool
+        ) -> Branch {
+            if let loadError { return .error(loadError) }
+            if sessionID == nil { return .noSession }
+            if messagesEmpty && !hasShownInitialMessages { return .waiting }
+            return .table
+        }
+    }
+
+    private var branch: Branch {
+        Branch.resolve(
+            loadError: loadError,
+            sessionID: currentSessionID,
+            messagesEmpty: messages.isEmpty,
+            hasShownInitialMessages: hasShownInitialMessages)
+    }
+
+    /// The identity the table is built under: its `.id`, its mount key, and
+    /// what its settled open records.
+    private var paneIdentity: PaneIdentity {
+        PaneIdentity(terminalID: terminalID, sessionID: currentSessionID)
+    }
+
+    /// What the widen is cleared on: the identity of the table `body` shows,
+    /// or nil while it shows none. Any change of it clears the widen, whether
+    /// the table is rebuilt under another identity or leaves the body; a
+    /// re-render of the same table, such as the one its own widen causes,
+    /// changes nothing.
+    static func shownTableKey(_ branch: Branch, identity: PaneIdentity) -> PaneIdentity? {
+        branch == .table ? identity : nil
+    }
+
     var body: some View {
         Group {
-            if let err = loadError {
-                errorState(message: err)
-            } else if currentSessionID == nil {
+            switch branch {
+            case .error(let message):
+                errorState(message: message)
+            case .noSession:
                 emptyState(text: "This terminal has no Claude session.")
-            } else if messages.isEmpty && !hasShownInitialMessages {
+            case .waiting:
                 emptyState(text: "Waiting for Claude to start the conversation…")
-            } else {
+            case .table:
                 tableTranscript
             }
         }
@@ -168,6 +225,24 @@ struct TableTranscriptPaneView: View {
         }
         .onChange(of: currentSessionID) { _, _ in
             activityGroupExpansion.removeAll()
+        }
+        // A table identity that widened can be built again: Retry after an
+        // error; a session that goes and returns; a pane whose identity moved
+        // on before the new table reported its open (torn down inside its two
+        // turns, or detached by `WorktreePager` with the report held) and then
+        // came back; or, before this pane has shown anything
+        // (`hasShownInitialMessages`), a store that empties under it, as a
+        // first app-side read that finds no file publishes, and then refills.
+        // So the widen is cleared in the update where the shown table's
+        // identity changes or the table leaves, on this outer group, which
+        // exists whichever branch shows. The table built in that update was
+        // built against the old widen, a different key, so it is windowed
+        // already, and its own report comes at least two turns later. Not in
+        // an `onDisappear`: a removal transition can run that after a
+        // same-identity table has mounted and widened again, leaving it stuck
+        // on its last `tailLimit` rows.
+        .onChange(of: Self.shownTableKey(branch, identity: paneIdentity)) { _, _ in
+            widenedPane = nil
         }
         // Prompt-card bookkeeping, outside any body evaluation: a dialog that
         // closes is held until its tool result lands (the merge's `settled`)
@@ -267,6 +342,13 @@ struct TableTranscriptPaneView: View {
         // closure calls, so the value handed to the table and the value the
         // resolver reads cannot disagree.
         let linkRoot = Self.worktreePath(in: appState, worktreeID: worktreeID)
+        // One value for the table's `.id`, its mount key and the widen its
+        // settled open records, so they cannot disagree.
+        let identity = paneIdentity
+        // Read here, in the body, so the widen re-runs it and the wider list
+        // reaches the table. A read inside `nodesProvider` would happen in
+        // `updateNSView` and leave the body depending on nothing.
+        let widened = widenedPane
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
@@ -291,19 +373,34 @@ struct TableTranscriptPaneView: View {
                     scrollToItem: promptScroll,
                     activityToggleToken: activityToggleToken,
                     linkRoot: linkRoot,
-                    nodesProvider: { timedRenderNodes(presentation.nodes) },
+                    // The window applies to what the open-timing markers saw,
+                    // so `table.open.nodesBuilt` still counts every node built;
+                    // the table's own `rows=` markers count what it was handed.
+                    // Only the table is windowed: the index above reads the
+                    // whole presentation. A row streamed in before the widen
+                    // slides the window by one, which the coordinator takes as
+                    // a `.rebuild` and, at the bottom, follows like any append.
+                    nodesProvider: {
+                        TranscriptTailFirstOpen.mountedNodes(
+                            timedRenderNodes(presentation.nodes),
+                            mountKey: identity,
+                            widenedKey: widened)
+                    },
                     onTableReady: { [appState, terminalID, registeredTable] table in
                         registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
                     },
-                    promptRail: .rail(earlier: nil)
+                    promptRail: .rail(earlier: nil),
+                    // The rest arrives as an update to the table now in the
+                    // window, as the backfill after a tail-first fetch does.
+                    onOpenSettled: { [identity] in widenedPane = identity }
                 )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
                 // Coordinator, re-resolving from a clean baseline rather than persisting
                 // the prior session's drilled-in subagent thread. (#129) The prompt
                 // rail lives inside the table's view, so the rebuild takes it too.
-                .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
+                .id(identity)
                 .overlay(alignment: .bottomLeading) {
                     jumpToBottomButton
                         .animation(.easeInOut(duration: 0.2), value: atBottom)
@@ -673,6 +770,49 @@ struct TableTranscriptPaneView: View {
         return merged.items
     }
 
+    /// The tail-first open's first write, merged by `openingTailMerge`, and
+    /// made only when it changes what the slot holds.
+    static func publishOpeningTail(
+        _ tail: [TranscriptItem], sessionID: String, into state: AppState
+    ) {
+        guard let merged = openingTailMerge(
+            slot: state.sessionTranscripts[sessionID] ?? [], tail: tail) else { return }
+        state.sessionTranscripts[sessionID] = merged
+        state.touchSessionTranscript(sessionID)
+    }
+
+    /// What the slot should hold once the opening tail lands, or nil to leave
+    /// it as it is.
+    ///
+    /// - **An empty slot** takes the tail.
+    /// - **A slot that holds the tail's first item** keeps its history up to
+    ///   that item and takes the tail from there. A pane that remounts over a
+    ///   store it filled before leaving the keep-alive set holds an older
+    ///   snapshot; this refreshes its bottom at once instead of after the full
+    ///   fetch, and never cuts the history a widened table is showing. Item
+    ///   IDs make the match: `parseTail` builds the tail with the full parse's
+    ///   own code, so an item has the same ID in both.
+    /// - **A tail whose first item comes from a line with no `uuid`** leaves
+    ///   any non-empty slot alone. That item's ID is positional
+    ///   (`TranscriptParser.isPositionalFallbackID`), numbered from the start
+    ///   of each read, so it can match a different line in a slot an earlier
+    ///   tail filled.
+    /// - **Any other slot** is left alone for the full fetch that follows to
+    ///   refresh: the tail reaches nothing it holds.
+    ///
+    /// Nil too when the result would equal the slot. Comparing the spliced
+    /// suffix is enough, since the history before it is kept as it is.
+    nonisolated static func openingTailMerge(
+        slot: [TranscriptItem], tail: [TranscriptItem]
+    ) -> [TranscriptItem]? {
+        guard let first = tail.first else { return nil }
+        if slot.isEmpty { return tail }
+        if TranscriptParser.isPositionalFallbackID(first.id) { return nil }
+        guard let start = slot.lastIndex(where: { $0.id == first.id }) else { return nil }
+        if slot[start...].elementsEqual(tail) { return nil }
+        return Array(slot[..<start]) + tail
+    }
+
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
 
@@ -701,11 +841,9 @@ struct TableTranscriptPaneView: View {
                 }
                 let tailSID = tail.sessionID ?? sid
                 await MainActor.run {
-                    let prev = appState.sessionTranscripts[tailSID] ?? []
-                    if prev != tail.messages {
-                        appState.sessionTranscripts[tailSID] = tail.messages
-                        appState.touchSessionTranscript(tailSID)
-                    }
+                    Self.publishOpeningTail(tail.messages, sessionID: tailSID, into: appState)
+                    // Latched whether or not the tail was written: a skipped
+                    // write means the store already holds rows to show.
                     if !tail.messages.isEmpty {
                         hasShownInitialMessages = true
                     }
@@ -844,8 +982,9 @@ struct TaskKey: Equatable {
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal
 /// with its current Claude session so a session rollover tears down and rebuilds
-/// the stateful Coordinator. (#129)
-private struct PaneIdentity: Hashable {
+/// the stateful Coordinator. (#129) Also the key of the pane's mount window
+/// (`TableTranscriptPaneView.shownTableKey`).
+struct PaneIdentity: Hashable {
     let terminalID: UUID
     let sessionID: String?
 }

@@ -515,7 +515,7 @@ struct SessionTranscriptView: View {
                 // Only the table is windowed; the index and everything else
                 // read the whole presentation.
                 let tableNodes = TranscriptTailFirstOpen.mountedNodes(
-                    presentation.nodes, sessionID: sessionId, widenedSessionID: widenedSessionID)
+                    presentation.nodes, mountKey: sessionId, widenedKey: widenedSessionID)
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
