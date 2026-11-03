@@ -1630,7 +1630,7 @@ public struct WorktreeListParams: Codable, Sendable {
     /// NOT "scratch only" — this flag is the only way to get scratch-only rows.
     public let scratchOnly: Bool?
     /// When false, the daemon skips per-row live session-file counting for the
-    /// archived listing (an expensive `~/.claude/projects/*` scan per row). The
+    /// archived listing (a project-directory lookup and listing per row). The
     /// deep-link archived lookup opts out with `false` because it only needs the
     /// row's identity, not its session count. Optional (nil == true) for
     /// backward compatibility — old daemons ignore the unknown key and always

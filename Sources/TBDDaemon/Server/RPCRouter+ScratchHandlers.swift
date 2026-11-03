@@ -619,9 +619,9 @@ extension RPCRouter {
             addRoot(configDirManager.configDirectory(forProfileID: profileID)
                 .appendingPathComponent("projects", isDirectory: true))
         }
-        // Detached: both the resolve (content scans) and the recursive copy
-        // are synchronous filesystem walks that must not block this handler's
-        // executor; the await preserves ordering for the caller.
+        // Detached: both the resolve (`fileExists` checks) and the recursive
+        // copy are synchronous filesystem work that must not block this
+        // handler's executor; the await preserves ordering for the caller.
         await Task.detached {
             for root in roots {
                 guard let oldDir = ClaudeProjectDirectory.resolve(

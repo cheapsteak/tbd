@@ -8,8 +8,8 @@ import TestSupport
 
 /// A `ClaudeProfileConfigDirManager` pointed at fresh temp dirs, so wake()'s
 /// transcript-sync ambient fallback lists a sandbox — never the developer's
-/// real `~/.claude/projects` (the tier-3 resolve there opens the first jsonl
-/// in every project dir). Every `HibernationCoordinator`/`RPCRouter`
+/// real `~/.claude/projects` (the sync lists every project dir there and can
+/// copy a transcript into it). Every `HibernationCoordinator`/`RPCRouter`
 /// construction in this file must pass one.
 private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
     let home = FileManager.default.temporaryDirectory
