@@ -154,7 +154,8 @@ struct WorktreeNotesButton: View {
         button
             .popover(isPresented: $showNotes, arrowEdge: .bottom) {
                 NotepadPopoverView(scope: NotesScope.resolve(for: worktree))
-                    // The main row's icon-button style stops at the popover.
+                    // No button style around the notes button reaches the
+                    // popover.
                     .buttonStyle(.automatic)
             }
     }

@@ -426,9 +426,10 @@ struct SideRegionView: View {
 
     /// The strip's row, without its scrolling. Its trailing end draws
     /// `SideStripTrailingItem.items` in the order they come, `edge`'s
-    /// buttons among them. Its icon buttons take the row's
+    /// buttons among them. The history group and the trailing group take
     /// `RowIconButtonStyle`, and the + menu, which is not a button, the same
-    /// square (`rowIconHoverSquare`).
+    /// square (`rowIconHoverSquare`). The tabs, with their context menus, take
+    /// no part of it.
     private func stripRow(tabs: [SideRegionTab], active: ActivePanel?, edge: TabRowEdgeControls) -> some View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
@@ -440,6 +441,9 @@ struct SideRegionView: View {
         let tabsInToolbar = chrome.tabsInToolbar
         return HStack(spacing: 0) {
             historyGroup(active: active)
+                // Icon buttons only, so the style reaches no tab and no
+                // context menu (`RowIconButtonStyle`).
+                .buttonStyle(RowIconButtonStyle())
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
 
@@ -474,12 +478,12 @@ struct SideRegionView: View {
                     trailingItem(item, active: active, edge: edge)
                 }
             }
+            // Icon buttons, and the + menu, whose content resets the style
+            // (`addMenu`).
+            .buttonStyle(RowIconButtonStyle())
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(1)
         }
-        // The strip's icon buttons draw the toolbar's hover square; a tab
-        // sets its own style.
-        .buttonStyle(RowIconButtonStyle())
         .padding(.trailing, MainTabRowMetrics.trailingInset)
         .frame(height: tabsInToolbar
             ? MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset)
@@ -565,7 +569,7 @@ struct SideRegionView: View {
         }
     }
 
-    /// A back or forward chevron, in the strip's `RowIconButtonStyle`,
+    /// A back or forward chevron, in the history group's `RowIconButtonStyle`,
     /// `SideStripMetrics.historyButtonWidth` square.
     private func historyStepButton(
         icon: String,
@@ -729,21 +733,27 @@ struct SideRegionView: View {
     /// menus are, so SwiftUI draws the label in its own colour and size, and
     /// the label fills the square, all of it clickable. A borderless menu
     /// would leave the label to AppKit, which draws it in the label colour.
+    /// Its content resets the trailing group's `RowIconButtonStyle` with
+    /// `.buttonStyle(.automatic)`: a custom button style over a menu's content
+    /// rebuilds the open menu continuously.
     private var addMenu: some View {
         let items = SideRegionStrip.addMenuItems(
             notes: appState.notes[worktree.id] ?? [], worktreePanels: surface.worktreePanels)
         let fixed = items.filter { !Self.isListedNote($0) }
         let listed = items.filter { Self.isListedNote($0) }
         return Menu {
-            ForEach(fixed) { item in
-                addMenuButton(item)
-            }
-            if !listed.isEmpty {
-                Divider()
-                ForEach(listed) { item in
+            Group {
+                ForEach(fixed) { item in
                     addMenuButton(item)
                 }
+                if !listed.isEmpty {
+                    Divider()
+                    ForEach(listed) { item in
+                        addMenuButton(item)
+                    }
+                }
             }
+            .buttonStyle(.automatic)
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 11))
@@ -850,7 +860,8 @@ struct SidePanelToggleButton: View {
     }
 
     var body: some View {
-        // Sized, with its hover square, by the row's `RowIconButtonStyle`.
+        // Sized, with its hover square, by the `RowIconButtonStyle` of the
+        // group it sits in.
         Button(action: action) {
             Image(systemName: "sidebar.right")
                 .font(.system(size: 11))

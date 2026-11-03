@@ -285,9 +285,9 @@ enum PaneChromeControl: Equatable {
 
 // MARK: - PaneChromeControlButton
 
-/// An icon-only button for a ``PaneChromeControl``. The tab row it sits in
-/// sizes it and draws its hover square (`RowIconButtonStyle`, which the rows
-/// apply at their root). It reads nothing but its control.
+/// An icon-only button for a ``PaneChromeControl``. The tab row's icon group
+/// it sits in sizes it and draws its hover square (`RowIconButtonStyle`,
+/// which the rows apply to those groups). It reads nothing but its control.
 struct PaneChromeControlButton: View {
     let control: PaneChromeControl
     let action: () -> Void

@@ -67,15 +67,23 @@ enum RowIconSquare {
 /// in the label (`.primary`, `.secondary`, `.tertiary`) is a level of this
 /// default, not of the label colour, so `.primary` there draws grey.
 ///
-/// **It is the rows' default.** The main pane's row (`TabBar`) and the side
-/// region's strip (`SideRegionView`) apply it once at their root, so a new
-/// `Button` in either row gets the square with no code of its own. A control
-/// with its own look — a tab, the title's menus — sets its style explicitly,
-/// and the row's default never reaches it. A control that is not a `Button`,
-/// such as a `Menu`, takes `.rowIconHoverSquare()` instead, and sets its
-/// label's colour itself: a custom button style does not reach a menu's
-/// label, and AppKit lays out a borderless menu's label itself, in the label
-/// colour.
+/// **The rows apply it to their icon groups, never at their root.** The main
+/// pane's row (`TabBar`) applies it to its trailing group and to the + after
+/// the tabs; the side region's strip (`SideRegionView`) to its history group
+/// and its trailing group. A new `Button` in one of those groups gets the
+/// square with no code of its own. A control that is not a `Button`, such as
+/// a `Menu`, takes `.rowIconHoverSquare()` instead, and sets its label's
+/// colour itself: a custom button style does not reach a menu's label, and
+/// AppKit lays out a borderless menu's label itself, in the label colour.
+///
+/// **Never put it, or any custom `ButtonStyle`, over a subtree that holds a
+/// `.contextMenu` or a `Menu`'s content.** SwiftUI then rebuilds the open menu
+/// continuously, and each rebuild closes an open submenu (measured on a
+/// session tab's context menu: the same 15 items removed and re-added about
+/// 230 times a second while it was open, with no body re-running). So no tab
+/// and no title column sits under it, and a `Menu` inside a styled group
+/// resets it with `.buttonStyle(.automatic)` on its content, as the strip's +
+/// menu does.
 struct RowIconButtonStyle: ButtonStyle {
     let size: RowIconSquare.Size
 
