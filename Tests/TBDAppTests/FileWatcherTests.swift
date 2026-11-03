@@ -59,7 +59,7 @@ import TestSupport
 /// | Guard | Value | What it waits on |
 /// |---|---|---|
 /// | `poll` / `writeUntilArmed` default | `TestDeadlines.saturatedPass` | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
-/// | `fdCloseTimeout` | `TestDeadlines.saturatedPass` | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
+/// | `fdCloseTimeout` | `TestDeadlines.saturatedPass` | `close(fd)` in a GCD **cancel handler on the stream's serial utility-QoS queue** |
 /// | `requireAdvanceWhenArmed` | 45 s | the clock's default arming guard; the arm is one hop from the recorded entry to `sleep` |
 /// | `writeUntilArmed`'s `attemptWindow` | 4 s | **not a guard** — the threshold that decides "the event is gone" |
 ///
@@ -101,10 +101,11 @@ struct FileWatcherTests {
     ///
     /// The invariant asserted at these sites ("exactly one FD closed") is
     /// exact. *When* it becomes observable is not: `close(fd)` runs in the
-    /// dispatch source's **cancel handler**, which GCD submits to
-    /// `DispatchQueue.global(qos: .utility)` (`startWatching()`). Utility QoS
-    /// is the first thing macOS starves on a saturated runner, so these
-    /// assertions are load-**tolerant**, not load-**independent**.
+    /// dispatch source's **cancel handler**, which GCD submits to the stream's
+    /// own serial queue at utility QoS (`StreamState.queue`). That queue always
+    /// gets a thread, but a utility-QoS thread is still the first thing macOS
+    /// starves of CPU on a saturated runner, so these assertions are
+    /// load-**tolerant**, not load-**independent**.
     ///
     /// The shared saturated-pass budget is that tolerance, and it is derived
     /// rather than tuned to green: it comes from the fast pass's measured
@@ -825,9 +826,9 @@ struct FileWatcherTests {
     ///
     /// The default covers the fast counters, whose producer is the consuming
     /// `Task` and the `AsyncStream` machinery. Callers waiting on `close(fd)`
-    /// pass `fdCloseTimeout` instead — that one runs on a utility-QoS queue and
-    /// is starved an order of magnitude harder. Both are the shared
-    /// saturated-pass budget; the reasoning is in the suite header.
+    /// pass `fdCloseTimeout` instead — that one runs on the stream's serial
+    /// utility-QoS queue, which a saturated runner starves harder. Both are the
+    /// shared saturated-pass budget; the reasoning is in the suite header.
     ///
     /// Failure is recorded as an **error**, not as `#expect(cond, "…")` and not
     /// as `Issue.record("…")`: both of those render their message on a separate
@@ -845,17 +846,21 @@ struct FileWatcherTests {
                              timeout: Duration = TestDeadlines.saturatedPass,
                              pollInterval: Duration = .milliseconds(25),
                              sourceLocation: SourceLocation = #_sourceLocation,
-                             observing observed: () -> Int,
-                             satisfies condition: (Int) -> Bool) async {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        var value = observed()
-        while !condition(value), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: pollInterval)
-            value = observed()
+                             observing observed: @escaping @Sendable () -> Int,
+                             satisfies condition: @escaping @Sendable (Int) -> Bool) async {
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(timeout: timeout, pollInterval: pollInterval) { @Sendable in
+            condition(observed())
         }
-        guard !condition(value) else { return }
+        // `.cancelled` means the harness ended the test; attribution is not ours.
+        guard outcome == .timedOut else { return }
+        // A read taken after the verdict, so it is the state that failed it.
+        let value = observed()
         Issue.record(
-            Failure("FileWatcher: \(description) — observed \(value) after polling up to \(timeout)"),
+            Failure("""
+                FileWatcher: \(description) — observed \(value) after \
+                \(ContinuousClock.now - start) (budget \(timeout))
+                """),
             sourceLocation: sourceLocation
         )
     }

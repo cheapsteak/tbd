@@ -158,9 +158,10 @@ final class FileWatcher: Sendable {
 // MARK: - StreamState (per-stream lifetime box)
 
 /// Mutable state for a single in-flight `changes(for:)` stream. Guarded by
-/// `OSAllocatedUnfairLock` so the dispatch event handler (running on a
-/// global utility queue) and the `onTermination` callback (running on
-/// whatever thread released the iterator) can both touch it safely.
+/// `OSAllocatedUnfairLock` so the dispatch event handler (running on the
+/// stream's own serial utility queue) and the `onTermination` callback
+/// (running on whatever thread released the iterator) can both touch it
+/// safely.
 ///
 /// The box itself is held strongly by the dispatch source's event handler
 /// closure for as long as the source is alive. When `terminate()` cancels
@@ -178,6 +179,19 @@ private final class StreamState: @unchecked Sendable {
 
     private let inner = OSAllocatedUnfairLock<Inner>(initialState: Inner())
     private let path: String
+    /// One serial queue per stream, shared by every epoch's dispatch source.
+    ///
+    /// Deliberately not `DispatchQueue.global(qos: .utility)`. A global queue
+    /// is a *constrained* (non-overcommit) root: the kernel workqueue gives it
+    /// a thread only while the process is not already running about one
+    /// thread per core at that QoS or above. In a process whose higher-QoS
+    /// threads keep every core busy, the source's cancel handler — the only
+    /// place the FD is closed — then waits for as long as that lasts, and the
+    /// FD stays open after its stream ended. A serial queue created with no
+    /// target sits on the overcommit root of its QoS, which always gets a
+    /// thread. It also runs one stream's event and cancel handlers in order
+    /// rather than concurrently.
+    private let queue: DispatchQueue
     private let continuation: AsyncStream<Void>.Continuation
     private let clock: any Clock<Duration>
 
@@ -187,6 +201,7 @@ private final class StreamState: @unchecked Sendable {
         self.path = path
         self.continuation = continuation
         self.clock = clock
+        self.queue = DispatchQueue(label: "com.tbd.app.fileWatcher", qos: .utility)
     }
 
     /// Open `self.path` and start a dispatch source for it. Returns `false`
@@ -201,11 +216,10 @@ private final class StreamState: @unchecked Sendable {
             return false
         }
 
-        let queue = DispatchQueue.global(qos: .utility)
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .extend, .delete, .rename, .revoke],
-            queue: queue
+            queue: self.queue
         )
 
         // Capture the source weakly via a local — the source is kept alive
