@@ -284,9 +284,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         heartbeatTimer = timer
     }
 
-    /// Make the main window's titlebar transparent and enable full-size content view
-    /// so the sidebar's vibrant material paints up under the titlebar (Tower /
-    /// Finder / Xcode look). Idempotent — safe to call repeatedly.
+    /// Finds the main window and applies its chrome (`MainWindowChrome`): a
+    /// transparent titlebar over full-size content, so the sidebar's vibrant
+    /// material paints up under the titlebar (Tower / Finder / Xcode look).
+    /// Idempotent — safe to call repeatedly.
     @MainActor
     static func applyMainWindowChrome() {
         // Prefer SwiftUI's scene identifier ("main" from `Window("TBD", id: "main")`).
@@ -306,10 +307,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let wasTransparent = window.titlebarAppearsTransparent
         let hadFullSize = window.styleMask.contains(.fullSizeContentView)
-        window.titlebarAppearsTransparent = true
-        window.styleMask.insert(.fullSizeContentView)
-        window.titlebarSeparatorStyle = .none
-        window.toolbarStyle = .unified
+        MainWindowChrome.apply(to: window)
         if !wasTransparent || !hadFullSize {
             // State transition — SwiftUI either hadn't applied the chrome yet or just reverted it.
             windowChromeLogger.info("Applied chrome to \(window.title, privacy: .public) (transparent: \(wasTransparent, privacy: .public)->\(window.titlebarAppearsTransparent, privacy: .public), fullSize: \(hadFullSize, privacy: .public)->\(window.styleMask.contains(.fullSizeContentView), privacy: .public))")

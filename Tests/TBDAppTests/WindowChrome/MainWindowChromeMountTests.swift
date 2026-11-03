@@ -385,7 +385,7 @@ struct MainWindowChromeMountTests {
                 ("the toolbar ends at the tracking separator",
                  mount.toolbarIdentifiers.last == MainToolbarItemID.sidebarSeparator),
                 ("every point reaches the pane", row.allInPane),
-                ("no point reaches a toolbar viewer", !row.anyToolbarViewer),
+                ("no point reaches the title bar or a toolbar item", !row.anyOutsideContent),
                 ("a point reaches the worktree's view", row.anyInWorktreeView),
                 ("a point reaches the drag gap", row.reachesDragGap),
             ])
@@ -406,7 +406,9 @@ struct MainWindowChromeMountTests {
     /// Positive control for `withTheSettingOnTheRowTakesTheToolbarRowsClicks`:
     /// with the setting off and the same selection, the title follows the
     /// tracking separator, some of the same points reach a toolbar item's
-    /// viewer, and no row draws a drag gap.
+    /// view, the title's or a flexible space's, and no row draws a drag gap.
+    /// A point that reaches nothing, or the title bar view itself, does not
+    /// count: the clause names the title bar when the points land there.
     @Test func withTheSettingOffTheToolbarKeepsTheRow() async throws {
         let mount = ChromeMount(label: "tabsInToolbarOff")
         defer { mount.tearDown() }
@@ -424,7 +426,10 @@ struct MainWindowChromeMountTests {
                 ("the snapshot sees the tab bar", controller.appliedSnapshot?.showsWorktreeTabBar == true),
                 ("the worktree's view is mounted",
                  ChromeMount.worktreePagerTabView(in: split.contentItem.viewController.view) != nil),
-                ("a point reaches a toolbar viewer", row.anyToolbarViewer),
+                (row.anyTitlebar
+                    ? "a point reaches a toolbar item's view (points reach the title bar view itself)"
+                    : "a point reaches a toolbar item's view",
+                 row.anyToolbarItem),
             ])
         }
         if !shown {
@@ -489,7 +494,7 @@ struct MainWindowChromeMountTests {
                  mount.toolbarIdentifiers == expected),
                 ("the published leading edge reaches over the pane", edge > 0),
                 ("every point past the row's start reaches the pane", row.allInPane),
-                ("no point reaches a toolbar viewer", !row.anyToolbarViewer),
+                ("no point reaches the title bar or a toolbar item", !row.anyOutsideContent),
                 ("a point reaches the drag gap", row.reachesDragGap),
             ])
         }
@@ -659,6 +664,10 @@ private final class ChromeMount {
         host = OffscreenHost(
             root: AnyView(root), size: ChromeMount.size, styleMask: ChromeMount.styleMask,
             sceneBridgingOptions: sceneBridgingOptions)
+        // The app's own main window chrome, through the function the app
+        // applies it with: a transparent title bar, among the rest, is what
+        // lets a click under the toolbar reach the content.
+        MainWindowChrome.apply(to: host.window)
     }
 
     /// Takes the toolbar off the window before the host goes, so the window
@@ -806,8 +815,13 @@ private final class ChromeMount {
 
     /// Where a hit test's view lies: a row's drag gap, the worktree's own
     /// view, elsewhere in the content pane, elsewhere in the window's
-    /// content, or outside the content view, which is the titlebar's, where
-    /// the toolbar's item viewers are.
+    /// content, or outside the content view, in the titlebar's hierarchy:
+    /// the title bar view itself, or a view in it, which is a toolbar item's.
+    ///
+    /// The title bar view is told apart by its class name, `NSTitlebarView`,
+    /// which is private: a deliberate test seam, as `KeyViewProxy` is in
+    /// `TabBarHitAreaTests`, so a hit the title bar takes itself is never
+    /// read as one a toolbar item took.
     static func kind(
         of hit: NSView?, pane: NSView, worktreeView: NSView?, content: NSView?
     ) -> RowObservation.HitKind {
@@ -816,7 +830,8 @@ private final class ChromeMount {
         if let worktreeView, hit.isDescendant(of: worktreeView) { return .worktreeView }
         if hit.isDescendant(of: pane) { return .pane }
         if let content, hit.isDescendant(of: content) { return .otherContent }
-        return .toolbar
+        if String(describing: type(of: hit)) == "NSTitlebarView" { return .titlebar }
+        return .toolbarItem
     }
 
     /// The drag gaps drawn in the content pane, in window coordinates.
@@ -932,13 +947,13 @@ private final class ChromeMount {
 private struct RowObservation: CustomStringConvertible {
     /// Where a hit test's view lies (`ChromeMount.kind(of:pane:worktreeView:content:)`).
     enum HitKind: String {
-        case nothing, dragGap, worktreeView, pane, otherContent, toolbar
+        case nothing, dragGap, worktreeView, pane, otherContent, titlebar, toolbarItem
 
         /// A view inside the content pane.
         var isInPane: Bool {
             switch self {
             case .dragGap, .worktreeView, .pane: return true
-            case .nothing, .otherContent, .toolbar: return false
+            case .nothing, .otherContent, .titlebar, .toolbarItem: return false
             }
         }
     }
@@ -978,10 +993,20 @@ private struct RowObservation: CustomStringConvertible {
         samples.contains { $0.kind == .dragGap }
     }
 
-    /// Some point reached a view outside the window's content: a toolbar
-    /// item's viewer.
-    var anyToolbarViewer: Bool {
-        samples.contains { $0.kind == .toolbar }
+    /// Some point reached a view outside the window's content: the title
+    /// bar view itself or a toolbar item's.
+    var anyOutsideContent: Bool {
+        samples.contains { $0.kind == .titlebar || $0.kind == .toolbarItem }
+    }
+
+    /// Some point reached a toolbar item's view, not the title bar view.
+    var anyToolbarItem: Bool {
+        samples.contains { $0.kind == .toolbarItem }
+    }
+
+    /// Some point reached the title bar view itself.
+    var anyTitlebar: Bool {
+        samples.contains { $0.kind == .titlebar }
     }
 
     var description: String {
