@@ -120,7 +120,7 @@ New code lives in `Sources/TBDApp/Sidebar/Native/`.
   builds no tree.
 - **`SidebarContainerController`** – the native sidebar's root and the whole
   sidebar column: the outline's scroll view filling it, then the dock along
-  the window's bottom edge. No line separates them: the outline ends where the
+  the column's bottom edge. No line separates them: the outline ends where the
   dock begins, and the dock sits on a `.bar` backdrop from its top edge to the
   column's bottom. It sets the dock's height in closed form,
   `PinnedDockMetrics.height(rowCount:availableHeight:)` — at most
@@ -928,9 +928,10 @@ App:
 - `ContentView` mounted offscreen holds exactly one native sidebar in the
   split's sidebar pane, and the native sidebar fills the pane down to the
   pane's foot, with no bar beneath it. The pane's own foot is where AppKit
-  puts the sidebar item: on macOS 26, 8 pt above the window's bottom edge.
-  Tests that touch defaults use `TestDefaultsSuite`, never
-  `UserDefaults.standard`.
+  puts the sidebar item. On macOS 26 the sidebar item is a floating glass
+  panel that AppKit insets from the window's leading, top and bottom edges,
+  by 8 pt as measured on macOS 26.6. Tests that touch defaults use
+  `TestDefaultsSuite`, never `UserDefaults.standard`.
 - The env-gated `SidebarRenderHarness` renders `SidebarView` from fixtures as
   images for review. It is not a CI gate.
 

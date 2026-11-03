@@ -347,8 +347,10 @@ No durable resource is added.
   the window's bottom edge, and the content pane ends its detail area one
   bottom-bar height above the pane's own foot, the band the status bar fills.
   The native sidebar fills the sidebar pane down to the pane's foot, with no
-  bar beneath it. The pane's own foot is where AppKit puts the sidebar item:
-  on macOS 26, 8 pt above the window's bottom edge.
+  bar beneath it. The pane's own foot is where AppKit puts the sidebar item.
+  On macOS 26 the sidebar item is a floating glass panel that AppKit insets
+  from the window's leading, top and bottom edges, by 8 pt as measured on
+  macOS 26.6.
 - **Item order, as values:** the sidebar shown and collapsed, the filter present
   only while shown, the leading item first and before the separator in both;
   each conditional item against the state that shows it.
@@ -406,8 +408,9 @@ No durable resource is added.
   with no glass behind them, a hover square filling each icon button's frame
   and clickable across it, the filter's menu opening under its button and its
   icon blue while a filter is set, the title staying put across back and
-  forward, the sidebar reaching the window's bottom edge beside the status
-  bar, and no collapse after waking from sleep.
+  forward, the outline and the dock reaching the foot of the sidebar's panel
+  beside the status bar with no bar beneath them, and no collapse after
+  waking from sleep.
 
 ## Risks
 

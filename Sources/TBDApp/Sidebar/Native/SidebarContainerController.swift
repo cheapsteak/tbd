@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The native sidebar's root, the whole sidebar column: the outline's scroll
-/// view filling it, then the pinned dock along the window's bottom edge, the
+/// view filling it, then the pinned dock along the column's bottom edge, the
 /// outline's bottom on the dock's top. The dock sits on a `.bar` backdrop that
 /// runs from its top edge to the column's bottom.
 ///

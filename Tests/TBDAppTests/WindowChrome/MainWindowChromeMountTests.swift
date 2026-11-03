@@ -100,11 +100,11 @@ struct MainWindowChromeMountTests {
     /// The sidebar column has no bar of its own: `SidebarView` holds only the
     /// native sidebar, which fills the sidebar pane down to the pane's foot,
     /// so a bar beneath the native sidebar would leave a band between the
-    /// native sidebar's foot and the pane's. Where the pane's own foot sits is
-    /// AppKit's placement of the sidebar split item, which can be inset from
-    /// the window's edges (measured on macOS 26.6: the pane ends 8 pt above
-    /// the window's foot while the split itself reaches it), so this test does
-    /// not assert it. That the split reaches the window's foot is
+    /// native sidebar's foot and the pane's. On macOS 26 the sidebar item is
+    /// AppKit's floating glass sidebar: AppKit puts the pane in a glass view
+    /// inset 8 pt from the split item's leading, top and bottom edges
+    /// (measured on macOS 26.6), so this test does not assert where the pane
+    /// ends. That the split reaches the window's foot is
     /// `statusBarSitsAtTheFootOfTheContentPane()`'s assertion.
     @Test func nothingSitsBeneathTheNativeSidebar() async throws {
         let mount = ChromeMount(label: "sidebarFoot")
