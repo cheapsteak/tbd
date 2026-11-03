@@ -30,8 +30,9 @@ struct SideRegionTab: Equatable, Identifiable {
         return noteID
     }
 
-    /// The symbol the workspace tab bar shows for the same kind.
-    var systemImage: String { content.kind.tabSystemImage }
+    /// The symbol the workspace tab bar shows for the same kind; nil for a
+    /// file, whose tab shows its name alone.
+    var systemImage: String? { content.kind.tabSystemImage }
 
     /// A web page's address, which its copy-address control copies until the
     /// page reports one of its own; nil for the other kinds.
@@ -117,8 +118,8 @@ enum SideStripAddItem: Hashable, Identifiable {
     var systemImage: String {
         switch self {
         case .newNote: return "square.and.pencil"
-        case .changes: return PanelKind.changes.tabSystemImage
-        case .note: return PanelKind.note.tabSystemImage
+        case .changes: return PanelKind.changesSystemImage
+        case .note: return PanelKind.noteSystemImage
         }
     }
 }
@@ -600,9 +601,11 @@ struct SideRegionView: View {
                 send(.select(panelID: tab.id))
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: tab.systemImage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(tab.isActive ? .primary : .tertiary)
+                    if let systemImage = tab.systemImage {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 10))
+                            .foregroundStyle(tab.isActive ? .primary : .tertiary)
+                    }
                     tabTitle(tab)
                 }
                 .padding(.leading, 8)

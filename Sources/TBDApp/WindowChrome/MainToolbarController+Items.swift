@@ -190,7 +190,7 @@ extension MainToolbarController {
         case MainToolbarItemID.servers:
             return makeServersItem()
         case MainToolbarItemID.remoteTranscript:
-            return makeRemoteItem(identifier, symbol: "text.bubble", tip: "Show transcript",
+            return makeRemoteItem(identifier, symbol: "bubble", tip: "Show transcript",
                                   label: "Transcript", action: #selector(remoteTranscriptClicked(_:)))
         case MainToolbarItemID.remoteReconnect:
             return makeRemoteItem(identifier, symbol: "arrow.clockwise",

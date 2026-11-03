@@ -8,16 +8,24 @@ import TBDShared
 // content, keeps the tab bar's own icon and title.
 
 extension PanelKind {
-    /// The symbol a tab shows for this kind of content.
-    var tabSystemImage: String {
+    /// The symbol a tab shows for this kind of content, or nil for a file,
+    /// whose tab shows its name alone, with no icon and no gap before it.
+    var tabSystemImage: String? {
         switch self {
-        case .file: return "doc.text"
+        case .file: return nil
         case .web: return "globe"
-        case .note: return "doc.text"
-        case .transcript: return "text.bubble"
-        case .changes: return "plus.forwardslash.minus"
+        case .note: return Self.noteSystemImage
+        case .transcript: return "bubble"
+        case .changes: return Self.changesSystemImage
         }
     }
+
+    /// A note tab's symbol, which the Notes button and the side strip's +
+    /// menu show too.
+    static let noteSystemImage = "doc.text"
+
+    /// The Changes tab's symbol, which the side strip's + menu shows too.
+    static let changesSystemImage = "plus.forwardslash.minus"
 }
 
 extension PanelContent {

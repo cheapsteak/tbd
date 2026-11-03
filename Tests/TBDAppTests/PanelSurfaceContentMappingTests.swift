@@ -118,10 +118,10 @@ struct PanelSurfaceContentMappingTests {
         let transcript = PanelContent.transcript(terminalID: UUID())
         let changes = PanelContent.changes
 
-        #expect(file.kind.tabSystemImage == "doc.text")
+        #expect(file.kind.tabSystemImage == nil)
         #expect(web.kind.tabSystemImage == "globe")
         #expect(note.kind.tabSystemImage == "doc.text")
-        #expect(transcript.kind.tabSystemImage == "text.bubble")
+        #expect(transcript.kind.tabSystemImage == "bubble")
         #expect(changes.kind.tabSystemImage == "plus.forwardslash.minus")
 
         #expect(file.tabTitle(noteTitle: titled, untitledNote: "Note") == "a.swift")

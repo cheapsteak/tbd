@@ -1093,9 +1093,11 @@ private struct TabBarItem: View {
                     }
 
                     // Type icon
-                    tabIconView
-                        .frame(width: 14)
-                        .padding(.trailing, 3)
+                    if showsTabIcon {
+                        tabIconView
+                            .frame(width: 14)
+                            .padding(.trailing, 3)
+                    }
 
                     if isEditing {
                         RenameableLabel(
@@ -1248,7 +1250,9 @@ private struct TabBarItem: View {
         .draggable(TabDragPayload(tabID: tab.id)) {
             // Drag preview: a translucent copy of the tab content.
             HStack(spacing: 0) {
-                tabIconView.frame(width: 14).padding(.trailing, 3)
+                if showsTabIcon {
+                    tabIconView.frame(width: 14).padding(.trailing, 3)
+                }
                 Text(tabLabel).font(.system(size: 11)).lineLimit(1).fixedSize()
             }
             .padding(.horizontal, 8)
@@ -1534,15 +1538,26 @@ private struct TabBarItem: View {
         isEditing = true
     }
 
+    /// False for viewer content whose tab shows no icon: a file, whose tab
+    /// shows its name alone. The tab then leaves out the icon's column and
+    /// the gap after it, not only the symbol.
+    private var showsTabIcon: Bool {
+        guard let viewer = LegacyTabConverter.panelContent(from: tab.content) else { return true }
+        return viewer.kind.tabSystemImage != nil
+    }
+
     /// Viewer content shows the icon it shares with the side region's strip
-    /// (`PanelKind.tabSystemImage`); a terminal's icon follows its session.
+    /// (`PanelKind.tabSystemImage`), or none (`showsTabIcon`); a terminal's
+    /// icon follows its session.
     @ViewBuilder
     private var tabIconView: some View {
         let style = isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary)
         if let viewer = LegacyTabConverter.panelContent(from: tab.content) {
-            Image(systemName: viewer.kind.tabSystemImage)
-                .font(.system(size: 10))
-                .foregroundStyle(style)
+            if let systemImage = viewer.kind.tabSystemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            }
         } else if isParked {
             Image(systemName: "moon")
                 .font(.system(size: 10))

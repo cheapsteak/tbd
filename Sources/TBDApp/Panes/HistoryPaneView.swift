@@ -190,7 +190,7 @@ struct HistoryPaneView: View {
 
     private var emptyDetailState: some View {
         VStack(spacing: 8) {
-            Image(systemName: "text.bubble")
+            Image(systemName: "bubble")
                 .font(.system(size: 32))
                 .foregroundStyle(.tertiary)
             Text("Select a session")

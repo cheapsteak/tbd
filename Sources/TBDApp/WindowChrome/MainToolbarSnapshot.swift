@@ -82,7 +82,7 @@ struct RemotePresentation: Equatable {
     /// The detail pane shows the transcript, so the toggle reads "Hide".
     var transcriptShown: Bool
 
-    var transcriptSymbolName: String { transcriptShown ? "text.bubble.fill" : "text.bubble" }
+    var transcriptSymbolName: String { transcriptShown ? "bubble.fill" : "bubble" }
     var transcriptHelp: String { transcriptShown ? "Hide transcript" : "Show transcript" }
 }
 

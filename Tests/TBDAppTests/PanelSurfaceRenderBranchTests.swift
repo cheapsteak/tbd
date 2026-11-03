@@ -377,11 +377,13 @@ struct PanelSurfaceRenderBranchTests {
 
         let ids: [PanelID] = [note.id, changes.id, file.id, web.id, transcript.id]
         let titles = ["Plan", "Changes", "main.swift", "example.com", "Transcript"]
-        let icons = ["doc.text", "plus.forwardslash.minus", "doc.text", "globe", "text.bubble"]
+        // A file tab shows its name alone.
+        let icons: [String?] = ["doc.text", "plus.forwardslash.minus", nil, "globe", "bubble"]
         let active = [false, false, false, true, false]
         #expect(tabs.map(\.id) == ids)
         #expect(tabs.map(\.title) == titles)
-        #expect(tabs.map(\.systemImage) == icons)
+        let tabIcons = tabs.map(\.systemImage)
+        #expect(tabIcons == icons)
         #expect(tabs.map(\.isActive) == active)
     }
 

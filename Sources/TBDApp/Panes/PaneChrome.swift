@@ -220,9 +220,9 @@ enum PaneChromeControl: Equatable {
     var systemImage: String {
         switch self {
         case .transcript(let isOn, _):
-            return isOn ? "text.bubble.fill" : "text.bubble"
+            return isOn ? "bubble.fill" : "bubble"
         case .notes:
-            return PanelKind.note.tabSystemImage
+            return PanelKind.noteSystemImage
         case .renderToggle:
             return "chevron.left.forwardslash.chevron.right"
         case .copyAddress(let copied):
