@@ -374,6 +374,15 @@ struct SessionTranscriptView: View {
     /// streaming update (follow the tail).
     @State private var activityToggleToken: Int = 0
 
+    /// The session whose table has mounted and settled its open, and so gets
+    /// every render node. Any other session's table mounts on only the last
+    /// `TranscriptTailFirstOpen.tailLimit`, whatever the store already holds —
+    /// a session reopened from the shared store would otherwise mount the
+    /// table holding every row, which is the 18–21 s hang. Keyed by session
+    /// because this view persists across selection changes; only the table is
+    /// rebuilt per session (`.id(sessionId)`).
+    @State private var widenedSessionID: String?
+
     /// Per-pane memo for `TranscriptPresentation.build`, which is called inline
     /// in `body` and so re-ran on every body evaluation — and this view observes
     /// `AppState`, so any unrelated publish paid for it. Per-pane rather than
@@ -498,6 +507,10 @@ struct SessionTranscriptView: View {
                 // resolver closure calls, so the value handed to the table and
                 // the value the resolver reads cannot disagree.
                 let linkRoot = Self.historyWorktreePath(in: appState, worktreeID: worktreeID)
+                // Only the table is windowed; the index and everything else
+                // read the whole presentation.
+                let tableNodes = TranscriptTailFirstOpen.mountedNodes(
+                    presentation.nodes, sessionID: sessionId, widenedSessionID: widenedSessionID)
                 SessionWorkbenchView(
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
@@ -528,8 +541,11 @@ struct SessionTranscriptView: View {
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
                         linkRoot: linkRoot,
-                        nodesProvider: { presentation.nodes },
-                        promptRail: .rail(earlier: nil)
+                        nodesProvider: { tableNodes },
+                        promptRail: .rail(earlier: nil),
+                        // The rest arrives as an update to the table now in
+                        // the window, as the live pane's backfill does.
+                        onOpenSettled: { [sessionId] in widenedSessionID = sessionId }
                     )
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {

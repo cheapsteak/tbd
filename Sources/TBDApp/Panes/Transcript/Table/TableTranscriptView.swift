@@ -64,6 +64,13 @@ struct TableTranscriptView: NSViewRepresentable {
     /// each `updateNSView` hands the card the mount's earlier-history state.
     /// `.none` (the default) mounts no rail and no gutter.
     var promptRail: PromptRailMount = .none
+    /// Called once, when the table's open has settled: two main-queue turns
+    /// after `makeNSView`, with the first layout done and the re-pinned scroll
+    /// to the end applied. Session History widens its windowed node list here,
+    /// so the rest of a long transcript reaches a table that is already in the
+    /// window as an update rather than as a mount (`TranscriptTailFirstOpen`).
+    /// Nil where nothing waits on the open.
+    var onOpenSettled: (@MainActor () -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -163,6 +170,7 @@ struct TableTranscriptView: NSViewRepresentable {
 
         // Pin the initial open to the newest message (last row), deferred so the
         // table has performed its first layout pass and row frames exist.
+        let onOpenSettled = self.onOpenSettled
         DispatchQueue.main.async {
             coordinator.scrollToEnd(animated: false)
             // Re-pin once more on the NEXT runloop turn. The first scroll-to-end
@@ -179,6 +187,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 let settledMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
                 Self.log.debug(
                     "table.open.firstLayoutSettled ms=\(settledMs, format: .fixed(precision: 1), privacy: .public)")
+                onOpenSettled?()
             }
         }
 

@@ -2344,6 +2344,20 @@ actor DaemonClient {
         return result
     }
 
+    /// The last `tailLimit` items of a session file: Session History's first,
+    /// small read, so its table mounts on a screenful before the full read
+    /// lands (`AppState.loadSessionTranscript`). Detached for the same reason
+    /// as `sessionMessages(filePath:)`.
+    ///
+    /// Nil when the file cannot be read app-side. `session.messages` takes no
+    /// tail limit, so such a caller skips straight to the one full read.
+    func sessionMessages(filePath: String, tailLimit: Int) async -> [TranscriptItem]? {
+        guard TranscriptDetailReader.shouldReadAppSide(path: filePath) else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            TranscriptDetailReader.tailMessages(path: filePath, limit: tailLimit)
+        }.value
+    }
+
     /// Load the full chat transcript for a terminal's current Claude session.
     /// Returns empty messages and nil sessionID if the terminal has no session yet;
     /// returns empty messages and a sessionID if the session JSONL doesn't exist yet.

@@ -19,12 +19,13 @@ struct TableTranscriptPaneView: View {
     private let pollInterval: TimeInterval = 1.5
     private let errorThreshold = 3
 
-    /// Tail-first open: the FIRST fetch asks the daemon for only the last N
-    /// visible items (fast even on 2000+ item / 30MB sessions), renders them,
-    /// then immediately backfills the FULL transcript in the same poll. The
-    /// tail IS the bottom of the full list, so the tail→full swap re-pins to an
-    /// unchanged bottom via the existing `.rebuild` path.
-    private let tailLimit = 60
+    /// Tail-first open: the FIRST fetch asks the daemon for only the last
+    /// `TranscriptTailFirstOpen.tailLimit` visible items (fast even on 2000+
+    /// item / 30MB sessions), renders them, then immediately backfills the FULL
+    /// transcript in the same poll. The tail IS the bottom of the full list, so
+    /// the tail→full swap re-pins to an unchanged bottom via the existing
+    /// `.rebuild` path. Session History opens the same way and shares the limit.
+    private let tailLimit = TranscriptTailFirstOpen.tailLimit
 
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
