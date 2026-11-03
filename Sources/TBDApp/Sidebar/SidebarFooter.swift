@@ -48,7 +48,9 @@ struct SidebarFooter: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("Add Repository")
+                // The plus is a visual extension of the menu's label; the menu
+                // already exposes the action to accessibility.
+                .accessibilityHidden(true)
                 .offset(y: -SidebarFooter.plusLift)
                 Menu {
                     Button("Local Folder…", action: addRepo)
