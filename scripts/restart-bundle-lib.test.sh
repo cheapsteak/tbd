@@ -858,6 +858,68 @@ test_sign_respects_a_live_lock_and_breaks_a_dead_one() {
     assert_no_dir "a dead lock: the lock is released afterwards" "$keychain.lock"
 }
 
+# A lock is also broken by age, whatever its pid file says: one with no pid
+# (its run was killed before writing it) or with a pid a live process has
+# since been given would otherwise send every later run to ad-hoc for good. A
+# fresh lock with no pid file is a run that has not written it yet, and is
+# respected.
+test_sign_breaks_a_lock_by_age_alone() {
+    local d rc log keychain holder
+    d="$(mksigncase lock-old-no-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    touch -t 202001010000 "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "an old lock with no pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "an old lock with no pid is broken and the identity created" "create-keychain" "$log"
+    assert_contains "an old lock with no pid: the new identity signs the bundle" "--sign TBD Dev Signing" "$log"
+    assert_no_dir "an old lock with no pid: the lock is released afterwards" "$keychain.lock"
+
+    # The pid file is written first: writing it would set the mtime again.
+    d="$(mksigncase lock-old-live-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    sleep 30 > /dev/null 2>&1 &
+    holder=$!
+    printf '%s\n' "$holder" > "$keychain.lock/pid"
+    touch -t 202001010000 "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    kill "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null
+    log="$(cat "$d/log")"
+    assert_eq "an old lock naming a live pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "an old lock naming a live pid is broken all the same" "create-keychain" "$log"
+    assert_no_dir "an old lock naming a live pid: the lock is released afterwards" "$keychain.lock"
+
+    d="$(mksigncase lock-fresh-no-pid)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    sign_in_case "$d" ""; rc=$?
+    log="$(cat "$d/log")"
+    assert_eq "a fresh lock with no pid: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "a fresh lock with no pid: the bundle is signed ad-hoc" "--sign - " "$log"
+    assert_not_contains "a fresh lock with no pid: no openssl runs" "openssl " "$log"
+    assert_not_contains "a fresh lock with no pid: no keychain is created" "create-keychain" "$log"
+    if [ -d "$keychain.lock" ] && [ ! -e "$keychain.lock/pid" ]; then
+        pass "a fresh lock with no pid is left as it was"
+    else
+        fail "a fresh lock with no pid is left as it was"
+    fi
+    assert_contains "a fresh lock with no pid is reported" \
+        "another run is creating the TBD signing identity" "$(cat "$d/err")"
+
+    # MUTATION: the same fresh lock under a stale age of 0 is broken, so the
+    # age is what spared it above.
+    d="$(mksigncase lock-fresh-stale-zero)"
+    keychain="$(case_keychain "$d")"
+    mkdir -p "$keychain.lock"
+    TBD_SIGNING_LOCK_STALE_SECONDS=0 sign_in_case "$d" ""; rc=$?
+    assert_eq "a stale age of 0: sign_app_bundle succeeds" "0" "$rc"
+    assert_contains "under a stale age of 0, a fresh lock is broken" "create-keychain" "$(cat "$d/log")"
+    assert_no_dir "under a stale age of 0, the lock is released afterwards" "$keychain.lock"
+}
+
 # A run that waited for the lock looks again once it has it: the run that held
 # the lock may have made the identity in the meantime, and making a second one
 # is what the lock is for preventing.
@@ -2328,6 +2390,7 @@ test_sign_survives_a_failed_provisioning_in_strict_mode
 test_sign_recreates_a_keychain_without_an_identity
 test_sign_leaves_a_foreign_keychain_alone
 test_sign_respects_a_live_lock_and_breaks_a_dead_one
+test_sign_breaks_a_lock_by_age_alone
 test_sign_rechecks_for_the_identity_after_waiting
 test_sign_rejects_a_missing_bundle_argument
 test_install_replaces_the_previous_bundle

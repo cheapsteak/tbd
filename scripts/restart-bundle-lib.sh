@@ -352,6 +352,13 @@ TBD_OPENSSL="${TBD_OPENSSL:-/usr/bin/openssl}"
 # before it signs ad-hoc instead. A seam so a harness never waits.
 TBD_SIGNING_LOCK_WAIT_SECONDS="${TBD_SIGNING_LOCK_WAIT_SECONDS:-30}"
 
+# How many seconds old a provisioning lock has to be before it is broken
+# whatever its pid file says. Creating the identity takes a few seconds, so a
+# lock ten minutes old was left behind: by a run killed before it wrote its
+# pid, or one whose pid the system has since handed to a live process. A seam
+# so a harness can break a fresh lock.
+TBD_SIGNING_LOCK_STALE_SECONDS="${TBD_SIGNING_LOCK_STALE_SECONDS:-600}"
+
 # Sign a bundle in place.
 #
 #   sign_app_bundle <bundle_dir>
@@ -446,6 +453,7 @@ provision_signing_identity() (
     lock="$keychain.lock"
     p12_password="tbd-signing"
     wait_seconds="$TBD_SIGNING_LOCK_WAIT_SECONDS"
+    stale_seconds="$TBD_SIGNING_LOCK_STALE_SECONDS"
     work=""
     locked=false
     created=false
@@ -454,6 +462,7 @@ provision_signing_identity() (
     [ -n "$keychain" ] || exit 1
     [ -z "${CI:-}" ] || exit 1
     _is_whole_number "$wait_seconds" || wait_seconds=30
+    _is_whole_number "$stale_seconds" || stale_seconds=600
 
     trap '
         if [ "$created" = true ] && [ "$provisioned" != true ]; then
@@ -469,13 +478,24 @@ provision_signing_identity() (
     # Two runs that each imported an identity would leave two of one name in
     # the keychain, and codesign refuses an ambiguous name on every run after.
     # So creating one holds a lock: a directory beside the keychain naming the
-    # pid of the script that holds it, and broken once that process is gone. A
-    # lock whose pid file is not written yet is taken to be held.
+    # pid of the script that holds it. A lock whose pid file is not written yet
+    # is taken to be held. It is broken once that process is gone, and also,
+    # whatever its pid file says, once it is older than stale_seconds, so that
+    # neither a missing pid nor a reused one can hold it for good. Its age is
+    # the directory's mtime, which writing the pid file sets; /usr/bin/stat by
+    # absolute path, since a GNU stat first on PATH reads -f as "file system".
     waited=0
     until mkdir "$lock" 2>/dev/null; do
         [ -d "$lock" ] || exit 1
         owner="$(head -1 "$lock/pid" 2>/dev/null | tr -dc '0-9')"
+        lock_mtime="$(/usr/bin/stat -f %m "$lock" 2>/dev/null)"
+        now="$(date +%s)"
         if [ -n "$owner" ] && ! process_is_running "$owner"; then
+            rm -rf "$lock" || exit 1
+            continue
+        fi
+        if _is_whole_number "$lock_mtime" && _is_whole_number "$now" &&
+            [ $((now - lock_mtime)) -ge "$stale_seconds" ]; then
             rm -rf "$lock" || exit 1
             continue
         fi

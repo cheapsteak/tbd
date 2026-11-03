@@ -78,7 +78,10 @@ prompt, and every install after signs with it:
   While one creates the identity it holds a lock, a directory beside the
   keychain (`tbd-signing.keychain-db.lock`) naming its pid. Another run waits
   up to 30 seconds for it, looks again once it has the lock, and signs that
-  build ad-hoc if the wait runs out. A lock whose process has gone is broken.
+  build ad-hoc if the wait runs out. A lock whose process has gone is broken,
+  and so is any lock more than ten minutes old, whatever pid it names:
+  creating the identity takes seconds, so such a lock was left by a run that
+  died before writing its pid, or names a pid the system has since reused.
 - **Failure** – if any step fails, the run says so and signs that build ad-hoc,
   and the install carries on. A keychain the failed run had created is deleted.
   A keychain left with no identity in it, by a run that was killed partway, is
@@ -103,13 +106,19 @@ The install that creates the identity says so in a note on stderr. Re-grant
 each permission once: in **System Settings > Privacy & Security**, open each
 list that grants TBD access (Screen Recording, Full Disk Access, Microphone,
 and so on), remove TBD, and add it back. To clear every decision at once
-instead, so that macOS asks again on next use:
+instead:
 
 ```bash
 tccutil reset All com.github.cheapsteak.tbd
 ```
 
-From then on grants and denials persist across rebuilds. Folder prompts work
+After a reset, services that prompt ask again on next use. Some services
+never prompt for a program running in a terminal, Screen Recording among
+them: tccd logs `Service kTCCServiceScreenCapture does not allow prompting;
+returning denied` and the access fails. Those still have to be added back by
+hand in System Settings, reset or not.
+
+Once re-granted, grants and denials persist across rebuilds. Folder prompts work
 the same way: the first one is the last one. Click **Don't Allow** (Claude only
 probes those folders; TBD worktrees live under `~/tbd/`, which isn't
 protected), and it stays denied silently.
