@@ -42,8 +42,9 @@ struct ServersChipPresentation: Equatable {
 /// `docs/specs/2026-11-02-tabs-in-toolbar-design.md`, "Servers in the status
 /// bar".
 ///
-/// - **The setting** is read through `@AppStorage`, on the store the window's
-///   hosted panes read (`MainWindowSplitView`), with its one default.
+/// - **The setting** is read from `appState.windowChrome`, as the panes read
+///   it, rather than through `@AppStorage`, which does not follow a write to
+///   this dotted key live (`WindowChromeState`).
 /// - **The list** is read here rather than in `StatusBarView`'s body, so a
 ///   change to any worktree's dev-server list re-evaluates this chip and not
 ///   the whole bar.
@@ -60,7 +61,6 @@ struct ServersChipPresentation: Equatable {
 ///   `Menu` draws its label in the control font, ignoring the bar's.
 struct ServersStatusChip: View {
     @Environment(AppState.self) private var appState
-    @AppStorage(AppState.tabsInToolbarKey) private var tabsInToolbar: Bool = AppState.tabsInToolbarDefault
 
     /// The worktree whose servers the chip shows: the one selected worktree,
     /// `ServersMenu.selectedWorktreeID(in:)`, or nil.
@@ -85,7 +85,7 @@ struct ServersStatusChip: View {
     var body: some View {
         if let worktreeID,
            let chip = ServersChipPresentation.make(
-               tabsInToolbar: tabsInToolbar, list: appState.devServerLists[worktreeID]) {
+               tabsInToolbar: appState.windowChrome.tabsInToolbar, list: appState.devServerLists[worktreeID]) {
             Button {
                 menuHost.popUp(worktreeID: worktreeID, appState: appState)
             } label: {

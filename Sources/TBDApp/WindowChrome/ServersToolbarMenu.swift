@@ -1,8 +1,9 @@
 import Foundation
 import TBDShared
 
-/// What choosing a Servers menu item does. The AppKit toolbar maps each case
-/// onto the same `AppState` call the SwiftUI menu makes.
+/// What choosing a Servers menu item does. `ServersMenu` maps each case onto
+/// its `AppState` call, for the toolbar's Servers item and the status bar's
+/// Servers chip alike.
 enum ServersMenuCommand: Equatable {
     case open(url: String)
     case showLastOutput(serverName: String)
@@ -21,10 +22,11 @@ enum ServersMenuEntry: Equatable {
     case separator
 }
 
-/// The Servers menu the toolbar builds each time it opens: the main URL first
-/// (D4), then each server with its state, its URLs and its actions; then Start
-/// all / Stop all / Refresh status; then parse errors and the last action's
-/// failures.
+/// The Servers menu that the toolbar's Servers item and the status bar's
+/// Servers chip build through `ServersMenu` each time it opens: the main URL
+/// first (D4), then each server with its state, its URLs and its actions;
+/// then Start all / Stop all / Refresh status; then parse errors and the last
+/// action's failures.
 enum ServersToolbarMenu {
     nonisolated static func entries(list: DevServerListResult, messages: [String]) -> [ServersMenuEntry] {
         var result: [ServersMenuEntry] = []

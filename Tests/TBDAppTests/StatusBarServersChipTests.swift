@@ -107,12 +107,14 @@ struct StatusBarServersChipTests {
 
     // MARK: The setting, read by the view
 
-    /// The chip reads the setting through `@AppStorage` on the store its tree
-    /// is given, as the window's hosted panes are: hosted with the setting
-    /// stored off it draws nothing, and stored on it draws, for the same
-    /// worktree and list. With no worktree it draws nothing either way.
+    /// The chip reads the setting from `appState.windowChrome`, which follows
+    /// the store the state was made with: hosted with the setting stored off
+    /// it draws nothing, and stored on it draws, for the same worktree and
+    /// list. With no worktree it draws nothing either way. Each write goes to
+    /// the store and is then followed directly (`followDefaults()`), so the
+    /// test does not wait on the store's change notification.
     @MainActor
-    @Test func theChipFollowsTheStoredSetting() {
+    @Test func theChipFollowsTheStoredSetting() throws {
         let suite = TestDefaultsSuite("StatusBarServersChip.setting")
         defer { suite.tearDown() }
         let defaults = suite.defaults
@@ -121,10 +123,15 @@ struct StatusBarServersChipTests {
         state.devServerLists[id] = list([server("web", .running)], id: id)
 
         defaults.set(false, forKey: AppState.tabsInToolbarKey)
-        let offWidth = Self.fittingWidth(worktreeID: id, state: state, defaults: defaults)
+        state.windowChrome.followDefaults()
+        try #require(state.windowChrome.tabsInToolbar == false)
+        let offWidth = Self.fittingWidth(worktreeID: id, state: state)
+
         defaults.set(true, forKey: AppState.tabsInToolbarKey)
-        let onWidth = Self.fittingWidth(worktreeID: id, state: state, defaults: defaults)
-        let noWorktreeWidth = Self.fittingWidth(worktreeID: nil, state: state, defaults: defaults)
+        state.windowChrome.followDefaults()
+        try #require(state.windowChrome.tabsInToolbar == true)
+        let onWidth = Self.fittingWidth(worktreeID: id, state: state)
+        let noWorktreeWidth = Self.fittingWidth(worktreeID: nil, state: state)
 
         #expect(offWidth == 0)
         #expect(onWidth > 0)
@@ -132,12 +139,11 @@ struct StatusBarServersChipTests {
     }
 
     /// The fitting width of a fresh chip for `worktreeID`, hosted in the
-    /// environment the status bar gives it and reading `defaults`.
+    /// environment the status bar gives it.
     @MainActor
-    private static func fittingWidth(worktreeID: UUID?, state: AppState, defaults: UserDefaults) -> CGFloat {
+    private static func fittingWidth(worktreeID: UUID?, state: AppState) -> CGFloat {
         let chip = ServersStatusChip(worktreeID: worktreeID)
             .environment(state)
-            .defaultAppStorage(defaults)
         return NSHostingView(rootView: chip).fittingSize.width
     }
 }
