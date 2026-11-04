@@ -696,6 +696,19 @@ struct ProfileUsageKeychainDerivationTests {
             Issue.record("expected the macOS account item")
         }
 
+        let olderTie = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+            service: "synthetic-service", account: "alice", executableURL: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        if case .found(let data) = olderTie {
+            #expect(parseClaudeCredentialsAccessToken(data) == "FAKE_NEW")
+        } else {
+            Issue.record("a tie between older items must not hide the unique newest item")
+        }
+
         await #expect(throws: ClaudeOAuthTokenReadError.self) {
             try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
                 service: "synthetic-service", account: "alice", executableURL: executable,

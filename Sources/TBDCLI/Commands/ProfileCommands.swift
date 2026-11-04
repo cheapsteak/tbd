@@ -72,7 +72,8 @@ struct ProfileCredentialCheck {
         let matching = items.filter { $0.account == account }
         if matching.count > 1 {
             let dates = matching.compactMap(\.modifiedAt)
-            selected = dates.count == matching.count && Set(dates).count == dates.count
+            let newest = dates.max()
+            selected = dates.count == matching.count && dates.filter({ $0 == newest }).count == 1
                 ? matching.max { ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast) }
                 : nil
         } else {

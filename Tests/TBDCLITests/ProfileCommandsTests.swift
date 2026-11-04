@@ -50,6 +50,19 @@ struct ProfileCommandsTests {
         #expect(check.selected == nil)
     }
 
+    /// A tie between older items does not hide a unique newest one.
+    @Test func keychainCheckSelectsUniqueNewestPastAnOlderTie() {
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let check = ProfileCredentialCheck(items: [
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: old),
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: old),
+            ProfileCredentialItem(account: "alice", createdAt: old, modifiedAt: recent),
+        ], account: "alice")
+        #expect(check.matchingAccountCount == 3)
+        #expect(check.selected?.modifiedAt == recent)
+    }
+
     private func entry(
         name: String,
         kind: CredentialKind = .oauth,

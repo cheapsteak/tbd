@@ -116,9 +116,10 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
             logger.warning("\(candidates.count, privacy: .public) keychain items share this profile's credential service. Run tbd profile keychain for account and date details.")
         }
         let matching = candidates?.filter { $0.account == account } ?? []
+        let newest = matching.compactMap(\.modifiedAt).max()
         if matching.count > 1 && (
             matching.contains(where: { $0.keychainPath == nil || $0.modifiedAt == nil })
-            || Set(matching.compactMap(\.modifiedAt)).count != matching.count
+            || matching.filter({ $0.modifiedAt == newest }).count > 1
         ) {
             throw ClaudeOAuthTokenReadError(
                 "multiple keychain items match the macOS account, but no unique newest item can be selected")
