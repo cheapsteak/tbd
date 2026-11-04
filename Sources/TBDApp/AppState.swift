@@ -1325,9 +1325,6 @@ final class AppState {
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     var gcEnabled: Bool = true
-    /// Whether ordinary new worktrees start with an empty "Notes" note. Loaded
-    /// from the daemon alongside the other config-backed worktree defaults.
-    var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
     /// `gcEnabled` by the daemon). Loaded via `loadGCConfig()`.
     var gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault
@@ -2147,24 +2144,25 @@ final class AppState {
     /// `transcript_streaming_enabled` flag, which spawns sessions with the
     /// session mod's `transcript-stream` feature.
     ///
-    /// False until capabilities have been fetched, which is the conservative
-    /// reading: a pane that registers no stream file renders exactly what it
-    /// renders today, while a provisional row that appeared and then vanished on
-    /// the first capability fetch would be worse than one that appeared a
-    /// moment late.
+    /// `Config.transcriptStreamingDefault` until capabilities have been
+    /// fetched: that is what every install that never touched the toggle
+    /// resolves to, so a pane mounted before the first fetch keys its stream
+    /// file the way the fetch will, and only an explicit off flips it.
     var transcriptStreamingEnabled: Bool {
-        daemonCapabilities?.transcriptStreamingEnabled ?? false
+        daemonCapabilities?.transcriptStreamingEnabled ?? Config.transcriptStreamingDefault
     }
     /// Whether question and permission prompts can be answered from the
-    /// transcript, as the daemon reports it. False until capabilities have
-    /// been fetched, so a card never offers an answer the daemon would refuse.
+    /// transcript, as the daemon reports it. `Config.transcriptPromptAnswerDefault`
+    /// until capabilities have been fetched, the value an install that never
+    /// chose resolves to. The daemon stays the authority: with the flag off it
+    /// refuses an answer sent before the fetch corrected the card.
     var transcriptPromptAnswerEnabled: Bool {
-        daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
+        daemonCapabilities?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
     }
     /// Whether composer drafts are saved and restored, as the daemon reports
-    /// it. False until capabilities have been fetched.
+    /// it. `Config.composerDraftDefault` until capabilities have been fetched.
     var composerDraftEnabled: Bool {
-        daemonCapabilities?.composerDraftEnabled ?? false
+        daemonCapabilities?.composerDraftEnabled ?? Config.composerDraftDefault
     }
     /// Whether automatic parking holds composer drafts on, as the daemon
     /// reports it, which greys the Settings toggle. False until capabilities
@@ -2224,10 +2222,6 @@ final class AppState {
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
-    /// How the automatic Notes preference is persisted — injectable for the
-    /// same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
     /// How `setGCCollectorEnabled` persists one opt-in GC collector's switch —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
@@ -2855,8 +2849,8 @@ final class AppState {
     /// preferences.
     let userDefaults: UserDefaults
 
-    /// The Tabs in the toolbar setting and the chrome geometry the panes'
-    /// top rows read (`WindowChromeState`), following `userDefaults`.
+    /// The chrome geometry the panes' top rows read (`WindowChromeState`),
+    /// as the toolbar controller measures it.
     let windowChrome: WindowChromeState
 
     init(
@@ -2864,7 +2858,7 @@ final class AppState {
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
     ) {
         self.userDefaults = userDefaults
-        self.windowChrome = WindowChromeState(defaults: userDefaults)
+        self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()

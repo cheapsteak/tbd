@@ -4,7 +4,7 @@ import Testing
 import TBDShared
 @testable import TBDApp
 
-@Suite("Servers toolbar item wording")
+@Suite("Servers wording")
 @MainActor
 struct ServersButtonLabelTests {
     private func info(_ state: DevServerStateKind, url: String? = nil, code: Int32? = nil) -> DevServerInfo {
@@ -72,11 +72,5 @@ struct ServersButtonLabelTests {
     @Test func theLabelTextCountsRunningServers() {
         #expect(ServersButtonLabel.title(runningCount: 0) == "Servers")
         #expect(ServersButtonLabel.title(runningCount: 2) == "2 running")
-    }
-
-    @Test func theBakedIconIsNotATemplate() {
-        let image = ServersButtonLabel.bakedIcon(running: true, colorScheme: .light)
-        #expect(!image.isTemplate)
-        #expect(ServersButtonLabel.bakedIcon(running: false, colorScheme: .light) !== image)
     }
 }

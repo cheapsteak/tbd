@@ -41,9 +41,6 @@ extension AppState {
             if result.gcEnabled != gcEnabled {
                 gcEnabled = result.gcEnabled
             }
-            if result.autoCreateNotesEnabled != autoCreateNotesEnabled {
-                autoCreateNotesEnabled = result.autoCreateNotesEnabled
-            }
             if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
                 autoResumeOnLimitReset = result.autoResumeOnLimitReset
             }
@@ -227,17 +224,6 @@ extension AppState {
         }
     }
 
-    /// Set whether ordinary new worktrees start with an empty "Notes" note.
-    func setAutoCreateNotesEnabled(_ enabled: Bool) async {
-        do {
-            try await autoCreateNotesSetter(enabled)
-            autoCreateNotesEnabled = enabled
-        } catch {
-            logger.error("Failed to set automatic Notes creation: \(error, privacy: .public)")
-            showAlert("Failed to update Notes setting: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Set the global session-limit auto-resume gate. Turning it OFF also
     /// cancels all pending scheduled resumes daemon-side.
     func setAutoResumeOnLimitReset(_ enabled: Bool) async {
@@ -311,7 +297,7 @@ extension AppState {
         }
     }
 
-    /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
+    /// Persist the setup-tab auto-close switch, then re-fetch capabilities
     /// so the Settings toggle reflects the daemon's persisted state. Applies
     /// to the next worktree creation.
     func setAutoCloseSetupEnabled(_ enabled: Bool) async {
@@ -401,15 +387,15 @@ extension AppState {
 
     /// Help text for the transcript-streaming toggle. A stored constant rather
     /// than a literal in the view so it is assertable, and it carries the two
-    /// limits the operator cannot see anywhere else: the feature reaches only
-    /// sessions spawned after the change, and only those where Claude Code
-    /// loads TBD's mod (not in an untrusted workspace, nor under a policy that
-    /// blocks mods).
+    /// limits the operator cannot see anywhere else: a change reaches only
+    /// sessions spawned after it, and only those where Claude Code loads TBD's
+    /// mod (not in an untrusted workspace, nor under a policy that blocks
+    /// mods).
     static let transcriptStreamingHelp = """
         Shows Claude's answer and thinking summaries in the transcript pane as \
         they are written, before they reach the session file. Applies to \
-        sessions started after you turn it on, and only where Claude Code \
-        loads TBD's mod. Off by default (soaking).
+        sessions started after a change, and only where Claude Code loads \
+        TBD's mod. On by default.
         """
 
     /// Persist the transcript-streaming gate, then re-fetch capabilities so the

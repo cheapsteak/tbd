@@ -5,7 +5,8 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Schema and resolution guards for `config.transcript_streaming_enabled`.
+/// Schema and resolution guards for `config.transcript_streaming_enabled`,
+/// which ships on.
 ///
 /// The column is added with **no SQL default**, so "never chose" (NULL) stays
 /// distinguishable from "explicitly off". If someone adds a `DEFAULT` clause to
@@ -51,7 +52,7 @@ struct TranscriptStreamingConfigFlagTests {
 
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
 
@@ -65,7 +66,7 @@ struct TranscriptStreamingConfigFlagTests {
             #expect(
                 raw.isNull,
                 "transcript_streaming_enabled on a config row written before the migration must read NULL, not \(raw)")
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 
@@ -93,6 +94,16 @@ struct TranscriptStreamingConfigFlagTests {
             explicitlyOff.toModel(transcriptStreamingDefault: true)
                 .transcriptStreamingEnabled == false,
             "an explicit opt-out must be honored forever, whatever the default becomes")
+        #expect(try await db.config.get().transcriptStreamingEnabled == false)
+    }
+
+    @Test func explicitTrueSticks() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptStreamingEnabled(true)
+        let on = try #require(try await fetchConfigRecord(db))
+        #expect(on.transcript_streaming_enabled == true)
+        #expect(on.toModel(transcriptStreamingDefault: false).transcriptStreamingEnabled)
+        #expect(try await db.config.get().transcriptStreamingEnabled)
     }
 
     /// Isolates the RESOLUTION guard from the STORAGE guard by constructing a
@@ -109,10 +120,11 @@ struct TranscriptStreamingConfigFlagTests {
 
     // MARK: - The shipped default, and the wire
 
-    @Test func shippedDefaultIsOff() async throws {
-        #expect(Config.transcriptStreamingDefault == false)
+    /// Streaming ships on: a row nobody chose for reads on.
+    @Test func shippedDefaultIsOn() async throws {
+        #expect(Config.transcriptStreamingDefault == true)
         let db = try TBDDatabase(inMemory: true)
-        #expect(try await db.config.get().transcriptStreamingEnabled == false)
+        #expect(try await db.config.get().transcriptStreamingEnabled == true)
     }
 
     @Test func configJSONWithoutTheKeyFollowsTheShippedDefault() throws {
@@ -121,11 +133,13 @@ struct TranscriptStreamingConfigFlagTests {
         #expect(config.transcriptStreamingEnabled == Config.transcriptStreamingDefault)
     }
 
+    /// Off is the value that differs from the shipped default, so it is the
+    /// one whose round trip says anything.
     @Test func configJSONRoundTripsAnExplicitChoice() throws {
         var config = Config()
-        config.transcriptStreamingEnabled = true
+        config.transcriptStreamingEnabled = false
         let decoded = try JSONDecoder().decode(
             Config.self, from: JSONEncoder().encode(config))
-        #expect(decoded.transcriptStreamingEnabled)
+        #expect(decoded.transcriptStreamingEnabled == false)
     }
 }

@@ -1522,12 +1522,19 @@ public struct Config: Codable, Sendable, Equatable {
     /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
     /// usage-limit hit. Default OFF.
     public var autoResumeOnApiError: Bool
-    /// Soak flag for auto-closing the setup-hook tab after a clean run.
-    /// When true AND a setup hook resolves, the hook's exit code is written
-    /// to a marker file; exit 0 closes the tab (kills the pane, deletes the
-    /// terminal/tab rows), nonzero leaves the tab open with an interactive
-    /// shell for debugging. Default OFF: this kills a pane and deletes rows
-    /// without a user gesture, so it is opt-in until it soaks.
+    /// Whether the setup-hook tab closes itself after a clean run. When true
+    /// AND a setup hook resolves, the hook's exit code is written to a marker
+    /// file; exit 0 closes the tab (kills the pane, deletes the terminal/tab
+    /// rows), nonzero leaves the tab open with an interactive shell for
+    /// debugging.
+    ///
+    /// **Resolved, not stored**: this property is
+    /// `auto_close_setup_enabled ?? Config.autoCloseSetupDefault`, so it is on
+    /// for everyone who has not turned it off. The column's frozen migration
+    /// gives it a SQL default of 0, which every row took; the
+    /// `20261104175902_auto_close_setup_default_on` migration resets the
+    /// column to NULL once, so NULL means "never chose" and an explicit `0`
+    /// or `1` written after it is honored.
     public var autoCloseSetupEnabled: Bool
     /// Pre-accept Claude Code's folder-trust dialog for the worktrees TBD
     /// created in a registered repo, and for that repo's own checkout.
@@ -1595,14 +1602,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
-    /// Whether ordinary new worktrees start with an empty "Notes" note. The
-    /// note opens no panel by itself.
-    ///
-    /// **Resolved, not stored.** The backing column carries no SQL default and
-    /// stays NULL until somebody touches the toggle, so this property is
-    /// `auto_create_notes_enabled ?? Config.autoCreateNotesDefault`. NULL
-    /// follows the shipped default; `0`/`1` remains an explicit choice.
-    public var autoCreateNotesEnabled: Bool
     /// Gate for the orphan-GC phase that reclaims per-profile config
     /// directories under `~/tbd/profiles/`
     /// (`docs/specs/2026-08-15-profile-dir-gc-design.md`). Read on top of
@@ -1733,7 +1732,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// `transcript-stream` feature, and the transcript shows the provisional
     /// rows it writes until the JSONL rows with the same `uuid`s land.
     ///
-    /// It ships OFF, and it depends on no other flag.
+    /// It ships ON, and it depends on no other flag.
     ///
     /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing column
     /// carries no SQL default and stays NULL until somebody touches the
@@ -1852,9 +1851,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// the feature is a change to this constant — no forcing `UPDATE`
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
-    /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
-    /// preserved until a user explicitly turns the automatic Notes note off.
-    public static let autoCreateNotesDefault = true
     /// The shipped default for `gcProfileDirsEnabled`, and the single place it
     /// lives. The profile-dir collector ships off; graduating it is a change to
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
@@ -1903,10 +1899,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// explicit choice that a default change leaves alone.
     public static let updateModeDefault: UpdateMode = .off
     /// The shipped default for `transcriptStreamingEnabled`, and the single
-    /// place it lives. Streaming ships off. Graduation is a change to this
-    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// place it lives. Streaming ships on. The column carries no SQL default,
+    /// so this reaches only rows that never chose, and an explicit opt-out is
     /// left alone.
-    public static let transcriptStreamingDefault = false
+    public static let transcriptStreamingDefault = true
     /// The shipped default for `profileBalancingEnabled`, and the single place
     /// it lives. Profile balancing ships off; graduation — after a soak in which
     /// the picker's choices match what the person would have chosen — is a
@@ -1917,12 +1913,20 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
     /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
-    /// place it lives. Graduation flips this constant.
-    public static let transcriptPromptAnswerDefault = false
+    /// place it lives. Ships on; the column carries no SQL default, so this
+    /// reaches only rows that never chose, and an explicit opt-out is left
+    /// alone.
+    public static let transcriptPromptAnswerDefault = true
     /// The shipped default for `composerDraftEnabled`, and the single place it
-    /// lives. Ships off; graduation is a change to this constant, with no
-    /// forcing `UPDATE` migration and every explicit opt-out left alone.
-    public static let composerDraftDefault = false
+    /// lives. Ships on; the column carries no SQL default, so this reaches
+    /// only rows that never chose, and an explicit opt-out is left alone.
+    public static let composerDraftDefault = true
+    /// The shipped default for `autoCloseSetupEnabled`, and the single place
+    /// it lives. Ships on. It reaches only a NULL column, which every row is
+    /// until somebody touches the toggle after the
+    /// `20261104175902_auto_close_setup_default_on` reset, so an explicit
+    /// opt-out is left alone.
+    public static let autoCloseSetupDefault = true
     /// The shipped default for `agentBackgroundEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
@@ -1962,7 +1966,7 @@ public struct Config: Codable, Sendable, Equatable {
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
-                autoCloseSetupEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = Config.autoCloseSetupDefault,
                 autoTrustWorktrees: Bool = true,
                 gcEnabled: Bool = true,
                 gcGraceSeconds: Int = Config.defaultGCGraceSeconds,
@@ -1970,7 +1974,6 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
-                autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -2007,7 +2010,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
-        self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
@@ -2050,8 +2052,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .controlModeEnabled) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
+        // Absent means the sender knew nothing about the flag, the NULL
+        // column's situation: follow the shipped default.
         autoCloseSetupEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+            Bool.self, forKey: .autoCloseSetupEnabled) ?? Config.autoCloseSetupDefault
         // Absent (older daemon / older persisted JSON) defaults to ON, matching
         // the column default — the trust answer is known by construction.
         autoTrustWorktrees = try c.decodeIfPresent(
@@ -2072,8 +2076,6 @@ public struct Config: Codable, Sendable, Equatable {
         // fall through to the shipped default rather than hardcoding `false`.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
-        autoCreateNotesEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .autoCreateNotesEnabled) ?? Config.autoCreateNotesDefault
         // Same tri-state as above: absent means the sender knew nothing about the
         // flag, which is the NULL column's situation — follow the shipped
         // default rather than hardcoding `false`.

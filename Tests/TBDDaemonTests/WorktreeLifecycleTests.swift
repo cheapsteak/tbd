@@ -121,7 +121,7 @@ import Testing
 
     #expect(primary.kind == .codex)
     #expect(primary.label == "Codex")
-    // The initial note stays out of the tab order.
+    // The tab order holds only the terminals.
     #expect(try await db.worktrees.getTabOrder(worktreeID: result.id) == terminals.map(\.id))
     #expect(try await db.worktrees.getActiveTabID(worktreeID: result.id) == primary.id)
 }

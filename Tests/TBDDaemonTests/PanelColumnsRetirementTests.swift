@@ -107,10 +107,10 @@ import Testing
             _ = try ConfigRecord.deleteOne(conn, key: ConfigStore.singletonID)
             try seeded.insert(conn)
         }
-        try await db.config.setAutoCreateNotes(false)
+        try await db.config.setQueuedPrompt(true)
 
         let config = try await db.config.get()
-        #expect(!config.autoCreateNotesEnabled)
+        #expect(config.queuedPromptEnabled)
     }
 
     /// A worktree row is inserted, updated and read back through the store

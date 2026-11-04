@@ -98,16 +98,11 @@ enum MainDetailContent: Equatable {
 }
 
 extension AppState {
-    /// Whether the panes draw the window's top row: the Tabs in the toolbar
-    /// setting is on and the detail area shows a worktree's tab bar. The
-    /// toolbar's `MainToolbarLayoutState.panesDrawTopRow` is the same
-    /// decision, made from the same function (`MainDetailContent`).
-    var panesDrawTopRow: Bool {
-        windowChrome.tabsInToolbar && showsWorktreeTabBar
-    }
-
     /// Whether the detail area draws a worktree's tab bar
-    /// (`MainDetailContent.showsWorktreeTabBar(worktreeExists:)`).
+    /// (`MainDetailContent.showsWorktreeTabBar(worktreeExists:)`), and so
+    /// whether the panes draw the window's top row. The toolbar's
+    /// `MainToolbarLayoutState.panesDrawTopRow` is the same decision, made
+    /// from the same function.
     var showsWorktreeTabBar: Bool {
         MainDetailContent.current(in: self).showsWorktreeTabBar { findWorktree(id: $0) != nil }
     }

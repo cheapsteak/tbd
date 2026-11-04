@@ -271,13 +271,14 @@ enum SideRegionStrip {
 /// renderer"): its strip, a divider, and the active panel through the shared
 /// leaf view.
 ///
-/// The strip is as tall as the workspace tab bar (`TabRowMetrics.height`, or
-/// with the Tabs in the toolbar setting on the toolbar's height,
-/// `MainTabRowMetrics.height`), so the two read as one row split by the
-/// divider, and clipped to its frame, so it never draws over the divider. The
-/// region is never narrower than the strip's fixed controls
-/// (`SideStripMetrics.fixedControlsWidth`), so none of them is clipped: the
-/// panel tabs between them give up room and scroll instead.
+/// The strip is the window's top row over the side region: as tall as the
+/// workspace tab bar, the toolbar's height (`MainTabRowMetrics.height`), so
+/// the two read as one row split by the divider, with pill tabs and a drag
+/// gap in the width after the last tab. It is clipped to its frame, so it
+/// never draws over the divider. The region is never narrower than the
+/// strip's fixed controls (`SideStripMetrics.fixedControlsWidth`), so none of
+/// them is clipped: the panel tabs between them give up room and scroll
+/// instead.
 ///
 /// Left to right (side panel toggle pills spec, "The strip") it holds:
 ///
@@ -478,11 +479,7 @@ struct SideRegionView: View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
             edgeItems: edge.items)
-        // With the Tabs in the toolbar setting on, the strip is the window's
-        // top row over the side region: the toolbar's height, pill tabs, and
-        // a drag gap in the width after the last tab.
         let chrome = appState.windowChrome
-        let tabsInToolbar = chrome.tabsInToolbar
         return HStack(spacing: 0) {
             historyGroup(active: active)
                 // Icon buttons only, so the style reaches no tab and no
@@ -491,31 +488,20 @@ struct SideRegionView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
 
-            if tabsInToolbar {
-                TabsThenDragGapLayout {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: MainTabRowMetrics.pillSpacing) {
-                            ForEach(tabs) { tab in
-                                tabItem(tab, pill: true)
-                            }
-                        }
-                        // Pills hold their own height; the stack fills the
-                        // row's to centre them on its midline.
-                        .frame(maxHeight: .infinity)
-                    }
-                    WindowDragGap()
-                }
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            } else {
+            TabsThenDragGapLayout {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
+                    HStack(spacing: MainTabRowMetrics.pillSpacing) {
                         ForEach(tabs) { tab in
-                            tabItem(tab, pill: false)
+                            tabItem(tab)
                         }
                     }
+                    // Pills hold their own height; the stack fills the
+                    // row's to centre them on its midline.
+                    .frame(maxHeight: .infinity)
                 }
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                WindowDragGap()
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 0) {
                 ForEach(trailingItems) { item in
@@ -529,9 +515,7 @@ struct SideRegionView: View {
             .layoutPriority(1)
         }
         .padding(.trailing, MainTabRowMetrics.trailingInset)
-        .frame(height: tabsInToolbar
-            ? MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset)
-            : TabRowMetrics.height)
+        .frame(height: MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset))
         // A backstop. The workspace view keeps the region at least as wide as
         // the two fixed-width ends (`SideStripMetrics.fixedControlsWidth`,
         // `PanelSurfaceWorkspaceView.minimumSideShare`), so they fit and only
@@ -634,11 +618,10 @@ struct SideRegionView: View {
     /// beside it — siblings, not nested, so each takes its own clicks. A
     /// right-click offers the file menu for file and transcript tabs, and
     /// Rename Tab alone for a note tab, which a double-click also renames.
-    /// As a pill (`pill`), with the Tabs in the toolbar setting on, it draws
-    /// the workspace tab bar's pill fill instead of the active tab's
-    /// background and line (`SideStripTabFill`).
+    /// It is a pill, with the workspace tab bar's pill fill, which follows
+    /// the pointer too (`TabPillBackground`).
     @ViewBuilder
-    private func tabItem(_ tab: SideRegionTab, pill: Bool) -> some View {
+    private func tabItem(_ tab: SideRegionTab) -> some View {
         let item = HStack(spacing: 0) {
             Button {
                 send(.select(panelID: tab.id))
@@ -682,7 +665,7 @@ struct SideRegionView: View {
             .help("Close panel")
         }
         .frame(maxHeight: .infinity)
-        .modifier(SideStripTabFill(isActive: tab.isActive, pill: pill))
+        .modifier(TabPillBackground(isActive: tab.isActive))
 
         if tab.noteID != nil {
             item.contextMenu {
@@ -854,32 +837,6 @@ struct SideRegionView: View {
 
     private func send(_ operation: PanelOperation) {
         appState.sendPanelOperation(worktreeID: surface.worktreeID, tabID: surface.id, operation)
-    }
-}
-
-// MARK: - SideStripTabFill
-
-/// A side strip tab's fill: the active tab's background and the line under
-/// it, or, as a pill (`pill`), the workspace tab bar's pill fill, which
-/// follows the pointer too (`TabPillBackground`).
-private struct SideStripTabFill: ViewModifier {
-    let isActive: Bool
-    let pill: Bool
-
-    func body(content: Content) -> some View {
-        if pill {
-            content.modifier(TabPillBackground(isActive: isActive))
-        } else {
-            content
-                .background(isActive ? Color(nsColor: .controlBackgroundColor) : Color.clear)
-                .overlay(alignment: .bottom) {
-                    if isActive {
-                        Rectangle()
-                            .fill(Color(nsColor: .separatorColor))
-                            .frame(height: 2)
-                    }
-                }
-        }
     }
 }
 

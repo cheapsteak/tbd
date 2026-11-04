@@ -49,7 +49,7 @@ struct FreshSpawnSessionModTests {
         }
 
         func setFlag(_ on: Bool) async throws {
-            try await db.config.setComposerDraftEnabled(on)
+            try await db.config.setComposerDraftAsTheOnlyModFeature(on)
         }
 
         func sessionsDirContents() throws -> Set<String> {
@@ -215,7 +215,7 @@ struct FreshSpawnSessionModTests {
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
-        try await db.config.setComposerDraftEnabled(flagOn)
+        try await db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
         try await db.config.setPrimaryAgentPreference(.claude)
 
         // A carryover primary and a fork of a real conversation schedule a

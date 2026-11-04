@@ -6,9 +6,8 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
-/// The status bar's Servers chip (`ServersStatusChip`), shown while Tabs in
-/// the toolbar is on: what it shows as values, with the setting on and off,
-/// and where its menu opens. Spec:
+/// The status bar's Servers chip (`ServersStatusChip`): what it shows as
+/// values, and where its menu opens. Spec:
 /// `docs/specs/2026-11-02-tabs-in-toolbar-design.md`, "Servers in the status
 /// bar". Tier 1.
 @Suite("Status bar Servers chip")
@@ -24,11 +23,10 @@ struct StatusBarServersChipTests {
 
     // MARK: Presentation
 
-    /// No list, or a list with no server, shows no chip, as the toolbar shows
-    /// no Servers item.
+    /// No list, or a list with no server, shows no chip.
     @Test func hiddenWithNoServers() {
-        let noList = ServersChipPresentation.make(tabsInToolbar: true, list: nil)
-        let emptyList = ServersChipPresentation.make(tabsInToolbar: true, list: list([]))
+        let noList = ServersChipPresentation.make(list: nil)
+        let emptyList = ServersChipPresentation.make(list: list([]))
         #expect(noList == nil)
         #expect(emptyList == nil)
     }
@@ -36,8 +34,7 @@ struct StatusBarServersChipTests {
     /// With servers but none running, the chip is the muted glyph and
     /// "Servers".
     @Test func mutedWithNoneRunning() {
-        let chip = ServersChipPresentation.make(
-            tabsInToolbar: true, list: list([server("web", .stopped), server("api", .exited)]))
+        let chip = ServersChipPresentation.make(list: list([server("web", .stopped), server("api", .exited)]))
         let expected = ServersChipPresentation(style: .idle, title: "Servers", accessibilityLabel: "Dev servers")
         #expect(chip == expected)
     }
@@ -46,31 +43,19 @@ struct StatusBarServersChipTests {
     /// servers only, and says it aloud.
     @Test func greenWithACount() {
         let chip = ServersChipPresentation.make(
-            tabsInToolbar: true,
             list: list([server("web", .running), server("api", .running), server("db", .stopped)]))
         let expected = ServersChipPresentation(
             style: .running, title: "2 running", accessibilityLabel: "Dev servers, 2 running")
         #expect(chip == expected)
     }
 
-    /// The chip's words are the toolbar item's, from `ServersButtonLabel`.
-    @Test func theWordsAreTheToolbarItems() throws {
+    /// The chip's words come from `ServersButtonLabel`.
+    @Test func theWordsAreTheServersLabels() throws {
         let running = list([server("web", .running)])
-        let chip = try #require(ServersChipPresentation.make(tabsInToolbar: true, list: running))
+        let chip = try #require(ServersChipPresentation.make(list: running))
         let count = ServersButtonLabel.runningCount(running)
         #expect(chip.title == ServersButtonLabel.title(runningCount: count))
         #expect(chip.accessibilityLabel == ServersButtonLabel.accessibilityLabel(runningCount: count))
-    }
-
-    /// With the setting off, no list shows a chip: the toolbar's Servers item
-    /// shows them instead.
-    @Test func settingOffShowsNoChip() {
-        let lists: [DevServerListResult?] = [
-            nil, list([]), list([server("web", .stopped)]), list([server("web", .running)]),
-        ]
-        let chips = lists.map { ServersChipPresentation.make(tabsInToolbar: false, list: $0) }
-        let shown = chips.compactMap { $0 }
-        #expect(shown.isEmpty)
     }
 
     // MARK: The menu's position
@@ -105,36 +90,24 @@ struct StatusBarServersChipTests {
         #expect(flippedBottom == chip.minY)
     }
 
-    // MARK: The setting, read by the view
+    // MARK: The view
 
-    /// The chip reads the setting from `appState.windowChrome`, which follows
-    /// the store the state was made with: hosted with the setting stored off
-    /// it draws nothing, and stored on it draws, for the same worktree and
-    /// list. With no worktree it draws nothing either way. Each write goes to
-    /// the store and is then followed directly (`followDefaults()`), so the
-    /// test does not wait on the store's change notification.
+    /// Hosted for a worktree whose list has a server, the chip draws; for a
+    /// worktree with no list, or for no worktree, it draws nothing.
     @MainActor
-    @Test func theChipFollowsTheStoredSetting() throws {
-        let suite = TestDefaultsSuite("StatusBarServersChip.setting")
+    @Test func theChipDrawsOnlyForAWorktreeWithServers() {
+        let suite = TestDefaultsSuite("StatusBarServersChip.view")
         defer { suite.tearDown() }
-        let defaults = suite.defaults
-        let state = AppState(userDefaults: defaults)
+        let state = AppState(userDefaults: suite.defaults)
         let id = UUID()
         state.devServerLists[id] = list([server("web", .running)], id: id)
 
-        defaults.set(false, forKey: AppState.tabsInToolbarKey)
-        state.windowChrome.followDefaults()
-        try #require(state.windowChrome.tabsInToolbar == false)
-        let offWidth = Self.fittingWidth(worktreeID: id, state: state)
-
-        defaults.set(true, forKey: AppState.tabsInToolbarKey)
-        state.windowChrome.followDefaults()
-        try #require(state.windowChrome.tabsInToolbar == true)
-        let onWidth = Self.fittingWidth(worktreeID: id, state: state)
+        let withServersWidth = Self.fittingWidth(worktreeID: id, state: state)
+        let withoutListWidth = Self.fittingWidth(worktreeID: UUID(), state: state)
         let noWorktreeWidth = Self.fittingWidth(worktreeID: nil, state: state)
 
-        #expect(offWidth == 0)
-        #expect(onWidth > 0)
+        #expect(withServersWidth > 0)
+        #expect(withoutListWidth == 0)
         #expect(noWorktreeWidth == 0)
     }
 

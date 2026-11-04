@@ -215,16 +215,15 @@ private struct TrailingEdgeClip: Shape {
 ///   this pane. With the sidebar collapsed the pane fills the window, and so
 ///   does the bar.
 ///
-/// With the Tabs in the toolbar setting on, while the detail area shows a
-/// worktree's tab bar (`AppState.panesDrawTopRow`), the pager reaches up under
-/// the toolbar, so the worktree's view can draw its tab strips in the
-/// toolbar row. Every other page keeps the safe area, and starts under the
-/// toolbar as it does with the setting off.
+/// While the detail area shows a worktree's tab bar
+/// (`AppState.showsWorktreeTabBar`), the pager reaches up under the toolbar,
+/// so the worktree's view can draw its tab strips in the toolbar row. Every
+/// other page keeps the safe area, and starts under the toolbar.
 struct MainDetailArea: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        let drawsTopRow = appState.panesDrawTopRow
+        let drawsTopRow = appState.showsWorktreeTabBar
         VStack(spacing: 0) {
             DetailSectionHostPager(
                 targetTab: DetailSectionHostPager.targetTab(

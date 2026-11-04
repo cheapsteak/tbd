@@ -125,21 +125,18 @@ New file `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+ReviveFresh.swift`.
 /// Everything the revive-fresh flow injects into an otherwise ordinary create.
 struct ConversationCarryover: Sendable {
     let sourceSessionID: String
-    /// Markdown seeded into the worktree's initial Notes tab.
+    /// Markdown for the provenance note the new worktree starts with.
     let notesSeed: String
 }
 ```
 
 The notes seed rides in this struct rather than being written by the caller after
-the fact, because on the `preSession` branch `createInitialNoteTab` runs *inside*
-the detached phase-3 task — `completeCreateWorktree` returns `.preSessionPending`
+the fact, because on the `preSession` branch the note is made *inside* the
+detached phase-3 task — `completeCreateWorktree` returns `.preSessionPending`
 before any note row exists, so a caller-side write would race it.
-`createInitialNoteTab` gains an optional `seed: String?` parameter, defaulting to
-nil. An ordinary create has no `ConversationCarryover`, so
-`completeCreateWorktree` applies the global automatic-notes preference before
-calling the helper with no seed. Fresh-branch revival supplies a carryover and
-its provenance seed, so it always calls the helper regardless of that
-preference.
+`createProvenanceNote(worktreeID:content:)` makes a note titled "Notes" holding
+the seed. An ordinary create has no `ConversationCarryover` and makes no note;
+fresh-branch revival supplies a carryover, so it always makes this one.
 
 Threaded from `completeCreateWorktree` down to `spawnPrimaryTerminals`. When
 present, `spawnPrimaryTerminals`:

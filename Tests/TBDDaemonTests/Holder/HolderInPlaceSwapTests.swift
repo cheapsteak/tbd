@@ -557,7 +557,7 @@ struct HolderInPlaceSwapTests {
     func holderWakeWithTheFlagOnWritesTheSpawnRecord() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
         defer { fixture.tearDown() }
-        try await fixture.db.config.setComposerDraftEnabled(true)
+        try await fixture.db.config.setComposerDraftAsTheOnlyModFeature(true)
         let terminal = try await Self.holderRow(fixture, parked: true)
         let draft = try Self.seedDraft(fixture)
 
@@ -579,12 +579,13 @@ struct HolderInPlaceSwapTests {
         #expect(try Data(contentsOf: draft) == Self.savedDraft)
     }
 
-    /// With the flag off, the same wake writes nothing under the sessions
-    /// directory.
+    /// With every feature off, the same wake writes nothing under the
+    /// sessions directory.
     @Test("a holder wake with the flag off writes no spawn record")
     func holderWakeWithTheFlagOffWritesNothing() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
         defer { fixture.tearDown() }
+        try await fixture.db.config.setEverySessionModFeatureOff()
         let terminal = try await Self.holderRow(fixture, parked: true)
 
         let result = try await Self.wakeParkedRow(fixture, terminal)

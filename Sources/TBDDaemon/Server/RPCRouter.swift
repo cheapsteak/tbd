@@ -1042,8 +1042,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetQueuedPrompt(request.paramsData)
             case RPCMethod.configSetClaudeCloud:
                 return try await handleConfigSetClaudeCloud(request.paramsData)
-            case RPCMethod.configSetAutoCreateNotes:
-                return try await handleConfigSetAutoCreateNotes(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
                 return try await handleConfigSetAutoCloseSetup(request.paramsData)
             case RPCMethod.configSetAutoTrustWorktrees:

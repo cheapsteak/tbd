@@ -16,18 +16,16 @@ struct ServersChipPresentation: Equatable {
     var title: String
     var accessibilityLabel: String
 
-    /// The chip's tooltip, the toolbar item's when it has no main URL. The
-    /// chip always opens the menu, whose first row opens the main URL.
+    /// The chip's tooltip. A click opens the menu, whose first row opens the
+    /// main URL when a running server has one.
     static let help = "Dev servers"
 
-    /// The chip for `list`, the selected worktree's dev servers. It shows only
-    /// while Tabs in the toolbar is on, since with it off the toolbar's
-    /// Servers item shows them, and only under that item's own rule,
-    /// `AppState.showsServersButton`: while the worktree has any server,
-    /// declared or running. The title and the spoken label are the toolbar
-    /// item's, from `ServersButtonLabel`.
-    static func make(tabsInToolbar: Bool, list: DevServerListResult?) -> ServersChipPresentation? {
-        guard tabsInToolbar, AppState.showsServersButton(list), let list else { return nil }
+    /// The chip for `list`, the selected worktree's dev servers. It shows
+    /// under `AppState.showsServersButton`: while the worktree has any
+    /// server, declared or running. The title and the spoken label come from
+    /// `ServersButtonLabel`.
+    static func make(list: DevServerListResult?) -> ServersChipPresentation? {
+        guard AppState.showsServersButton(list), let list else { return nil }
         let runningCount = ServersButtonLabel.runningCount(list)
         return ServersChipPresentation(
             style: runningCount > 0 ? .running : .idle,
@@ -36,15 +34,12 @@ struct ServersChipPresentation: Equatable {
     }
 }
 
-/// The status bar's Servers chip, at the start of the bar's right-hand group,
-/// shown while Tabs in the toolbar is on: the toolbar gives up its Servers
-/// item then, and this chip takes its place. Spec:
+/// The status bar's Servers chip, at the start of the bar's right-hand group:
+/// the window's one Servers control, since the toolbar has no Servers item
+/// (`MainToolbarLayout.identifiers(for:)`). Spec:
 /// `docs/specs/2026-11-02-tabs-in-toolbar-design.md`, "Servers in the status
 /// bar".
 ///
-/// - **The setting** is read from `appState.windowChrome`, as the panes read
-///   it, rather than through `@AppStorage`, which does not follow a write to
-///   this dotted key live (`WindowChromeState`).
 /// - **The list** is read here rather than in `StatusBarView`'s body, so a
 ///   change to any worktree's dev-server list re-evaluates this chip and not
 ///   the whole bar.
@@ -84,8 +79,7 @@ struct ServersStatusChip: View {
 
     var body: some View {
         if let worktreeID,
-           let chip = ServersChipPresentation.make(
-               tabsInToolbar: appState.windowChrome.tabsInToolbar, list: appState.devServerLists[worktreeID]) {
+           let chip = ServersChipPresentation.make(list: appState.devServerLists[worktreeID]) {
             Button {
                 menuHost.popUp(worktreeID: worktreeID, appState: appState)
             } label: {

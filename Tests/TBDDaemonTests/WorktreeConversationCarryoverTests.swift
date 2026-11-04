@@ -20,7 +20,6 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        try await db.config.setAutoCreateNotes(false)
         let recorder = PreSessionRecordedCommands()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
@@ -67,7 +66,6 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        try await db.config.setAutoCreateNotes(false)
         let recorder = PreSessionRecordedCommands()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
@@ -117,7 +115,6 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        try await db.config.setAutoCreateNotes(false)
         let lifecycle = makeCarryoverLifecycle(
             db: db,
             recorder: PreSessionRecordedCommands(),

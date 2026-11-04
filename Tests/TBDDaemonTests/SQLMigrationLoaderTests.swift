@@ -575,6 +575,7 @@ import Testing
             "20261030170000_reset_hook_written_activity",
             "20261030194425_panel_tabs",
             "20261101170000_worktree_panel",
+            "20261104175902_auto_close_setup_default_on",
         ]
         let expectedInline = ["20261101170100_side_panel_notes"]
         let found = try SQLMigrationLoader.bundled.get()

@@ -325,7 +325,6 @@ public enum RPCMethod {
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
-    public static let configSetAutoCreateNotes = "config.setAutoCreateNotes"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
@@ -972,9 +971,6 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
     public let gcEnabled: Bool
-    /// Whether creating an ordinary new worktree makes an empty "Notes"
-    /// starter note, which the Notes button opens.
-    public let autoCreateNotesEnabled: Bool
     /// The machine-wide remote create-param defaults (config scope), keyed by
     /// the provider's own `create_params` field names. Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
@@ -997,7 +993,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
-        autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
         globalRemoteCreateDefaults: [String: String] = [:],
         profileBalancingEnabled: Bool? = nil,
         profileBalancingUsageCeilingPercent: Int? = nil,
@@ -1012,7 +1007,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
-        self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
         self.profileBalancingEnabled = profileBalancingEnabled
         self.profileBalancingUsageCeilingPercent = profileBalancingUsageCeilingPercent
@@ -1040,9 +1034,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
-        autoCreateNotesEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .autoCreateNotesEnabled
-        ) ?? Config.autoCreateNotesDefault
         // Absent (older daemon) means the daemon knew nothing about create
         // defaults — the same state as an empty map: no opinion at this level.
         globalRemoteCreateDefaults = try c.decodeIfPresent(
@@ -3471,15 +3462,6 @@ public struct ConfigSetQueuedPromptParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setAutoCreateNotes` — the default-ON preference for
-/// creating an empty "Notes" starter note in ordinary new worktrees, opened
-/// from the Notes button. Conversation carryover creates its populated
-/// provenance note independently of this preference.
-public struct ConfigSetAutoCreateNotesParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setClaudeCloud` — the Claude cloud sessions gate
 /// (design 2026-08-15 §7, default OFF). A second gate inside
 /// `remote_backends_enabled`, never a bypass.
@@ -3580,9 +3562,10 @@ public enum WorktreeSetPendingPromptResult: Codable, Sendable, Equatable {
     }
 }
 
-/// Params for `config.setAutoCloseSetup` — the auto-close-setup-tab soak
-/// flag (default OFF). Read fresh at spawn time; applies to the next
-/// worktree creation, no daemon restart required.
+/// Params for `config.setAutoCloseSetup` — whether the setup-hook tab closes
+/// itself after a clean run (default ON; an explicit off survives). Read fresh
+/// at spawn time; applies to the next worktree creation, no daemon restart
+/// required.
 public struct ConfigSetAutoCloseSetupParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
@@ -4084,8 +4067,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
     /// Computed daemon-side so the app never parses version strings.
     public let controlModeSupported: Bool
-    /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
-    /// default OFF). Re-evaluated by the daemon on every call.
+    /// Whether the setup-hook tab auto-closes after a clean run (default ON,
+    /// resolved through `Config.autoCloseSetupDefault`). Re-evaluated by the
+    /// daemon on every call.
     public let autoCloseSetupEnabled: Bool
     /// Whether delivery acknowledgement is armed (`delivery_verification_enabled`,
     /// design §12). Default OFF while it soaks. This is the read-back for the
@@ -4182,8 +4166,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
     /// Whether answering prompts from the transcript is on
-    /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
-    /// Resolved through `Config.transcriptPromptAnswerDefault`.
+    /// (`transcript_prompt_answer_enabled`). Default ON. Resolved through
+    /// `Config.transcriptPromptAnswerDefault`.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
     /// Whether composer draft save-and-restore is on: `Config.composerDraftEnabled`,
     /// the effective value, which automatic parking holds on whatever the
@@ -4232,7 +4216,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                autoCloseSetupEnabled: Bool = false,
+                autoCloseSetupEnabled: Bool = Config.autoCloseSetupDefault,
                 deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
                 remoteBackendsEnabled: Bool = false,
@@ -4272,8 +4256,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // conservative "unsupported / unknown version".
         tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
-        // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
-        autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
+        // Absent means the daemon knew nothing about setup-tab auto-close:
+        // follow the shipped default.
+        autoCloseSetupEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .autoCloseSetupEnabled) ?? Config.autoCloseSetupDefault
         // New field for delivery acknowledgement; absent from older daemons defaults to false (soaking).
         deliveryVerificationEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .deliveryVerificationEnabled) ?? false

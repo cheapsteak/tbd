@@ -4,13 +4,12 @@ import SwiftUI
 // MARK: - RowIconSquare
 
 /// The hover square of an icon button in the panes' top rows: the main pane's
-/// tab row and the side region's strip, in the toolbar row with the Tabs in
-/// the toolbar setting on and as the classic tab bars with it off. It is the
-/// square the toolbar's leading buttons draw (`ToolbarIconButton`), with the
-/// same colours, the same corner radius and the same size, read from the same
-/// constants so the two never drift: `ToolbarIconButton.hoverFill` while the
-/// pointer is over the button, `ToolbarIconButton.pressedFill` while it is
-/// pressed, nothing at rest or while it is disabled.
+/// tab row and the side region's strip, both in the window's toolbar row. It
+/// is the square the toolbar's leading buttons draw (`ToolbarIconButton`),
+/// with the same colours, the same corner radius and the same size, read from
+/// the same constants so the two never drift: `ToolbarIconButton.hoverFill`
+/// while the pointer is over the button, `ToolbarIconButton.pressedFill` while
+/// it is pressed, nothing at rest or while it is disabled.
 enum RowIconSquare {
     /// How big the square is.
     enum Size: Equatable {

@@ -1,4 +1,5 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -162,7 +163,7 @@ func makeSessionsDir() throws -> URL {
     }
 
     @Test func featureEnabledFollowsConfig() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         #expect(SessionModFeature.enabled(in: config).isEmpty)
         config.composerDraftEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft])

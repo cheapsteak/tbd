@@ -159,16 +159,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist whether ordinary new worktrees start with an empty "Notes"
-    /// note. The create lifecycle snapshots this setting per creation, so the
-    /// change applies to the next worktree without a daemon restart.
-    func handleConfigSetAutoCreateNotes(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetAutoCreateNotesParams.self, from: paramsData)
-        try await db.config.setAutoCreateNotes(params.enabled)
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
     ///
     /// The daemon builds its provider manager, and registers the built-in
@@ -184,9 +174,9 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the auto-close-setup-tab soak flag. Read fresh at spawn time,
-    /// so it applies to the next worktree creation immediately — already-open
-    /// setup tabs are unaffected.
+    /// Persist the setup-tab auto-close switch (default ON). Read fresh at
+    /// spawn time, so it applies to the next worktree creation immediately —
+    /// already-open setup tabs are unaffected.
     func handleConfigSetAutoCloseSetup(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetAutoCloseSetupParams.self, from: paramsData)
         try await db.config.setAutoCloseSetup(enabled: params.enabled)
@@ -346,7 +336,7 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the transcript-streaming gate — the default-off soak switch for
+    /// Persist the transcript-streaming gate — the switch, on by default, for
     /// the session mod's `transcript-stream` feature and the provisional rows
     /// the transcript pane reads from it.
     ///
@@ -466,7 +456,7 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the transcript prompt-answer gate (default OFF while it soaks).
+    /// Persist the transcript prompt-answer gate (default ON).
     /// Hook changes reach a session on its next start; the answer RPCs read the
     /// column on every call, so they follow the toggle at once.
     func handleConfigSetTranscriptPromptAnswerEnabled(_ paramsData: Data) async throws -> RPCResponse {
@@ -533,7 +523,7 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the composer draft gate (default OFF, soaking). Sessions pick the
+    /// Persist the composer draft gate (default ON). Sessions pick the
     /// feature up when they next start. Automatic parking holds the feature on
     /// whatever this stores, so while it is on, an off written here takes
     /// effect only once automatic parking is off.

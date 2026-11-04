@@ -65,9 +65,9 @@ Left to right:
 With the Changes pill absent, the trailing group is the active panel's
 control, transcript, Notes and collapse.
 
-With Tabs in the toolbar on, the drag gap fills the width between the last
-tab and the trailing group, as before, so a strip whose only open panels have
-pills is history buttons, drag gap, and the trailing group.
+The drag gap fills the width between the last tab and the trailing group, so
+a strip whose only open panels have pills is history buttons, drag gap, and
+the trailing group.
 
 ## Pills
 
@@ -192,10 +192,12 @@ NSMenu's item notifications while it is open.
 
 - **One note per worktree:** the first, oldest by creation, as the Notes
   button's rule already picks. The Notes pill is its only control.
-- **Nothing makes a second note.** The + menu's New Note goes. The Notes pill
-  creates a note titled "Notes" only when the worktree has none, as the button
-  does today. Worktree creation's starter note is that first note. The CLI
-  has no note-creating command, and `note.create` stays as it is.
+- **Nothing makes a second note.** The + menu's New Note goes. A new worktree
+  has no note until the Notes pill's first click creates one, titled "Notes";
+  the pill creates a note only when the worktree has none. A conversation
+  revived on a fresh branch starts with its provenance note, which is then the
+  first note. The CLI has no note-creating command, and `note.create` stays as
+  it is.
 - **Legacy extra notes.** A worktree made before this change can have more than
   one. Each extra note whose panel is open shows as an ordinary tab with its ×,
   which deletes it, asking first when it has text. One with no panel is listed
@@ -208,10 +210,10 @@ NSMenu's item notifications while it is open.
 
 While the region is hidden, the workspace tab bar's trailing end holds the
 Changes, transcript and Notes buttons (`TabBarTrailingItem.edge`), then the
-expand button, with Tabs in the toolbar on or off. The Changes button shows by
-the Changes pill's rule. They draw as plain icons, with the pills' symbols and
-in the pills' grey, `NSColor.secondaryLabelColor`, whatever their panel's
-state, so the bar and the strip match. A disabled one draws that grey dimmed,
+expand button. The Changes button shows by the Changes pill's rule. They draw
+as plain icons, with the pills' symbols and in the pills' grey,
+`NSColor.secondaryLabelColor`, whatever their panel's state, so the bar and
+the strip match. A disabled one draws that grey dimmed,
 as the row style dims a disabled button. No panel is in view, so none shows a
 fill or an accent colour, either of which would read as a panel showing, and
 none carries a label: they are icon buttons like the rest of the bar's

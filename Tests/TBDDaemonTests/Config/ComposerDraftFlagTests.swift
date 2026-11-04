@@ -21,9 +21,10 @@ private final class SessionModPluginSyncRecorder: @unchecked Sendable {
     }
 }
 
-/// Schema and resolution guards for `config.composer_draft_enabled`, the
-/// default-off soak gate for saving and restoring composer drafts. The column carries no
-/// SQL default, so NULL ("never chose") stays distinct from 0 ("off").
+/// Schema and resolution guards for `config.composer_draft_enabled`, the gate
+/// for saving and restoring composer drafts, which ships on. The column carries
+/// no SQL default, so NULL ("never chose") stays distinct from 0 ("off"): NULL
+/// reads on, and an explicit off survives any change to the shipped default.
 @Suite("ComposerDraftFlag")
 struct ComposerDraftFlagTests {
 
@@ -36,16 +37,28 @@ struct ComposerDraftFlagTests {
         }
     }
 
-    @Test func shippedDefaultIsOff() {
-        #expect(Config.composerDraftDefault == false)
-        #expect(Config().composerDraftEnabled == false)
+    @Test func shippedDefaultIsOn() {
+        #expect(Config.composerDraftDefault == true)
+        #expect(Config().composerDraftEnabled == true)
     }
 
-    @Test func nullBeforeAnyGesture() async throws {
+    /// The first of the three states: nobody chose, so the column is NULL and
+    /// the feature reads on.
+    @Test func nullBeforeAnyGestureReadsOn() async throws {
         let db = try TBDDatabase(inMemory: true)
         let record = try #require(try await fetchConfigRecord(db))
         #expect(record.composer_draft_enabled == nil,
                 "composer_draft_enabled grew a DEFAULT clause; remove it.")
+        #expect(try await db.config.get().composerDraftEnabled == true)
+    }
+
+    /// The second: an explicit off is stored as 0 and reads off, with the
+    /// shipped default on.
+    @Test func explicitFalseReadsOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setComposerDraftEnabled(false)
+        let off = try #require(try await fetchConfigRecord(db))
+        #expect(off.composer_draft_enabled == false)
         #expect(try await db.config.get().composerDraftEnabled == false)
     }
 
@@ -55,7 +68,7 @@ struct ComposerDraftFlagTests {
         try migrator.migrate(queue, upTo: Self.lastIdentifierBeforeTheFlag)
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
         try migrator.migrate(queue)
@@ -65,7 +78,7 @@ struct ComposerDraftFlagTests {
                 arguments: [ConfigStore.singletonID]))
             let raw: DatabaseValue = row["composer_draft_enabled"]
             #expect(raw.isNull)
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 
@@ -101,11 +114,13 @@ struct ComposerDraftFlagTests {
         #expect(caps.composerDraftEnabled == Config.composerDraftDefault)
     }
 
+    /// Off is the value that differs from the shipped default, so it is the
+    /// one whose round trip says anything.
     @Test func modelRoundTripsTheValue() throws {
         var config = Config()
-        config.composerDraftEnabled = true
+        config.composerDraftEnabled = false
         let decoded = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(config))
-        #expect(decoded.composerDraftEnabled == true)
+        #expect(decoded.composerDraftEnabled == false)
     }
 
     @Test func methodName() {
@@ -139,6 +154,8 @@ struct ComposerDraftFlagTests {
             db: db,
             lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        // The other features ship on; off, the list is composer drafts alone.
+        try await db.config.setEverySessionModFeatureOff()
         let recorder = SessionModPluginSyncRecorder()
         router.sessionModPluginSync = { recorder.append($0) }
 

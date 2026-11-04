@@ -25,6 +25,8 @@ Both run on worktree creation — and again when an archived worktree is revived
 
 The split is your repo's choice; the rule of thumb is *preSession = "the agent must not start before this finishes"*. The `preSession` hook runs in a visible terminal tab (labeled `pre-session`), so you can watch its output live. That tab is **ephemeral on success**: once the hook exits 0 and the agent terminals exist, TBD closes it automatically. If the hook exits non-zero, times out, or its pane gets killed, the tab is left open instead — dropped into a regular shell with the hook's output still on screen — and TBD raises an error notification.
 
+The `setup` tab (labeled `setup`) closes itself the same way when its hook exits 0. A failed `setup` hook keeps the tab open with a shell and the hook's output on screen. To keep every `setup` tab open, turn off **Auto-close the setup tab on success** under Settings → General → Worktrees; the change applies to worktrees created after it.
+
 `preSession` has a 600-second timeout. A non-zero exit status, a timeout, or a killed pane does **not** abort worktree creation or block the agent forever — TBD posts a notification and starts the agent anyway, leaving the hook's tab open as described above.
 
 ## Re-running `preSession`

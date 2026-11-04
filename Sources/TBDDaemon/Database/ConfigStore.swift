@@ -47,6 +47,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
+    /// Setup-tab auto-close. **Tri-state**: the frozen
+    /// `v57_config_auto_close_setup` migration gave the column a SQL default
+    /// of 0, and `20261104175902_auto_close_setup_default_on` resets it to
+    /// NULL, so `nil` means "never chose". Resolve it through
+    /// `Config.autoCloseSetupDefault`, never through `?? false`.
     var auto_close_setup_enabled: Bool?
     /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
     /// repos (TBD-created ones and the repo's own checkout), excluding
@@ -65,12 +70,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.queuedPromptDefault`, never through `?? false`.
     var queued_prompt_enabled: Bool?
-    /// Whether ordinary new worktrees start with an empty "Notes" note. The
-    /// note opens no panel by itself.
-    /// **Genuinely tri-state**: the backing migration carries no SQL default,
-    /// so `nil` means "never chose" and resolves through
-    /// `Config.autoCreateNotesDefault`.
-    var auto_create_notes_enabled: Bool?
     /// Gate for the profile-dir collector
     /// (design 2026-08-15). **Genuinely tri-state**, same shape as
     /// `queued_prompt_enabled`: the `v78_config_gc_profile_dirs` column carries
@@ -214,9 +213,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
     ///   the parameter exists so tests can prove that NULL *follows* a changed
     ///   default while an explicit `false` does not.
-    /// - Parameter autoCreateNotesDefault: same shape, for
-    ///   `auto_create_notes_enabled` — the parameter proves that an untouched
-    ///   preference follows the shipped default while explicit choices stick.
+    /// - Parameter autoCloseSetupDefault: same shape, for
+    ///   `auto_close_setup_enabled`.
     /// - Parameter gcProfileDirsDefault: same shape again, for
     ///   `gc_profile_dirs_enabled` — the profile-dir collector's own soak gate.
     /// - Parameter claudeCloudEnabledDefault: same shape again, for the Claude
@@ -276,7 +274,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   feature on.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
-        autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
+        autoCloseSetupDefault: Bool = Config.autoCloseSetupDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -330,7 +328,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
-            autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
+            // NOT `?? false`: NULL means "never chose" and follows the
+            // shipped default.
+            autoCloseSetupEnabled: auto_close_setup_enabled ?? autoCloseSetupDefault,
             autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
@@ -341,7 +341,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // means "never chose" and must resolve to the shipped default —
             // that is the whole point of v70_config_queued_prompt.
             queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
-            autoCreateNotesEnabled: auto_create_notes_enabled ?? autoCreateNotesDefault,
             // Same reasoning, for the profile-dir collector's gate — NOT
             // `?? false`.
             gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault,
@@ -702,18 +701,6 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist whether ordinary new worktrees start with an empty "Notes"
-    /// note. Writing either value records an explicit choice, distinct from
-    /// NULL.
-    public func setAutoCreateNotes(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7). Off is the
     /// shipped default. Writing either value is an explicit gesture that leaves
     /// the column non-NULL forever after — including `false`, which is the
@@ -732,9 +719,10 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the auto-close-setup-tab opt-in (default OFF, soaking). Read
-    /// fresh at spawn time, so no daemon restart is required — applies to the
-    /// next worktree creation.
+    /// Persist whether the setup-hook tab closes itself after a clean run.
+    /// On is the shipped default; writing either value is an explicit choice
+    /// that a later default change leaves alone. Read fresh at spawn time, so
+    /// no daemon restart is required — applies to the next worktree creation.
     public func setAutoCloseSetup(enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
@@ -1050,7 +1038,7 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the transcript-streaming gate (default OFF, soaking) — whether
+    /// Persist the transcript-streaming gate (default ON) — whether
     /// sessions spawn with the session mod's `transcript-stream` feature, and
     /// the transcript shows the provisional rows it feeds.
     ///

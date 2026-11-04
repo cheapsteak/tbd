@@ -7,92 +7,38 @@ import TBDShared
 import TestSupport
 
 // Tier 1: values, and an in-memory `AppState` on a test defaults suite. No
-// window; the one wait suspends for the store's change notification.
+// window and no waits.
 
-/// The Tabs in the toolbar setting: the flag, the shared choice of whether the
-/// detail area draws a worktree's tab bar, the toolbar items each choice
-/// gives, the row's metrics and the main row's width rule. Each gated
-/// behaviour is checked with the setting on and off. Spec:
+/// Each pane's tab strip in the window's toolbar row: the shared choice of
+/// whether the detail area draws a worktree's tab bar, the toolbar items each
+/// choice gives, the row's metrics and the main row's width rule. Spec:
 /// docs/specs/2026-11-02-tabs-in-toolbar-design.md, "Testing".
 @MainActor
 @Suite("Tabs in the toolbar")
 struct TabsInToolbarTests {
     private typealias ItemID = MainToolbarItemID
 
-    // MARK: - The setting
-
-    /// Off until somebody chooses: an unset key follows the shipped default,
-    /// an explicit choice survives a change to it.
-    @Test func theSettingIsOffUntilChosenAndAChoiceSurvivesADefaultChange() {
-        #expect(AppState.tabsInToolbarKey == "window.tabsInToolbar")
-        #expect(AppState.tabsInToolbarDefault == false)
-        let unset = AppState.tabsInToolbarEnabled(stored: nil)
-        #expect(unset == false)
-        let unsetAfterAFlip = AppState.tabsInToolbarEnabled(stored: nil, shippedDefault: true)
-        #expect(unsetAfterAFlip)
-        let optedOut = AppState.tabsInToolbarEnabled(stored: false, shippedDefault: true)
-        #expect(optedOut == false)
-        let optedIn = AppState.tabsInToolbarEnabled(stored: true, shippedDefault: false)
-        #expect(optedIn)
-    }
-
-    /// `AppState.windowChrome` follows the key in `AppState.userDefaults`: a
-    /// write through the store reaches it through the store's change
-    /// notification, a write to another key changes nothing, and the Settings
-    /// toggle's setter writes the store.
-    @Test func theChromeFollowsTheStore() async throws {
-        try await withTestDefaults("TabsInToolbarTests.follows") { defaults in
-            let state = AppState(userDefaults: defaults)
-            let chrome = state.windowChrome
-            #expect(chrome.tabsInToolbar == false)
-
-            defaults.set("acme", forKey: "TabsInToolbarTests.unrelatedKey")
-            chrome.followDefaults()
-            #expect(chrome.tabsInToolbar == false)
-
-            defaults.set(true, forKey: AppState.tabsInToolbarKey)
-            let followed = try await waitForMainActorCondition("the chrome to follow the store's write") {
-                chrome.tabsInToolbar
-            }
-            #expect(followed)
-
-            chrome.setTabsInToolbar(false)
-            let stored = defaults.object(forKey: AppState.tabsInToolbarKey) as? Bool
-            #expect(stored == false)
-            #expect(chrome.tabsInToolbar == false)
-        }
-    }
-
-    /// An AppState whose store holds the setting on reads it on at once.
-    @Test func aStoredChoiceIsReadAtLaunch() {
-        withTestDefaults("TabsInToolbarTests.launch") { defaults in
-            defaults.set(true, forKey: AppState.tabsInToolbarKey)
-            let state = AppState(userDefaults: defaults)
-            #expect(state.windowChrome.tabsInToolbar)
-        }
-    }
+    // MARK: - The chrome
 
     /// The geometry the toolbar controller measures is written only when it
     /// changes, and read back as written.
     @Test func theChromeTakesTheMeasuredGeometry() {
-        withTestDefaults("TabsInToolbarTests.geometry") { defaults in
-            let chrome = AppState(userDefaults: defaults).windowChrome
-            #expect(chrome.topSafeAreaInset == 0)
-            #expect(chrome.leadingItemTrailingEdge == nil)
-            chrome.update(topSafeAreaInset: 52, leadingItemTrailingEdge: -120)
-            #expect(chrome.topSafeAreaInset == 52)
-            #expect(chrome.leadingItemTrailingEdge == -120)
-            chrome.update(topSafeAreaInset: 66, leadingItemTrailingEdge: nil)
-            #expect(chrome.topSafeAreaInset == 66)
-            #expect(chrome.leadingItemTrailingEdge == nil)
-        }
+        let chrome = WindowChromeState()
+        #expect(chrome.topSafeAreaInset == 0)
+        #expect(chrome.leadingItemTrailingEdge == nil)
+        chrome.update(topSafeAreaInset: 52, leadingItemTrailingEdge: -120)
+        #expect(chrome.topSafeAreaInset == 52)
+        #expect(chrome.leadingItemTrailingEdge == -120)
+        chrome.update(topSafeAreaInset: 66, leadingItemTrailingEdge: nil)
+        #expect(chrome.topSafeAreaInset == 66)
+        #expect(chrome.leadingItemTrailingEdge == nil)
     }
 
     // MARK: - The row's metrics
 
     /// The row is the toolbar's height, as the content pane's top safe-area
     /// inset reads it, whatever that is; only an unmeasured inset falls back
-    /// to the tab row's own height.
+    /// to `TabRowMetrics.height`.
     @Test func theRowIsTheTopSafeAreaInsetTall() {
         let owners = MainTabRowMetrics.height(topSafeAreaInset: 52)
         #expect(owners == 52)
@@ -357,30 +303,25 @@ struct TabsInToolbarTests {
     }
 
     /// The toolbar's `panesDrawTopRow` and the panes' agree for every kind of
-    /// selection, with the setting on and off, and both are on exactly when
-    /// the setting is on and the detail area shows `SingleWorktreeView` for a
-    /// worktree it finds.
+    /// selection, and both are on exactly when the detail area shows
+    /// `SingleWorktreeView` for a worktree it finds.
     @Test func theToolbarAndTheDetailAreaAgree() {
-        for tabsInToolbar in [false, true] {
-            for scenario in Scenario.allCases {
-                withTestDefaults("TabsInToolbarTests.agree") { defaults in
-                    defaults.set(tabsInToolbar, forKey: AppState.tabsInToolbarKey)
-                    let state = Self.state(defaults: defaults)
-                    scenario.apply(to: state)
+        for scenario in Scenario.allCases {
+            withTestDefaults("TabsInToolbarTests.agree") { defaults in
+                let state = Self.state(defaults: defaults)
+                scenario.apply(to: state)
 
-                    let toolbar = MainToolbarSnapshot.make(from: state)
-                        .layoutState(sidebarCollapsed: false).panesDrawTopRow
-                    let panes = state.panesDrawTopRow
-                    var drawsSingleWorktree = false
-                    if case .worktree(let id) = MainDetailContent.current(in: state) {
-                        drawsSingleWorktree = state.findWorktree(id: id) != nil
-                    }
-                    let expected = tabsInToolbar && drawsSingleWorktree
-                    #expect(toolbar == panes, "\(scenario) with the setting \(tabsInToolbar)")
-                    #expect(panes == expected, "\(scenario) with the setting \(tabsInToolbar)")
-                    let tabBarScenario = scenario == .oneWorktree
-                    #expect(drawsSingleWorktree == tabBarScenario, "\(scenario)")
+                let toolbar = MainToolbarSnapshot.make(from: state)
+                    .layoutState(sidebarCollapsed: false).panesDrawTopRow
+                let panes = state.showsWorktreeTabBar
+                var drawsSingleWorktree = false
+                if case .worktree(let id) = MainDetailContent.current(in: state) {
+                    drawsSingleWorktree = state.findWorktree(id: id) != nil
                 }
+                #expect(toolbar == panes, "\(scenario)")
+                #expect(panes == drawsSingleWorktree, "\(scenario)")
+                let tabBarScenario = scenario == .oneWorktree
+                #expect(drawsSingleWorktree == tabBarScenario, "\(scenario)")
             }
         }
     }
@@ -422,101 +363,68 @@ struct TabsInToolbarTests {
 
     // MARK: - Toolbar items
 
-    /// With the setting off, every state keeps the title straight after the
-    /// tracking separator, then the flexible space, and the Servers item
-    /// follows its presentation, whatever the detail area shows.
-    @Test func withTheSettingOffEveryStateKeepsTodaysList() {
-        for state in Self.layoutCombinations(tabsInToolbar: false) {
-            let list = MainToolbarLayout.identifiers(for: state.layout)
-            let separator = list.firstIndex(of: ItemID.sidebarSeparator) ?? -1
-            #expect(state.layout.panesDrawTopRow == false)
-            #expect(state.layout.showsServers == state.hasServers)
-            let next = Array(list.dropFirst(separator + 1).prefix(2))
-            let titleThenSpace: [NSToolbarItem.Identifier] = [ItemID.title, .flexibleSpace]
-            #expect(next == titleThenSpace)
-            #expect(list.contains(ItemID.servers) == state.hasServers)
-        }
-    }
-
-    /// With the setting on and a worktree's tab bar showing, the list ends at
-    /// the tracking separator, with the sidebar shown and collapsed.
-    @Test func withTheSettingOnAndATabBarTheListEndsAtTheSeparator() {
+    /// With a worktree's tab bar showing, the list ends at the tracking
+    /// separator, with the sidebar shown and collapsed.
+    @Test func withATabBarTheListEndsAtTheSeparator() {
         let shown = MainToolbarLayout.identifiers(
-            for: Self.snapshot(tabsInToolbar: true, tabBar: true, servers: true).layoutState(sidebarCollapsed: false))
+            for: Self.snapshot(tabBar: true).layoutState(sidebarCollapsed: false))
         let expectedShown: [NSToolbarItem.Identifier] = [
             ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter, ItemID.sidebarSeparator,
         ]
         #expect(shown == expectedShown)
         let collapsed = MainToolbarLayout.identifiers(
-            for: Self.snapshot(tabsInToolbar: true, tabBar: true, servers: true).layoutState(sidebarCollapsed: true))
+            for: Self.snapshot(tabBar: true).layoutState(sidebarCollapsed: true))
         let expectedCollapsed: [NSToolbarItem.Identifier] = [ItemID.leadingButtons, ItemID.sidebarSeparator]
         #expect(collapsed == expectedCollapsed)
-
-        // The same snapshot with the setting off keeps the title and Servers.
-        let off = MainToolbarLayout.identifiers(
-            for: Self.snapshot(tabsInToolbar: false, tabBar: true, servers: true).layoutState(sidebarCollapsed: false))
-        #expect(off.contains(ItemID.title))
-        #expect(off.contains(ItemID.servers))
     }
 
-    /// With the setting on and any other page, the title cluster follows the
-    /// tracking separator, as with the setting off.
-    @Test func withTheSettingOnElsewhereTheTitleFollowsTheSeparator() {
+    /// On any other page, the title cluster follows the tracking separator.
+    @Test func elsewhereTheTitleFollowsTheSeparator() {
         for collapsed in [false, true] {
             let list = MainToolbarLayout.identifiers(
-                for: Self.snapshot(tabsInToolbar: true, tabBar: false, servers: false)
-                    .layoutState(sidebarCollapsed: collapsed))
+                for: Self.snapshot(tabBar: false).layoutState(sidebarCollapsed: collapsed))
             let separator = list.firstIndex(of: ItemID.sidebarSeparator) ?? -1
             let next = list.dropFirst(separator + 1).first
             #expect(next == ItemID.title)
         }
     }
 
-    /// With the setting on, no state lists Servers: it lives in the status
-    /// bar.
-    @Test func withTheSettingOnNoStateListsServers() {
-        for state in Self.layoutCombinations(tabsInToolbar: true) {
-            let list = MainToolbarLayout.identifiers(for: state.layout)
-            #expect(!list.contains(ItemID.servers))
-            #expect(state.layout.showsServers == false)
-        }
-    }
-
-    /// A remote session's Transcript, Reconnect and Stop are the same with
-    /// the setting on and off.
-    @Test func remoteItemsAreTheSameEitherWay() {
-        let remote = RemotePresentation(
+    /// A remote session's page draws no tab bar, so its Transcript, Reconnect
+    /// and Stop follow the title and the flexible space, with the sidebar
+    /// shown and collapsed.
+    @Test func aRemoteSessionKeepsItsButtonsAfterTheTitle() {
+        var snapshot = Self.snapshot(tabBar: false)
+        snapshot.remote = RemotePresentation(
             showsTranscript: true, showsReconnect: true, showsStop: true, transcriptShown: false)
+        let afterTheSeparator: [NSToolbarItem.Identifier] = [
+            ItemID.title, .flexibleSpace, ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
+        ]
         for collapsed in [false, true] {
-            var on = Self.snapshot(tabsInToolbar: true, tabBar: false, servers: false)
-            on.remote = remote
-            var off = on
-            off.tabsInToolbar = false
-            let onList = MainToolbarLayout.identifiers(for: on.layoutState(sidebarCollapsed: collapsed))
-            let offList = MainToolbarLayout.identifiers(for: off.layoutState(sidebarCollapsed: collapsed))
-            #expect(onList == offList)
-            #expect(onList.contains(ItemID.remoteStop))
+            let list = MainToolbarLayout.identifiers(for: snapshot.layoutState(sidebarCollapsed: collapsed))
+            let separator = list.firstIndex(of: ItemID.sidebarSeparator) ?? -1
+            let rest = Array(list.dropFirst(separator + 1))
+            #expect(rest == afterTheSeparator)
         }
     }
 
-    /// The snapshot reads the setting from the store and whether a worktree's
-    /// tab bar shows from the shared choice.
-    @Test func theSnapshotReadsTheSettingAndTheTabBar() {
+    /// The snapshot reads whether a worktree's tab bar shows from the shared
+    /// choice.
+    @Test func theSnapshotReadsTheTabBar() {
         withTestDefaults("TabsInToolbarTests.snapshot") { defaults in
             let state = Self.state(defaults: defaults)
-            let unset = MainToolbarSnapshot.make(from: state)
-            #expect(unset.tabsInToolbar == false)
-            #expect(unset.showsWorktreeTabBar == false)
+            let unselected = MainToolbarSnapshot.make(from: state)
+            #expect(unselected.showsWorktreeTabBar == false)
+            let unselectedDraws = unselected.layoutState(sidebarCollapsed: false).panesDrawTopRow
+            #expect(unselectedDraws == false)
 
-            defaults.set(true, forKey: AppState.tabsInToolbarKey)
             state.isConnected = true
             let worktreeID = state.worktrees.values.flatMap { $0 }[0].id
             state.selectedWorktreeIDs = [worktreeID]
-            let on = MainToolbarSnapshot.make(from: state)
-            #expect(on.tabsInToolbar)
-            #expect(on.showsWorktreeTabBar)
-            #expect(on != unset)
-            #expect(on.layoutState(sidebarCollapsed: false).panesDrawTopRow)
+            let selected = MainToolbarSnapshot.make(from: state)
+            #expect(selected.showsWorktreeTabBar)
+            #expect(selected != unselected)
+            let selectedDraws = selected.layoutState(sidebarCollapsed: false).panesDrawTopRow
+            #expect(selectedDraws)
         }
     }
 
@@ -549,34 +457,9 @@ struct TabsInToolbarTests {
             hiddenRepoCount: 0, showsHiddenRepos: false)
     }
 
-    private static func servers() -> ServersPresentation {
-        ServersPresentation(
-            title: "Servers", isRunning: false, primaryURL: nil,
-            help: "Dev servers", accessibilityLabel: "Dev servers")
-    }
-
-    private static func snapshot(tabsInToolbar: Bool, tabBar: Bool, servers: Bool) -> MainToolbarSnapshot {
+    private static func snapshot(tabBar: Bool) -> MainToolbarSnapshot {
         MainToolbarSnapshot(
             canGoBack: false, canGoForward: false, filter: filter(),
-            servers: servers ? Self.servers() : nil, remote: nil, title: "feature",
-            tabsInToolbar: tabsInToolbar, showsWorktreeTabBar: tabBar)
-    }
-
-    /// Every combination of collapse, Servers, the three remote buttons and
-    /// a worktree tab bar, through the snapshot, for one setting.
-    private static func layoutCombinations(
-        tabsInToolbar: Bool
-    ) -> [(layout: MainToolbarLayoutState, hasServers: Bool)] {
-        (0..<64).map { bits in
-            let remote = RemotePresentation(
-                showsTranscript: bits & 4 != 0, showsReconnect: bits & 8 != 0, showsStop: bits & 16 != 0,
-                transcriptShown: false)
-            let hasServers = bits & 2 != 0
-            let snapshot = MainToolbarSnapshot(
-                canGoBack: false, canGoForward: false, filter: filter(),
-                servers: hasServers ? servers() : nil, remote: remote, title: "feature",
-                tabsInToolbar: tabsInToolbar, showsWorktreeTabBar: bits & 32 != 0)
-            return (snapshot.layoutState(sidebarCollapsed: bits & 1 != 0), hasServers)
-        }
+            remote: nil, title: "feature", showsWorktreeTabBar: tabBar)
     }
 }

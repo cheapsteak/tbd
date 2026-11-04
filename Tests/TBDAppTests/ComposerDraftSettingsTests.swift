@@ -98,10 +98,13 @@ struct ComposerDraftSettingsTests {
         #expect(AppState.composerDraftRequiredByAutoParkCaption == "On while auto-hibernation is on")
     }
 
+    /// Before capabilities arrive the flag reads the shipped default, the
+    /// value an install that never chose resolves to.
     @Test func computedFlagFollowsCapabilities() async {
         await withAppState { state in
+            let beforeLoad = state.composerDraftEnabled
             #expect(state.daemonCapabilities == nil)
-            #expect(state.composerDraftEnabled == false)
+            #expect(beforeLoad == Config.composerDraftDefault)
             state.daemonCapabilities = Self.capabilities(composerDraft: true)
             #expect(state.composerDraftEnabled == true)
             state.daemonCapabilities = Self.capabilities(composerDraft: false)

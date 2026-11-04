@@ -27,21 +27,9 @@ struct MainToolbarSnapshotTests {
         try body(state, [first, second], worktrees)
     }
 
-    private func server(_ name: String, _ state: DevServerStateKind, url: String? = nil) -> DevServerInfo {
-        DevServerInfo(name: name, label: name, source: "tbd.toml", state: state, exitCode: nil,
-                      endpoints: url.map { [DevServerEndpoint(name: "app", url: $0)] } ?? [],
-                      terminalID: nil, pid: nil, hasStopCommand: false,
-                      stateFromStatusCommand: nil, hasStatusCommand: true, exitedTab: nil)
-    }
-
-    private func list(_ servers: [DevServerInfo], id: UUID) -> DevServerListResult {
-        DevServerListResult(worktreeID: id, servers: servers, parseErrors: [], runningFileDiagnostics: [])
-    }
-
     @Test func nothingSelected() {
         withState { state, repos, _ in
             let snapshot = MainToolbarSnapshot.make(from: state)
-            #expect(snapshot.servers == nil)
             #expect(snapshot.remote == nil)
             let titles: [String] = snapshot.filter.options.map(\.title)
             #expect(titles == ["All Repos", "acme", "widgets"])
@@ -149,44 +137,6 @@ struct MainToolbarSnapshotTests {
         }
     }
 
-    @Test func serversNeedOneSelectedWorktreeAndAList() {
-        withState { state, _, worktrees in
-            let a = worktrees[0].id
-            let b = worktrees[1].id
-            state.devServerLists[a] = list([server("web", .stopped)], id: a)
-            state.devServerLists[b] = list([server("web", .stopped)], id: b)
-
-            // Both worktrees have a list, so only the count guard can refuse.
-            state.selectedWorktreeIDs = [a, b]
-            #expect(MainToolbarSnapshot.make(from: state).servers == nil)
-
-            state.devServerLists[b] = nil
-
-            state.selectedWorktreeIDs = [b]
-            #expect(MainToolbarSnapshot.make(from: state).servers == nil)
-
-            state.selectedWorktreeIDs = [a]
-            let idle = MainToolbarSnapshot.make(from: state).servers
-            #expect(idle?.title == "Servers")
-            #expect(idle?.isRunning == false)
-            #expect(idle?.primaryURL == nil)
-            #expect(idle?.help == "Dev servers")
-            #expect(idle?.accessibilityLabel == "Dev servers")
-
-            state.devServerLists[a] = list(
-                [server("web", .running, url: "http://localhost:3000"), server("api", .running)], id: a)
-            let running = MainToolbarSnapshot.make(from: state).servers
-            #expect(running?.title == "2 running")
-            #expect(running?.isRunning == true)
-            #expect(running?.primaryURL == "http://localhost:3000")
-            #expect(running?.help == "Open http://localhost:3000 · more options")
-            #expect(running?.accessibilityLabel == "Dev servers, 2 running")
-
-            state.devServerLists[a] = list([], id: a)
-            #expect(MainToolbarSnapshot.make(from: state).servers == nil)
-        }
-    }
-
     private func provider(capabilities: [String]) -> RemoteProviderStatus {
         RemoteProviderStatus(
             config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
@@ -281,23 +231,26 @@ struct MainToolbarSnapshotTests {
         let filter = RepoFilterPresentation(
             options: [.init(id: nil, title: "All Repos")], selected: nil, selectedIsKnown: true,
             hiddenRepoCount: 0, showsHiddenRepos: false)
-        let servers = ServersPresentation(
-            title: "Servers", isRunning: false, primaryURL: nil,
-            help: "Dev servers", accessibilityLabel: "Dev servers")
         let remote = RemotePresentation(
             showsTranscript: true, showsReconnect: false, showsStop: true, transcriptShown: false)
 
         let bare = MainToolbarSnapshot(
-            canGoBack: false, canGoForward: false, filter: filter, servers: nil, remote: nil)
+            canGoBack: false, canGoForward: false, filter: filter, remote: nil)
         #expect(bare.layoutState(sidebarCollapsed: false) == MainToolbarLayoutState(
-            sidebarCollapsed: false, showsServers: false, showsTranscript: false,
-            showsReconnect: false, showsStop: false))
+            sidebarCollapsed: false, showsTranscript: false,
+            showsReconnect: false, showsStop: false, panesDrawTopRow: false))
 
         let full = MainToolbarSnapshot(
-            canGoBack: true, canGoForward: true, filter: filter, servers: servers, remote: remote)
+            canGoBack: true, canGoForward: true, filter: filter, remote: remote)
         #expect(full.layoutState(sidebarCollapsed: true) == MainToolbarLayoutState(
-            sidebarCollapsed: true, showsServers: true, showsTranscript: true,
-            showsReconnect: false, showsStop: true))
+            sidebarCollapsed: true, showsTranscript: true,
+            showsReconnect: false, showsStop: true, panesDrawTopRow: false))
+
+        let tabBar = MainToolbarSnapshot(
+            canGoBack: false, canGoForward: false, filter: filter, remote: nil, showsWorktreeTabBar: true)
+        #expect(tabBar.layoutState(sidebarCollapsed: false) == MainToolbarLayoutState(
+            sidebarCollapsed: false, showsTranscript: false,
+            showsReconnect: false, showsStop: false, panesDrawTopRow: true))
     }
 
     /// The title is the title cluster's main title: the selected worktree's

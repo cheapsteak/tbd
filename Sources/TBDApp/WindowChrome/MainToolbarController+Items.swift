@@ -1,6 +1,5 @@
 import AppKit
 import os
-import SwiftUI
 import TBDShared
 
 private let itemsLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
@@ -171,7 +170,7 @@ extension MainToolbarController {
 
     /// A fresh item for `identifier`, as the delegate hands out. Content that
     /// follows `AppState` is filled in by `updateContent(_:)`, which looks the
-    /// current item up by identifier. `nil` leaves the standard spaces to the
+    /// current item up by identifier. `nil` leaves the flexible space to the
     /// toolbar, and refuses the tracking separator once its split is gone.
     ///
     /// - Parameter willBeInserted: false when AppKit asks for an item it will
@@ -187,8 +186,6 @@ extension MainToolbarController {
             return makeTrackingSeparator()
         case MainToolbarItemID.title:
             return makeTitleItem(withView: willBeInserted)
-        case MainToolbarItemID.servers:
-            return makeServersItem()
         case MainToolbarItemID.remoteTranscript:
             return makeRemoteItem(identifier, symbol: "bubble", tip: "Show transcript",
                                   label: "Transcript", action: #selector(remoteTranscriptClicked(_:)))
@@ -512,22 +509,6 @@ extension MainToolbarController {
     static let titleFillPriority = NSLayoutConstraint.Priority(
         rawValue: NSLayoutConstraint.Priority.fittingSizeCompression.rawValue - 1)
 
-    private func makeServersItem() -> NSMenuToolbarItem {
-        let item = NSMenuToolbarItem(itemIdentifier: MainToolbarItemID.servers)
-        item.label = "Servers"
-        item.showsIndicator = true
-        item.visibilityPriority = .high
-        // Without a main URL the item has no action and a click opens the
-        // menu; validation must not read the missing action as disabled.
-        item.autovalidates = false
-        item.isEnabled = true
-        let menu = NSMenu(title: "Servers")
-        menu.autoenablesItems = false
-        menu.delegate = self
-        item.menu = menu
-        return item
-    }
-
     /// A remote session button. Its overflow row is explicit, titled with
     /// its label and carrying its target and action: AppKit documents a
     /// default row with a target and action only for standard items.
@@ -561,10 +542,6 @@ extension MainToolbarController {
         }
         if let titleItem = item(MainToolbarItemID.title) {
             updateTitleForm(titleItem, snapshot.title)
-        }
-        if let servers = snapshot.servers,
-           let serversItem = item(MainToolbarItemID.servers) as? NSMenuToolbarItem {
-            updateServers(serversItem, servers)
         }
         if let remote = snapshot.remote, let transcript = item(MainToolbarItemID.remoteTranscript) {
             updateTranscript(transcript, remote)
@@ -749,64 +726,6 @@ extension MainToolbarController {
         }
     }
 
-    private func updateServers(_ item: NSMenuToolbarItem, _ servers: ServersPresentation) {
-        if item.title != servers.title {
-            item.title = servers.title
-        }
-        let colorScheme = currentColorScheme
-        setImage(item, key: Self.serversImageKey(servers, colorScheme: colorScheme)) {
-            serversImage(servers, colorScheme: colorScheme)
-        }
-        if item.toolTip != servers.help {
-            item.toolTip = servers.help
-        }
-        // With a main URL a click opens it; without one the item has no
-        // action, and a click opens the menu.
-        let action: Selector? = servers.primaryURL == nil ? nil : #selector(openPrimaryServerURL(_:))
-        let target: AnyObject? = action == nil ? nil : self
-        if item.action != action {
-            item.action = action
-        }
-        if item.target !== target {
-            item.target = target
-        }
-        // An empty menu is seeded once; every open rebuilds it anyway.
-        if item.menu.numberOfItems == 0 {
-            rebuildServersMenu(item.menu)
-        }
-    }
-
-    /// What a Servers icon is baked from: the running state, the appearance
-    /// and the accessibility label.
-    private static func serversImageKey(_ servers: ServersPresentation, colorScheme: ColorScheme) -> String {
-        "\(servers.isRunning)-\(colorScheme)-\(servers.accessibilityLabel)"
-    }
-
-    /// The baked Servers icon for the appearance, copied so the copy can carry
-    /// the accessibility label (`NSToolbarItem` has none of its own) without
-    /// touching the image `ServersButtonLabel.bakedIcon` caches.
-    private func serversImage(_ servers: ServersPresentation, colorScheme: ColorScheme) -> NSImage {
-        let key = Self.serversImageKey(servers, colorScheme: colorScheme)
-        if let cached = serversImages[key] { return cached }
-        let baked = ServersButtonLabel.bakedIcon(running: servers.isRunning, colorScheme: colorScheme)
-        guard let image = baked.copy() as? NSImage else { return baked }
-        image.isTemplate = false
-        image.accessibilityDescription = servers.accessibilityLabel
-        serversImages[key] = image
-        return image
-    }
-
-    // MARK: The Servers menu
-
-    /// Rebuilds `menu` through the shared `ServersMenu` for the one selected
-    /// worktree's current list, each row sending `serversMenuItemChosen(_:)`
-    /// to this controller. Empty when there is no single selection.
-    func rebuildServersMenu(_ menu: NSMenu) {
-        ServersMenu.rebuild(
-            menu, worktreeID: ServersMenu.selectedWorktreeID(in: appState), appState: appState,
-            target: self, action: #selector(serversMenuItemChosen(_:)))
-    }
-
     // MARK: Actions
 
     // Every action the toolbar wires takes `Any?` and checks the sender's
@@ -860,15 +779,6 @@ extension MainToolbarController {
         let defaults = appState.userDefaults
         let shown = SidebarBuildOptions.storedShowHiddenRepos(defaults)
         defaults.set(!shown, forKey: SidebarBuildOptions.showHiddenReposKey)
-    }
-
-    @objc func openPrimaryServerURL(_ sender: Any?) {
-        guard let url = appliedSnapshot?.servers?.primaryURL else { return }
-        appState.openDevServerURL(url)
-    }
-
-    @objc func serversMenuItemChosen(_ sender: Any?) {
-        ServersMenu.runChosen(sender, appState: appState)
     }
 
     // Each remote action reads the selection when it is clicked, so it acts

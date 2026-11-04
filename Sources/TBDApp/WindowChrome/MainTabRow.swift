@@ -1,17 +1,16 @@
 import AppKit
 import SwiftUI
 
-// The pieces of the panes' top rows with the Tabs in the toolbar setting on:
+// The pieces of the panes' top rows, which draw in the window's toolbar row:
 // the row's metrics, the main row's width rule and layout, the side strip's
 // layout, the drag gap and the pill tabs. Spec:
 // docs/specs/2026-11-02-tabs-in-toolbar-design.md.
 
 // MARK: - Metrics
 
-/// The sizes the top rows rest on with the setting on. The row's height and
-/// leading inset follow the toolbar (`WindowChromeState`); the rest are
-/// choices. The title column's fonts and spacing are the toolbar title's
-/// (`WorktreeTitleMetrics`).
+/// The sizes the top rows rest on. The row's height and leading inset follow
+/// the toolbar (`WindowChromeState`); the rest are choices. The title
+/// column's fonts and spacing are the toolbar title's (`WorktreeTitleMetrics`).
 enum MainTabRowMetrics {
     /// The gap between the toolbar's leading item and the main row's first
     /// item while the item sits over the main pane (sidebar collapsed).
@@ -49,9 +48,10 @@ enum MainTabRowMetrics {
     static let pillToAddSpacing: CGFloat = 4
 
     /// The row's height: the content pane's top safe-area inset, the
-    /// toolbar's height over the pane, never less than the tab row's own
-    /// height. The floor holds only before the toolbar controller has
-    /// measured the inset, when the row would otherwise take no height.
+    /// toolbar's height over the pane, never less than
+    /// `TabRowMetrics.height`. The floor holds only before the toolbar
+    /// controller has measured the inset, when the row would otherwise take
+    /// no height.
     static func height(topSafeAreaInset: CGFloat) -> CGFloat {
         max(topSafeAreaInset, TabRowMetrics.height)
     }

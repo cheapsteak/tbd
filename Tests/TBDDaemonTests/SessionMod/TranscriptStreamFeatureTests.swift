@@ -29,9 +29,7 @@ private final class PluginSyncRecorder: @unchecked Sendable {
     }
 
     @Test func theFeatureListNamesTranscriptStreamExactlyWhenTheFlagIsOn() {
-        var config = Config()
-        config.composerDraftEnabled = false
-        config.transcriptStreamingEnabled = false
+        var config = Config.withoutSessionModFeatures
         #expect(SessionModFeature.enabled(in: config) == [])
 
         config.transcriptStreamingEnabled = true
@@ -44,8 +42,9 @@ private final class PluginSyncRecorder: @unchecked Sendable {
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft])
     }
 
-    @Test func theShippedConfigSpawnsNoTranscriptStream() {
-        #expect(!SessionModFeature.enabled(in: Config()).contains(.transcriptStream))
+    /// Streaming ships on, so the shipped config spawns with the feature.
+    @Test func theShippedConfigSpawnsWithTranscriptStream() {
+        #expect(SessionModFeature.enabled(in: Config()).contains(.transcriptStream))
     }
 
     @Test func theSpawnEnvironmentListsTheFeature() throws {
@@ -72,6 +71,8 @@ private final class PluginSyncRecorder: @unchecked Sendable {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        // The other features ship on; off, the list is streaming alone.
+        try await db.config.setEverySessionModFeatureOff()
         let recorder = PluginSyncRecorder()
         router.sessionModPluginSync = { recorder.append($0) }
 

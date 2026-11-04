@@ -270,8 +270,9 @@ extension AppState {
         revealTerminal(terminalID: terminalID)
     }
 
-    /// The toolbar's primary click: the main URL of the first running server
-    /// that has one; nil disables the primary half.
+    /// The main URL of the first running server that has one, which the
+    /// Servers menu's first row opens (`ServersToolbarMenu`); nil leaves that
+    /// row out.
     nonisolated static func primaryDevServerURL(_ list: DevServerListResult?) -> String? {
         list?.servers.first { $0.state == .running && $0.mainURL != nil }?.mainURL
     }

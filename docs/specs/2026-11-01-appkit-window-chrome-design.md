@@ -58,8 +58,8 @@ once.
 
 ## Non-goals
 
-- **Changing what the other toolbar items do.** The Servers split button and
-  the remote session buttons keep the behavior their own specs give them.
+- **Changing what the other toolbar items do.** The remote session buttons
+  keep the behavior their own spec gives them.
 - **User toolbar customization.**
 
 ## Window structure
@@ -126,12 +126,16 @@ Nothing in the window uses SwiftUI's `.toolbar`. Items, left to right:
    is cut at the item's trailing edge, and nothing else is cut: the notes
    button's hover label reaches past the cluster's leading and bottom edges.
 6. **Flexible space.**
-7. **The right-hand items:** the Servers split button and the remote session
-   buttons (Reconnect, Stop with its confirmation, and
-   Transcript, shown on the remote spec's terms). The Servers button is an
-   `NSMenuToolbarItem` whose menu an `NSMenuDelegate` builds each time it
-   opens, and whose image updates in place, so no item is rebuilt to refresh
-   it.
+7. **The right-hand items:** the remote session buttons (Reconnect, Stop with
+   its confirmation, and Transcript, shown on the remote spec's terms). The
+   selected worktree's dev servers have their control in the status bar
+   ([`2026-11-02-tabs-in-toolbar-design.md`](2026-11-02-tabs-in-toolbar-design.md),
+   "Servers in the status bar").
+
+While the detail area shows a worktree's tab bar, the list ends at the
+tracking separator: the panes draw their tab strips and the worktree's title
+in the toolbar row instead, and any item after the separator would take the
+row's clicks (the tabs-in-toolbar spec, "Who draws the row").
 
 There is no PR button and no file-panel toggle (see "Goals").
 
@@ -273,7 +277,7 @@ An item that does not fit goes to the toolbar's overflow menu (») as its menu
 form. AppKit's default form for a view item is a row titled with the item's
 label that sends the view's action from an `NSMenuItem`, and `NSToolbarItem.h`
 promises a target and action on the default row only for standard items. So
-every item but one has an explicit form:
+every item has an explicit form:
 
 - **Leading buttons** – "Navigation", with a submenu of "Toggle Sidebar",
   "Back" and "Forward", each acting as its button does. The submenu does not
@@ -288,8 +292,6 @@ every item but one has an explicit form:
   overflows, and a hidden row would leave the menu empty.
 - **Remote session buttons** – a row titled with the button's label, carrying
   its action.
-
-The Servers item keeps AppKit's documented default: its menu is its form.
 
 The title's and the filter's rows are replaced, never edited, when what they
 show changes, since AppKit may build the overflow menu from copies of them. A
@@ -393,11 +395,10 @@ No durable resource is added.
 - **Which repos show:** with Show Hidden Repos off, a hidden repo chosen in
   the filter shows, dimmed; with it on, it shows too; with no repo chosen,
   hidden repos show only while it is on.
-- **Overflow rows:** every item's menu form, or AppKit's default where it has
-  none, sends its action from a menu item without raising, the leading item's
-  "Navigation" submenu row by row with Toggle Sidebar checked rather than
-  sent; the filter's form mirrors the button's menu, Show Hidden Repos
-  included, and sets the filter.
+- **Overflow rows:** every item's menu form sends its action from a menu item
+  without raising, the leading item's "Navigation" submenu row by row with
+  Toggle Sidebar checked rather than sent; the filter's form mirrors the
+  button's menu, Show Hidden Repos included, and sets the filter.
 - **Title width:** the title item keeps its frame as the title goes from short
   to long and back, and starts at or after the divider; a fitting measurement
   of the title view gives its constant ideal width whatever the text.

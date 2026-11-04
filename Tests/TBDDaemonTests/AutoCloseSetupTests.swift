@@ -56,17 +56,17 @@ struct AutoCloseSetupTests {
 
     // MARK: - Config flag plumbing
 
-    @Test func configFlagDefaultsOffAndRoundtrips() async throws {
+    @Test func configFlagDefaultsOnAndRoundtrips() async throws {
         let db = try TBDDatabase(inMemory: true)
-        #expect(try await db.config.get().autoCloseSetupEnabled == false,
-                "auto_close_setup_enabled must default OFF")
-        try await db.config.setAutoCloseSetup(enabled: true)
-        #expect(try await db.config.get().autoCloseSetupEnabled == true)
+        #expect(try await db.config.get().autoCloseSetupEnabled == true,
+                "auto_close_setup_enabled must default ON")
         try await db.config.setAutoCloseSetup(enabled: false)
         #expect(try await db.config.get().autoCloseSetupEnabled == false)
+        try await db.config.setAutoCloseSetup(enabled: true)
+        #expect(try await db.config.get().autoCloseSetupEnabled == true)
     }
 
-    // MARK: - Flag OFF (default): behavior byte-for-byte unchanged
+    // MARK: - Flag OFF: the plain setup command, no marker, no watcher
 
     @Test func flagOffSpawnsPlainShellWrappedSetupAndNoWatcher() async throws {
         let (_, cleanup) = isolateTBDHome()
@@ -75,6 +75,7 @@ struct AutoCloseSetupTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setAutoCloseSetup(enabled: false)
         let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -110,6 +111,45 @@ struct AutoCloseSetupTests {
         #expect(FileManager.default.fileExists(atPath: markerPath),
                 "flag off must not consume the marker (no watcher running)")
         try? FileManager.default.removeItem(atPath: markerPath)
+    }
+
+    // MARK: - Never chosen: the shipped default arms the wrapper
+
+    /// Nobody touched the toggle, so `auto_close_setup_enabled` is NULL and
+    /// the shipped default (on) decides: the setup window runs the
+    /// marker-writing wrapper and a watcher is armed. A failed exit is written
+    /// so the watcher finishes inside the test.
+    @Test func neverChosenSpawnsTheAutoCloseWrapper() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 5)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installHook(named: "setup", repoDir: repoDir)
+
+        let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        let setup = try #require(terminals.first { $0.label == TerminalLabel.setup })
+
+        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
+        let setupBody = try #require(
+            windowCalls.compactMap(\.last).first { $0.contains(".worktree-hooks/setup") }
+        )
+        #expect(setupBody.contains("runtime/setup"),
+                "a never-chosen flag must arm the marker-writing wrapper")
+        #expect(setupBody.contains("if [ $__tbd_rc -ne 0 ]"))
+
+        try writeSetupMarker(worktreeID: wt.id, exitCode: 3)
+        let markerPath = WorktreeLifecycle.setupMarkerPath(worktreeID: wt.id)
+        try await waitFor("setup marker consumed") {
+            !FileManager.default.fileExists(atPath: markerPath)
+        }
+        #expect(try await db.terminals.get(id: setup.id) != nil,
+                "a nonzero exit must keep the setup tab open")
     }
 
     // MARK: - Flag ON: clean exit closes the tab, failure keeps it

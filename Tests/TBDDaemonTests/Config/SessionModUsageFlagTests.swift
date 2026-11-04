@@ -140,6 +140,8 @@ struct SessionModUsageFlagTests {
     /// on, so composer-draft staying on keeps the mod while usage toggles.
     @Test func setterRPCSyncsThePluginWithTheFreshFeatures() async throws {
         let db = try TBDDatabase(inMemory: true)
+        // The other features ship on; off, the list is usage alone.
+        try await db.config.setEverySessionModFeatureOff()
         let router = makeRouter(db)
         let recorder = UsagePluginSyncRecorder()
         router.sessionModPluginSync = { recorder.append($0) }
@@ -167,20 +169,20 @@ struct SessionModUsageFlagTests {
     }
 
     @Test func enabledListsOnlyUsageWhenOnlyUsageIsOn() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.sessionModUsageEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.usage])
     }
 
     @Test func enabledListsBothInAllCasesOrder() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.composerDraftEnabled = true
         config.sessionModUsageEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft, .usage])
     }
 
-    @Test func enabledIsEmptyWhenBothAreOff() {
-        let config = Config()
+    @Test func enabledIsEmptyWhenEveryFeatureIsOff() {
+        let config = Config.withoutSessionModFeatures
         #expect(SessionModFeature.enabled(in: config).isEmpty)
     }
 }

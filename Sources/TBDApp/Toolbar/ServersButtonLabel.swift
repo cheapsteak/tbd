@@ -1,12 +1,9 @@
-import AppKit
-import SwiftUI
+import Foundation
 import TBDShared
 
-/// The Servers button's wording and icon: its title, its accessibility label,
-/// its menu's titles, and one baked icon (green when something runs), for
-/// `MainToolbarSnapshot`, `ServersToolbarMenu`, the toolbar's item and the
-/// status bar's Servers chip (`ServersChipPresentation`), which uses the
-/// wording but draws its own glyph.
+/// The Servers chip's wording: its title, its accessibility label and its
+/// menu's titles, for the status bar's Servers chip
+/// (`ServersChipPresentation`) and its menu (`ServersToolbarMenu`).
 enum ServersButtonLabel {
     static func runningCount(_ list: DevServerListResult) -> Int {
         list.servers.filter { $0.state == .running }.count
@@ -54,31 +51,5 @@ enum ServersButtonLabel {
     /// server has reported a main URL.
     static func leadItemTitle(primaryURL: String?) -> String? {
         primaryURL.map { "Open \($0)" }
-    }
-
-    @MainActor private static var bakedIconCache: [String: NSImage] = [:]
-
-    /// `server.rack`, tinted green when a server runs and secondary-label
-    /// otherwise, baked into a non-template image — draw, `color.set()`, fill
-    /// with `.sourceAtop`, `isTemplate = false` — so a toolbar control that
-    /// tints template images keeps the color.
-    @MainActor static func bakedIcon(running: Bool, colorScheme: ColorScheme) -> NSImage {
-        let key = "\(running)-\(colorScheme)"
-        if let cached = bakedIconCache[key] { return cached }
-        let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-        let base = NSImage(systemSymbolName: "server.rack", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config) ?? NSImage(size: NSSize(width: 12, height: 12))
-        let color: NSColor = running ? .systemGreen : .secondaryLabelColor
-        let image = NSImage(size: base.size, flipped: false) { rect in
-            // Colors resolve inside the draw handler, so dynamic colors pick
-            // up the current appearance.
-            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-            color.set()
-            rect.fill(using: .sourceAtop)
-            return true
-        }
-        image.isTemplate = false
-        bakedIconCache[key] = image
-        return image
     }
 }

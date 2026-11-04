@@ -20,7 +20,6 @@ enum MainToolbarItemID {
     /// bound to the split from the start.
     static let sidebarSeparator = NSToolbarItem.Identifier("tbd.toolbar.sidebarTrackingSeparator")
     static let title = NSToolbarItem.Identifier("tbd.toolbar.title")
-    static let servers = NSToolbarItem.Identifier("tbd.toolbar.servers")
     static let remoteTranscript = NSToolbarItem.Identifier("tbd.toolbar.remoteTranscript")
     static let remoteReconnect = NSToolbarItem.Identifier("tbd.toolbar.remoteReconnect")
     static let remoteStop = NSToolbarItem.Identifier("tbd.toolbar.remoteStop")
@@ -28,11 +27,11 @@ enum MainToolbarItemID {
     /// TBD's own identifiers, in toolbar order: the one list of them.
     static let custom: [NSToolbarItem.Identifier] = [
         leadingButtons, repoFilter, sidebarSeparator, title,
-        servers, remoteTranscript, remoteReconnect, remoteStop,
+        remoteTranscript, remoteReconnect, remoteStop,
     ]
 
-    /// The standard identifiers the layout uses: the spaces only.
-    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace, .space]
+    /// The standard identifiers the layout uses: the flexible space only.
+    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace]
 
     /// Every identifier the toolbar delegate may be asked for.
     static let allowed: [NSToolbarItem.Identifier] = custom + standard
@@ -41,14 +40,13 @@ enum MainToolbarItemID {
 /// The inputs that decide which items the toolbar shows.
 struct MainToolbarLayoutState: Equatable {
     var sidebarCollapsed: Bool
-    var showsServers: Bool
     var showsTranscript: Bool
     var showsReconnect: Bool
     var showsStop: Bool
-    /// The panes draw the window's top row: the Tabs in the toolbar setting
-    /// is on and the detail area shows a worktree's tab bar
-    /// (`AppState.panesDrawTopRow`). The item list then ends at the tracking
-    /// separator, so nothing of the toolbar's covers the row's tabs.
+    /// The panes draw the window's top row: the detail area shows a
+    /// worktree's tab bar (`AppState.showsWorktreeTabBar`). The item list
+    /// then ends at the tracking separator, so nothing of the toolbar's covers
+    /// the row's tabs.
     var panesDrawTopRow: Bool = false
 }
 
@@ -97,18 +95,28 @@ enum MainToolbarLayout {
             (state.showsReconnect, MainToolbarItemID.remoteReconnect),
             (state.showsStop, MainToolbarItemID.remoteStop),
         ]
-        let shownRemote = remote.filter { $0.0 }.map { $0.1 }
-        if state.showsServers {
-            ids.append(MainToolbarItemID.servers)
-            if !shownRemote.isEmpty { ids.append(.space) }
-        }
-        ids.append(contentsOf: shownRemote)
+        ids.append(contentsOf: remote.filter { $0.0 }.map { $0.1 })
         return ids
     }
 
     /// Minimal-ish edits turning `from` into `to`, using only inserts and
-    /// removes so items shared by both lists (notably the leading item and the
-    /// tracking separator) are never torn down.
+    /// removes, so items shared by both lists, the leading item and the
+    /// tracking separator above all, are never torn down. Removing an item
+    /// destroys its `NSToolbarItem`, and the separator's is bound to the
+    /// split view.
+    ///
+    /// The walk keeps `working` equal to `to` up to `i`. Where the two differ
+    /// at `i`, it removes `working[i]` in two cases, and otherwise inserts
+    /// `to[i]`:
+    /// - `working[i]` is surplus: the rest of `working` holds more of it than
+    ///   the rest of `to` needs. Only `.flexibleSpace` repeats, so any other
+    ///   item is surplus exactly when `to` lacks it.
+    /// - `to[i]` is a unique identifier, anything but `.flexibleSpace`, that
+    ///   still sits later in `working`. Inserting it would make a second
+    ///   copy and leave the original to the trailing removal, so the walk
+    ///   removes what stands before it and keeps it. Every layout lists its
+    ///   unique items in one order, so what this removes is a flexible
+    ///   space, which costs nothing to insert again where `to` wants one.
     static func edits(
         from: [NSToolbarItem.Identifier], to: [NSToolbarItem.Identifier]
     ) -> [ToolbarEdit] {
@@ -121,13 +129,12 @@ enum MainToolbarLayout {
                 continue
             }
             if i < working.count {
-                // Count-aware: `.flexibleSpace` repeats, so the item at `i` is
-                // only surplus when the rest of `working` holds more of it
-                // than the rest of `to` needs.
                 let current = working[i]
                 let have = working[i...].filter { $0 == current }.count
                 let need = to[i...].filter { $0 == current }.count
-                if have > need {
+                let currentIsSurplus = have > need
+                let targetSitsLater = to[i] != .flexibleSpace && working[(i + 1)...].contains(to[i])
+                if currentIsSurplus || targetSitsLater {
                     result.append(.remove(at: i))
                     working.remove(at: i)
                     continue

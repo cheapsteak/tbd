@@ -31,12 +31,6 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
-    static let autoCreateNotesLabel = "Create a starter note for new worktrees"
-    static let autoCreateNotesHelp =
-        "On: each ordinary new worktree gets an empty \"Notes\" note, which opens from the Notes button " +
-        "in the tab bar. Turn this off to skip it. " +
-        "Conversations revived on a fresh branch still receive their populated provenance note."
-
     @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
@@ -187,11 +181,7 @@ struct GeneralSettingsTab: View {
                 Toggle("Send first messages immediately", isOn: $sendFirstMessageImmediately)
                     .help("Default for first messages you write while a new worktree is coming up. On: TBD presses Return, and the agent starts working the moment the message is in. Off: the text waits in the composer for you to read and send. The \"Send immediately\" checkbox in that creation sheet changes this too; the identical-looking checkbox on an already-parked message edits only that message.")
 
-                Toggle(Self.autoCreateNotesLabel, isOn: Binding(
-                    get: { appState.autoCreateNotesEnabled },
-                    set: { newValue in Task { await appState.setAutoCreateNotesEnabled(newValue) } }
-                ))
-                .help(Self.autoCreateNotesHelp)
+                autoCloseSetupToggle
             }
 
             Section("Cleanup") {
@@ -226,6 +216,8 @@ struct GeneralSettingsTab: View {
                 .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
+                transcriptStreamingToggle
+                transcriptPromptAnswerToggle
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
                 Picker("Usage reset times", selection: $usageResetTimeStyle) {
@@ -248,6 +240,8 @@ struct GeneralSettingsTab: View {
                 if appState.autoHibernateEnabled {
                     hibernateIdleThresholdRow
                 }
+
+                composerDraftToggle
             }
 
             Section("Remote Sessions") {
@@ -275,13 +269,8 @@ struct GeneralSettingsTab: View {
                 controlModeToggle
                 ptyHolderToggle
                 holderClaimReconcileToggle
-                transcriptStreamingToggle
-                transcriptPromptAnswerToggle
-                composerDraftToggle
                 sessionModUsageToggle
-                autoCloseSetupToggle
                 queuedPromptToggle
-                tabsInToolbarToggle
                 updateModePicker
             }
         }
@@ -402,7 +391,7 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Transcript-streaming opt-in. Reads the persisted flag from
+    /// Transcript streaming, on by default. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setTranscriptStreamingEnabled`.
     /// The stream comes from the session mod's `transcript-stream` feature, on
     /// both terminal transports.
@@ -410,7 +399,7 @@ struct GeneralSettingsTab: View {
     private var transcriptStreamingToggle: some View {
         let capabilities = appState.daemonCapabilities
         Toggle("Stream assistant text into the transcript", isOn: Binding(
-            get: { capabilities?.transcriptStreamingEnabled ?? false },
+            get: { capabilities?.transcriptStreamingEnabled ?? Config.transcriptStreamingDefault },
             set: { newValue in Task { await appState.setTranscriptStreamingEnabled(newValue) } }
         ))
         .help(AppState.transcriptStreamingHelp)
@@ -428,25 +417,6 @@ struct GeneralSettingsTab: View {
         ))
         .help("Opens a prompt sheet right after creation starts, and hands the text to the agent whenever it comes up — so you don't wait out a preSession hook before saying what you want. While it's on, the inline rename field no longer opens on create. Off by default (soaking).")
     }
-
-    /// The Tabs in the toolbar setting (`AppState.tabsInToolbarKey`). Read
-    /// from and written to `appState.userDefaults` through
-    /// `appState.windowChrome`, the store the toolbar and the panes follow,
-    /// rather than through `@AppStorage`, whose store is `.standard` and so
-    /// another one under `TBD_MOCK`. Off by default (soaking).
-    private var tabsInToolbarToggle: some View {
-        let chrome = appState.windowChrome
-        return Toggle(Self.tabsInToolbarLabel, isOn: Binding(
-            get: { chrome.tabsInToolbar },
-            set: { chrome.setTabsInToolbar($0) }
-        ))
-        .help(Self.tabsInToolbarHelp)
-    }
-
-    static let tabsInToolbarLabel = "Tabs in the toolbar"
-    static let tabsInToolbarHelp =
-        "Moves each pane's tabs and the worktree's title into the window's top row, " +
-        "and the Servers button to the status bar. Off by default (soaking)."
 
     /// How TBD updates itself. Reads the persisted mode from
     /// `daemon.capabilities` and writes via `config.setUpdateMode`. Off by
@@ -501,7 +471,7 @@ struct GeneralSettingsTab: View {
 
     /// Answer Claude's question and permission dialogs from the transcript.
     /// Reads `daemon.capabilities`, writes `config.setTranscriptPromptAnswerEnabled`.
-    /// Off by default (soaking). New sessions pick up the hooks.
+    /// On by default. New sessions pick up the hooks.
     @ViewBuilder
     private var transcriptPromptAnswerToggle: some View {
         let capabilities = appState.daemonCapabilities
@@ -514,14 +484,14 @@ struct GeneralSettingsTab: View {
 
     static let transcriptPromptAnswerHelp = "Shows question and permission dialogs as cards you can answer in the "
         + "transcript. The terminal dialog stays live, and whichever answers first wins. Applies to sessions "
-        + "started after you turn it on."
+        + "started after a change."
 
     /// Save and restore the unsent text in a Claude session's prompt box.
     /// Reads `daemon.capabilities`, writes `config.setComposerDraftEnabled`.
-    /// Off by default (soaking). New sessions pick it up. While automatic
-    /// parking is on the daemon holds the feature on, so the toggle reads on,
-    /// is greyed, and says why; what the person stored comes back once
-    /// automatic parking is off.
+    /// On by default. New sessions pick it up. While automatic parking is on
+    /// the daemon holds the feature on, so the toggle reads on, is greyed, and
+    /// says why; what the person stored comes back once automatic parking is
+    /// off.
     @ViewBuilder
     private var composerDraftToggle: some View {
         let capabilities = appState.daemonCapabilities
@@ -546,7 +516,7 @@ struct GeneralSettingsTab: View {
         + "when a hibernated session wakes. It is the only thing that keeps hibernating from losing unsent "
         + "text, so it stays on while auto-hibernation is on. If TBD can't confirm a draft is saved, such "
         + "as one holding a large paste, automatic hibernation skips the session; hibernating it yourself "
-        + "goes ahead. Applies to sessions started after you turn it on."
+        + "goes ahead. Applies to sessions started after a change."
 
     /// Record each Claude session's context window, rate limits and cost
     /// through the session mod. Reads `daemon.capabilities`, writes
@@ -584,15 +554,15 @@ struct GeneralSettingsTab: View {
 
     /// Auto-close the setup-hook tab after a clean run. Reads the persisted
     /// flag from `daemon.capabilities` and writes via
-    /// `config.setAutoCloseSetup`. Off by default (soaking).
+    /// `config.setAutoCloseSetup`. On by default.
     @ViewBuilder
     private var autoCloseSetupToggle: some View {
         let capabilities = appState.daemonCapabilities
         Toggle("Auto-close the setup tab on success", isOn: Binding(
-            get: { capabilities?.autoCloseSetupEnabled ?? false },
+            get: { capabilities?.autoCloseSetupEnabled ?? Config.autoCloseSetupDefault },
             set: { newValue in Task { await appState.setAutoCloseSetupEnabled(newValue) } }
         ))
-        .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. Off by default (soaking). Applies to newly created worktrees.")
+        .help("When a repo's setup hook exits cleanly, close its tab automatically. A failed hook keeps the tab open with a shell for debugging. On by default. Applies to newly created worktrees.")
     }
 
     /// Pre-accept Claude's folder-trust dialog for the worktrees of registered

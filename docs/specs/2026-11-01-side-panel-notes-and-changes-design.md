@@ -13,9 +13,9 @@ else in the side panel.
 ## Problem
 
 - **Notes crowd the workspace tab bar.** Every note row becomes a workspace tab
-  (`AppState.reconcileNoteTabs`), and every new worktree starts with one, so
-  the bar that holds a worktree's agents also holds its scratch text. A note is
-  reference material beside the work, which is what the side panel is for.
+  (`AppState.reconcileNoteTabs`), so the bar that holds a worktree's agents
+  also holds its scratch text. A note is reference material beside the work,
+  which is what the side panel is for.
 - **The Changes list is a second right-hand area.** `FileViewerPanel` sits in
   its own column at the window's right edge, toggled from the window toolbar
   (⌘⇧E), beside the side panel that now holds every other viewer. Clicking a
@@ -111,12 +111,10 @@ revision guard needs nothing new.
   menu.
 - **Notes follow their panels.** `note.delete` deletes the note's worktree panel
   in the same transaction and broadcasts the change.
-- **New worktrees.** Worktree creation makes the starter "Notes" note as
-  before, carryover seed included, and opens no panel for it and no longer
-  appends it to the tab order. The note opens from the Notes pill. The
-  config column `auto_create_notes_enabled` keeps its meaning; its Settings
-  label becomes "Create a starter note for new worktrees", and its help text
-  says the note opens from the Notes pill.
+- **New worktrees.** An ordinary new worktree has no note; the Notes pill
+  creates its first one on the first click. A conversation revived on a fresh
+  branch gets its populated provenance note at creation, which opens no panel
+  and stays out of the tab order; it opens from the Notes pill.
 - **`note.create`** takes an optional title, so the Notes pill can name the
   note it creates "Notes". Without one, the default "Note N" title stays.
 - **Migration.** Existing notes leave the workspace tab bar and keep their
@@ -226,8 +224,8 @@ tabs, so they are reached through the Notes pill until one does.
   - `note.delete` removes the note's panel.
   - Archive deletes the worktree's panels, and promote moves the Changes
     panel and deletes the note panels.
-  - Creation makes the starter note and opens no panel when
-    `auto_create_notes_enabled` is on, and makes neither when it is off.
+  - An ordinary creation makes no note and opens no panel; a carryover
+    creation makes the provenance note and opens no panel for it.
   - `note.create` names the note by its title when one is given.
   - The migration moves a note out of `tabOrder`, repairs an `activeTabID`
     that names it, removes a tab's own note panel with its front falling back,
@@ -271,8 +269,9 @@ tabs, so they are reached through the Notes pill until one does.
   that keeps each agent's transcript and opened files beside its own terminal.
 - **Reusing a note panel with history, as files do.** A note is a document the
   user keeps open; stepping it through other notes hides one to show another.
-- **Opening the starter note in every worktree.** It narrows every terminal for
-  a note most worktrees leave empty.
+- **Giving every new worktree a note.** Opened, it narrows every terminal for a
+  note most worktrees leave empty; closed, it is an empty row the Notes pill
+  makes on demand anyway.
 - **Moving only the Changes button.** It keeps two right-hand areas side by side.
 - **Keeping "Note" in the workspace bar's + menu.** That menu makes workspace
   tabs; a note made there would appear somewhere other than where it was asked

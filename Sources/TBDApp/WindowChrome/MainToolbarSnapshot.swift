@@ -62,15 +62,6 @@ struct RepoFilterPresentation: Equatable {
     }
 }
 
-/// The Servers button for the one selected worktree.
-struct ServersPresentation: Equatable {
-    var title: String
-    var isRunning: Bool
-    var primaryURL: String?
-    var help: String
-    var accessibilityLabel: String
-}
-
 /// The selected remote session's toolbar buttons.
 /// Its actions read the selected session when they are clicked, so it carries
 /// no selection of its own.
@@ -87,42 +78,35 @@ struct RemotePresentation: Equatable {
 }
 
 /// Everything the AppKit main toolbar reads from `AppState`, and from its
-/// defaults store for the filter's Show Hidden Repos row and the Tabs in the
-/// toolbar setting, as plain values.
+/// defaults store for the filter's Show Hidden Repos row, as plain values.
 /// Each apply makes one. The controller compares it with the one it last
 /// applied only to skip an apply an observed change asked for when nothing
 /// the toolbar shows changed, since making it reads more than it shows, such
-/// as every worktree's dev-server list. An apply that runs diffs the items
-/// against the layout, then sets each item property only when it differs from
-/// what the item shows (`MainToolbarController.updateContent`).
+/// as every worktree, which `findWorktree` searches for the selected one. An
+/// apply that runs diffs the items against the layout, then sets each item
+/// property only when it differs from what the item shows
+/// (`MainToolbarController.updateContent`).
 struct MainToolbarSnapshot: Equatable {
     var canGoBack: Bool
     var canGoForward: Bool
     var filter: RepoFilterPresentation
-    var servers: ServersPresentation?
     var remote: RemotePresentation?
     /// The title cluster's main title (`ToolbarTitleCluster.mainTitle(in:)`),
     /// which the title item's overflow row shows. `nil` with nothing selected.
     var title: String?
-    /// The Tabs in the toolbar setting, read from the defaults store
-    /// (`AppState.tabsInToolbarKey`), which the controller's defaults watch
-    /// follows.
-    var tabsInToolbar: Bool = false
     /// Whether the detail area shows a worktree's tab bar
     /// (`AppState.showsWorktreeTabBar`, from `MainDetailContent`).
     var showsWorktreeTabBar: Bool = false
 
-    /// The layout's inputs. With the Tabs in the toolbar setting on, the
-    /// Servers item never shows, as it lives in the status bar, and the
-    /// panes draw the top row while a worktree's tab bar shows.
+    /// The layout's inputs: the panes draw the top row while a worktree's tab
+    /// bar shows.
     func layoutState(sidebarCollapsed: Bool) -> MainToolbarLayoutState {
         MainToolbarLayoutState(
             sidebarCollapsed: sidebarCollapsed,
-            showsServers: servers != nil && !tabsInToolbar,
             showsTranscript: remote?.showsTranscript ?? false,
             showsReconnect: remote?.showsReconnect ?? false,
             showsStop: remote?.showsStop ?? false,
-            panesDrawTopRow: tabsInToolbar && showsWorktreeTabBar)
+            panesDrawTopRow: showsWorktreeTabBar)
     }
 
     @MainActor
@@ -138,21 +122,6 @@ struct MainToolbarSnapshot: Equatable {
             selectedIsKnown: selected == nil || appState.repos.contains { $0.id == selected },
             hiddenRepoCount: appState.repos.filter { $0.hidden }.count,
             showsHiddenRepos: SidebarBuildOptions.storedShowHiddenRepos(appState.userDefaults))
-
-        var servers: ServersPresentation?
-        if appState.selectedWorktreeIDs.count == 1,
-           let worktreeID = appState.selectedWorktreeIDs.first,
-           let list = appState.devServerLists[worktreeID],
-           AppState.showsServersButton(list) {
-            let runningCount = ServersButtonLabel.runningCount(list)
-            let primaryURL = AppState.primaryDevServerURL(list)
-            servers = ServersPresentation(
-                title: ServersButtonLabel.title(runningCount: runningCount),
-                isRunning: runningCount > 0,
-                primaryURL: primaryURL,
-                help: primaryURL.map { "Open \($0) · more options" } ?? "Dev servers",
-                accessibilityLabel: ServersButtonLabel.accessibilityLabel(runningCount: runningCount))
-        }
 
         var remote: RemotePresentation?
         if let selection = appState.selectedRemoteSession {
@@ -175,12 +144,8 @@ struct MainToolbarSnapshot: Equatable {
             canGoBack: appState.canGoBack,
             canGoForward: appState.canGoForward,
             filter: filter,
-            servers: servers,
             remote: remote,
             title: ToolbarTitleCluster.mainTitle(in: appState),
-            // Like the Show Hidden Repos key, read from the store: the
-            // controller's defaults watch asks for the apply that reads it.
-            tabsInToolbar: AppState.tabsInToolbarEnabled(defaults: appState.userDefaults),
             showsWorktreeTabBar: appState.showsWorktreeTabBar)
     }
 }
