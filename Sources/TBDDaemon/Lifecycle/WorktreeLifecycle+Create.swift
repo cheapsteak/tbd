@@ -1946,10 +1946,10 @@ extension WorktreeLifecycle {
             let setupCommand: String
             var setupMarkerPath: String?
             if config.autoCloseSetupEnabled, let setupHookPath {
-                // Auto-close soak flag ON with a resolved hook: wrap so the
-                // exit code lands in a marker (the watcher spawned below tears
-                // the tab down on exit 0). Delete any stale marker from a
-                // previous run of this worktree ID before the pane spawns.
+                // Auto-close on with a resolved hook: wrap so the exit code
+                // lands in a marker (the watcher spawned below tears the tab
+                // down on exit 0). Delete any stale marker from a previous run
+                // of this worktree ID before the pane spawns.
                 let markerPath = Self.setupMarkerPath(worktreeID: worktreeID)
                 try? FileManager.default.removeItem(atPath: markerPath)
                 setupMarkerPath = markerPath
@@ -1960,7 +1960,7 @@ extension WorktreeLifecycle {
                     shell: defaultShell
                 )
             } else {
-                // Flag off (default) or no hook: today's behavior unchanged.
+                // Auto-close off, or no hook: the plain wrapped hook or shell.
                 setupCommand = shellWrapped(setupHookPath ?? defaultShell)
             }
             // Suppress the omz update prompt only when a setup hook actually

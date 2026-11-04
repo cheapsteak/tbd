@@ -364,7 +364,7 @@ struct ContinueInClaudeTransactionTests {
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
         let fixture = try await makeRPCFixture(ownsPane: true, sessionsDir: sessionsDir)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        try await fixture.db.config.setComposerDraftEnabled(flagOn)
+        try await fixture.db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
 
         let request = try RPCRequest(
             method: RPCMethod.terminalContinueInClaude,

@@ -147,6 +147,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
 
     @Test func refusedWhileFlagOff() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setTranscriptPromptAnswerEnabled(false)
         let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.answer]), listing()])
         let m = await manager(invoker)
         await poll(m)

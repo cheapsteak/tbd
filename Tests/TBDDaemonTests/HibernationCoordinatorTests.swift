@@ -1530,7 +1530,7 @@ struct HibernationCoordinatorTests {
     func wakeWithTheFlagOnExportsTheModAndRewritesSpawn(windowIsDead: Bool) async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        try await db.config.setComposerDraftEnabled(true)
+        try await db.config.setComposerDraftAsTheOnlyModFeature(true)
         let sessionsDir = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
         let directory = try seedSessionFiles(sessionsDir)
@@ -1569,12 +1569,13 @@ struct HibernationCoordinatorTests {
             == [SessionModFiles.spawnFileName, SessionModFiles.composerDraftFileName])
     }
 
-    /// With the flag off a wake is what it always was: no mod variable in the
-    /// launch's process environment and nothing written under the sessions
+    /// With every feature off a wake is what it always was: no mod variable in
+    /// the launch's process environment and nothing written under the sessions
     /// directory.
     @Test func wakeWithTheFlagOffExportsNothing() async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        try await db.config.setEverySessionModFeatureOff()
         let sessionsDir = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
         let recorded = RecordedTmuxCommands()

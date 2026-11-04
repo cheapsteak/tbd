@@ -1673,10 +1673,11 @@ struct ModelProfileSpawnTests {
         let a = try await seedOAuthProfile(db, name: "A")
         let b = try await seedOAuthProfile(db, name: "B")
         try await db.config.setDefaultProfileID(a.id)
+        // Every feature off for the create, and composer drafts alone set
+        // after it, so the swap's launch is the only spawn the flag can reach.
+        try await db.config.setEverySessionModFeatureOff()
         let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-        // Set after the create, so the swap's launch is the only spawn the
-        // flag can reach.
-        try await db.config.setComposerDraftEnabled(flagOn)
+        try await db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
 
         let beforeSwap = recorder.calls.count
         let swapResp = await router.handle(try RPCRequest(
@@ -1736,7 +1737,7 @@ struct ModelProfileSpawnTests {
         try await db.config.setDefaultProfileID(a.id)
         // On before the create, so the session is spawned with the feature:
         // the create writes the spawn record for the incarnation it persists.
-        try await db.config.setComposerDraftEnabled(true)
+        try await db.config.setComposerDraftAsTheOnlyModFeature(true)
         let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
         let row = try #require(try await db.terminals.get(id: oldTerm.id))
         let incarnation = try #require(row.sessionIncarnationID)
@@ -1779,10 +1780,11 @@ struct ModelProfileSpawnTests {
         let a = try await seedOAuthProfile(db, name: "A")
         let b = try await seedOAuthProfile(db, name: "B")
         try await db.config.setDefaultProfileID(a.id)
-        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-        // Legacy by construction: the flag was never turned on, so the create
-        // wrote no spawn record and the session reads as spawned without the
+        // Legacy by construction: every feature is off for the create, so it
+        // writes no spawn record and the session reads as spawned without the
         // feature.
+        try await db.config.setEverySessionModFeatureOff()
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
         let sessionID = try #require(oldTerm.claudeSessionID)
         #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID) == nil)
 

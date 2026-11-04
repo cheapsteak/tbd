@@ -1262,7 +1262,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the transcript prompt-answer gate (default OFF, soaking). New
+    /// Persist the transcript prompt-answer gate (default ON). New
     /// sessions pick up the hooks.
     func setTranscriptPromptAnswer(enabled: Bool) async throws {
         try await callVoidAsync(
@@ -1271,7 +1271,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the composer draft gate (default OFF, soaking). Sessions started
+    /// Persist the composer draft gate (default ON). Sessions started
     /// afterwards save drafts.
     func setComposerDraft(enabled: Bool) async throws {
         try await callVoidAsync(
@@ -1298,7 +1298,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
+    /// Persist the setup-tab auto-close switch (default ON). Applies to
     /// the next worktree creation.
     func setAutoCloseSetup(enabled: Bool) async throws {
         try await callVoidAsync(
@@ -1341,7 +1341,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the transcript-streaming gate (default OFF), which decides
+    /// Persist the transcript-streaming gate (default ON), which decides
     /// whether the transcript renders a provisional assistant row while the
     /// model streams. Applies to sessions started after the call.
     func setTranscriptStreamingEnabled(enabled: Bool) async throws {

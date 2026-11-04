@@ -7,9 +7,11 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Schema and resolution guards for `config.transcript_prompt_answer_enabled`, the
-/// default-off soak gate for answering prompts from the transcript. The column carries no
-/// SQL default, so NULL ("never chose") stays distinct from 0 ("off").
+/// Schema and resolution guards for `config.transcript_prompt_answer_enabled`,
+/// the gate for answering prompts from the transcript, which ships on. The
+/// column carries no SQL default, so NULL ("never chose") stays distinct from 0
+/// ("off"): NULL reads on, and an explicit off survives any change to the
+/// shipped default.
 @Suite("TranscriptPromptAnswerFlag")
 struct TranscriptPromptAnswerFlagTests {
 
@@ -22,17 +24,18 @@ struct TranscriptPromptAnswerFlagTests {
         }
     }
 
-    @Test func shippedDefaultIsOff() {
-        #expect(Config.transcriptPromptAnswerDefault == false)
-        #expect(Config().transcriptPromptAnswerEnabled == false)
+    @Test func shippedDefaultIsOn() {
+        #expect(Config.transcriptPromptAnswerDefault == true)
+        #expect(Config().transcriptPromptAnswerEnabled == true)
     }
 
-    @Test func nullBeforeAnyGesture() async throws {
+    /// Nobody chose, so the column is NULL and answering reads on.
+    @Test func nullBeforeAnyGestureReadsOn() async throws {
         let db = try TBDDatabase(inMemory: true)
         let record = try #require(try await fetchConfigRecord(db))
         #expect(record.transcript_prompt_answer_enabled == nil,
                 "transcript_prompt_answer_enabled grew a DEFAULT clause; remove it.")
-        #expect(try await db.config.get().transcriptPromptAnswerEnabled == false)
+        #expect(try await db.config.get().transcriptPromptAnswerEnabled == true)
     }
 
     @Test func rowWrittenBeforeTheMigrationStillReadsNull() throws {
@@ -64,6 +67,7 @@ struct TranscriptPromptAnswerFlagTests {
         let off = try #require(try await fetchConfigRecord(db))
         #expect(off.transcript_prompt_answer_enabled == false)
         #expect(off.toModel(transcriptPromptAnswerDefault: true).transcriptPromptAnswerEnabled == false)
+        #expect(try await db.config.get().transcriptPromptAnswerEnabled == false)
     }
 
     @Test func explicitTrueSticks() async throws {

@@ -306,6 +306,8 @@ extension TBDHomeSerialized {
         let sessions = try sessionsDir(scratch)
         let fixture = try await makeFixture(
             scratch, withConversation: true, sessionsDir: sessions)
+        // The other features ship on; off, the record names usage alone.
+        try await fixture.db.config.setEverySessionModFeatureOff()
         try await fixture.db.config.setSessionModUsageEnabled(true)
 
         let response = try await swap(fixture, mode: .inPlace)

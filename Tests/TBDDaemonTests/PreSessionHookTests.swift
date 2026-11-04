@@ -185,6 +185,9 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
+        // Auto-close off: this pins the plain setup command, and leaves no
+        // 600 s marker watcher running after the test.
+        try await db.config.setAutoCloseSetup(enabled: false)
         let recorder = PreSessionRecordedCommands()
         let lifecycle = makeLifecycle(db: db, recorder: recorder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)

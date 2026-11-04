@@ -1,4 +1,5 @@
 import Testing
+import DaemonTestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -9,13 +10,13 @@ struct SessionModFeatureTests {
     }
 
     @Test func enabledListsPromptAnswerWhenFlagOn() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.transcriptPromptAnswerEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.promptAnswer])
     }
 
     @Test func enabledOmitsPromptAnswerWhenFlagOff() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.transcriptPromptAnswerEnabled = false
         config.composerDraftEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft])
@@ -24,14 +25,20 @@ struct SessionModFeatureTests {
     }
 
     @Test func bothOnFollowsAllCasesOrder() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.composerDraftEnabled = true
         config.transcriptPromptAnswerEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft, .promptAnswer])
     }
 
+    /// The shipped config turns on every feature but session usage.
+    @Test func theShippedConfigListsEveryFeatureButUsage() {
+        #expect(SessionModFeature.enabled(in: Config())
+            == [.composerDraft, .transcriptStream, .promptAnswer])
+    }
+
     @Test func everyFeatureOnFollowsAllCasesOrder() {
-        var config = Config()
+        var config = Config.withoutSessionModFeatures
         config.composerDraftEnabled = true
         config.transcriptStreamingEnabled = true
         config.sessionModUsageEnabled = true

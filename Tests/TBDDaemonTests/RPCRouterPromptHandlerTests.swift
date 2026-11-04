@@ -48,9 +48,7 @@ struct RPCRouterPromptHandlerTests {
             recordedAppIdentity: { SendHarness.AuthenticatedApp.identity },
             processSignaller: SendHarness.AuthenticatedApp.Signaller(),
             actuationLog: ActuationLog(path: logPath))
-        if flagOn {
-            try await db.config.setTranscriptPromptAnswerEnabled(true)
-        }
+        try await db.config.setTranscriptPromptAnswerEnabled(flagOn)
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)", displayName: "test-repo", defaultBranch: "main")
         let worktree = try await db.worktrees.create(

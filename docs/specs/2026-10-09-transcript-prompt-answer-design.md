@@ -341,11 +341,12 @@ The card stays read-only, exactly as today, in these cases:
 
 ## Flag
 
-`transcript_prompt_answer_enabled` is a new `config` column, added by a `.sql`
+`transcript_prompt_answer_enabled` is a `config` column, added by a `.sql`
 migration with no SQL default, so NULL means "never chose". Its default lives
-in `Config.transcriptPromptAnswerDefault = false`. The flag is reported
-through `DaemonCapabilitiesResult` and toggled in Settings under
-Experimental, after the transcript-streaming toggle.
+in `Config.transcriptPromptAnswerDefault = true`: the feature is on for every
+install that never chose, and an explicit off survives a change to the
+constant. The flag is reported through `DaemonCapabilitiesResult` and toggled
+in Settings under Claude, after the transcript-streaming toggle.
 
 The flag gates two things:
 - **Off:** the session mod's `prompt-answer` feature is not enabled for new
@@ -358,9 +359,8 @@ The flag gates two things:
 The feature list is fixed when a session spawns, so a flag change reaches a
 session on its next start.
 
-The flag exists because the feature sends input to sessions. The soak runs
-with the flag on. Graduation flips the default constant, and a later change
-deletes the flag.
+The flag exists because the feature sends input to sessions. It ships on, and
+the toggle stays so a person can turn answering from the transcript off.
 
 ## Testing
 

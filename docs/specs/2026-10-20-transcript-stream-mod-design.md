@@ -11,8 +11,8 @@ This design moves the job into the session mod as a feature,
 Claude Code and writes a small snapshot file into the session's directory; the
 pane reads that file. The proxy, its supervisor, its routing and everything
 else that exists only for it are deleted. The feature keeps the existing
-default-off flag, `transcript_streaming_enabled`, and works on both terminal
-transports.
+flag, `transcript_streaming_enabled`, which is on by default, and works on
+both terminal transports.
 
 This design supersedes the
 [model-proxy design](2026-09-05-transcript-streaming-model-proxy-design.md) and
@@ -273,18 +273,18 @@ The snapshot lives in the session's directory, which the OrphanGC arm over
 ## Flag
 
 `transcript_streaming_enabled` keeps its meaning: stream into the transcript
-pane. It stays default-off and tri-state, and it no longer depends on a second
-flag.
+pane. It is tri-state and on by default: `Config.transcriptStreamingDefault` is
+`true`, so every install that never chose streams, and an explicit off
+survives a change to the constant. It depends on no second flag.
 
-- **Settings:** the toggle stays. Its help text says it applies to sessions
-  started after it is turned on, and only where Claude Code loads TBD's mod.
+- **Settings:** the toggle stays, in the Claude section beside "Live
+  transcript pane". Its help text says a change applies to sessions started
+  after it, and only where Claude Code loads TBD's mod.
 - **RPC:** `config.setTranscriptStreamingEnabled` stays and no longer touches
   any proxy setting.
-- **Soak:** turn the toggle on in Settings, start new sessions on both
-  transports, and compare the provisional rows against the final JSONL rows.
-  Check that thinking summaries stream as deltas rather than arriving whole.
-- **Graduation:** flip `Config.transcriptStreamingDefault` once the soak
-  shows no lost or stuck rows.
+- **Checking it:** start new sessions on both transports and compare the
+  provisional rows against the final JSONL rows. Thinking summaries stream as
+  deltas rather than arriving whole.
 
 ## Delivery
 

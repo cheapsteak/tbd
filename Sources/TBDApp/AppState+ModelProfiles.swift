@@ -311,7 +311,7 @@ extension AppState {
         }
     }
 
-    /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
+    /// Persist the setup-tab auto-close switch, then re-fetch capabilities
     /// so the Settings toggle reflects the daemon's persisted state. Applies
     /// to the next worktree creation.
     func setAutoCloseSetupEnabled(_ enabled: Bool) async {
@@ -401,15 +401,15 @@ extension AppState {
 
     /// Help text for the transcript-streaming toggle. A stored constant rather
     /// than a literal in the view so it is assertable, and it carries the two
-    /// limits the operator cannot see anywhere else: the feature reaches only
-    /// sessions spawned after the change, and only those where Claude Code
-    /// loads TBD's mod (not in an untrusted workspace, nor under a policy that
-    /// blocks mods).
+    /// limits the operator cannot see anywhere else: a change reaches only
+    /// sessions spawned after it, and only those where Claude Code loads TBD's
+    /// mod (not in an untrusted workspace, nor under a policy that blocks
+    /// mods).
     static let transcriptStreamingHelp = """
         Shows Claude's answer and thinking summaries in the transcript pane as \
         they are written, before they reach the session file. Applies to \
-        sessions started after you turn it on, and only where Claude Code \
-        loads TBD's mod. Off by default (soaking).
+        sessions started after a change, and only where Claude Code loads \
+        TBD's mod. On by default.
         """
 
     /// Persist the transcript-streaming gate, then re-fetch capabilities so the

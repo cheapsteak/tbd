@@ -184,10 +184,11 @@ struct ComposerDraftAutoParkTests {
     }
 
     /// A worktree override of false parks nothing on merge, so it holds
-    /// nothing.
+    /// nothing: an explicit off reads off.
     @Test func aWorktreeOverrideOfFalseHoldsNothing() async throws {
         let db = try TBDDatabase(inMemory: true)
         let worktreeID = try await makeWorktree(db)
+        try await db.config.setComposerDraftEnabled(false)
         try await db.worktrees.setAutoHibernateOnMerge(id: worktreeID, value: false)
 
         let config = try await db.config.get()
@@ -201,6 +202,7 @@ struct ComposerDraftAutoParkTests {
     @Test func anArchivedWorktreesOverrideHoldsNothing() async throws {
         let db = try TBDDatabase(inMemory: true)
         let worktreeID = try await makeWorktree(db)
+        try await db.config.setComposerDraftEnabled(false)
         try await db.worktrees.setAutoHibernateOnMerge(id: worktreeID, value: true)
         #expect(try await db.config.get().composerDraftRequiredByAutoPark)
 
@@ -301,13 +303,15 @@ struct ComposerDraftAutoParkTests {
 
     /// Turning automatic parking on re-syncs the plugin with the mod; the
     /// same write again changes no feature and re-syncs nothing; turning it
-    /// off re-syncs the plugin without it.
+    /// off re-syncs the plugin without it. Every feature starts off, composer
+    /// drafts included, so the hold is the only thing that turns one on.
     @Test(arguments: [Trigger.idleSweep, .mergeDefault, .worktreeOverride])
     func eachAutomaticParkingWriteResyncsThePluginWhenTheFeaturesChange(
         _ trigger: Trigger
     ) async throws {
         let db = try TBDDatabase(inMemory: true)
         let worktreeID = try await makeWorktree(db)
+        try await db.config.setEverySessionModFeatureOff()
         let router = makeRouter(db)
         let recorder = AutoParkPluginSyncRecorder()
         router.sessionModPluginSync = { recorder.append($0) }
@@ -401,11 +405,21 @@ struct ComposerDraftAutoParkTests {
         #expect(try await storedFlag(db) == nil, "the startup wrote composer_draft_enabled")
     }
 
-    /// The other side: with automatic parking off and the flag never chosen,
-    /// the startup plugin carries no mod.
-    @Test func anInstallWithAutomaticParkingOffWritesNoModAtStartup() async throws {
+    /// The other side: with automatic parking off, the startup plugin follows
+    /// the stored flag. An explicit off carries no composer-draft mod.
+    @Test func anInstallWithAutomaticParkingOffAndTheFlagOffWritesNoComposerDraftAtStartup() async throws {
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setComposerDraftEnabled(false)
         let features = await Daemon.startupSessionModFeatures(config: db.config)
         #expect(!features.contains(.composerDraft))
+    }
+
+    /// And a never-chosen flag with automatic parking off follows the shipped
+    /// default at startup.
+    @Test func anInstallThatNeverChoseFollowsTheShippedDefaultAtStartup() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        #expect(try await storedFlag(db) == nil)
+        let features = await Daemon.startupSessionModFeatures(config: db.config)
+        #expect(features.contains(.composerDraft) == Config.composerDraftDefault)
     }
 }

@@ -786,6 +786,9 @@ struct HolderSpawnGateTests {
     @Test func setupHookTabFollowsTheHolderPrimary() async throws {
         let fixture = try await GateFixture.make(flagEnabled: true)
         defer { fixture.tearDown() }
+        // Auto-close ships on, and this hook exits 0: off, the tab stays for
+        // the assertions below instead of closing under them.
+        try await fixture.db.config.setAutoCloseSetup(enabled: false)
         try fixture.installWorktreeHook(.setup)
 
         let created = try await fixture.spawnPrimaryTerminals()
@@ -966,6 +969,8 @@ struct HolderSpawnGateTests {
     @Test func setupHookTabStaysOnTmuxWithTheFlagOff() async throws {
         let fixture = try await GateFixture.make(flagEnabled: false)
         defer { fixture.tearDown() }
+        // Auto-close ships on; off, the setup tab stays for the assertions.
+        try await fixture.db.config.setAutoCloseSetup(enabled: false)
         try fixture.installWorktreeHook(.setup)
 
         let created = try await fixture.spawnPrimaryTerminals()

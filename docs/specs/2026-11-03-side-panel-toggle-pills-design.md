@@ -65,9 +65,9 @@ Left to right:
 With the Changes pill absent, the trailing group is the active panel's
 control, transcript, Notes and collapse.
 
-With Tabs in the toolbar on, the drag gap fills the width between the last
-tab and the trailing group, as before, so a strip whose only open panels have
-pills is history buttons, drag gap, and the trailing group.
+The drag gap fills the width between the last tab and the trailing group, so
+a strip whose only open panels have pills is history buttons, drag gap, and
+the trailing group.
 
 ## Pills
 
@@ -208,10 +208,10 @@ NSMenu's item notifications while it is open.
 
 While the region is hidden, the workspace tab bar's trailing end holds the
 Changes, transcript and Notes buttons (`TabBarTrailingItem.edge`), then the
-expand button, with Tabs in the toolbar on or off. The Changes button shows by
-the Changes pill's rule. They draw as plain icons, with the pills' symbols and
-in the pills' grey, `NSColor.secondaryLabelColor`, whatever their panel's
-state, so the bar and the strip match. A disabled one draws that grey dimmed,
+expand button. The Changes button shows by the Changes pill's rule. They draw
+as plain icons, with the pills' symbols and in the pills' grey,
+`NSColor.secondaryLabelColor`, whatever their panel's state, so the bar and
+the strip match. A disabled one draws that grey dimmed,
 as the row style dims a disabled button. No panel is in view, so none shows a
 fill or an accent colour, either of which would read as a panel showing, and
 none carries a label: they are icon buttons like the rest of the bar's

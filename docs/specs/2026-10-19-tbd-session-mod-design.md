@@ -10,10 +10,10 @@ This design gives TBD's Claude Code plugin, `tbd`, a hooks module: the
 person types and puts it back when the session revives, so a park can go ahead
 with a draft in the box and lose nothing. The mod is built as a home for later
 features: one module inside the existing plugin, one directory per session,
-one liveness check, and a per-spawn feature list. The composer feature ships
-behind a default-off flag that automatic parking turns on, and it is the only
-guard a park has for an unsent draft: no park reads the screen to decide, and
-none types into the composer to end Claude.
+one liveness check, and a per-spawn feature list. The composer feature is on
+by default, behind a flag a person can turn off and that automatic parking
+holds on, and it is the only guard a park has for an unsent draft: no park
+reads the screen to decide, and none types into the composer to end Claude.
 
 Related: [mod-only park guard](2026-10-24-mod-only-park-guard-design.md)
 (which parks go ahead, and how automatic parking turns the feature on),
@@ -468,12 +468,13 @@ stays with the original session.
 
 ### Flag
 
-`composer_draft_enabled`, default off:
+`composer_draft_enabled`, default on:
 
 - a `.sql` migration, `ALTER TABLE config ADD COLUMN composer_draft_enabled
   INTEGER;` with no `DEFAULT`, appended to the migration manifest test
 - `ConfigRecord` holds `Bool?`, resolved with `?? Config.composerDraftDefault`
-  (`false`)
+  (`true`), so every install that never chose has the feature, and an explicit
+  off survives a change to the constant
 - an optional field on the shared `Config` model
 - a setter RPC, `tbd config` support, and a Settings toggle
 
@@ -498,27 +499,26 @@ park follows `spawn.json`, not the current value:
   feature then read as unknown until they respawn: automatic parks skip them,
   and a manual park goes ahead.
 
-### Soak and graduation
+### Rollout
 
-The flag is turned on on the author's machine, and automatic parking turns it
-on wherever that is on. The soak reads two signals. One is the
-`com.tbd.daemon` log under category `composer-draft`: parks skipped for an
+The flag ships on, and its toggle stays in Settings, under Session
+Hibernation, so a person can turn the feature off; automatic parking holds it
+on regardless. Two signals show how the feature behaves in the field. One is
+the `com.tbd.daemon` log under category `composer-draft`: parks skipped for an
 unknown reason, with the reason. The other is restores, read from the session
 directories rather than any log: each
 `~/tbd/sessions/*/composer-draft.restore.json` records its session's latest
 restore outcome, and a `composer-draft.unrestored` beside it holds the drafts
-that could not go back. The flag graduates when every skip reason is
-explained, and restores have been seen working on both tmux and holder.
-Graduation flips `Config.composerDraftDefault`.
+that could not go back.
 
-### Deletion after graduation
+### Deleting the flag
 
-A later PR deletes the flag, which makes `composer-draft` a feature every
-spawn lists and keeps the hooks module in the plugin for good. Automatic
-parking then has nothing left to turn on, so `Config.composerDraftRequiredByAutoPark`
-and the greyed Settings toggle go with it. After it, a session spawned without
-the feature exists only until its next spawn, and a session whose feature is
-not confirmed never parks automatically.
+Deleting the flag would make `composer-draft` a feature every spawn lists and
+keep the hooks module in the plugin for good. Automatic parking would then
+have nothing left to turn on, so `Config.composerDraftRequiredByAutoPark` and
+the greyed Settings toggle would go with it. A session spawned without the
+feature would exist only until its next spawn, and a session whose feature is
+not confirmed would never park automatically.
 
 ## Testing
 
@@ -553,8 +553,8 @@ Each gating branch gets its own test.
 - **Spawn** – the flag on sets all three environment variables, lists
   `composer-draft` in `TBD_MOD_FEATURES`, and writes `spawn.json`; every
   feature off sets none of them and writes nothing.
-- **Flag states** – a pre-migration row reads NULL, and an explicit `false`
-  survives a change to `Config.composerDraftDefault`.
+- **Flag states** – a pre-migration row reads NULL and resolves on, and an
+  explicit `false` survives a change to `Config.composerDraftDefault`.
 - **Reconciler** – a session directory named only by a terminal row, or only by
   a `terminal_history` row in a worktree that is not archived, is kept; one
   named only by `archivedClaudeSessions`, or only by history in an archived
@@ -605,7 +605,8 @@ Each gating branch gets its own test.
   gets its own spec.
 - A channel from the daemon to the mod.
 - Turning the idle sweep back on by default. `v50` turned it off because of
-  the scrape's failure direction; that follow-up can cite this design's soak.
+  the scrape's failure direction; that follow-up can cite the restore and
+  skip signals under "Rollout".
 - Codex sessions, which are never parked.
 
 ## Rejected alternatives

@@ -62,8 +62,7 @@ struct TranscriptStreamingFlagTests {
 /// run, so whatever that resolution depends on has to be part of the key or the
 /// loop keeps running against a stale reading of it. The flag is the input that
 /// actually moves: a viewer ticks "Stream assistant text into the transcript"
-/// in Settings while a pane is on screen, and off→on is the direction the soak
-/// depends on.
+/// in Settings while a pane is on screen, in either direction.
 @Suite("TranscriptPaneTaskKey")
 struct TranscriptPaneTaskKeyTests {
 

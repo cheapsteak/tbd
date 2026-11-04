@@ -143,7 +143,7 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("pr-poll-schedule: on"))
     }
 
-    // MARK: - transcript-prompt-answer: the soak switch for answering prompts from the transcript
+    // MARK: - transcript-prompt-answer: the switch for answering prompts from the transcript
 
     @Test func transcriptPromptAnswerDescribesBothStates() {
         let on = ConfigSet.confirmation(key: "transcript-prompt-answer", value: .on)
@@ -164,12 +164,13 @@ struct ConfigCommandsTests {
 
     @Test func configGetPrintsTranscriptPromptAnswerInBothStates() {
         var config = Config()
+        config.transcriptPromptAnswerEnabled = false
         #expect(ConfigGet.render(config).contains("transcript-prompt-answer: off"))
         config.transcriptPromptAnswerEnabled = true
         #expect(ConfigGet.render(config).contains("transcript-prompt-answer: on"))
     }
 
-    // MARK: - composer-draft: the soak switch for saving and restoring composer drafts
+    // MARK: - composer-draft: the switch for saving and restoring composer drafts
 
     @Test func composerDraftDescribesBothStates() {
         let on = ConfigSet.confirmation(key: "composer-draft", value: .on)
@@ -190,6 +191,7 @@ struct ConfigCommandsTests {
 
     @Test func configGetPrintsComposerDraftInBothStates() {
         var config = Config()
+        config.composerDraftEnabled = false
         #expect(ConfigGet.render(config).contains("composer-draft: off"))
         config.composerDraftEnabled = true
         #expect(ConfigGet.render(config).contains("composer-draft: on"))

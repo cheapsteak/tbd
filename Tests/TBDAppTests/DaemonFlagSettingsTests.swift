@@ -108,14 +108,15 @@ struct DaemonFlagSettingsTests {
         }
     }
 
-    /// The help string carries promises the operator acts on: the change
-    /// applies to sessions started after it, and only where Claude Code loads
-    /// TBD's mod. Pinned so a rewrite that drops either has to be deliberate.
+    /// The help string carries promises the operator acts on: a change
+    /// applies to sessions started after it, only where Claude Code loads
+    /// TBD's mod, and the setting is on unless turned off. Pinned so a rewrite
+    /// that drops any of them has to be deliberate.
     @Test func transcriptStreamingHelpStatesWhenTheChangeAppliesAndWhatItNeeds() {
         #expect(
             AppState.transcriptStreamingHelp.contains(
-                "Applies to sessions started after you turn it on, and only where Claude Code loads TBD's mod."))
-        #expect(AppState.transcriptStreamingHelp.contains("Off by default (soaking)."))
+                "Applies to sessions started after a change, and only where Claude Code loads TBD's mod."))
+        #expect(AppState.transcriptStreamingHelp.contains("On by default."))
     }
 
     @Test("the remote transcript live sync toggle help names the hint requirement")

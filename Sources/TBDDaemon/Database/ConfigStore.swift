@@ -47,6 +47,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
+    /// Setup-tab auto-close. **Tri-state**: the frozen
+    /// `v57_config_auto_close_setup` migration gave the column a SQL default
+    /// of 0, and `20261104175902_auto_close_setup_default_on` resets it to
+    /// NULL, so `nil` means "never chose". Resolve it through
+    /// `Config.autoCloseSetupDefault`, never through `?? false`.
     var auto_close_setup_enabled: Bool?
     /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
     /// repos (TBD-created ones and the repo's own checkout), excluding
@@ -214,6 +219,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `queued_prompt_enabled` resolves to. Defaulted to the real constant;
     ///   the parameter exists so tests can prove that NULL *follows* a changed
     ///   default while an explicit `false` does not.
+    /// - Parameter autoCloseSetupDefault: same shape, for
+    ///   `auto_close_setup_enabled`.
     /// - Parameter autoCreateNotesDefault: same shape, for
     ///   `auto_create_notes_enabled` — the parameter proves that an untouched
     ///   preference follows the shipped default while explicit choices stick.
@@ -276,6 +283,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   feature on.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
+        autoCloseSetupDefault: Bool = Config.autoCloseSetupDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
@@ -330,7 +338,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
-            autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
+            // NOT `?? false`: NULL means "never chose" and follows the
+            // shipped default.
+            autoCloseSetupEnabled: auto_close_setup_enabled ?? autoCloseSetupDefault,
             autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
@@ -732,9 +742,10 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the auto-close-setup-tab opt-in (default OFF, soaking). Read
-    /// fresh at spawn time, so no daemon restart is required — applies to the
-    /// next worktree creation.
+    /// Persist whether the setup-hook tab closes itself after a clean run.
+    /// On is the shipped default; writing either value is an explicit choice
+    /// that a later default change leaves alone. Read fresh at spawn time, so
+    /// no daemon restart is required — applies to the next worktree creation.
     public func setAutoCloseSetup(enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
@@ -1050,7 +1061,7 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the transcript-streaming gate (default OFF, soaking) — whether
+    /// Persist the transcript-streaming gate (default ON) — whether
     /// sessions spawn with the session mod's `transcript-stream` feature, and
     /// the transcript shows the provisional rows it feeds.
     ///

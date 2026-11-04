@@ -24,9 +24,11 @@ struct PromptAnswerPluginSyncTests {
     }
 
     /// Turning the flag on adds `.promptAnswer`; off removes it. A composer
-    /// draft flag left on keeps the mod in the list.
+    /// draft flag left on keeps the mod in the list. The other features ship
+    /// on, so the test starts with every one of them off.
     @Test func setterSyncsThePluginWithTheFreshFeatures() async throws {
         let router = try makeRouter()
+        try await router.db.config.setEverySessionModFeatureOff()
         let recorder = PluginSyncRecorder()
         router.sessionModPluginSync = { recorder.append($0) }
 

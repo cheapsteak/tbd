@@ -5,11 +5,11 @@ import TBDShared
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "setupHook")
 
 /// Auto-close for the setup-hook tab, gated on `config.auto_close_setup_enabled`
-/// (default OFF, soaking). When the flag is on AND a setup hook resolves, the
-/// hook command writes its exit code to a marker file; a detached watcher
-/// tears the tab down on a clean exit and leaves it open (with an interactive
-/// shell) on failure/timeout/killed pane. Flag off keeps today's behavior
-/// byte-for-byte (plain `shellWrapped`, no marker, no watcher).
+/// (default ON; an explicit off survives). When the flag is on AND a setup hook
+/// resolves, the hook command writes its exit code to a marker file; a detached
+/// watcher tears the tab down on a clean exit and leaves it open (with an
+/// interactive shell) on failure/timeout/killed pane. With the flag off the
+/// setup tab runs the plain `shellWrapped` hook, with no marker and no watcher.
 extension WorktreeLifecycle {
 
     /// Directory holding setup-hook completion markers. Sibling of

@@ -1,4 +1,5 @@
 import CryptoKit
+import DaemonTestSupport
 import Foundation
 import TestSupport
 import Testing
@@ -153,8 +154,7 @@ func readSpawnRecord(sessionsDir: URL, sessionID: String) -> SessionModFiles.Spa
     @Test func prepareFromConfigMintsOnlyWithAFeatureOn() throws {
         let root = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: root) }
-        var config = Config()
-        config.composerDraftEnabled = false
+        var config = Config.withoutSessionModFeatures
 
         #expect(SessionModSpawn.prepare(
             config: config, claudeSessionID: "flag-off", incarnationID: nil,
