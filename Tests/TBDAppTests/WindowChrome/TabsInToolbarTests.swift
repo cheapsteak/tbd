@@ -129,6 +129,7 @@ struct TabsInToolbarTests {
         #expect(MainTabRowMetrics.pillHeight == 28)
         #expect(MainTabRowMetrics.pillCornerRadius == 7)
         #expect(MainTabRowMetrics.pillSpacing == 2)
+        #expect(MainTabRowMetrics.pillToAddSpacing == 4)
     }
 
     // MARK: - Overflow
@@ -224,45 +225,85 @@ struct TabsInToolbarTests {
 
     // MARK: - The title column
 
-    /// The notes button follows the project name's line, sized to its 11 pt,
-    /// and with no project the title's own line, sized to its 13 pt.
-    @Test func theNotesButtonFollowsTheBottomLine() {
-        let withProject = WorktreeTitleColumn.notesLine(repoName: "acme")
-        #expect(withProject == .project)
-        let projectSize = withProject.fontSize
-        #expect(projectSize == MainTabRowMetrics.projectFontSize)
-        let scratch = WorktreeTitleColumn.notesLine(repoName: nil)
-        #expect(scratch == .title)
-        let titleSize = scratch.fontSize
-        #expect(titleSize == MainTabRowMetrics.titleFontSize)
-        #expect(MainTabRowMetrics.notesToProjectSpacing == 4)
+    /// The title line's sizes, which the row's title column and the
+    /// toolbar's title item both draw from: the title in 14 pt, the project
+    /// name in 11 pt, 6 pt apart, and the notes symbol at the toolbar's 13 pt.
+    @Test func theTitleLineTakesTheToolbarTitlesSizes() {
+        #expect(WorktreeTitleMetrics.titleFontSize == 14)
+        #expect(WorktreeTitleMetrics.projectFontSize == 11)
+        #expect(WorktreeTitleMetrics.spacing == 6)
+        #expect(WorktreeTitleMetrics.notesSymbolSize == 13)
     }
 
     /// The toolbar's inline cluster keeps the notes button's toolbar style,
     /// the default.
     @Test func theToolbarsNotesButtonKeepsItsStyle() {
-        let worktree = Worktree(
-            repoID: UUID(), name: "feature", displayName: "feature", branch: "feature",
-            path: "/tmp/acme-feature", tmuxServer: "acme")
-        let style = WorktreeNotesButton(worktree: worktree).style
+        let style = WorktreeNotesButton(worktree: Self.titleWorktree(repoID: UUID())).style
         #expect(style == .toolbar)
     }
 
-    /// A worktree with a project shows the title over the project name, two
-    /// lines; a scratch space, with none, shows the title alone.
-    @Test func aProjectAddsTheSecondLine() {
+    /// The row's notes button, in its inline style, is the toolbar's size:
+    /// its symbol draws at the size the toolbar's hosting view gives the
+    /// toolbar style's.
+    @Test func theRowsNotesButtonIsTheToolbarsSize() {
+        let worktree = Self.titleWorktree(repoID: UUID())
+        let inline = NSHostingView(rootView: WorktreeNotesButton(worktree: worktree, style: .inline)).fittingSize
+        let toolbar = NSHostingView(rootView: WorktreeNotesButton(worktree: worktree)).fittingSize
+        #expect(inline.width > 0)
+        let widthGap = abs(inline.width - toolbar.width)
+        let heightGap = abs(inline.height - toolbar.height)
+        #expect(widthGap < 0.5)
+        #expect(heightGap < 0.5)
+    }
+
+    /// The title column is one line with or without a project: a project
+    /// leaves it as tall as a scratch space's, and widens it by the project
+    /// name's menu and one spacing.
+    @Test func theTitleColumnIsOneLine() {
         withTestDefaults("TabsInToolbarTests.titleColumn") { defaults in
             let state = AppState(userDefaults: defaults)
             let repo = Repo(path: "/tmp/acme", displayName: "acme")
-            let worktree = Worktree(
-                repoID: repo.id, name: "feature", displayName: "feature", branch: "feature",
-                path: "/tmp/acme-feature", tmuxServer: "acme")
-            let twoLines = NSHostingView(rootView: WorktreeTitleColumn(
-                appState: state, worktree: worktree, repoName: "acme")).fittingSize.height
-            let oneLine = NSHostingView(rootView: WorktreeTitleColumn(
-                appState: state, worktree: worktree, repoName: nil)).fittingSize.height
-            #expect(oneLine > 0)
-            #expect(twoLines > oneLine)
+            let worktree = Self.titleWorktree(repoID: repo.id)
+            let withProject = NSHostingView(rootView: WorktreeTitleColumn(
+                appState: state, worktree: worktree, repoName: "acme")).fittingSize
+            let scratch = NSHostingView(rootView: WorktreeTitleColumn(
+                appState: state, worktree: worktree, repoName: nil)).fittingSize
+            let projectMenu = NSHostingView(rootView: WorktreeTitleMenus.repoMenu(
+                appState: state, worktree: worktree
+            ) {
+                Text("acme")
+                    .font(WorktreeTitleMetrics.projectFont)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }).fittingSize
+            #expect(scratch.height > 0)
+            #expect(projectMenu.width > 0)
+            #expect(withProject.height == scratch.height)
+            let added = withProject.width - scratch.width
+            let expectedAdded = projectMenu.width + WorktreeTitleMetrics.spacing
+            let addedGap = abs(added - expectedAdded)
+            #expect(addedGap < 2, "a project added \(added) pt, expected \(expectedAdded) pt")
+        }
+    }
+
+    /// The row's title column and the toolbar's title item draw the same
+    /// line, with a project and without: the same width and height.
+    @Test func theRowsTitleColumnMatchesTheToolbarsTitle() {
+        withTestDefaults("TabsInToolbarTests.titleMatchesToolbar") { defaults in
+            let state = AppState(userDefaults: defaults)
+            let repo = Repo(path: "/tmp/acme", displayName: "acme")
+            let worktree = Self.titleWorktree(repoID: repo.id)
+            for repoName in ["acme", nil] as [String?] {
+                let row = NSHostingView(rootView: WorktreeTitleColumn(
+                    appState: state, worktree: worktree, repoName: repoName)).fittingSize
+                let toolbar = NSHostingView(rootView: WorktreeTitleView(
+                    appState: state, worktree: worktree, repoName: repoName)).fittingSize
+                #expect(row.width > 0)
+                let widthGap = abs(row.width - toolbar.width)
+                let heightGap = abs(row.height - toolbar.height)
+                #expect(widthGap < 1, "row \(row), toolbar \(toolbar), project \(repoName ?? "none")")
+                #expect(heightGap < 1, "row \(row), toolbar \(toolbar), project \(repoName ?? "none")")
+            }
         }
     }
 
@@ -493,6 +534,13 @@ struct TabsInToolbarTests {
                      path: "/tmp/acme-fix", tmuxServer: "acme"),
         ]]
         return state
+    }
+
+    /// The worktree the title-column tests name, in the repo `repoID`.
+    private static func titleWorktree(repoID: UUID) -> Worktree {
+        Worktree(
+            repoID: repoID, name: "feature", displayName: "feature", branch: "feature",
+            path: "/tmp/acme-feature", tmuxServer: "acme")
     }
 
     private static func filter() -> RepoFilterPresentation {

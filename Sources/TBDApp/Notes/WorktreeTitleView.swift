@@ -1,10 +1,35 @@
 import SwiftUI
 import TBDShared
 
+/// The sizes of the worktree's title line, which the toolbar's title item
+/// (`WorktreeTitleView`) and the main row's title column
+/// (`WorktreeTitleColumn`) both draw from, so the two read the same.
+enum WorktreeTitleMetrics {
+    /// The worktree title's point size, at semibold weight (`titleFont`).
+    static let titleFontSize: CGFloat = 14
+    /// The project name's point size, in the secondary colour
+    /// (`projectFont`).
+    static let projectFontSize: CGFloat = 11
+    /// Between the notes button, the project name and the title.
+    static let spacing: CGFloat = 6
+    /// The notes button's symbol size in the main row's title column. The
+    /// toolbar's notes button sets no font, so its symbol takes the default
+    /// font of the hosting view the toolbar draws it in
+    /// (`MainWindowSplitView.makeTitleView`), the 13 pt body font; the row's
+    /// draws at this size to match it.
+    static let notesSymbolSize: CGFloat = 13
+
+    /// The worktree title's font.
+    static var titleFont: Font { .system(size: titleFontSize, weight: .semibold) }
+    /// The project name's font.
+    static var projectFont: Font { .system(size: projectFontSize) }
+}
+
 /// Replaces the static "TBD" window title in the toolbar. Left-to-right:
 /// notes button, repo name (11 pt) as a dropdown to the repo's detail tabs, and
 /// the worktree display name (14 pt) as a dropdown reusing the sidebar row
-/// action menu (Rename, Archive, …).
+/// action menu (Rename, Archive, …), at the sizes `WorktreeTitleMetrics`
+/// names.
 ///
 /// `appState`/`worktree`/`repoName` are passed in (not read from the
 /// environment) so this view has no `@Environment` dependency inside the
@@ -15,12 +40,12 @@ struct WorktreeTitleView: View {
     let repoName: String?
 
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
+        HStack(alignment: .center, spacing: WorktreeTitleMetrics.spacing) {
             WorktreeNotesButton(worktree: worktree)
             if let repoName {
                 WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
                     Text(repoName)
-                        .font(.system(size: 11))
+                        .font(WorktreeTitleMetrics.projectFont)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -28,7 +53,7 @@ struct WorktreeTitleView: View {
             }
             WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
                 Text(worktree.displayName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(WorktreeTitleMetrics.titleFont)
                     .lineLimit(1)
             }
             .fixedSize()
@@ -36,82 +61,52 @@ struct WorktreeTitleView: View {
     }
 }
 
-/// The worktree's title set over its project name, the way macOS sets a
-/// window's subtitle under its title, for the main pane's top row with the
-/// Tabs in the toolbar setting on: the title in 13 pt semibold, and under it
-/// the project name in 11 pt, secondary, followed by the notes button. Each
-/// line keeps the menu `WorktreeTitleView` gives it. A worktree with no
-/// project, a scratch space, shows the title alone, which the row centres on
-/// its midline, and the notes button follows that line instead.
+/// The worktree's title line in the main pane's top row, with the Tabs in the
+/// toolbar setting on: the line the toolbar's title item draws
+/// (`WorktreeTitleView`) on every page without a tab bar, at the same sizes
+/// (`WorktreeTitleMetrics`), so the title reads the same in both. Left to
+/// right, centred on the row's midline: the notes button, the project name in
+/// 11 pt, secondary, and the worktree title in 14 pt semibold, 6 pt apart,
+/// each text with the menu `WorktreeTitleView` gives it. A worktree with no
+/// project, a scratch space, shows the notes button, then the title.
 ///
-/// The notes button, sized to the line it follows, never shrinks. Neither text
-/// holds its ideal width: offered less, the title truncates in the middle and
-/// the project name at the end, with the button right after the truncated
-/// text, and hovering the title shows it whole.
-/// `MainTabRowWidths` decides how much the column gets.
+/// The column takes the width `MainTabRowWidths` gives it. The notes button
+/// never shrinks. Neither text holds its ideal width: offered less than the
+/// line's ideal width, the project name gives way first, truncating at its
+/// end, and then the title, truncating in the middle. Hovering the title
+/// shows it whole.
+///
+/// The notes button takes its inline style rather than the toolbar's, whose
+/// hover label draws below the button, where the pane would cut it off.
 struct WorktreeTitleColumn: View {
     let appState: AppState
     let worktree: Worktree
     let repoName: String?
 
-    /// The line the notes button follows.
-    enum NotesLine: Equatable {
-        /// The project name's line, under the title.
-        case project
-        /// The title's own line, the only one.
-        case title
-
-        /// The point size of the line's text, which the button's symbol
-        /// takes.
-        var fontSize: CGFloat {
-            switch self {
-            case .project: MainTabRowMetrics.projectFontSize
-            case .title: MainTabRowMetrics.titleFontSize
-            }
-        }
-    }
-
-    /// The project name's line when there is a project, else the title's.
-    static func notesLine(repoName: String?) -> NotesLine {
-        repoName == nil ? .title : .project
-    }
-
     var body: some View {
-        if Self.notesLine(repoName: repoName) == .project, let repoName {
-            VStack(alignment: .leading, spacing: MainTabRowMetrics.titleLineSpacing) {
-                titleMenu
-                HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
-                    WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
-                        Text(repoName)
-                            .font(.system(size: MainTabRowMetrics.projectFontSize))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    notesButton(.project)
+        HStack(alignment: .center, spacing: WorktreeTitleMetrics.spacing) {
+            WorktreeNotesButton(worktree: worktree, style: .inline)
+                .fixedSize()
+            if let repoName {
+                WorktreeTitleMenus.repoMenu(appState: appState, worktree: worktree) {
+                    Text(repoName)
+                        .font(WorktreeTitleMetrics.projectFont)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
-        } else {
-            HStack(spacing: MainTabRowMetrics.notesToProjectSpacing) {
-                titleMenu
-                notesButton(.title)
+            WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
+                Text(worktree.displayName)
+                    .font(WorktreeTitleMetrics.titleFont)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+            .help(worktree.displayName)
+            // Offered its width before the project name, so the project name
+            // gives way first.
+            .layoutPriority(1)
         }
-    }
-
-    private var titleMenu: some View {
-        WorktreeTitleMenus.worktreeMenu(appState: appState, worktree: worktree) {
-            Text(worktree.displayName)
-                .font(.system(size: MainTabRowMetrics.titleFontSize, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .help(worktree.displayName)
-    }
-
-    private func notesButton(_ line: NotesLine) -> some View {
-        WorktreeNotesButton(worktree: worktree, style: .inline(fontSize: line.fontSize))
-            .fixedSize()
     }
 }
 
@@ -120,18 +115,19 @@ struct WorktreeTitleColumn: View {
 /// (`RowIconButtonStyle`) at its small size: a square
 /// `MainTabRowMetrics.notesHitOutset` past its symbol on each side, which is
 /// its hit area too and leaves the button's size, and the layout around it,
-/// as they are. A full 28 pt square would dwarf the line of text it follows.
+/// as they are. A full 28 pt square would dwarf the line of text it leads.
 /// The style draws its symbol in the secondary colour too.
 struct WorktreeNotesButton: View {
     /// How the button draws.
     enum Style: Equatable {
-        /// The toolbar's inline cluster: the symbol at the default size, with
-        /// a hover label drawn under it.
+        /// The toolbar's inline cluster: the symbol at the hosting view's
+        /// default font, 13 pt, with a hover label drawn under it.
         case toolbar
-        /// Leading a line of text in the main row's title column: the symbol
-        /// at the line's point size, in the secondary colour, and its help tag
-        /// as its hover label.
-        case inline(fontSize: CGFloat)
+        /// Leading the main row's title column: the symbol at
+        /// `WorktreeTitleMetrics.notesSymbolSize`, the toolbar style's size,
+        /// and its help tag as its hover label, which the pane cannot cut
+        /// off.
+        case inline
     }
 
     /// The hover square both styles draw.
@@ -185,13 +181,13 @@ struct WorktreeNotesButton: View {
                         .allowsHitTesting(false)
                 }
             }
-        case .inline(let fontSize):
+        case .inline:
             Button {
                 showNotes.toggle()
             } label: {
                 // In the style's own secondary colour.
                 Image(systemName: "square.and.pencil")
-                    .font(.system(size: fontSize))
+                    .font(.system(size: WorktreeTitleMetrics.notesSymbolSize))
             }
             .buttonStyle(Self.squareStyle)
             .help(notesTooltip)

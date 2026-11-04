@@ -3,9 +3,10 @@ import Foundation
 extension AppState {
     /// UserDefaults key for the Settings → General → Experimental toggle
     /// "Tabs in the toolbar". On, each pane's tab strip draws in the window's
-    /// top row, the worktree title moves into the main pane's row set over its
-    /// project name, and the Servers button moves from the toolbar to the
-    /// status bar. Spec: `docs/specs/2026-11-02-tabs-in-toolbar-design.md`.
+    /// top row, the worktree title moves into the main pane's row after the
+    /// notes button and the project name, and the Servers button moves from
+    /// the toolbar to the status bar. Spec:
+    /// `docs/specs/2026-11-02-tabs-in-toolbar-design.md`.
     ///
     /// Stored in `AppState.userDefaults`, the store `MainWindowSplitView`
     /// passes its hosted panes and the toolbar controller watches. Three

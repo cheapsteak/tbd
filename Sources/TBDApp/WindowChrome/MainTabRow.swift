@@ -10,7 +10,8 @@ import SwiftUI
 
 /// The sizes the top rows rest on with the setting on. The row's height and
 /// leading inset follow the toolbar (`WindowChromeState`); the rest are
-/// choices.
+/// choices. The title column's fonts and spacing are the toolbar title's
+/// (`WorktreeTitleMetrics`).
 enum MainTabRowMetrics {
     /// The gap between the toolbar's leading item and the main row's first
     /// item while the item sits over the main pane (sidebar collapsed).
@@ -29,15 +30,6 @@ enum MainTabRowMetrics {
     static let minimumDragGap: CGFloat = 24
     /// Between the title column and the first tab.
     static let titleToTabsSpacing: CGFloat = 14
-    /// The worktree title's point size in the row.
-    static let titleFontSize: CGFloat = 13
-    /// The project name's point size in the row.
-    static let projectFontSize: CGFloat = 11
-    /// Between the worktree title and the project name under it.
-    static let titleLineSpacing: CGFloat = 3
-    /// Between the text on the title column's bottom line and the notes button
-    /// that follows it.
-    static let notesToProjectSpacing: CGFloat = 4
     /// How far the notes button's hover square, which is its hit area too,
     /// reaches past its symbol on each side (`RowIconSquare.Size.outset`).
     /// It changes neither the button's size nor the line's layout.
@@ -53,6 +45,8 @@ enum MainTabRowMetrics {
     static let pillHoverOpacity: Double = 0.045
     /// Between two pill tabs.
     static let pillSpacing: CGFloat = 2
+    /// Between the last pill tab and the + button's hover square.
+    static let pillToAddSpacing: CGFloat = 4
 
     /// The row's height: the content pane's top safe-area inset, the
     /// toolbar's height over the pane, never less than the tab row's own

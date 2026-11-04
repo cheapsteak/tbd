@@ -250,10 +250,11 @@ struct TabBar: View {
         }
     }
 
-    /// The tabs, a horizontal scroll view, then the + button straight after
-    /// the last one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs
-    /// in the toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing`
-    /// apart, centred on the row's midline.
+    /// The tabs, a horizontal scroll view, then the + button after the last
+    /// one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs in the
+    /// toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing` apart,
+    /// centred on the row's midline, and the + button sits
+    /// `MainTabRowMetrics.pillToAddSpacing` after the last pill.
     private func tabsThenAdd(pills: Bool) -> some View {
         TabsThenAddLayout {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -287,6 +288,8 @@ struct TabBar: View {
                 onChooseAccount: onChooseAccount,
                 onAddCodex: onAddCodex
             )
+            // Outside the button, so its hover square stays 28 x 28.
+            .padding(.leading, pills ? MainTabRowMetrics.pillToAddSpacing : 0)
             // On the button alone: the tabs' context menus must stay outside
             // the style (`RowIconButtonStyle`).
             .buttonStyle(RowIconButtonStyle())
@@ -294,13 +297,14 @@ struct TabBar: View {
     }
 
     /// The main pane's top row, with the Tabs in the toolbar setting on, in
-    /// the window's toolbar row (`MainTabRowLayout`): the worktree's title
-    /// over the notes button and the project name (`WorktreeTitleColumn`),
-    /// the tabs as pills with the + button after them, the drag gap, and the
-    /// trailing group. It starts past the toolbar's leading item while that
-    /// item sits over the pane (`MainTabRowMetrics.leadingInset`), and is the
-    /// toolbar's height (`MainTabRowMetrics.height`), both as the toolbar
-    /// controller measured them (`WindowChromeState`). A worktree the app
+    /// the window's toolbar row (`MainTabRowLayout`): the notes button, the
+    /// project name and the worktree's title on one line, as the toolbar's
+    /// title item sets them (`WorktreeTitleColumn`), the tabs as pills with
+    /// the + button after them, the drag gap, and the trailing group. It
+    /// starts past the toolbar's leading item while that item sits over the
+    /// pane (`MainTabRowMetrics.leadingInset`), and is the toolbar's height
+    /// (`MainTabRowMetrics.height`), both as the toolbar controller measured
+    /// them (`WindowChromeState`). A worktree the app
     /// cannot find shows no title. The + button and the trailing group take
     /// `RowIconButtonStyle`; the title column and the tabs do not.
     private var topRow: some View {

@@ -6,16 +6,17 @@ Pairs with: the AppKit window chrome ([`2026-11-01-appkit-window-chrome-design.m
 
 This spec moves each pane's tab strip up into the main window's toolbar row,
 behind a setting that is off by default. The worktree's title moves into the
-same row, set over its project name. The terminal and the side panel then start
-at the top of the window, and the Servers button moves to the status bar.
+same row, on one line after the notes button and the project name, as the
+toolbar sets it. The terminal and the side panel then start at the top of the
+window, and the Servers button moves to the status bar.
 
 ## Problem
 
 A worktree's window spends two rows on chrome before its content starts:
 
 - **The toolbar row** holds the window buttons, the sidebar's controls and,
-  over the main area, the title cluster: the worktree title, the project
-  name and the repo notes button after it. The rest of that row is empty.
+  over the main area, the title cluster: the repo notes button, the project
+  name and the worktree title. The rest of that row is empty.
 - **The tab row** sits under it, 30 pt tall: the session tabs over the main
   pane, and the side panel's strip over the side panel.
 
@@ -27,9 +28,9 @@ the main area carries nothing.
 
 - Each pane's tab strip sits in the toolbar row, so both panes' content starts
   directly under it, 30 pt sooner.
-- The title cluster keeps the worktree title and the project name, each with
-  its menu, at full length when there is room, and the notes button after the
-  project name, with its popover.
+- The title cluster keeps the notes button with its popover, and the project
+  name and the worktree title with their menus, at full length when there is
+  room, and reads the same as the toolbar's title on every other page.
 - A worktree keeps any number of session tabs; none is hidden while the title
   can still give up room.
 - The window can still be dragged and double-clicked by its top row.
@@ -123,17 +124,22 @@ Left to right:
    Every tab row (this one, the classic row and the side region's strip) ends
    12 pt short of its trailing edge, so the last icon button's hover square
    clears the window's edge; the row's background still reaches the edge.
-2. **Title cluster.** A column of two lines: the worktree title in 13 pt
-   semibold, and under it the project name in 11 pt, secondary colour, the way
-   macOS sets a window's subtitle under its title. The notes button follows the
-   bottom line's text, 4 pt after the project name, its symbol drawn at the line's
-   11 pt in the same secondary colour, so the line is no taller than its text.
-   Its hit area reaches a little past the symbol, it names itself on hover with
-   a help tag, and it keeps its popover. Each line keeps its menu. A worktree
-   with no project (a scratch space) shows the title alone, centred on the
-   midline, with the notes button following that line at the title's 13 pt.
-3. **Session tabs**, then the + button straight after the last tab
-   (`TabsThenAddLayout`, unchanged), in the pill style below.
+2. **Title cluster.** One line, set as the toolbar's title item sets it on
+   every page without a tab bar (`WorktreeTitleView`), centred on the midline.
+   Left to right: the notes button, the project name in 11 pt in the secondary
+   colour, and the worktree title in 14 pt semibold, 6 pt apart. The row's
+   column (`WorktreeTitleColumn`) and the toolbar's title item read those sizes
+   from the same constants (`WorktreeTitleMetrics`), so the two cannot drift.
+   The notes button draws its symbol in the secondary colour at 13 pt, the size
+   the toolbar's button takes from its hosting view's default font. Its hit
+   area reaches a little past the symbol, and it keeps its popover. It names
+   itself on hover with a help tag rather than the toolbar's hover label, which
+   draws under the button, where the pane would cut it off. Each text keeps its
+   menu. A worktree with no project (a scratch space) shows the notes button,
+   then the title.
+3. **Session tabs**, then the + button 4 pt after the last tab
+   (`TabsThenAddLayout`), so its hover square clears the pill, in the pill
+   style below.
 4. **Drag gap,** at least 24 pt, taking all spare width (see "Dragging the
    window").
 5. **Session History,** and while the side region is hidden, the transcript,
@@ -143,9 +149,10 @@ Left to right:
 
 - With room for everything, the cluster and the tabs take their ideal widths.
 - Short of room, the title column shrinks first, down to a floor of 110 pt.
-  Both lines truncate at the column's width, the title in the middle and the
-  project name at the end; the notes button keeps its size. Hovering the
-  title shows it in full, and the sidebar's selected row shows it too.
+  Within it the project name gives way first, truncating at its end, and then
+  the title, truncating in the middle; the notes button keeps its size.
+  Hovering the title shows it in full, and the sidebar's selected row shows it
+  too.
 - Only once the title is at its floor do the tabs scroll, as they do today.
 
 One pure function decides the two widths from the cluster's ideal width, its
@@ -233,9 +240,11 @@ Each gated behaviour is tested with the setting on and off.
   choice of `SingleWorktreeView` agree for every kind of selection.
 - **Row height:** the row's height equals the hosted pane's top safe-area
   inset.
-- **Title cluster:** a worktree with a project shows two lines, the notes
-  button following the project's; a scratch space shows the title alone, the
-  notes button following it.
+- **Title cluster:** one line with or without a project: a project leaves the
+  column as tall as a scratch space's and widens it by the project name and one
+  spacing. The row's column and the toolbar's title item are the same size,
+  with a project and without, and the row's notes button is the toolbar's
+  size.
 - **Overflow, as values:** everything fits; the title shrinks and the tabs
   keep their width; the title at its floor and the tabs scrolling; a title
   already narrower than the floor never grows.
@@ -272,10 +281,14 @@ Each gated behaviour is tested with the setting on and off.
   spec's toolbar and leaves the window buttons' placement to TBD.
 - **Only the main strip moves up.** The two strips share one row today; moving
   one would leave the side panel's content 30 pt lower than the terminal's.
-- **The title on one line, before the tabs.** At the owner's window size the
-  inline cluster took about 280 pt of a 516 pt main pane, and one tab fit
-  before the strip scrolled. Setting the project under the title frees the
-  project name's width, about 65 pt, most of a tab.
+- **The title over the project name,** the way macOS sets a window's subtitle
+  under its title. At the owner's window size the toolbar's one-line cluster
+  took about 280 pt of a 516 pt main pane, and setting the project under the
+  title frees the project name's width, about 65 pt, most of a tab. But the
+  title then reads differently in the row than in the toolbar's title item,
+  which every page without a tab bar shows, and changes shape whenever the
+  selection moves from one to the other. The title floor, and the project name
+  giving way before the title, bound what one line costs the tabs.
 - **The tabs scroll and the title stays whole.** A tab scrolled out of view
   shows nowhere else, while the title also shows in the sidebar's selected row.
 - **Today's 2 pt line under the active tab, or an active tab that opens into
