@@ -18,56 +18,47 @@ import AppKit
 /// `Role` names a row's part in one line, and `pieces(role:x:tickEnd:...)`
 /// turns that part into the rectangles, curve and fade the row draws.
 ///
-/// **Strength.** At rest a line is a quiet hairline. The line the hovered
-/// row and each selected row is joined to — the one it starts, or the one it
-/// branches off — is *active* and draws at full strength, so the group you
-/// are in stands out. On a row that draws a highlight, every line takes the
-/// highlight's accent colour, blended toward white, instead of grey, so a
-/// neutral line never muddies the tint. Each line draws as one shape at its
-/// alpha, so where its turn leaves the vertical the colour does not double.
+/// **Strength.** Every line draws at one strength, `width` wide. On a plain
+/// row it is grey, the secondary label colour. On a row that draws a
+/// highlight it takes the highlight's accent colour, blended toward white,
+/// so a neutral line never muddies the tint. Each line draws as one shape at
+/// its alpha, so where its turn leaves the vertical the colour does not
+/// double.
 ///
-/// Which lines are active is the list's hierarchy's to say
-/// (`GuideHierarchy.activeGuideAncestor(of:)`), and which part of which line
-/// a row draws too (`GuideHierarchy.guideRuns(of:)`), by one set of rules for
-/// the outline and the dock; how each one draws is here, beside
-/// `SidebarRowHighlight`'s constants, so tuning the lines is one edit.
-/// `SidebarGuideLineTests` pins every value.
+/// Which part of which line a row draws is the list's hierarchy's to say
+/// (`GuideHierarchy.guideRuns(of:)`), by one set of rules for the outline
+/// and the dock; how each one draws is here, beside `SidebarRowHighlight`'s
+/// constants, so tuning the lines is one edit. `SidebarGuideLineTests` pins
+/// every value.
 enum SidebarGuideLine {
     // MARK: Strength
 
-    /// The alpha a line draws at in each state. It multiplies the colour's
-    /// own alpha: the secondary label colour is translucent already, the
-    /// highlight tint opaque.
+    /// The alpha a line draws at on each kind of row. It multiplies the
+    /// colour's own alpha: the secondary label colour is translucent already,
+    /// the highlight tint opaque.
     struct Alphas: Equatable, Sendable {
-        /// A line at rest, in the secondary label colour.
-        var rest: CGFloat
-        /// An active line, in the secondary label colour.
-        var active: CGFloat
-        /// A line at rest on a highlighted row, in the highlight tint.
-        var restOnHighlight: CGFloat
-        /// An active line on a highlighted row, in the highlight tint.
-        var activeOnHighlight: CGFloat
+        /// A line on a plain row, in the secondary label colour.
+        var plain: CGFloat
+        /// A line on a row that draws a highlight, in the highlight tint.
+        var onHighlight: CGFloat
 
         /// No lines: a row draws no line whose alpha is 0.
-        static let none = Alphas(rest: 0, active: 0, restOnHighlight: 0, activeOnHighlight: 0)
+        static let none = Alphas(plain: 0, onHighlight: 0)
     }
 
-    /// The lines' strengths. Active is close to
-    /// `Color.secondary.opacity(0.25)`, and rest about half of it. Set this
-    /// to `.none` to see the sidebar without guide lines.
-    static let alphas = Alphas(rest: 0.12, active: 0.24, restOnHighlight: 0.30, activeOnHighlight: 0.55)
+    /// The lines' strength. On a plain row it is close to
+    /// `Color.secondary.opacity(0.25)`. Set this to `.none` to see the
+    /// sidebar without guide lines.
+    static let alphas = Alphas(plain: 0.24, onHighlight: 0.55)
 
     // MARK: Width
 
-    /// A resting line's width in device pixels. 1 is a hairline: 0.5 pt on
-    /// a Retina display.
-    static let restPixelWidth: CGFloat = 1
-
-    /// An active line's width in points.
-    static let activeWidth: CGFloat = 1
+    /// Every line's width in points.
+    static let width: CGFloat = 1
 
     /// The backing scale a row assumes when neither its window nor a screen
-    /// can tell it one.
+    /// can tell it one: what `pieces(role:x:tickEnd:...)` snaps a line's
+    /// edges to device pixels by.
     static let defaultBackingScale: CGFloat = 2
 
     // MARK: Shape
@@ -239,19 +230,12 @@ enum SidebarGuideLine {
         var width: CGFloat
     }
 
-    /// The style of a line that is active or at rest, on a row that draws a
-    /// highlight or on a plain one, at `backingScale` device pixels per
-    /// point. A scale of 0 or less reads as `defaultBackingScale`.
-    static func style(isActive: Bool, isOnHighlight: Bool, backingScale: CGFloat,
-                      alphas: Alphas = SidebarGuideLine.alphas) -> Style {
-        let scale = backingScale > 0 ? backingScale : defaultBackingScale
-        let width = isActive ? activeWidth : restPixelWidth / scale
-        switch (isActive, isOnHighlight) {
-        case (false, false): return Style(color: .secondaryLabel, alpha: alphas.rest, width: width)
-        case (true, false): return Style(color: .secondaryLabel, alpha: alphas.active, width: width)
-        case (false, true): return Style(color: .highlightTint, alpha: alphas.restOnHighlight, width: width)
-        case (true, true): return Style(color: .highlightTint, alpha: alphas.activeOnHighlight, width: width)
-        }
+    /// The style of every line on a row that draws a highlight, or on a
+    /// plain one.
+    static func style(isOnHighlight: Bool, alphas: Alphas = SidebarGuideLine.alphas) -> Style {
+        isOnHighlight
+            ? Style(color: .highlightTint, alpha: alphas.onHighlight, width: width)
+            : Style(color: .secondaryLabel, alpha: alphas.plain, width: width)
     }
 
     // MARK: A row's part in a line
@@ -296,14 +280,10 @@ enum SidebarGuideLine {
     }
 
     /// A row's guide lines as a list keeps them, worked out once for its
-    /// rows (`GuideHierarchy.rowGuides(of:)`), so a hover or a selection only
-    /// looks them up.
+    /// rows (`GuideHierarchy.rowGuides(of:)`), so a hover only looks them up.
     struct RowGuides: Equatable {
         /// The row's part in each line above it, outermost first.
         var guides: [Guide] = []
-        /// Each guide's owner, in `guides`' order: what the active lines
-        /// index.
-        var owners: [SidebarNodeID] = []
         /// The row starts a line of its own.
         var startsGuide = false
     }
@@ -335,17 +315,6 @@ enum SidebarGuideLine {
     /// child's row: above it, by the length of the stub the parent's own row
     /// holds.
     static let continuedFadeStart: CGFloat = stubStart(rowHeight: ownerRowHeight) - ownerRowHeight
-
-    /// The indices of `ancestors` — a row's line owners, outermost first —
-    /// whose lines are active.
-    static func activeIndices<ID: Hashable>(of ancestors: [ID], active: Set<ID>) -> IndexSet {
-        guard !active.isEmpty else { return [] }
-        var indices = IndexSet()
-        for (index, ancestor) in ancestors.enumerated() where active.contains(ancestor) {
-            indices.insert(index)
-        }
-        return indices
-    }
 
     // MARK: Geometry
 
@@ -395,11 +364,11 @@ enum SidebarGuideLine {
     ///
     /// The line starts at `x` rounded down to a device-pixel boundary and
     /// runs right from there, so a width of whole device pixels covers whole
-    /// pixels and draws crisp; a hairline centred on a whole point would
-    /// straddle two half-lit pixels instead. The tick's top edge sits on the
-    /// row's centre rounded down the same way, so it too covers whole pixel
-    /// rows, and the turn's stroke runs half a width inside both edges to
-    /// join them.
+    /// pixels and draws crisp; a line an odd number of device pixels wide,
+    /// centred on a whole point, would straddle two half-lit pixels instead.
+    /// The tick's top edge sits on the row's centre rounded down the same
+    /// way, so it too covers whole pixel rows, and the turn's stroke runs
+    /// half a width inside both edges to join them.
     /// - Parameters:
     ///   - x: the line's x: under its owner's icon.
     ///   - tickEnd: where a branch's tick stops, `tickInset` short of the

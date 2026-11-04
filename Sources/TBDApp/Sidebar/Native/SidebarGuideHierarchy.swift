@@ -3,8 +3,7 @@ import Foundation
 /// A list's rows as the guide-line rules read them: the row each sits under,
 /// the rows shown under each, and each row's indentation level. The outline's
 /// `SidebarTree` and the dock's `DockGuideHierarchy` both conform, so the two
-/// lists shape and light their lines by the one set of rules in the extension
-/// below.
+/// lists shape their lines by the one set of rules in the extension below.
 ///
 /// Worktree rows are the rows whose ID is `SidebarNodeID.worktree`: the only
 /// rows that own a line and the only rows a line joins.
@@ -17,8 +16,6 @@ protocol GuideHierarchy {
     /// `id`'s indentation level. A line runs under its owner's icon, at the
     /// owner's level.
     func level(of id: SidebarNodeID) -> Int
-    /// Whether the list shows `id`.
-    func isShown(_ id: SidebarNodeID) -> Bool
 }
 
 extension SidebarNodeID {
@@ -73,11 +70,10 @@ extension GuideHierarchy {
     }
 
     /// `id`'s row's lines, as a list keeps them: the guides of its runs
-    /// (`guideRuns(of:)`), each one's owner, and whether it starts its own.
+    /// (`guideRuns(of:)`), and whether it starts its own.
     func rowGuides(of id: SidebarNodeID) -> SidebarGuideLine.RowGuides {
-        let runs = guideRuns(of: id)
-        return SidebarGuideLine.RowGuides(guides: SidebarGuideLine.guides(for: runs), owners: runs.map(\.owner),
-                                          startsGuide: startsGuide(id))
+        SidebarGuideLine.RowGuides(guides: SidebarGuideLine.guides(for: guideRuns(of: id)),
+                                   startsGuide: startsGuide(id))
     }
 
     /// `owner`'s line as `row` draws it, when `child` — the owner's child on
@@ -96,43 +92,5 @@ extension GuideHierarchy {
         }
         guard !isLast else { return nil }
         return SidebarGuideLine.Run(owner: owner, level: level(of: owner), role: .passing, continuesFade: false)
-    }
-}
-
-// MARK: Focus
-
-/// Which guide lines draw active: the line a focus row — the hovered row, or
-/// a selected worktree row — draws a branch of, or starts.
-///
-/// A focus row lights only a line it is joined to by the shape rules above,
-/// so what lights is always drawn through the row:
-/// - **A worktree row that starts a line** — its worktree children show
-///   under it — lights its own, the one down its children.
-/// - **Any other worktree row whose parent is a worktree** lights its
-///   parent's line, the one it branches off or ends in.
-/// - **Every other row** lights nothing: a top-level worktree row that starts
-///   no line, a worktree row whose only worktree descendants sit in a group
-///   under it, a row inside a Remote or Exited group (lines never cross a
-///   group header), a header, a group header, a remote session and the
-///   scratch prompt.
-extension GuideHierarchy {
-    /// The worktree whose guide line `focus` lights, or nil when it lights
-    /// none. See the extension's rule.
-    func activeGuideAncestor(of focus: SidebarNodeID) -> SidebarNodeID? {
-        guard focus.isWorktree else { return nil }
-        if startsGuide(focus) { return focus }
-        guard let parent = parent(of: focus), parent.isWorktree else { return nil }
-        return parent
-    }
-
-    /// The active ancestors of every focus row the list shows. A focus row
-    /// out of view — a selected row inside a collapsed section or group, or
-    /// one the dock does not show — lights nothing.
-    func activeGuideAncestors(of focus: some Sequence<SidebarNodeID>) -> Set<SidebarNodeID> {
-        var active: Set<SidebarNodeID> = []
-        for id in focus where isShown(id) {
-            if let ancestor = activeGuideAncestor(of: id) { active.insert(ancestor) }
-        }
-        return active
     }
 }

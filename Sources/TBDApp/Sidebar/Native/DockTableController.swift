@@ -94,11 +94,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// held rows carrying the latest models. Written only by the apply,
     /// through `setRows(_:)`.
     private(set) var rows: [DockRow] = []
-    /// `rows` as the guide-line rules read them.
-    private(set) var guideHierarchy = DockGuideHierarchy(rows: [])
     /// Each row's guide lines, by index into `rows`, worked out when the
-    /// rows' IDs or depths last changed, so a hover or a selection only
-    /// looks them up.
+    /// rows' IDs or depths last changed, so a hover only looks them up.
     private var rowGuides: [SidebarGuideLine.RowGuides] = []
     /// Runs after an apply changed the number of rows; the container resizes
     /// the dock.
@@ -121,11 +118,6 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     private(set) var hoverTracker: SidebarHoverTracker?
     /// What the pointer was last reported over.
     private(set) var hoverState = SidebarHoverTracker.State()
-    /// The dock rows whose guide lines draw active: the active ancestors of
-    /// the hovered row and of each selected worktree row the dock shows, by
-    /// the outline's rule (`GuideHierarchy.activeGuideAncestors(of:)`).
-    /// Recomputed once per hover change, selection change and apply.
-    private(set) var activeGuideAncestors: Set<SidebarNodeID> = []
 
     // MARK: Test seams
 
@@ -399,9 +391,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             table.reloadData()
             hasLoaded = true
         }
-        // Re-derives the row views the rows changed under once, with the
-        // lines the selection lights, rather than once for the rows and
-        // again for the selection.
+        // Mirrors the selection, and re-derives the row views the rows
+        // changed under.
         applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
         isApplyingModelSelection = false
         // The dock takes its new height before a new selection scrolls into
@@ -479,8 +470,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         let structureChanged = !Self.haveSameStructure(rows, newRows)
         rows = newRows
         guard structureChanged else { return false }
-        guideHierarchy = DockGuideHierarchy(rows: newRows)
-        rowGuides = Self.rowGuides(of: newRows, in: guideHierarchy)
+        rowGuides = Self.rowGuides(of: newRows, in: DockGuideHierarchy(rows: newRows))
         guideRebuildCount += 1
         return true
     }
@@ -528,12 +518,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// Selects the rows `AppState` names: its selected worktrees and its
     /// selected remote session. A row the dock does not show is skipped.
-    /// The selected rows light their groups' guide lines, so the row views
-    /// take the active lines here: at the end of every apply, and after a
-    /// user's selection.
+    /// A row view draws the selection from the table's own (`isSelected`),
+    /// so a selection alone reconfigures no row view.
     /// - Parameter refreshingRowViews: true after an apply that changed the
     ///   rows' structure, so every row view takes its configuration afresh
-    ///   here even when the active lines stay the same.
+    ///   here.
     private func applyModelSelection(refreshingRowViews: Bool = false) {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
@@ -547,7 +536,9 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         if indexes != table.selectedRowIndexes {
             table.selectRowIndexes(indexes, byExtendingSelection: false)
         }
-        refreshActiveGuides(refreshingRowViews: refreshingRowViews)
+        if refreshingRowViews {
+            refreshRowViewConfigurations()
+        }
     }
 
     /// A selection that changed since the last apply scrolls its first dock
@@ -668,9 +659,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
 
     /// The row view's guide lines — its part in each line above it, by the
     /// outline's shape (`GuideHierarchy.guideRuns(of:)`), and its own line's
-    /// start when its children show under it — active where their owner is
-    /// in `activeGuideAncestors`, broken where the gutter pin shows: on
-    /// hover, and always once pinned — and its hover highlight.
+    /// start when its children show under it — broken where the gutter pin
+    /// shows: on hover, and always once pinned — and its hover highlight.
     private func configureRowView(_ rowView: SidebarRowView, at index: Int) {
         guard rows.indices.contains(index) else { return }
         let row = rows[index]
@@ -681,12 +671,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             configuration.level = row.depth
             let lines = rowGuides.indices.contains(index) ? rowGuides[index] : SidebarGuideLine.RowGuides()
             configuration.guides = lines.guides
-            if !activeGuideAncestors.isEmpty {
-                configuration.activeGuides = SidebarGuideLine.activeIndices(
-                    of: lines.owners, active: activeGuideAncestors)
-            }
             configuration.drawsStub = lines.startsGuide
-            configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(row.id)
             configuration.showsPinGap = (model.isPinned || isHovered) && !model.isMain
         }
         configuration.isHovered = isHovered
@@ -694,8 +679,8 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// Re-derives every row view's configuration from the rows each view
-    /// shows: after the rows' structure changes, and when the active guide
-    /// lines change. A view whose configuration is unchanged does not redraw.
+    /// shows: after the rows' structure changes. A view whose configuration
+    /// is unchanged does not redraw.
     private func refreshRowViewConfigurations() {
         table.enumerateAvailableRowViews { rowView, index in
             guard let rowView = rowView as? SidebarRowView else { return }
@@ -715,27 +700,6 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
     }
 
-    // MARK: Active guide lines
-
-    /// The active ancestors of the hovered row and of each selected worktree
-    /// row the dock shows.
-    private func focusedGuideAncestors() -> Set<SidebarNodeID> {
-        var focus = appState.selectedWorktreeIDs.map { SidebarNodeID.worktree($0) }
-        if let hovered = hoverState.row { focus.append(hovered) }
-        return guideHierarchy.activeGuideAncestors(of: focus)
-    }
-
-    /// Recomputes the active guide lines after the selection or the rows
-    /// changed. When they differ, or `refreshingRowViews` asks, every row
-    /// view the table holds takes its configuration afresh; a view whose
-    /// configuration comes out the same does not redraw.
-    private func refreshActiveGuides(refreshingRowViews: Bool = false) {
-        let active = focusedGuideAncestors()
-        guard refreshingRowViews || active != activeGuideAncestors else { return }
-        activeGuideAncestors = active
-        refreshRowViewConfigurations()
-    }
-
     // MARK: Hover
 
     /// A dock row as the hover tracker sees it: its ID, in no section.
@@ -745,11 +709,10 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     /// The tracker's report: the `+` under the pointer arms the shared menu,
-    /// the hovered row lights the guide line it is joined to, and every row
-    /// the table has takes the new hover. A recompute that finds nothing
-    /// changed leaves the rows as they are. The row views and the active
-    /// lines follow only the hovered row, so a move between parts of one row
-    /// reaches only the cells.
+    /// and every row the table has takes the new hover. A recompute that
+    /// finds nothing changed leaves the rows as they are. The row views —
+    /// their hover highlight and pin gap — follow only the hovered row, so a
+    /// move between parts of one row reaches only the cells.
     func hoverChanged(_ state: SidebarHoverTracker.State) {
         let previous = hoverState
         hoverState = state
@@ -758,15 +721,11 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             from: previous.part == .plus ? previous.row : nil, to: state.part == .plus ? state.row : nil,
             in: table, anchor: { plusAnchor(for: $0) }, target: { plusTarget(for: $0) },
             appState: appState, sheets: sheets)
-        let rowChanged = state.row != previous.row
-        if rowChanged {
-            activeGuideAncestors = focusedGuideAncestors()
-        }
-        applyHoverToAvailableRows(includingRowViews: rowChanged)
+        applyHoverToAvailableRows(includingRowViews: state.row != previous.row)
     }
 
-    /// Hands every row view the table has its hover highlight, active guide
-    /// lines and pin gap, and every cell its hover.
+    /// Hands every row view the table has its hover highlight and pin gap,
+    /// and every cell its hover.
     /// - Parameter includingRowViews: false when only the cells' hover
     ///   changed, so the row views keep their configurations.
     func applyHoverToAvailableRows(includingRowViews: Bool = true) {

@@ -1,8 +1,8 @@
 import Foundation
 
 /// The dock's rows as the guide-line rules read them (`GuideHierarchy`), so
-/// the dock shapes and lights its lines by the outline's rules. Built when
-/// the dock's rows' IDs or depths change.
+/// the dock shapes its lines by the outline's rules. Built when the dock's
+/// rows' IDs or depths change.
 ///
 /// The rows are a preorder walk of each pinned subtree with a depth per row,
 /// so a row's parent is the nearest row above it one level up, and a row's
@@ -59,10 +59,5 @@ struct DockGuideHierarchy: GuideHierarchy {
 
     func level(of id: SidebarNodeID) -> Int {
         indices[id].map { depths[$0] } ?? 0
-    }
-
-    /// Every dock row shows: the dock has nothing to collapse.
-    func isShown(_ id: SidebarNodeID) -> Bool {
-        indices[id] != nil
     }
 }
