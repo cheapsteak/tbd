@@ -82,7 +82,7 @@ final class FileWatcher: Sendable {
             let box = StreamState(path: path, continuation: continuation, clock: self.clock)
 
             #if DEBUG
-            Self._liveStreamCountLock.withLock { $0 += 1 }
+            Self.adjustLiveStreamCount(forPath: path, by: 1)
             #endif
 
             // First open. If it fails, finish the stream right away.
@@ -91,7 +91,7 @@ final class FileWatcher: Sendable {
             continuation.onTermination = { _ in
                 box.terminate()
                 #if DEBUG
-                Self._liveStreamCountLock.withLock { $0 -= 1 }
+                Self.adjustLiveStreamCount(forPath: path, by: -1)
                 #endif
             }
 
@@ -101,23 +101,57 @@ final class FileWatcher: Sendable {
         }
     }
 
-    /// DEBUG-only counter for lifecycle balance assertions in tests.
-    /// Increments when a stream is created, decrements when its
-    /// `onTermination` fires (consumer dropped iterator or `.task` was
-    /// cancelled or `finish()` was called).
+    // MARK: DEBUG lifecycle counters
+    //
+    // Both counters are keyed by the watched path rather than kept as one
+    // process-wide number. Every suite in the test process runs alongside every
+    // other, and any of them can open and close a watcher (a mounted file
+    // viewer owns one), so a process-wide count moves under a test that did
+    // nothing. A test that watches a path only it uses reads counts that only
+    // its own streams move.
     #if DEBUG
-    nonisolated private static let _liveStreamCountLock = OSAllocatedUnfairLock<Int>(initialState: 0)
-    nonisolated static var liveStreamCount: Int { _liveStreamCountLock.withLock { $0 } }
+    /// Live streams for `path`: incremented when a stream is created,
+    /// decremented when its `onTermination` fires (consumer dropped the
+    /// iterator, `.task` was cancelled, or `finish()` was called).
+    ///
+    /// A path's entry is removed when its count returns to zero, so the table
+    /// holds only paths with a live stream, and a path watched again later
+    /// counts from zero again.
+    nonisolated static func liveStreamCount(forPath path: String) -> Int {
+        _liveStreamCounts.withLock { $0[path] ?? 0 }
+    }
 
-    /// DEBUG-only count of FDs actually closed, incremented inside the
-    /// dispatch source's cancel handler next to `close(fd)`. `liveStreamCount`
+    /// FDs actually closed for `path`, incremented inside the dispatch
+    /// source's cancel handler next to `close(fd)`. `liveStreamCount(forPath:)`
     /// can only observe that `onTermination` *fired* — it is decremented on a
     /// line independent of `box.terminate()`, so deleting `src?.cancel()` from
     /// `terminate()` would leak every FD with the whole suite still green.
     /// This is what makes lifecycle invariant #2 assertable.
-    /// `fileprivate` because the increment lives in `StreamState`.
-    nonisolated fileprivate static let _closedFDCountLock = OSAllocatedUnfairLock<Int>(initialState: 0)
-    nonisolated static var closedFDCount: Int { _closedFDCountLock.withLock { $0 } }
+    ///
+    /// Cumulative: it never returns to zero, so its entries are kept, one per
+    /// distinct path ever watched. That grows with the number of files
+    /// watched, not with the number of streams or re-opens.
+    nonisolated static func closedFDCount(forPath path: String) -> Int {
+        _closedFDCounts.withLock { $0[path] ?? 0 }
+    }
+
+    nonisolated private static let _liveStreamCounts = OSAllocatedUnfairLock<[String: Int]>(initialState: [:])
+    nonisolated private static let _closedFDCounts = OSAllocatedUnfairLock<[String: Int]>(initialState: [:])
+
+    nonisolated private static func adjustLiveStreamCount(forPath path: String, by delta: Int) {
+        _liveStreamCounts.withLock { counts in
+            let updated = counts[path, default: 0] + delta
+            // A negative count is kept, not dropped: it would mean one
+            // stream's `onTermination` ran twice, and a test should see that.
+            counts[path] = updated == 0 ? nil : updated
+        }
+    }
+
+    /// `fileprivate` because the increment lives in `StreamState`'s cancel
+    /// handler.
+    nonisolated fileprivate static func recordClosedFD(forPath path: String) {
+        _closedFDCounts.withLock { $0[path, default: 0] += 1 }
+    }
     #endif
 }
 
@@ -158,9 +192,12 @@ private final class StreamState: @unchecked Sendable {
     /// Open `self.path` and start a dispatch source for it. Returns `false`
     /// if `open()` failed (caller should `continuation.finish()`).
     func startWatching() -> Bool {
-        let fd = open(self.path, O_EVTONLY)
+        // A local `let`, so the cancel handler below captures the path (a
+        // `String`) and not `self`.
+        let path = self.path
+        let fd = open(path, O_EVTONLY)
         guard fd >= 0 else {
-            logger.debug("FileWatcher: open(\(self.path, privacy: .public)) failed errno=\(errno)")
+            logger.debug("FileWatcher: open(\(path, privacy: .public)) failed errno=\(errno)")
             return false
         }
 
@@ -188,7 +225,7 @@ private final class StreamState: @unchecked Sendable {
             // consumer dropping the iterator).
             close(fd)
             #if DEBUG
-            FileWatcher._closedFDCountLock.withLock { $0 += 1 }
+            FileWatcher.recordClosedFD(forPath: path)
             #endif
         }
 
