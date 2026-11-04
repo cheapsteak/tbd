@@ -275,8 +275,9 @@ highlight instead of turning white.
 `SidebarRowView` draws, under the cell, the row's highlight and the hierarchy
 guide lines over it, in both the outline and the dock. Every value it draws
 with — shape, alphas per state and appearance, the line width, fade, radii —
-lives in two enums, `SidebarRowHighlight` and `SidebarGuideLine`, so tuning either is one
-edit, and `SidebarRowHighlightTests` and `SidebarGuideLineTests` pin them.
+lives in two enums, `SidebarRowHighlight` and `SidebarGuideLine`, so tuning
+either is one edit, and `SidebarRowHighlightTests` and `SidebarGuideLineTests`
+pin them.
 
 The highlight is one shape on every row, whatever its depth or kind:
 `SidebarRowHighlight.highlightRect(in:)`, the row's full height, edge to edge,
