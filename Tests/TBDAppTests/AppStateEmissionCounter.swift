@@ -167,7 +167,6 @@ final class AppStateEmissionTracker {
         _ = state.gcProfileDirsEnabled
         _ = state.gcRetainedTranscriptsEnabled
         _ = state.gcHangStacksEnabled
-        _ = state.autoCreateNotesEnabled
         _ = state.autoHibernateEnabled
         _ = state.hibernateIdleMinutes
         _ = state.autoResumeOnLimitReset
@@ -298,7 +297,6 @@ final class AppStateEmissionTracker {
         "gcProfileDirsEnabled",
         "gcRetainedTranscriptsEnabled",
         "gcHangStacksEnabled",
-        "autoCreateNotesEnabled",
         "autoHibernateEnabled",
         "hibernateIdleMinutes",
         "autoResumeOnLimitReset",

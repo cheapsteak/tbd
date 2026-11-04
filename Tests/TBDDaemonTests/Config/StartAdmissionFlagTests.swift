@@ -56,7 +56,7 @@ struct StartAdmissionFlagTests {
         try migrator.migrate(queue, upTo: Self.lastIdentifierBeforeTheFlags)
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
         try migrator.migrate(queue)
@@ -68,7 +68,7 @@ struct StartAdmissionFlagTests {
             let background: DatabaseValue = row["agent_background_enabled"]
             #expect(admission.isNull)
             #expect(background.isNull)
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 

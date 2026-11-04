@@ -103,7 +103,6 @@ extension RPCRouter {
             autoResumeOnLimitReset: config.autoResumeOnLimitReset,
             autoResumeOnApiError: config.autoResumeOnApiError,
             gcEnabled: config.gcEnabled,
-            autoCreateNotesEnabled: config.autoCreateNotesEnabled,
             globalRemoteCreateDefaults: config.remoteCreateDefaults,
             profileBalancingEnabled: config.profileBalancingEnabled,
             profileBalancingUsageCeilingPercent: config.profileBalancingUsageCeilingPercent,

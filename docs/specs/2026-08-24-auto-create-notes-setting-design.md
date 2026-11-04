@@ -1,6 +1,15 @@
 # Automatic Notes tabs for new worktrees
 
-Status: **implemented**.
+Status: **retired**.
+
+> This setting does not exist, and new worktrees get no starter note. A
+> worktree's first note is made by the side panel's Notes pill on its first
+> click ([side panel toggle pills](2026-11-03-side-panel-toggle-pills-design.md),
+> "Notes"). The one note a creation still makes is the populated provenance note
+> a conversation revived on a fresh branch receives. The
+> `config.auto_create_notes_enabled` column is retired under
+> [column retirement](2026-10-24-column-retirement-design.md) at schema epoch 7.
+> The rest of this document records the setting's design.
 
 ## Problem
 

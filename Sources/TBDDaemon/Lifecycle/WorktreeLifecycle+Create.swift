@@ -26,8 +26,8 @@ public enum WorktreeCreateCompletion: Sendable {
 /// composer, exactly like an ordinary resume. An earlier revision passed a
 /// "you have been moved" context prompt as the spawn's trailing argument,
 /// which Claude answered immediately — an unwanted turn on every revive.
-/// Provenance lives solely in `notesSeed`, which seeds the initial "Notes"
-/// note.
+/// Provenance lives solely in `notesSeed`, the content of the "Notes" note
+/// the new worktree starts with.
 ///
 /// `claudeSpawnExtras` are the plugin folders and settings overlay the source
 /// session's terminal carried when its worktree was archived: the carried-over
@@ -278,8 +278,6 @@ extension WorktreeLifecycle {
             let clock = ContinuousClock()
             let phaseStart = clock.now
             let creationConfig = try await db.config.get()
-            let shouldCreateInitialNote = carryover != nil
-                || creationConfig.autoCreateNotesEnabled
             let creationPrimaryKind: TerminalKind = carryover == nil
                 ? resolvePrimaryTerminalKind(
                     skipClaude: skipClaude,
@@ -591,11 +589,8 @@ extension WorktreeLifecycle {
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
                     )
-                    if shouldCreateInitialNote {
-                        await createInitialNote(
-                            worktreeID: worktree.id,
-                            seed: carryover?.notesSeed
-                        )
+                    if let notesSeed = carryover?.notesSeed {
+                        await createProvenanceNote(worktreeID: worktree.id, content: notesSeed)
                     }
                 }
                 // Phase 3 never deletes the row, so the row owns the checkout now.
@@ -624,15 +619,12 @@ extension WorktreeLifecycle {
             let terminalSpawnElapsedMs = terminalSpawnStart.duration(to: clock.now) / .milliseconds(1)
             timingLogger.debug("terminal-spawn \(worktreeID.uuidString, privacy: .public) \(Int(terminalSpawnElapsedMs))ms")
 
-            // 3c. Conversation carryover always gets a seeded provenance note;
-            // ordinary creates get an empty note only when configured. Either
+            // 3c. A conversation carried onto a fresh branch gets its
+            // provenance note; an ordinary create makes no note. The note
             // stays out of the tab order and opens no panel, so the primary
             // terminal keeps focus.
-            if shouldCreateInitialNote {
-                await createInitialNote(
-                    worktreeID: worktreeID,
-                    seed: carryover?.notesSeed
-                )
+            if let notesSeed = carryover?.notesSeed {
+                await createProvenanceNote(worktreeID: worktreeID, content: notesSeed)
             }
 
             // 4. Update status to active
@@ -814,27 +806,22 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Creates the initial "Notes" note. Ordinary creates leave it empty; a
-    /// conversation carryover supplies the populated provenance seed. The
-    /// note stays out of the tab order, so the primary terminal keeps focus,
-    /// and it opens no panel: the app's Notes toggle opens it on demand
-    /// (side panel notes spec).
+    /// Creates the "Notes" note, holding `content`, that a conversation
+    /// carried onto a fresh branch starts with. It is the only note a
+    /// creation makes: an ordinary new worktree has none until the side
+    /// panel's Notes pill makes one. The note stays out of the tab order, so
+    /// the primary terminal keeps focus, and it opens no panel: the Notes pill
+    /// opens it on demand (side panel toggle pills spec).
     ///
     /// Best-effort: a failure (e.g. the worktree row vanished mid-create,
     /// FK-failing the insert) must never fail the create, whose checkout and
     /// terminals are already valid.
-    func createInitialNote(worktreeID: UUID, seed: String? = nil) async {
+    func createProvenanceNote(worktreeID: UUID, content: String) async {
         do {
             let note = try await db.notes.create(worktreeID: worktreeID, title: "Notes")
-            if let seed {
-                _ = try await db.notes.update(
-                    id: note.id,
-                    title: note.title,
-                    content: seed
-                )
-            }
+            _ = try await db.notes.update(id: note.id, title: note.title, content: content)
         } catch {
-            logger.warning("failed to create initial note for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.warning("failed to create provenance note for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

@@ -52,7 +52,7 @@ struct TranscriptStreamingConfigFlagTests {
 
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
 
@@ -66,7 +66,7 @@ struct TranscriptStreamingConfigFlagTests {
             #expect(
                 raw.isNull,
                 "transcript_streaming_enabled on a config row written before the migration must read NULL, not \(raw)")
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 

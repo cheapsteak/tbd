@@ -192,10 +192,12 @@ NSMenu's item notifications while it is open.
 
 - **One note per worktree:** the first, oldest by creation, as the Notes
   button's rule already picks. The Notes pill is its only control.
-- **Nothing makes a second note.** The + menu's New Note goes. The Notes pill
-  creates a note titled "Notes" only when the worktree has none, as the button
-  does today. Worktree creation's starter note is that first note. The CLI
-  has no note-creating command, and `note.create` stays as it is.
+- **Nothing makes a second note.** The + menu's New Note goes. A new worktree
+  has no note until the Notes pill's first click creates one, titled "Notes";
+  the pill creates a note only when the worktree has none. A conversation
+  revived on a fresh branch starts with its provenance note, which is then the
+  first note. The CLI has no note-creating command, and `note.create` stays as
+  it is.
 - **Legacy extra notes.** A worktree made before this change can have more than
   one. Each extra note whose panel is open shows as an ordinary tab with its ×,
   which deletes it, asking first when it has text. One with no panel is listed

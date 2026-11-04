@@ -58,7 +58,7 @@ struct GCRetainedTranscriptsFlagTests {
 
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
 
@@ -73,7 +73,7 @@ struct GCRetainedTranscriptsFlagTests {
                 raw.isNull,
                 "a config row written before the migration must read NULL, not \(raw)")
             // The pre-existing write survived — the migration is purely additive.
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 

@@ -47,5 +47,8 @@ enum RetiredColumns {
         // The side panel with tabs' soak flag, added by `20261030194425_panel_tabs`
         // as `INTEGER` with no default. Panel tabs are always on.
         RetiredColumn(table: "config", column: "panel_tabs_enabled", epoch: 6),
+        // The starter-note setting, added by `20260824214437_auto_create_notes_setting`
+        // as `INTEGER` with no default. New worktrees get no starter note.
+        RetiredColumn(table: "config", column: "auto_create_notes_enabled", epoch: 7),
     ]
 }

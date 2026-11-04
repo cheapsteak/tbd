@@ -68,7 +68,7 @@ struct ComposerDraftFlagTests {
         try migrator.migrate(queue, upTo: Self.lastIdentifierBeforeTheFlag)
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
         try migrator.migrate(queue)
@@ -78,7 +78,7 @@ struct ComposerDraftFlagTests {
                 arguments: [ConfigStore.singletonID]))
             let raw: DatabaseValue = row["composer_draft_enabled"]
             #expect(raw.isNull)
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
         }
     }
 

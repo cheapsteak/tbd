@@ -373,11 +373,14 @@ value = json.load(open(sys.argv[1]))["schemaEpoch"]
 sys.exit(0 if type(value) is int else 1)
 ' "$sidecar"
 
-    sed -E 's/(public static let current = )[0-9]+/\17/' "$SCHEMA_EPOCH_FILE" \
+    # An epoch the real file never holds, so the sidecar can only carry it by
+    # reading the tree being built.
+    other_epoch=$((expected + 100))
+    sed -E "s/(public static let current = )[0-9]+/\1${other_epoch}/" "$SCHEMA_EPOCH_FILE" \
         > "$repo/Sources/TBDShared/SchemaEpoch.swift"
     write_build_identity "$repo" "$build" >/dev/null 2>&1
     assert_eq "the schema epoch comes from the tree being built" \
-        "7" "$(sidecar_field "$sidecar" schemaEpoch)"
+        "$other_epoch" "$(sidecar_field "$sidecar" schemaEpoch)"
 }
 
 # A bundle without an epoch holds every column drop until the next update

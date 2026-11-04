@@ -169,9 +169,9 @@ struct PreSessionHookTests {
         #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(setupBody.contains("export TBD_BRANCH='\(wt.branch)'"))
 
-        // Tab order [claude, setup], active = claude; the initial note stays
-        // out of the tab order and opens no worktree panel.
-        #expect(try await db.notes.list(worktreeID: wt.id).count == 1)
+        // Tab order [claude, setup], active = claude; the create makes no
+        // note and opens no worktree panel.
+        #expect(try await db.notes.list(worktreeID: wt.id).isEmpty)
         #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id])
         #expect(try await db.panelSurface.worktreePanels(worktreeID: wt.id).isEmpty)
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
@@ -308,12 +308,12 @@ struct PreSessionHookTests {
                 "a clean hook run must delete its own terminal row")
         let claude = try #require(terminals.first { $0.label == "Claude Code" })
         let setup = try #require(terminals.first { $0.label == "setup" })
-        #expect(try await db.notes.list(worktreeID: pending.id).count == 1)
+        #expect(try await db.notes.list(worktreeID: pending.id).isEmpty)
         #expect(try await db.worktrees.getTabOrder(worktreeID: pending.id)
                 == [claude.id, setup.id],
                 "tab order must be [claude, setup] once the pre-session tab is closed")
         #expect(try await db.panelSurface.worktreePanels(worktreeID: pending.id).isEmpty,
-                "the initial note stays out of the tab order and opens no worktree panel")
+                "the create opens no worktree panel")
         #expect(try await db.worktrees.getActiveTabID(worktreeID: pending.id) == claude.id)
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
         // Exit 0 → no notification.

@@ -1602,14 +1602,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var queuedPromptEnabled: Bool
-    /// Whether ordinary new worktrees start with an empty "Notes" note. The
-    /// note opens no panel by itself.
-    ///
-    /// **Resolved, not stored.** The backing column carries no SQL default and
-    /// stays NULL until somebody touches the toggle, so this property is
-    /// `auto_create_notes_enabled ?? Config.autoCreateNotesDefault`. NULL
-    /// follows the shipped default; `0`/`1` remains an explicit choice.
-    public var autoCreateNotesEnabled: Bool
     /// Gate for the orphan-GC phase that reclaims per-profile config
     /// directories under `~/tbd/profiles/`
     /// (`docs/specs/2026-08-15-profile-dir-gc-design.md`). Read on top of
@@ -1859,9 +1851,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// the feature is a change to this constant — no forcing `UPDATE`
     /// migration, and an explicit opt-out is left alone.
     public static let queuedPromptDefault = false
-    /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
-    /// preserved until a user explicitly turns the automatic Notes note off.
-    public static let autoCreateNotesDefault = true
     /// The shipped default for `gcProfileDirsEnabled`, and the single place it
     /// lives. The profile-dir collector ships off; graduating it is a change to
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
@@ -1985,7 +1974,6 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteBackendsEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
-                autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -2022,7 +2010,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
-        self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
@@ -2089,8 +2076,6 @@ public struct Config: Codable, Sendable, Equatable {
         // fall through to the shipped default rather than hardcoding `false`.
         queuedPromptEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
-        autoCreateNotesEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .autoCreateNotesEnabled) ?? Config.autoCreateNotesDefault
         // Same tri-state as above: absent means the sender knew nothing about the
         // flag, which is the NULL column's situation — follow the shipped
         // default rather than hardcoding `false`.

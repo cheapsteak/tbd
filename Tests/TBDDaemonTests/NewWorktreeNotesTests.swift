@@ -10,8 +10,13 @@ import Testing
 // TBD_HOME mutation) so hook resolution and runtime dirs never touch the
 // developer's real ~/tbd. See TBDHomeSerializedSuites.swift.
 extension TBDHomeSerialized {
-@Suite("Automatic note on worktree create")
-struct NoteTabOnCreateTests {
+/// An ordinary new worktree has no note: the side panel's Notes pill makes the
+/// first one on its first click. The one note a creation makes is the
+/// populated provenance note of a conversation revived on a fresh branch,
+/// which `WorktreeConversationCarryoverTests` covers.
+/// Design: docs/specs/2026-11-03-side-panel-toggle-pills-design.md, "Notes".
+@Suite("Notes on worktree create")
+struct NewWorktreeNotesTests {
 
     /// The worktree's `worktree_panel` rows, read raw so a malformed row
     /// counts too.
@@ -23,51 +28,16 @@ struct NoteTabOnCreateTests {
         }
     }
 
-    /// With `auto_create_notes_enabled` on, a create makes one empty "Notes"
-    /// note and opens no panel for it: no `worktree_panel` row and no
-    /// surface. The note stays out of the tab order, which holds only the
-    /// terminals, and a terminal keeps focus.
-    @Test func creationCreatesInitialNoteWithoutAPanelWhenEnabled() async throws {
+    /// An ordinary create makes no note and opens no panel: no
+    /// `worktree_panel` row and no surface. The tab order holds only the
+    /// terminals, and a terminal has focus.
+    @Test func anOrdinaryCreateMakesNoNote() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoCreateNotes(true)
-        let lifecycle = makeLifecycle(db: db)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-        let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-
-        let notes = try await db.notes.list(worktreeID: wt.id)
-        #expect(notes.count == 1)
-        let note = try #require(notes.first)
-        #expect(note.title == "Notes")
-        #expect(!note.hasLegacyContent)
-        #expect(try await worktreePanelRowCount(db, worktreeID: wt.id) == 0)
-        #expect(try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty)
-
-        let terminals = try await db.terminals.list(worktreeID: wt.id)
-        let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
-        #expect(!order.contains(note.id))
-        #expect(Set(order) == Set(terminals.map(\.id)))
-        let active = try await db.worktrees.getActiveTabID(worktreeID: wt.id)
-        #expect(terminals.map(\.id).contains(try #require(active)))
-    }
-
-    /// With the setting off, an ordinary create makes no note and opens no
-    /// panel. A conversation carryover still makes its note, whatever the
-    /// setting: `WorktreeConversationCarryoverTests` runs with it off and
-    /// asserts the seeded note and that no panel opens.
-    @Test func creationCreatesNoNoteWhenDisabled() async throws {
-        let (_, cleanup) = isolateTBDHome()
-        defer { cleanup() }
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoCreateNotes(false)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -76,24 +46,21 @@ struct NoteTabOnCreateTests {
         #expect(try await db.notes.list(worktreeID: wt.id).isEmpty)
         #expect(try await worktreePanelRowCount(db, worktreeID: wt.id) == 0)
         #expect(try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty)
-        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        let terminalIDs = try await db.terminals.list(worktreeID: wt.id).map(\.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
-        #expect(Set(order) == Set(terminals.map(\.id)))
-        let active = try await db.worktrees.getActiveTabID(worktreeID: wt.id)
-        #expect(terminals.map(\.id).contains(try #require(active)))
+        #expect(Set(order) == Set(terminalIDs))
+        let active = try #require(try await db.worktrees.getActiveTabID(worktreeID: wt.id))
+        #expect(terminalIDs.contains(active))
     }
 
-    /// Whether or not the setting makes a note, creation writes no surface
-    /// and broadcasts no panel surface.
-    @Test(arguments: [false, true])
-    func creationWritesNoSurfaceAndBroadcastsNone(autoCreateNotes: Bool) async throws {
+    /// Creation writes no surface and broadcasts no panel surface.
+    @Test func anOrdinaryCreateWritesNoSurfaceAndBroadcastsNone() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoCreateNotes(autoCreateNotes)
         let recorder = BroadcastRecorder()
         let subscriptions = StateSubscriptionManager()
         subscriptions.addSubscriber { data in
@@ -107,8 +74,7 @@ struct NoteTabOnCreateTests {
 
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
-        let expectedNoteCount: Int = autoCreateNotes ? 1 : 0
-        #expect(try await db.notes.list(worktreeID: wt.id).count == expectedNoteCount)
+        #expect(try await db.notes.list(worktreeID: wt.id).isEmpty)
         #expect(try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty)
         let panelBroadcasts = recorder.deltas.filter {
             if case .panelSurfaceChanged = $0 { return true }
@@ -117,53 +83,15 @@ struct NoteTabOnCreateTests {
         #expect(panelBroadcasts.isEmpty)
     }
 
-    /// A create gated on a `preSession` hook makes the note once the hook
-    /// finishes, and opens no panel for it.
-    @Test func preSessionGatedCreateCreatesNoteWithoutAPanelWhenEnabled() async throws {
+    /// A create gated on a `preSession` hook makes no note once the hook
+    /// finishes either.
+    @Test func aPreSessionGatedCreateMakesNoNote() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoCreateNotes(true)
-        let lifecycle = makeLifecycle(db: db)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        try await installPreSessionHook(repoDir: repoDir)
-
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
-        let completion = try await lifecycle.completeCreateWorktree(
-            worktreeID: pending.id, skipClaude: true
-        )
-        guard case .preSessionPending(let phase3) = completion else {
-            Issue.record("expected .preSessionPending when a preSession hook resolves")
-            return
-        }
-        try writeMarker(worktreeID: pending.id, exitCode: 0)
-        await phase3.value
-
-        let notes = try await db.notes.list(worktreeID: pending.id)
-        #expect(notes.count == 1)
-        let note = try #require(notes.first)
-        #expect(note.title == "Notes")
-        #expect(try await worktreePanelRowCount(db, worktreeID: pending.id) == 0)
-        #expect(try await db.panelSurface.surfaces(worktreeID: pending.id).isEmpty)
-        let terminals = try await db.terminals.list(worktreeID: pending.id)
-        let order = try await db.worktrees.getTabOrder(worktreeID: pending.id)
-        #expect(!order.contains(note.id))
-        #expect(Set(order) == Set(terminals.map(\.id)))
-        let active = try await db.worktrees.getActiveTabID(worktreeID: pending.id)
-        #expect(terminals.map(\.id).contains(try #require(active)))
-    }
-
-    @Test func preSessionGatedCreateCreatesNoNoteWhenDisabled() async throws {
-        let (_, cleanup) = isolateTBDHome()
-        defer { cleanup() }
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setAutoCreateNotes(false)
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
@@ -181,11 +109,51 @@ struct NoteTabOnCreateTests {
 
         #expect(try await db.notes.list(worktreeID: pending.id).isEmpty)
         #expect(try await worktreePanelRowCount(db, worktreeID: pending.id) == 0)
-        let terminals = try await db.terminals.list(worktreeID: pending.id)
+        let terminalIDs = try await db.terminals.list(worktreeID: pending.id).map(\.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: pending.id)
-        #expect(Set(order) == Set(terminals.map(\.id)))
-        let active = try await db.worktrees.getActiveTabID(worktreeID: pending.id)
-        #expect(terminals.map(\.id).contains(try #require(active)))
+        #expect(Set(order) == Set(terminalIDs))
+        let active = try #require(try await db.worktrees.getActiveTabID(worktreeID: pending.id))
+        #expect(terminalIDs.contains(active))
+    }
+
+    /// A carryover create gated on a `preSession` hook makes its provenance
+    /// note once the hook finishes, with the seed as its content, and opens
+    /// no panel for it.
+    @Test func aPreSessionGatedCarryoverCreateMakesTheProvenanceNote() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let seed = "# Revived conversation\n"
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id,
+            skipClaude: true,
+            carryover: ConversationCarryover(
+                sourceSessionID: UUID().uuidString, notesSeed: seed)
+        )
+        guard case .preSessionPending(let phase3) = completion else {
+            Issue.record("expected .preSessionPending when a preSession hook resolves")
+            return
+        }
+        try writeMarker(worktreeID: pending.id, exitCode: 0)
+        await phase3.value
+
+        let notes = try await db.notes.list(worktreeID: pending.id)
+        #expect(notes.count == 1)
+        let summary = try #require(notes.first)
+        #expect(summary.title == "Notes")
+        let note = try #require(try await db.notes.get(id: summary.id))
+        #expect(note.content == seed)
+        #expect(try await worktreePanelRowCount(db, worktreeID: pending.id) == 0)
+        let order = try await db.worktrees.getTabOrder(worktreeID: pending.id)
+        #expect(!order.contains(summary.id))
     }
 
     @Test func rowDeletedMidCarryoverCreateLeavesNoOrphanNote() async throws {

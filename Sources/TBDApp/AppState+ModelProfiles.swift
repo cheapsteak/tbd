@@ -41,9 +41,6 @@ extension AppState {
             if result.gcEnabled != gcEnabled {
                 gcEnabled = result.gcEnabled
             }
-            if result.autoCreateNotesEnabled != autoCreateNotesEnabled {
-                autoCreateNotesEnabled = result.autoCreateNotesEnabled
-            }
             if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
                 autoResumeOnLimitReset = result.autoResumeOnLimitReset
             }
@@ -224,17 +221,6 @@ extension AppState {
         } catch {
             logger.error("Failed to set gcEnabled: \(error, privacy: .public)")
             showAlert("Failed to update GC setting: \(error.localizedDescription)", isError: true)
-        }
-    }
-
-    /// Set whether ordinary new worktrees start with an empty "Notes" note.
-    func setAutoCreateNotesEnabled(_ enabled: Bool) async {
-        do {
-            try await autoCreateNotesSetter(enabled)
-            autoCreateNotesEnabled = enabled
-        } catch {
-            logger.error("Failed to set automatic Notes creation: \(error, privacy: .public)")
-            showAlert("Failed to update Notes setting: \(error.localizedDescription)", isError: true)
         }
     }
 

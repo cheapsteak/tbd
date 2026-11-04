@@ -1204,14 +1204,6 @@ actor DaemonClient {
         try await callVoidAsync(method: method, params: params)
     }
 
-    /// Set whether ordinary new worktrees start with an empty "Notes" note.
-    func setAutoCreateNotes(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetAutoCreateNotes,
-            params: ConfigSetAutoCreateNotesParams(enabled: enabled)
-        )
-    }
-
     /// Persist the tmux control-mode opt-in (M5). Applies to newly created
     /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
     /// the gate on regardless of this flag.

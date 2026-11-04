@@ -325,7 +325,6 @@ public enum RPCMethod {
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
-    public static let configSetAutoCreateNotes = "config.setAutoCreateNotes"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
@@ -972,9 +971,6 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
     public let gcEnabled: Bool
-    /// Whether creating an ordinary new worktree makes an empty "Notes"
-    /// starter note, which the Notes button opens.
-    public let autoCreateNotesEnabled: Bool
     /// The machine-wide remote create-param defaults (config scope), keyed by
     /// the provider's own `create_params` field names. Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
@@ -997,7 +993,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
-        autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
         globalRemoteCreateDefaults: [String: String] = [:],
         profileBalancingEnabled: Bool? = nil,
         profileBalancingUsageCeilingPercent: Int? = nil,
@@ -1012,7 +1007,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
-        self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
         self.profileBalancingEnabled = profileBalancingEnabled
         self.profileBalancingUsageCeilingPercent = profileBalancingUsageCeilingPercent
@@ -1040,9 +1034,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         gcEnabled = try c.decodeIfPresent(Bool.self, forKey: .gcEnabled) ?? true
-        autoCreateNotesEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .autoCreateNotesEnabled
-        ) ?? Config.autoCreateNotesDefault
         // Absent (older daemon) means the daemon knew nothing about create
         // defaults — the same state as an empty map: no opinion at this level.
         globalRemoteCreateDefaults = try c.decodeIfPresent(
@@ -3467,15 +3458,6 @@ public struct ConfigSetDeliveryVerificationParams: Codable, Sendable {
 /// until this verb writes to it, and a written `false` stays off even after the
 /// shipped default graduates.
 public struct ConfigSetQueuedPromptParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setAutoCreateNotes` — the default-ON preference for
-/// creating an empty "Notes" starter note in ordinary new worktrees, opened
-/// from the Notes button. Conversation carryover creates its populated
-/// provenance note independently of this preference.
-public struct ConfigSetAutoCreateNotesParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

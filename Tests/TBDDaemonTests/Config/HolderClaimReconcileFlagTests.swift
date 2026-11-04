@@ -56,7 +56,7 @@ struct HolderClaimReconcileFlagTests {
         // written to, but knows nothing about the new column.
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE config SET auto_create_notes_enabled = 1 WHERE id = ?",
+                sql: "UPDATE config SET queued_prompt_enabled = 1 WHERE id = ?",
                 arguments: [ConfigStore.singletonID])
         }
         try migrator.migrate(queue)
@@ -68,7 +68,7 @@ struct HolderClaimReconcileFlagTests {
             #expect(raw.isNull,
                     "a config row written before the migration must read NULL, not \(raw)")
             // The pre-existing write survived: the migration is purely additive.
-            #expect(row["auto_create_notes_enabled"] == true)
+            #expect(row["queued_prompt_enabled"] == true)
             let record = try #require(try ConfigRecord.fetchOne(db, key: ConfigStore.singletonID))
             #expect(record.holder_claim_reconcile_enabled == nil)
             #expect(record.toModel().holderClaimReconcileEnabled
