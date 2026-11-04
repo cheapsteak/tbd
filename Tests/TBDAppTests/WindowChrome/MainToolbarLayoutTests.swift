@@ -184,6 +184,50 @@ struct MainToolbarLayoutTests {
         }
     }
 
+    /// Collapsing the sidebar while the panes stop drawing the top row. The
+    /// shown list has a flexible space where the collapsed one has the
+    /// separator, and the collapsed list still needs a flexible space after
+    /// the title, so a walk that keeps that flexible space inserts a second
+    /// separator ahead of it and then removes the original one off the end.
+    @Test func collapsingTheSidebarAsThePanesLeaveTheTopRowKeepsTheSeparator() {
+        let fromState = MainToolbarLayoutState(
+            sidebarCollapsed: false, showsTranscript: false,
+            showsReconnect: false, showsStop: false, panesDrawTopRow: true)
+        let toState = MainToolbarLayoutState(
+            sidebarCollapsed: true, showsTranscript: false,
+            showsReconnect: false, showsStop: false, panesDrawTopRow: false)
+        let from = Self.ids(fromState)
+        let to = Self.ids(toState)
+        let expectedFrom: [NSToolbarItem.Identifier] = [
+            ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter, ItemID.sidebarSeparator,
+        ]
+        let expectedTo: [NSToolbarItem.Identifier] = [
+            ItemID.leadingButtons, ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
+        ]
+        #expect(from == expectedFrom)
+        #expect(to == expectedTo)
+
+        var working = from
+        var removed: [NSToolbarItem.Identifier] = []
+        var inserted: [NSToolbarItem.Identifier] = []
+        let stop = MainToolbarLayout.perform(
+            MainToolbarLayout.edits(from: from, to: to),
+            count: { working.count },
+            remove: { index in removed.append(working.remove(at: index)) },
+            insert: { identifier, index in
+                inserted.append(identifier)
+                working.insert(identifier, at: index)
+            })
+
+        #expect(stop == nil)
+        #expect(working == to)
+        let protected: Set<NSToolbarItem.Identifier> = [ItemID.leadingButtons, ItemID.sidebarSeparator]
+        let protectedRemoved = removed.filter { protected.contains($0) }
+        let protectedInserted = inserted.filter { protected.contains($0) }
+        #expect(protectedRemoved.isEmpty)
+        #expect(protectedInserted.isEmpty)
+    }
+
     // MARK: - Edits that do not take
 
     /// An insert that adds nothing, as one the toolbar's delegate cannot

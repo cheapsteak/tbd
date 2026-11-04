@@ -100,8 +100,23 @@ enum MainToolbarLayout {
     }
 
     /// Minimal-ish edits turning `from` into `to`, using only inserts and
-    /// removes so items shared by both lists (notably the leading item and the
-    /// tracking separator) are never torn down.
+    /// removes, so items shared by both lists, the leading item and the
+    /// tracking separator above all, are never torn down. Removing an item
+    /// destroys its `NSToolbarItem`, and the separator's is bound to the
+    /// split view.
+    ///
+    /// The walk keeps `working` equal to `to` up to `i`. Where the two differ
+    /// at `i`, it removes `working[i]` in two cases, and otherwise inserts
+    /// `to[i]`:
+    /// - `working[i]` is surplus: the rest of `working` holds more of it than
+    ///   the rest of `to` needs. Only `.flexibleSpace` repeats, so any other
+    ///   item is surplus exactly when `to` lacks it.
+    /// - `to[i]` is a unique identifier, anything but `.flexibleSpace`, that
+    ///   still sits later in `working`. Inserting it would make a second
+    ///   copy and leave the original to the trailing removal, so the walk
+    ///   removes what stands before it and keeps it. Every layout lists its
+    ///   unique items in one order, so what this removes is a flexible
+    ///   space, which costs nothing to insert again where `to` wants one.
     static func edits(
         from: [NSToolbarItem.Identifier], to: [NSToolbarItem.Identifier]
     ) -> [ToolbarEdit] {
@@ -114,13 +129,12 @@ enum MainToolbarLayout {
                 continue
             }
             if i < working.count {
-                // Count-aware: `.flexibleSpace` repeats, so the item at `i` is
-                // only surplus when the rest of `working` holds more of it
-                // than the rest of `to` needs.
                 let current = working[i]
                 let have = working[i...].filter { $0 == current }.count
                 let need = to[i...].filter { $0 == current }.count
-                if have > need {
+                let currentIsSurplus = have > need
+                let targetSitsLater = to[i] != .flexibleSpace && working[(i + 1)...].contains(to[i])
+                if currentIsSurplus || targetSitsLater {
                     result.append(.remove(at: i))
                     working.remove(at: i)
                     continue
