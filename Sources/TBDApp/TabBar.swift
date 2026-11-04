@@ -297,13 +297,14 @@ struct TabBar: View {
     }
 
     /// The main pane's top row, with the Tabs in the toolbar setting on, in
-    /// the window's toolbar row (`MainTabRowLayout`): the worktree's title
-    /// over the notes button and the project name (`WorktreeTitleColumn`),
-    /// the tabs as pills with the + button after them, the drag gap, and the
-    /// trailing group. It starts past the toolbar's leading item while that
-    /// item sits over the pane (`MainTabRowMetrics.leadingInset`), and is the
-    /// toolbar's height (`MainTabRowMetrics.height`), both as the toolbar
-    /// controller measured them (`WindowChromeState`). A worktree the app
+    /// the window's toolbar row (`MainTabRowLayout`): the notes button, the
+    /// project name and the worktree's title on one line, as the toolbar's
+    /// title item sets them (`WorktreeTitleColumn`), the tabs as pills with
+    /// the + button after them, the drag gap, and the trailing group. It
+    /// starts past the toolbar's leading item while that item sits over the
+    /// pane (`MainTabRowMetrics.leadingInset`), and is the toolbar's height
+    /// (`MainTabRowMetrics.height`), both as the toolbar controller measured
+    /// them (`WindowChromeState`). A worktree the app
     /// cannot find shows no title. The + button and the trailing group take
     /// `RowIconButtonStyle`; the title column and the tabs do not.
     private var topRow: some View {
