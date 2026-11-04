@@ -166,11 +166,11 @@ enum TabRowEdgeItem: Equatable, Identifiable {
     /// The Notes toggle (`TabRowEdgeControls.notes`).
     case notes(PaneChromeControl)
 
-    static let changesLabel = "Changes"
     static let transcriptLabel = "Transcript"
     static let notesLabel = "Notes"
-    /// Every pill's label, in the toggles' order.
-    static let pillLabels = [changesLabel, transcriptLabel, notesLabel]
+    /// Every pill label, in the toggles' order: the transcript's and Notes'.
+    /// Changes has none.
+    static let pillLabels = [transcriptLabel, notesLabel]
 
     /// One per kind, whatever the control's state, so a toggle whose state
     /// changes keeps its place in the row.
@@ -195,11 +195,13 @@ enum TabRowEdgeItem: Equatable, Identifiable {
         control.pillState ?? .off
     }
 
-    /// What the toggle's pill reads while its panel is open: the panel's name.
-    /// The Notes pill reads "Notes" whatever its note is titled.
-    var pillLabel: String {
+    /// What the toggle's pill reads, in every state and at every strip width:
+    /// its panel's name for the transcript and Notes, the Notes pill reading
+    /// "Notes" whatever its note is titled. Nil for Changes, whose pill is
+    /// its icon alone (`SidePanelPillButton`).
+    var pillLabel: String? {
         switch self {
-        case .changes: return Self.changesLabel
+        case .changes: return nil
         case .transcript: return Self.transcriptLabel
         case .notes: return Self.notesLabel
         }

@@ -67,26 +67,34 @@ enum SideStripMetrics {
     static let historyButtonWidth: CGFloat = TabRowMetrics.controlWidth
     /// Search, back and forward.
     static let historyButtonCount = 3
-    /// The most buttons the trailing group holds: the active panel's control,
-    /// the Changes, transcript and Notes pills at their icon-only width, and
-    /// collapse. The most, not the current count, so the region's minimum
-    /// width stays put as the active panel, the transcript setting or the
-    /// worktree's changes come and go; a pill that is not drawn, such as
-    /// Changes for a worktree with none, only leaves the tabs more room. A
-    /// pill's label is not counted: the labels show only while the strip has
-    /// room for them (`SidePanelPillMetrics.labelsFit`).
+    /// The most items the trailing group holds: the active panel's control,
+    /// the Changes, transcript and Notes pills, and collapse. The most, not
+    /// the current count, so the region's minimum width stays put as the
+    /// active panel, the transcript setting or the worktree's changes come and
+    /// go; a pill that is not drawn, such as Changes for a worktree with none,
+    /// only leaves the tabs more room.
     static let trailingSlotCount = 5
 
-    /// The width the strip's fixed controls need, in points: the history
-    /// buttons with their inset, a full trailing group of
-    /// `TabRowMetrics.controlWidth` buttons, and the strip's trailing inset
+    /// The width the strip's fixed controls need, in whole points: the
+    /// history buttons with their inset; a full trailing group, its
+    /// transcript and Notes pills at their labelled widths
+    /// (`SidePanelPillMetrics.labelledWidth`, one per
+    /// `TabRowEdgeItem.pillLabels`) and its other slots, the active panel's
+    /// control, the Changes pill and collapse, each a
+    /// `TabRowMetrics.controlWidth` square; and the strip's trailing inset
     /// (`MainTabRowMetrics.trailingInset`). The panel tabs between them need
-    /// none, since they scroll. The side region is kept at least this wide
-    /// (`PanelSurfaceWorkspaceView.minimumSideShare`).
+    /// none, since they scroll and give up their room first. The side region
+    /// is kept at least this wide (`PanelSurfaceWorkspaceView.minimumSideShare`),
+    /// so no pill and no button is ever clipped. Measured on macOS 27, it is
+    /// 335 pt.
+    @MainActor
     static var fixedControlsWidth: CGFloat {
-        historyLeadingInset
+        let labels = TabRowEdgeItem.pillLabels
+        let labelledPillsWidth: CGFloat = labels.reduce(0) { $0 + SidePanelPillMetrics.labelledWidth($1) }
+        return historyLeadingInset
             + CGFloat(historyButtonCount) * historyButtonWidth
-            + CGFloat(trailingSlotCount) * TabRowMetrics.controlWidth
+            + labelledPillsWidth
+            + CGFloat(trailingSlotCount - labels.count) * TabRowMetrics.controlWidth
             + MainTabRowMetrics.trailingInset
     }
 }
@@ -287,10 +295,10 @@ enum SideRegionStrip {
 /// - **The pills**: Changes while the worktree has changes or its panel is
 ///   open (`TabRowEdgeControls.showsChanges`), the transcript while the
 ///   workspace tab bar would draw its toggle, and Notes
-///   (`SidePanelPillButton`). Each opens, selects or closes its panel, and
-///   shows the panel's name while it is open and the strip has room
-///   (`SidePanelPillMetrics.labelsFit`, from the strip's measured width,
-///   `labelRuleWidth`). The transcript pill's right-click
+///   (`SidePanelPillButton`). Each opens, selects or closes its panel. The
+///   transcript and Notes pills always show their panel's name, and Changes
+///   is its icon alone (`TabRowEdgeItem.pillLabel`), so every control keeps
+///   its place whatever the panels do. The transcript pill's right-click
 ///   offers the session file's menu, and the Notes pill's Delete Note… and,
 ///   when the worktree has other notes with no panel, Open Other Note.
 /// - **Collapse**, which carries `⌘\` while the region shows.
@@ -349,11 +357,6 @@ struct SideRegionView: View {
     @State private var showHistoryPalette = false
     /// The note tab whose rename field is open, if any.
     @State private var renamingPanelID: PanelID?
-    /// The strip's width as the pills' label rule reads it
-    /// (`SidePanelPillMetrics.labelRuleWidth`): whole points, held within the
-    /// band where the rule can change, so a resize outside it changes no
-    /// state and re-evaluates nothing.
-    @State private var labelRuleWidth: CGFloat = 0
 
     /// The active panel, with what the strip and the leaf act on for it.
     private struct ActivePanel {
@@ -475,8 +478,6 @@ struct SideRegionView: View {
         let trailingItems = SideStripTrailingItem.items(
             activePanelControl: active.flatMap { activeControl($0) },
             edgeItems: edge.items)
-        let labelsFit = SidePanelPillMetrics.labelsFit(stripWidth: labelRuleWidth, edgeItems: edge.items)
-        let labelRuleBand = SidePanelPillMetrics.labelRuleBand
         // With the Tabs in the toolbar setting on, the strip is the window's
         // top row over the side region: the toolbar's height, pill tabs, and
         // a drag gap in the width after the last tab.
@@ -518,7 +519,7 @@ struct SideRegionView: View {
 
             HStack(spacing: 0) {
                 ForEach(trailingItems) { item in
-                    trailingItem(item, active: active, edge: edge, labelsFit: labelsFit, notes: notes)
+                    trailingItem(item, active: active, edge: edge, notes: notes)
                 }
             }
             // Icon buttons and pills; the pills' context menus reset the
@@ -549,13 +550,6 @@ struct SideRegionView: View {
         .clipped()
         .contentShape(Rectangle())
         .background(Color(nsColor: .windowBackgroundColor))
-        // The strip's width, for the pills' labels: held to the band where
-        // the rule can change, so a divider drag elsewhere changes nothing.
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            SidePanelPillMetrics.labelRuleWidth(proxy.size.width, band: labelRuleBand)
-        } action: { width in
-            labelRuleWidth = width
-        }
     }
 
     /// Scrolls the strip's tabs the least distance that shows the active
@@ -752,7 +746,7 @@ struct SideRegionView: View {
     @ViewBuilder
     private func trailingItem(
         _ item: SideStripTrailingItem, active: ActivePanel?, edge: TabRowEdgeControls,
-        labelsFit: Bool, notes: [NoteSummary]?
+        notes: [NoteSummary]?
     ) -> some View {
         switch item {
         case .activePanelControl(let control):
@@ -766,7 +760,7 @@ struct SideRegionView: View {
                 }
             }
         case .edge(let edgeItem):
-            pill(edgeItem, edge: edge, labelsFit: labelsFit, notes: notes)
+            pill(edgeItem, edge: edge, notes: notes)
         case .collapse:
             SidePanelToggleButton(collapsed: false) {
                 send(.setCollapsed(true))
@@ -787,12 +781,10 @@ struct SideRegionView: View {
     /// (`HeaderFileContextMenu`), and `notesMenu` here.
     @ViewBuilder
     private func pill(
-        _ item: TabRowEdgeItem, edge: TabRowEdgeControls, labelsFit: Bool, notes: [NoteSummary]?
+        _ item: TabRowEdgeItem, edge: TabRowEdgeControls, notes: [NoteSummary]?
     ) -> some View {
         let action = edge.action(for: item)
-        let button = SidePanelPillButton(
-            item: item, showsLabel: SidePanelPillMetrics.showsLabel(item, labelsFit: labelsFit)
-        ) {
+        let button = SidePanelPillButton(item: item) {
             action()
         }
         switch item {

@@ -231,29 +231,12 @@ struct NotesButtonTests {
 
     // MARK: - The symbol
 
-    @Test("a note draws the page and pencil where the system has it, and doc.text where it does not")
-    func noteSymbolFallsBackWithoutPageAndPencil() {
-        let available = PanelKind.noteSymbol(pageAndPencilAvailable: true)
-        let unavailable = PanelKind.noteSymbol(pageAndPencilAvailable: false)
-        #expect(available == "long.text.page.and.pencil")
-        #expect(unavailable == "doc.text")
-    }
-
-    @Test("the note symbol in use is the one this macOS has, and the system draws it")
-    func noteSymbolInUseExists() {
-        let expected: String
-        if #available(macOS 15.4, *) {
-            expected = "long.text.page.and.pencil"
-        } else {
-            expected = "doc.text"
-        }
-        let inUse = PanelKind.noteSystemImage
-        #expect(inUse == expected)
-        let image = NSImage(systemSymbolName: inUse, accessibilityDescription: nil)
-        #expect(image != nil, "SF Symbols has no \(inUse) on this macOS")
-        // The fallback draws on every macOS the app runs on.
-        let fallback = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)
-        #expect(fallback != nil)
+    @Test("a note draws pencil.line, and the system draws it")
+    func noteSymbolIsPencilLine() {
+        let symbol = PanelKind.noteSystemImage
+        #expect(symbol == "pencil.line")
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        #expect(image != nil, "SF Symbols has no \(symbol) on this macOS")
     }
 
     // MARK: - The button

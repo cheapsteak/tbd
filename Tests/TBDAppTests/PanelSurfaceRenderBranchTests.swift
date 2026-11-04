@@ -737,22 +737,29 @@ struct PanelSurfaceRenderBranchTests {
 
     /// The strip's controls are measured in points and the model's width in
     /// shares, so the app turns one into the other for the space at hand.
-    @Test("the strip's fixed controls need 240 pt, and the side's smallest share is theirs, within the model's range")
+    @Test("the side's smallest share is the strip's fixed controls' share, within the model's range")
     func minimumSideShareFitsTheFixedControls() {
-        #expect(SideStripMetrics.fixedControlsWidth == 240)
-
+        let controls = SideStripMetrics.fixedControlsWidth
         let lowerBound = CGFloat(SideRegion.widthRange.lowerBound)
         let upperBound = CGFloat(SideRegion.widthRange.upperBound)
-        let controlsShareAt1400: CGFloat = 240 / 1400
-        // A 1,400 pt main area: the controls' own share, above the floor.
-        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 1400) == controlsShareAt1400)
+        // A main area where the controls' share lies inside the range, and
+        // one where it lies below the floor.
+        let midSpace = controls / 0.25
+        let wideSpace = controls / (lowerBound / 2)
+        let controlsShareAtMid = controls / midSpace
+        let atMid = PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: midSpace)
+        let atWide = PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: wideSpace)
+        let atTiny = PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 200)
+        let atZero = PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 0)
+        // The controls' own share, above the floor.
+        #expect(atMid == controlsShareAtMid)
         // A wide one: the controls need less than the floor, so the floor.
-        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 3000) == lowerBound)
+        #expect(atWide == lowerBound)
         // A tiny one: even the widest share cannot hold them, so the cap wins
         // and the primary keeps what it leaves.
-        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 200) == upperBound)
+        #expect(atTiny == upperBound)
         // No space to share.
-        #expect(PanelSurfaceWorkspaceView.minimumSideShare(availableSpace: 0) == lowerBound)
+        #expect(atZero == lowerBound)
     }
 
     @Test("a stored width below the strip's limit renders at the limit, and a wider one is unchanged")

@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 // The side region's toggle pills: Changes, the transcript and Notes, each one
-// control that turns its panel on and off and shows the panel's name while it
-// is open. Spec: docs/specs/2026-11-03-side-panel-toggle-pills-design.md.
+// control that turns its panel on and off. The transcript and Notes pills
+// always show their panel's name; Changes is its icon alone. Spec:
+// docs/specs/2026-11-03-side-panel-toggle-pills-design.md.
 
 // MARK: - SidePanelPillState
 
@@ -47,15 +48,16 @@ enum SidePanelPillState: Equatable {
 
 // MARK: - SidePanelPillMetrics
 
-/// A pill's geometry, and the rule for when the pills that are on show their
-/// labels.
+/// A pill's geometry.
 ///
-/// Off, a pill is its icon alone in a row icon button's square,
-/// `RowIconSquare.standardSide` wide, so the strip's fixed controls take
-/// `SideStripMetrics.fixedControlsWidth` with every pill off. A label adds
-/// `labelExtra` to its pill: the icon keeps its place, centred where the
-/// square centres it, and the label follows it. Every width here is a whole
-/// number of points, so the label rule's thresholds are too.
+/// The Changes pill is its icon alone in a row icon button's square,
+/// `RowIconSquare.standardSide` wide, in every state. The transcript and Notes
+/// pills show their label in every state (`TabRowEdgeItem.pillLabel`), so each
+/// is `labelledWidth` wide whatever its panel does and whatever the strip's
+/// width: the icon keeps the place the square would centre it in, and the
+/// label follows it. Every width here is a whole number of points, so the
+/// strip's fixed controls, which count both labelled pills, are too
+/// (`SideStripMetrics.fixedControlsWidth`).
 @MainActor
 enum SidePanelPillMetrics {
     /// The icon's and the label's point size, the strip's tab titles' size.
@@ -75,7 +77,7 @@ enum SidePanelPillMetrics {
     static let trailingPadding: CGFloat = 8
 
     /// Before the icon's slot: what centres the slot where the square centres
-    /// the icon of a pill that is off.
+    /// the Changes pill's icon.
     static var leadingPadding: CGFloat {
         (RowIconSquare.standardSide - iconSlotWidth) / 2
     }
@@ -96,83 +98,35 @@ enum SidePanelPillMetrics {
         measuredLabelWidths[label] ?? measuredWidth(of: label)
     }
 
-    /// A pill's width while it shows `label`.
+    /// The width of a pill that shows `label`.
     static func labelledWidth(_ label: String) -> CGFloat {
         leadingPadding + iconSlotWidth + iconToLabelSpacing + labelWidth(label) + trailingPadding
-    }
-
-    /// How much wider than the icon-only square a pill showing `label` is.
-    static func labelExtra(_ label: String) -> CGFloat {
-        labelledWidth(label) - RowIconSquare.standardSide
-    }
-
-    /// Whether the pills that are on show their labels in a strip
-    /// `stripWidth` wide, with `edgeItems` its pills: when the strip's fixed
-    /// controls (`SideStripMetrics.fixedControlsWidth`) and every pill that
-    /// is on at its labelled width fit with no room left for a tab. The tabs
-    /// scroll, so they give up their room first; only when even that leaves
-    /// too little do the labels go, all together, and the pill in front keeps
-    /// its fill (`SidePanelPillButton`).
-    ///
-    /// The fixed controls count the strip's full trailing group, not the
-    /// items drawn now, so the labels do not come and go as the active panel
-    /// gains or loses a control of its own.
-    static func labelsFit(stripWidth: CGFloat, edgeItems: [TabRowEdgeItem]) -> Bool {
-        var needed = SideStripMetrics.fixedControlsWidth
-        for item in edgeItems where item.state.isOn {
-            needed += labelExtra(item.pillLabel)
-        }
-        return needed <= stripWidth
-    }
-
-    /// Whether `item` shows its label: only a pill that is on, and only while
-    /// the labels fit (`labelsFit`).
-    static func showsLabel(_ item: TabRowEdgeItem, labelsFit: Bool) -> Bool {
-        labelsFit && item.state.isOn
-    }
-
-    /// The strip widths across which `labelsFit` can change its answer: from
-    /// a point short of the fixed controls, where no label fits, to the
-    /// fixed controls with every pill labelled, where every label does.
-    static var labelRuleBand: ClosedRange<CGFloat> {
-        let fixed = SideStripMetrics.fixedControlsWidth
-        var widest = fixed
-        for label in TabRowEdgeItem.pillLabels {
-            widest += labelExtra(label)
-        }
-        return (fixed - 1)...widest
-    }
-
-    /// The width the strip measures for the label rule: `stripWidth` in whole
-    /// points, held within `band` (`labelRuleBand`). Every threshold of the
-    /// rule is a whole number of points in that band, so the rule answers the
-    /// same for this as for `stripWidth`, and a strip resized outside the
-    /// band changes nothing the strip's body reads. Nonisolated, with the
-    /// band handed in, so a geometry callback can call it.
-    nonisolated static func labelRuleWidth(_ stripWidth: CGFloat, band: ClosedRange<CGFloat>) -> CGFloat {
-        let measured = stripWidth.isFinite ? stripWidth.rounded(.down) : band.lowerBound
-        return min(max(measured, band.lowerBound), band.upperBound)
     }
 }
 
 // MARK: - SidePanelPillButton
 
 /// One of the side region's strip's pills (`TabRowEdgeItem`), its icon and
-/// label in the sidebar's grey (`SidePanelPillMetrics.foregroundColor`) in
-/// every state, with its control's symbol (`PaneChromeControl.systemImage`):
+/// any label in the sidebar's grey (`SidePanelPillMetrics.foregroundColor`) in
+/// every state, with its control's symbol (`PaneChromeControl.systemImage`).
+/// Its shape is fixed by its kind, never by its state or the strip's width:
 ///
-/// - **Off:** its icon alone, in the row icon button's square.
-/// - **On, in front:** icon and label, filled as a selected pill tab is
-///   (`TabPillShape`).
-/// - **On, behind** another panel or with the region collapsed: icon and
-///   label, with no fill and no outline.
+/// - **Changes:** its icon alone, in the row icon button's square.
+/// - **The transcript and Notes:** icon and label (`TabRowEdgeItem.pillLabel`),
+///   `SidePanelPillMetrics.labelledWidth` wide.
 ///
-/// An on pill shows its label while `showsLabel` says so
-/// (`SidePanelPillMetrics.showsLabel`). Without it, the pill in front keeps
-/// its fill, and a pill behind draws as one that is off, its icon alone. Its
-/// hover and press feedback are `RowIconButtonStyle`'s, sized to the pill
-/// (`RowIconSquare.Size.pill`), so they cover the shape it draws, and leave
-/// its colour as it is; the fill is drawn in that same shape
+/// Its state shows only in its fill:
+///
+/// - **Off:** no fill.
+/// - **On, in front:** filled as a selected pill tab is (`TabPillShape`), in
+///   the pill's own shape, the square for Changes.
+/// - **On, behind** another panel or with the region collapsed: no fill and
+///   no outline, so it draws as one that is off. Only the pill in front is
+///   marked.
+///
+/// Its hover and press feedback are `RowIconButtonStyle`'s, sized to the pill
+/// (`RowIconSquare.Size.pill` for a labelled one), so they cover the shape it
+/// draws, and leave its colour as it is; the fill is drawn in that same shape
 /// (`RowIconSquareShape`).
 ///
 /// It sets its own style on the button, and the strip hangs its right-click
@@ -180,17 +134,18 @@ enum SidePanelPillMetrics {
 /// environment and resets it (`SideRegionView`, `Sources/TBDApp/CLAUDE.md`).
 struct SidePanelPillButton: View {
     let item: TabRowEdgeItem
-    let showsLabel: Bool
     let action: () -> Void
 
-    /// The pill's square: a labelled pill's width, or the icon-only square.
-    static func size(for item: TabRowEdgeItem, showsLabel: Bool) -> RowIconSquare.Size {
-        showsLabel ? .pill(width: SidePanelPillMetrics.labelledWidth(item.pillLabel)) : RowIconSquare.standard
+    /// The pill's square: its labelled width for a pill with a label, the
+    /// icon-only square for Changes.
+    static func size(for item: TabRowEdgeItem) -> RowIconSquare.Size {
+        guard let label = item.pillLabel else { return RowIconSquare.standard }
+        return .pill(width: SidePanelPillMetrics.labelledWidth(label))
     }
 
     var body: some View {
         let control = item.control
-        let size = Self.size(for: item, showsLabel: showsLabel)
+        let size = Self.size(for: item)
         Button(action: action) {
             label(size: size)
         }
@@ -204,20 +159,22 @@ struct SidePanelPillButton: View {
     @ViewBuilder
     private func label(size: RowIconSquare.Size) -> some View {
         let shape = RowIconSquareShape(size: size)
+        let pillLabel = item.pillLabel
+        let labelled = pillLabel != nil
         let content = HStack(spacing: SidePanelPillMetrics.iconToLabelSpacing) {
             Image(systemName: item.control.systemImage)
                 .frame(width: SidePanelPillMetrics.iconSlotWidth)
-            if showsLabel {
-                Text(item.pillLabel)
+            if let pillLabel {
+                Text(pillLabel)
                     .lineLimit(1)
                     .fixedSize()
             }
         }
         .font(.system(size: SidePanelPillMetrics.fontSize))
-        .padding(.leading, showsLabel ? SidePanelPillMetrics.leadingPadding : 0)
-        .padding(.trailing, showsLabel ? SidePanelPillMetrics.trailingPadding : 0)
+        .padding(.leading, labelled ? SidePanelPillMetrics.leadingPadding : 0)
+        .padding(.trailing, labelled ? SidePanelPillMetrics.trailingPadding : 0)
         .frame(width: Self.width(of: size), height: RowIconSquare.standardSide,
-               alignment: showsLabel ? .leading : .center)
+               alignment: labelled ? .leading : .center)
         // A concrete colour, so it is the sidebar's grey rather than the
         // style's hierarchical one (`RowIconButtonStyle`).
         .foregroundStyle(Color(nsColor: SidePanelPillMetrics.foregroundColor))

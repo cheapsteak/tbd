@@ -1,10 +1,11 @@
 # Side panel toggle pills
 
 The side region's Changes, transcript and Notes are each reached by one
-button at the window's right edge. While one is open, that button draws as a
-labelled pill, and the panel gets no tab of its own. The Changes button shows
-only while the worktree has changes or its panel is open. A worktree has one
-note.
+button at the window's right edge. The transcript and Notes buttons are pills
+that always read their panel's name, Changes is an icon, and the one whose
+panel is in front is filled. An open panel gets no tab of its own. The Changes
+button shows only while the worktree has changes or its panel is open. A
+worktree has one note.
 
 Related specs: [`2026-11-01-side-panel-notes-and-changes-design.md`](2026-11-01-side-panel-notes-and-changes-design.md)
 (worktree panels, the notes model) and
@@ -28,11 +29,13 @@ Related specs: [`2026-11-01-side-panel-notes-and-changes-design.md`](2026-11-01-
 ## Goals
 
 - One control per panel: Changes, the transcript and Notes each turn on and off
-  from one pill, which shows the panel's name while it is open.
+  from one pill.
+- Each pill keeps one size in every state and at every strip width.
 - No Changes control for a worktree with nothing to show in it.
 - One note per worktree.
 - No + menu in the strip.
-- The strip keeps its 240 pt minimum width.
+- No pill is ever clipped: the side region is never narrower than its strip's
+  controls with both labels shown.
 
 ## Non-goals
 
@@ -68,44 +71,56 @@ pills is history buttons, drag gap, and the trailing group.
 
 ## Pills
 
-Each pill has three states. In all of them, hovered or not, its icon and label
-draw in the grey of the left sidebar's row icons, `NSColor.secondaryLabelColor`
-(`SidePanelPillMetrics.foregroundColor`). The pill names that colour
-concretely, so the strip matches the sidebar exactly; the row style's
-hierarchical secondary can resolve to a different grey.
+Each pill has three states: off; on, in front; and on, behind another panel or
+with the region collapsed. In all of them, hovered or not, its icon and any
+label draw in the grey of the left sidebar's row icons,
+`NSColor.secondaryLabelColor` (`SidePanelPillMetrics.foregroundColor`). The
+pill names that colour concretely, so the strip matches the sidebar exactly;
+the row style's hierarchical secondary can resolve to a different grey.
 
-- **Off:** its icon alone, in the 28 × 28 hover square every row icon button
-  draws (`RowIconButtonStyle`).
-- **On, in front:** icon and label, filled as the selected tab is. The fill is
-  all that marks the pill in front.
-- **On, behind** another panel, or with the region collapsed: icon and label,
-  with no fill and no outline.
+A pill's shape belongs to its kind, and neither its state nor the strip's width
+changes it (`TabRowEdgeItem.pillLabel`, `SidePanelPillButton.size(for:)`):
 
-Labels: "Changes", "Transcript", "Notes". The Notes pill reads "Notes" whatever
-the note's title. Each pill draws one icon in every state, never a filled one:
+- **Changes** – its icon alone, in the 28 × 28 hover square every row icon
+  button draws (`RowIconButtonStyle`), in every state.
+- **Transcript** – its icon and the label "Transcript", in every state.
+- **Notes** – its icon and the label "Notes", in every state, whatever the
+  note's title.
+
+A labelled pill's icon sits where the square would centre it, and the label
+follows, so the pill is `SidePanelPillMetrics.labelledWidth` wide, in whole
+points.
+
+Only the fill shows which panel is in front. The pill in front is filled as the
+selected tab is, in its own shape: the square for Changes, the pill for the
+transcript and Notes. A pill that is off and one that is behind draw alike: a
+transcript or Notes pill shows its label with no fill, and Changes its icon
+with no fill. So only the pill in front is marked.
+
+Each pill draws one icon in every state, never a filled one:
 
 - **Changes** – `plusminus`, the Changes tab's symbol
   (`PanelKind.changesSystemImage`).
 - **Transcript** – `bubble`, empty whether its panel is open or not.
-- **Notes** – `long.text.page.and.pencil`, the symbol a note's tab shows too
-  (`PanelKind.noteSystemImage`). It came with macOS 15.4, and the app also
-  runs on macOS 15.0–15.3, where `Image(systemName:)` would draw nothing for
-  it, so there Notes draws `doc.text`. One pure function names the symbol from
-  whether the page and pencil is available
-  (`PanelKind.noteSymbol(pageAndPencilAvailable:)`), and its caller passes
-  `#available(macOS 15.4, *)`.
+- **Notes** – `pencil.line`, the symbol a note's tab shows too
+  (`PanelKind.noteSystemImage`). SF Symbols has had it since macOS 13, so it
+  draws on every macOS the app runs on.
 
 Each pill's hover and pressed square is the row's, sized to the pill's width,
 so the feedback covers the shape the pill draws.
 
-**When the strip is narrow,** the pills that are on drop their labels, and the
-one in front keeps its fill, so the panel in view still reads. A pill behind
-then draws as one that is off, its icon alone. The tabs give up their room
-first. One pure function of the strip's width and the pills' states decides
-whether the labels show, so it can be tested without a view. The pills'
-icon-only widths equal the buttons they replace (Changes takes the + menu's
-slot), so `SideStripMetrics.fixedControlsWidth` stays 240 pt. That width is a
-minimum: a pill that is not drawn only leaves the tabs more room.
+**Width.** The side region is never narrower than its strip's fixed controls
+(`SideStripMetrics.fixedControlsWidth`): the history buttons; a full trailing
+group of the active panel's control, the Changes square, the transcript and
+Notes pills at their labelled widths, and collapse; and the strip's trailing
+inset. The tabs between them scroll, so they give up their room first, and no
+pill is ever clipped. The width comes from the labels measured in the 11 pt
+system font, in whole points: on macOS 27 the transcript pill is 87 pt, the
+Notes pill 64 pt, and the minimum 335 pt. It counts the transcript pill and the
+Changes pill even where they are not drawn, so it stays put as they come and
+go; a pill that is not drawn only leaves the tabs more room. The divider's
+smallest share is that width's share of the space
+(`PanelSurfaceWorkspaceView.minimumSideShare`).
 
 ## The Changes pill
 
@@ -198,8 +213,10 @@ the Changes pill's rule. They draw as plain icons, with the pills' symbols and
 in the pills' grey, `NSColor.secondaryLabelColor`, whatever their panel's
 state, so the bar and the strip match. A disabled one draws that grey dimmed,
 as the row style dims a disabled button. No panel is in view, so none shows a
-label, a fill or an accent colour, each of which would read as a panel
-showing. A click follows the pill's rule ("Clicks"), so it expands the region.
+fill or an accent colour, either of which would read as a panel showing, and
+none carries a label: they are icon buttons like the rest of the bar's
+trailing end. A click follows the pill's rule ("Clicks"), so it expands the
+region.
 
 ## Rollout
 
@@ -221,10 +238,8 @@ changes, so a revert restores the old strip with every panel and note intact.
 - **Pill state:** off, in front, and behind, for each pill, including a
   collapsed region reading as behind.
 - **Icons:** `plusminus` for Changes in the pill, the tab and the bar; an
-  empty `bubble` for the transcript, on and off, in the pill and the bar; the
-  Notes symbol's two branches, `long.text.page.and.pencil` where it is
-  available and `doc.text` where it is not, with the symbol in use matching
-  the running macOS and drawing there.
+  empty `bubble` for the transcript, on and off, in the pill and the bar;
+  `pencil.line` for Notes and a note's tab, which the system draws.
 - **Colour:** the pills' grey is `NSColor.secondaryLabelColor`, the tint of the
   sidebar's row icons, and the bar's three icons name the same colour in every
   state, enabled or disabled.
@@ -239,8 +254,15 @@ changes, so a revert restores the old strip with every panel and note intact.
   screen loads at once; resigning active stops the polling. A load records
   whether its list is empty and counts as in flight while it reads git, and
   the poller follows the single selected worktree only.
-- **The label rule** at its boundaries: labels at the width that fits them,
-  icons one point narrower, and icons for every pill that is off.
+- **Labels:** the transcript and Notes pills show theirs off, behind and in
+  front, enabled or not, and Changes shows none in any state. A pill's size is
+  its labelled width for the transcript and Notes and the row's square for
+  Changes, in every state.
+- **The minimum width:** the fullest strip's fixed controls, with the pills at
+  the sizes they draw and the tabs given no room, take exactly
+  `SideStripMetrics.fixedControlsWidth`, a whole number of points; the
+  divider's smallest share is that width's share of the space, held to the
+  model's range.
 - **The Changes pill's decision** for its own workspace tab: open, select, close.
 - **Notes menu:** Open Other Note lists exactly the extra notes with no panel,
   and is absent when there are none.
@@ -253,9 +275,12 @@ changes, so a revert restores the old strip with every panel and note intact.
   pill's menu.** That is one right-click deeper than the + menu put them.
 - **The transcript's file menu moves under the button style.** The style reset
   on the menu's content is what keeps it stable; the live check guards it.
-- **A pill behind reads as off in a narrow strip.** With the labels gone, only
-  the fill tells pills apart, and it marks the one in front. A click on either
-  brings its panel to the front, so mistaking one for the other loses nothing.
+- **A pill behind reads as off.** Only the fill marks a pill's state, and it
+  marks the one in front. A click on either brings its panel to the front, so mistaking
+  one for the other loses nothing.
+- **The side region is never narrower than 335 pt** on macOS 27, the width its
+  controls need with both labels shown, so a terminal beside an open side
+  region always gives up at least that much.
 
 ## Rejected alternatives
 
@@ -270,12 +295,18 @@ changes, so a revert restores the old strip with every panel and note intact.
   the problem above is about.
 - **Merging extra notes into the first.** It rewrites user files once, for
   worktrees whose extras the user can delete in a click.
-- **Labels always shown**, with the strip's minimum width grown to about
-  385 pt to fit three. It narrows every terminal beside a side region.
-- **A label only on the pill in front.** It hides which other panels are on.
+- **Labels that drop when the strip is narrow.** A label that comes and goes
+  with the strip's width moves the controls around it as the divider is
+  dragged. A fixed label keeps each control in one place, and the region's
+  minimum width holds it.
+- **A label on the Changes pill too.** It would add about 52 pt to the side
+  region's minimum width, to about 387 pt, which every terminal beside a side
+  region gives up at the region's narrowest.
+- **A label only on the pill in front.** The label would come and go as
+  panels move to the front, moving the controls around it.
 - **The label colour for a pill that is on.** It tells a pill behind from one
-  that is off at any width, but draws the pills darker than the row's other
-  icons and the sidebar's, which are grey.
+  that is off, but draws the pills darker than the row's other icons and the
+  sidebar's, which are grey.
 - **A filled bubble while the transcript is open.** The fill already marks
   the pill in front, and no other pill changes its symbol with its state.
 - **Changes always shown.** For a worktree with nothing changed, it is a pill

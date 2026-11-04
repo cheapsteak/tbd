@@ -298,10 +298,10 @@ struct TabRowTrailingTests {
         let expectedWithoutChanges: [TabRowEdgeItem] = [.transcript(transcript), .notes(notes)]
         #expect(withoutChanges.items == expectedWithoutChanges)
 
-        // Each pill reads its panel's name, the Notes pill whatever the note
-        // is titled.
+        // The transcript and Notes pills read their panel's name, the Notes
+        // pill whatever the note is titled; Changes reads nothing.
         let labels = withTranscript.items.map(\.pillLabel)
-        let expectedLabels = ["Changes", "Transcript", "Notes"]
+        let expectedLabels: [String?] = [nil, "Transcript", "Notes"]
         #expect(labels == expectedLabels)
     }
 
@@ -395,7 +395,8 @@ struct TabRowTrailingTests {
         ]
         #expect(noChanges == expectedNoChanges)
 
-        // At most five slots, so the strip's fixed controls stay 240 pt.
+        // At most five slots, the count the side region's minimum width is
+        // built from (`SideStripMetrics.fixedControlsWidth`).
         let slotCount = full.count
         #expect(slotCount == SideStripMetrics.trailingSlotCount)
     }
