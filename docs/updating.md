@@ -236,7 +236,36 @@ Apple silicon always builds locally. `--debug` always builds locally.
 While the standing source is `release`, the update writes
 `~/tbd/updates/check-ref`, and the daemon's check compares against the
 `main-builds` tag instead of `main`, so "update available" means a published
-build exists. `tbd update --check` writes it too.
+build exists. `tbd update --check` writes it too. The file is written by an
+update run, so a source set by hand takes effect for the check after the next
+run. The daemon reads the file on every check, and its status reports which ref
+it compared against (`comparedRef`). An install that already runs the newest
+published commit is up to date even when `main` has moved on; an install that
+compiles from `main` is compared against `main`, and keeps its notice.
+
+## When the notice stays quiet
+
+The app's "A newer TBD is available" notice only appears when someone has to
+act on it. It is hidden while updates install on their own, which is either of:
+
+- **`update-mode` is `auto`.**
+- **An external auto-updater is on.** It signals that by creating
+  `~/tbd/updates/external-auto-enabled` (under `TBD_HOME` when that is set) and
+  removing it when it turns off. Only the file's existence matters. The daemon
+  checks it each time it reports status, so toggling it needs no restart.
+
+In place of the notice, the app shows a small dismissable line, "Update
+installs when idle", but only when a newer build has been waiting for more than
+a day while auto-update is on. The daemon tracks when it first saw the latest
+commit, in memory, so a daemon restart restarts that clock. Dismissing the line
+or the notice hides it for that commit; the next commit shows it again.
+
+Checking by hand always works and always reports the truth. The "Check for
+Updates…" menu item, `tbd version --check`, and the version label in the status
+bar answer the same way whether or not auto-update is on. With auto-update on,
+the menu item's answer adds that the update installs when idle. The Settings
+caption under the picker says when an external auto-updater is hiding the
+notice.
 
 ## Useful flags
 

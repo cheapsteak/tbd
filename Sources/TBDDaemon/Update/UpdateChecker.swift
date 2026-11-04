@@ -58,6 +58,16 @@ public actor UpdateChecker {
         comparedRef(fileContents: read(TBDConstants.updateCheckRefFile(environment: environment)))
     }
 
+    /// Whether an external auto-updater has switched itself on, given a
+    /// file-existence probe. Read on every status, so toggling the switch file
+    /// takes effect without a restart.
+    public static func externalAutoActive(
+        environment: [String: String],
+        exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+    ) -> Bool {
+        exists(TBDConstants.externalAutoUpdateFile(environment: environment))
+    }
+
     /// How often a running checker ticks, absent an override. One hour: the
     /// check is a single ref advertisement, and an operator who wants to know
     /// sooner has `tbd version --check`.
@@ -107,6 +117,8 @@ public actor UpdateChecker {
     private let isAncestor: AncestryProbe
     private let behindCount: BehindCounter
     private let launch: Launcher
+    private let comparedRefReader: @Sendable () -> String
+    private let externalAutoActive: @Sendable () -> Bool
     private let tickInterval: Duration
     private let clock: any Clock<Duration>
     private let now: @Sendable () -> Date
@@ -128,6 +140,10 @@ public actor UpdateChecker {
     /// not once an hour.
     private var loggedUnusableRemote = false
     private var loopTask: Task<Void, Never>?
+    /// The head `firstSeenAt` belongs to, and when it was first seen. Reset
+    /// whenever the compared head changes.
+    private var trackedLatest: String?
+    private var firstSeenAt: Date?
 
     // MARK: - Init
 
@@ -141,6 +157,8 @@ public actor UpdateChecker {
         behindCount: @escaping BehindCounter,
         launch: @escaping Launcher,
         interval: Duration = UpdateChecker.defaultInterval,
+        comparedRef: @escaping @Sendable () -> String = { UpdateChecker.mainRef },
+        externalAutoActive: @escaping @Sendable () -> Bool = { false },
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -153,6 +171,8 @@ public actor UpdateChecker {
         self.behindCount = behindCount
         self.launch = launch
         self.tickInterval = interval
+        self.comparedRefReader = comparedRef
+        self.externalAutoActive = externalAutoActive
         self.now = now
         self.clock = clock
     }
@@ -162,8 +182,16 @@ public actor UpdateChecker {
     /// The last observation, or nil when none has been made. Nil is what
     /// `daemon.status` carries for a daemon in `off` mode or one that has not
     /// finished its first tick.
-    public func currentStatus() -> UpdateStatus? {
-        hasObserved ? status : nil
+    public func currentStatus() async -> UpdateStatus? {
+        guard hasObserved else { return nil }
+        return await stamped(status)
+    }
+
+    /// Stamp whether auto-update is active, read fresh: the mode and the
+    /// external switch file can both change between checks.
+    private func stamped(_ observed: UpdateStatus) async -> UpdateStatus {
+        let mode = await readMode()
+        return observed.withAutoUpdateActive(mode.launchesUpdates || externalAutoActive())
     }
 
     /// Run one check now and answer with the result, whatever `update_mode`
@@ -173,7 +201,7 @@ public actor UpdateChecker {
     public func checkNow() async -> UpdateStatus {
         let mode = await readMode()
         await performCheck(mayLaunch: mode.launchesUpdates)
-        return status
+        return await stamped(status)
     }
 
     /// One tick of the timer. Reads the mode fresh, so a mode change is honored
@@ -282,12 +310,19 @@ public actor UpdateChecker {
         if relation == .behind, let ours = ourCommit {
             count = await behindCount(ours, latest, worktree)
         }
+        let observedAt = now()
+        if trackedLatest != latest {
+            trackedLatest = latest
+            firstSeenAt = observedAt
+        }
         status = UpdateStatus(
             latestCommit: latest,
-            observedAt: now(),
+            observedAt: observedAt,
             relation: relation,
             behindBy: count,
-            remote: url)
+            remote: url,
+            comparedRef: comparedRefReader(),
+            latestFirstSeenAt: firstSeenAt)
         hasObserved = true
 
         guard mayLaunch, relation == .behind else { return }

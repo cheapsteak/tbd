@@ -2047,7 +2047,13 @@ public final class Daemon: Sendable {
                     UpdateLauncher.launch(UpdateLauncher.plan(sourceWorktree: worktree))
                 },
                 interval: UpdateChecker.interval(
-                    from: ProcessInfo.processInfo.environment)
+                    from: ProcessInfo.processInfo.environment),
+                comparedRef: {
+                    UpdateChecker.comparedRef(environment: ProcessInfo.processInfo.environment)
+                },
+                externalAutoActive: {
+                    UpdateChecker.externalAutoActive(environment: ProcessInfo.processInfo.environment)
+                }
             )
             self.updateChecker = checker
             rpcRouter.updateChecker = checker

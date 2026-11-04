@@ -124,19 +124,40 @@ public struct UpdateStatus: Codable, Sendable, Equatable {
     public let behindBy: Int?
     /// The remote URL that was consulted. Nil before the first resolution.
     public let remote: String?
+    /// The ref `latestCommit` was read from: `refs/heads/main` when the check
+    /// follows `main`, `refs/tags/<tag>` when it follows the published release
+    /// (update source `release`). Nil from a daemon that does not report it,
+    /// which readers must treat as "measured against `main`".
+    public let comparedRef: String?
+    /// Whether an update installs without a gesture: `update_mode` is `auto`,
+    /// or an external auto-updater has switched itself on. Nil from a daemon
+    /// that does not report it, which readers must treat as "not auto" — the
+    /// previous behaviour, where the notice shows.
+    public let autoUpdateActive: Bool?
+    /// When this daemon first saw `latestCommit` as the compared ref's head.
+    /// In memory in the daemon, so a restart restarts the clock; nil when
+    /// unknown. Lets the app tell a release that has just landed from one that
+    /// has been waiting for days.
+    public let latestFirstSeenAt: Date?
 
     public init(
         latestCommit: String? = nil,
         observedAt: Date? = nil,
         relation: UpdateRelation = .unknown,
         behindBy: Int? = nil,
-        remote: String? = nil
+        remote: String? = nil,
+        comparedRef: String? = nil,
+        autoUpdateActive: Bool? = nil,
+        latestFirstSeenAt: Date? = nil
     ) {
         self.latestCommit = latestCommit
         self.observedAt = observedAt
         self.relation = relation
         self.behindBy = behindBy
         self.remote = remote
+        self.comparedRef = comparedRef
+        self.autoUpdateActive = autoUpdateActive
+        self.latestFirstSeenAt = latestFirstSeenAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -148,6 +169,20 @@ public struct UpdateStatus: Codable, Sendable, Equatable {
         relation = (try? c.decode(UpdateRelation.self, forKey: .relation)) ?? .unknown
         behindBy = try c.decodeIfPresent(Int.self, forKey: .behindBy)
         remote = try c.decodeIfPresent(String.self, forKey: .remote)
+        // The three fields below only quiet or annotate a notice, so a value of
+        // the wrong type reads as absent rather than losing the whole status.
+        comparedRef = try? c.decodeIfPresent(String.self, forKey: .comparedRef)
+        autoUpdateActive = try? c.decodeIfPresent(Bool.self, forKey: .autoUpdateActive)
+        latestFirstSeenAt = try? c.decodeIfPresent(Date.self, forKey: .latestFirstSeenAt)
+    }
+
+    /// This status with `autoUpdateActive` replaced; the daemon stamps it fresh
+    /// each time a status is handed out.
+    public func withAutoUpdateActive(_ active: Bool) -> UpdateStatus {
+        UpdateStatus(
+            latestCommit: latestCommit, observedAt: observedAt, relation: relation,
+            behindBy: behindBy, remote: remote, comparedRef: comparedRef,
+            autoUpdateActive: active, latestFirstSeenAt: latestFirstSeenAt)
     }
 
     /// Nothing observed yet.

@@ -83,6 +83,9 @@ struct UpdateCheckerTests {
         remoteURL: String? = "git@github.com:acme/tbd.git",
         behindBy: Int? = nil,
         interval: Duration = .seconds(3600),
+        comparedRef: @escaping @Sendable () -> String = { UpdateChecker.mainRef },
+        externalAuto: @escaping @Sendable () -> Bool = { false },
+        now: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_780_000_000) },
         clock: any Clock<Duration> = ContinuousClock()
     ) -> UpdateChecker {
         UpdateChecker(
@@ -104,8 +107,95 @@ struct UpdateCheckerTests {
                 return fixture.launchSucceeds
             },
             interval: interval,
-            now: { Date(timeIntervalSince1970: 1_780_000_000) },
+            comparedRef: comparedRef,
+            externalAutoActive: externalAuto,
+            now: now,
             clock: clock)
+    }
+
+    // MARK: - auto-update flag, compared ref, first-seen age
+
+    /// A mutable clock reading for tests that move time between ticks.
+    private final class Now: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _value = Date(timeIntervalSince1970: 1_780_000_000)
+        var value: Date {
+            get { lock.withLock { _value } }
+            set { lock.withLock { _value = newValue } }
+        }
+    }
+
+    @Test func statusReportsTheComparedRef() async {
+        let checker = makeChecker(
+            fixture: Fixture(mode: .check, head: Self.latest), spy: Spy(),
+            comparedRef: { "refs/tags/main-builds" })
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.comparedRef == "refs/tags/main-builds")
+    }
+
+    /// Running the commit the release tag names is up to date, whatever `main`
+    /// has moved on to.
+    @Test func runningTheReleaseCommitIsUpToDateAgainstTheReleaseRef() async {
+        let checker = makeChecker(
+            fixture: Fixture(mode: .check, head: Self.ours), spy: Spy(),
+            comparedRef: { "refs/tags/main-builds" })
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.relation == .upToDate)
+    }
+
+    @Test func autoUpdateIsActiveForAutoModeOrTheExternalSwitch() async {
+        let auto = makeChecker(fixture: Fixture(mode: .auto, head: Self.latest), spy: Spy())
+        await auto.runOnce()
+        #expect(await auto.currentStatus()?.autoUpdateActive == true)
+
+        let external = makeChecker(
+            fixture: Fixture(mode: .check, head: Self.latest), spy: Spy(),
+            externalAuto: { true })
+        await external.runOnce()
+        #expect(await external.currentStatus()?.autoUpdateActive == true)
+
+        let neither = makeChecker(fixture: Fixture(mode: .check, head: Self.latest), spy: Spy())
+        await neither.runOnce()
+        #expect(await neither.currentStatus()?.autoUpdateActive == false)
+    }
+
+    /// Read fresh on every status, not captured at the check.
+    @Test func autoUpdateActiveIsReadFreshOnEachStatus() async {
+        let fixture = Fixture(mode: .check, head: Self.latest)
+        let checker = makeChecker(fixture: fixture, spy: Spy())
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.autoUpdateActive == false)
+        fixture.mode = .auto
+        #expect(await checker.currentStatus()?.autoUpdateActive == true)
+        #expect(await checker.checkNow().autoUpdateActive == true)
+    }
+
+    @Test func externalSwitchFileLivesUnderTheTBDHome() {
+        let env = ["TBD_HOME": "/scratch/tbd-home"]
+        #expect(TBDConstants.externalAutoUpdateFile(environment: env).path
+            == "/scratch/tbd-home/updates/external-auto-enabled")
+        var asked: [String] = []
+        #expect(UpdateChecker.externalAutoActive(environment: env) { asked.append($0.path); return true })
+        #expect(asked == ["/scratch/tbd-home/updates/external-auto-enabled"])
+        #expect(!UpdateChecker.externalAutoActive(environment: env) { _ in false })
+    }
+
+    @Test func firstSeenIsKeptWhileTheHeadStaysAndResetsWhenItMoves() async {
+        let fixture = Fixture(mode: .check, head: Self.latest)
+        let clock = Now()
+        let checker = makeChecker(
+            fixture: fixture, spy: Spy(), now: { clock.value })
+        let t0 = clock.value
+        await checker.runOnce()
+        clock.value = t0.addingTimeInterval(7200)
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.latestFirstSeenAt == t0)
+        #expect(await checker.currentStatus()?.observedAt == t0.addingTimeInterval(7200))
+
+        fixture.head = Self.newerStill
+        clock.value = t0.addingTimeInterval(9000)
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.latestFirstSeenAt == t0.addingTimeInterval(9000))
     }
 
     // MARK: - off does nothing at all

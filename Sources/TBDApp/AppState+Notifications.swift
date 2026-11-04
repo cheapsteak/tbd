@@ -82,6 +82,16 @@ extension AppState {
             daemon: daemonBuildIdentity, update: daemonUpdateStatus)
     }
 
+    /// The quiet "Update installs when idle" line, shown instead of the banner
+    /// while auto-update is on and a release has waited over a day. Dismissed
+    /// per commit together with the banner.
+    func updateIdleLine(now: Date = Date()) -> String? {
+        guard let latest = daemonUpdateStatus?.latestCommit,
+              latest != dismissedUpdateCommit
+        else { return nil }
+        return UpdateNotice.idleLine(update: daemonUpdateStatus, now: now)
+    }
+
     /// Dismiss the update notice for the commit it is currently about.
     func dismissUpdateNotice() {
         dismissedUpdateCommit = daemonUpdateStatus?.latestCommit

@@ -469,7 +469,7 @@ struct GeneralSettingsTab: View {
                 Text("Check only").tag(UpdateMode.check)
                 Text("Check and install").tag(UpdateMode.auto)
             }
-            Text(UpdateNotice.modeCaption(mode))
+            Text(UpdateNotice.modeCaption(mode, update: appState.daemonUpdateStatus))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
