@@ -391,9 +391,12 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
             table.reloadData()
             hasLoaded = true
         }
-        // Mirrors the selection, and re-derives the row views the rows
+        // Mirrors the selection, then re-derives the row views the rows
         // changed under.
-        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
+        applyModelSelection()
+        if rowViewsNeedRefresh {
+            refreshRowViewConfigurations()
+        }
         isApplyingModelSelection = false
         // The dock takes its new height before a new selection scrolls into
         // it, so the scroll reads the height the rows will have.
@@ -520,10 +523,7 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
     /// selected remote session. A row the dock does not show is skipped.
     /// A row view draws the selection from the table's own (`isSelected`),
     /// so a selection alone reconfigures no row view.
-    /// - Parameter refreshingRowViews: true after an apply that changed the
-    ///   rows' structure, so every row view takes its configuration afresh
-    ///   here.
-    private func applyModelSelection(refreshingRowViews: Bool = false) {
+    private func applyModelSelection() {
         let remote = appState.selectedRemoteSession.map {
             RemoteSessionIdentity.uuid(provider: $0.provider, sessionID: $0.sessionID)
         }
@@ -535,9 +535,6 @@ final class DockTableController: NSViewController, NSTableViewDataSource, NSTabl
         }
         if indexes != table.selectedRowIndexes {
             table.selectRowIndexes(indexes, byExtendingSelection: false)
-        }
-        if refreshingRowViews {
-            refreshRowViewConfigurations()
         }
     }
 

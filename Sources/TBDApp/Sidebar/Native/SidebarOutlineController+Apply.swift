@@ -25,9 +25,12 @@ extension SidebarOutlineController {
         // The drop index is built again on first use: once per applied tree,
         // and never for a rebuild no drag asks about.
         dropIndexCache = nil
-        // Mirrors the selection, and re-derives the row views the structure
+        // Mirrors the selection, then re-derives the row views the structure
         // changed under.
-        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
+        applyModelSelection()
+        if rowViewsNeedRefresh {
+            refreshRowViewConfigurations()
+        }
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
         reconcileVanishedSelection()
