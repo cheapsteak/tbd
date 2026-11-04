@@ -118,7 +118,6 @@ struct MainToolbarControllerTests {
         #expect(!fixture.identifiers.contains(standard))
         #expect(fixture.identifiers.contains(MainToolbarItemID.sidebarSeparator))
 
-        fixture.showServers(url: "http://localhost:3000")
         fixture.showRemoteSession()
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         try #require(fixture.identifiers.contains(MainToolbarItemID.remoteStop))
@@ -151,14 +150,12 @@ struct MainToolbarControllerTests {
         try await fixture.ready()
 
         // Every conditional item present too, so each kind is checked.
-        fixture.showServers(url: "http://localhost:3000")
         fixture.showRemoteSession()
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
 
         let identifiers = fixture.identifiers
         let allowed = Set(MainToolbarItemID.allowed)
         let stray = identifiers.filter { !allowed.contains($0) }
-        #expect(identifiers.contains(MainToolbarItemID.servers))
         #expect(identifiers.contains(MainToolbarItemID.remoteStop))
         #expect(stray.isEmpty)
         #expect(fixture.window.toolbar?.delegate === fixture.controller)
@@ -942,9 +939,9 @@ struct MainToolbarControllerTests {
 
     // MARK: - Overflow menu
 
-    /// Every item the layout can show, with the Servers item and every remote
-    /// item present, sends its overflow row's action from that row, as the
-    /// overflow menu does, and each row of a submenu sends its own. An
+    /// Every item the layout can show, with every remote item present, sends
+    /// its overflow row's action from that row, as the overflow menu does,
+    /// and each row of a submenu sends its own. An
     /// action that assumed another sender would raise, ending the test
     /// process, which is the regression this guards. The filter's rows run
     /// in order, so the last repo is the filter after them, and Stop asks for
@@ -956,15 +953,11 @@ struct MainToolbarControllerTests {
     /// - **Toggle Sidebar** is checked, not sent: sending it would collapse
     ///   the sidebar and take the filter away part way through.
     ///   `leadingButtonsSurviveACollapse` covers the collapse.
-    /// - **Servers** has no main URL, so it carries no action that would open
-    ///   one, and its rows are sent from a bare menu item: run, each would
-    ///   start or stop servers through the daemon.
     /// - **Remote buttons** have explicit rows titled with their labels.
     @Test func everyOverflowRowToleratesAMenuItemSender() async throws {
         let fixture = ToolbarFixture(label: "everyOverflowRowToleratesAMenuItemSender")
         defer { fixture.tearDown() }
         try await fixture.ready()
-        fixture.showServers(url: nil)
         let selection = fixture.showRemoteSession()
         fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
         let items = fixture.controller.toolbar.items
@@ -1010,8 +1003,7 @@ struct MainToolbarControllerTests {
             for subrow in row.subrows where !subrow.isSeparatorItem && subrow.action != toggleAction {
                 guard let action = subrow.action else { continue }
                 sent += 1
-                let sender = ToolbarFixture.harmlessSender(for: subrow)
-                if !NSApplication.shared.sendAction(action, to: subrow.target, from: sender) {
+                if !NSApplication.shared.sendAction(action, to: subrow.target, from: subrow) {
                     unsent.append(subrow.title)
                 }
             }
@@ -1479,64 +1471,6 @@ struct MainToolbarControllerTests {
         #expect(uninstalled.applyScheduled == false)
     }
 
-    /// The defaults watch's gate for the Tabs in the toolbar key, driven
-    /// directly as `defaultsWatchQueuesAnApplyOnlyForTheShowHiddenReposKey`
-    /// drives it. With a worktree's tab bar showing, turning the key on
-    /// queues the apply that compares first, and that apply ends the items at
-    /// the tracking separator; turning it off brings the title back. Another
-    /// key queues nothing, and neither does a controller that is not
-    /// installed.
-    @Test func defaultsWatchQueuesAnApplyForTheTabsInToolbarKey() async throws {
-        let fixture = ToolbarFixture(label: "defaultsWatchQueuesAnApplyForTheTabsInToolbarKey")
-        defer { fixture.tearDown() }
-        fixture.state.isConnected = true
-        fixture.state.selectedWorktreeIDs = [fixture.worktrees[1].id]
-        try await fixture.ready()
-        let controller = fixture.controller
-        let defaults = fixture.suite.defaults
-        try #require(fixture.identifiers.contains(MainToolbarItemID.title))
-
-        try await fixture.withNoApplyQueued("before the store changes") {
-            defaults.set("acme", forKey: "MainToolbarControllerTests.unrelatedKey")
-            controller.defaultsChanged()
-            let queuedForAnotherKey = controller.applyScheduled
-            #expect(queuedForAnotherKey == false)
-
-            defaults.set(true, forKey: AppState.tabsInToolbarKey)
-            controller.defaultsChanged()
-            let queuedForTheKey = controller.applyScheduled
-            #expect(queuedForTheKey)
-            let runsInFull = controller.queuedApplyRunsInFull
-            #expect(runsInFull == false)
-        }
-        let ended = try await waitForMainActorCondition("the items to end at the tracking separator") {
-            fixture.identifiers.last == MainToolbarItemID.sidebarSeparator
-                && controller.appliedSnapshot?.tabsInToolbar == true
-        }
-        #expect(ended)
-        let hasTitle = fixture.identifiers.contains(MainToolbarItemID.title)
-        #expect(hasTitle == false)
-
-        try await fixture.withNoApplyQueued("before the key turns off") {
-            defaults.set(false, forKey: AppState.tabsInToolbarKey)
-            controller.defaultsChanged()
-            let queuedForTheKey = controller.applyScheduled
-            #expect(queuedForTheKey)
-        }
-        let restored = try await waitForMainActorCondition("the title to come back") {
-            fixture.identifiers.contains(MainToolbarItemID.title)
-                && controller.appliedSnapshot?.tabsInToolbar == false
-        }
-        #expect(restored)
-
-        let uninstalled = MainToolbarController(
-            appState: fixture.state, split: ToolbarFixture.makeSplit(), titleView: NSView(),
-            requestRemoteStop: { _ in })
-        defaults.set(true, forKey: AppState.tabsInToolbarKey)
-        uninstalled.defaultsChanged()
-        #expect(uninstalled.applyScheduled == false)
-    }
-
     /// While installed, the controller measures what the panes' top rows
     /// read: the content pane's top safe-area inset, which the toolbar takes,
     /// and the leading item's trailing edge from the content pane's leading
@@ -1577,25 +1511,6 @@ struct MainToolbarControllerTests {
             return fixture.controller.chromeGeometryPublishScheduled
         }()
         #expect(scheduledAfterUninstall == false)
-    }
-
-    /// `serversMenuItemChosen(_:)` runs only a row that carries a command: a
-    /// bare menu item, another control and no sender at all run nothing.
-    @Test func serversMenuItemChosenToleratesAnySender() async throws {
-        let fixture = ToolbarFixture(label: "serversMenuItemChosenToleratesAnySender")
-        defer { fixture.tearDown() }
-        try await fixture.ready()
-        let controller = fixture.controller
-        let action = #selector(MainToolbarController.serversMenuItemChosen(_:))
-        let worktreeID = fixture.worktrees[0].id
-
-        let bare = NSMenuItem(title: "Start", action: action, keyEquivalent: "")
-        let fromBareRow = NSApplication.shared.sendAction(action, to: controller, from: bare)
-        #expect(fromBareRow)
-        let fromButton = NSApplication.shared.sendAction(action, to: controller, from: NSButton())
-        #expect(fromButton)
-        controller.serversMenuItemChosen(nil)
-        #expect(fixture.state.devServerActionMessages[worktreeID] == nil)
     }
 
     // MARK: - Title
@@ -1688,172 +1603,6 @@ struct MainToolbarControllerTests {
         MainToolbarController.prepareTitleView(longTitle)
         #expect(shortTitle.fittingSize.width == MainToolbarMetrics.titleIdealWidth)
         #expect(longTitle.fittingSize.width == MainToolbarMetrics.titleIdealWidth)
-    }
-
-    // MARK: - Servers
-
-    @Test func serversMenuIsBuiltOnOpen() async throws {
-        let fixture = ToolbarFixture(label: "serversMenuIsBuiltOnOpen")
-        defer { fixture.tearDown() }
-        try await fixture.ready()
-
-        let worktreeID = fixture.worktrees[0].id
-        let messages = ["web: failed to stop"]
-        let first = fixture.showServers(url: "http://localhost:3000")
-        fixture.state.devServerActionMessages[worktreeID] = messages
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let servers = try #require(fixture.controller.item(MainToolbarItemID.servers) as? NSMenuToolbarItem)
-        let menu = servers.menu
-        #expect(menu.autoenablesItems == false)
-        #expect(menu.delegate === fixture.controller)
-
-        fixture.controller.menuNeedsUpdate(menu)
-        let expectedFirst = ServersToolbarMenu.entries(list: first, messages: messages).map { Self.describeEntry($0) }
-        let rowsFirst = menu.items.map { Self.describeRow($0) }
-        #expect(rowsFirst == expectedFirst)
-        let note = menu.items.first { $0.title == "web: failed to stop" }
-        #expect(note?.isEnabled == false)
-
-        // The list changes between two opens; the second open shows the new one.
-        let second = fixture.list(
-            [fixture.server("web", .running, url: "http://localhost:3000"), fixture.server("api", .stopped)],
-            id: worktreeID)
-        fixture.state.devServerLists[worktreeID] = second
-        fixture.controller.menuNeedsUpdate(menu)
-        let expectedSecond = ServersToolbarMenu.entries(list: second, messages: messages).map { Self.describeEntry($0) }
-        let rowsSecond = menu.items.map { Self.describeRow($0) }
-        #expect(expectedSecond != expectedFirst)
-        #expect(rowsSecond == expectedSecond)
-    }
-
-    @Test func serversPrimaryActionOnlyWithAURL() async throws {
-        let fixture = ToolbarFixture(label: "serversPrimaryActionOnlyWithAURL")
-        defer { fixture.tearDown() }
-        try await fixture.ready()
-
-        fixture.showServers(url: "http://localhost:3000")
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let withURL = try #require(fixture.controller.item(MainToolbarItemID.servers) as? NSMenuToolbarItem)
-        #expect(withURL.action == #selector(MainToolbarController.openPrimaryServerURL(_:)))
-        #expect(withURL.target === fixture.controller)
-        #expect(withURL.title == "1 running")
-        #expect(withURL.toolTip == "Open http://localhost:3000 · more options")
-        #expect(withURL.showsIndicator == true)
-        #expect(withURL.visibilityPriority == .high)
-
-        fixture.showServers(url: nil)
-        fixture.controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let withoutURL = try #require(fixture.controller.item(MainToolbarItemID.servers) as? NSMenuToolbarItem)
-        #expect(withoutURL.action == nil)
-        #expect(withoutURL.toolTip == "Dev servers")
-    }
-
-    /// A change of the window's appearance between light and dark re-bakes
-    /// the Servers icon with nothing else asking for an apply: the watch
-    /// queues the apply that compares first, and the color scheme is among
-    /// what it compares. Both ways are checked. Each icon the change shows is
-    /// the one an apply at the new scheme shows, as a direct apply right
-    /// after it sets no other: the toolbar sets an image only when the key it
-    /// is baked from, which holds the scheme, differs.
-    @Test func serversIconReBakesOnAppearance() async throws {
-        let dark = try #require(NSAppearance(named: .darkAqua))
-        let aqua = try #require(NSAppearance(named: .aqua))
-        #expect(MainToolbarController.colorScheme(for: dark) == .dark)
-        #expect(MainToolbarController.colorScheme(for: aqua) == .light)
-
-        let fixture = ToolbarFixture(label: "serversIconReBakesOnAppearance")
-        defer { fixture.tearDown() }
-        fixture.window.appearance = aqua
-        try await fixture.ready()
-        let controller = fixture.controller
-        fixture.showServers(url: "http://localhost:3000")
-        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        let servers = try #require(controller.item(MainToolbarItemID.servers))
-        let light = try #require(servers.image)
-        #expect(light.accessibilityDescription == "Dev servers, 1 running")
-        #expect(light.isTemplate == false)
-
-        // The appearance change alone applies the re-bake, through KVO.
-        let appliesBeforeDark = controller.applyCount
-        fixture.window.appearance = dark
-        let lightID = ObjectIdentifier(light)
-        let followedDark = try await waitForMainActorCondition("the Servers icon to follow the dark appearance") {
-            servers.image.map { ObjectIdentifier($0) } != lightID
-        }
-        try #require(followedDark)
-        #expect(controller.applyCount > appliesBeforeDark)
-        #expect(controller.currentColorScheme == .dark)
-        let darkIcon = try #require(servers.image)
-        #expect(darkIcon.accessibilityDescription == "Dev servers, 1 running")
-        #expect(darkIcon.isTemplate == false)
-        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(servers.image === darkIcon)
-
-        let appliesBeforeLight = controller.applyCount
-        fixture.window.appearance = aqua
-        let darkID = ObjectIdentifier(darkIcon)
-        let followedLight = try await waitForMainActorCondition("the Servers icon to follow the light appearance") {
-            servers.image.map { ObjectIdentifier($0) } != darkID
-        }
-        try #require(followedLight)
-        #expect(controller.applyCount > appliesBeforeLight)
-        #expect(controller.currentColorScheme == .light)
-        let lightIcon = try #require(servers.image)
-        #expect(lightIcon.accessibilityDescription == "Dev servers, 1 running")
-        controller.apply(MainToolbarSnapshot.make(from: fixture.state))
-        #expect(servers.image === lightIcon)
-    }
-
-    /// A report that the window's appearance changed, leaving its color
-    /// scheme as it was, applies nothing: the watch queues the apply that
-    /// compares first, which finds the scheme the Servers icon is baked for
-    /// unchanged. The report is the KVO notification the watch observes,
-    /// posted by hand with the appearance untouched, so it certainly reaches
-    /// the watch and certainly keeps the scheme; a set of the appearance the
-    /// window already has may post nothing at all.
-    ///
-    /// Whether the watch asked for an apply in full is read from the queued
-    /// apply's flag, in the same synchronous segment as the post and the
-    /// check that found none queued before it, so nothing else can reach the
-    /// flag in between. `applyCount` read behind the apply could not be
-    /// trusted the same way: a `scheduleApply()` from another source in the
-    /// turns before the queued apply runs joins it, makes it run in full and
-    /// moves `applyCount`, though the watch asked for no such apply. What is
-    /// read behind it holds whatever joins: an apply in full does not move
-    /// `comparedApplyCount`, and at an unchanged scheme it keeps the Servers
-    /// icon, as the compared apply does.
-    @Test func anAppearanceReportThatKeepsTheColorSchemeDoesNotReapply() async throws {
-        let aqua = try #require(NSAppearance(named: .aqua))
-        let fixture = ToolbarFixture(label: "anAppearanceReportThatKeepsTheColorSchemeDoesNotReapply")
-        defer { fixture.tearDown() }
-        fixture.window.appearance = aqua
-        try await fixture.ready()
-        let controller = fixture.controller
-        let window = fixture.window
-
-        fixture.showServers(url: "http://localhost:3000")
-        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
-            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
-        }
-        try #require(shown)
-        let servers = try #require(controller.item(MainToolbarItemID.servers))
-        let icon = try #require(servers.image)
-
-        let comparedBefore = try await fixture.withNoApplyQueued("before the appearance report") { () throws -> Int in
-            let compared = controller.comparedApplyCount
-            try #require(controller.currentColorScheme == .light)
-            window.willChangeValue(forKey: "effectiveAppearance")
-            window.didChangeValue(forKey: "effectiveAppearance")
-            #expect(controller.currentColorScheme == .light)
-            // KVO reports synchronously, so the watch has queued its apply
-            // by now, and asked for one that compares first.
-            #expect(controller.applyScheduled)
-            #expect(controller.queuedApplyRunsInFull == false)
-            return compared
-        }
-        let after = try await fixture.countsBehindTheQueuedApply()
-        #expect(after.comparedApplies == comparedBefore)
-        #expect(servers.image === icon)
     }
 
     // MARK: - Re-install
@@ -2143,9 +1892,7 @@ struct MainToolbarControllerTests {
     /// from the split's `viewDidAppear`, can do so at any turn of a loaded
     /// pass, after the check that found none queued: its apply either joins
     /// the one the change queued, which then runs in full, or runs after it.
-    /// Either adds to `applyCount` and neither moves the count asserted. The
-    /// appearance watch compares first too, so a report from it that keeps
-    /// the color scheme moves neither.
+    /// Either adds to `applyCount` and neither moves the count asserted.
     @Test func anUnchangedObservedChangeDuringTheCooldownDoesNotReapply() async throws {
         let fixture = ToolbarFixture(
             label: "anUnchangedObservedChangeDuringTheCooldownDoesNotReapply",
@@ -2155,11 +1902,12 @@ struct MainToolbarControllerTests {
         let controller = fixture.controller
         let window = fixture.window
 
-        // The snapshot reads the dev-server lists only with one worktree
-        // selected.
-        fixture.showServers(url: "http://localhost:3000")
-        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
-            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
+        // The snapshot reads the worktree lists only with a worktree
+        // selected, to find the title's.
+        fixture.selectFirstWorktree()
+        let titled = fixture.worktrees[0].displayName
+        let shown = try await waitForMainActorCondition("the apply that shows the worktree's title, with none queued") {
+            controller.appliedSnapshot?.title == titled && !controller.applyScheduled
         }
         try #require(shown)
 
@@ -2171,8 +1919,7 @@ struct MainToolbarControllerTests {
             () throws -> (comparedApplies: Int, changes: Int) in
             let counts = (comparedApplies: controller.comparedApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
-            fixture.state.devServerLists[other] = fixture.list(
-                [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+            fixture.renameWorktree(at: 1, to: "acme-renamed")
             return counts
         }
         let comparedAppliesBefore = before.comparedApplies
@@ -2388,33 +2135,33 @@ struct MainToolbarControllerTests {
         #expect(fixture.controller.appliedSnapshot?.filter.selected == repoID)
     }
 
-    /// The snapshot reads the whole dev-server dictionary, so a list landing
-    /// for a worktree other than the selected one is observed and queues an
-    /// apply. That apply finds the snapshot, the collapse and the appearance
-    /// as the toolbar shows them and does no layout or content work. It still
-    /// re-arms the tracking: a change to the selected worktree's list is
-    /// applied after it. The count asserted is the one only an apply that
-    /// compared first moves, for the reason
+    /// The snapshot looks the selected worktree up among all of them, so a
+    /// rename of a worktree other than the selected one is observed and
+    /// queues an apply. That apply finds the snapshot and the collapse as the
+    /// toolbar shows them and does no layout or content work. It still
+    /// re-arms the tracking: a rename of the selected worktree is applied
+    /// after it. The count asserted is the one only an apply that compared
+    /// first moves, for the reason
     /// `anUnchangedObservedChangeDuringTheCooldownDoesNotReapply` gives.
-    @Test func anotherWorktreesServersDoNotReapply() async throws {
-        let fixture = ToolbarFixture(label: "anotherWorktreesServersDoNotReapply")
+    @Test func anotherWorktreesRenameDoesNotReapply() async throws {
+        let fixture = ToolbarFixture(label: "anotherWorktreesRenameDoesNotReapply")
         defer { fixture.tearDown() }
         try await fixture.ready()
         let controller = fixture.controller
 
-        fixture.showServers(url: "http://localhost:3000")
-        let shown = try await waitForMainActorCondition("the apply that shows the Servers item, with none queued") {
-            controller.appliedSnapshot?.servers?.isRunning == true && !controller.applyScheduled
+        fixture.selectFirstWorktree()
+        let titled = fixture.worktrees[0].displayName
+        let shown = try await waitForMainActorCondition("the apply that shows the worktree's title, with none queued") {
+            controller.appliedSnapshot?.title == titled && !controller.applyScheduled
         }
         try #require(shown)
 
         let other = fixture.worktrees[1].id
-        let before = try await fixture.withNoApplyQueued("before another worktree's servers change") {
+        let before = try await fixture.withNoApplyQueued("before another worktree's rename") {
             () throws -> (comparedApplies: Int, changes: Int) in
             let counts = (comparedApplies: controller.comparedApplyCount, changes: controller.observedChangeCount)
             try #require(fixture.state.selectedWorktreeIDs.contains(other) == false)
-            fixture.state.devServerLists[other] = fixture.list(
-                [fixture.server("api", .running, url: "http://localhost:4000")], id: other)
+            fixture.renameWorktree(at: 1, to: "acme-renamed")
             return counts
         }
         let comparedAppliesBefore = before.comparedApplies
@@ -2426,9 +2173,9 @@ struct MainToolbarControllerTests {
         #expect(controller.observedChangeCount == changesBefore + 1)
         #expect(controller.comparedApplyCount == comparedAppliesBefore)
 
-        fixture.showServers(url: nil)
-        let applied = try await waitForMainActorCondition("the apply for the selected worktree's change") {
-            controller.appliedSnapshot?.servers?.isRunning == false
+        fixture.renameWorktree(at: 0, to: "acme-selected")
+        let applied = try await waitForMainActorCondition("the apply for the selected worktree's rename") {
+            controller.appliedSnapshot?.title == "acme-selected"
         }
         #expect(applied)
     }
@@ -2464,29 +2211,25 @@ struct MainToolbarControllerTests {
 
     // MARK: - Content
 
-    /// An apply that changes nothing sets nothing: the Transcript and Servers
-    /// images are the same objects afterwards. A changed Transcript symbol
-    /// does set a new image and tool tip.
+    /// An apply that changes nothing sets nothing: the Transcript image is
+    /// the same object afterwards. A changed Transcript symbol does set a new
+    /// image and tool tip.
     @Test func unchangedContentIsNotSetAgain() async throws {
         let fixture = ToolbarFixture(label: "unchangedContentIsNotSetAgain")
         defer { fixture.tearDown() }
         try await fixture.ready()
 
-        fixture.showServers(url: "http://localhost:3000")
         fixture.showRemoteSession()
         var snapshot = MainToolbarSnapshot.make(from: fixture.state)
         let remote = try #require(snapshot.remote)
         try #require(remote.showsTranscript)
         fixture.controller.apply(snapshot)
         let transcript = try #require(fixture.controller.item(MainToolbarItemID.remoteTranscript))
-        let servers = try #require(fixture.controller.item(MainToolbarItemID.servers))
         let transcriptImage = try #require(transcript.image)
-        let serversImage = try #require(servers.image)
         let transcriptTip = transcript.toolTip
 
         fixture.controller.apply(snapshot)
         #expect(transcript.image === transcriptImage)
-        #expect(servers.image === serversImage)
         #expect(transcript.toolTip == transcriptTip)
 
         snapshot.remote?.transcriptShown = !remote.transcriptShown
@@ -2497,7 +2240,6 @@ struct MainToolbarControllerTests {
         #expect(toggled !== transcriptImage)
         #expect(toggled.accessibilityDescription == toggledHelp)
         #expect(transcript.toolTip == toggledHelp)
-        #expect(servers.image === serversImage)
     }
 
     // MARK: - Remote
@@ -2628,28 +2370,6 @@ struct MainToolbarControllerTests {
         showHiddenReposRow(menu).map { ShowHiddenReposRowState(title: $0.title, checked: $0.state == .on) }
     }
 
-    /// A Servers menu row as text: kind, title, enablement and command.
-    private static func describeRow(_ row: NSMenuItem) -> String {
-        if row.isSeparatorItem { return "separator" }
-        if row.isSectionHeader { return "header:\(row.title)" }
-        let command = (row.representedObject as? ServersMenuCommandBox).map { "\($0.command)" } ?? "none"
-        return "item:\(row.title):\(row.isEnabled):\(command)"
-    }
-
-    /// The row `entry` should become, in `describeRow`'s terms: a note is a
-    /// disabled row with no command.
-    private static func describeEntry(_ entry: ServersMenuEntry) -> String {
-        switch entry {
-        case .separator:
-            return "separator"
-        case .header(let title):
-            return "header:\(title)"
-        case .note(let text):
-            return "item:\(text):false:none"
-        case .item(let title, let isEnabled, let command):
-            return "item:\(title):\(isEnabled):\(command)"
-        }
-    }
 }
 
 // MARK: - Fixture
@@ -2825,9 +2545,8 @@ private final class ToolbarFixture {
     /// earlier main-actor turn than the test body, which has to win the main
     /// actor back once the wait returns, and anything that runs in that gap
     /// can queue an apply: `scheduleApply()` from an install, a collapse
-    /// report or a cooldown's end, or the comparing apply the window's
-    /// `effectiveAppearance` watch or an observed `AppState` change queues.
-    /// That apply is a
+    /// report or a cooldown's end, or the comparing apply the defaults watch
+    /// or an observed `AppState` change queues. That apply is a
     /// `DispatchQueue.main.async` block queued behind the body, so a body that
     /// then asserts its own change queued nothing would see it. So the check
     /// is made here first, with nothing that can suspend between it and
@@ -3129,26 +2848,18 @@ private final class ToolbarFixture {
             subrows: (item as? NSMenuToolbarItem)?.menu.items ?? [])
     }
 
-    /// The sender to send `row`'s action from: `row` itself, except for a
-    /// Servers row carrying a command, which is sent from a bare menu item
-    /// so that no server is started or stopped and no URL opened.
-    static func harmlessSender(for row: NSMenuItem) -> NSMenuItem {
-        guard row.representedObject is ServersMenuCommandBox else { return row }
-        return NSMenuItem(title: row.title, action: row.action, keyEquivalent: "")
-    }
-
     // MARK: State
 
-    /// Selects the first worktree and gives it one server: running with
-    /// `url`, or stopped without one.
-    @discardableResult
-    func showServers(url: String?) -> DevServerListResult {
-        let worktreeID = worktrees[0].id
-        let running = url.map { server("web", .running, url: $0) } ?? server("web", .stopped)
-        let result = list([running], id: worktreeID)
-        state.devServerLists[worktreeID] = result
-        state.selectedWorktreeIDs = [worktreeID]
-        return result
+    /// Selects the first worktree, so the title names it and the snapshot
+    /// reads the worktree lists to find it.
+    func selectFirstWorktree() {
+        state.selectedWorktreeIDs = [worktrees[0].id]
+    }
+
+    /// Renames the worktree at `index` in the first repo's list, which holds
+    /// both of the fixture's worktrees.
+    func renameWorktree(at index: Int, to name: String) {
+        state.worktrees[repos[0].id]?[index].displayName = name
     }
 
     /// Selects and attaches a running remote session whose provider attaches
@@ -3169,17 +2880,6 @@ private final class ToolbarFixture {
         state.selectedRemoteSession = selection
         state.reattachRemoteSession(selection)
         return selection
-    }
-
-    func server(_ name: String, _ state: DevServerStateKind, url: String? = nil) -> DevServerInfo {
-        DevServerInfo(name: name, label: name, source: "tbd.toml", state: state, exitCode: nil,
-                      endpoints: url.map { [DevServerEndpoint(name: "app", url: $0)] } ?? [],
-                      terminalID: nil, pid: nil, hasStopCommand: false,
-                      stateFromStatusCommand: nil, hasStatusCommand: true, exitedTab: nil)
-    }
-
-    func list(_ servers: [DevServerInfo], id: UUID) -> DevServerListResult {
-        DevServerListResult(worktreeID: id, servers: servers, parseErrors: [], runningFileDiagnostics: [])
     }
 
     /// A plain view controller over a sized, empty view.
@@ -3203,8 +2903,8 @@ private struct ApplyCounts: Sendable {
 /// ran. Each gap names the observed-change and apply counts at the quiet
 /// probe and at the test's turn; an observed-change count that rose names an
 /// observed `AppState` change as the source, and one that did not names the
-/// appearance watch or `scheduleApply()` — an install, a collapse report or
-/// a cooldown's end.
+/// defaults watch or `scheduleApply()` — an install, a collapse report or a
+/// cooldown's end.
 private struct ApplyQueuedBeforeTheTestsTurn: Error, CustomStringConvertible {
     let what: String
     let gaps: [String]
@@ -3214,7 +2914,7 @@ private struct ApplyQueuedBeforeTheTestsTurn: Error, CustomStringConvertible {
         no turn with no apply queued \(what): after each of \(gaps.count) wait(s) for \
         none, an apply was queued again before the test's turn — \
         \(gaps.joined(separator: "; ")). A rise in observed changes names an observed \
-        AppState change as the source; none names the appearance watch or \
+        AppState change as the source; none names the defaults watch or \
         scheduleApply() (install, collapse, cooldown end).
         """
     }

@@ -4,7 +4,7 @@ A repo often runs several long-lived local servers while someone works on it: a 
 
 ## What TBD does with dev servers
 
-A repo declares its servers in a file. Someone starts and stops them from `tbd server` or the toolbar's Servers button; each runs in an ordinary terminal tab. A running server reports its URLs by writing a *running file*, and TBD uses those to offer an Open button and to show a green dot on the worktree's sidebar row.
+A repo declares its servers in a file. Someone starts and stops them from `tbd server` or the status bar's Servers chip; each runs in an ordinary terminal tab. A running server reports its URLs by writing a *running file*, and TBD uses those to offer an Open button and to show a green dot on the worktree's sidebar row.
 
 Two things TBD deliberately does not do. It never allocates or probes a port: the repo owns its ports. And nothing starts on its own: every start is a click or a `tbd server start`. A repo with no declaration sees no button, no dot and no change in behavior.
 
@@ -18,7 +18,7 @@ TBD reads three sources, each fresh from the worktree being acted on:
 
 Sources layer by server name, in that order. A server in a later source replaces the same-named server from an earlier one as a whole, with no field-level merge. Servers with other names are kept from every source. Declared servers keep the order in which their names first appear — within a TOML file, the order of its `[servers.<name>]` sections; a replaced server keeps its original position.
 
-A source that fails to parse is named, with its error, in `tbd server list` and at the bottom of the toolbar menu. It contributes nothing and never hides servers from the other sources.
+A source that fails to parse is named, with its error, in `tbd server list` and at the bottom of the Servers menu. It contributes nothing and never hides servers from the other sources.
 
 ### `tbd.toml` and `servers.toml`
 
@@ -72,7 +72,7 @@ Many repos already carry this file for Claude Code's preview. Each entry of `con
 - **`cwd` and `env`** carry over. `${workspaceFolder}` resolves to the worktree root. A `cwd` outside the worktree is a parse error for that entry.
 - **`port`, `url` and `autoPort`** are ignored.
 
-The file may contain comments and trailing commas, as VS Code writes it. A repo that has only `launch.json` still gets the Servers button and Start/Stop; it gets open buttons once its servers write running files.
+The file may contain comments and trailing commas, as VS Code writes it. A repo that has only `launch.json` still gets the Servers chip and Start/Stop; it gets open buttons once its servers write running files.
 
 ## The running file
 

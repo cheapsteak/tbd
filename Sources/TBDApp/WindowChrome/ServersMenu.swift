@@ -17,12 +17,12 @@ final class ServersMenuCommandBox: NSObject {
     }
 }
 
-/// The Servers menu as AppKit shows it, shared by the toolbar's Servers item
-/// and the status bar's Servers chip: the rows `ServersToolbarMenu.entries`
-/// lists, built into an `NSMenu`, and the `AppState` call each row's command
-/// makes. Each caller names the target and action its rows send, so the
-/// toolbar's rows keep targeting its controller and the chip's target its
-/// own host; both actions hand the chosen row to `runChosen(_:appState:)`.
+/// The Servers menu as AppKit shows it, which the status bar's Servers chip
+/// opens: the rows `ServersToolbarMenu.entries` lists, built into an
+/// `NSMenu`, and the `AppState` call each row's command makes. The caller
+/// names the target and action its rows send, as the chip's host does
+/// (`ServersChipMenuHost`), and that action hands the chosen row to
+/// `runChosen(_:appState:)`.
 @MainActor
 enum ServersMenu {
     /// The worktree the Servers menu is for: the one selected worktree, or

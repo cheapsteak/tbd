@@ -52,12 +52,6 @@ struct TerminalContainerView: View {
             ? appState.selectedWorktreeIDs.first
             : nil
 
-        // With the Tabs in the toolbar setting on, the single worktree's view
-        // draws its tab bar in the toolbar row, so its pager reaches up under
-        // the toolbar; `SingleWorktreeView` does the same inside it. The dock
-        // and the multi-select grid stay below the toolbar.
-        let tabsInToolbar = appState.windowChrome.tabsInToolbar
-
         // Chosen by `MainDetailContent.worktreeSelection`, the function the
         // toolbar's choice of whether to keep its title also comes from.
         let mainContent = Group {
@@ -73,7 +67,11 @@ struct TerminalContainerView: View {
                     worktreeIDs: appState.keepAliveWorktreeIDs,
                     activeID: activeWorktreeID
                 )
-                .ignoresSafeArea(.container, edges: tabsInToolbar ? Edge.Set.top : [])
+                // The single worktree's view draws its tab bar in the toolbar
+                // row, so its pager reaches up under the toolbar;
+                // `SingleWorktreeView` does the same inside it. The dock and
+                // the multi-select grid stay below the toolbar.
+                .ignoresSafeArea(.container, edges: .top)
             default:
                 Text("Select a worktree or click + to create one")
                     .foregroundStyle(.secondary)
@@ -158,11 +156,6 @@ struct SingleWorktreeView: View {
             let daemonTab = daemonPathTab(worktree: localWorktree)
             let onDaemonPath = daemonTab != nil
             let showsPreSessionBanner = appState.showsPreSessionBanner(for: worktree)
-            // With the Tabs in the toolbar setting on, the tab bar is the
-            // window's top row: this view reaches up under the toolbar, and
-            // the bar, on either path, takes the toolbar's height
-            // (`TabBar`, `SideRegionView`), so the content starts under it.
-            let tabsInToolbar = appState.windowChrome.tabsInToolbar
             VStack(spacing: 0) {
                 // The full-width tab bar on every path but the daemon one,
                 // where `PanelSurfaceWorkspaceView` draws it over the primary's
@@ -238,7 +231,11 @@ struct SingleWorktreeView: View {
                     QueuedPromptBanner(worktree: worktree)
                 }
             }
-            .ignoresSafeArea(.container, edges: tabsInToolbar ? Edge.Set.top : [])
+            // The tab bar is the window's top row: this view reaches up under
+            // the toolbar, and the bar, on either path, takes the toolbar's
+            // height (`TabBar`, `SideRegionView`), so the content starts
+            // under it.
+            .ignoresSafeArea(.container, edges: .top)
             .sheet(isPresented: $showAccountPicker) {
                 AccountPickerSheet { profileID in
                     Task {

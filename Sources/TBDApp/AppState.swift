@@ -1325,9 +1325,6 @@ final class AppState {
     /// `Config.gcEnabled`). Loaded from the daemon alongside
     /// `autoArchiveOnMergeDefault` via `loadModelProfiles()`.
     var gcEnabled: Bool = true
-    /// Whether ordinary new worktrees start with an empty "Notes" note. Loaded
-    /// from the daemon alongside the other config-backed worktree defaults.
-    var autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault
     /// Opt-in orphan-GC collectors (Config mirrors, each read on top of
     /// `gcEnabled` by the daemon). Loaded via `loadGCConfig()`.
     var gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault
@@ -2224,10 +2221,6 @@ final class AppState {
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
-    /// How the automatic Notes preference is persisted — injectable for the
-    /// same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var autoCreateNotesSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setAutoCreateNotes(enabled: enabled) }
     /// How `setGCCollectorEnabled` persists one opt-in GC collector's switch —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
@@ -2855,8 +2848,8 @@ final class AppState {
     /// preferences.
     let userDefaults: UserDefaults
 
-    /// The Tabs in the toolbar setting and the chrome geometry the panes'
-    /// top rows read (`WindowChromeState`), following `userDefaults`.
+    /// The chrome geometry the panes' top rows read (`WindowChromeState`),
+    /// as the toolbar controller measures it.
     let windowChrome: WindowChromeState
 
     init(
@@ -2864,7 +2857,7 @@ final class AppState {
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
     ) {
         self.userDefaults = userDefaults
-        self.windowChrome = WindowChromeState(defaults: userDefaults)
+        self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
         self.tmuxExecutableResolution = tmuxExecutableResolver.resolve()

@@ -20,7 +20,6 @@ enum MainToolbarItemID {
     /// bound to the split from the start.
     static let sidebarSeparator = NSToolbarItem.Identifier("tbd.toolbar.sidebarTrackingSeparator")
     static let title = NSToolbarItem.Identifier("tbd.toolbar.title")
-    static let servers = NSToolbarItem.Identifier("tbd.toolbar.servers")
     static let remoteTranscript = NSToolbarItem.Identifier("tbd.toolbar.remoteTranscript")
     static let remoteReconnect = NSToolbarItem.Identifier("tbd.toolbar.remoteReconnect")
     static let remoteStop = NSToolbarItem.Identifier("tbd.toolbar.remoteStop")
@@ -28,11 +27,11 @@ enum MainToolbarItemID {
     /// TBD's own identifiers, in toolbar order: the one list of them.
     static let custom: [NSToolbarItem.Identifier] = [
         leadingButtons, repoFilter, sidebarSeparator, title,
-        servers, remoteTranscript, remoteReconnect, remoteStop,
+        remoteTranscript, remoteReconnect, remoteStop,
     ]
 
-    /// The standard identifiers the layout uses: the spaces only.
-    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace, .space]
+    /// The standard identifiers the layout uses: the flexible space only.
+    static let standard: [NSToolbarItem.Identifier] = [.flexibleSpace]
 
     /// Every identifier the toolbar delegate may be asked for.
     static let allowed: [NSToolbarItem.Identifier] = custom + standard
@@ -41,14 +40,13 @@ enum MainToolbarItemID {
 /// The inputs that decide which items the toolbar shows.
 struct MainToolbarLayoutState: Equatable {
     var sidebarCollapsed: Bool
-    var showsServers: Bool
     var showsTranscript: Bool
     var showsReconnect: Bool
     var showsStop: Bool
-    /// The panes draw the window's top row: the Tabs in the toolbar setting
-    /// is on and the detail area shows a worktree's tab bar
-    /// (`AppState.panesDrawTopRow`). The item list then ends at the tracking
-    /// separator, so nothing of the toolbar's covers the row's tabs.
+    /// The panes draw the window's top row: the detail area shows a
+    /// worktree's tab bar (`AppState.showsWorktreeTabBar`). The item list
+    /// then ends at the tracking separator, so nothing of the toolbar's covers
+    /// the row's tabs.
     var panesDrawTopRow: Bool = false
 }
 
@@ -97,12 +95,7 @@ enum MainToolbarLayout {
             (state.showsReconnect, MainToolbarItemID.remoteReconnect),
             (state.showsStop, MainToolbarItemID.remoteStop),
         ]
-        let shownRemote = remote.filter { $0.0 }.map { $0.1 }
-        if state.showsServers {
-            ids.append(MainToolbarItemID.servers)
-            if !shownRemote.isEmpty { ids.append(.space) }
-        }
-        ids.append(contentsOf: shownRemote)
+        ids.append(contentsOf: remote.filter { $0.0 }.map { $0.1 })
         return ids
     }
 

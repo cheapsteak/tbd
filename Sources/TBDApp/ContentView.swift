@@ -73,9 +73,10 @@ struct ContentView: View {
             MainWindowSplitView(
                 requestRemoteStop: { remoteStopConfirm = $0 }, appStorage: hostedAppStorage)
                 .ignoresSafeArea(.container, edges: .top)
-                // The Servers item's list whenever a single worktree becomes
-                // selected (the toolbar menu exposes no reliable will-open
-                // hook). Selection is not a gesture on the servers, so repo
+                // The status bar's Servers chip's list whenever a single
+                // worktree becomes selected: the chip shows only once the
+                // list says the worktree has servers (`ServersStatusChip`).
+                // Selection is not a gesture on the servers, so repo
                 // `status` commands do not run here; actions, "Refresh status"
                 // and `devServersChanged` deltas refresh it from `AppState`.
                 .task(id: appState.selectedWorktreeIDs.count == 1 ? appState.selectedWorktreeIDs.first : nil) {

@@ -15,7 +15,7 @@ struct MainToolbarLayoutTests {
 
     private static func state(collapsed: Bool) -> MainToolbarLayoutState {
         MainToolbarLayoutState(
-            sidebarCollapsed: collapsed, showsServers: false, showsTranscript: false,
+            sidebarCollapsed: collapsed, showsTranscript: false,
             showsReconnect: false, showsStop: false)
     }
 
@@ -29,23 +29,23 @@ struct MainToolbarLayoutTests {
 
     @Test func shownOrderWithEveryRightHandItem() {
         let state = MainToolbarLayoutState(
-            sidebarCollapsed: false, showsServers: true, showsTranscript: true,
+            sidebarCollapsed: false, showsTranscript: true,
             showsReconnect: true, showsStop: true)
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.leadingButtons, .flexibleSpace, ItemID.repoFilter,
             ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
-            ItemID.servers, .space, ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
+            ItemID.remoteTranscript, ItemID.remoteReconnect, ItemID.remoteStop,
         ]
         #expect(Self.ids(state) == expected)
     }
 
-    @Test func collapsedOrderWithServersAndReconnect() {
+    @Test func collapsedOrderWithReconnect() {
         let state = MainToolbarLayoutState(
-            sidebarCollapsed: true, showsServers: true, showsTranscript: false,
+            sidebarCollapsed: true, showsTranscript: false,
             showsReconnect: true, showsStop: false)
         let expected: [NSToolbarItem.Identifier] = [
             ItemID.leadingButtons, ItemID.sidebarSeparator, ItemID.title, .flexibleSpace,
-            ItemID.servers, .space, ItemID.remoteReconnect,
+            ItemID.remoteReconnect,
         ]
         #expect(Self.ids(state) == expected)
     }
@@ -98,13 +98,18 @@ struct MainToolbarLayoutTests {
         }
     }
 
+    /// Each remote item follows its flag, while the panes leave the toolbar
+    /// the part after the tracking separator.
     @Test func eachRightHandItemFollowsItsFlag() {
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
-            #expect(list.contains(ItemID.servers) == state.showsServers)
-            #expect(list.contains(ItemID.remoteTranscript) == state.showsTranscript)
-            #expect(list.contains(ItemID.remoteReconnect) == state.showsReconnect)
-            #expect(list.contains(ItemID.remoteStop) == state.showsStop)
+            let shown = !state.panesDrawTopRow
+            let wantsTranscript = shown && state.showsTranscript
+            let wantsReconnect = shown && state.showsReconnect
+            let wantsStop = shown && state.showsStop
+            #expect(list.contains(ItemID.remoteTranscript) == wantsTranscript)
+            #expect(list.contains(ItemID.remoteReconnect) == wantsReconnect)
+            #expect(list.contains(ItemID.remoteStop) == wantsStop)
             let remote = list.filter {
                 $0 == ItemID.remoteTranscript || $0 == ItemID.remoteReconnect || $0 == ItemID.remoteStop
             }
@@ -115,21 +120,26 @@ struct MainToolbarLayoutTests {
         }
     }
 
-    @Test func spaceOnlyBetweenServersAndRemote() {
+    /// While the panes draw the top row, the list ends at the tracking
+    /// separator whatever else the state asks for; otherwise the title and
+    /// the flexible space follow the separator.
+    @Test func nothingFollowsTheSeparatorWhileThePanesDrawTheTopRow() {
         for state in MainToolbarLayoutState.allCombinations {
             let list = Self.ids(state)
-            let anyRemote = state.showsTranscript || state.showsReconnect || state.showsStop
-            let wantsSpace = state.showsServers && anyRemote
-            #expect(list.contains(.space) == wantsSpace)
-            if wantsSpace, let serversIndex = list.firstIndex(of: ItemID.servers) {
-                let after = list.dropFirst(serversIndex + 1).first
-                #expect(after == .space)
+            let separator = list.firstIndex(of: ItemID.sidebarSeparator) ?? -1
+            let rest = Array(list.dropFirst(separator + 1))
+            if state.panesDrawTopRow {
+                #expect(rest.isEmpty)
+            } else {
+                let titleThenSpace: [NSToolbarItem.Identifier] = [ItemID.title, .flexibleSpace]
+                let next = Array(rest.prefix(2))
+                #expect(next == titleThenSpace)
             }
         }
     }
 
     @Test func noPRAndNoFilePanelItem() {
-        #expect(ItemID.custom.count == 8)
+        #expect(ItemID.custom.count == 7)
         let distinct = Set(ItemID.custom)
         #expect(distinct.count == ItemID.custom.count)
         let allowed: [NSToolbarItem.Identifier] = ItemID.custom + ItemID.standard
@@ -328,10 +338,10 @@ private extension MainToolbarLayoutState {
         (0..<32).map { bits in
             MainToolbarLayoutState(
                 sidebarCollapsed: bits & 1 != 0,
-                showsServers: bits & 2 != 0,
-                showsTranscript: bits & 4 != 0,
-                showsReconnect: bits & 8 != 0,
-                showsStop: bits & 16 != 0)
+                showsTranscript: bits & 2 != 0,
+                showsReconnect: bits & 4 != 0,
+                showsStop: bits & 8 != 0,
+                panesDrawTopRow: bits & 16 != 0)
         }
     }
 }

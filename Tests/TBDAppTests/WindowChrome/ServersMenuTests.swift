@@ -5,15 +5,13 @@ import TBDShared
 @testable import TBDApp
 import TestSupport
 
-/// The shared Servers menu, `ServersMenu`, that the toolbar's Servers item and
-/// the status bar's Servers chip both open: the rows it builds from
-/// `ServersToolbarMenu.entries`, the target and action each row sends, and
-/// what a chosen row runs. The toolbar's own use of it is covered by
-/// `MainToolbarControllerTests` ("Servers"). Tier 1, except the two tests
-/// that wait for a chosen row's command to reach the injected daemon seam,
-/// which run real main-actor scheduling.
+/// The Servers menu, `ServersMenu`, that the status bar's Servers chip
+/// opens: the rows it builds from `ServersToolbarMenu.entries`, the target
+/// and action each row sends, and what a chosen row runs. Tier 1, except the
+/// two tests that wait for a chosen row's command to reach the injected
+/// daemon seam, which run real main-actor scheduling.
 @MainActor
-@Suite("Shared Servers menu")
+@Suite("Servers menu")
 struct ServersMenuTests {
     private func server(_ name: String, _ state: DevServerStateKind, url: String? = nil) -> DevServerInfo {
         DevServerInfo(name: name, label: name, source: "tbd.toml", state: state, exitCode: nil,
@@ -110,8 +108,8 @@ struct ServersMenuTests {
         #expect(ServersMenu.selectedWorktreeID(in: state) == nil)
     }
 
-    /// The chip's menu lists the same rows the shared builder gives the
-    /// toolbar, each sending `itemChosen(_:)` to the chip's host, with
+    /// The chip's menu lists the rows the builder gives, each sending
+    /// `itemChosen(_:)` to the chip's host, with
     /// autoenabling off so a row's own enablement stands.
     @Test func theChipsMenuListsTheSameRows() throws {
         let suite = TestDefaultsSuite("ServersMenu.chip")

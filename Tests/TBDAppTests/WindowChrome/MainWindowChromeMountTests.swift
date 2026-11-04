@@ -301,8 +301,8 @@ struct MainWindowChromeMountTests {
     /// separator follows. Each step waits for the toolbar to take the new
     /// title, then gives the hosted title a few turns to draw it: a title
     /// item sized to its text would have changed width by then. The server
-    /// fetch answers an empty list, so no Servers item comes and goes beside
-    /// it.
+    /// fetch each selection makes answers an empty list rather than reaching
+    /// for a daemon.
     @Test func titleStaysPutAsTheTitleChanges() async throws {
         let mount = ChromeMount(label: "titleStaysPut")
         defer { mount.tearDown() }
@@ -340,39 +340,40 @@ struct MainWindowChromeMountTests {
     // MARK: - The selection's server refresh
 
     /// `ContentView`'s `.task(id:)` fetches a selected worktree's servers, and
-    /// the Servers item appearing is what that fetch is for.
+    /// the list landing, which the status bar's Servers chip reads, is what
+    /// that fetch is for.
     @Test func selectionRefreshesTheSelectedWorktreesServers() async throws {
         let mount = ChromeMount(label: "servers")
         defer { mount.tearDown() }
         let fetches = mount.recordServerFetches()
         _ = try await mount.appKitReady()
-        try #require(!mount.toolbarIdentifiers.contains(MainToolbarItemID.servers))
 
         let worktreeID = mount.worktrees[1].id
+        try #require(mount.state.devServerLists[worktreeID] == nil)
         mount.state.selectedWorktreeIDs = [worktreeID]
 
         let fetched = try await waitForMainActorCondition("the selection's server fetch") {
             fetches.worktreeIDs.contains(worktreeID)
         }
         #expect(fetched)
-        let shown = try await waitForMainActorCondition("the Servers item") {
-            mount.toolbarIdentifiers.contains(MainToolbarItemID.servers)
+        let landed = try await waitForMainActorCondition("the selected worktree's server list") {
+            mount.state.devServerLists[worktreeID] != nil
         }
-        #expect(shown)
+        #expect(landed)
     }
 
     // MARK: - Tabs in the toolbar
 
-    /// With the setting on and a worktree's tab bar showing, the toolbar's
-    /// items end at the tracking separator and the main pane's row takes the
-    /// toolbar row's clicks: a hit test at every point along the row's
-    /// midline over the visible part of the pane, a tab's centre among them,
-    /// reaches a view inside the pane, the worktree's own view and the row's
-    /// drag gap among them, and never a toolbar viewer.
-    @Test func withTheSettingOnTheRowTakesTheToolbarRowsClicks() async throws {
-        let mount = ChromeMount(label: "tabsInToolbarOn", tabsInToolbar: true)
+    /// With a worktree's tab bar showing, the toolbar's items end at the
+    /// tracking separator and the main pane's row takes the toolbar row's
+    /// clicks: a hit test at every point along the row's midline over the
+    /// visible part of the pane, a tab's centre among them, reaches a view
+    /// inside the pane, the worktree's own view and the row's drag gap among
+    /// them, and never a toolbar viewer.
+    @Test func theRowTakesTheToolbarRowsClicks() async throws {
+        let mount = ChromeMount(label: "rowClicks")
         defer { mount.tearDown() }
-        let controller = try await mount.appKitReady()
+        _ = try await mount.appKitReady()
         let split = try #require(mount.mountedSplit)
         mount.showSingleWorktree()
 
@@ -400,53 +401,14 @@ struct MainWindowChromeMountTests {
             MainToolbarItemID.sidebarSeparator,
         ]
         #expect(identifiers == expected)
-        #expect(controller.appliedSnapshot?.tabsInToolbar == true)
     }
 
-    /// Positive control for `withTheSettingOnTheRowTakesTheToolbarRowsClicks`:
-    /// with the setting off and the same selection, the title follows the
-    /// tracking separator, some of the same points reach a toolbar item's
-    /// view, the title's or a flexible space's, and no row draws a drag gap.
-    /// A point that reaches nothing, or the title bar view itself, does not
-    /// count: the clause names the title bar when the points land there.
-    @Test func withTheSettingOffTheToolbarKeepsTheRow() async throws {
-        let mount = ChromeMount(label: "tabsInToolbarOff")
-        defer { mount.tearDown() }
-        let controller = try await mount.appKitReady()
-        let split = try #require(mount.mountedSplit)
-        mount.showSingleWorktree()
-
-        let what = "the worktree's view under the toolbar's title"
-        let log = RowWaitLog()
-        let shown = try await waitForMainActorCondition(what) {
-            mount.keepConnected()
-            let row = mount.observeRow(in: split)
-            return log.note(row, clauses: [
-                ("the toolbar shows the title", mount.toolbarIdentifiers.contains(MainToolbarItemID.title)),
-                ("the snapshot sees the tab bar", controller.appliedSnapshot?.showsWorktreeTabBar == true),
-                ("the worktree's view is mounted",
-                 ChromeMount.worktreePagerTabView(in: split.contentItem.viewController.view) != nil),
-                (row.anyTitlebar
-                    ? "a point reaches a toolbar item's view (points reach the title bar view itself)"
-                    : "a point reaches a toolbar item's view",
-                 row.anyToolbarItem),
-            ])
-        }
-        if !shown {
-            Issue.record(RowWaitTimedOut(what: what, observed: log.last))
-        }
-        #expect(shown)
-        let row = mount.observeRow(in: split)
-        #expect(row.reachesDragGap == false)
-        #expect(mount.dragGapFrames(in: split).isEmpty)
-    }
-
-    /// With the setting on, the main pane's row is the toolbar's height, the
-    /// content pane's top safe-area inset, and starts at the pane's top edge,
-    /// so its centre is the toolbar row's midline. Measured on the row's drag
-    /// gap, which spans the row's height.
+    /// The main pane's row is the toolbar's height, the content pane's top
+    /// safe-area inset, and starts at the pane's top edge, so its centre is
+    /// the toolbar row's midline. Measured on the row's drag gap, which spans
+    /// the row's height.
     @Test func theRowIsTheTopSafeAreaInsetTall() async throws {
-        let mount = ChromeMount(label: "tabsInToolbarHeight", tabsInToolbar: true)
+        let mount = ChromeMount(label: "rowHeight")
         defer { mount.tearDown() }
         _ = try await mount.appKitReady()
         let split = try #require(mount.mountedSplit)
@@ -465,13 +427,13 @@ struct MainWindowChromeMountTests {
         #expect(measured)
     }
 
-    /// With the setting on and the sidebar collapsed, the toolbar's leading
-    /// item still sits over the main pane's top-left corner and takes its own
+    /// With the sidebar collapsed, the toolbar's leading item still sits over
+    /// the main pane's top-left corner and takes its own
     /// clicks: a hit test on Back returns the toolbar's button. The row
     /// starts past it, and every point from there on reaches the pane, the
     /// drag gap among them, never a toolbar viewer.
     @Test func withTheSidebarCollapsedBackStaysTheToolbars() async throws {
-        let mount = ChromeMount(label: "tabsInToolbarCollapsed", tabsInToolbar: true)
+        let mount = ChromeMount(label: "rowCollapsed")
         defer { mount.tearDown() }
         let controller = try await mount.appKitReady()
         let split = try #require(mount.mountedSplit)
@@ -616,18 +578,12 @@ private final class ChromeMount {
     ///     `NSHostingView`'s default.
     ///   - hostedPaneProbe: set on the root as `\.hostedPaneProbe`, for the
     ///     split to draw behind each pane it hosts.
-    ///   - tabsInToolbar: the Tabs in the toolbar setting, written to the
-    ///     suite before the state reads it.
     init(
         label: String, sceneBridgingOptions: NSHostingSceneBridgingOptions? = nil,
-        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil,
-        tabsInToolbar: Bool = false
+        hostedPaneProbe: (@MainActor (MainWindowSplitView.HostedPane) -> AnyView)? = nil
     ) {
         let suite = TestDefaultsSuite("MainWindowChromeMountTests.\(label)")
         self.suite = suite
-        if tabsInToolbar {
-            suite.defaults.set(true, forKey: AppState.tabsInToolbarKey)
-        }
         let state = AppState(userDefaults: suite.defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         let worktrees = [
@@ -997,16 +953,6 @@ private struct RowObservation: CustomStringConvertible {
     /// bar view itself or a toolbar item's.
     var anyOutsideContent: Bool {
         samples.contains { $0.kind == .titlebar || $0.kind == .toolbarItem }
-    }
-
-    /// Some point reached a toolbar item's view, not the title bar view.
-    var anyToolbarItem: Bool {
-        samples.contains { $0.kind == .toolbarItem }
-    }
-
-    /// Some point reached the title bar view itself.
-    var anyTitlebar: Bool {
-        samples.contains { $0.kind == .titlebar }
     }
 
     var description: String {

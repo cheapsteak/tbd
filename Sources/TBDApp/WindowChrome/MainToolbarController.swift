@@ -1,7 +1,6 @@
 import AppKit
 import Observation
 import os
-import SwiftUI
 
 private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
 
@@ -13,32 +12,28 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   separator is made bound to it and never re-bound.
 /// - **Install.** `install(on:)` puts the toolbar on the window once the
 ///   split appears in it, wires the split's collapse report, and watches the
-///   window's appearance and its `toolbar`. Installed on one window, an
-///   install on another uninstalls from the first. It sets nothing on the
-///   toolbar beyond `window.toolbar`; every item change goes through an
-///   apply.
+///   window's `toolbar`. Installed on one window, an install on another
+///   uninstalls from the first. It sets nothing on the toolbar beyond
+///   `window.toolbar`; every item change goes through an apply.
 ///   `uninstall(fallbackWindow:)` stops the watching, takes the toolbar off,
 ///   unhooks the split's collapse report and lets go of the window.
 /// - **Update loop.** `DockTableController`'s: `MainToolbarSnapshot.make(from:)`
 ///   runs inside `withObservationTracking`, and a change schedules one apply on
 ///   the next main-loop turn, outside SwiftUI's update pass. Only the newest
 ///   registration acts on a change (see `observedChange(generation:)`). The
-///   snapshot reads more than it shows, such as every worktree's dev-server
-///   list, and the window's appearance can change without its color scheme,
-///   as Increase Contrast changes it. So an apply only observed changes and
-///   the appearance watch asked for compares first: it does nothing when the
-///   snapshot, the collapse and the color scheme are what the last apply
-///   showed and it would not put the toolbar back on the window, as during a
-///   cooldown it would not. Every other apply runs in full.
+///   snapshot reads more than it shows, such as every worktree, which
+///   `findWorktree` searches for the selected one. So an apply only observed
+///   changes and the defaults watch asked for compares first: it does nothing
+///   when the snapshot and the collapse are what the last apply showed and it
+///   would not put the toolbar back on the window, as during a cooldown it
+///   would not. Every other apply runs in full.
 /// - **Defaults.** The filter's Show Hidden Repos row reads
 ///   `SidebarBuildOptions.showHiddenReposKey` from `appState.userDefaults`,
-///   the store the sidebar's outline reads, and the layout reads the Tabs in
-///   the toolbar setting, `AppState.tabsInToolbarKey`, from the same store;
-///   Observation tracks neither. So the controller watches that store's
-///   `didChangeNotification`, from init to deinit, and while installed a
-///   change that leaves either key other than the last apply showed queues
-///   the apply that compares first, as an observed change does
-///   (`defaultsChanged()`).
+///   the store the sidebar's outline reads, which Observation does not track.
+///   So the controller watches that store's `didChangeNotification`, from
+///   init to deinit, and while installed a change that leaves the key other
+///   than the last apply showed queues the apply that compares first, as an
+///   observed change does (`defaultsChanged()`).
 /// - **Apply.** Re-installs the toolbar if something replaced it on the
 ///   window (see "Replacement"), diffs the items against `MainToolbarLayout.identifiers(for:)`
 ///   through `ToolbarLayoutSync`, with inserts and removes only, so the items
@@ -62,27 +57,26 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   a submenu with a row for each of its buttons, and every action the
 ///   toolbar wires takes `Any?`, so a row sending it from an `NSMenuItem`
 ///   never meets a method typed for another sender. The remote buttons have
-///   explicit rows too; only the Servers item keeps AppKit's default, its
-///   menu. The title's and the filter's rows are replaced, never edited,
-///   when what they show changes, as AppKit may build the menu from copies,
-///   and a new title or filter item starts from what the last apply showed.
+///   explicit rows too. The title's and the filter's rows are replaced, never
+///   edited, when what they show changes, as AppKit may build the menu from
+///   copies, and a new title or filter item starts from what the last apply
+///   showed.
 ///   `validateMenuItem(_:)` disables the Back and Forward rows when history
 ///   has nowhere to go.
 /// - **Title.** The title view is shared by every title item, so its width
 ///   constraints are set once, at init (`prepareTitleView(_:)`).
-/// - **Chrome geometry.** With the Tabs in the toolbar setting on, the panes
-///   draw their tab strips in the toolbar row, at the content pane's top
-///   safe-area inset and clear of the leading item. While installed, the
-///   controller measures both in AppKit on the main-actor turn after the
-///   split lays out, the window's content layout rect changes, the sidebar
-///   collapses or expands, or an apply runs, and writes them to
-///   `appState.windowChrome` (`publishChromeGeometry()`).
+/// - **Chrome geometry.** The panes draw their tab strips in the toolbar
+///   row, at the content pane's top safe-area inset and clear of the leading
+///   item. While installed, the controller measures both in AppKit on the
+///   main-actor turn after the split lays out, the window's content layout
+///   rect changes, the sidebar collapses or expands, or an apply runs, and
+///   writes them to `appState.windowChrome` (`publishChromeGeometry()`).
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width"; docs/specs/2026-11-02-tabs-in-toolbar-design.md, "Who draws
 /// the row" and "The main row".
 @MainActor
-final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, NSMenuItemValidation {
+final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValidation {
     /// Each toolbar's identifier is this plus a UUID. Toolbars that share an
     /// identifier mirror each other's item changes; with autosave and
     /// customization off, that mirroring is the identifier's only effect, and
@@ -125,18 +119,17 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// reported it.
     private(set) var sidebarCollapsed = false
 
-    /// The snapshot the last apply used. A click reads what the toolbar shows
-    /// from it, such as the Servers button's main URL.
+    /// The snapshot the last apply used.
     private(set) var appliedSnapshot: MainToolbarSnapshot?
 
     /// Applies run so far, for the debug log and for tests. An apply that
     /// found nothing to do is not counted.
     private(set) var applyCount = 0
     /// Applies run that compared first, for tests: those only observed
-    /// changes, the appearance watch and the defaults watch asked for. Every
-    /// other source asks through `scheduleApply()`, which makes the apply run
-    /// in full, so only those three move this count. An apply that compared
-    /// and found nothing to do is not counted.
+    /// changes and the defaults watch asked for. Every other source asks
+    /// through `scheduleApply()`, which makes the apply run in full, so only
+    /// those two move this count. An apply that compared and found nothing to
+    /// do is not counted.
     private(set) var comparedApplyCount = 0
     /// Observed `AppState` changes that scheduled an apply, for the debug log
     /// and for tests: a stale registration's change is not counted.
@@ -146,19 +139,17 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// apply; `applyNow()` clears it.
     private(set) var applyScheduled = false
     /// Whether the queued apply runs in full. `scheduleApply()` sets it; an
-    /// apply only observed changes, the appearance watch and the defaults
-    /// watch asked for leaves it clear. Readable for tests.
+    /// apply only observed changes and the defaults watch asked for leaves it
+    /// clear. Readable for tests.
     private(set) var queuedApplyRunsInFull = false
     /// What the last apply whose layout landed showed. An apply that compares
     /// first, finding all of it as it was, has nothing to do.
     private var appliedInputs: AppliedInputs?
 
-    /// What an apply shows: the snapshot, the collapse its layout is for and
-    /// the appearance its icons are baked for.
+    /// What an apply shows: the snapshot and the collapse its layout is for.
     private struct AppliedInputs: Equatable {
         var snapshot: MainToolbarSnapshot
         var sidebarCollapsed: Bool
-        var colorScheme: ColorScheme
     }
 
     /// Bumped by each apply, which arms a fresh observation registration.
@@ -166,7 +157,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// Keeps the items in step with the layout, leaving out an item the
     /// delegate could not serve until the layout changes or an install.
     private var layoutSync = ToolbarLayoutSync()
-    private var appearanceObservation: NSKeyValueObservation?
     private var toolbarObservation: NSKeyValueObservation?
     /// KVO on the window's `contentLayoutRect`, which moves with the
     /// toolbar's height, so the panes' top rows follow it.
@@ -222,8 +212,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// and for tests. An apply that finds the menu already checking the
     /// filter changes none.
     var filterSelectionCount = 0
-    /// The Servers icon per running state, appearance and accessibility label.
-    var serversImages: [String: NSImage] = [:]
     /// Per item, the key its image was last derived from, so an unchanged
     /// image is not set again.
     var shownImageKeys: [NSToolbarItem.Identifier: ToolbarImageKey] = [:]
@@ -275,8 +263,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
 
     // MARK: Install
 
-    /// Puts the toolbar on `window`, follows the split's collapse, the
-    /// window's appearance and its `toolbar`, and schedules the first apply.
+    /// Puts the toolbar on `window`, follows the split's collapse and the
+    /// window's `toolbar`, and schedules the first apply.
     /// Safe to call again for the same window, as each `viewDidAppear` does.
     /// For another window while installed, it uninstalls first, which takes
     /// the toolbar off the old window if that still shows it, so one toolbar
@@ -312,9 +300,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         // thread, and `performOnMain` covers any other. Neither reads its
         // change object. The toolbar's is registered after `attach`, so the
         // install's own set is not reported to it.
-        appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
-            MainToolbarController.performOnMain { self?.appearanceChanged() }
-        }
         toolbarObservation = window.observe(\.toolbar) { [weak self] _, _ in
             MainToolbarController.performOnMain { self?.windowToolbarChanged() }
         }
@@ -335,8 +320,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// was never installed. Safe to call again.
     func uninstall(fallbackWindow: NSWindow? = nil) {
         isInstalled = false
-        appearanceObservation?.invalidate()
-        appearanceObservation = nil
         toolbarObservation?.invalidate()
         toolbarObservation = nil
         contentLayoutObservation?.invalidate()
@@ -369,30 +352,15 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         scheduleChromeGeometryPublish()
     }
 
-    /// The window's `effectiveAppearance` changed, or was reported as changed.
-    /// Queues the apply that compares first, as an observed change does: the
-    /// color scheme the Servers icon is baked for is among what it compares,
-    /// so a light↔dark change applies, and a report that leaves the scheme as
-    /// it was does nothing.
-    private func appearanceChanged() {
-        guard isInstalled else { return }
-        enqueueApply()
-    }
-
     /// `appState.userDefaults` changed. Queues the apply that compares first,
-    /// as an observed change does, when the Show Hidden Repos key or the Tabs
-    /// in the toolbar key differs from what the last apply showed, or no
-    /// apply has run: the store changes for many keys the toolbar does not
-    /// show. Internal so a test can drive it.
+    /// as an observed change does, when the Show Hidden Repos key differs
+    /// from what the last apply showed, or no apply has run: the store
+    /// changes for many keys the toolbar does not show. Internal so a test
+    /// can drive it.
     func defaultsChanged() {
         guard isInstalled else { return }
-        let defaults = appState.userDefaults
-        let showsHiddenRepos = SidebarBuildOptions.storedShowHiddenRepos(defaults)
-        let tabsInToolbar = AppState.tabsInToolbarEnabled(defaults: defaults)
-        let shown = appliedSnapshot.map {
-            $0.filter.showsHiddenRepos == showsHiddenRepos && $0.tabsInToolbar == tabsInToolbar
-        } ?? false
-        guard !shown else { return }
+        let showsHiddenRepos = SidebarBuildOptions.storedShowHiddenRepos(appState.userDefaults)
+        guard appliedSnapshot?.filter.showsHiddenRepos != showsHiddenRepos else { return }
         enqueueApply()
     }
 
@@ -475,8 +443,8 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     /// whatever it finds; further calls before it runs are covered by it.
     /// Install, a replaced toolbar, the cooldown's end, a collapse change and
     /// the filter menu's close all come through here, since each asks for
-    /// something the snapshot does not hold. The appearance and defaults
-    /// watches do not (see `appearanceChanged()` and `defaultsChanged()`).
+    /// something the snapshot does not hold. The defaults watch does not
+    /// (see `defaultsChanged()`).
     /// Does nothing while the toolbar is not installed, such as after
     /// `uninstall`.
     func scheduleApply() {
@@ -544,7 +512,7 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
     }
 
     private func inputs(for snapshot: MainToolbarSnapshot) -> AppliedInputs {
-        AppliedInputs(snapshot: snapshot, sidebarCollapsed: sidebarCollapsed, colorScheme: currentColorScheme)
+        AppliedInputs(snapshot: snapshot, sidebarCollapsed: sidebarCollapsed)
     }
 
     /// Runs `body` on the main actor: at once when already on the main thread,
@@ -674,18 +642,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         toolbar.items.first { $0.itemIdentifier == identifier }
     }
 
-    // MARK: Appearance
-
-    /// The color scheme a baked icon is drawn for under `appearance`.
-    static func colorScheme(for appearance: NSAppearance) -> ColorScheme {
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
-    }
-
-    /// The window's color scheme, or the app's before the toolbar has one.
-    var currentColorScheme: ColorScheme {
-        Self.colorScheme(for: window?.effectiveAppearance ?? NSApplication.shared.effectiveAppearance)
-    }
-
     // MARK: NSToolbarDelegate
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -703,14 +659,6 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuDelegate, 
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         makeItem(itemIdentifier, willBeInserted: flag)
-    }
-
-    // MARK: NSMenuDelegate (the Servers menu)
-
-    /// Rebuilds the Servers menu from the current list each time it opens, so
-    /// a list that changed since the last open never shows stale rows.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        rebuildServersMenu(menu)
     }
 
     // MARK: NSMenuItemValidation (overflow rows)

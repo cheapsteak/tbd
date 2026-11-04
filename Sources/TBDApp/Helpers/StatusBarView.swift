@@ -690,10 +690,9 @@ struct StatusBarView: View {
                 AutoArchiveChipView(worktreeID: selected.id, chip: chip)
             }
             Spacer()
-            // The right-hand group opens with the Servers chip, shown only
-            // while Tabs in the toolbar is on, which takes the toolbar's
-            // Servers item away. It reads the setting and the dev-server
-            // lists itself, so their changes re-evaluate the chip alone.
+            // The right-hand group opens with the Servers chip. It reads the
+            // dev-server lists itself, so their changes re-evaluate the chip
+            // alone.
             ServersStatusChip(worktreeID: ServersMenu.selectedWorktreeID(in: appState))
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)

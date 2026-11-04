@@ -79,8 +79,10 @@ private struct TabDropDelegate: DropDelegate {
 
 // MARK: - TabRowMetrics
 
-/// The tab row's dimensions. The workspace tab bar and the side region's strip
-/// share one row across the window, so both take their height from here.
+/// The tab rows' dimensions. The workspace tab bar and the side region's
+/// strip share the window's toolbar row, so both take their height from
+/// `MainTabRowMetrics.height(topSafeAreaInset:)`, which falls back to
+/// `height` before the toolbar's height is measured.
 enum TabRowMetrics {
     static let height: CGFloat = 30
     /// The width of one icon button in a tab row: the side of the square
@@ -150,16 +152,18 @@ struct TabBarTrailingItems {
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
 /// Replaces the former TerminalTabBar.
 ///
-/// Reads, left to right: the tabs, the + button, then a trailing group in the
-/// order `trailing` gives — the primary's viewer control, Session History,
-/// and, while the side region is hidden, the transcript button, the Notes
-/// button and the expand button — all but Session History only as `trailing`
-/// asks. The trailing group keeps its full width at the row's trailing edge
-/// however many tabs there are. While the tabs fit
-/// in the width it leaves, the + button sits right after the last one; once
-/// they overflow — a narrow primary column on the daemon path, beside a wide
-/// side region — they scroll horizontally, and the + button stays in view
-/// just after them (`TabsThenAddLayout`). The selected tab is scrolled into
+/// It draws in the window's toolbar row (`topRow`), and reads, left to right:
+/// the worktree's title line, the tabs as pills, the + button, the drag gap,
+/// then a trailing group in the order `trailing` gives — the primary's viewer
+/// control, Session History, and, while the side region is hidden, the
+/// Changes, transcript and Notes toggles and the expand button — all but
+/// Session History only as `trailing` asks. The trailing group keeps its full
+/// width at the row's trailing edge however many tabs there are. While the
+/// tabs fit in the width it leaves, the + button sits right after the last
+/// one; once they overflow — a narrow primary column on the daemon path,
+/// beside a wide side region — they scroll horizontally, and the + button
+/// stays in view just after them (`TabsThenAddLayout`), after the title has
+/// given way (`MainTabRowWidths`). The selected tab is scrolled into
 /// view when the bar appears, when the selection changes and when the tab
 /// list does, so a tab appended and selected, or one selected by a shortcut
 /// or from the sidebar, is never left outside the visible tabs.
@@ -183,19 +187,11 @@ struct TabBar: View {
     var trailing: TabBarTrailingItems = .none
 
     var body: some View {
-        // Read once per body, so the bar draws one row or the other whole.
-        let tabsInToolbar = appState.windowChrome.tabsInToolbar
         ScrollViewReader { proxy in
-            Group {
-                if tabsInToolbar {
-                    topRow
-                } else {
-                    row
-                }
-            }
-            .onAppear { scrollSelectedTabIntoView(proxy) }
-            .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
-            .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
+            topRow
+                .onAppear { scrollSelectedTabIntoView(proxy) }
+                .onChange(of: selectedTabID) { _, _ in scrollSelectedTabIntoView(proxy) }
+                .onChange(of: tabs.map(\.id)) { _, _ in scrollSelectedTabIntoView(proxy) }
         }
     }
 
@@ -219,46 +215,15 @@ struct TabBar: View {
         proxy.scrollTo(selectedTabID)
     }
 
-    /// The tabs, the + button and the trailing group, in one row. The + button
-    /// and the trailing group take `RowIconButtonStyle`; the tabs do not.
-    private var row: some View {
-        HStack(spacing: 0) {
-            tabsThenAdd(pills: false)
-            // Exactly the width the trailing group leaves, the tabs and the +
-            // button at its leading edge: `minWidth: 0` stops the frame from
-            // reporting the tabs' full width, which would push the trailing
-            // group past the row's end. Clipped only for a column too narrow
-            // for the + button itself.
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            .clipped()
-
-            trailingGroup
-                // Its full width, at the row's height, sized before the tabs.
-                .fixedSize(horizontal: true, vertical: false)
-                .layoutPriority(1)
-        }
-        .padding(.trailing, MainTabRowMetrics.trailingInset)
-        .frame(height: TabRowMetrics.height)
-        .background(Color(nsColor: .windowBackgroundColor))
-        // Catch-all so dropping a tab on the +/history button or empty
-        // strip space still clears `draggingTabID`. Returns false (no
-        // reorder), but ends the visual "dragging" state. Per-tab drop
-        // delegates above handle real reorders.
-        .onDrop(of: [UTType.tbdTabDrag], isTargeted: nil) { _ in
-            appState.draggingTabID = nil
-            return false
-        }
-    }
-
     /// The tabs, a horizontal scroll view, then the + button after the last
-    /// one (`TabsThenAddLayout`). As pills (`pills`), with the Tabs in the
-    /// toolbar setting on, the tabs sit `MainTabRowMetrics.pillSpacing` apart,
-    /// centred on the row's midline, and the + button sits
-    /// `MainTabRowMetrics.pillToAddSpacing` after the last pill.
-    private func tabsThenAdd(pills: Bool) -> some View {
+    /// one (`TabsThenAddLayout`). The tabs are pills,
+    /// `MainTabRowMetrics.pillSpacing` apart and centred on the row's midline,
+    /// and the + button sits `MainTabRowMetrics.pillToAddSpacing` after the
+    /// last pill.
+    private var tabsThenAdd: some View {
         TabsThenAddLayout {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: pills ? MainTabRowMetrics.pillSpacing : 0) {
+                HStack(spacing: MainTabRowMetrics.pillSpacing) {
                     ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                         TabBarItem(
                             tab: tab,
@@ -267,15 +232,13 @@ struct TabBar: View {
                             isSelected: index == activeTabIndex,
                             terminal: terminalForTab(tab.id),
                             onSelect: { activeTabIndex = index },
-                            onClose: { onCloseTab(index) },
-                            pillStyle: pills
+                            onClose: { onCloseTab(index) }
                         )
                     }
                 }
                 // Pills hold their own height, so the stack fills the scroll
-                // view's height to centre them; classic tabs fill it
-                // themselves.
-                .frame(maxHeight: pills ? CGFloat.infinity : nil)
+                // view's height to centre them.
+                .frame(maxHeight: .infinity)
             }
             // Tabs that fit stay put under a trackpad swipe.
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
@@ -289,24 +252,24 @@ struct TabBar: View {
                 onAddCodex: onAddCodex
             )
             // Outside the button, so its hover square stays 28 x 28.
-            .padding(.leading, pills ? MainTabRowMetrics.pillToAddSpacing : 0)
+            .padding(.leading, MainTabRowMetrics.pillToAddSpacing)
             // On the button alone: the tabs' context menus must stay outside
             // the style (`RowIconButtonStyle`).
             .buttonStyle(RowIconButtonStyle())
         }
     }
 
-    /// The main pane's top row, with the Tabs in the toolbar setting on, in
-    /// the window's toolbar row (`MainTabRowLayout`): the notes button, the
-    /// project name and the worktree's title on one line, as the toolbar's
-    /// title item sets them (`WorktreeTitleColumn`), the tabs as pills with
-    /// the + button after them, the drag gap, and the trailing group. It
-    /// starts past the toolbar's leading item while that item sits over the
-    /// pane (`MainTabRowMetrics.leadingInset`), and is the toolbar's height
+    /// The main pane's top row, in the window's toolbar row
+    /// (`MainTabRowLayout`): the notes button, the project name and the
+    /// worktree's title on one line, as the toolbar's title item sets them
+    /// (`WorktreeTitleColumn`), the tabs as pills with the + button after
+    /// them, the drag gap, and the trailing group. It starts past the
+    /// toolbar's leading item while that item sits over the pane
+    /// (`MainTabRowMetrics.leadingInset`), and is the toolbar's height
     /// (`MainTabRowMetrics.height`), both as the toolbar controller measured
-    /// them (`WindowChromeState`). A worktree the app
-    /// cannot find shows no title. The + button and the trailing group take
-    /// `RowIconButtonStyle`; the title column and the tabs do not.
+    /// them (`WindowChromeState`). A worktree the app cannot find shows no
+    /// title. The + button and the trailing group take `RowIconButtonStyle`;
+    /// the title column and the tabs do not.
     private var topRow: some View {
         let chrome = appState.windowChrome
         let worktree = appState.findWorktree(id: worktreeID)
@@ -318,7 +281,7 @@ struct TabBar: View {
                 Color.clear.frame(width: 0, height: 0)
             }
             // Clipped only for a width too narrow for the + button itself.
-            tabsThenAdd(pills: true)
+            tabsThenAdd
                 .clipped()
             WindowDragGap()
             trailingGroup
@@ -328,8 +291,10 @@ struct TabBar: View {
         .padding(.leading, MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge))
         .frame(height: MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset))
         .background(Color(nsColor: .windowBackgroundColor))
-        // The same catch-all as the classic row's: a tab dropped anywhere in
-        // the row but on another tab ends the drag without a reorder.
+        // Catch-all so a tab dropped anywhere in the row but on another tab,
+        // the + and trailing buttons and the drag gap included, still clears
+        // `draggingTabID`. It returns false, so nothing is reordered; the
+        // per-tab drop delegates handle real reorders.
         .onDrop(of: [UTType.tbdTabDrag], isTargeted: nil) { _ in
             appState.draggingTabID = nil
             return false
@@ -989,10 +954,6 @@ private struct TabBarItem: View {
     let terminal: Terminal?
     let onSelect: () -> Void
     let onClose: () -> Void
-    /// Draws the tab as a pill (`MainTabRowMetrics`), as the top row does
-    /// with the Tabs in the toolbar setting on: a rounded fill for the active
-    /// and the hovered tab, and no line under the active one.
-    var pillStyle: Bool = false
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
@@ -1181,39 +1142,17 @@ private struct TabBarItem: View {
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
         }
-        // Stretch to the tab bar's full height (30px) so the bottom-aligned
-        // active indicator seats flush against the divider below the strip.
-        // Without maxHeight the 28px item center-aligns in the 30px bar,
-        // leaving a ~1px sliver under the indicator. Content stays centered,
-        // so the label doesn't shift on select/deselect.
-        // A pill holds its own height instead, centred in the row.
-        .frame(
-            minHeight: pillStyle ? MainTabRowMetrics.pillHeight : 28,
-            maxHeight: pillStyle ? MainTabRowMetrics.pillHeight : .infinity)
+        // A pill (`MainTabRowMetrics`) holds its own height, centred in the
+        // row: a rounded fill for the active and the hovered tab.
+        .frame(minHeight: MainTabRowMetrics.pillHeight, maxHeight: MainTabRowMetrics.pillHeight)
         .background {
-            if pillStyle {
-                TabPillShape(isActive: isSelected, isHovering: isHovering)
-            } else {
-                isSelected
-                    ? Color(nsColor: .controlBackgroundColor)
-                    : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
-            }
+            TabPillShape(isActive: isSelected, isHovering: isHovering)
         }
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: TabWidthPreference.self, value: geo.size.width)
             }
         )
-        // Active-tab indicator: a bottom lip drawn as an overlay so it never
-        // participates in layout — the tab content must not shift on selection.
-        // A pill has none.
-        .overlay(alignment: .bottom) {
-            if isSelected && !pillStyle {
-                Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
-                    .frame(height: 2)
-            }
-        }
         .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         // nil = no card (non-Claude tabs).
