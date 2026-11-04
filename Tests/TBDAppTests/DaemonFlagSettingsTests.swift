@@ -97,10 +97,13 @@ struct DaemonFlagSettingsTests {
         }
     }
 
+    /// Before capabilities arrive the flag reads the shipped default, the
+    /// value an install that never chose resolves to.
     @Test func transcriptPromptAnswerFlagFollowsCapabilities() async {
         await withAppState { state in
+            let beforeLoad = state.transcriptPromptAnswerEnabled
             #expect(state.daemonCapabilities == nil)
-            #expect(state.transcriptPromptAnswerEnabled == false)
+            #expect(beforeLoad == Config.transcriptPromptAnswerDefault)
             state.daemonCapabilities = DaemonFlagToggle.transcriptPromptAnswer.capabilities(reporting: true)
             #expect(state.transcriptPromptAnswerEnabled == true)
             state.daemonCapabilities = DaemonFlagToggle.transcriptPromptAnswer.capabilities(reporting: false)

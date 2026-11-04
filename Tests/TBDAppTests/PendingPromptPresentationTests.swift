@@ -295,15 +295,25 @@ struct PendingPromptPresentationTests {
         let state = AppState(userDefaults: defaults)
         state.pendingPrompts[Fix.terminalID] = [Fix.permissionPayload()]
 
-        // No capabilities yet: read-only.
-        #expect(PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)
-            .map(\.answerability) == [.readOnly(note: nil)])
+        // No capabilities yet: the shipped default.
+        let beforeLoad = PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)
+            .map(\.answerability)
+        let shipped: [PromptAnswerability] =
+            Config.transcriptPromptAnswerDefault ? [.answerable] : [.readOnly(note: nil)]
+        #expect(beforeLoad == shipped)
 
         var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
+        caps.transcriptPromptAnswerEnabled = false
+        state.daemonCapabilities = caps
+        let reportedOff = PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)
+            .map(\.answerability)
+        #expect(reportedOff == [.readOnly(note: nil)])
+
         caps.transcriptPromptAnswerEnabled = true
         state.daemonCapabilities = caps
-        #expect(PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)
-            .map(\.answerability) == [.answerable])
+        let reportedOn = PendingPromptMerge.livePrompts(appState: state, terminalID: Fix.terminalID)
+            .map(\.answerability)
+        #expect(reportedOn == [.answerable])
     }
 
     /// The seed's liveness follows the card's `isLive`, never its phase: an

@@ -22,13 +22,16 @@ struct TranscriptStreamingFlagTests {
     }
 
     /// The app is launched by `open`, which drops shell env, so capabilities
-    /// are nil until the first RPC lands. Reading that as "off" is what keeps a
-    /// provisional row from appearing and then vanishing a moment later.
-    @Test("capabilities that have not arrived read as off")
-    func nilCapabilitiesReadAsOff() async {
+    /// are nil until the first RPC lands. Until then the flag reads the shipped
+    /// default, which is what an install that never chose resolves to, so a
+    /// pane mounted before the fetch does not flip when it lands.
+    @Test("capabilities that have not arrived read as the shipped default")
+    func nilCapabilitiesReadAsTheShippedDefault() async {
         await withAppState { state in
-            #expect(state.daemonCapabilities == nil)
-            #expect(state.transcriptStreamingEnabled == false)
+            let capabilities = state.daemonCapabilities
+            let enabled = state.transcriptStreamingEnabled
+            #expect(capabilities == nil)
+            #expect(enabled == Config.transcriptStreamingDefault)
         }
     }
 
@@ -42,9 +45,9 @@ struct TranscriptStreamingFlagTests {
         }
     }
 
-    /// The off branch is its own assertion rather than an inference from the
-    /// nil case: a property that ignored the field entirely and always returned
-    /// false would pass the nil test too.
+    /// The off branch is its own assertion: a property that ignored the field
+    /// entirely and always returned the shipped default would pass the nil
+    /// test and the on test.
     @Test("the daemon reporting streaming off keeps it off")
     func capabilityOffDisables() async {
         await withAppState { state in
