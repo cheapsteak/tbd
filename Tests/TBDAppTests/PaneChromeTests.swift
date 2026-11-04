@@ -122,21 +122,28 @@ struct PaneChromeTests {
         #expect(!state.showSourceCode, "a copy leaves the rendered/source toggle alone")
     }
 
-    /// The transcript and Notes controls open or close a panel, which the
-    /// view that draws each sends; the chrome state has nothing to do for
-    /// them.
-    @Test("copy-address with no address to copy, and the transcript and Notes controls, change nothing")
+    /// The Changes, transcript and Notes toggles open or close a panel,
+    /// which the view that draws each sends; the chrome state has nothing to
+    /// do for them.
+    @Test("copy-address with no address to copy, and the Changes, transcript and Notes toggles, change nothing")
     func performingWithoutAnEffectChangesNothing() throws {
         let opened = try #require(URL(string: "https://example.com/opened"))
         let written = FireRecorder<String>()
         let state = PaneChromeState(pasteboard: { written.record($0) }, clock: ImmediateClock<Duration>())
 
         state.perform(.copyAddress(copied: false), contentURL: nil)
-        state.perform(.transcript(isOn: false, isEnabled: true), contentURL: opened)
-        state.perform(.transcript(isOn: true, isEnabled: true), contentURL: opened)
-        state.perform(.transcript(isOn: false, isEnabled: false), contentURL: opened)
-        state.perform(.notes(isOn: false, isEnabled: true), contentURL: opened)
-        state.perform(.notes(isOn: true, isEnabled: true), contentURL: opened)
+        let toggles: [PaneChromeControl] = [
+            .changes(state: .off), .changes(state: .front), .changes(state: .behind),
+            .transcript(state: .off, isEnabled: true), .transcript(state: .front, isEnabled: true),
+            .transcript(state: .behind, isEnabled: true), .transcript(state: .off, isEnabled: false),
+            .notes(state: .off, isEnabled: true), .notes(state: .front, isEnabled: true),
+            .notes(state: .behind, isEnabled: true),
+        ]
+        for toggle in toggles {
+            state.perform(toggle, contentURL: opened)
+        }
+        let refreshCount = state.refreshCount
+        #expect(refreshCount == 0)
 
         #expect(written.values.isEmpty)
         #expect(!state.didCopyAddress)
@@ -170,30 +177,75 @@ struct PaneChromeTests {
         }
     }
 
-    @Test("the transcript control fills and takes the accent colour only while on")
-    func transcriptControlFollowsItsOnState() {
-        let on = PaneChromeControl.transcript(isOn: true, isEnabled: true)
-        let off = PaneChromeControl.transcript(isOn: false, isEnabled: true)
+    @Test("the transcript toggle's icon button draws an empty bubble in the sidebar's grey in every state, and offers to hide its panel only in front")
+    func transcriptControlFollowsItsState() {
+        let front = PaneChromeControl.transcript(state: .front, isEnabled: true)
+        let behind = PaneChromeControl.transcript(state: .behind, isEnabled: true)
+        let off = PaneChromeControl.transcript(state: .off, isEnabled: true)
 
-        #expect(on.systemImage == "bubble.fill")
-        #expect(on.tint == .accent)
-        #expect(on.help == "Hide the chat-style live transcript pane")
-        #expect(on.isEnabled)
-        #expect(off.systemImage == "bubble")
-        // Off, it takes the row's own grey (`RowIconButtonStyle`).
-        #expect(off.tint == nil)
+        // The icon button shows only while no panel is in view, so neither a
+        // filled symbol nor a colour marks the panel open: it draws the
+        // sidebar's grey, as its pill does.
+        let symbols = [front.systemImage, behind.systemImage, off.systemImage]
+        let expectedSymbols = ["bubble", "bubble", "bubble"]
+        #expect(symbols == expectedSymbols)
+        let tints = [front.tint, behind.tint, off.tint]
+        let expectedTints: [PaneChromeControl.Tint?] = [.sidebarGrey, .sidebarGrey, .sidebarGrey]
+        #expect(tints == expectedTints)
+        #expect(front.help == "Hide the chat-style live transcript pane")
+        #expect(front.isEnabled)
+        // Behind, a press brings it forward, so the tooltip offers to show it.
+        #expect(behind.help == "Show the chat-style live transcript pane")
         #expect(off.help == "Show the chat-style live transcript pane")
         #expect(off.isEnabled)
+        let states: [SidePanelPillState?] = [front.pillState, behind.pillState, off.pillState]
+        let expectedStates: [SidePanelPillState?] = [.front, .behind, .off]
+        #expect(states == expectedStates)
+    }
+
+    @Test("the Changes toggle draws plusminus in the sidebar's grey in every state, and is always enabled")
+    func changesControlFollowsItsState() {
+        let front = PaneChromeControl.changes(state: .front)
+        let behind = PaneChromeControl.changes(state: .behind)
+        let off = PaneChromeControl.changes(state: .off)
+        let shortcut = MainWindowCommand.toggleChanges.shortcutDisplay
+
+        let symbols = [front.systemImage, behind.systemImage, off.systemImage]
+        let expectedSymbols = ["plusminus", "plusminus", "plusminus"]
+        #expect(symbols == expectedSymbols)
+        let tabSymbol = PanelKind.changes.tabSystemImage
+        #expect(tabSymbol == "plusminus", "the Changes tab and toggle share a symbol")
+        let tints = [front.tint, behind.tint, off.tint]
+        let expectedTints: [PaneChromeControl.Tint?] = [.sidebarGrey, .sidebarGrey, .sidebarGrey]
+        #expect(tints == expectedTints)
+        #expect(front.help == "Hide Changes (\(shortcut))")
+        #expect(behind.help == "Show Changes (\(shortcut))")
+        #expect(off.help == "Show Changes (\(shortcut))")
+        let enabled = [front.isEnabled, behind.isEnabled, off.isEnabled]
+        #expect(enabled == [true, true, true])
+    }
+
+    @Test("only the three toggles carry a pill state")
+    func onlyTogglesCarryAPillState() {
+        let others: [PaneChromeControl] = [
+            .renderToggle(showingSource: false), .copyAddress(copied: false), .refresh,
+        ]
+        for control in others {
+            #expect(control.pillState == nil, "\(control)")
+        }
     }
 
     /// In front of a primary with no transcript to show the transcript
-    /// button stays in its place, drawn disabled, and says so.
-    @Test("the disabled transcript control is secondary, cannot be pressed, and says the tab has no transcript")
+    /// button stays in its place, drawn disabled, and says so. It keeps the
+    /// sidebar's grey, which the row style dims while it is disabled.
+    @Test("the disabled transcript control keeps the sidebar's grey, cannot be pressed, and says the tab has no transcript")
     func disabledTranscriptControl() {
-        let disabled = PaneChromeControl.transcript(isOn: false, isEnabled: false)
+        let disabled = PaneChromeControl.transcript(state: .off, isEnabled: false)
 
         #expect(disabled.systemImage == "bubble")
-        #expect(disabled.tint == .secondary)
+        #expect(disabled.tint == .sidebarGrey)
+        let dimmed = RowIconSquare.disabledLabelOpacity
+        #expect(dimmed < 1, "a disabled toggle draws dimmer than an enabled one")
         #expect(!disabled.isEnabled)
         #expect(disabled.help == "No transcript for this tab")
     }

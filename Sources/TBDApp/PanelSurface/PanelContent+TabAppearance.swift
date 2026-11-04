@@ -20,12 +20,13 @@ extension PanelKind {
         }
     }
 
-    /// A note tab's symbol, which the Notes button and the side strip's +
-    /// menu show too.
-    static let noteSystemImage = "doc.text"
+    /// A note tab's symbol, which the Notes toggle and its pill show too: a
+    /// pencil over a line. SF Symbols has had it since macOS 13, before the
+    /// oldest macOS the app runs on.
+    static let noteSystemImage = "pencil.line"
 
-    /// The Changes tab's symbol, which the side strip's + menu shows too.
-    static let changesSystemImage = "plus.forwardslash.minus"
+    /// The Changes tab's symbol, which the Changes toggle shows too.
+    static let changesSystemImage = "plusminus"
 }
 
 extension PanelContent {

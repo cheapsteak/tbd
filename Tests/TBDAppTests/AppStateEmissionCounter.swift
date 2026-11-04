@@ -210,6 +210,7 @@ final class AppStateEmissionTracker {
         _ = state.queuedPromptTarget
         _ = state.parkedPromptReadback
         _ = state.parkedPromptDeliveryInFlight
+        _ = state.changesListIsEmpty
     }
 
     /// The read list above, as data, for the coverage test.
@@ -340,6 +341,7 @@ final class AppStateEmissionTracker {
         "queuedPromptTarget",
         "parkedPromptReadback",
         "parkedPromptDeliveryInFlight",
+        "changesListIsEmpty",
     ]
 }
 

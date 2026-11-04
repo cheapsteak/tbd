@@ -38,21 +38,21 @@ private enum NoteContentRead: Sendable {
 extension AppState {
     // MARK: - Note Actions
 
-    /// Create a note in a worktree — from the side strip's New Note, or from
-    /// the Notes button in a worktree with no note — and show it in the side
-    /// panel of the workspace tab `tabID`: the note is opened as a worktree
-    /// panel, so every workspace tab of the worktree shows it, and it comes
-    /// to the front in `tabID`. A note is never a workspace tab. `title` is
-    /// the note's title; nil takes the daemon's default, as New Note does.
+    /// Create a note in a worktree — from the Notes toggle in a worktree with
+    /// no note — and show it in the side panel of the workspace tab `tabID`:
+    /// the note is opened as a worktree panel, so every workspace tab of the
+    /// worktree shows it, and it comes to the front in `tabID`. A note is
+    /// never a workspace tab. `title` is the note's title; nil takes the
+    /// daemon's default.
     ///
-    /// The note's summary lands in `notes` before the open goes out, so its
-    /// tab reads the note's title, and the + menu does not list it, from the
-    /// moment the panel arrives. It is appended only when `notes` does not
-    /// list the note already: a notes refresh can land while the create is
-    /// in flight and bring the new note with it.
+    /// The note's summary lands in `notes` before the open goes out, so the
+    /// Notes toggle stands for the note from the moment its panel arrives. It
+    /// is appended only when `notes` does not list the note already: a notes
+    /// refresh can land while the create is in flight and bring the new note
+    /// with it.
     ///
     /// A failed create opens nothing and shows an error toast; a failed open
-    /// leaves the note, which the + menu then lists.
+    /// leaves the note, which the next press of the Notes toggle opens.
     func createNote(worktreeID: UUID, tabID: UUID, title: String? = nil) async {
         let note: Note
         do {
@@ -73,7 +73,7 @@ extension AppState {
             .open(content: .note(noteID: note.id), newPanel: false))
     }
 
-    /// The Notes button of the workspace tab `tabID`: shows, brings
+    /// The Notes toggle of the workspace tab `tabID`: shows, brings
     /// forward or closes the worktree's first note, as
     /// `PaneActions.notesToggleDecision` decides from the app's copy of the
     /// tab's surface and the worktree's `notes` as they are at the press. A
@@ -104,7 +104,7 @@ extension AppState {
     /// summaries replace its entry in `notes` when they differ, and a
     /// worktree the answer names no note for gets an empty list. So every
     /// worktree an answer covered has an entry, and a nil entry means the
-    /// worktree's notes have not loaded yet — which the Notes button tells
+    /// worktree's notes have not loaded yet — which the Notes toggle tells
     /// apart from a worktree with none (`NotesToggleDecision.unavailable`).
     /// A note shows in the side panel as a worktree panel, never as a
     /// workspace tab, so this touches no tab.

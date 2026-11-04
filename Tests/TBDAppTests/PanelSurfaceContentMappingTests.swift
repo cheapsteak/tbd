@@ -120,9 +120,10 @@ struct PanelSurfaceContentMappingTests {
 
         #expect(file.kind.tabSystemImage == nil)
         #expect(web.kind.tabSystemImage == "globe")
-        #expect(note.kind.tabSystemImage == "doc.text")
+        let noteSymbol = PanelKind.noteSystemImage
+        #expect(note.kind.tabSystemImage == noteSymbol)
         #expect(transcript.kind.tabSystemImage == "bubble")
-        #expect(changes.kind.tabSystemImage == "plus.forwardslash.minus")
+        #expect(changes.kind.tabSystemImage == "plusminus")
 
         #expect(file.tabTitle(noteTitle: titled, untitledNote: "Note") == "a.swift")
         #expect(web.tabTitle(noteTitle: titled, untitledNote: "Note") == "example.com")

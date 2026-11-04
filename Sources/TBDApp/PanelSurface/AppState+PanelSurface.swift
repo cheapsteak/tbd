@@ -407,8 +407,9 @@ extension AppState {
     ///
     /// The `close` operation itself keeps the note — the daemon action set's
     /// close sends it alone — so an agent's `tbd panel close` and the Notes
-    /// button (`toggleNotesPanel`) do too, and the strip's + menu then lists
-    /// the note.
+    /// toggle (`toggleNotesPanel`) do too. A note other than the first that
+    /// a close leaves without a panel is listed in the Notes pill's Open
+    /// Other Note menu (`SideRegionStrip.otherNotes`).
     func closeSidePanel(
         worktreeID: UUID, tabID: UUID, panelID: PanelID, content: PanelContent
     ) async {
@@ -417,12 +418,7 @@ extension AppState {
             await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close)
             return
         }
-        await flushPendingNoteSave(noteID: noteID)
-        if noteHasContent(worktreeID: worktreeID, noteID: noteID) {
-            let note = notes[worktreeID]?.first(where: { $0.id == noteID })
-                ?? NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")
-            guard noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) else { return }
-        }
+        guard await confirmNoteDeletion(worktreeID: worktreeID, noteID: noteID) else { return }
         // A refused close leaves the panel on screen, so its note must stay.
         guard await applyPanelOperation(worktreeID: worktreeID, tabID: tabID, close) != nil else {
             return
@@ -430,10 +426,43 @@ extension AppState {
         await deleteNote(noteID: noteID, worktreeID: worktreeID)
     }
 
+    /// The Notes pill's Delete Note… (side panel toggle pills spec,
+    /// "Right-click menus"): deletes the note `noteID`, asking first when it
+    /// has content, as a note tab's × does. While a worktree panel of the
+    /// workspace tab `tabID` shows the note, it goes through `closeSidePanel`
+    /// on that panel, which closes the panel before it deletes the note.
+    /// With no panel, there is nothing to close: the note is deleted once
+    /// any confirmation is given, and nothing is sent to the daemon's panels.
+    func deleteNoteAsking(worktreeID: UUID, tabID: UUID, noteID: UUID) async {
+        let content = PanelContent.note(noteID: noteID)
+        if let panel = panelSurface(worktreeID: worktreeID, tabID: tabID)?
+            .worktreePanel(showing: .note(noteID: noteID)) {
+            await closeSidePanel(worktreeID: worktreeID, tabID: tabID, panelID: panel.id, content: content)
+            return
+        }
+        guard await confirmNoteDeletion(worktreeID: worktreeID, noteID: noteID) else { return }
+        await deleteNote(noteID: noteID, worktreeID: worktreeID)
+    }
+
+    /// Whether a note about to be deleted may go: true at once for an empty
+    /// note, and otherwise what the user answers (`noteCloseConfirmer`).
+    /// Whether it has content (`noteHasContent`) is asked once any save an
+    /// open editor of the note still holds on its debounce has landed
+    /// (`flushPendingNoteSave`). Without a summary in `notes`, the
+    /// confirmation names the note "Note".
+    private func confirmNoteDeletion(worktreeID: UUID, noteID: UUID) async -> Bool {
+        await flushPendingNoteSave(noteID: noteID)
+        guard noteHasContent(worktreeID: worktreeID, noteID: noteID) else { return true }
+        let note = notes[worktreeID]?.first(where: { $0.id == noteID })
+            ?? NoteSummary(id: noteID, worktreeID: worktreeID, title: "Note")
+        return noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID))
+    }
+
     /// ⌘⇧E (side panel notes and Changes spec, "⌘⇧E"): toggles the Changes
     /// panel in the tab on screen — the single selected local worktree's
-    /// resolved active tab — by `PaneActions.changesToggleDecision`, so it
-    /// opens Changes, brings it forward, or closes it.
+    /// resolved active tab — as that tab's Changes toggle does
+    /// (`toggleChangesPanel(worktreeID:tabID:)`), so it opens Changes,
+    /// brings it forward, or closes it.
     ///
     /// A tab on the daemon path with no surface in the copy yet opens
     /// Changes, though the workspace tab bar draws no ◫ there until the
@@ -451,13 +480,25 @@ extension AppState {
               let worktree = selectedLocalWorktree,
               let tab = resolvedActiveTab(worktreeID: worktree.id) else { return }
         guard !historyActiveWorktrees.contains(worktree.id),
-              case .daemon(let surface) = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id)
+              case .daemon = workspaceRenderPath(worktreeID: worktree.id, tabID: tab.id)
         else {
             refusalBeep()
             return
         }
-        let decision = PaneActions.changesToggleDecision(surface: surface)
-        sendPanelOperation(worktreeID: worktree.id, tabID: tab.id, decision.operation(opening: .changes))
+        toggleChangesPanel(worktreeID: worktree.id, tabID: tab.id)
+    }
+
+    /// The Changes toggle of the workspace tab `tabID` (side panel toggle
+    /// pills spec, "Clicks"): opens the Changes list in that tab, brings it
+    /// forward, or closes it, as `PaneActions.changesToggleDecision` decides
+    /// from the copy's surface for that tab, whichever tab is on screen. A
+    /// tab with no surface in the copy yet opens Changes. The toggle is drawn
+    /// only on a tab that renders on the daemon path, so this checks no
+    /// render path; ⌘⇧E checks it first (`toggleChangesPanel()`).
+    func toggleChangesPanel(worktreeID: UUID, tabID: UUID) {
+        let decision = PaneActions.changesToggleDecision(
+            surface: panelSurface(worktreeID: worktreeID, tabID: tabID))
+        sendPanelOperation(worktreeID: worktreeID, tabID: tabID, decision.operation(opening: .changes))
     }
 
     // MARK: - Tab sync

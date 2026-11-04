@@ -24,6 +24,13 @@ enum RowIconSquare {
         /// size, so the line's layout does not change; the square and the
         /// hit area reach past the label's frame.
         case outset(CGFloat)
+        /// A labelled pill `width` points wide and `standardSide` tall: the
+        /// button's frame, with the label centred in it, and its hit area. Its
+        /// rounded rectangle stops `pillInset` short of each end of the frame,
+        /// so two such pills side by side keep a gap, as pill tabs do. For a
+        /// button that shows a label beside its icon (`SidePanelPillButton`),
+        /// so the hover and press feedback cover the shape the button draws.
+        case pill(width: CGFloat)
     }
 
     /// The side of a row icon button: the toolbar's icon button height.
@@ -33,15 +40,21 @@ enum RowIconSquare {
     /// The corner radius of an `outset` square, smaller than a full square's
     /// to suit its smaller size.
     static let outsetCornerRadius: CGFloat = 4
+    /// How far a `pill`'s rounded rectangle stops short of each end of its
+    /// frame: half the gap between two pill tabs
+    /// (`MainTabRowMetrics.pillSpacing`).
+    static let pillInset: CGFloat = MainTabRowMetrics.pillSpacing / 2
     /// A disabled button's label, at this opacity.
     static let disabledLabelOpacity: Double = 0.4
 
     /// The square's corner radius for `size`: the toolbar's
-    /// `MainToolbarMetrics.iconButtonCornerRadius` for a full square.
+    /// `MainToolbarMetrics.iconButtonCornerRadius` for a full square, and a
+    /// pill tab's (`MainTabRowMetrics.pillCornerRadius`) for a pill.
     static func cornerRadius(for size: Size) -> CGFloat {
         switch size {
         case .square: MainToolbarMetrics.iconButtonCornerRadius
         case .outset: outsetCornerRadius
+        case .pill: MainTabRowMetrics.pillCornerRadius
         }
     }
 
@@ -81,9 +94,10 @@ enum RowIconSquare {
 /// continuously, and each rebuild closes an open submenu (measured on a
 /// session tab's context menu: the same 15 items removed and re-added about
 /// 230 times a second while it was open, with no body re-running). So no tab
-/// and no title column sits under it, and a `Menu` inside a styled group
-/// resets it with `.buttonStyle(.automatic)` on its content, as the strip's +
-/// menu does.
+/// and no title column sits under it; a `Menu` inside a styled group resets
+/// it with `.buttonStyle(.automatic)` on its content; and a styled button
+/// with a right-click menu, as the strip's transcript and Notes pills have,
+/// resets it the same way on the menu's content.
 struct RowIconButtonStyle: ButtonStyle {
     let size: RowIconSquare.Size
 
@@ -145,26 +159,35 @@ private struct RowIconSquareHost<Content: View>: View {
             content.frame(width: side, height: side)
         case .outset:
             content
+        case .pill(let width):
+            content.frame(width: width, height: RowIconSquare.standardSide)
         }
     }
 }
 
 /// A row icon button's square, centred in the rect it is given: the rect's
-/// shorter side for a full square, which fills the button's frame, and the
-/// longer side plus the outset on each side for an `outset` one. Corners
-/// are circular, as `ToolbarIconButton` draws them.
-private struct RowIconSquareShape: Shape {
+/// shorter side for a full square, which fills the button's frame, the
+/// longer side plus the outset on each side for an `outset` one, and for a
+/// `pill` the rect less `RowIconSquare.pillInset` at each end. Corners are
+/// circular, as `ToolbarIconButton` draws them. Not private, so a view that
+/// draws its own fill in the same shape as the hover square
+/// (`SidePanelPillButton`) can use it.
+struct RowIconSquareShape: Shape {
     let size: RowIconSquare.Size
 
     func path(in rect: CGRect) -> Path {
-        let side: CGFloat
+        func centredSquare(side: CGFloat) -> CGRect {
+            CGRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side)
+        }
+        let outline: CGRect
         switch size {
         case .square:
-            side = min(rect.width, rect.height)
+            outline = centredSquare(side: min(rect.width, rect.height))
         case .outset(let outset):
-            side = max(rect.width, rect.height) + 2 * outset
+            outline = centredSquare(side: max(rect.width, rect.height) + 2 * outset)
+        case .pill:
+            outline = rect.insetBy(dx: RowIconSquare.pillInset, dy: 0)
         }
-        let square = CGRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side)
-        return Path(roundedRect: square, cornerRadius: RowIconSquare.cornerRadius(for: size))
+        return Path(roundedRect: outline, cornerRadius: RowIconSquare.cornerRadius(for: size))
     }
 }

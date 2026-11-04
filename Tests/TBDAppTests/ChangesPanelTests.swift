@@ -277,6 +277,79 @@ struct ChangesPanelTests {
         }
     }
 
+    // MARK: - The Changes pill
+
+    /// The pill acts on the workspace tab whose strip or bar draws it, not on
+    /// the tab on screen: here the worktree is not selected at all, and the
+    /// tab is not its active one.
+    @Test("the Changes toggle opens, selects and closes Changes in its own workspace tab, whichever tab is on screen")
+    func tabScopedChangesToggleThreeStates() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let ownTab = UUID()
+            let otherTab = UUID()
+            let note = WorktreePanel(id: UUID(), content: .note(noteID: UUID()))
+            let changes = WorktreePanel(id: UUID(), content: .changes)
+            let otherSurface = Self.surface(
+                tabID: otherTab, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id)
+            let cases: [(surface: WorkspaceTabSurface, expected: PanelOperation, pill: SidePanelPillState)] = [
+                // No Changes panel: open one.
+                (Self.surface(tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note], active: note.id),
+                 .open(content: .changes, newPanel: false), .off),
+                // Behind another panel: select it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note, changes], active: note.id),
+                 .select(panelID: changes.id), .behind),
+                // In front of a collapsed region: select it, which expands it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [changes], active: changes.id,
+                    collapsed: true),
+                 .select(panelID: changes.id), .behind),
+                // In front and visible: close it.
+                (Self.surface(
+                    tabID: ownTab, worktreeID: worktreeID, worktreePanels: [note, changes], active: changes.id),
+                 .close(panelID: changes.id), .front),
+            ]
+            for testCase in cases {
+                state.panelSurfaces = [worktreeID: [ownTab: testCase.surface, otherTab: otherSurface]]
+                let envelopes = Fixture.collectEnvelopes(state, replying: testCase.surface)
+
+                state.toggleChangesPanel(worktreeID: worktreeID, tabID: ownTab)
+                await Fixture.drainMainActor()
+
+                let sent = try Fixture.single(envelopes.envelopes)
+                #expect(sent.operation == testCase.expected)
+                #expect(sent.worktreeID == worktreeID)
+                #expect(sent.tabID == ownTab, "the toggle's own tab, not another")
+                // The pill draws the state its press acts on.
+                let control = PanelSurfaceWorkspaceView.changesControl(surface: testCase.surface)
+                let expectedControl: PaneChromeControl = .changes(state: testCase.pill)
+                #expect(control == expectedControl)
+            }
+        }
+    }
+
+    @Test("the Changes toggle on a tab with no surface yet opens Changes there, and draws off")
+    func tabScopedChangesToggleWithoutSurfaceOpens() async throws {
+        try await Fixture.withState { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let reply = Self.surface(tabID: tabID, worktreeID: worktreeID, worktreePanels: [], active: nil)
+            let envelopes = Fixture.collectEnvelopes(state, replying: reply)
+
+            state.toggleChangesPanel(worktreeID: worktreeID, tabID: tabID)
+            await Fixture.drainMainActor()
+
+            let sent = try Fixture.single(envelopes.envelopes)
+            let expectedOpen: PanelOperation = .open(content: .changes, newPanel: false)
+            #expect(sent.operation == expectedOpen)
+            #expect(sent.tabID == tabID)
+            let control = PanelSurfaceWorkspaceView.changesControl(surface: nil)
+            let off: PaneChromeControl = .changes(state: .off)
+            #expect(control == off)
+        }
+    }
+
     // MARK: - The refresh control
 
     @Test("the Changes list's control is refresh, whatever the other inputs say")
@@ -294,7 +367,8 @@ struct ChangesPanelTests {
 
         state.perform(.renderToggle(showingSource: false), contentURL: nil)
         state.perform(.copyAddress(copied: false), contentURL: nil)
-        state.perform(.transcript(isOn: true, isEnabled: true), contentURL: nil)
+        state.perform(.transcript(state: .front, isEnabled: true), contentURL: nil)
+        state.perform(.changes(state: .front), contentURL: nil)
         #expect(state.refreshCount == 0)
 
         state.perform(.refresh, contentURL: nil)
@@ -604,6 +678,91 @@ struct ChangesPanelTests {
 
             let cachedAfterArchive = state.changesSnapshot(worktreeID: worktree.id) != nil
             #expect(!cachedAfterArchive)
+        }
+    }
+
+    @Test("a load records whether the worktree's list is empty, for the Changes toggle, and forgetting the list drops it")
+    func loadRecordsWhetherTheListIsEmpty() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let dates = TestDateSource()
+            state.now = dates.provider
+            let loads = PanelEventLog()
+            let withFile = Self.snapshot(unstaged: "a.swift")
+            let empty = ChangesSnapshot(statuses: [], branch: [])
+            state.changesLoader = { @MainActor _, _ in
+                loads.record("load")
+                return loads.events.count == 1 ? withFile : empty
+            }
+            let beforeAny = state.changesListIsEmpty[worktree.id]
+            #expect(beforeAny == nil, "nothing loaded yet")
+
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let afterFiles = state.changesListIsEmpty[worktree.id]
+            #expect(afterFiles == false)
+
+            dates.advance(by: 1)
+            _ = await state.loadChangesSnapshot(worktree: worktree)
+            let afterEmpty = state.changesListIsEmpty[worktree.id]
+            #expect(afterEmpty == true)
+
+            state.forgetChangesSnapshot(worktreeID: worktree.id)
+            let afterForget = state.changesListIsEmpty[worktree.id]
+            #expect(afterForget == nil)
+        }
+    }
+
+    @Test("a load counts as in flight while it reads git, and the poller waits for it")
+    func loadCountsAsInFlight() async throws {
+        try await Fixture.withState { state in
+            let worktree = try Self.localWorktree()
+            let gate = PanelCallGate()
+            let loaded = Self.snapshot(unstaged: "a.swift")
+            state.changesLoader = { @MainActor _, _ in
+                await gate.wait()
+                return loaded
+            }
+            let inFlightBefore = state.changesLoadInFlight(worktreeID: worktree.id)
+            let pollLoadsBefore = state.changesPollNeedsLoad(worktreeID: worktree.id)
+            #expect(!inFlightBefore)
+            #expect(pollLoadsBefore, "nothing cached: a poll loads")
+
+            let load = Task { @MainActor in await state.loadChangesSnapshot(worktree: worktree) }
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the load is in flight")
+            let inFlight = state.changesLoadInFlight(worktreeID: worktree.id)
+            let pollLoadsWhileReading = state.changesPollNeedsLoad(worktreeID: worktree.id)
+            #expect(inFlight)
+            #expect(!pollLoadsWhileReading, "no second load starts while one reads git")
+
+            gate.release()
+            _ = await load.value
+            let inFlightAfter = state.changesLoadInFlight(worktreeID: worktree.id)
+            #expect(!inFlightAfter)
+        }
+    }
+
+    @Test("the poller polls the selected worktree only while exactly one is selected, and a state made while TBD is inactive does not poll")
+    func pollWorktreeIsTheSingleSelection() async {
+        await Fixture.withState { state in
+            let repoID = UUID()
+            let first = Self.worktree(id: UUID(), repoID: repoID)
+            let second = Self.worktree(id: UUID(), repoID: repoID)
+            state.worktrees[repoID] = [first, second]
+
+            let pollingAtStart = state.changesListPoller.isPolling
+            #expect(!pollingAtStart, "TBD is not active under test, so nothing polls")
+
+            state.selectedWorktreeIDs = [first.id]
+            let one = state.changesPollWorktreeIDs
+            state.selectedWorktreeIDs = [first.id, second.id]
+            let two = state.changesPollWorktreeIDs
+            state.selectedWorktreeIDs = []
+            let none = state.changesPollWorktreeIDs
+
+            #expect(one == [first.id])
+            #expect(two.isEmpty, "a multiple selection draws no tab bar or side region")
+            #expect(none.isEmpty)
         }
     }
 

@@ -263,7 +263,7 @@ final class AppState {
     /// the note it loads, holding the model weakly, so the registry never
     /// keeps a model alive. Several editors of one note have one entry each.
     @ObservationIgnored var noteSaveFlushers: [UUID: [UUID: @MainActor () async -> Void]] = [:]
-    /// Worktrees whose Notes button is creating their first note
+    /// Worktrees whose Notes toggle is creating their first note
     /// (`toggleNotesPanel`). A press while that create is in flight sends
     /// nothing, so a double click makes one note, not two.
     @ObservationIgnored var notesButtonCreatesInFlight: Set<UUID> = []
@@ -389,6 +389,9 @@ final class AppState {
             }
             // Skip the write entirely when nothing moved.
             if newOrder != selectionOrder { selectionOrder = newOrder }
+            // Another worktree on screen: load its Changes list now if the
+            // cache's is missing or old, so its Changes toggle is current.
+            changesListPoller.worktreesOnScreenChanged()
             // When a single worktree becomes the focused selection, the user is
             // now viewing its active tab — clear that tab's unread-completion
             // bold. Single-select only: tab bars only render in single-select.
@@ -1007,6 +1010,20 @@ final class AppState {
     /// (`forgetChangesSnapshot`). A cache no view observes: the list reads it
     /// when it is made and when it appears.
     @ObservationIgnored var changesSnapshots: [UUID: ChangesSnapshotCache.Entry] = [:]
+    /// Worktree → whether its last loaded Changes list had no file in it;
+    /// absent before any load of it has finished. Observed, unlike
+    /// `changesSnapshots`, so the Changes toggle comes and goes with it
+    /// (`TabRowEdgeControls.showsChanges`), and written only when the answer
+    /// changes, so a poll that finds what the last one found redraws nothing.
+    var changesListIsEmpty: [UUID: Bool] = [:]
+    /// Worktree → how many loads of its Changes list are reading git now
+    /// (`loadChangesSnapshot`), so the poller never starts a second one
+    /// (`changesPollNeedsLoad`).
+    @ObservationIgnored var changesLoadsInFlight: [UUID: Int] = [:]
+    /// Keeps the Changes list of the worktree on screen fresh while TBD is
+    /// active, so the Changes toggle shows whether it has changes
+    /// (`ChangesListPoller`). Its host is this state, set in `init`.
+    @ObservationIgnored let changesListPoller = ChangesListPoller()
     /// The current time, as `loadChangesSnapshot` stamps a load as it begins
     /// and finishes and `changesSnapshotNeedsLoad` ages a cached one.
     /// Injectable so a test can set how old a cached list is and the order
@@ -2522,14 +2539,14 @@ final class AppState {
         { [daemonClient] noteID in try await daemonClient.deleteNote(noteID: noteID) }
     /// How a note is created in a worktree on the daemon (`createNote`),
     /// given the worktree and the title to create it with, or nil for the
-    /// daemon's default. Injectable so a test can drive the side strip's New
-    /// Note and the Notes button without a daemon.
+    /// daemon's default. Injectable so a test can drive the Notes toggle's
+    /// create without a daemon.
     @ObservationIgnored lazy var noteCreator: @MainActor (UUID, String?) async throws -> Note =
         { [daemonClient] worktreeID, title in
             try await daemonClient.createNote(worktreeID: worktreeID, title: title) }
-    /// Asks the user to confirm closing a note's side-panel tab whose note has
-    /// content — that close hard-deletes the note row (`closeSidePanel` →
-    /// `deleteNote`). Injectable so tests can exercise both branches without
+    /// Asks the user to confirm closing a note's side-panel tab, or the Notes
+    /// pill's Delete Note…, when the note has content — either hard-deletes
+    /// the note row (`closeSidePanel`, `deleteNoteAsking` → `deleteNote`). Injectable so tests can exercise both branches without
     /// a real modal NSAlert.
     ///
     /// Takes the content-file path rather than deriving one: the alert
@@ -2541,9 +2558,11 @@ final class AppState {
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Close note \u{201C}\(note.title)\u{201D}?"
-        alert.informativeText = "Closing this tab removes the note from TBD. Its contents are kept on disk at \(filePath)."
-        alert.addButton(withTitle: "Close Note")
+        // Worded for both places that ask: a note tab's ×, which closes the
+        // tab, and the Notes pill's Delete Note…, which may have no tab.
+        alert.messageText = "Delete note \u{201C}\(note.title)\u{201D}?"
+        alert.informativeText = "This removes the note from TBD. Its contents are kept on disk at \(filePath)."
+        alert.addButton(withTitle: "Delete Note")
         alert.addButton(withTitle: "Cancel")
         // HIG: destructive action shouldn't be the Return-key default (same
         // pattern as LegacyHooksCoordinator's migrate dialog).
@@ -2868,6 +2887,10 @@ final class AppState {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        changesListPoller.host = self
+        if isAppActive() {
+            changesListPoller.appBecameActive()
+        }
         // A card retired on its timeout is never reported settled, so its
         // drafts and delivery state are dropped here instead.
         promptCardRetention.onRetire = { [weak self] promptID in
@@ -2959,6 +2982,7 @@ final class AppState {
             // is Sendable from Swift 6's view — hop via assumeIsolated.
             MainActor.assumeIsolated {
                 self.macNotificationManager.dismissDelivered(worktreeIDs: self.visibleWorktreeIDs)
+                self.changesListPoller.appBecameActive()
             }
             Task { [weak self] in
                 guard let self else { return }
@@ -2975,6 +2999,9 @@ final class AppState {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            MainActor.assumeIsolated {
+                self.changesListPoller.appResignedActive()
+            }
             Task { [weak self] in
                 guard let self else { return }
                 do {

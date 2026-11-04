@@ -98,8 +98,8 @@ enum TabRowMetrics {
 /// `PanelSurfaceWorkspaceView` decides them from the tab, its side region and
 /// the worktree's notes: the primary's viewer control and Session History,
 /// then, while the side region is hidden and the bar reaches the window's
-/// right edge, the transcript and Notes buttons (`TabRowEdgeControls`) and
-/// the expand button. A bar drawn anywhere else (Session History open, a tab
+/// right edge, the Changes, transcript and Notes toggles
+/// (`TabRowEdgeControls`) and the expand button. A bar drawn anywhere else (Session History open, a tab
 /// whose layout still splits off a terminal, no tabs) takes `none`.
 struct TabBarTrailingItems {
     /// The primary's own control (`WorkspaceTabBarChrome.viewerControl`), or
@@ -107,8 +107,8 @@ struct TabBarTrailingItems {
     let viewerControl: PaneChromeControl?
     /// What the primary's viewer control does.
     let onViewerControl: @MainActor () -> Void
-    /// The transcript and Notes buttons, with their actions, while the bar
-    /// draws them (`PanelSurfaceWorkspaceView.barEdgeControls`); nil while
+    /// The Changes, transcript and Notes toggles, with their actions, while
+    /// the bar draws them (`PanelSurfaceWorkspaceView.barEdgeControls`); nil while
     /// the side region shows, whose strip draws its own, and for a bar off
     /// the daemon path (`none`).
     let edge: TabRowEdgeControls?
@@ -132,8 +132,8 @@ struct TabBarTrailingItems {
             showsExpandButton: showsExpandButton)
     }
 
-    /// Session History alone: no viewer control, no transcript or Notes
-    /// button and no expand button.
+    /// Session History alone: no viewer control, no Changes, transcript or
+    /// Notes toggle and no expand button.
     ///
     /// Computed rather than stored: Swift 6 accepts a stored static only of a
     /// `Sendable` type, which a struct of closures is not, and building an

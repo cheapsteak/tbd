@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -107,9 +108,9 @@ final class PaneChromeState {
     /// copy-address copies the page's current address, which follows in-page
     /// navigation, or `contentURL`, the address its content opened with,
     /// until the page reports one, and refresh bumps ``refreshCount``. The
-    /// transcript and Notes controls change the layout, not this state, so
-    /// the view that draws each sends that itself and this does nothing for
-    /// them.
+    /// Changes, transcript and Notes toggles change the layout, not this
+    /// state, so the view that draws each sends that itself and this does
+    /// nothing for them.
     func perform(_ control: PaneChromeControl, contentURL: URL?) {
         switch control {
         case .renderToggle:
@@ -119,7 +120,7 @@ final class PaneChromeState {
             copyAddress(url)
         case .refresh:
             refreshCount += 1
-        case .transcript, .notes:
+        case .changes, .transcript, .notes:
             break
         }
     }
@@ -166,22 +167,25 @@ final class PaneChromeStore {
 // MARK: - PaneChromeControl
 
 /// A control a tab row draws — one a pane's kind puts there, or one of the
-/// two at the window's right edge, the transcript button and the Notes
-/// button (`TabRowEdgeControls`) — as a value, so the row can decide which
-/// one to show and the button can draw it without reading anything else.
+/// three toggles at the window's right edge, Changes, the transcript and
+/// Notes (`TabRowEdgeControls`) — as a value, so the row can decide which one
+/// to show and the button can draw it without reading anything else.
 enum PaneChromeControl: Equatable {
-    /// The transcript button at the window's right edge
+    /// The Changes toggle at the window's right edge
+    /// (`PanelSurfaceWorkspaceView.changesControl`), in the state of the
+    /// worktree's Changes panel in this tab.
+    case changes(state: SidePanelPillState)
+    /// The transcript toggle at the window's right edge, after Changes
     /// (`WorkspaceTabBarChrome.transcriptControl`). In front of a Claude
-    /// terminal it toggles that terminal's transcript panel, and is on while
-    /// the panel exists, whether or not that panel is in front. In front of
-    /// any other primary it is drawn disabled rather than removed, so the
-    /// controls before it stay where they are.
-    case transcript(isOn: Bool, isEnabled: Bool)
-    /// The Notes button at the window's right edge, right after the
-    /// transcript button: on while the worktree's first note is in front of a
-    /// visible side region (`NotesToggleDecision.isOn`), and disabled while it
-    /// cannot act (`NotesToggleDecision.isEnabled`).
-    case notes(isOn: Bool, isEnabled: Bool)
+    /// terminal it toggles that terminal's transcript panel, in that panel's
+    /// state. In front of any other primary it is drawn disabled and off
+    /// rather than removed, so the controls before it stay where they are.
+    case transcript(state: SidePanelPillState, isEnabled: Bool)
+    /// The Notes toggle at the window's right edge, after the transcript: in
+    /// the state of the worktree's first note's panel
+    /// (`SidePanelPillState.state(for:)`), and disabled while it cannot act
+    /// (`NotesToggleDecision.isEnabled`).
+    case notes(state: SidePanelPillState, isEnabled: Bool)
     /// A renderable file's rendered/source toggle.
     case renderToggle(showingSource: Bool)
     /// A web page's copy-address, showing a checkmark after a copy.
@@ -212,15 +216,29 @@ enum PaneChromeControl: Equatable {
 
     /// The symbol's colour.
     enum Tint {
-        case accent
+        /// The label colour.
         case primary
+        /// The row style's own grey (`RowIconButtonStyle`).
         case secondary
+        /// The left sidebar's icon grey, which the side region's pills draw
+        /// (`SidePanelPillMetrics.foregroundColor`), named as a concrete
+        /// colour so the icon button and the pills match exactly.
+        case sidebarGrey
     }
 
+    /// The symbol the icon button draws (`PaneChromeControlButton`), and for
+    /// the three toggles the symbol their pills draw too
+    /// (`SidePanelPillButton`). Each toggle draws one symbol whatever its
+    /// panel's state, never a filled one: Changes' tab symbol
+    /// (`PanelKind.changesSystemImage`), an empty `bubble` for the
+    /// transcript, and a note's symbol for Notes
+    /// (`PanelKind.noteSystemImage`).
     var systemImage: String {
         switch self {
-        case .transcript(let isOn, _):
-            return isOn ? "bubble.fill" : "bubble"
+        case .changes:
+            return PanelKind.changesSystemImage
+        case .transcript:
+            return "bubble"
         case .notes:
             return PanelKind.noteSystemImage
         case .renderToggle:
@@ -232,15 +250,31 @@ enum PaneChromeControl: Equatable {
         }
     }
 
+    /// The panel state of one of the three toggles at the window's right
+    /// edge, which their pills draw (`SidePanelPillButton`); nil for every
+    /// other control.
+    var pillState: SidePanelPillState? {
+        switch self {
+        case .changes(let state), .transcript(let state, _), .notes(let state, _):
+            return state
+        case .renderToggle, .copyAddress, .refresh:
+            return nil
+        }
+    }
+
     /// Nil leaves the symbol in the button style's own colour: the row's
-    /// secondary grey (`RowIconButtonStyle`). The transcript and Notes
-    /// buttons take the accent colour while on, and the row's grey while off.
-    /// The render toggle's primary marks it showing source.
+    /// secondary grey (`RowIconButtonStyle`). The Changes, transcript and
+    /// Notes toggles draw the sidebar's grey, as their pills do, whatever
+    /// their panel's state: the icon button draws them only at the workspace
+    /// tab bar's end while the side region is hidden, where no panel is in
+    /// view, so a colour marking one open would read as a panel showing. A
+    /// disabled one draws the same grey, dimmed by the style
+    /// (`RowIconSquare.disabledLabelOpacity`). The render toggle's primary
+    /// marks it showing source.
     var tint: Tint? {
         switch self {
-        case .transcript(let isOn, let isEnabled), .notes(let isOn, let isEnabled):
-            guard isEnabled else { return .secondary }
-            return isOn ? .accent : nil
+        case .changes, .transcript, .notes:
+            return .sidebarGrey
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
         case .copyAddress, .refresh:
@@ -248,31 +282,36 @@ enum PaneChromeControl: Equatable {
         }
     }
 
-    /// Whether the button can be pressed: false only for the Notes button
-    /// while it cannot act, and for the transcript button in front of a
+    /// Whether the button can be pressed: false only for the Notes toggle
+    /// while it cannot act, and for the transcript toggle in front of a
     /// primary that is not a Claude terminal.
     var isEnabled: Bool {
         switch self {
         case .transcript(_, let isEnabled), .notes(_, let isEnabled):
             return isEnabled
-        case .renderToggle, .copyAddress, .refresh:
+        case .changes, .renderToggle, .copyAddress, .refresh:
             return true
         }
     }
 
-    /// The tooltip, which also names the button for accessibility.
+    /// The tooltip, which also names the button for accessibility. A toggle
+    /// offers to hide its panel only while that panel is in front, where a
+    /// press closes it; otherwise a press shows it.
     var help: String {
         switch self {
-        case .transcript(let isOn, let isEnabled):
+        case .changes(let state):
+            let shortcut = MainWindowCommand.toggleChanges.shortcutDisplay
+            return state == .front ? "Hide Changes (\(shortcut))" : "Show Changes (\(shortcut))"
+        case .transcript(let state, let isEnabled):
             // Neutral: a Claude terminal whose row has not loaded, or whose
             // session cannot be resumed yet, draws this too.
             guard isEnabled else { return "No transcript for this tab" }
-            return isOn
+            return state == .front
                 ? "Hide the chat-style live transcript pane"
                 : "Show the chat-style live transcript pane"
-        case .notes(let isOn, let isEnabled):
+        case .notes(let state, let isEnabled):
             guard isEnabled else { return "Notes are loading" }
-            return isOn ? "Hide notes" : "Show notes"
+            return state == .front ? "Hide notes" : "Show notes"
         case .renderToggle(let showingSource):
             return showingSource ? "Show rendered view" : "Show source code"
         case .copyAddress:
@@ -301,19 +340,26 @@ struct PaneChromeControlButton: View {
         .accessibilityLabel(Text(control.help))
     }
 
-    /// The symbol in its tint. Secondary is the row style's own colour, so it
-    /// sets none; primary names the label colour itself, because a
-    /// hierarchical `.primary` would be a level of the style's grey.
+    /// The colour the symbol names for `tint`, or nil for the row style's
+    /// own grey. Secondary is that grey, so it names none. Primary and the
+    /// sidebar's grey name concrete colours, because a hierarchical style in
+    /// the label would be a level of the style's grey.
+    static func symbolColor(for tint: PaneChromeControl.Tint?) -> NSColor? {
+        switch tint {
+        case .primary?: .labelColor
+        case .sidebarGrey?: SidePanelPillMetrics.foregroundColor
+        case .secondary?, nil: nil
+        }
+    }
+
+    /// The symbol in its tint (`symbolColor(for:)`).
     @ViewBuilder
     private var symbol: some View {
         let image = Image(systemName: control.systemImage)
             .font(.system(size: 11))
-        switch control.tint {
-        case .accent?:
-            image.foregroundStyle(Color.accentColor)
-        case .primary?:
-            image.foregroundStyle(Color(nsColor: .labelColor))
-        case .secondary?, nil:
+        if let color = Self.symbolColor(for: control.tint) {
+            image.foregroundStyle(Color(nsColor: color))
+        } else {
             image
         }
     }
