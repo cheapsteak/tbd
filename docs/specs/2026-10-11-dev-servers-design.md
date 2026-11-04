@@ -52,7 +52,7 @@ servers with other names are kept from every source. The result is the
 worktree's *declared servers*.
 
 A source that fails to parse is reported — in `tbd server list` and at the
-bottom of the toolbar menu, naming the file and the error — and contributes
+bottom of the Servers menu, naming the file and the error — and contributes
 nothing. It never hides servers from the other sources.
 
 ### `tbd.toml` and `servers.toml`
@@ -222,7 +222,7 @@ not want a dependency on the `tbd` binary writes the JSON itself.
 
 ### Starting
 
-`tbd server start [name…]`, the toolbar's Start items, and "Start all" (all
+`tbd server start [name…]`, the Servers menu's Start items, and "Start all" (all
 declared servers, started side by side) do the same thing per server:
 
 - TBD opens a terminal tab titled with the server's label, running `exec
@@ -354,7 +354,7 @@ caused by a stop is never recorded as the server's last output: the save
 applies only while the server's tab still exists, and a stop closes the tab
 before it clears the server's entries.
 
-The toolbar menu offers **Show last output** for an exited server. On the
+The Servers menu offers **Show last output** for an exited server. On the
 holder transport it opens the saved entry in Session History's Closed
 Terminals viewer; on tmux it focuses the server's tab, where the dead pane
 shows the output.
@@ -498,14 +498,11 @@ output`.
 
 ## UI
 
-- **Toolbar "Servers" split button**, shown only when the worktree has at least
-  one declared or reported server. It follows the PR split button's pattern
-  (`ContentView.swift`) and the Liquid Glass grouping rules in
-  `Sources/TBDApp/CLAUDE.md`.
-  - When a running server has reported a URL, the button is a split button:
-    its primary click opens the main URL of the first such server. Otherwise
-    the whole button opens the menu, as the PR button does when no single PR
-    URL applies; a toolbar `Menu` cannot disable its primary half alone.
+- **Status-bar Servers chip** (`ServersStatusChip`), shown only when the
+  worktree has at least one declared or reported server. It reads "N running"
+  in a green capsule while servers run and a muted "Servers" otherwise.
+  - A click opens the Servers menu upward; there is no primary action, so the
+    chip never opens a URL on its own. Opening a URL is the menu's first item.
   - The menu's first item is "Open <main URL>" whenever there is one. Then
     each server with its state and URLs and its Start, Stop and Restart items,
     plus "Show last output" for an exited server. A server with nothing
@@ -532,7 +529,7 @@ parts touch no process: the liveness re-check reads, and the stale-file sweep
 deletes only files whose process is gone.
 
 A repo that has only `.claude/launch.json` counts as opted in: it gains the
-Servers button and Start/Stop/logs with no extra setup, and gains open buttons
+Servers chip and Start/Stop/logs with no extra setup, and gains open buttons
 once it writes running files. Nothing runs until someone clicks Start, and
 no repo `status` command runs until someone starts, stops, restarts or
 refreshes the servers, or runs `tbd server list` or `tbd server status`, and a
