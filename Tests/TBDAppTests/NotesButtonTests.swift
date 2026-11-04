@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import TBDShared
@@ -228,31 +229,60 @@ struct NotesButtonTests {
         #expect(NotesToggleDecision.close(panelID).isEnabled)
     }
 
+    // MARK: - The symbol
+
+    @Test("a note draws the page and pencil where the system has it, and doc.text where it does not")
+    func noteSymbolFallsBackWithoutPageAndPencil() {
+        let available = PanelKind.noteSymbol(pageAndPencilAvailable: true)
+        let unavailable = PanelKind.noteSymbol(pageAndPencilAvailable: false)
+        #expect(available == "long.text.page.and.pencil")
+        #expect(unavailable == "doc.text")
+    }
+
+    @Test("the note symbol in use is the one this macOS has, and the system draws it")
+    func noteSymbolInUseExists() {
+        let expected: String
+        if #available(macOS 15.4, *) {
+            expected = "long.text.page.and.pencil"
+        } else {
+            expected = "doc.text"
+        }
+        let inUse = PanelKind.noteSystemImage
+        #expect(inUse == expected)
+        let image = NSImage(systemSymbolName: inUse, accessibilityDescription: nil)
+        #expect(image != nil, "SF Symbols has no \(inUse) on this macOS")
+        // The fallback draws on every macOS the app runs on.
+        let fallback = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)
+        #expect(fallback != nil)
+    }
+
     // MARK: - The button
 
-    @Test("the toggle draws doc.text in the row's grey whatever its note's panel's state, and secondary and disabled while loading")
+    @Test("the toggle draws a note's symbol in the sidebar's grey whatever its note's panel's state, and stays grey but disabled while loading")
     func notesControlAppearance() {
         let front = PaneChromeControl.notes(state: .front, isEnabled: true)
         let behind = PaneChromeControl.notes(state: .behind, isEnabled: true)
         let off = PaneChromeControl.notes(state: .off, isEnabled: true)
         let loading = PaneChromeControl.notes(state: .off, isEnabled: false)
+        let noteSymbol = PanelKind.noteSystemImage
 
-        #expect(front.systemImage == "doc.text")
+        #expect(front.systemImage == noteSymbol)
         #expect(front.systemImage == PanelKind.note.tabSystemImage)
-        // The icon button draws no colour of its own, open or not: it shows
-        // only while no panel is in view.
-        #expect(front.tint == nil)
+        // The icon button marks no state with a colour, open or not: it shows
+        // only while no panel is in view, and draws the sidebar's grey, as
+        // its pill does.
+        #expect(front.tint == .sidebarGrey)
         #expect(front.help == "Hide notes")
         #expect(front.isEnabled)
-        #expect(behind.systemImage == "doc.text")
-        #expect(behind.tint == nil)
+        #expect(behind.systemImage == noteSymbol)
+        #expect(behind.tint == .sidebarGrey)
         #expect(behind.help == "Show notes", "behind, a press brings it forward")
-        #expect(off.systemImage == "doc.text")
-        #expect(off.tint == nil)
+        #expect(off.systemImage == noteSymbol)
+        #expect(off.tint == .sidebarGrey)
         #expect(off.help == "Show notes")
         #expect(off.isEnabled)
-        #expect(loading.systemImage == "doc.text")
-        #expect(loading.tint == .secondary)
+        #expect(loading.systemImage == noteSymbol)
+        #expect(loading.tint == .sidebarGrey)
         #expect(loading.help == "Notes are loading")
         #expect(!loading.isEnabled)
         // The viewer controls can always be pressed, and so can a live

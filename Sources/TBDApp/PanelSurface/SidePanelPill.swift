@@ -60,6 +60,13 @@ enum SidePanelPillState: Equatable {
 enum SidePanelPillMetrics {
     /// The icon's and the label's point size, the strip's tab titles' size.
     static let fontSize: CGFloat = 11
+    /// The icon's and the label's colour in every state, in front, behind or
+    /// off, hovered or not: the grey of the left sidebar's row icons
+    /// (`WorktreeRowCell`), named as a concrete colour so the two match
+    /// exactly. The pill in front is told apart by its fill alone. The
+    /// toggles at the workspace tab bar's end draw it too
+    /// (`PaneChromeControl.Tint.sidebarGrey`).
+    static let foregroundColor: NSColor = .secondaryLabelColor
     /// The width the icon is centred in.
     static let iconSlotWidth: CGFloat = 14
     /// Between the icon's slot and the label.
@@ -104,9 +111,8 @@ enum SidePanelPillMetrics {
     /// controls (`SideStripMetrics.fixedControlsWidth`) and every pill that
     /// is on at its labelled width fit with no room left for a tab. The tabs
     /// scroll, so they give up their room first; only when even that leaves
-    /// too little do the labels go, all together, and each pill that is on
-    /// keeps its label colour, and the one in front its fill
-    /// (`SidePanelPillButton`).
+    /// too little do the labels go, all together, and the pill in front keeps
+    /// its fill (`SidePanelPillButton`).
     ///
     /// The fixed controls count the strip's full trailing group, not the
     /// items drawn now, so the labels do not come and go as the active panel
@@ -151,21 +157,23 @@ enum SidePanelPillMetrics {
 
 // MARK: - SidePanelPillButton
 
-/// One of the side region's strip's pills (`TabRowEdgeItem`):
+/// One of the side region's strip's pills (`TabRowEdgeItem`), its icon and
+/// label in the sidebar's grey (`SidePanelPillMetrics.foregroundColor`) in
+/// every state, with its control's symbol (`PaneChromeControl.systemImage`):
 ///
-/// - **Off:** its icon alone, in the row icon button's square, in the row's
-///   grey.
-/// - **On, in front:** filled as a selected pill tab is (`TabPillShape`), its
-///   icon and label in the label colour.
-/// - **On, behind** another panel or with the region collapsed: its icon and
-///   label in the label colour, with no fill and no outline.
+/// - **Off:** its icon alone, in the row icon button's square.
+/// - **On, in front:** icon and label, filled as a selected pill tab is
+///   (`TabPillShape`).
+/// - **On, behind** another panel or with the region collapsed: icon and
+///   label, with no fill and no outline.
 ///
 /// An on pill shows its label while `showsLabel` says so
-/// (`SidePanelPillMetrics.showsLabel`), and keeps its colour, and in front its
-/// fill, without it, so a narrow strip still tells on from off. Its hover and
-/// press feedback are `RowIconButtonStyle`'s, sized to the pill
-/// (`RowIconSquare.Size.pill`), so they cover the shape it draws; the fill is
-/// drawn in that same shape (`RowIconSquareShape`).
+/// (`SidePanelPillMetrics.showsLabel`). Without it, the pill in front keeps
+/// its fill, and a pill behind draws as one that is off, its icon alone. Its
+/// hover and press feedback are `RowIconButtonStyle`'s, sized to the pill
+/// (`RowIconSquare.Size.pill`), so they cover the shape it draws, and leave
+/// its colour as it is; the fill is drawn in that same shape
+/// (`RowIconSquareShape`).
 ///
 /// It sets its own style on the button, and the strip hangs its right-click
 /// menu outside it, so the menu's content still sits in the style's
@@ -197,7 +205,7 @@ struct SidePanelPillButton: View {
     private func label(size: RowIconSquare.Size) -> some View {
         let shape = RowIconSquareShape(size: size)
         let content = HStack(spacing: SidePanelPillMetrics.iconToLabelSpacing) {
-            Image(systemName: item.pillSystemImage)
+            Image(systemName: item.control.systemImage)
                 .frame(width: SidePanelPillMetrics.iconSlotWidth)
             if showsLabel {
                 Text(item.pillLabel)
@@ -210,20 +218,16 @@ struct SidePanelPillButton: View {
         .padding(.trailing, showsLabel ? SidePanelPillMetrics.trailingPadding : 0)
         .frame(width: Self.width(of: size), height: RowIconSquare.standardSide,
                alignment: showsLabel ? .leading : .center)
+        // A concrete colour, so it is the sidebar's grey rather than the
+        // style's hierarchical one (`RowIconButtonStyle`).
+        .foregroundStyle(Color(nsColor: SidePanelPillMetrics.foregroundColor))
 
-        // A concrete colour for a pill that is on: a hierarchical `.primary`
-        // would be a level of the style's grey (`RowIconButtonStyle`).
-        switch item.state {
-        case .front:
+        if item.state == .front {
             content
-                .foregroundStyle(Color(nsColor: .labelColor))
                 .background {
                     shape.fill(Color.primary.opacity(MainTabRowMetrics.pillActiveOpacity))
                 }
-        case .behind:
-            content
-                .foregroundStyle(Color(nsColor: .labelColor))
-        case .off:
+        } else {
             content
         }
     }

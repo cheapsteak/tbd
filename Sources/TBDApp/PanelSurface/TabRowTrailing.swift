@@ -195,16 +195,6 @@ enum TabRowEdgeItem: Equatable, Identifiable {
         control.pillState ?? .off
     }
 
-    /// The symbol the toggle's pill draws: the control's
-    /// (`PaneChromeControl.systemImage`), except the transcript's, which
-    /// fills while its panel is open.
-    var pillSystemImage: String {
-        if case .transcript = self, state.isOn {
-            return "bubble.fill"
-        }
-        return control.systemImage
-    }
-
     /// What the toggle's pill reads while its panel is open: the panel's name.
     /// The Notes pill reads "Notes" whatever its note is titled.
     var pillLabel: String {
@@ -220,10 +210,11 @@ enum TabRowEdgeItem: Equatable, Identifiable {
 
 /// One of the three toggles at the window's right edge as the workspace tab
 /// bar draws it while the side region is hidden: `item`'s control as an icon
-/// button in the row's grey, open or not, with a plain symbol and no label
-/// (`PaneChromeControl.tint`, `PaneChromeControl.systemImage`), since no
-/// panel is in view. Pressing it does what `edge` says for it. The strip
-/// draws the same toggles as pills instead (`SidePanelPillButton`).
+/// button with no label, open or not, since no panel is in view, in its
+/// pill's grey and with its pill's symbol (`PaneChromeControl.tint`,
+/// `PaneChromeControl.systemImage`). Pressing it does what `edge` says for
+/// it. The strip draws the same toggles as pills instead
+/// (`SidePanelPillButton`).
 struct TabRowEdgeButton: View {
     let item: TabRowEdgeItem
     let edge: TabRowEdgeControls

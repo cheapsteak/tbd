@@ -20,8 +20,24 @@ extension PanelKind {
         }
     }
 
-    /// A note tab's symbol, which the Notes toggle shows too.
-    static let noteSystemImage = "doc.text"
+    /// A note tab's symbol, which the Notes toggle and its pill show too:
+    /// the page and pencil wherever this macOS has it
+    /// (`noteSymbol(pageAndPencilAvailable:)`).
+    static let noteSystemImage: String = {
+        if #available(macOS 15.4, *) {
+            return PanelKind.noteSymbol(pageAndPencilAvailable: true)
+        }
+        return PanelKind.noteSymbol(pageAndPencilAvailable: false)
+    }()
+
+    /// A note's symbol: `long.text.page.and.pencil` where the system has it,
+    /// and `doc.text` where it does not. The page and pencil came with
+    /// macOS 15.4, and the app also runs on 15.0–15.3, where
+    /// `Image(systemName:)` would draw nothing for it. `noteSystemImage`
+    /// passes whether this macOS is 15.4 or later.
+    static func noteSymbol(pageAndPencilAvailable: Bool) -> String {
+        pageAndPencilAvailable ? "long.text.page.and.pencil" : "doc.text"
+    }
 
     /// The Changes tab's symbol, which the Changes toggle shows too.
     static let changesSystemImage = "plusminus"

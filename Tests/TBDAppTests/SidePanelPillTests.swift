@@ -1,14 +1,18 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDApp
 
 // Tier 1: deterministic, in-process values only. No view is drawn; the label
-// widths come from the system font's metrics.
+// widths come from the system font's metrics, and the sidebar's grey from a
+// sidebar row cell configured off any window.
 
 /// The side region's toggle pills (side panel toggle pills spec, "Pills"):
-/// the state each decision stands for, the rule for when the pills that are
-/// on show their labels, and the square each pill's hover covers.
+/// the state each decision stands for, each pill's symbol and colour, the
+/// rule for when the pills that are on show their labels, and the square
+/// each pill's hover covers.
 @Suite("Side panel pills")
 @MainActor
 struct SidePanelPillTests {
@@ -40,18 +44,65 @@ struct SidePanelPillTests {
         #expect(onStates == [false, true, true])
     }
 
-    @Test("the transcript pill fills its bubble while its panel is open; every other pill draws its icon button's symbol")
+    @Test("the transcript pill draws an empty bubble on and off, and each pill keeps one symbol in every state")
     func pillSymbols() {
-        let items: [TabRowEdgeItem] = [
-            .transcript(.transcript(state: .front, isEnabled: true)),
-            .transcript(.transcript(state: .behind, isEnabled: true)),
-            .transcript(.transcript(state: .off, isEnabled: true)),
-            .changes(.changes(state: .front)),
-            .notes(.notes(state: .behind, isEnabled: true)),
+        // `SidePanelPillButton` draws its control's symbol.
+        let states: [SidePanelPillState] = [.front, .behind, .off]
+        let transcript = states.map {
+            TabRowEdgeItem.transcript(.transcript(state: $0, isEnabled: true)).control.systemImage
+        }
+        let changes = states.map { TabRowEdgeItem.changes(.changes(state: $0)).control.systemImage }
+        let notes = states.map {
+            TabRowEdgeItem.notes(.notes(state: $0, isEnabled: true)).control.systemImage
+        }
+        let noteSymbol = PanelKind.noteSystemImage
+        #expect(transcript == ["bubble", "bubble", "bubble"])
+        #expect(changes == ["plusminus", "plusminus", "plusminus"])
+        #expect(notes == [noteSymbol, noteSymbol, noteSymbol])
+        // A disabled transcript pill draws the same bubble.
+        let disabled = TabRowEdgeItem.transcript(.transcript(state: .off, isEnabled: false))
+        let disabledSymbol = disabled.control.systemImage
+        #expect(disabledSymbol == "bubble")
+    }
+
+    // MARK: - Colour
+
+    @Test("a pill draws the left sidebar's grey, the same grey as its toggle at the tab bar's end")
+    func pillsDrawTheSidebarsGrey() {
+        let pill = SidePanelPillMetrics.foregroundColor
+        #expect(pill == NSColor.secondaryLabelColor)
+
+        // The sidebar's row icons draw it: the pending glyph's tint.
+        let cell = WorktreeRowCell()
+        cell.configure(SidebarCellTests.worktree(name: "acme", leading: .pending))
+        let sidebarIcon = cell.leadingImageView.contentTintColor
+        #expect(sidebarIcon == pill)
+
+        // The toggles at the workspace tab bar's end name the same colour,
+        // in every state, enabled or not.
+        let controls: [PaneChromeControl] = [
+            .changes(state: .front), .changes(state: .behind), .changes(state: .off),
+            .transcript(state: .front, isEnabled: true), .transcript(state: .behind, isEnabled: true),
+            .transcript(state: .off, isEnabled: true), .transcript(state: .off, isEnabled: false),
+            .notes(state: .front, isEnabled: true), .notes(state: .behind, isEnabled: true),
+            .notes(state: .off, isEnabled: true), .notes(state: .off, isEnabled: false),
         ]
-        let symbols = items.map(\.pillSystemImage)
-        let expected = ["bubble.fill", "bubble.fill", "bubble", "plusminus", "doc.text"]
-        #expect(symbols == expected)
+        for control in controls {
+            let tint = control.tint
+            let color = PaneChromeControlButton.symbolColor(for: tint)
+            #expect(tint == .sidebarGrey, "\(control)")
+            #expect(color == pill, "\(control)")
+        }
+    }
+
+    @Test("the icon button's other tints keep their colours: primary the label colour, secondary and none the style's grey")
+    func otherTintsKeepTheirColours() {
+        let primary = PaneChromeControlButton.symbolColor(for: .primary)
+        let secondary = PaneChromeControlButton.symbolColor(for: .secondary)
+        let none = PaneChromeControlButton.symbolColor(for: nil)
+        #expect(primary == NSColor.labelColor)
+        #expect(secondary == nil)
+        #expect(none == nil)
     }
 
     // MARK: - The label rule

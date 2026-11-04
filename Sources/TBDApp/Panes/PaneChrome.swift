@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -215,15 +216,23 @@ enum PaneChromeControl: Equatable {
 
     /// The symbol's colour.
     enum Tint {
+        /// The label colour.
         case primary
+        /// The row style's own grey (`RowIconButtonStyle`).
         case secondary
+        /// The left sidebar's icon grey, which the side region's pills draw
+        /// (`SidePanelPillMetrics.foregroundColor`), named as a concrete
+        /// colour so the icon button and the pills match exactly.
+        case sidebarGrey
     }
 
-    /// The symbol the icon button draws (`PaneChromeControlButton`). Each of
-    /// the three toggles draws one symbol whatever its panel's state: the
-    /// icon button shows them only while no panel is in view, so a filled
-    /// symbol there would read as a panel showing. Their pills draw their
-    /// own (`TabRowEdgeItem.pillSystemImage`).
+    /// The symbol the icon button draws (`PaneChromeControlButton`), and for
+    /// the three toggles the symbol their pills draw too
+    /// (`SidePanelPillButton`). Each toggle draws one symbol whatever its
+    /// panel's state, never a filled one: Changes' tab symbol
+    /// (`PanelKind.changesSystemImage`), an empty `bubble` for the
+    /// transcript, and a note's symbol for Notes
+    /// (`PanelKind.noteSystemImage`).
     var systemImage: String {
         switch self {
         case .changes:
@@ -255,19 +264,20 @@ enum PaneChromeControl: Equatable {
 
     /// Nil leaves the symbol in the button style's own colour: the row's
     /// secondary grey (`RowIconButtonStyle`). The Changes, transcript and
-    /// Notes toggles stay in that grey whatever their panel's state, and a
-    /// disabled one is secondary: the icon button draws them only at the
-    /// workspace tab bar's end while the side region is hidden, where no
-    /// panel is in view, so a colour there would read as one showing. Their
-    /// pills draw their state themselves (`SidePanelPillButton`). The render
-    /// toggle's primary marks it showing source.
+    /// Notes toggles draw the sidebar's grey, as their pills do, whatever
+    /// their panel's state: the icon button draws them only at the workspace
+    /// tab bar's end while the side region is hidden, where no panel is in
+    /// view, so a colour marking one open would read as a panel showing. A
+    /// disabled one draws the same grey, dimmed by the style
+    /// (`RowIconSquare.disabledLabelOpacity`). The render toggle's primary
+    /// marks it showing source.
     var tint: Tint? {
         switch self {
-        case .transcript(_, let isEnabled), .notes(_, let isEnabled):
-            return isEnabled ? nil : .secondary
+        case .changes, .transcript, .notes:
+            return .sidebarGrey
         case .renderToggle(let showingSource):
             return showingSource ? .primary : .secondary
-        case .changes, .copyAddress, .refresh:
+        case .copyAddress, .refresh:
             return nil
         }
     }
@@ -330,17 +340,26 @@ struct PaneChromeControlButton: View {
         .accessibilityLabel(Text(control.help))
     }
 
-    /// The symbol in its tint. Secondary is the row style's own colour, so it
-    /// sets none; primary names the label colour itself, because a
-    /// hierarchical `.primary` would be a level of the style's grey.
+    /// The colour the symbol names for `tint`, or nil for the row style's
+    /// own grey. Secondary is that grey, so it names none. Primary and the
+    /// sidebar's grey name concrete colours, because a hierarchical style in
+    /// the label would be a level of the style's grey.
+    static func symbolColor(for tint: PaneChromeControl.Tint?) -> NSColor? {
+        switch tint {
+        case .primary?: .labelColor
+        case .sidebarGrey?: SidePanelPillMetrics.foregroundColor
+        case .secondary?, nil: nil
+        }
+    }
+
+    /// The symbol in its tint (`symbolColor(for:)`).
     @ViewBuilder
     private var symbol: some View {
         let image = Image(systemName: control.systemImage)
             .font(.system(size: 11))
-        switch control.tint {
-        case .primary?:
-            image.foregroundStyle(Color(nsColor: .labelColor))
-        case .secondary?, nil:
+        if let color = Self.symbolColor(for: control.tint) {
+            image.foregroundStyle(Color(nsColor: color))
+        } else {
             image
         }
     }
