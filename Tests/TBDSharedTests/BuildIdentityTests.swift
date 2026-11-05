@@ -287,6 +287,42 @@ struct UpdateRelationTests {
         #expect(decoded.latestCommit == "abc")
     }
 
+    @Test func newFieldsRoundTrip() throws {
+        let status = UpdateStatus(
+            latestCommit: Self.latest, relation: .behind,
+            comparedRef: "refs/tags/main-builds", autoUpdateActive: true,
+            latestFirstSeenAt: Date(timeIntervalSince1970: 1_780_000_000))
+        let decoded = try JSONDecoder().decode(
+            UpdateStatus.self, from: JSONEncoder().encode(status))
+        #expect(decoded == status)
+    }
+
+    /// JSON from a daemon that predates the fields: the previous behaviour,
+    /// which is to show the notice.
+    @Test func olderJSONWithoutTheNewFieldsDecodesToAbsent() throws {
+        let json = #"{"latestCommit":"abc","relation":"behind"}"#
+        let decoded = try JSONDecoder().decode(UpdateStatus.self, from: Data(json.utf8))
+        #expect(decoded.relation == .behind)
+        #expect(decoded.comparedRef == nil)
+        #expect(decoded.autoUpdateActive == nil)
+        #expect(decoded.latestFirstSeenAt == nil)
+    }
+
+    /// Wrong types and nulls neither fail the decode nor quiet anything.
+    @Test(arguments: [
+        #"{"latestCommit":"abc","relation":"behind","autoUpdateActive":"yes","comparedRef":7,"latestFirstSeenAt":"soon"}"#,
+        #"{"latestCommit":"abc","relation":"behind","autoUpdateActive":1,"comparedRef":["x"],"latestFirstSeenAt":{}}"#,
+        #"{"latestCommit":"abc","relation":"behind","autoUpdateActive":null,"comparedRef":null,"latestFirstSeenAt":null}"#,
+    ])
+    func hostileNewFieldsFailClosed(json: String) throws {
+        let decoded = try JSONDecoder().decode(UpdateStatus.self, from: Data(json.utf8))
+        #expect(decoded.latestCommit == "abc")
+        #expect(decoded.relation == .behind)
+        #expect(decoded.comparedRef == nil)
+        #expect(decoded.autoUpdateActive == nil)
+        #expect(decoded.latestFirstSeenAt == nil)
+    }
+
     @Test func modeCapabilities() {
         #expect(UpdateMode.off.runsChecks == false)
         #expect(UpdateMode.off.launchesUpdates == false)

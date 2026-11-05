@@ -62,6 +62,16 @@ public enum TBDConstants {
             .appendingPathComponent("check-ref")
     }
 
+    /// Switch file an external auto-updater creates while it is on:
+    /// `~/tbd/updates/external-auto-enabled`. Its existence alone means updates
+    /// install without a gesture, so the app's "newer version" notice stays
+    /// quiet. Honors `TBD_HOME`.
+    public static func externalAutoUpdateFile(environment: [String: String]) -> URL {
+        configDir(environment: environment)
+            .appendingPathComponent("updates")
+            .appendingPathComponent("external-auto-enabled")
+    }
+
     /// Unix socket path resolved from the given environment dictionary.
     /// Honors `TBD_SOCKET_PATH` independently of `TBD_HOME` — darwin caps
     /// `sun_path` at ~104 bytes, so a deep `TBD_HOME` can overflow even though

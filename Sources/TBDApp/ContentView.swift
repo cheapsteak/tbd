@@ -66,6 +66,22 @@ struct ContentView: View {
                 .background(Color.blue.opacity(0.15))
             }
 
+            // Auto-update is on, so no banner — but a build that has waited
+            // over a day is worth one quiet line.
+            if let idle = appState.updateIdleLine() {
+                HStack(spacing: 6) {
+                    Text(idle).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Dismiss") {
+                        appState.dismissUpdateNotice()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+
             // The window's split and its `NSToolbar`, all AppKit. The split
             // reaches up under the toolbar and down to the window's bottom
             // edge; each pane's hosted content keeps its own safe area. The

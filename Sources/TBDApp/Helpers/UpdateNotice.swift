@@ -13,7 +13,35 @@ enum UpdateNotice {
     /// healthy installation sits in for weeks; a banner that says "up to date"
     /// is a banner people learn to ignore, and by the time it says something
     /// that matters they have stopped reading it.
+    ///
+    /// Also silent while auto-update is on: an update that installs by itself
+    /// needs no prompt to run `tbd update`. `idleLine` covers the one case
+    /// where that promise is not being kept.
     static func message(daemon: BuildIdentity?, update: UpdateStatus?) -> String? {
+        guard update?.autoUpdateActive != true else { return nil }
+        return availableText(daemon: daemon, update: update)
+    }
+
+    /// How long a newer build may wait while auto-update is on before the app
+    /// says so.
+    static let idleWaitThreshold: TimeInterval = 24 * 60 * 60
+
+    /// The small line shown in place of the banner while auto-update is on and
+    /// a newer build has been waiting longer than `idleWaitThreshold`. Nil in
+    /// every other case, including when the daemon did not say when it first
+    /// saw the commit.
+    static func idleLine(update: UpdateStatus?, now: Date) -> String? {
+        guard let update, update.autoUpdateActive == true,
+              update.relation == .behind, update.latestCommit != nil,
+              let seen = update.latestFirstSeenAt,
+              now.timeIntervalSince(seen) > idleWaitThreshold
+        else { return nil }
+        return "Update installs when idle."
+    }
+
+    /// The "a newer TBD exists" sentence, with no regard for whether anything
+    /// should be shown unprompted.
+    private static func availableText(daemon: BuildIdentity?, update: UpdateStatus?) -> String? {
         guard let update, update.relation == .behind,
               let latest = update.latestCommit
         else { return nil }
@@ -37,6 +65,13 @@ enum UpdateNotice {
         case .upToDate:
             return "TBD is up to date."
         case .behind:
+            if update.autoUpdateActive == true {
+                // Asked for by hand, so it answers even though the banner is
+                // hidden; the answer says nothing needs doing.
+                let short = update.latestCommit.map { String($0.prefix(7)) }
+                return "A newer TBD is available" + (short.map { " (\($0))" } ?? "")
+                    + ". Auto-update installs it when idle."
+            }
             return message(daemon: daemon, update: update)
                 ?? "A newer TBD is available. Run tbd update in a terminal."
         case .unknown:
@@ -58,14 +93,22 @@ enum UpdateNotice {
     ///
     /// A pure static presenter rather than three `.help(…)` strings inline, so
     /// each branch is a value a test can read.
-    static func modeCaption(_ mode: UpdateMode) -> String {
+    static func modeCaption(_ mode: UpdateMode, update: UpdateStatus? = nil) -> String {
+        let base = baseModeCaption(mode)
+        if mode != .auto, update?.autoUpdateActive == true {
+            return base + " An external auto-updater is on, so the newer-version notice is hidden."
+        }
+        return base
+    }
+
+    private static func baseModeCaption(_ mode: UpdateMode) -> String {
         switch mode {
         case .off:
             return "TBD never checks whether a newer version exists. You can still check by hand with tbd version --check."
         case .check:
             return "TBD checks hourly and shows a notice when a newer version exists. It installs nothing."
         case .auto:
-            return "TBD checks hourly and installs a newer version on its own, rebuilding out of place and restarting the daemon and this app. Sessions are handed over rather than killed; any that end up parked are woken again, a few at a time."
+            return "TBD checks hourly and installs a newer version on its own, rebuilding out of place and restarting the daemon and this app. Sessions are handed over rather than killed; any that end up parked are woken again, a few at a time. The newer-version notice stays hidden; \"Check for Updates…\" still answers."
         }
     }
 }

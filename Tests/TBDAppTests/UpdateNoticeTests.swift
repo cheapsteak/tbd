@@ -112,7 +112,7 @@ struct UpdateNoticeTests {
     /// Three modes, three captions, each naming what the daemon will do. A
     /// caption shared between two modes is a caption that is wrong in one.
     @Test func everyModeHasItsOwnCaption() {
-        let captions = UpdateMode.allCases.map(UpdateNotice.modeCaption)
+        let captions = UpdateMode.allCases.map { UpdateNotice.modeCaption($0) }
         #expect(Set(captions).count == UpdateMode.allCases.count)
         #expect(UpdateNotice.modeCaption(.off).contains("never checks"))
         #expect(UpdateNotice.modeCaption(.check).contains("installs nothing"))
@@ -208,4 +208,102 @@ struct UpdateNoticeTests {
 
     #expect(state.daemonUpdateStatus == nil)
     #expect(state.activeToast?.style == .error)
+}
+
+// MARK: - Quieting the banner
+
+/// The banner is noise when the build it announces is not installable yet, or
+/// when an update installs by itself. Fixture commits only.
+@Suite("UpdateNotice quieting")
+struct UpdateNoticeQuietingTests {
+    private static let build = BuildIdentity(
+        commit: "1111111111111111111111111111111111111111",
+        shortCommit: "1111111", branch: "main")
+    private static let latest = "2222222222222222222222222222222222222222"
+    private static let day: TimeInterval = 24 * 60 * 60
+    private static let seen = Date(timeIntervalSince1970: 1_780_000_000)
+
+    private func status(
+        relation: UpdateRelation = .behind, auto: Bool? = nil, seen: Date? = UpdateNoticeQuietingTests.seen
+    ) -> UpdateStatus {
+        UpdateStatus(
+            latestCommit: Self.latest, relation: relation,
+            comparedRef: "refs/tags/main-builds", autoUpdateActive: auto,
+            latestFirstSeenAt: seen)
+    }
+
+    /// (a) Behind `main` but on the newest published build: the daemon, which
+    /// compares against the release tag, reports up to date, so nothing shows.
+    @Test func runningTheNewestReleaseShowsNoBanner() {
+        let s = status(relation: .upToDate)
+        #expect(UpdateNotice.message(daemon: Self.build, update: s) == nil)
+        #expect(UpdateNotice.idleLine(update: s, now: Self.seen.addingTimeInterval(3 * Self.day)) == nil)
+    }
+
+    /// (b) Auto-update on hides the banner.
+    @Test func autoUpdateHidesTheBanner() {
+        #expect(UpdateNotice.message(daemon: Self.build, update: status(auto: true)) == nil)
+    }
+
+    /// (c) A release waiting with auto-update off still banners, and an
+    /// older daemon that never says anything about auto behaves the same.
+    @Test func aWaitingReleaseWithAutoOffShowsTheBanner() {
+        #expect(UpdateNotice.message(daemon: Self.build, update: status(auto: false))?
+            .contains("2222222") == true)
+        #expect(UpdateNotice.message(daemon: Self.build, update: status(auto: nil))?
+            .contains("2222222") == true)
+        #expect(UpdateNotice.idleLine(
+            update: status(auto: false), now: Self.seen.addingTimeInterval(3 * Self.day)) == nil)
+    }
+
+    /// (d) The idle line appears only past a day.
+    @Test func theIdleLineAppearsOnlyAfterADay() {
+        let s = status(auto: true)
+        #expect(UpdateNotice.idleLine(update: s, now: Self.seen.addingTimeInterval(Self.day - 1)) == nil)
+        #expect(UpdateNotice.idleLine(update: s, now: Self.seen.addingTimeInterval(Self.day)) == nil)
+        #expect(UpdateNotice.idleLine(update: s, now: Self.seen.addingTimeInterval(Self.day + 1))
+            == "Update installs when idle.")
+    }
+
+    @Test func theIdleLineNeedsEveryConditionAndAKnownAge() {
+        let late = Self.seen.addingTimeInterval(2 * Self.day)
+        #expect(UpdateNotice.idleLine(update: status(auto: true, seen: nil), now: late) == nil)
+        #expect(UpdateNotice.idleLine(update: status(relation: .unknown, auto: true), now: late) == nil)
+        #expect(UpdateNotice.idleLine(update: nil, now: late) == nil)
+    }
+
+    /// The manual path keeps telling the truth while auto is on.
+    @Test func theCheckToastStillAnswersWhenAutoIsOn() {
+        let toast = UpdateNotice.checkResultToast(daemon: Self.build, update: status(auto: true))
+        #expect(toast.contains("A newer TBD is available"))
+        #expect(toast.contains("2222222"))
+        #expect(toast.contains("installs it when idle"))
+        #expect(UpdateNotice.checkResultToast(
+            daemon: Self.build, update: status(relation: .upToDate, auto: true))
+            == "TBD is up to date.")
+    }
+
+    @Test func settingsSaysWhenAnExternalUpdaterIsOn() {
+        #expect(UpdateNotice.modeCaption(.check, update: status(auto: true))
+            .contains("external auto-updater"))
+        #expect(!UpdateNotice.modeCaption(.check, update: status(auto: false))
+            .contains("external auto-updater"))
+        #expect(UpdateNotice.modeCaption(.auto, update: status(auto: true))
+            == UpdateNotice.modeCaption(.auto))
+    }
+
+    @MainActor
+    @Test func dismissingTheIdleLineIsPerCommit() {
+        let state = AppState()
+        let late = Self.seen.addingTimeInterval(2 * Self.day)
+        state.daemonUpdateStatus = status(auto: true)
+        #expect(state.updateIdleLine(now: late) != nil)
+        #expect(state.updateNoticeMessage == nil)
+        state.dismissUpdateNotice()
+        #expect(state.updateIdleLine(now: late) == nil)
+        state.daemonUpdateStatus = UpdateStatus(
+            latestCommit: "3333333333333333333333333333333333333333", relation: .behind,
+            autoUpdateActive: true, latestFirstSeenAt: Self.seen)
+        #expect(state.updateIdleLine(now: late) != nil)
+    }
 }
