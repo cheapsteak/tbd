@@ -24,28 +24,22 @@ extension SidebarOutlineController: SidebarMenuHost {
 
     /// A recompute after a scroll or an apply reports an unchanged state too:
     /// the rows then already carry it — cells and row views made since were
-    /// configured with it — and only the bubble needs re-anchoring. A new
-    /// hovered row lights the guide line it is joined to, and the old one's
-    /// goes out; a cleared hover — the pointer left, or a drag began — puts
-    /// out its line. The row views and the active lines follow only the
-    /// hovered row, so a move between parts of one row, or onto a section's
-    /// chevron, reaches only the cells.
+    /// configured with it — and only the bubble needs re-anchoring. The row
+    /// views — their hover highlight and pin gap — follow only the hovered
+    /// row, so a move between parts of one row, or onto a section's chevron,
+    /// reaches only the cells.
     func hoverChanged(_ state: SidebarHoverTracker.State) {
         let previous = hoverState
         hoverState = state
         if state != previous {
             updatePlusTrigger(from: previous, to: state)
-            let rowChanged = state.row != previous.row
-            if rowChanged {
-                activeGuideAncestors = focusedGuideAncestors()
-            }
-            applyHoverToAvailableRows(includingRowViews: rowChanged)
+            applyHoverToAvailableRows(includingRowViews: state.row != previous.row)
         }
         updateTooltip()
     }
 
-    /// Hands every row view the outline has its hover, active guide lines,
-    /// pin gap and highlight, and every cell its hover and dimming.
+    /// Hands every row view the outline has its hover, pin gap and
+    /// highlight, and every cell its hover and dimming.
     /// - Parameter includingRowViews: false when only the cells' hover
     ///   changed, so the row views keep their configurations.
     func applyHoverToAvailableRows(includingRowViews: Bool = true) {

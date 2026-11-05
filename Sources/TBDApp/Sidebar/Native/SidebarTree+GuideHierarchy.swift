@@ -18,16 +18,4 @@ extension SidebarTree: GuideHierarchy {
         case .scratchHeader, .scratchPrompt, .repoHeader, .providerHeader, .addRepository: return 0
         }
     }
-
-    /// Whether the outline shows `id`: it is in the tree, and every node
-    /// above it shows its children.
-    func isShown(_ id: SidebarNodeID) -> Bool {
-        guard contains(id) else { return false }
-        var current = parent(of: id)
-        while let ancestor = current {
-            guard node(ancestor)?.showsChildren == true else { return false }
-            current = parent(of: ancestor)
-        }
-        return true
-    }
 }

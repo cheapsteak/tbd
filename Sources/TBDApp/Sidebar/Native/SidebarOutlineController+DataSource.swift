@@ -171,17 +171,14 @@ extension SidebarOutlineController {
 
     /// What a row view's configuration takes from the tree: everything but
     /// the content origin, which follows the chevron placement, and what the
-    /// pointer, the selection and a drag set. Worked out on a row's first
-    /// configuration after an apply and kept by row ID until the next
-    /// (`rowViewBases`), so a hover or a selection that relights the lines
-    /// walks no ancestors and copies no nodes.
+    /// pointer and a drag set. Worked out on a row's first configuration
+    /// after an apply and kept by row ID until the next (`rowViewBases`), so
+    /// a hover that reconfigures the row views walks no ancestors and copies
+    /// no nodes.
     struct RowViewBase {
         /// The row's level, guide lines and own line's start, and whether its
         /// model selects it.
         var configuration = SidebarRowView.Configuration()
-        /// Each guide's owner, in `configuration.guides`' order: what the
-        /// active lines index.
-        var owners: [SidebarNodeID] = []
         var showsHoverHighlight = false
         /// The row has a gutter pin, which sits on its parent's line: a
         /// worktree row other than a repo's main checkout.
@@ -200,7 +197,6 @@ extension SidebarOutlineController {
             let lines = tree.rowGuides(of: node.id)
             configuration.guides = lines.guides
             configuration.drawsStub = lines.startsGuide
-            owners = lines.owners
             showsHoverHighlight = SidebarOutlineController.showsHoverHighlight(node.kind)
             switch node.kind {
             case .worktree(let model):
@@ -232,18 +228,15 @@ extension SidebarOutlineController {
     }
 
     /// The row view of row `id`: what the tree gives it (`RowViewBase`), the
-    /// content origin, and the pointer's, the selection's and a drag's part —
-    /// the lines whose owner is in `activeGuideAncestors` draw active, the
-    /// pin breaks its line while it shows, on hover and always once pinned,
-    /// and the hover and nest highlights. A row the tree lacks keeps its
+    /// content origin, and the pointer's and a drag's part — the pin breaks
+    /// its line while it shows, on hover and always once pinned, and the
+    /// hover and nest highlights. A row the tree lacks keeps its
     /// configuration.
     func configure(_ rowView: SidebarRowView, id: SidebarNodeID) {
         guard let base = rowViewBase(id) else { return }
         let isHovered = hoverState.row == id
         var configuration = base.configuration
         configuration.contentOrigin = SidebarNativeMetrics.rowContentInset(chevronBeforeTitle: chevronBeforeTitle)
-        configuration.activeGuides = SidebarGuideLine.activeIndices(of: base.owners, active: activeGuideAncestors)
-        configuration.isStubActive = configuration.drawsStub && activeGuideAncestors.contains(id)
         configuration.showsPinGap = base.hasPin && (base.isPinned || isHovered)
         configuration.isHovered = isHovered && base.showsHoverHighlight
         configuration.isNestTarget = nestTargetID == id
@@ -263,26 +256,5 @@ extension SidebarOutlineController {
         case .groupHeader, .addRepository:
             false
         }
-    }
-
-    // MARK: Active guide lines
-
-    /// The active ancestors of the hovered row and of each selected worktree
-    /// row the outline shows.
-    func focusedGuideAncestors() -> Set<SidebarNodeID> {
-        var focus = appState.selectedWorktreeIDs.map { SidebarNodeID.worktree($0) }
-        if let hovered = hoverState.row { focus.append(hovered) }
-        return tree.activeGuideAncestors(of: focus)
-    }
-
-    /// Recomputes the active guide lines after the selection or the tree
-    /// changed. When they differ, or `refreshingRowViews` asks, every row
-    /// view the outline holds takes its configuration afresh; a view whose
-    /// configuration comes out the same does not redraw.
-    func refreshActiveGuides(refreshingRowViews: Bool = false) {
-        let active = focusedGuideAncestors()
-        guard refreshingRowViews || active != activeGuideAncestors else { return }
-        activeGuideAncestors = active
-        refreshRowViewConfigurations()
     }
 }

@@ -16,10 +16,9 @@ import AppKit
 /// owner's level and the row's part in it, and whether the row starts a line
 /// of its own (`drawsStub`); `SidebarGuideLine` turns those into pieces.
 ///
-/// How each line draws is `SidebarGuideLine`'s: a hairline at rest, full
-/// strength for the lines the controller marks active (`activeGuides`,
-/// `isStubActive`), and the accent colour over the row's hover or selection
-/// highlight.
+/// How each line draws is `SidebarGuideLine`'s: every line at one strength,
+/// grey on a plain row and the accent colour over the row's hover or
+/// selection highlight.
 final class SidebarRowView: NSTableRowView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("tbd.nativeSidebar.row")
 
@@ -33,14 +32,9 @@ final class SidebarRowView: NSTableRowView {
         /// of, outermost first: each owner's level and the row's role in its
         /// line.
         var guides: [SidebarGuideLine.Guide] = []
-        /// The lines of the focused group, which draw at full strength:
-        /// indices into `guides`. The rest draw at rest.
-        var activeGuides = IndexSet()
         /// The row's worktree children show, so its own line starts here,
         /// under its leading icon.
         var drawsStub = false
-        /// The row's own line is the focused group's.
-        var isStubActive = false
         /// The gutter pin is showing, so the line it sits on — the one a
         /// level up, under the pin's centre — leaves out its turn and tick
         /// and breaks across the pin.
@@ -121,8 +115,8 @@ final class SidebarRowView: NSTableRowView {
         needsDisplay = true
     }
 
-    /// A resting guide line is one device pixel wide, so a move to a screen
-    /// of another scale redraws it.
+    /// A guide line's edges sit on device-pixel boundaries, so a move to a
+    /// screen of another scale redraws the lines.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         needsDisplay = true
@@ -150,34 +144,30 @@ final class SidebarRowView: NSTableRowView {
     }
 
     /// What the row draws of each line, outermost ancestor first and its own
-    /// line last, each in its style: active or at rest, and in the accent
-    /// colour while the row draws a highlight — hovered or selected, not the
-    /// nest target's wash. The pin lands in the row's own gutter, centred on
-    /// the line a level up — its parent's — and over that line's turn and
-    /// tick, so that line leaves out only what the pin covers rather than
-    /// strike the glyph: it breaks across the pin and keeps the rest.
+    /// line last, all in one style: grey, or the accent colour while the row
+    /// draws a highlight — hovered or selected, not the nest target's wash.
+    /// The pin lands in the row's own gutter, centred on the line a level
+    /// up — its parent's — and over that line's turn and tick, so that line
+    /// leaves out only what the pin covers rather than strike the glyph: it
+    /// breaks across the pin and keeps the rest.
     func guidePieces(backingScale: CGFloat,
                      alphas: SidebarGuideLine.Alphas = SidebarGuideLine.alphas) -> [SidebarGuideLine.Pieces] {
-        let isOnHighlight = highlightAlpha != nil
+        let style = SidebarGuideLine.style(isOnHighlight: highlightAlpha != nil, alphas: alphas)
         let pinnedLevel = configuration.showsPinGap ? configuration.level - 1 : nil
         let tickEnd = tickEndX
         var result: [SidebarGuideLine.Pieces] = []
-        func appendPieces(role: SidebarGuideLine.Role, level: Int, fadeStart: CGFloat?, isActive: Bool) {
-            let style = SidebarGuideLine.style(isActive: isActive, isOnHighlight: isOnHighlight,
-                                               backingScale: backingScale, alphas: alphas)
+        func appendPieces(role: SidebarGuideLine.Role, level: Int, fadeStart: CGFloat?) {
             if let pieces = SidebarGuideLine.pieces(
                 role: role, x: lineX(level: level), tickEnd: tickEnd, fadeStart: fadeStart,
                 style: style, in: bounds, backingScale: backingScale, pinGap: level == pinnedLevel) {
                 result.append(pieces)
             }
         }
-        for (index, guide) in configuration.guides.enumerated() {
-            appendPieces(role: guide.role, level: guide.level, fadeStart: guide.fadeStart,
-                         isActive: configuration.activeGuides.contains(index))
+        for guide in configuration.guides {
+            appendPieces(role: guide.role, level: guide.level, fadeStart: guide.fadeStart)
         }
         if configuration.drawsStub {
-            appendPieces(role: .stub, level: configuration.level, fadeStart: nil,
-                         isActive: configuration.isStubActive)
+            appendPieces(role: .stub, level: configuration.level, fadeStart: nil)
         }
         return result
     }

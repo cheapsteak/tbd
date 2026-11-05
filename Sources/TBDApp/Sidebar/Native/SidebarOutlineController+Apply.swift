@@ -25,10 +25,12 @@ extension SidebarOutlineController {
         // The drop index is built again on first use: once per applied tree,
         // and never for a rebuild no drag asks about.
         dropIndexCache = nil
-        // Re-derives the row views the structure changed under once, with
-        // the lines the selection lights, rather than once for the structure
-        // and again for the selection.
-        applyModelSelection(refreshingRowViews: rowViewsNeedRefresh)
+        // Mirrors the selection, then re-derives the row views the structure
+        // changed under.
+        applyModelSelection()
+        if rowViewsNeedRefresh {
+            refreshRowViewConfigurations()
+        }
         scrollPendingTargetToCenter()
         isApplyingModelSelection = false
         reconcileVanishedSelection()
@@ -198,10 +200,9 @@ extension SidebarOutlineController {
 
     /// Re-derives every row view's configuration from the current tree,
     /// by the row each view shows: after an apply that changed the
-    /// structure, and when the active guide lines change. Cheap — only the
-    /// views the outline holds, each reading what the tree gave its row
-    /// (`RowViewBase`) — and a view whose configuration is unchanged does
-    /// not redraw.
+    /// structure. Cheap — only the views the outline holds, each reading
+    /// what the tree gave its row (`RowViewBase`) — and a view whose
+    /// configuration is unchanged does not redraw.
     func refreshRowViewConfigurations() {
         outline.enumerateAvailableRowViews { rowView, row in
             guard let sidebarRow = rowView as? SidebarRowView,

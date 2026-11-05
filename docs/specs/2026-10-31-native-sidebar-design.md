@@ -274,9 +274,10 @@ highlight instead of turning white.
 
 `SidebarRowView` draws, under the cell, the row's highlight and the hierarchy
 guide lines over it, in both the outline and the dock. Every value it draws
-with — shape, alphas per state and appearance, widths, fade, radii — lives in
-two enums, `SidebarRowHighlight` and `SidebarGuideLine`, so tuning either is one
-edit, and `SidebarRowHighlightTests` and `SidebarGuideLineTests` pin them.
+with — shape, alphas per state and appearance, the line width, fade, radii —
+lives in two enums, `SidebarRowHighlight` and `SidebarGuideLine`, so tuning
+either is one edit, and `SidebarRowHighlightTests` and `SidebarGuideLineTests`
+pin them.
 
 The highlight is one shape on every row, whatever its depth or kind:
 `SidebarRowHighlight.highlightRect(in:)`, the row's full height, edge to edge,
@@ -328,35 +329,22 @@ The guide lines show which worktree rows are nested under which:
   and tick, so that line leaves both out and breaks across the pin's glyph
   (`SidebarGuideLine.pinGapHalfHeight`), drawing on above it, faded where the
   fade reaches, and below it where the line goes on to a later child.
-- **Strength** – at rest a line is a one-device-pixel hairline; the *active*
-  lines draw a point wide and stronger. On a row that draws a highlight every
-  line takes the accent blended toward white instead of gray, so a neutral
-  line never muddies the highlight; the blend is resolved once per appearance
-  and kept until the system colors change, when every row view draws again.
-  Each line draws as one shape at its alpha, so the color does not double
-  where the turn leaves the vertical.
+- **Strength** – every line draws at one strength, a point wide: gray on a
+  plain row, and on a row that draws a highlight the accent blended toward
+  white instead, so a neutral line never muddies the highlight; the blend is
+  resolved once per appearance and kept until the system colors change, when
+  every row view draws again. Each line draws as one shape at its alpha, so
+  the color does not double where the turn leaves the vertical.
 
-A line is active while the row that focuses it — the hovered row, or a
-selected worktree row the list shows — is joined to it. A focus row lights:
-
-- **Its own line**, when it starts one.
-- **Its parent's line**, the one it branches off or ends in, when it starts
-  none and its parent is a worktree.
-- **Nothing** otherwise: a top-level row that starts no line, a worktree row
-  whose only worktree descendants sit in a group under it, a row inside a
-  Remote or Exited group, a header, a group header, a remote session and the
-  scratch prompt.
-
-One set of rules gives every row's part in every line and the lines each focus
-row lights, for both lists: they read a small `GuideHierarchy` protocol — the
-row a row sits under, the rows shown under it, its level, and whether the list
-shows it. `SidebarTree` conforms directly, and the dock reads its preorder rows
-into a `DockGuideHierarchy`. Each list keeps every row's lines once it has
-worked them out: the outline by row ID, from a row's first configuration after
-each apply, with the rest of what the tree gives the row's view; the dock by
-row, worked out again only when its rows' IDs or depths change, so an apply
-that changes only models keeps them. A hover or a selection only looks a row's
-lines up and marks which of them are active.
+One set of rules gives every row's part in every line, for both lists: they
+read a small `GuideHierarchy` protocol — the row a row sits under, the rows
+shown under it, and its level. `SidebarTree` conforms directly, and the dock
+reads its preorder rows into a `DockGuideHierarchy`. Each list keeps every
+row's lines once it has worked them out: the outline by row ID, from a row's
+first configuration after each apply, with the rest of what the tree gives the
+row's view; the dock by row, worked out again only when its rows' IDs or depths
+change, so an apply that changes only models keeps them. A hover that
+reconfigures a row's view only looks the row's lines up.
 
 ## Interaction
 
@@ -496,7 +484,7 @@ repository never depends on which sections show. The dock has no such row.
   its buttons does nothing. It has no context menu, writes no drag payload, and
   takes no drop: onto it and into it reject, and the gap below it reads as the
   gap above it, the end of the last section. It draws no selection, highlight
-  or guide line, and lights no guide line when hovered.
+  or guide line.
 - **Accessibility** – the `+` and label read as one button, "Add Repository",
   and the chevron as "More ways to add a repository".
 
@@ -875,8 +863,8 @@ Most coverage is pure:
   selections, and the plain and ⌘/⇧ branches of a user's selection.
 - **Row drawing** – the highlight's shape and alphas per state and
   appearance, the guide lines' pieces for each role, with the fade and the
-  pin's break, and the shape and focus rules read through the outline's tree
-  and through the dock's rows, which give the same answers.
+  pin's break, and the shape rules read through the outline's tree and
+  through the dock's rows, which give the same answers.
 
 Daemon:
 
