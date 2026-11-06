@@ -12,7 +12,8 @@ enum SessionRestoreWakeOutcome: Sendable, Equatable {
     /// wake got there first, as `.inFlight` or `.notHibernated`, or the row no
     /// longer meets the rule that selected it, as `.conditionNotMet`.
     case skipped
-    /// The wake could not start the session, which stays parked.
+    /// The wake could not start the session. A row that still exists stays
+    /// parked.
     case failed
     /// Start admission held the wake. The session stays parked and the pass ends
     /// when its batch finishes.
@@ -62,17 +63,31 @@ extension RPCRouter {
     /// - Returns: the pass's counts.
     @discardableResult
     func restoreSessionsAfterStartup(parkedSince: Date) async -> SessionRestoreSummary {
-        var summary = SessionRestoreSummary()
-        guard await sessionRestoreEnabled() else { return summary }
+        guard await sessionRestoreEnabled() else { return SessionRestoreSummary() }
         let condition = SessionRestoreCondition(parkedSince: parkedSince)
         let selected = await sessionsToRestore(condition)
-        guard !selected.isEmpty else { return summary }
-        summary.selected = selected.count
+        guard !selected.isEmpty else { return SessionRestoreSummary() }
 
+        let summary = await wakeInBatches(selected, condition: condition)
+        logger.notice("session restore finished: selected \(summary.selected, privacy: .public), woken \(summary.woken, privacy: .public), skipped \(summary.skipped, privacy: .public), failed \(summary.failed, privacy: .public), held \(summary.held, privacy: .public)")
+        return summary
+    }
+
+    /// Wake `selected` a batch at a time, until the batches run out or something
+    /// stops the pass. Apart from the selection so a test can reach the first
+    /// batch on a cancelled task: a cancelled task's database reads fail, so a
+    /// task that enters through the selection stops there.
+    func wakeInBatches(
+        _ selected: [UUID], condition: SessionRestoreCondition
+    ) async -> SessionRestoreSummary {
+        var summary = SessionRestoreSummary(selected: selected.count)
         let batches = stride(from: 0, to: selected.count, by: Self.sessionRestoreBatchSize).map {
             Array(selected[$0..<min($0 + Self.sessionRestoreBatchSize, selected.count)])
         }
         for (index, batch) in batches.enumerated() {
+            // Ahead of the first batch too: a `Daemon.stop()` can land after
+            // selection, and a wake that begins is not cancelled.
+            guard !Task.isCancelled else { break }
             if index > 0 {
                 try? await clock.sleep(for: Self.sessionRestoreBatchGap)
                 // `try?` swallows a cancelled sleep, which returns at once: a
@@ -84,8 +99,6 @@ extension RPCRouter {
             outcomes.forEach { summary.record($0) }
             if outcomes.contains(.held) { break }
         }
-
-        logger.notice("session restore finished: selected \(summary.selected, privacy: .public), woken \(summary.woken, privacy: .public), skipped \(summary.skipped, privacy: .public), failed \(summary.failed, privacy: .public), held \(summary.held, privacy: .public)")
         return summary
     }
 
@@ -134,10 +147,12 @@ extension RPCRouter {
     /// Wake one batch concurrently and wait for every wake to return.
     ///
     /// Each wake runs in an unstructured task, which does not inherit the pass's
-    /// cancellation as a group child would. A wake that has begun must finish:
-    /// the database throws on a cancelled task, which would report a false
-    /// `.notFound`, abandon a holder the wake had just started, or leave a live
-    /// session under a parked row.
+    /// cancellation as a group child would. The database throws on a cancelled
+    /// task, which would report a false `.notFound`, abandon a holder the wake
+    /// had just started, or leave a live session under a parked row. So cancelling
+    /// the pass does not stop a wake that has begun, but nothing guarantees that
+    /// it finishes: `Daemon.stop()` does not await the pass, so `Foundation.exit(0)`
+    /// can still end a wake partway, the same exposure as an RPC wake in flight.
     private func wakeBatchForRestore(
         _ batch: [UUID], condition: SessionRestoreCondition
     ) async -> [SessionRestoreWakeOutcome] {

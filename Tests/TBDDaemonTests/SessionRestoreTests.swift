@@ -151,13 +151,15 @@ struct SessionRestoreTests {
     }
 
     /// A parked row whose transcript last changed `age` seconds before startup.
-    private func parkWithTranscript(in fixture: Fixture, age: Int) async throws -> UUID {
+    private func parkWithTranscript(
+        in fixture: Fixture, age: Int, worktree: Worktree? = nil
+    ) async throws -> UUID {
         let url = fixture.directory.appendingPathComponent("\(UUID().uuidString).jsonl")
         try Data("{}\n".utf8).write(to: url)
         try FileManager.default.setAttributes(
             [.modificationDate: Self.thisStartup.addingTimeInterval(Double(-age))],
             ofItemAtPath: url.path)
-        return try await park(in: fixture, transcriptPath: url.path)
+        return try await park(in: fixture, worktree: worktree, transcriptPath: url.path)
     }
 
     /// The user wakes the row and it parks again, stamped after this startup so
@@ -551,6 +553,32 @@ struct SessionRestoreTests {
         #expect(try await awake(ids, in: fixture.db) == Set(ids.prefix(3)))
     }
 
+    /// A cancelled task's database reads fail, so a task cancelled before the
+    /// pass begins stops at its flag read. A `Daemon.stop()` landing after
+    /// selection has no read left to stop it, so this enters at the batches. The
+    /// latch holds the task until the cancellation has landed.
+    @Test("a task cancelled before the first batch wakes nothing")
+    func cancellationBeforeTheFirstBatchWakesNothing() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let ids = try await parkRows(4, in: fixture)
+        let router = fixture.router
+        let condition = SessionRestoreCondition(parkedSince: Self.thisStartup)
+        let latch = WakeLatch()
+        let pass = Task {
+            await latch.wait()
+            return await router.wakeInBatches(ids, condition: condition)
+        }
+
+        pass.cancel()
+        await latch.release()
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 4))
+        #expect(try await awake(ids, in: fixture.db).isEmpty)
+        #expect(try wakeRequests(at: fixture.logPath).isEmpty)
+    }
+
     /// The cancellation lands while one wake is held inside its admission check.
     /// A wake that inherited it would fail its next database read, so the row
     /// would read as not found and stay parked.
@@ -817,6 +845,39 @@ struct SessionRestoreTests {
         let summary = await pass.value
         #expect(summary == SessionRestoreSummary(selected: 4, woken: 3, skipped: 1))
         #expect(try await awake(ids + [row], in: fixture.db) == Set(ids))
+    }
+
+    /// An archive that has finished has deleted the worktree's rows, so the wake
+    /// has no row to ask the rule about and answers not found. Nothing but the
+    /// error text would set this apart from any other row that went missing, so
+    /// it counts as failed.
+    @Test("a row deleted during a gap counts as failed and the pass goes on")
+    func rowDeletedDuringAGapCountsAsFailed() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let first = try await parkRows(3, in: fixture)
+        let worktree = try await makeWorktree(in: fixture)
+        let deleted = try await parkWithTranscript(in: fixture, age: 3, worktree: worktree)
+        let rest = [
+            try await parkWithTranscript(in: fixture, age: 4),
+            try await parkWithTranscript(in: fixture, age: 5),
+            try await parkWithTranscript(in: fixture, age: 6),
+        ]
+        let pass = startPass(fixture)
+
+        try await fixture.clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        try await fixture.db.worktrees.archive(id: worktree.id)
+        try await fixture.db.terminals.deleteForWorktree(worktreeID: worktree.id)
+        await fixture.clock.advance(by: Self.gap)
+        try await fixture.clock.requireAdvanceWhenArmed(
+            by: Self.gap, timeout: TestDeadlines.saturatedPass)
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 7, woken: 6, failed: 1))
+        let others = first + rest
+        #expect(try await awake(others, in: fixture.db) == Set(others))
+        let row = try await fixture.db.terminals.get(id: deleted)
+        #expect(row == nil)
     }
 
     @Test("a wake whose condition is not met starts nothing and changes nothing")

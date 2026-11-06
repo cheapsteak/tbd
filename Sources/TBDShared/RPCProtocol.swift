@@ -4212,8 +4212,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
     /// Whether the restore pass is on (`session_restore_enabled`). Default OFF
     /// while it soaks. Resolved through `Config.sessionRestoreDefault`.
-    /// Assigned after construction, for the type-checker reason
-    /// `profileBalancingEnabled` gives.
+    /// The initializer takes it as a defaulted parameter. The daemon leaves that
+    /// parameter out and assigns this after construction, for the type-checker
+    /// reason `profileBalancingEnabled` gives.
     public var sessionRestoreEnabled: Bool = Config.sessionRestoreDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
