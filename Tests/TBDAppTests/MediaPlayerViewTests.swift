@@ -93,6 +93,15 @@ private final class PlayerScene {
     }
 }
 
+/// Carries a main-actor view into a `@Sendable` poll closure. A
+/// `@MainActor` final class that is not an `NSView` is Sendable, and every
+/// read of `value` happens on the main actor.
+@MainActor
+private final class MainActorRef<Value: AnyObject> {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// The class a failure callback flips, so the test can read it afterwards.
 @MainActor
 private final class FailureFlag {
@@ -304,12 +313,13 @@ struct MediaPlayerViewTests {
         host.load(url: url, revision: 1)
 
         let start = ContinuousClock.now
+        let hostRef = MainActorRef(host)
         let ready = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
         ) { @Sendable in
             await MainActor.run {
                 RunLoopPump.turn()
-                guard let item = host.player?.currentItem else { return false }
+                guard let item = hostRef.value.player?.currentItem else { return false }
                 return ObjectIdentifier(item) != firstItemID && item.status == .readyToPlay
             }
         }
@@ -338,12 +348,13 @@ struct MediaPlayerViewTests {
 @discardableResult
 private func waitForHiddenAudioOnlyIndicators(in host: MediaPlayerHostView, phase: String) async -> Bool {
     let start = ContinuousClock.now
+    let hostRef = MainActorRef(host)
     let outcome = await pollUntilTrue(
         timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
     ) { @Sendable in
         await MainActor.run {
             RunLoopPump.turn()
-            let indicators = audioOnlyIndicators(under: host.playerView)
+            let indicators = audioOnlyIndicators(under: hostRef.value.playerView)
             return !indicators.isEmpty && indicators.allSatisfy { $0.isHidden }
         }
     }
