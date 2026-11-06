@@ -267,4 +267,10 @@ enum ActuationRail {
     /// report moving a bound remote worktree row out of — or back into — the
     /// active list. No RPC carried it, so the sync writes its own row.
     static let remoteFilingSync = "remote-filing-sync"
+    /// The startup restore pass waking the Claude sessions that startup parked.
+    /// Unlike its neighbours, this rail goes through the `terminal.wake` handler
+    /// rather than around the router, so the wake's own row names it. It is the
+    /// one daemon rail `StartAdmissionActorRule` checks: a program starting many
+    /// agents with no gesture is the case the gate exists for.
+    static let sessionRestore = "session-restore"
 }

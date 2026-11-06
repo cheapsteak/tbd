@@ -429,6 +429,8 @@ actor TerminalTransportMigrator {
             return "this session moved to the pty holder, but its account could not be resolved (profile \(profileID.uuidString)), so it was not resumed"
         case .paneBusy(let pid):
             return "this session moved to the pty holder, but another process (pid \(pid)) still holds its terminal, so it was not resumed"
+        case .conditionNotMet:
+            return "this session moved to the pty holder, but it no longer met the condition on this wake, so it was not resumed; focus the tab to start it there"
         }
     }
 }

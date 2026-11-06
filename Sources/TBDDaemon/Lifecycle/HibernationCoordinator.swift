@@ -127,6 +127,11 @@ public enum WakeResult: Equatable, Sendable {
     /// row stays exit-stamped, so a retry once the process finishes still
     /// wakes. Carries the foreground pid so the message can name it.
     case paneBusy(pid: Int32)
+    /// The caller named a `SessionRestoreCondition` and this parked row no
+    /// longer meets it. Nothing was started and the row stays exactly as it was,
+    /// because the row is no longer the one the caller chose. Only a wake that
+    /// names a condition gets this answer.
+    case conditionNotMet
 }
 
 /// What moving a RUNNING session with nothing to resume onto the pty holder
@@ -1679,7 +1684,12 @@ public actor HibernationCoordinator {
     /// holder row is classified against the process table rather than against a
     /// pane, because a holder row's pane id is the empty string by construction
     /// and tmux answers for it by reporting the pane gone.
-    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
+    ///
+    /// `condition` limits a wake to the rows its caller chose. A parked row that
+    /// no longer meets it answers `.conditionNotMet`. A row that changes after
+    /// the check loses the compare-and-set each mechanic makes before it starts
+    /// anything.
+    public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil, condition: SessionRestoreCondition? = nil) async -> WakeResult {
         // Claim synchronously, before the first suspension. Otherwise two wake
         // calls can both read the parked row, then each pass the in-flight check
         // after actor reentrancy lets them interleave. Keep the claim across all
@@ -1745,6 +1755,15 @@ public actor HibernationCoordinator {
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
+        }
+        // Asked of the row this call read, after its claim, because anything the
+        // caller checked before calling can be stale by now: start admission
+        // alone runs between the two. Ahead of the directory check, so a worktree
+        // whose archive has already removed its directory answers this and not
+        // `.worktreeMissing`.
+        if let condition, !condition.isMet(by: terminal, worktreeStatus: worktree.status) {
+            logger.info("wake: terminal \(terminal.id, privacy: .public) no longer meets this wake's condition; leaving it as it is")
+            return .conditionNotMet
         }
         // Never respawn into a missing directory: tmux's `-c` silently falls
         // back to $HOME, and the resumed claude would neither find its session

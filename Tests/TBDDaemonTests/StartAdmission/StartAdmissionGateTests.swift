@@ -54,6 +54,34 @@ struct StartAdmissionGateTests {
         #expect(StartAdmissionActorRule.isChecked(nil))
     }
 
+    @Test func theSessionRestoreRailIsChecked() {
+        #expect(StartAdmissionActorRule.isChecked(
+            ActuationActor.daemon(rail: ActuationRail.sessionRestore)))
+    }
+
+    @Test("every other daemon rail, and a daemon actor with no rail, stays unchecked",
+          arguments: [
+            nil, ActuationRail.limitResume, ActuationRail.autoHibernate,
+            ActuationRail.autoHibernateOnMerge, ActuationRail.autoArchiveOnMerge,
+            ActuationRail.reconcile, ActuationRail.queuedPrompt, ActuationRail.remoteFilingSync,
+          ] as [String?])
+    func otherDaemonRailsStayUnchecked(rail: String?) {
+        #expect(!StartAdmissionActorRule.isChecked(ActuationActor.daemon(rail: rail)))
+    }
+
+    /// The exception belongs to the daemon's rail, not to the name: an app actor
+    /// that carries it is still never checked.
+    @Test func theRailNameDoesNotCheckTheApp() {
+        #expect(!StartAdmissionActorRule.isChecked(ActuationActor.app))
+        #expect(!StartAdmissionActorRule.isChecked(
+            ActuationActor(kind: ActuationActor.Kind.app, rail: ActuationRail.sessionRestore)))
+    }
+
+    /// The rule by kind has no rail to read, so a daemon kind stays unchecked.
+    @Test func theKindRuleKeepsTheDaemonUnchecked() {
+        #expect(!StartAdmissionActorRule.isChecked(kind: ActuationActor.Kind.daemon))
+    }
+
     // MARK: - Verdicts
 
     @Test func exitZeroAdmits() async throws {

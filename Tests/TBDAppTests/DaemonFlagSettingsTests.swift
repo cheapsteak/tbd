@@ -127,6 +127,22 @@ struct DaemonFlagSettingsTests {
         #expect(GeneralSettingsTab.remoteTranscriptLiveSyncHelp.contains("transcript hint"))
     }
 
+    /// The caption is the toggle's whole explanation, and it carries the promise
+    /// that a hibernated session stays asleep.
+    @Test("the session restore caption says who comes back and who stays asleep")
+    func sessionRestoreCaptionStatesItsPromise() {
+        #expect(GeneralSettingsTab.sessionRestoreCaption == "When TBD starts, Claude sessions that were "
+            + "running come back, a few at a time. Hibernated sessions stay asleep.")
+    }
+
+    @Test("a daemon that does not report session restore reads it as the shipped default")
+    func unreportedSessionRestoreReadsTheDefault() throws {
+        let decoded = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: Data(#"{"controlModeEnabled":false}"#.utf8))
+        #expect(decoded.sessionRestoreEnabled == Config.sessionRestoreDefault)
+        #expect(Config.sessionRestoreDefault == false, "the flag ships off while it soaks")
+    }
+
     @Test("a daemon that does not report remote transcript live sync reads it as off")
     func unreportedRemoteTranscriptLiveSyncReadsOff() throws {
         let decoded = try JSONDecoder().decode(
@@ -145,6 +161,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     case transcriptPromptAnswer
     case transcriptStreaming
     case remoteTranscriptLiveSync
+    case sessionRestore
 
     var testDescription: String { rawValue }
 
@@ -157,6 +174,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: state.transcriptPromptAnswerFlagSetter = setter
         case .transcriptStreaming: state.transcriptStreamingFlagSetter = setter
         case .remoteTranscriptLiveSync: state.remoteTranscriptLiveSyncFlagSetter = setter
+        case .sessionRestore: state.sessionRestoreFlagSetter = setter
         }
     }
 
@@ -169,6 +187,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: await state.setTranscriptPromptAnswerEnabled(enabled)
         case .transcriptStreaming: await state.setTranscriptStreamingEnabled(enabled)
         case .remoteTranscriptLiveSync: await state.setRemoteTranscriptLiveSyncEnabled(enabled)
+        case .sessionRestore: await state.setSessionRestoreEnabled(enabled)
         }
     }
 
@@ -181,6 +200,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: result.transcriptPromptAnswerEnabled = enabled
         case .transcriptStreaming: result.transcriptStreamingEnabled = enabled
         case .remoteTranscriptLiveSync: result.remoteTranscriptLiveSyncEnabled = enabled
+        case .sessionRestore: result.sessionRestoreEnabled = enabled
         }
         return result
     }
@@ -194,6 +214,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptPromptAnswer: return capabilities.transcriptPromptAnswerEnabled
         case .transcriptStreaming: return capabilities.transcriptStreamingEnabled
         case .remoteTranscriptLiveSync: return capabilities.remoteTranscriptLiveSyncEnabled
+        case .sessionRestore: return capabilities.sessionRestoreEnabled
         }
     }
 }

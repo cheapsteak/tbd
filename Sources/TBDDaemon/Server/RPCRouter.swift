@@ -1040,6 +1040,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
                 return try await handleConfigSetQueuedPrompt(request.paramsData)
+            case RPCMethod.configSetSessionRestore:
+                return try await handleConfigSetSessionRestore(request.paramsData)
             case RPCMethod.configSetClaudeCloud:
                 return try await handleConfigSetClaudeCloud(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
@@ -1222,6 +1224,7 @@ public final class RPCRouter: Sendable {
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
+        result.sessionRestoreEnabled = config.sessionRestoreEnabled
         return try RPCResponse(result: result)
     }
 

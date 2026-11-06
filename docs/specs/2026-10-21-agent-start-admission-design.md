@@ -61,13 +61,16 @@ Each request carries its `ActuationActor`. The gate checks every actor except tw
 
 - `app` is never checked. Everything the app sends follows something the person did in
   it, including the wake that selecting a parked tab performs.
-- `daemon` is never checked. TBD's own rails (startup recovery of a half-created
-  worktree, and any transport migration TBD starts itself) are out of scope for this
-  version.
+- `daemon` is not checked, with one exception by rail name. TBD's own rails (startup
+  recovery of a half-created worktree, and any transport migration TBD starts itself) are
+  out of scope for this gate. The exception is `session-restore`, the startup pass in
+  [`2026-11-06-session-restore-after-restart-design.md`](2026-11-06-session-restore-after-restart-design.md).
+  It starts many agents with no gesture, the case the gate exists for, and it is checked.
 
 So `session` (a `tbd` command run inside a TBD terminal, usually an agent), `anonymous` (a
-`tbd` command run outside TBD, usually a script or another tool's timer), and any kind a
-newer client declares are all checked. The actor is self-declared, not authenticated
+`tbd` command run outside TBD, usually a script or another tool's timer), the
+`session-restore` daemon rail, and any kind a newer client declares are all checked. The
+actor is self-declared, not authenticated
 (`ActuationActor.swift`). This is a resource policy, not a security boundary: a caller that
 claims to be the app defeats only its own user's policy.
 
@@ -238,7 +241,7 @@ a message naming the flag; `off` and `status` always work. Turning the flag off 
 
 ## Not in this version
 
-- Checking TBD's own daemon rails.
+- Checking TBD's own daemon rails, other than `session-restore`.
 - A queue of held starts inside TBD, with retries.
 - Toggles in the app's settings; `tbd config set` sets both flags.
 

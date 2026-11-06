@@ -159,6 +159,20 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the session restore flag (design 2026-11-06).
+    ///
+    /// Either value is an explicit gesture that takes the backing column out of
+    /// its NULL "never chose" state for good. The restore pass reads the flag
+    /// before each batch, so writing `false` during a pass stops it after the
+    /// current batch.
+    func handleConfigSetSessionRestore(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetSessionRestoreParams.self, from: paramsData)
+        try await db.config.setSessionRestore(params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
     ///
     /// The daemon builds its provider manager, and registers the built-in
