@@ -281,8 +281,12 @@ struct MediaPlayerViewTests {
 
     /// For an item with no video track, AVKit adds a private view that fills
     /// the player with opaque grey once the item is ready to play, and the
-    /// host hides it. The wait needs the view present as well as hidden,
-    /// because "none visible" also holds before AVKit has added it.
+    /// host hides it, for the first item and again for the item a reload puts
+    /// in its place. Each wait needs the view present as well as hidden,
+    /// because "none visible" also holds before AVKit has added it, and the
+    /// reload's wait starts only once the new item is ready, so a view AVKit
+    /// kept from the first item cannot satisfy it early. Whether AVKit reuses
+    /// that view or builds a new one is left open.
     @Test func hidesAVKitsAudioOnlyIndicator() async throws {
         let fixtures = try MediaFixtures()
         defer { fixtures.remove() }
@@ -293,27 +297,75 @@ struct MediaPlayerViewTests {
 
         host.load(url: url, revision: 0)
         host.player?.isMuted = true
+        guard await waitForHiddenAudioOnlyIndicators(in: host, phase: "first load") else { return }
+
+        let firstItem = try #require(host.player?.currentItem)
+        let firstItemID = ObjectIdentifier(firstItem)
+        host.load(url: url, revision: 1)
 
         let start = ContinuousClock.now
-        let outcome = await pollUntilTrue(
+        let ready = await pollUntilTrue(
             timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
         ) { @Sendable in
             await MainActor.run {
                 RunLoopPump.turn()
-                let indicators = audioOnlyIndicators(under: host.playerView)
-                return !indicators.isEmpty && indicators.allSatisfy { $0.isHidden }
+                guard let item = host.player?.currentItem else { return false }
+                return ObjectIdentifier(item) != firstItemID && item.status == .readyToPlay
             }
         }
-        if outcome == .timedOut {
+        guard ready == .satisfied else {
+            if ready == .timedOut {
+                let current = host.player?.currentItem
+                let status = current === firstItem
+                    ? "still the first item"
+                    : "new, \(statusName(of: current))"
+                recordAudioOnlyIndicatorTimeout(
+                    in: host, phase: "reload, waiting for the new item to be ready",
+                    itemStatus: status, since: start)
+            }
+            return
+        }
+        #expect(host.player?.currentItem !== firstItem)
+
+        await waitForHiddenAudioOnlyIndicators(in: host, phase: "reload")
+    }
+}
+
+/// Polls until at least one audio-only indicator sits under `host`'s player
+/// view and every one of them is hidden. On a timeout it records what it last
+/// saw, naming `phase`. Returns whether the wait succeeded.
+@MainActor
+@discardableResult
+private func waitForHiddenAudioOnlyIndicators(in host: MediaPlayerHostView, phase: String) async -> Bool {
+    let start = ContinuousClock.now
+    let outcome = await pollUntilTrue(
+        timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+    ) { @Sendable in
+        await MainActor.run {
+            RunLoopPump.turn()
             let indicators = audioOnlyIndicators(under: host.playerView)
-            Issue.record(AudioOnlyIndicatorTimeout(
-                found: indicators.count,
-                visible: indicators.filter { !$0.isHidden }.count,
-                itemStatus: statusName(of: host.player?.currentItem),
-                viewClasses: viewClassNames(under: host.playerView),
-                elapsed: ContinuousClock.now - start))
+            return !indicators.isEmpty && indicators.allSatisfy { $0.isHidden }
         }
     }
+    if outcome == .timedOut {
+        recordAudioOnlyIndicatorTimeout(
+            in: host, phase: phase, itemStatus: statusName(of: host.player?.currentItem), since: start)
+    }
+    return outcome == .satisfied
+}
+
+@MainActor
+private func recordAudioOnlyIndicatorTimeout(
+    in host: MediaPlayerHostView, phase: String, itemStatus: String, since start: ContinuousClock.Instant
+) {
+    let indicators = audioOnlyIndicators(under: host.playerView)
+    Issue.record(AudioOnlyIndicatorTimeout(
+        phase: phase,
+        found: indicators.count,
+        visible: indicators.filter { !$0.isHidden }.count,
+        itemStatus: itemStatus,
+        viewClasses: viewClassNames(under: host.playerView),
+        elapsed: ContinuousClock.now - start))
 }
 
 /// Every view under `view` whose class is AVKit's audio-only indicator,
@@ -356,6 +408,7 @@ private func statusName(of item: AVPlayerItem?) -> String {
 /// What the audio-only indicator wait last saw, recorded as an error so the
 /// diagnostic lands on the failure's primary line.
 private struct AudioOnlyIndicatorTimeout: Error, CustomStringConvertible {
+    let phase: String
     let found: Int
     let visible: Int
     let itemStatus: String
@@ -363,7 +416,7 @@ private struct AudioOnlyIndicatorTimeout: Error, CustomStringConvertible {
     let elapsed: Duration
 
     var description: String {
-        "audio-only indicator: found \(found), \(visible) still visible, item \(itemStatus), "
+        "audio-only indicator (\(phase)): found \(found), \(visible) still visible, item \(itemStatus), "
             + "after \(elapsed); views under the player: \(viewClasses.joined(separator: ", "))"
     }
 }
