@@ -48,14 +48,23 @@ enum StartAdmissionVerdict: Sendable, Equatable {
 /// Every actor kind is checked except two: `app` (everything the app sends
 /// follows something the person did in it, including the wake that selecting a
 /// parked tab performs) and `daemon` (TBD's own rails are out of scope for this
-/// version). No declared actor is the anonymous actor and is checked. The
-/// actor is self-declared, so this is a resource policy and not a security
-/// boundary.
+/// gate). One daemon rail is the exception: `session-restore` starts many
+/// agents with no gesture, the case the gate exists for, so it is checked and
+/// every other daemon rail is not. No declared actor is the anonymous actor and
+/// is checked. The actor is self-declared, so this is a resource policy and not
+/// a security boundary.
 enum StartAdmissionActorRule {
     static func isChecked(_ actor: ActuationActor?) -> Bool {
-        isChecked(kind: (actor ?? .anonymous).kind)
+        let actor = actor ?? .anonymous
+        if actor.kind == ActuationActor.Kind.daemon,
+           actor.rail == ActuationRail.sessionRestore {
+            return true
+        }
+        return isChecked(kind: actor.kind)
     }
 
+    /// The rule by kind alone. A daemon actor reads as unchecked here, because
+    /// its one exception is named by rail.
     static func isChecked(kind: String) -> Bool {
         kind != ActuationActor.Kind.app && kind != ActuationActor.Kind.daemon
     }

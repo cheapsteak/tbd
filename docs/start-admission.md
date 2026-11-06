@@ -20,7 +20,8 @@ TBD runs it with a 10 second limit, the daemon's own environment, and:
 
 - **`TBD_START_KIND`** – `create` or `wake`.
 - **`TBD_AGENT`** – `claude` or `codex`.
-- **`TBD_ACTOR`** – who asked: `session`, `anonymous`, or a kind a newer client declared.
+- **`TBD_ACTOR`** – who asked: `session`, `anonymous`, `daemon` (the session restore pass after a
+  restart), or a kind a newer client declared.
 - **`TBD_WORKTREE_ID`** – the worktree the start belongs to.
 - **`TBD_TERMINAL_ID`** – the terminal, when the start names one.
 
@@ -61,5 +62,6 @@ again. A held transport move leaves the session running where it is and lists it
 Also checked: recreating a Codex tab's window, and moving a running Claude session to the pty
 holder. Not checked: shell and dev-server tabs, a wake of a tab that is not parked or is Codex's
 (the wake refuses it), a move or
-window recreate that starts no agent, remote sessions, and TBD's own daemon rails. The actor is self-declared,
-so this is a resource policy and not a security boundary.
+window recreate that starts no agent, remote sessions, and TBD's own daemon rails other than the
+session restore pass, which starts many agents with no gesture. The actor is self-declared, so this
+is a resource policy and not a security boundary.

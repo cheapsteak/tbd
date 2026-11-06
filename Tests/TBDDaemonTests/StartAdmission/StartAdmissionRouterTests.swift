@@ -114,6 +114,24 @@ struct StartAdmissionRouterTests {
         }
     }
 
+    @Test("the restore rail's wake is checked, and another daemon rail's is not")
+    func daemonRailsAgainstAWake() async throws {
+        let fixture = try await makeFixture()
+        let worktree = try await makeWorktree(in: fixture.db)
+        let terminal = try await makeParkedClaude(in: fixture.db, worktree: worktree)
+
+        let otherRail = await fixture.router.holdWakeIfDenied(
+            "id", actor: .daemon(rail: ActuationRail.limitResume), terminalID: terminal.id)
+        #expect(otherRail == nil)
+        #expect(fixture.stub.requests.isEmpty)
+
+        let restoreRail = await fixture.router.holdWakeIfDenied(
+            "id", actor: .daemon(rail: ActuationRail.sessionRestore), terminalID: terminal.id)
+        #expect(restoreRail?.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(fixture.stub.requests.map(\.kind) == [.wake])
+        #expect(fixture.stub.requests.first?.actorKind == ActuationActor.Kind.daemon)
+    }
+
     @Test("a start with no declared actor is checked as anonymous")
     func undeclaredActorIsAnonymous() async throws {
         let fixture = try await makeFixture()
