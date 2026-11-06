@@ -231,6 +231,9 @@ public final class Daemon: Sendable {
     /// whenever `modChannelServer` is.
     nonisolated(unsafe) var modDisconnectSweep: ModDisconnectSweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
+    /// The startup restore pass (`nil` in mock mode). Nothing awaits it; it is
+    /// held so `stop()` can end a running pass between batches.
+    public nonisolated(unsafe) var sessionRestoreTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
     /// drives.
@@ -1495,6 +1498,11 @@ public final class Daemon: Sendable {
         // reap shared scratch servers; once serving begins, a terminal-create
         // RPC can have created and stamped a window whose DB row has not yet
         // landed, so that full sweep is no longer safe.
+        //
+        // The moment is taken first because it is what the restore pass (step
+        // 15) reads `hibernatedAt` against: every park at or after it is this
+        // startup's.
+        let startupReconcileBegan = Date()
         if mockMode == nil {
             await rpcRouter.hibernationCoordinator.reconcileOnStartup()
         }
@@ -2268,6 +2276,18 @@ public final class Daemon: Sendable {
                     await hibernationCoordinator.sweep()
                 }
             }
+
+            // 15. Restore the sessions this startup parked, when
+            // `session_restore_enabled` says so. Last, because the wakes are
+            // ordinary `terminal.wake` calls: everything they reach must be up,
+            // and with every listener serving, the app sees each row wake and
+            // the operator can turn the setting off during the pass. Detached
+            // with nothing awaiting it, because the pass sleeps between batches
+            // and 28 sessions take about 90 seconds, which must not delay
+            // startup.
+            self.sessionRestoreTask = Task.detached { [rpcRouter] in
+                _ = await rpcRouter.restoreSessionsAfterStartup(parkedSince: startupReconcileBegan)
+            }
         } else {
             daemonLogger.info("Mock mode: skipping periodic background tasks")
         }
@@ -2278,6 +2298,9 @@ public final class Daemon: Sendable {
     /// Stop the daemon: shut down servers, remove PID and socket files.
     public func stop() async {
         daemonLogger.info("Shutting down...")
+
+        // No further batch of restored sessions may start during a shutdown.
+        sessionRestoreTask?.cancel()
 
         // Stop Claude usage pollers before other background tasks.
         if let poller = claudeUsagePoller {
