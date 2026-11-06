@@ -110,8 +110,16 @@ after its singleflight claim, on the row it has just read. A check in the pass w
 because the admission command can run for up to 10 seconds before the wake.
 
 On a mismatch the wake answers `.conditionNotMet`, starts nothing and changes nothing, and the pass
-counts the row as skipped. A row that changes after that check loses the compare-and-set every wake
-makes before it starts anything. Every other caller names no condition and behaves as before.
+counts the row as skipped. Every other caller names no condition and behaves as before.
+
+An archive flips the worktree's status before it deletes the worktree's rows. A row whose status has
+flipped counts as skipped. A row already deleted answers `.notFound` and counts as failed, and the
+pass continues.
+
+A row that changes after the check loses the compare-and-set every wake makes before it starts
+anything. That compare-and-set covers the row, not the worktree status, so an archive landing after
+the check is the same race every holder wake has, and `registry.abandon`, the failed
+`setHolderProcess` path and `reclaimRowlessHolders` own its outcomes.
 
 ### Start admission
 
@@ -127,6 +135,9 @@ nothing.
 A hold ends the pass when its batch finishes. The held row records its reason, and its parked pane
 shows it through the existing "Automatic wake held" line. The rest stay parked with no further
 command run. Opening any of them still wakes it, because app wakes are not checked.
+
+Admission runs before the wake's check, so a row parked again during a pass can still be held: it
+keeps the hold line until its next wake and ends the pass, and no session starts.
 
 ### Failure
 
@@ -236,12 +247,14 @@ Pass behavior, on a test clock:
 - A failed wake leaves the row parked and the pass continues.
 - A hold records its reason on the row, ends the pass after its batch, and no later batch runs the
   command.
+- Cancelling the pass before the first batch wakes nothing.
 - Cancelling the pass during a batch lets that batch finish, and no further batch starts.
 - `.inFlight` and `.notHibernated` count as skipped.
 - A row parked again with `manual`, `exited`, `merged` or `auto` during a gap stays parked with that
   reason and counts as skipped, and so does a `manual` or `exited` row parked again during its
   wake's admission check.
-- A row whose worktree is archived during a gap stays parked and counts as skipped.
+- A row whose worktree status flips to `archived` during a gap stays parked and counts as skipped.
+- A row deleted during a gap counts as failed, and the pass continues.
 - A wake whose condition is not met starts nothing and leaves the row unchanged, and a wake that
   names no condition still wakes a `manual` row.
 - Each wake's actuation row names the `session-restore` rail.
