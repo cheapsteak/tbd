@@ -1,0 +1,13 @@
+-- Gate for the restore pass: after a startup that found Claude sessions dead
+-- and parked them, the daemon restarts those sessions a few at a time
+-- (docs/specs/2026-11-06-session-restore-after-restart-design.md). The pass
+-- acts with no gesture and starts agent processes in a burst at login, so it
+-- soaks behind its own switch. Whether to restore is also a real preference,
+-- so the toggle outlives the soak.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place: Config.sessionRestoreDefault.
+ALTER TABLE config ADD COLUMN session_restore_enabled INTEGER;

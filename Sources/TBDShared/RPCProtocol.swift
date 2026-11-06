@@ -324,6 +324,11 @@ public enum RPCMethod {
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
+    /// The session restore gate (`session_restore_enabled`). Read at the start
+    /// of the restore pass and before each later batch, so turning it off stops
+    /// a running pass. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetSessionRestore = "config.setSessionRestore"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
@@ -3462,6 +3467,18 @@ public struct ConfigSetQueuedPromptParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setSessionRestore` — the session restore flag (default
+/// OFF, design 2026-11-06). The restore pass reads it at startup and before
+/// each later batch, so no daemon restart is required.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays off even after the
+/// shipped default graduates.
+public struct ConfigSetSessionRestoreParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setClaudeCloud` — the Claude cloud sessions gate
 /// (design 2026-08-15 §7, default OFF). A second gate inside
 /// `remote_backends_enabled`, never a bypass.
@@ -4192,6 +4209,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
     public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
+    /// Whether the restore pass is on (`session_restore_enabled`). Default OFF
+    /// while it soaks. Resolved through `Config.sessionRestoreDefault`.
+    /// Assigned after construction, for the type-checker reason
+    /// `profileBalancingEnabled` gives.
+    public var sessionRestoreEnabled: Bool = Config.sessionRestoreDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4229,7 +4251,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 ptyHolderEnabled: Bool = false,
                 ptyHolderSupported: Bool = false,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
-                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault) {
+                profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
+                sessionRestoreEnabled: Bool = Config.sessionRestoreDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -4335,6 +4358,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
+        // A daemon that does not send it knows nothing about the pass, so fall
+        // through to the shipped default.
+        sessionRestoreEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .sessionRestoreEnabled) ?? Config.sessionRestoreDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)

@@ -324,6 +324,20 @@ extension AppState {
         }
     }
 
+    /// Persist the session restore flag, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state. Applies at the
+    /// next daemon startup; turning it off also stops a running restore pass
+    /// after its current batch.
+    func setSessionRestoreEnabled(_ enabled: Bool) async {
+        do {
+            try await sessionRestoreFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set session restore: \(error, privacy: .public)")
+            showAlert("Failed to set session restore: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Help text for the pty-holder transport toggle.
     ///
     /// A stored constant rather than a literal in the view so it is assertable:

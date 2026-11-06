@@ -242,6 +242,7 @@ struct GeneralSettingsTab: View {
                 }
 
                 composerDraftToggle
+                sessionRestoreToggle
             }
 
             Section("Remote Sessions") {
@@ -517,6 +518,24 @@ struct GeneralSettingsTab: View {
         + "text, so it stays on while auto-hibernation is on. If TBD can't confirm a draft is saved, such "
         + "as one holding a large paste, automatic hibernation skips the session; hibernating it yourself "
         + "goes ahead. Applies to sessions started after a change."
+
+    /// Restart the Claude sessions a startup found dead. Reads the persisted
+    /// flag from `daemon.capabilities` and writes via
+    /// `config.setSessionRestore`. Off by default (soaking).
+    @ViewBuilder
+    private var sessionRestoreToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Restart running sessions after a reboot", isOn: Binding(
+            get: { capabilities?.sessionRestoreEnabled ?? Config.sessionRestoreDefault },
+            set: { newValue in Task { await appState.setSessionRestoreEnabled(newValue) } }
+        ))
+        Text(Self.sessionRestoreCaption)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    static let sessionRestoreCaption = "When TBD starts, Claude sessions that were running come back, "
+        + "a few at a time. Hibernated sessions stay asleep."
 
     /// Record each Claude session's context window, rate limits and cost
     /// through the session mod. Reads `daemon.capabilities`, writes

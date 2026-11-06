@@ -1310,6 +1310,17 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the session restore flag (default OFF). The restore pass reads
+    /// it at startup and before each later batch, so no daemon restart is
+    /// needed; sending either value is an explicit gesture that survives a
+    /// later change to the shipped default.
+    func setSessionRestore(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetSessionRestore,
+            params: ConfigSetSessionRestoreParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pty-holder transport gate (default ON). Read fresh at spawn
     /// time, so no daemon restart is needed — but it applies only to sessions
     /// created after the call: a session records its transport at creation and

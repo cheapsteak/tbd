@@ -1800,6 +1800,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
     /// Read on every create, so a change takes effect at the next one.
     public var cloneCheckoutEnabled: Bool = Config.cloneCheckoutDefault
+    /// Restart the Claude sessions a daemon startup found dead, a few at a
+    /// time. Resolved as `session_restore_enabled ?? Config.sessionRestoreDefault`,
+    /// and never stored. Read before each batch of the restore pass, so turning
+    /// it off stops a running pass.
+    /// Assigned after construction by the daemon, like `composerDraftEnabled`.
+    public var sessionRestoreEnabled: Bool = Config.sessionRestoreDefault
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1951,6 +1957,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `cloneCheckoutEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let cloneCheckoutDefault = false
+    /// The shipped default for `sessionRestoreEnabled`, and the single place it
+    /// lives. Ships off; the backing column has no SQL default, so graduation
+    /// is a change to this constant, reaching everyone who never chose and
+    /// keeping every explicit choice.
+    public static let sessionRestoreDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1987,7 +1998,8 @@ public struct Config: Codable, Sendable, Equatable {
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
                 remoteCreateDefaults: [String: String] = [:],
-                holderOwnerToken: String? = nil) {
+                holderOwnerToken: String? = nil,
+                sessionRestoreEnabled: Bool = Config.sessionRestoreDefault) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -2023,6 +2035,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.prPollScheduleEnabled = prPollScheduleEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
+        self.sessionRestoreEnabled = sessionRestoreEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -2148,6 +2161,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
+        sessionRestoreEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .sessionRestoreEnabled) ?? Config.sessionRestoreDefault
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(

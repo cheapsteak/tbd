@@ -187,6 +187,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.cloneCheckoutDefault`, never through `?? false`.
     var clone_checkout_enabled: Bool?
+    /// Session restore gate. **Genuinely tri-state**: the
+    /// `20261106120000_config_session_restore` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.sessionRestoreDefault`, never through `?? false`.
+    var session_restore_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -267,6 +272,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
+    /// - Parameter sessionRestoreDefault: same shape again, for
+    ///   `session_restore_enabled` — the restore pass's gate.
     /// - Parameter worktreeParksOnMerge: whether a worktree that is not
     ///   archived overrides park-on-merge to true. It lives in the `worktree`
     ///   table, so `ConfigStore.get()` reads it with one query beside this row;
@@ -294,6 +301,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
+        sessionRestoreDefault: Bool = Config.sessionRestoreDefault,
         worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -413,6 +421,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Live remote transcript sync gate — NOT `?? false`.
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
+        // Session restore gate — NOT `?? false`.
+        config.sessionRestoreEnabled = session_restore_enabled ?? sessionRestoreDefault
         return config
     }
 }
@@ -696,6 +706,20 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET queued_prompt_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the session restore gate. Off is the shipped default. Writing
+    /// either value is an explicit gesture that leaves the column non-NULL
+    /// forever after, so an operator who turns the feature off keeps it off when
+    /// the shipped default graduates. The restore pass reads it at startup and
+    /// before each later batch, so no daemon restart is required.
+    public func setSessionRestore(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET session_restore_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
