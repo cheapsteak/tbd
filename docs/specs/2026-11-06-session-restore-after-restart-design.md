@@ -51,7 +51,8 @@ A row is selected when all of these hold:
 
 The time limit is what separates this restart from older ones. Without it, the 25 stale rows above
 would come back too, some of them after months. The limit needs no new column: the daemon captures
-the time before step 8d and passes it to the pass.
+the time before step 8d and passes it to the pass. The comparison allows one millisecond, because
+the store keeps milliseconds and a park in the same millisecond as that moment reads back earlier.
 
 The pass is not tied to a reboot as such. Logout, power loss and a killed holder fleet all leave
 the same evidence, and the user wants the same outcome from each. A routine daemon restart restores
@@ -79,7 +80,8 @@ sessions before it restarted. The concern is the burst of starts.
 ### The switch stops a running pass
 
 The pass reads the flag again before each batch. Turning the setting off during a pass stops it
-after the current batch. This is the operator's brake if a restart goes badly.
+after the current batch. This is the operator's brake if a restart goes badly. A daemon shutdown
+ends the pass the same way: `Daemon.stop()` cancels its task, and no further batch starts.
 
 ### Each wake is an ordinary wake
 
