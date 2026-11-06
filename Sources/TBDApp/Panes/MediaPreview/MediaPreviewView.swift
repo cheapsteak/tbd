@@ -3,7 +3,7 @@ import SwiftUI
 /// An audio or video file in the file viewer, or the "Cannot preview" screen
 /// once the player reports that the file does not load.
 ///
-/// Audio shows as `AudioPreviewCard`. Video fills the pane's visible area when
+/// Audio shows as `AudioPreviewView`. Video fills the pane's visible area when
 /// it is the only file, and takes a 16:9 frame as wide as the pane in a
 /// multi-file stack. The viewer stacks files in a `ScrollView`, which proposes
 /// no height, so a single video sizes itself against the scroll view's visible
@@ -29,7 +29,7 @@ struct MediaPreviewView: View {
         } else if isVideo {
             video
         } else {
-            AudioPreviewCard(
+            AudioPreviewView(
                 filePath: filePath,
                 revision: revision,
                 fillsViewport: fillsViewport,

@@ -278,4 +278,92 @@ struct MediaPlayerViewTests {
 
         #expect(flag.fired)
     }
+
+    /// For an item with no video track, AVKit adds a private view that fills
+    /// the player with opaque grey once the item is ready to play, and the
+    /// host hides it. The wait needs the view present as well as hidden,
+    /// because "none visible" also holds before AVKit has added it.
+    @Test func hidesAVKitsAudioOnlyIndicator() async throws {
+        let fixtures = try MediaFixtures()
+        defer { fixtures.remove() }
+        let scene = PlayerScene()
+        defer { scene.tearDown() }
+        let host = scene.addHost()
+        let url = try fixtures.silentWAV()
+
+        host.load(url: url, revision: 0)
+        host.player?.isMuted = true
+
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            await MainActor.run {
+                RunLoopPump.turn()
+                let indicators = audioOnlyIndicators(under: host.playerView)
+                return !indicators.isEmpty && indicators.allSatisfy { $0.isHidden }
+            }
+        }
+        if outcome == .timedOut {
+            let indicators = audioOnlyIndicators(under: host.playerView)
+            Issue.record(AudioOnlyIndicatorTimeout(
+                found: indicators.count,
+                visible: indicators.filter { !$0.isHidden }.count,
+                itemStatus: statusName(of: host.player?.currentItem),
+                viewClasses: viewClassNames(under: host.playerView),
+                elapsed: ContinuousClock.now - start))
+        }
+    }
+}
+
+/// Every view under `view` whose class is AVKit's audio-only indicator,
+/// matched by name as `MediaPlayerHostView` matches it.
+@MainActor
+private func audioOnlyIndicators(under view: NSView) -> [NSView] {
+    var found: [NSView] = []
+    for subview in view.subviews {
+        if String(describing: type(of: subview)) == MediaPlayerHostView.audioOnlyIndicatorClassName {
+            found.append(subview)
+        }
+        found.append(contentsOf: audioOnlyIndicators(under: subview))
+    }
+    return found
+}
+
+/// The class names of every view under `view`, depth first, so a timeout
+/// shows what AVKit built if the indicator went by another name.
+@MainActor
+private func viewClassNames(under view: NSView) -> [String] {
+    var names: [String] = []
+    for subview in view.subviews {
+        names.append(String(describing: type(of: subview)))
+        names.append(contentsOf: viewClassNames(under: subview))
+    }
+    return names
+}
+
+@MainActor
+private func statusName(of item: AVPlayerItem?) -> String {
+    guard let item else { return "no item" }
+    switch item.status {
+    case .unknown: return "unknown"
+    case .readyToPlay: return "readyToPlay"
+    case .failed: return "failed"
+    @unknown default: return "status \(item.status.rawValue)"
+    }
+}
+
+/// What the audio-only indicator wait last saw, recorded as an error so the
+/// diagnostic lands on the failure's primary line.
+private struct AudioOnlyIndicatorTimeout: Error, CustomStringConvertible {
+    let found: Int
+    let visible: Int
+    let itemStatus: String
+    let viewClasses: [String]
+    let elapsed: Duration
+
+    var description: String {
+        "audio-only indicator: found \(found), \(visible) still visible, item \(itemStatus), "
+            + "after \(elapsed); views under the player: \(viewClasses.joined(separator: ", "))"
+    }
 }

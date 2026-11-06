@@ -8,8 +8,8 @@ time, not from a list in TBD: a file is media when it is not text, its type is
 audio or video, and AVFoundation says it can play that type.
 
 The player never starts by itself, pauses whenever its view is removed or
-hidden, and only one file plays at a time across the app. Audio shows as a compact card
-with the system play bar; video fills the pane.
+hidden, and only one file plays at a time across the app. Audio shows its name
+above the system play bar; video fills the pane.
 
 The "Cannot preview binary file" screen, which every other non-text file still
 reaches, gets two buttons: **Quick Look**, which opens the floating Quick Look
@@ -75,16 +75,35 @@ fails the second, so it reaches the "Cannot preview" screen.
 
 ### Audio
 
-A compact card centered in the pane's visible area, with these parts:
+Centered in the pane's visible area, on the pane's own background, with no
+card or box around it, top to bottom:
 
 - a music symbol
 - the file name
-- the duration
 - an `AVPlayerView` with `controlsStyle = .inline`, framed to the height of its
-  control bar: play and pause, scrubbing, volume
+  control bar: play and pause, the elapsed time, scrubbing, the length and the
+  playback speed
 
-The card does not show `AVPlayerView`'s audio-only placeholder, a large
-QuickTime logo over an empty area.
+The play bar shows the file's length, so the view adds no caption of its own.
+
+AVKit draws a grey box of its own behind the play bar, and TBD hides it. For an
+item with no video track, AVKit adds a private view, `AVAudioOnlyIndicatorView`,
+inside `AVPlayerView` when the item becomes ready to play: none exists before
+the item's status turns `.readyToPlay`, and one exists by the time that change
+is reported. It fills the player's whole frame with opaque grey, measured on
+macOS 27 as sRGB (0.26, 0.26, 0.27), and holds the audio-only placeholder, a
+large QuickTime logo. `AVPlayerView` has no public switch for it, and its
+`contentOverlayView` is a different view. So `MediaPlayerHostView` finds the
+view by class name and sets `isHidden`, once when the item becomes ready to
+play, again on the next main-queue turn so AVKit's own reaction to that change
+has run, and whenever the host joins a window.
+
+Measured on macOS 27, a hidden indicator stays hidden through a new item, a
+change between light and dark appearance, play and pause, a resize, a move to
+another superview, and the player set to nil and back. The play bar is
+untouched: it sits on a sibling branch of the player's view tree. Matching by
+name is the fail-safe: if a later macOS renames the view, nothing matches, the
+grey box comes back, and nothing else changes. A video item has no such view.
 
 ### Video
 
@@ -99,7 +118,7 @@ taking the pane over the way a rendered markdown document does.
 ### Multi-file selection
 
 When the viewer's sidebar selects several files, they stack in the pane's
-scroll view. An audio file shows its card at the card's own height. A video
+scroll view. An audio file takes its own height. A video
 shows in a 16:9 frame as wide as the pane.
 
 ### Playback rules
@@ -165,11 +184,11 @@ New files live in `Sources/TBDApp/Panes/MediaPreview/`, so
     built from a fresh `AVURLAsset` and leaves playback paused.
   - **Error state:** it reports load failure upward, as described under
     "Errors" below.
-- **`AudioPreviewCard`**
-  - **What it is:** the SwiftUI card that lays out the symbol, name and
-    duration around a `MediaPlayerView`.
-  - **Duration:** loaded with `asset.load(.duration)` in a task, never in
-    `body`.
+  - **Audio-only backdrop:** the host view hides AVKit's
+    `AVAudioOnlyIndicatorView`, as described under "Audio" above.
+- **`AudioPreviewView`**
+  - **What it is:** the SwiftUI view that lays out the symbol and the name
+    above a `MediaPlayerView`, on the pane's background.
 - **`MediaPlaybackCoordinator`**
   - **What it does:** enforces "one at a time".
   - **How:** each `MediaPlayerView` registers with the coordinator and
@@ -248,6 +267,8 @@ Unit tests use Swift Testing and run through `scripts/test.sh`.
   - play, then remove from the window: paused
   - play, then hide an ancestor: paused
   - a revision bump: a new item, paused, at time zero
+  - a wav that is ready to play: its `AVAudioOnlyIndicatorView` is present
+    and hidden
 - **`MediaPlaybackCoordinator`**: starting B pauses A. The test uses a stub
   behind a small protocol, not real `AVPlayer`s.
 - **`BinaryFallbackView`**:
@@ -268,15 +289,15 @@ Live verification after `scripts/restart.sh`, with cua-driver window captures:
 4. On a zip, Quick Look opens the floating panel, and Reveal in Finder selects
    the zip in Finder. Neither Music nor Archive Utility opens.
 5. An agent rewriting an open audio file reloads it.
-6. The audio card's `AVPlayerView` draws its whole control bar at the card's
-   height.
+6. An audio file's `AVPlayerView` draws its whole control bar at the height
+   it is framed to, with no grey box behind it.
 
 Playback state comes from the player, not from listening. A ten-second listen
 by a person confirms that a worktree switch silences the audio.
 
 ## Out of scope
 
-- Waveforms, and metadata beyond duration (sample rate, channels, codec).
+- Waveforms, and metadata such as sample rate, channels or codec.
 - The transcript overlay's file frame (`OverlayFileView`), which shows text
   only. The transcript's Preview File button opens the viewer pane, so it gets
   the player.

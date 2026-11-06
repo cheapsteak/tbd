@@ -241,8 +241,9 @@ struct FilePreviewView: View {
     /// Where a repo-local markdown link goes. Only the rendered path raises it.
     let onOpenFile: (URL) -> Void
     /// True when this is the only file in the pane, so a video or the audio
-    /// card sizes itself to the pane's visible area. False in a multi-file
-    /// stack, where a video takes a 16:9 frame and the card its own height.
+    /// view sizes itself to the pane's visible area. False in a multi-file
+    /// stack, where a video takes a 16:9 frame and the audio view its own
+    /// height.
     let fillsViewport: Bool
 
     @State private var revision: Int = 0
