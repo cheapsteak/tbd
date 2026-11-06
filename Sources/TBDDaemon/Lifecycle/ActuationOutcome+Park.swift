@@ -64,6 +64,9 @@ extension ActuationOutcome {
         // The row is exit-stamped and its pane is busy: a well-formed wake the
         // daemon declines, and nothing was respawned.
         case .paneBusy: return .refused(.notEligible)
+        // The row is parked, but no longer the one the caller chose. Declined
+        // with nothing touched.
+        case .conditionNotMet: return .refused(.notEligible)
         }
     }
 
@@ -89,6 +92,7 @@ extension ActuationOutcome {
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
         case .paneBusy(let pid): return HibernationCoordinator.paneBusyRefusal(pid: pid)
+        case .conditionNotMet: return "the row no longer meets this wake's condition"
         }
     }
 }

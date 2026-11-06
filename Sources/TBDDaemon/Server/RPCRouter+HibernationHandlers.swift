@@ -94,8 +94,8 @@ extension RPCRouter {
     /// The success payload for a wake outcome, or nil for an outcome that is an
     /// RPC error rather than a result.
     ///
-    /// Pure and static so the four rows that matter — woken with an id, woken
-    /// without one, and each idempotent no-op — are statable without a
+    /// Pure and static so the rows that matter — woken with an id, woken
+    /// without one, and each no-op — are statable without a
     /// coordinator, a database or a tmux server.
     static func wakeResultPayload(for result: WakeResult) -> TerminalWakeResult? {
         switch result {
@@ -106,6 +106,10 @@ extension RPCRouter {
             // autonomous caller knows its `prompt` was NOT delivered (the
             // terminal is live; pasting into it now could hit a human session),
             // and no incarnation, because no spawn happened to name.
+            return TerminalWakeResult(woken: false)
+        case .conditionNotMet:
+            // Not an error: a caller that names a condition expects some rows to
+            // stop meeting it, and no spawn happened here either.
             return TerminalWakeResult(woken: false)
         case .sessionGone, .paneUnreadable, .notFound, .noSessionID, .notAClaudeTab, .respawnFailed,
             .worktreeMissing, .profileMissing, .paneBusy:
@@ -119,8 +123,12 @@ extension RPCRouter {
 
     /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
     /// terminal's kept-alive window. Idempotent.
+    ///
+    /// `condition` is for the in-process caller that chose its rows earlier, the
+    /// session restore pass. `terminal.wake` has no parameter for it.
     func handleTerminalWake(
-        _ paramsData: Data, actor: ActuationActor? = nil
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        condition: SessionRestoreCondition? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
         let actuationID = try await beginActuation(
@@ -136,7 +144,8 @@ extension RPCRouter {
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,
             allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false,
-            initialPrompt: params.prompt
+            initialPrompt: params.prompt,
+            condition: condition
         )
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
@@ -177,9 +186,9 @@ extension RPCRouter {
                 code: RPCErrorCode.profileMissing.rawValue)
         case .paneBusy(let pid):
             return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
-        case .ok, .notHibernated, .inFlight:
+        case .ok, .notHibernated, .inFlight, .conditionNotMet:
             // Unreachable: `wakeResultPayload` returns non-nil for exactly
-            // these three cases and this function already returned above.
+            // these cases and this function already returned above.
             // Kept explicit (rather than `default:`) so a new WakeResult case
             // added later must be classified deliberately in BOTH switches.
             //

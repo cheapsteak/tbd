@@ -94,6 +94,12 @@ extension RPCRouter {
                 code: RPCErrorCode.profileMissing.rawValue)
         case .paneBusy(let pid):
             return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
+        case .conditionNotMet:
+            // Unreachable: this wake names no condition. Listed so a new
+            // WakeResult case is classified here deliberately, and an error
+            // rather than `.ok()` because a resume that started nothing must not
+            // read as one that did.
+            return RPCResponse(error: "terminal.resume got a condition result, but it names no condition. This is a daemon bug: the session was not resumed.")
         }
     }
 

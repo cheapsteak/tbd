@@ -3284,8 +3284,9 @@ public struct TerminalWakeParams: Codable, Sendable {
 /// Result payload for `terminal.wake`.
 public struct TerminalWakeResult: Codable, Sendable {
     /// true — this call respawned `claude --resume` (the terminal was parked);
-    /// false — idempotent no-op (already awake, or another wake in flight).
-    /// A `prompt` param is delivered only when true.
+    /// false — idempotent no-op (already awake, or another wake in flight), or,
+    /// for the daemon's own session restore pass, a row that no longer meets the
+    /// pass's condition. A `prompt` param is delivered only when true.
     public let woken: Bool
     /// The session incarnation this respawn minted, planted in the spawned
     /// process's environment as `TBD_TERMINAL_INCARNATION_ID` and echoed back on
@@ -4253,6 +4254,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 sessionRestoreEnabled: Bool = Config.sessionRestoreDefault) {
+        self.sessionRestoreEnabled = sessionRestoreEnabled
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported

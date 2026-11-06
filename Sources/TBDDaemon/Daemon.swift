@@ -580,6 +580,25 @@ public final class Daemon: Sendable {
         }
     }
 
+    /// Start the session restore pass as a background task, or nothing in mock
+    /// mode, which skips it like every other background rail.
+    ///
+    /// Detached, with nothing awaiting it, because the pass sleeps between batches
+    /// and 28 sessions take about 90 seconds, which must not delay startup.
+    /// `parkedSince` is when this daemon began its startup reconcile.
+    @discardableResult
+    static func startSessionRestore(
+        mockMode: MockMode?, router: RPCRouter, parkedSince: Date
+    ) -> Task<Void, Never>? {
+        guard mockMode == nil else {
+            daemonLogger.info("Mock mode: skipping session restore")
+            return nil
+        }
+        return Task.detached {
+            _ = await router.restoreSessionsAfterStartup(parkedSince: parkedSince)
+        }
+    }
+
     /// The construction behind `remote_backends_enabled` / `claude_cloud_enabled`
     /// at boot (Task 7) — the sole place `RemoteProviderManager` is
     /// constructed in production. Extracted from `start()` for the same
@@ -2276,21 +2295,17 @@ public final class Daemon: Sendable {
                     await hibernationCoordinator.sweep()
                 }
             }
-
-            // 15. Restore the sessions this startup parked, when
-            // `session_restore_enabled` says so. Last, because the wakes are
-            // ordinary `terminal.wake` calls: everything they reach must be up,
-            // and with every listener serving, the app sees each row wake and
-            // the operator can turn the setting off during the pass. Detached
-            // with nothing awaiting it, because the pass sleeps between batches
-            // and 28 sessions take about 90 seconds, which must not delay
-            // startup.
-            self.sessionRestoreTask = Task.detached { [rpcRouter] in
-                _ = await rpcRouter.restoreSessionsAfterStartup(parkedSince: startupReconcileBegan)
-            }
         } else {
             daemonLogger.info("Mock mode: skipping periodic background tasks")
         }
+
+        // 15. Restore the sessions this startup parked, when
+        // `session_restore_enabled` says so. Last, because the wakes are ordinary
+        // `terminal.wake` calls: everything they reach must be up, and with every
+        // listener serving, the app sees each row wake and the operator can turn
+        // the setting off during the pass.
+        self.sessionRestoreTask = Daemon.startSessionRestore(
+            mockMode: mockMode, router: rpcRouter, parkedSince: startupReconcileBegan)
 
         daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
     }

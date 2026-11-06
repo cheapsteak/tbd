@@ -9,7 +9,8 @@ enum SessionRestoreWakeOutcome: Sendable, Equatable {
     /// The wake started the session.
     case woken
     /// The wake started nothing and needed to start nothing: the user's own
-    /// wake got there first, as `.inFlight` or `.notHibernated`.
+    /// wake got there first, as `.inFlight` or `.notHibernated`, or the row no
+    /// longer meets the rule that selected it, as `.conditionNotMet`.
     case skipped
     /// The wake could not start the session, which stays parked.
     case failed
@@ -48,16 +49,6 @@ extension RPCRouter {
     /// start every session within seconds.
     static let sessionRestoreBatchGap: Duration = .seconds(10)
 
-    /// The worktree statuses a restored session may belong to. A whitelist, so a
-    /// status added later stays left out until somebody decides otherwise.
-    static let sessionRestoreWorktreeStatuses: Set<WorktreeStatus> = [.active, .main]
-
-    /// How far before `parkedSince` a park still counts as this startup's. The
-    /// store keeps `hibernatedAt` to the millisecond, so a row parked in the
-    /// same millisecond as a `parkedSince` with finer precision reads back
-    /// slightly earlier than the moment that preceded it.
-    static let sessionRestoreStampResolution: TimeInterval = 0.001
-
     /// Restart the Claude sessions this startup parked, newest first and a few
     /// at a time. Design: `docs/specs/2026-11-06-session-restore-after-restart-design.md`.
     ///
@@ -73,7 +64,8 @@ extension RPCRouter {
     func restoreSessionsAfterStartup(parkedSince: Date) async -> SessionRestoreSummary {
         var summary = SessionRestoreSummary()
         guard await sessionRestoreEnabled() else { return summary }
-        let selected = await sessionsToRestore(parkedSince: parkedSince)
+        let condition = SessionRestoreCondition(parkedSince: parkedSince)
+        let selected = await sessionsToRestore(condition)
         guard !selected.isEmpty else { return summary }
         summary.selected = selected.count
 
@@ -88,7 +80,7 @@ extension RPCRouter {
                 // batch with no gap.
                 guard !Task.isCancelled, await sessionRestoreEnabled() else { break }
             }
-            let outcomes = await wakeBatchForRestore(batch)
+            let outcomes = await wakeBatchForRestore(batch, condition: condition)
             outcomes.forEach { summary.record($0) }
             if outcomes.contains(.held) { break }
         }
@@ -98,9 +90,12 @@ extension RPCRouter {
     }
 
     /// The flag, read fresh: the pass asks before each batch so turning it off
-    /// stops a running pass. A failed read gets the shipped default.
+    /// stops a running pass. A failed read answers off and never the shipped
+    /// default. That default stands in for nobody having chosen, and a failed
+    /// read says nothing about what was chosen, so a transient error must not
+    /// start a pass for someone who turned this off.
     private func sessionRestoreEnabled() async -> Bool {
-        guard let config = try? await db.config.get() else { return Config.sessionRestoreDefault }
+        guard let config = try? await db.config.get() else { return false }
         return config.sessionRestoreEnabled
     }
 
@@ -108,18 +103,14 @@ extension RPCRouter {
     /// first by transcript modification time, a file that cannot be read last.
     /// The activity columns cannot supply the order, because parking overwrites
     /// them.
-    private func sessionsToRestore(parkedSince: Date) async -> [UUID] {
+    private func sessionsToRestore(_ condition: SessionRestoreCondition) async -> [UUID] {
         do {
-            let restorableWorktrees = Set(try await db.worktrees.list()
-                .filter { Self.sessionRestoreWorktreeStatuses.contains($0.status) }
-                .map { $0.id })
-            let cutoff = parkedSince.addingTimeInterval(-Self.sessionRestoreStampResolution)
+            let worktreeStatuses = Dictionary(
+                uniqueKeysWithValues: try await db.worktrees.list().map { ($0.id, $0.status) })
             return try await db.terminals.list()
                 .filter { terminal in
-                    guard terminal.hibernateReason == .recovery,
-                          let hibernatedAt = terminal.hibernatedAt else { return false }
-                    return hibernatedAt >= cutoff
-                        && restorableWorktrees.contains(terminal.worktreeID)
+                    guard let status = worktreeStatuses[terminal.worktreeID] else { return false }
+                    return condition.isMet(by: terminal, worktreeStatus: status)
                         && terminal.claudeResumeDecision.resumableSessionID != nil
                 }
                 .map { (id: $0.id, modified: Self.transcriptModified($0.transcriptPath)) }
@@ -141,12 +132,22 @@ extension RPCRouter {
     }
 
     /// Wake one batch concurrently and wait for every wake to return.
-    private func wakeBatchForRestore(_ batch: [UUID]) async -> [SessionRestoreWakeOutcome] {
+    ///
+    /// Each wake runs in an unstructured task, which does not inherit the pass's
+    /// cancellation as a group child would. A wake that has begun must finish:
+    /// the database throws on a cancelled task, which would report a false
+    /// `.notFound`, abandon a holder the wake had just started, or leave a live
+    /// session under a parked row.
+    private func wakeBatchForRestore(
+        _ batch: [UUID], condition: SessionRestoreCondition
+    ) async -> [SessionRestoreWakeOutcome] {
         await withTaskGroup(
             of: SessionRestoreWakeOutcome.self, returning: [SessionRestoreWakeOutcome].self
         ) { group in
             for terminalID in batch {
-                group.addTask { await self.wakeForRestore(terminalID) }
+                group.addTask {
+                    await Task { await self.wakeForRestore(terminalID, condition: condition) }.value
+                }
             }
             var outcomes: [SessionRestoreWakeOutcome] = []
             for await outcome in group {
@@ -160,11 +161,13 @@ extension RPCRouter {
     /// (a pane attaching sizes the session), no `prompt` (TBD types nothing)
     /// and no default-profile fallback. A thrown error costs this wake and not
     /// the pass.
-    private func wakeForRestore(_ terminalID: UUID) async -> SessionRestoreWakeOutcome {
+    private func wakeForRestore(
+        _ terminalID: UUID, condition: SessionRestoreCondition
+    ) async -> SessionRestoreWakeOutcome {
         do {
             let params = try JSONEncoder().encode(TerminalWakeParams(terminalID: terminalID))
             let response = try await handleTerminalWake(
-                params, actor: .daemon(rail: ActuationRail.sessionRestore))
+                params, actor: .daemon(rail: ActuationRail.sessionRestore), condition: condition)
             let outcome = Self.sessionRestoreOutcome(of: response)
             if outcome == .failed {
                 logger.error("could not restore terminal \(terminalID, privacy: .public): \(response.error ?? "no reason given", privacy: .public)")
@@ -178,7 +181,8 @@ extension RPCRouter {
 
     /// Classify a `terminal.wake` response. Held is an error with its own code,
     /// and any other error is a failure. A success says whether the wake started
-    /// a session: `.inFlight` and `.notHibernated` answer `woken: false`.
+    /// a session: `.inFlight`, `.notHibernated` and `.conditionNotMet` answer
+    /// `woken: false`.
     static func sessionRestoreOutcome(of response: RPCResponse) -> SessionRestoreWakeOutcome {
         guard response.success else {
             return response.errorCode == RPCErrorCode.startHeld.rawValue ? .held : .failed

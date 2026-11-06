@@ -3,6 +3,7 @@ import GRDB
 import Testing
 import DaemonTestSupport
 import TestSupport
+import TBDKernel
 
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -109,8 +110,8 @@ struct SessionRestoreTests {
             directory: directory, repoID: repo.id, worktree: worktree)
     }
 
-    /// A worktree row with its own directory on disk: `worktree.path` is unique,
-    /// and a wake refuses a directory that is not there.
+    /// A worktree row with its own directory on disk: its path is unique, and a
+    /// wake refuses a directory that is not there.
     private func makeWorktree(db: TBDDatabase, repoID: UUID, directory: URL) async throws -> Worktree {
         let name = "acme-\(UUID().uuidString)"
         let path = directory.appendingPathComponent(name, isDirectory: true)
@@ -157,6 +158,20 @@ struct SessionRestoreTests {
             [.modificationDate: Self.thisStartup.addingTimeInterval(Double(-age))],
             ofItemAtPath: url.path)
         return try await park(in: fixture, transcriptPath: url.path)
+    }
+
+    /// The user wakes the row and it parks again, stamped after this startup so
+    /// the reason is all that sets it apart. Static so a `@Sendable` admission
+    /// closure can call it.
+    private static func repark(
+        _ id: UUID, reason: HibernateReason, in db: TBDDatabase
+    ) async throws {
+        let row = try #require(try await db.terminals.get(id: id))
+        let sessionID = try #require(row.claudeSessionID)
+        try await db.terminals.clearHibernated(id: id)
+        try await db.terminals.setHibernated(
+            id: id, sessionID: sessionID, reason: reason,
+            at: thisStartup.addingTimeInterval(30))
     }
 
     /// `count` parked rows, returned in the order the pass wakes them.
@@ -516,8 +531,11 @@ struct SessionRestoreTests {
         #expect(try await awake(ids, in: fixture.db) == Set(ids.prefix(3)))
     }
 
-    /// `try?` swallows the cancelled sleep, which returns at once. A pass that
-    /// did not ask would run its next batch with no gap in a shutting-down daemon.
+    /// Proves the outcome and not which line produces it. The pass stops here
+    /// through its `Task.isCancelled` check or through the flag read beside it,
+    /// because that read fails on a cancelled task too, and either stop passes
+    /// this test. The explicit check stays so the stop does not rest on how the
+    /// database treats cancellation.
     @Test("cancelling the pass during a gap starts no further batch")
     func cancellationDuringAGapStopsThePass() async throws {
         let fixture = try await makeFixture()
@@ -530,6 +548,37 @@ struct SessionRestoreTests {
 
         let summary = await pass.value
         #expect(summary == SessionRestoreSummary(selected: 4, woken: 3))
+        #expect(try await awake(ids, in: fixture.db) == Set(ids.prefix(3)))
+    }
+
+    /// The cancellation lands while one wake is held inside its admission check.
+    /// A wake that inherited it would fail its next database read, so the row
+    /// would read as not found and stay parked.
+    @Test("cancelling the pass mid-batch lets the batch finish and starts no further batch")
+    func cancellationDuringABatchFinishesTheBatch() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let ids = try await parkRows(4, in: fixture)
+        let stalled = ids[2]
+        let latch = WakeLatch()
+        let admission = ScriptedAdmission { request in
+            if request.terminalID == stalled { await latch.wait() }
+            return .admit
+        }
+        fixture.router.startAdmission = admission
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+        let pass = startPass(fixture)
+
+        let asked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            admission.requests.count == 3
+        }
+        #expect(asked == .satisfied)
+        pass.cancel()
+        await latch.release()
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 4, woken: 3))
+        #expect(admission.requests.count == 3, "a later batch ran the command")
         #expect(try await awake(ids, in: fixture.db) == Set(ids.prefix(3)))
     }
 
@@ -546,7 +595,7 @@ struct SessionRestoreTests {
             [.modificationDate: Self.thisStartup.addingTimeInterval(1)], ofItemAtPath: url.path)
         let failing = try await park(in: fixture, worktree: gone, transcriptPath: url.path)
         let others = try await parkRows(3, in: fixture)
-        try FileManager.default.removeItem(atPath: gone.path)
+        try FileManager.default.removeItem(atPath: gone.localPath)
         let pass = startPass(fixture)
 
         try await fixture.clock.requireAdvanceWhenArmed(
@@ -558,6 +607,27 @@ struct SessionRestoreTests {
         let row = try #require(try await fixture.db.terminals.get(id: failing))
         #expect(row.isParked)
         #expect(row.hibernateReason == .recovery)
+    }
+
+    @Test("a spawn tmux refuses leaves the row parked and the pass goes on")
+    func failedSpawnLeavesTheRowParkedAndThePassContinues() async throws {
+        let fixture = try await makeFixture(tmux: TmuxManager(
+            dryRun: true,
+            dryRunRespawnWindowError: { _ in TmuxError.unexpectedOutput("no such window") }))
+        defer { fixture.cleanUp() }
+        let ids = try await parkRows(4, in: fixture)
+        let pass = startPass(fixture)
+
+        try await fixture.clock.requireAdvanceWhenArmed(
+            by: Self.gap, timeout: TestDeadlines.saturatedPass)
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 4, failed: 4))
+        #expect(try await awake(ids, in: fixture.db).isEmpty)
+        for id in ids {
+            let row = try #require(try await fixture.db.terminals.get(id: id))
+            #expect(row.hibernateReason == .recovery)
+        }
     }
 
     @Test("a missing account profile fails the wake, with no fallback to the default")
@@ -682,6 +752,103 @@ struct SessionRestoreTests {
         #expect(try await awake([control, raced], in: fixture.db) == [control, raced])
     }
 
+    // MARK: - A row that stopped qualifying after selection
+
+    /// Landing in the admission check puts the change after anything the pass
+    /// could ask before it calls the handler, so only the wake's own read of the
+    /// row can see it.
+    @Test("a row parked again during its wake's admission check stays parked",
+          arguments: [HibernateReason.manual, .exited])
+    func rowReparkedDuringAdmissionIsSkipped(reason: HibernateReason) async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let control = try await park(in: fixture)
+        let raced = try await park(in: fixture)
+        let db = fixture.db
+        fixture.router.startAdmission = ScriptedAdmission { request in
+            if request.terminalID == raced { try? await Self.repark(raced, reason: reason, in: db) }
+            return .admit
+        }
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+
+        let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
+
+        #expect(summary == SessionRestoreSummary(selected: 2, woken: 1, skipped: 1))
+        #expect(try await awake([control, raced], in: fixture.db) == [control])
+        let row = try #require(try await fixture.db.terminals.get(id: raced))
+        #expect(row.hibernateReason == reason)
+    }
+
+    @Test("a row parked again during a gap stays parked, with the reason it was given",
+          arguments: [HibernateReason.manual, .exited, .merged, .auto])
+    func rowReparkedDuringAGapIsSkipped(reason: HibernateReason) async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let ids = try await parkRows(4, in: fixture)
+        let pass = startPass(fixture)
+
+        try await fixture.clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        try await Self.repark(ids[3], reason: reason, in: fixture.db)
+        await fixture.clock.advance(by: Self.gap)
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 4, woken: 3, skipped: 1))
+        #expect(try await awake(ids, in: fixture.db) == Set(ids.prefix(3)))
+        let row = try #require(try await fixture.db.terminals.get(id: ids[3]))
+        #expect(row.hibernateReason == reason)
+    }
+
+    /// An archive flips the worktree's status well before it deletes the
+    /// worktree's rows, so the wake finds a parked row in an archived worktree.
+    /// The row with no transcript is the last one the pass reaches.
+    @Test("a row whose worktree is archived during a gap stays parked")
+    func worktreeArchivedDuringAGapIsSkipped() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let ids = try await parkRows(3, in: fixture)
+        let worktree = try await makeWorktree(in: fixture)
+        let row = try await park(in: fixture, worktree: worktree)
+        let pass = startPass(fixture)
+
+        try await fixture.clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        try await fixture.db.worktrees.archive(id: worktree.id)
+        await fixture.clock.advance(by: Self.gap)
+
+        let summary = await pass.value
+        #expect(summary == SessionRestoreSummary(selected: 4, woken: 3, skipped: 1))
+        #expect(try await awake(ids + [row], in: fixture.db) == Set(ids))
+    }
+
+    @Test("a wake whose condition is not met starts nothing and changes nothing")
+    func unmetConditionTouchesNothing() async throws {
+        let recorded = RecordedTmuxArgs()
+        let fixture = try await makeFixture(tmux: TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) }))
+        defer { fixture.cleanUp() }
+        let row = try await park(in: fixture, reason: .manual)
+        let before = try #require(try await fixture.db.terminals.get(id: row))
+
+        let result = await fixture.router.hibernationCoordinator.wake(
+            terminalID: row, condition: SessionRestoreCondition(parkedSince: Self.thisStartup))
+
+        #expect(result == .conditionNotMet)
+        #expect(recorded.snapshot().isEmpty, "the wake reached tmux: \(recorded.snapshot())")
+        let after = try #require(try await fixture.db.terminals.get(id: row))
+        #expect(after == before)
+    }
+
+    @Test("a wake naming no condition still wakes a row the pass would leave alone")
+    func wakeWithNoConditionIsUnchanged() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let row = try await park(in: fixture, reason: .manual)
+
+        let result = await fixture.router.hibernationCoordinator.wake(terminalID: row)
+
+        #expect(result.isOk)
+        #expect(try await awake([row], in: fixture.db) == [row])
+    }
+
     // MARK: - Each wake is an ordinary wake
 
     @Test("each wake's actuation row names the session-restore rail and carries no prompt")
@@ -703,6 +870,62 @@ struct SessionRestoreTests {
         }
     }
 
+    /// A dry run records a size only where a wake recreates its window, so that
+    /// is where a size the pass sent would show.
+    @Test("a wake names no size, so a window it recreates takes the default")
+    func wakeNamesNoSize() async throws {
+        let recorded = RecordedTmuxArgs()
+        let fixture = try await makeFixture(tmux: TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { _ in true }))
+        defer { fixture.cleanUp() }
+        try await park(in: fixture)
+
+        let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
+
+        #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
+        let newSession = recorded.snapshot().first { $0.contains("new-session") }
+        let args = try #require(newSession)
+        let width = try #require(args.firstIndex(of: "-x"))
+        let height = try #require(args.firstIndex(of: "-y"))
+        #expect(args[width + 1] == String(TmuxManager.defaultCols))
+        #expect(args[height + 1] == String(TmuxManager.defaultRows))
+    }
+
+    /// A fast-pass test cannot start a real holder. This registry has no spawner,
+    /// so the wake gets as far as the fixture can state: the row was selected and
+    /// its wake took the holder path to the spawn it then refused, reaching no
+    /// tmux on the way.
+    @Test("a holder row is selected and wakes on the holder path")
+    func holderRowWakesOnTheHolderPath() async throws {
+        let recorded = RecordedTmuxArgs()
+        let fixture = try await makeFixture(tmux: TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) }))
+        defer { fixture.cleanUp() }
+        let sessionID = "session-holder"
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude,
+            transport: .holder)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: sessionID, reason: .recovery, at: Self.thisStartup)
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-sr-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [terminal] })
+        #expect(registry.canSpawn == false)
+        await fixture.router.hibernationCoordinator.setHolderRegistry(registry)
+
+        let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
+
+        #expect(summary == SessionRestoreSummary(selected: 1, failed: 1))
+        #expect(recorded.snapshot().isEmpty, "the holder wake reached tmux: \(recorded.snapshot())")
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.isParked)
+        #expect(row.hibernateReason == .recovery)
+    }
+
     @Test("a wake response classifies as woken, skipped, failed or held")
     func wakeResponseClassification() throws {
         let woken = try RPCResponse(result: TerminalWakeResult(woken: true))
@@ -718,5 +941,34 @@ struct SessionRestoreTests {
         #expect(RPCRouter.sessionRestoreOutcome(of: failed) == .failed)
         #expect(RPCRouter.sessionRestoreOutcome(of: otherCode) == .failed)
         #expect(RPCRouter.sessionRestoreOutcome(of: noResult) == .failed)
+    }
+
+    // MARK: - The daemon's startup step
+
+    @Test("the startup step runs the pass outside mock mode")
+    func startupStepRunsThePass() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let row = try await park(in: fixture)
+
+        let task = try #require(Daemon.startSessionRestore(
+            mockMode: nil, router: fixture.router, parkedSince: Self.thisStartup))
+        await task.value
+
+        #expect(try await awake([row], in: fixture.db) == [row])
+    }
+
+    @Test("the startup step starts nothing in mock mode")
+    func startupStepSkipsMockMode() async throws {
+        let fixture = try await makeFixture()
+        defer { fixture.cleanUp() }
+        let row = try await park(in: fixture)
+
+        let task = Daemon.startSessionRestore(
+            mockMode: .enabled(fixturePath: "/tmp/does-not-exist.json"),
+            router: fixture.router, parkedSince: Self.thisStartup)
+
+        #expect(task == nil)
+        #expect(try await awake([row], in: fixture.db).isEmpty)
     }
 }

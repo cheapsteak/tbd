@@ -236,6 +236,8 @@ struct ActuationLogTests {
         #expect(ActuationOutcome.classify(WakeResult.noSessionID) == .refused(.notEligible))
         #expect(ActuationOutcome.classify(WakeResult.profileMissing(profileID: UUID()))
             == .refused(.notEligible))
+        #expect(ActuationOutcome.classify(WakeResult.conditionNotMet) == .refused(.notEligible))
+        #expect(ActuationOutcome.detail(WakeResult.conditionNotMet) != nil)
 
         // A row that claims awake whose pane disagrees. The two shapes must not
         // collapse onto one reason: a gone or exited pane is the named target

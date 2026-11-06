@@ -23,7 +23,7 @@ struct TerminalWakeIncarnationTests {
     /// `woken: false` means the prompt was never delivered anywhere, so there is
     /// no spawn to name and nothing for a hold to wait on.
     @Test func theNoOpPathsCarryNoID() throws {
-        for result in [WakeResult.notHibernated, WakeResult.inFlight] {
+        for result in [WakeResult.notHibernated, WakeResult.inFlight, WakeResult.conditionNotMet] {
             let payload = try #require(RPCRouter.wakeResultPayload(for: result))
             #expect(!payload.woken)
             #expect(payload.sessionIncarnationID == nil)
