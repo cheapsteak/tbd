@@ -100,6 +100,19 @@ The user may open a worktree during a pass. The wake's own singleflight settles 
 the two calls gets `.inFlight`, or the later one gets `.notHibernated`, and the pass counts it as
 skipped.
 
+A row can also stop qualifying after the pass selects it. The pass selects once and takes about 90
+seconds, so during a gap the user can wake a row and park it again, or archive its worktree.
+Starting such a row would be wrong. For an `exited` row it would be destructive, because the wake is
+`respawn-window -k` and kills the idle shell the user is in. So the reason, the time limit and the
+worktree status are one predicate, `SessionRestoreCondition`. Selection uses it, and the pass hands
+it to each wake. `handleTerminalWake` passes it to `HibernationCoordinator.wake`, which evaluates it
+after its singleflight claim, on the row it has just read. A check in the pass would be too early,
+because the admission command can run for up to 10 seconds before the wake.
+
+On a mismatch the wake answers `.conditionNotMet`, starts nothing and changes nothing, and the pass
+counts the row as skipped. A row that changes after that check loses the compare-and-set every wake
+makes before it starts anything. Every other caller names no condition and behaves as before.
+
 ### Start admission
 
 The restore rail is checked by the start-admission gate
@@ -223,8 +236,19 @@ Pass behavior, on a test clock:
 - A failed wake leaves the row parked and the pass continues.
 - A hold records its reason on the row, ends the pass after its batch, and no later batch runs the
   command.
+- Cancelling the pass during a batch lets that batch finish, and no further batch starts.
 - `.inFlight` and `.notHibernated` count as skipped.
+- A row parked again with `manual`, `exited`, `merged` or `auto` during a gap stays parked with that
+  reason and counts as skipped, and so does a `manual` or `exited` row parked again during its
+  wake's admission check.
+- A row whose worktree is archived during a gap stays parked and counts as skipped.
+- A wake whose condition is not met starts nothing and leaves the row unchanged, and a wake that
+  names no condition still wakes a `manual` row.
 - Each wake's actuation row names the `session-restore` rail.
+- A failed spawn leaves the row parked and the pass continues.
+- A wake names no size, so a window it recreates takes the default.
+- A holder row is selected, and its wake takes the holder path and reaches no tmux.
+- The startup step starts no pass in mock mode, and starts one otherwise.
 
 The admission rule gets its own test: the restore rail is checked, and other daemon rails and the
 app actor are not.
