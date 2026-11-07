@@ -298,21 +298,36 @@ describe("room", () => {
     expect(await laptop.closed).toEqual(CLOSE_TOO_LARGE);
   });
 
-  it("frames from a socket the relay is closing are dropped", async () => {
+  it("a replaced phone's late frame and close event reach the laptop as nothing", async () => {
+    const room = newRoomID();
+    const { laptop } = await pair(room);
+    const m = await runInDurableObject(stub(room), (instance, state) => {
+      const [old] = state.getWebSockets("phone");
+      // The relay's own replace path marks the old phone and closes it.
+      const joined = clientOf(instance.fetch(joinRequest(room, "phone")), "phone");
+      expect(isMarkedClosing(old!)).toBe(true);
+      // Then the old phone's late frame and its close event arrive.
+      instance.webSocketMessage(old!, frame(5));
+      instance.webSocketClose(old!, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
+      // The marker rides the new phone, so everything queued for the laptop comes first.
+      const sent = marker();
+      joined.send(sent);
+      return sent;
+    });
+    // The laptop hears the new phone join, and neither the late frame nor a peer-left.
+    expect(await laptop.until(m)).toEqual([SIGNAL.peerJoined]);
+  });
+
+  it("a frame from an unmarked socket that is already closing is dropped", async () => {
     const room = newRoomID();
     const { laptop } = await pair(room);
     await runInDurableObject(stub(room), (instance, state) => {
-      instance.webSocketMessage(state.getWebSockets("phone")[0]!, frame(4));
+      const [server] = state.getWebSockets("phone");
+      instance.webSocketMessage(server!, frame(4));
+      server!.close(1000, "");
+      instance.webSocketMessage(server!, frame(5));
     });
     expect(bytes(await laptop.next())).toEqual(new Uint8Array([4]));
-
-    await runInDurableObject(stub(room), (instance, state) => {
-      const [server] = state.getWebSockets("phone");
-      server!.close(CLOSE_REPLACED.code, CLOSE_REPLACED.reason);
-      instance.webSocketMessage(server!, frame(5));
-      instance.webSocketClose(server!, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
-    });
-    expect(await laptop.next()).toBe(SIGNAL.peerLeft);
   });
 
   it("forwarding and peer-left survive hibernation", async () => {
