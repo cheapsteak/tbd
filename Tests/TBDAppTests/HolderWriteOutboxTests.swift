@@ -189,8 +189,8 @@ struct HolderWriteOutboxTests {
         defer { panel.tearDown() }
         let queue = panel.coordinator.outgoingQueueForTesting
         panel.pty.fillPTY()
-        panel.coordinator.send(
-            source: panel.view, data: [UInt8](Data(repeating: 0x61, count: 4_096))[...])
+        panel.coordinator.engine(
+            panel.engine, send: [UInt8](Data(repeating: 0x61, count: 4_096))[...])
         #expect(queue.pendingByteCountForTesting > 0,
                 "the fixture must actually produce a remainder, or this test is vacuous")
 
