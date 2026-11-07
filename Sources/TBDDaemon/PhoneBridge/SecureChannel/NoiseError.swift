@@ -10,7 +10,9 @@ enum NoiseError: LocalizedError, Equatable {
     case nonceExhausted
     /// A message is shorter than its fixed parts.
     case messageTooShort
-    /// A message or plaintext exceeds the 65,535-byte Noise limit.
+    /// A received message exceeds the 65,535-byte Noise message limit, or a
+    /// transport plaintext or handshake payload would make a message that
+    /// exceeds it.
     case messageTooLong
     /// A public key is not a usable X25519 key.
     case invalidPublicKey
@@ -30,7 +32,7 @@ enum NoiseError: LocalizedError, Equatable {
         case .messageTooShort:
             return "A phone channel message is too short."
         case .messageTooLong:
-            return "A phone channel message is longer than 65,535 bytes."
+            return "A phone channel message would exceed the 65,535-byte Noise message limit."
         case .invalidPublicKey:
             return "A phone channel public key is not a valid X25519 key."
         case .invalidPSK:

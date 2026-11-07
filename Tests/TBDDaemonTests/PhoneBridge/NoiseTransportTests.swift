@@ -141,6 +141,11 @@ struct NoiseTransportTests {
         #expect(throws: NoiseError.messageTooShort) { try b.decrypt(Data(count: 15)) }
         let opened = try b.decrypt(largest)
         #expect(opened == Data(count: 65_519))
+        // The refused encrypt left the send counter at 1, so `a`'s next
+        // message is the one `b` expects after `largest`.
+        let next = try a.encrypt(Self.p)
+        let openedNext = try b.decrypt(next)
+        #expect(openedNext == Self.p)
     }
 
     /// The bridge hands the channel slices of relay frames, whose

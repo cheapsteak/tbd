@@ -15,7 +15,7 @@ struct NoiseCipherState: Sendable {
     /// The AES-GCM tag that follows every ciphertext.
     static let tagLength = 16
 
-    private var key: SymmetricKey?
+    private let key: SymmetricKey?
     private(set) var nonce: UInt64
 
     init(key: SymmetricKey? = nil, nonce: UInt64 = 0) {

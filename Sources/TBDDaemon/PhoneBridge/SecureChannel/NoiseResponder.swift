@@ -1,0 +1,55 @@
+import CryptoKit
+import Foundation
+
+/// The laptop's side of the phone channel's handshake: it reads message 1 and
+/// writes message 2.
+struct NoiseResponder: Sendable {
+    private var state: NoiseHandshakeState
+
+    /// Throws `invalidPSK` unless `psk` fits `pattern`: `ikpsk2` needs a
+    /// 256-bit key and `ik` takes nil. `ephemeral` is for the vectors; nil
+    /// makes a fresh key.
+    init(
+        pattern: NoisePattern,
+        staticKey: Curve25519.KeyAgreement.PrivateKey,
+        psk: SymmetricKey?,
+        prologue: Data,
+        ephemeral: Curve25519.KeyAgreement.PrivateKey? = nil
+    ) throws {
+        state = try NoiseHandshakeState.responder(
+            pattern: pattern,
+            staticKey: staticKey,
+            psk: psk,
+            prologue: prologue,
+            ephemeral: ephemeral
+        )
+    }
+
+    /// Reads message 1 and returns the phone's static key with the payload.
+    /// A throw leaves the handshake as it was, so the caller can drop a stale
+    /// frame and still read the real message 1.
+    ///
+    /// Check `remoteStatic` against the room's paired phones before calling
+    /// `writeMessage2`, and never write message 2 for an unknown key. Noise
+    /// gives message 1 no replay protection, so act on nothing in its payload
+    /// until the handshake completes, the phone's first transport message
+    /// decrypts and, when pairing, the user allows the phone.
+    mutating func readMessage1(_ message: Data) throws -> (remoteStatic: Curve25519.KeyAgreement.PublicKey, payload: Data) {
+        var next = state
+        let payload = try next.readMessage(message)
+        guard let remoteStatic = next.remoteStatic else {
+            throw NoiseError.invalidState
+        }
+        state = next
+        return (remoteStatic, payload)
+    }
+
+    /// Message 2, which carries `payload` encrypted and completes the
+    /// handshake. A throw ends this handshake: every later call throws
+    /// `invalidState`.
+    mutating func writeMessage2(payload: Data) throws -> (message: Data, transport: NoiseTransport, handshakeHash: Data) {
+        let message = try state.writeMessage(payload: payload)
+        let finished = try state.finish()
+        return (message, finished.transport, finished.handshakeHash)
+    }
+}
