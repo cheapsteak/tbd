@@ -72,13 +72,17 @@ struct PhoneRPCWireTests {
         }
     }
 
+    /// Every expected address here must also pass the pairing link's relay
+    /// rule; `RelayAddressParityTests` (TBDDaemonTests, which can see
+    /// `PairingLink`) carries the same cases and checks that.
     @Test(arguments: [
         ("https://acme-relay.acme.workers.dev/", "https://acme-relay.acme.workers.dev"),
         ("  https://ACME-relay.acme.workers.dev  ", "https://acme-relay.acme.workers.dev"),
-        ("https://acme.example/relay/", "https://acme.example/relay"),
         ("http://localhost:8787", "http://localhost:8787"),
         ("http://127.0.0.1:8787/", "http://127.0.0.1:8787"),
-        ("HTTPS://Acme.Example//", "https://acme.example"),
+        ("HTTPS://Acme.Example/", "https://acme.example"),
+        ("http://LOCALHOST:8787/", "http://localhost:8787"),
+        ("https://acme.example:443", "https://acme.example:443"),
     ])
     func relayURLsNormalize(raw: String, expected: String) throws {
         #expect(try PhoneURLValidation.relay(raw).absoluteString == expected)
@@ -93,6 +97,16 @@ struct PhoneRPCWireTests {
         ("acme.example", PhoneURLValidation.Failure.notAURL),
         ("https://acme.example/?x=1", PhoneURLValidation.Failure.hasQuery),
         ("https://acme.example/#p", PhoneURLValidation.Failure.hasFragment),
+        // A pairing link carries a relay as scheme, host and port only.
+        ("https://acme.example/relay/", PhoneURLValidation.Failure.hasPath),
+        ("https://acme.example/relay", PhoneURLValidation.Failure.hasPath),
+        ("https://acme.example//", PhoneURLValidation.Failure.hasPath),
+        ("https://user@acme.example", PhoneURLValidation.Failure.hasUserInfo),
+        ("https://127.0.0.1", PhoneURLValidation.Failure.badHost),
+        ("https://acme_relay.example", PhoneURLValidation.Failure.badHost),
+        ("https://xn--acme-9qa.example", PhoneURLValidation.Failure.badHost),
+        ("https://acme.example.", PhoneURLValidation.Failure.badHost),
+        ("https://acme.example:0", PhoneURLValidation.Failure.badPort),
     ])
     func badRelayURLsAreRefused(raw: String, failure: PhoneURLValidation.Failure) {
         #expect(throws: failure) {
@@ -115,6 +129,7 @@ struct PhoneRPCWireTests {
 
     @Test(arguments: [
         PhoneURLValidation.Failure.notAURL, .unsupportedScheme, .noHost, .hasQuery, .hasFragment,
+        .hasPath, .hasUserInfo, .badHost, .badPort,
     ])
     func everyURLFailureExplainsItself(failure: PhoneURLValidation.Failure) {
         // `LocalizedError` puts the description where the Phone pane reads it,

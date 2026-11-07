@@ -122,8 +122,11 @@ public enum PhonePairingState: String, Codable, Sendable {
     case paired
     case denied
     case expired
-    /// The pairing stopped before Allow: the phone left, a frame failed to
-    /// decrypt, or the handshake timed out.
+    /// The pairing stopped before it finished: once the phone's `hello` had
+    /// decrypted, its channel broke (a phone joined or left the room, the
+    /// link closed, or a frame failed to decrypt); or the relay refused the
+    /// pairing link; or the laptop could not store the allowed phone. A
+    /// handshake that times out before `hello` keeps the offer waiting.
     case interrupted
     /// A state a newer daemon added.
     case unknown

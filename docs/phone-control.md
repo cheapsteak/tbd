@@ -32,6 +32,8 @@ not offer relay API 1. It tells you which.
 
 - Addresses must start with `https://`.
 - `http://localhost` and `http://127.0.0.1` are accepted only for a local test relay.
+- An address is the server name and an optional port, with no path after it, because the pairing
+  QR code carries only those.
 - TBD checks the relay again every time it connects.
 
 ## Turn on phone control

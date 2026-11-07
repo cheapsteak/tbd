@@ -31,10 +31,10 @@ enum PhoneRoom {
     /// `<relay path>/v1/rooms/<roomID>?role=laptop`, with `https` mapped to
     /// `wss` and `http` (a loopback test relay) to `ws`.
     ///
-    /// A path prefix on the relay URL is kept, so a relay served under
-    /// `https://acme.example/relay` gets `/relay/v1/rooms/...`. Trailing
-    /// slashes are dropped before the path is appended, so the result never
-    /// holds `//v1/`, which the relay answers with a 404.
+    /// A saved relay URL has no path, because a pairing link cannot carry
+    /// one (`PhoneURLValidation.relay`). The builders still keep any path
+    /// they are given, minus trailing slashes, so the result never holds
+    /// `//v1/`, which the relay answers with a 404.
     static func socketURL(relay: URL, roomID: String) -> URL {
         var parts = baseComponents(relay)
         switch parts.scheme?.lowercased() {
@@ -68,8 +68,8 @@ enum PhoneRoom {
 
     /// `relay`'s components with no query, no fragment and no trailing slash
     /// on the path, ready to have a path appended. `PhoneURLValidation.relay`
-    /// already normalizes a stored relay URL this way; this keeps the
-    /// builders safe for any URL.
+    /// already saves a relay URL as a scheme, host and port alone; this keeps
+    /// the builders safe for any URL.
     private static func baseComponents(_ relay: URL) -> URLComponents {
         // A URL with a host always has components and a path that is empty
         // or starts with "/", so appending "/v1/..." keeps `url` non-nil.
