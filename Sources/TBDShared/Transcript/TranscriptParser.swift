@@ -829,8 +829,13 @@ public enum TranscriptParser {
         lookupDetail(filePath: filePath, itemID: itemID, startingAt: 0)
     }
 
-    /// How much `lookupDetail` reads from the file at a time.
+    /// How much `lookupDetail`'s forward scan reads from the file at a time.
     static let detailChunkBytes = 1 << 20
+
+    /// How much `lookupDetail` reads at a time for an `at-<n>` ID, which
+    /// fetches one line. Most lines fit in the first read; a longer one is
+    /// carried across reads and still returned whole.
+    static let positionalDetailChunkBytes = 64 * 1024
 
     /// `lookupDetail`, scanning forward from `offset` and stopping at the
     /// first match. Same id forms as `lookupFullBody`.
@@ -1016,6 +1021,8 @@ public enum TranscriptParser {
 
     /// The non-empty line that starts at byte `offset`, without its newline.
     /// Nil when `offset` is past the end, inside a line, or on an empty line.
+    /// Reads `positionalDetailChunkBytes` at a time, so a short line costs
+    /// one small read and a long one is carried across reads.
     private static func lineBytes(startingAt offset: UInt64, in handle: FileHandle) -> Data? {
         // A line starts at `offset` when it is the first byte or the byte
         // before it is "\n", and it is not empty when its own first byte is
@@ -1027,7 +1034,8 @@ public enum TranscriptParser {
               probe.count == probeLength,
               offset == 0 || probe.first == UInt8(ascii: "\n"),
               probe.last != UInt8(ascii: "\n"),
-              var reader = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
+              var reader = ForwardLineReader(
+                  handle: handle, from: offset, chunkSize: positionalDetailChunkBytes) else {
             return nil
         }
         return reader.next()

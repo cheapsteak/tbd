@@ -399,6 +399,29 @@ struct TranscriptParserWindowTests {
         }
     }
 
+    /// A positional lookup reads less at a time than the forward scan, so a
+    /// line more than twice that size is carried across reads before its
+    /// newline. It still resolves whole.
+    @Test func aPositionalIDResolvesALineLongerThanOneReadInFull() throws {
+        let longReply = String(repeating: "v", count: 2 * TranscriptParser.positionalDetailChunkBytes + 17)
+        var reply = WindowLine.assistantText("unused", longReply)
+        reply.removeValue(forKey: "uuid")
+        let fixture = try WindowFixture([
+            WindowLine.prompt("m1", "placeholder prompt 1"),
+            reply,
+            WindowLine.prompt("m2", "placeholder prompt 2"),
+        ])
+        defer { fixture.remove() }
+        let id = "at-\(fixture.offsets[1])#0"
+
+        let resolved = TranscriptParser.lookupDetail(filePath: fixture.path, itemID: id).text
+        let isWhole = resolved == longReply
+        let readsLess = TranscriptParser.positionalDetailChunkBytes < TranscriptParser.detailChunkBytes
+
+        #expect(readsLess, "a positional lookup reads a smaller first chunk than the forward scan")
+        #expect(isWhole, "a line longer than one positional read resolves to its full text")
+    }
+
     @Test func aPositionalIDNamingALineWithAUUIDResolvesNothing() throws {
         let fixture = try WindowFixture([
             WindowLine.prompt("m1", "placeholder prompt 1"),
