@@ -22,5 +22,6 @@ Claude, DevServers, Mock
 Hooks, Remote
 Lifecycle
 GC, PR
+PhoneBridge
 Server
 (root)
