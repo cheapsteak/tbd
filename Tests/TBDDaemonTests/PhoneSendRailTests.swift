@@ -237,22 +237,34 @@ struct PhoneSendRailTests {
             device: device, message: "", error: RPCRouter.phoneEmptySendRefusal)
     }
 
-    /// Whitespace is empty too, in text and in parts. Text parts that carry
-    /// only whitespace are a shape the send core already calls malformed, so
-    /// that refusal leaves no row.
+    /// Whitespace text is empty too. Parts are the send core's shape check's
+    /// to judge, not the phone rail's: text parts that carry only whitespace,
+    /// and text beside parts, are shapes it calls malformed, so each gets the
+    /// core's refusal and leaves no row.
     @Test func aPairedPhoneSendOfWhitespaceIsRefusedAndTypesNothing() async throws {
         let harness = try await SendHarness.make()
+        let blankParts = TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true, parts: [.text(" "), .text("\n")])
+        let textBesideParts = TerminalSendParams(
+            terminalID: harness.terminal.id, text: " ", submit: true, parts: [.text("hi")])
+        guard case .malformed(let blankPartsRefusal) = RPCRouter.validateSendShape(blankParts),
+              case .malformed(let textBesidePartsRefusal) = RPCRouter.validateSendShape(textBesideParts) else {
+            Issue.record("the send core's shape check must call both part shapes malformed")
+            return
+        }
 
         let textResponse = try await harness.router.sendFromPairedPhone(
             TerminalSendParams(terminalID: harness.terminal.id, text: " \n\t", submit: true),
             deviceID: UUID())
-        let partsResponse = try await harness.router.sendFromPairedPhone(
-            TerminalSendParams(
-                terminalID: harness.terminal.id, submit: true, parts: [.text(" "), .text("\n")]),
-            deviceID: UUID())
+        let partsResponse = try await harness.router.sendFromPairedPhone(blankParts, deviceID: UUID())
+        let textBesidePartsResponse = try await harness.router.sendFromPairedPhone(
+            textBesideParts, deviceID: UUID())
 
         #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
-        #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(partsResponse.error == blankPartsRefusal, "blank parts get the core's refusal")
+        #expect(
+            textBesidePartsResponse.error == textBesidePartsRefusal,
+            "text beside parts gets the core's refusal")
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
         let logPath = await harness.router.actuationLog.path
