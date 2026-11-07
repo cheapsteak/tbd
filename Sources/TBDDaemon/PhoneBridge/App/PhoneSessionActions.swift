@@ -16,8 +16,9 @@ import TBDShared
 /// keep shells, which spec section 6 hides from the phone, out of its reach,
 /// and keep its messages to text: `phoneSessionStates` drops every report on
 /// a shell, and the send rail refuses a shell, a message part that is not
-/// text and an empty message, after the core's shape check and before the
-/// rest of the send core (see `phoneSend`).
+/// text, an empty message and a message holding a control character, after
+/// the core's shape check and before the rest of the send core (see
+/// `phoneSend`).
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -49,7 +50,9 @@ protocol PhoneSessionActions: Sendable {
     /// The paired-phone send rail: the terminal, the message (`text` or
     /// `parts`) and `submit`, with no dispatch marker, always gated on
     /// awaiting input, never verified and never keys, whatever `p` asks for.
-    /// A shell terminal, a part that is not text or an empty message is
+    /// Every CRLF in the message becomes LF. A shell terminal, a part that is
+    /// not text, an empty message or a message holding a control character
+    /// (a scalar below U+0020 other than LF and tab, DEL, or a C1 control) is
     /// refused before anything is typed.
     ///
     /// The order, all inside the terminal's send lane: the core's shape
@@ -57,7 +60,7 @@ protocol PhoneSessionActions: Sendable {
     /// payload gets the shape error `terminal.send` gives, with no actuation
     /// row, whatever its target, and only a well-formed one meets the
     /// phone's refusals: a shell, then a part that is not text, then an
-    /// empty message.
+    /// empty message, then a control character.
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.wake` with only the terminal and the message the wake

@@ -298,6 +298,74 @@ struct PhoneSendRailTests {
         #expect(requests.first?.message == " \n\t")
     }
 
+    /// The rail drops keys, but text can carry a key's byte. A pane whose
+    /// child has bracketed paste off reads ESC as Escape, so a message holding
+    /// a control character is refused before anything is typed. It is a
+    /// well-formed send the daemon declined, so it is recorded as refused.
+    @Test func aPairedPhoneSendWithAnEscapeIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+        let device = UUID()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "a\u{1b}b", submit: true),
+            deviceID: device)
+
+        #expect(response.error == RPCRouter.phoneControlCharacterRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        try await harness.expectRecordedRefusal(
+            device: device, message: "a\u{1b}b", error: RPCRouter.phoneControlCharacterRefusal)
+    }
+
+    /// Ctrl-C, a lone CR (an early Enter), DEL and a C1 control are refused
+    /// too, in a text part as in `text`.
+    @Test(arguments: ["a\u{3}b", "a\rb", "a\u{7f}b", "a\u{9b}b"])
+    func aPairedPhoneSendWithAControlCharacterInAPartIsRefused(text: String) async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, submit: true, parts: [.text(text)]),
+            deviceID: UUID())
+
+        #expect(response.error == RPCRouter.phoneControlCharacterRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+    }
+
+    /// A phone can end its lines with CRLF. The rail makes each CRLF a bare
+    /// LF, in `text` and in a text part, so the CR is never typed and the
+    /// message is not refused for it.
+    @Test func aPairedPhoneSendMakesCRLFLineEndingsLF() async throws {
+        let textHarness = try await SendHarness.make()
+        let partsHarness = try await SendHarness.make()
+
+        let textResponse = try await textHarness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: textHarness.terminal.id, text: "a\r\nb", submit: true),
+            deviceID: UUID())
+        let partsResponse = try await partsHarness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: partsHarness.terminal.id, submit: true, parts: [.text("c\r\nd")]),
+            deviceID: UUID())
+
+        #expect(textResponse.success, "error was: \(textResponse.error ?? "none")")
+        #expect(textHarness.tmux.pastedBodies == ["a\nb"])
+        #expect(partsResponse.success, "error was: \(partsResponse.error ?? "none")")
+        #expect(partsHarness.tmux.pastedBodies == ["c\nd"])
+    }
+
+    /// A tab and a newline are text, not keys, so they reach the pane as
+    /// written.
+    @Test func aPairedPhoneSendKeepsATabAndANewline() async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "a\tb\nc", submit: true),
+            deviceID: UUID())
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == ["a\tb\nc"])
+    }
+
     /// A terminal with no row is not the shell check's to judge: the send core
     /// reports it missing, as it does for every caller.
     @Test func aPairedPhoneSendToAMissingTerminalFallsThroughToTheSendCore() async throws {

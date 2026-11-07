@@ -3877,6 +3877,13 @@ extension RPCRouter {
     ///   laptop, which a phone cannot know, so a send with any non-text part
     ///   is refused whole, before anything is typed, rather than having the
     ///   part dropped.
+    /// - Every CRLF in the message, in `text` and in each text part, becomes
+    ///   a bare LF (`phoneLineEndingsNormalized`). A phone's keyboard or
+    ///   clipboard can end lines with CRLF, and the control-character refusal
+    ///   below would otherwise refuse every such message for its CRs. The
+    ///   shape check gives the same verdict either way: it reads text for
+    ///   emptiness after trimming whitespace, and CR is whitespace, so the
+    ///   rebuild can make this change before the shape check runs.
     ///
     /// **A shell is refused before anything is typed.** Shells are hidden from
     /// the phone (spec section 6), and a shell runs what is typed into it. The
@@ -3901,6 +3908,17 @@ extension RPCRouter {
     /// each with no row. It refuses a send that names no message at all
     /// (neither `text` nor `parts`) the same way.
     ///
+    /// **A control character is refused before anything is typed.** The rail
+    /// drops `keys`, but text can carry a key's byte. When the pane's child
+    /// has bracketed paste off, the body reaches it bare: tmux's
+    /// `paste-buffer -p` adds the paste markers only when the child asked for
+    /// them, and so does the holder's `HolderSendComposition`. The child then
+    /// reads ESC as Escape, ETX as Ctrl-C and a CR as an Enter partway through
+    /// the message. So text or a text part holding a scalar below U+0020 other
+    /// than LF and tab, or DEL (U+007F), or a C1 control (U+0080–U+009F), is
+    /// refused whole. The check reads the message after the CRLF rebuild
+    /// above, so only a lone CR is refused.
+    ///
     /// **These refusals are recorded as the send core records its own.** A
     /// well-formed act the daemon declined gets a `terminal.send` row naming
     /// the phone and a refusal outcome; a payload whose shape names no act
@@ -3911,16 +3929,21 @@ extension RPCRouter {
     /// (`sendOnInternalRail`'s `preSend`). A malformed payload therefore gets
     /// the core's own shape error and no row, as it would from
     /// `terminal.send`, even when it is also aimed at a shell. A well-formed
-    /// one meets the shell, text-only and blank refusals in that order, each
-    /// judged on the terminal row read once this send's turn in the lane has
-    /// come, so a send queued behind another is never admitted on a row read
-    /// before its wait.
+    /// one meets the shell, text-only, blank and control-character refusals
+    /// in that order, each judged on the terminal row read once this send's
+    /// turn in the lane has come, so a send queued behind another is never
+    /// admitted on a row read before its wait.
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
         let phoneParams = TerminalSendParams(
-            terminalID: params.terminalID, text: params.text,
-            submit: params.submit, parts: params.parts,
+            terminalID: params.terminalID,
+            text: params.text.map { text in Self.phoneLineEndingsNormalized(text) },
+            submit: params.submit,
+            parts: params.parts?.map { (part: SendPart) -> SendPart in
+                guard case .text(let value) = part else { return part }
+                return .text(Self.phoneLineEndingsNormalized(value))
+            },
             gateOnAwaitingInput: true)
         let actor = ActuationActor.phone(deviceID: deviceID)
         return try await sendOnInternalRail(phoneParams, actor: actor) {
@@ -3936,7 +3959,7 @@ extension RPCRouter {
     /// core, whose own shape check refuses it with its own error before any
     /// row exists, exactly as it does for `terminal.send`. Only a well-formed
     /// payload meets the phone's refusals, in this order: a shell, a part that
-    /// is not text, a blank text message.
+    /// is not text, a blank text message, a control character in any text.
     private func phoneSendRefusal(
         _ params: TerminalSendParams, actor: ActuationActor
     ) async throws -> RPCResponse? {
@@ -3957,6 +3980,10 @@ extension RPCRouter {
             return try await recordPhoneSendRefusal(
                 payload, terminal: row, actor: actor, message: Self.phoneEmptySendRefusal)
         }
+        if Self.phoneMessageHasControlCharacter(params) {
+            return try await recordPhoneSendRefusal(
+                payload, terminal: row, actor: actor, message: Self.phoneControlCharacterRefusal)
+        }
         return nil
     }
 
@@ -3968,6 +3995,37 @@ extension RPCRouter {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// `text` with every CRLF made a bare LF, for a phone message. A lone CR
+    /// is kept, for the control-character refusal to judge.
+    private static func phoneLineEndingsNormalized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+    }
+
+    /// Whether the message in `params`, its `text` or any text part, holds a
+    /// control character a phone message may not carry
+    /// (`isPhoneRefusedControl`).
+    private static func phoneMessageHasControlCharacter(_ params: TerminalSendParams) -> Bool {
+        var texts: [String] = params.text.map { text in [text] } ?? []
+        for case .text(let value) in params.parts ?? [] {
+            texts.append(value)
+        }
+        return texts.contains { text in
+            text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
+        }
+    }
+
+    /// Whether `scalar` is a control character a phone message may not carry:
+    /// a C0 control (below U+0020) other than LF and tab, DEL (U+007F), or a
+    /// C1 control (U+0080–U+009F). Any of them reaches a pane whose child has
+    /// bracketed paste off as a key, not as text.
+    private static func isPhoneRefusedControl(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0A, 0x09: return false
+        case 0x00..<0x20, 0x7F, 0x80...0x9F: return true
+        default: return false
+        }
+    }
+
     /// What a paired phone hears when it sends to a shell tab.
     static let phoneShellSendRefusal = "a phone cannot send to a shell tab"
 
@@ -3976,6 +4034,9 @@ extension RPCRouter {
 
     /// What a paired phone hears when its message is empty or whitespace.
     static let phoneEmptySendRefusal = "a phone message cannot be empty"
+
+    /// What a paired phone hears when its message holds a control character.
+    static let phoneControlCharacterRefusal = "a phone message cannot contain control characters"
 
     /// Refuse a phone send of `payload` with `message`, writing the rows the
     /// send core writes when it declines a well-formed act: a `terminal.send`
