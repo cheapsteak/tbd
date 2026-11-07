@@ -24,13 +24,13 @@ struct ProjectionParityTests {
     static let captureScrollback = 1_000
 
     static let projectionMisses: [String: String] = [
-        "scroll-up-down": "SwiftTerm keeps the rows SU scrolls off the top as scrollback; libghostty discards them",
+        "scroll-up-down": "libghostty keeps the rows SU scrolls off the top as scrollback; SwiftTerm deletes them",
         "vs16-at-edge": "libghostty widens a heart with VS16 to two columns and wraps it to the next row; SwiftTerm keeps it one column wide in the last column, so the text and the cursor differ",
         "wide-overwrite-tail": "printing over the second half of a wide character: libghostty clears its first half, SwiftTerm keeps it",
     ]
 
     static let captureMisses: [String: String] = [
-        "scroll-up-down": "SwiftTerm keeps the rows SU scrolls off the top as scrollback; libghostty discards them",
+        "scroll-up-down": "libghostty keeps the rows SU scrolls off the top as scrollback; SwiftTerm deletes them",
         "vs16-at-edge": "libghostty widens a heart with VS16 to two columns and wraps it to the next row; SwiftTerm keeps it in the last column",
         "wide-overwrite-tail": "printing over the second half of a wide character: libghostty clears its first half, SwiftTerm keeps it",
     ]
