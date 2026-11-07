@@ -91,6 +91,71 @@ func terminalModifiers(from flags: NSEvent.ModifierFlags) -> TerminalModifiers {
     return mods
 }
 
+/// Where a wheel event sits in its gesture, collapsed from `NSEvent`'s `phase` and
+/// `momentumPhase` to what the wheel arithmetic acts on. The app's `ScrollWheelAccumulator.Phase`
+/// draws the same lines.
+enum WheelPhase: Sendable, Equatable {
+    /// Neither phase set: a classic wheel notch, or a precise device that reports no gesture.
+    case unphased
+    /// Fingers touched down or started moving (`.mayBegin`, `.began`): a new gesture, which must
+    /// not inherit the last one's remainder.
+    case gestureBegan
+    /// The rest of a gesture with fingers on the surface (`.changed`, `.stationary`, `.ended`,
+    /// `.cancelled`).
+    case gestureChanged
+    /// Inertial motion after the fingers lift (`momentumPhase` set). It continues the gesture it
+    /// follows, remainder included.
+    case momentum
+
+    init(phase: NSEvent.Phase, momentumPhase: NSEvent.Phase) {
+        if !momentumPhase.isEmpty {
+            self = .momentum
+        } else if phase.contains(.began) || phase.contains(.mayBegin) {
+            self = .gestureBegan
+        } else if !phase.isEmpty {
+            self = .gestureChanged
+        } else {
+            self = .unphased
+        }
+    }
+}
+
+/// Bounds the arrow keys the wheel types under alternate scroll: `sustainedKeysPerSecond`, with a
+/// burst of `burstKeys`, the bound the app's wheel monitor puts on its reports. Keys over it are
+/// dropped, not queued, because a backlog would keep scrolling after the fingers stop. Each key
+/// makes a pager or an editor redraw, and a flick's momentum tail would otherwise type keys at
+/// the event rate.
+///
+/// Time is the events' own `timestamp`, so tests drive it without a clock or a timer.
+struct WheelKeyBound: Sendable, Equatable {
+    /// Keys the bucket regains per second of event time.
+    static let sustainedKeysPerSecond: Double = 100
+    /// Keys the bucket holds when full: what passes at once after a pause.
+    static let burstKeys = 6
+
+    /// Keys the bucket can still let through. Starts full.
+    private var tokens = Double(WheelKeyBound.burstKeys)
+    /// `timestamp` of the last refill; nil until the first key.
+    private var lastRefill: TimeInterval?
+
+    init() {}
+
+    /// How many of `count` keys pass at `timestamp`, after refilling the bucket for the event time
+    /// since the last refill. The rest are dropped.
+    mutating func admit(_ count: Int, at timestamp: TimeInterval) -> Int {
+        guard count > 0 else { return 0 }
+        if let lastRefill {
+            // Clamped, so an out-of-order timestamp never drains the bucket.
+            let elapsed = max(0, timestamp - lastRefill)
+            tokens = min(Double(Self.burstKeys), tokens + elapsed * Self.sustainedKeysPerSecond)
+        }
+        lastRefill = timestamp
+        let admitted = min(count, Int(tokens))
+        tokens -= Double(admitted)
+        return admitted
+    }
+}
+
 // MARK: - MouseController
 
 /// Routes `NSEvent`s into the mouse encoder, the selection gesture and the pasteboard.
@@ -143,6 +208,7 @@ final class MouseController: NSObject {
 
     private var trackingArea: NSTrackingArea?
     private var accumulator = ScrollAccumulator()
+    private var arrowKeyBound = WheelKeyBound()
     private var autoscrollTask: Task<Void, Never>?
     private var autoscrollPosition = SurfacePoint(x: 0, y: 0)
     /// Where the last reported press or drag was. A release sent on focus loss, with no event of
@@ -411,23 +477,29 @@ final class MouseController: NSObject {
         handleWheel(
             deltaY: event.scrollingDeltaY,
             hasPreciseDeltas: event.hasPreciseScrollingDeltas,
-            gestureEnded: event.phase.contains(.ended) || event.momentumPhase.contains(.ended),
+            phase: WheelPhase(phase: event.phase, momentumPhase: event.momentumPhase),
+            timestamp: event.timestamp,
             at: surfacePoint(of: event, in: view),
             mods: terminalModifiers(from: event.modifierFlags),
             in: view)
         return true
     }
 
-    /// One wheel event, from its deltas on: whole rows from the accumulator, then a report or
-    /// arrow keys sent to the program, or a viewport scroll. Returns what the terminal decided.
+    /// One wheel event, from its deltas on: whole rows, then a report or arrow keys sent to the
+    /// program, or a viewport scroll. Returns what was done; arrow keys are counted after
+    /// `arrowKeyBound`, which drops those over it.
     ///
     /// Separate from `scrollWheel` because `NSEvent.phase` is not settable on a synthesized event,
-    /// so the tests drive the whole path from here, the end of a gesture included.
+    /// so the tests drive the whole path from here, gesture phases and timestamps included.
+    ///
+    /// - Parameter timestamp: the event's own `timestamp`, in seconds. The arrow-key bound refills
+    ///   from its progress, so no clock is involved.
     @discardableResult
     func handleWheel(
         deltaY: Double,
         hasPreciseDeltas: Bool,
-        gestureEnded: Bool,
+        phase: WheelPhase,
+        timestamp: TimeInterval,
         at position: SurfacePoint,
         mods: TerminalModifiers,
         in view: GhosttyTerminalView
@@ -436,15 +508,20 @@ final class MouseController: NSObject {
         let rows = wheelRows(
             deltaY: deltaY,
             hasPreciseDeltas: hasPreciseDeltas,
+            phase: phase,
             backingScale: Double(view.backingScale),
-            cellHeightPx: Double(geometry.cellHeight),
-            gestureEnded: gestureEnded)
+            cellHeightPx: Double(geometry.cellHeight))
         guard rows != 0 else { return .none }
 
         let outcome = view.terminal.mouseWheel(rows: rows, at: position, mods: mods)
         switch outcome {
-        case .report(let bytes), .cursorKeys(let bytes):
+        case .report(let bytes):
             send(bytes)
+        case .cursorKeys(let key, let count):
+            let admitted = arrowKeyBound.admit(count, at: timestamp)
+            guard admitted > 0 else { return .none }
+            send(Array([[UInt8]](repeating: key, count: admitted).joined()))
+            return .cursorKeys(key: key, count: admitted)
         case .scrolledViewport:
             view.requestFrame()
         case .none:
@@ -453,34 +530,43 @@ final class MouseController: NSObject {
         return outcome
     }
 
-    /// Turns one wheel event into whole rows, carrying the sub-row remainder between events.
+    /// Turns one wheel event into whole rows, carrying the sub-row remainder between events. The
+    /// arithmetic is that of SwiftTerm's `scrollWheel`, which the app's wheel monitor also uses:
     ///
-    /// Pure apart from the accumulator, and separate from `scrollWheel` because `NSEvent.phase` is
-    /// not settable on a synthesized event — the tests drive this directly.
+    /// - A classic wheel's notch is one row, whatever its delta, and it ends any precise motion in
+    ///   progress. Its `scrollingDeltaY` carries the system's wheel acceleration, which is not a
+    ///   row count. On the primary screen the viewport moves one row a notch as well.
+    /// - Precise deltas (trackpad, Magic Mouse) accumulate against the cell height. The remainder
+    ///   is dropped when a new gesture begins and when the direction reverses, so a stale fraction
+    ///   never joins motion it did not belong to. Momentum continues the gesture it follows.
     ///
     /// - Parameters:
-    ///   - deltaY: `NSEvent.scrollingDeltaY`, in **points**, positive = content moves down.
-    ///   - hasPreciseDeltas: trackpad / Magic Mouse. `false` means the delta is already in lines.
+    ///   - deltaY: `NSEvent.scrollingDeltaY`, **points** when precise; positive = content moves
+    ///     down.
+    ///   - hasPreciseDeltas: trackpad / Magic Mouse.
+    ///   - phase: where the event sits in its gesture.
     ///   - backingScale: points → device pixels, because `cellHeightPx` is in device pixels.
-    ///   - gestureEnded: `phase`/`momentumPhase` contains `.ended`; drops the carried fraction.
     /// - Returns: whole rows, **negative = up**, matching `GHOSTTY_SCROLL_VIEWPORT_DELTA`.
     func wheelRows(
         deltaY: Double,
         hasPreciseDeltas: Bool,
+        phase: WheelPhase,
         backingScale: Double,
-        cellHeightPx: Double,
-        gestureEnded: Bool
+        cellHeightPx: Double
     ) -> Int {
-        // The accumulator counts positive = downward; `scrollingDeltaY` is positive when the
-        // content moves down, i.e. when the viewport moves *up*. Hence the negation.
-        let rows: Int
-        if hasPreciseDeltas {
-            rows = accumulator.consume(pixels: -deltaY * backingScale, cellHeight: cellHeightPx)
-        } else {
-            rows = accumulator.consume(rows: -deltaY)
+        // `scrollingDeltaY` is positive when the content moves down, i.e. when the viewport moves
+        // *up*, and rows count up as negative. Hence the negations.
+        guard hasPreciseDeltas else {
+            accumulator.reset()
+            guard deltaY != 0 else { return 0 }
+            return deltaY > 0 ? -1 : 1
         }
-        if gestureEnded { accumulator.reset() }
-        return rows
+        if phase == .gestureBegan { accumulator.reset() }
+        guard deltaY != 0, cellHeightPx > 0 else { return 0 }
+        let rows = -deltaY * backingScale / cellHeightPx
+        // A reversal starts from zero rather than netting against a fraction banked the other way.
+        if accumulator.remainder * rows < 0 { accumulator.reset() }
+        return accumulator.consume(rows: rows)
     }
 
     // MARK: - Tracking-area callbacks

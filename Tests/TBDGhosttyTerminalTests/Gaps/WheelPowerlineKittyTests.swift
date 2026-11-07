@@ -31,11 +31,14 @@ private func repeated(_ key: String, _ count: Int) -> [UInt8] {
     Array(String(repeating: key, count: count).utf8)
 }
 
+private let cursorDown = Array("\u{1b}[B".utf8)
+private let cursorUp = Array("\u{1b}[A".utf8)
+
 private func describe(_ outcome: WheelOutcome) -> String {
     switch outcome {
     case .none: "nothing"
     case .report(let bytes): "the report \(String(decoding: bytes, as: UTF8.self).debugDescription)"
-    case .cursorKeys(let bytes): "the keys \(String(decoding: bytes, as: UTF8.self).debugDescription)"
+    case .cursorKeys(let key, let count): "\(count) of the key \(String(decoding: key, as: UTF8.self).debugDescription)"
     case .scrolledViewport(let rows): "a viewport scroll of \(rows) rows"
     }
 }
@@ -98,13 +101,14 @@ struct WheelPowerlineKittyTests {
         terminal.feed(text: "\u{1b}[?1049h\u{1b}[?1007h")
 
         let down = terminal.mouseWheel(rows: 3, at: wheelPoint, mods: [])
-        #expect(down == .cursorKeys(repeated("\u{1b}[B", 3)), "three rows down gave \(describe(down))")
+        #expect(down == .cursorKeys(key: cursorDown, count: 3), "three rows down gave \(describe(down))")
         let up = terminal.mouseWheel(rows: -2, at: wheelPoint, mods: [])
-        #expect(up == .cursorKeys(repeated("\u{1b}[A", 2)), "two rows up gave \(describe(up))")
+        #expect(up == .cursorKeys(key: cursorUp, count: 2), "two rows up gave \(describe(up))")
 
         terminal.feed(text: "\u{1b}[?1h")
         let application = terminal.mouseWheel(rows: 1, at: wheelPoint, mods: [])
-        #expect(application == .cursorKeys(Array("\u{1b}OB".utf8)), "under DECCKM a row down gave \(describe(application))")
+        #expect(application == .cursorKeys(key: Array("\u{1b}OB".utf8), count: 1),
+                "under DECCKM a row down gave \(describe(application))")
 
         terminal.feed(text: "\u{1b}[?1007l")
         let off = terminal.mouseWheel(rows: 3, at: wheelPoint, mods: [])
@@ -120,20 +124,24 @@ struct WheelPowerlineKittyTests {
     }
 
     /// A new terminal has alternate scroll on, as Ghostty and SwiftTerm do, so `less` scrolls by wheel
-    /// without asking. Through the view: three wheel-down lines send three cursor-down keys.
+    /// without asking. Through the view, a classic wheel's notch is one arrow key whatever its
+    /// delta, which carries the wheel's acceleration rather than a row count.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
-    func wheelLinesReachTheProgramAsArrowKeys() throws {
+    func aWheelNotchIsOneArrowKeyWhateverItsDelta() throws {
         let (terminal, view, recorder) = try makeView()
         terminal.feed(text: "\u{1b}[?1049h")
         #expect(terminal.withLocked { $0.mode(1007) }, "a new terminal starts with alternate scroll off")
 
-        let outcome = view.mouseController.handleWheel(
-            deltaY: -3, hasPreciseDeltas: false, gestureEnded: false, at: wheelPoint, mods: [], in: view)
-        #expect(recorder.sent == [repeated("\u{1b}[B", 3)], "three wheel-down lines sent \(recorder.sent), from \(describe(outcome))")
+        let down = Self.wheel(view, deltaY: -3, precise: false, phase: .unphased, at: 1)
+        #expect(recorder.sent == [cursorDown], "a wheel-down notch of 3 lines sent \(recorder.sent), from \(describe(down))")
+        recorder.sent = []
+        let up = Self.wheel(view, deltaY: 12, precise: false, phase: .unphased, at: 2)
+        #expect(recorder.sent == [cursorUp], "a wheel-up notch of 12 lines sent \(recorder.sent), from \(describe(up))")
     }
 
-    /// A trackpad moves by fractions of a line. They add up to whole lines, and the fraction left
-    /// when a gesture ends is dropped, so a short flick sends nothing.
+    /// A trackpad moves by fractions of a line. They add up to whole lines within a gesture, and
+    /// the fraction one gesture leaves is dropped when the next begins, so a short flick sends
+    /// nothing and lends nothing to the next gesture.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func trackpadFractionsBuildUpIntoWholeLines() throws {
         let (terminal, view, recorder) = try makeView()
@@ -141,14 +149,59 @@ struct WheelPowerlineKittyTests {
         // Points down, as `scrollingDeltaY` reports a scroll toward the end.
         let fraction = -0.3 * Double(view.cellSize.height)
 
-        Self.trackpadScroll(view, deltaY: fraction, ended: true)
+        Self.wheel(view, deltaY: fraction, phase: .gestureBegan, at: 1)
         #expect(recorder.sent.isEmpty, "a 0.3-line flick sent \(recorder.sent)")
 
         // Had the flick's fraction been kept, the third of these would make a whole line.
-        for _ in 0..<3 { Self.trackpadScroll(view, deltaY: fraction, ended: false) }
+        Self.wheel(view, deltaY: fraction, phase: .gestureBegan, at: 2)
+        Self.wheel(view, deltaY: fraction, phase: .gestureChanged, at: 2.01)
+        Self.wheel(view, deltaY: fraction, phase: .gestureChanged, at: 2.02)
         #expect(recorder.sent.isEmpty, "0.9 of a line sent \(recorder.sent)")
-        Self.trackpadScroll(view, deltaY: fraction, ended: false)
-        #expect(recorder.sent == [Array("\u{1b}[B".utf8)], "1.2 lines sent \(recorder.sent)")
+        Self.wheel(view, deltaY: fraction, phase: .gestureChanged, at: 2.03)
+        #expect(recorder.sent == [cursorDown], "1.2 lines sent \(recorder.sent)")
+    }
+
+    /// Reversing direction drops the fraction banked the other way rather than netting against it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aReversalDiscardsTheRemainder() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h")
+        let line = Double(view.cellSize.height)
+
+        // 0.7 of a line down, then 1.1 up in two steps. Netted against the 0.7, the 1.1 would
+        // leave 0.4 up and send nothing; with the 0.7 dropped, it is a whole line up.
+        Self.wheel(view, deltaY: -0.7 * line, phase: .gestureBegan, at: 1)
+        Self.wheel(view, deltaY: 0.5 * line, phase: .gestureChanged, at: 1.01)
+        #expect(recorder.sent.isEmpty, "0.7 of a line down and 0.5 up sent \(recorder.sent)")
+        let up = Self.wheel(view, deltaY: 0.6 * line, phase: .gestureChanged, at: 1.02)
+        #expect(recorder.sent == [cursorUp], "after the reversal, 1.1 lines up sent \(recorder.sent), from \(describe(up))")
+    }
+
+    /// A flick's momentum tail, 60 events of two lines each within 100 ms, types no more arrow keys
+    /// than the bound lets through: the burst at once, then 100 a second, so at most 16 of the 120.
+    /// The keys over the bound are dropped, not queued: an event after the tail sends only its own.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aMomentumTailIsBoundedByTheBurst() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h")
+        let line = Double(view.cellSize.height)
+        let events = 60
+        let span: TimeInterval = 0.1
+
+        for index in 0..<events {
+            Self.wheel(view, deltaY: -2 * line, phase: .momentum, at: 10 + span * Double(index) / Double(events))
+        }
+        let sent = Array(recorder.sent.joined())
+        let typed = sent.count / cursorDown.count
+        let bound = WheelKeyBound.burstKeys + Int(span * WheelKeyBound.sustainedKeysPerSecond)
+        #expect(sent == repeated("\u{1b}[B", typed), "the momentum tail sent \(String(decoding: sent, as: UTF8.self).debugDescription)")
+        #expect(typed >= WheelKeyBound.burstKeys && typed <= bound,
+                "120 lines of momentum in 100 ms typed \(typed) arrow keys, not from \(WheelKeyBound.burstKeys) to \(bound)")
+
+        recorder.sent = []
+        // A line and a half, so the one whole line does not hang on rounding.
+        Self.wheel(view, deltaY: -1.5 * line, phase: .gestureBegan, at: 11)
+        #expect(recorder.sent == [cursorDown], "a line and a half a second after the tail sent \(recorder.sent)")
     }
 
     /// On the primary screen the wheel moves the viewport through scrollback and sends the program
@@ -340,10 +393,15 @@ struct WheelPowerlineKittyTests {
 
     // MARK: - Fixture
 
-    /// One trackpad wheel event of `deltaY` points through the view's mouse controller.
-    private static func trackpadScroll(_ view: GhosttyTerminalView, deltaY: Double, ended: Bool) {
+    /// One wheel event through the view's mouse controller, at event time `timestamp` seconds.
+    /// `deltaY` is in points from a trackpad (`precise`), in lines from a classic wheel.
+    @discardableResult
+    private static func wheel(
+        _ view: GhosttyTerminalView, deltaY: Double, precise: Bool = true, phase: WheelPhase, at timestamp: TimeInterval
+    ) -> WheelOutcome {
         view.mouseController.handleWheel(
-            deltaY: deltaY, hasPreciseDeltas: true, gestureEnded: ended, at: wheelPoint, mods: [], in: view)
+            deltaY: deltaY, hasPreciseDeltas: precise, phase: phase, timestamp: timestamp,
+            at: wheelPoint, mods: [], in: view)
     }
 
     /// A terminal and a windowless view over it, 400×200 points, recording what it sends.

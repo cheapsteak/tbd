@@ -167,8 +167,8 @@ struct ScrollAccumulator: Sendable, Equatable {
         return Int(whole)
     }
 
-    /// Drop the carried fraction — call at the end of a scroll gesture (`NSEvent.phase == .ended`)
-    /// so a new flick starts clean.
+    /// Drop the carried fraction — call when a new gesture begins or the direction reverses, so a
+    /// stale fraction never joins motion it did not belong to.
     mutating func reset() { remainder = 0 }
 }
 
@@ -178,9 +178,10 @@ enum WheelOutcome: Sendable, Equatable {
     case none
     /// Write these bytes to the pty (mouse tracking is on).
     case report([UInt8])
-    /// Write these bytes to the pty: one cursor-up or cursor-down key per row, because a program
-    /// on the alternate screen with alternate scroll (`?1007h`) asked for the wheel as arrow keys.
-    case cursorKeys([UInt8])
+    /// Write `key`, a cursor-up or cursor-down key, to the pty `count` times, once per row, because
+    /// a program on the alternate screen with alternate scroll (`?1007h`) asked for the wheel as
+    /// arrow keys. A count rather than the bytes, so the view can bound how many it sends.
+    case cursorKeys(key: [UInt8], count: Int)
     /// Mouse tracking is off and the viewport was scrolled by this many rows (negative = up).
     case scrolledViewport(rows: Int)
 }
@@ -491,8 +492,9 @@ final class MouseEncoder {
             let state = GhosttyTerminalState(raw: terminal)
             if state.isAlternateScreen {
                 guard state.mode(Self.alternateScrollMode) else { return .none }
-                return .cursorKeys(Self.alternateScrollKeys(
-                    rows: rows, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode)))
+                let key = Self.alternateScrollKey(
+                    up: rows < 0, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode))
+                return .cursorKeys(key: key, count: abs(rows))
             }
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
@@ -521,11 +523,10 @@ final class MouseEncoder {
     /// DEC private mode 1, DECCKM: the cursor keys send `ESC O A` rather than `ESC [ A`.
     static let applicationCursorKeysMode: UInt16 = 1
 
-    /// The keys `rows` of wheel scrolling type under alternate scroll: one cursor key per row, up
-    /// for negative rows. Under DECCKM they are the application form, as the real keys are.
-    static func alternateScrollKeys(rows: Int, applicationCursorKeys: Bool) -> [UInt8] {
-        let key: [UInt8] = [0x1B, UInt8(ascii: applicationCursorKeys ? "O" : "["), UInt8(ascii: rows < 0 ? "A" : "B")]
-        return Array([[UInt8]](repeating: key, count: abs(rows)).joined())
+    /// The key one row of wheel scrolling types under alternate scroll: cursor up or cursor down.
+    /// Under DECCKM it is the application form, as the real key is.
+    static func alternateScrollKey(up: Bool, applicationCursorKeys: Bool) -> [UInt8] {
+        [0x1B, UInt8(ascii: applicationCursorKeys ? "O" : "["), UInt8(ascii: up ? "A" : "B")]
     }
 }
 
