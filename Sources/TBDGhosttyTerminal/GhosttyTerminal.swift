@@ -395,7 +395,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
         guard created == GHOSTTY_SUCCESS, let handle else {
             let result = GhosttyCallError(result: created, operation: "ghostty_terminal_new").result
             terminalEngineLog.error("ghostty_terminal_new failed: \(result, privacy: .public)")
-            throw GhosttyError.terminalInit(result == 0 ? -1 : result)
+            // Success with no terminal has no result to report.
+            throw GhosttyError.terminalInit(result == 0 ? nil : result)
         }
         let context = IOContext(
             callbacks: callbacks,
@@ -408,7 +409,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
             throw GhosttyError.terminalInit(error.result)
         } catch {
             ghostty_terminal_free(handle)
-            throw GhosttyError.terminalInit(-1)
+            throw GhosttyError.terminalInit(nil)
         }
         self.core = TerminalCore(raw: handle, context: context, cols: columns, rows: lines)
         self.callbacks = callbacks

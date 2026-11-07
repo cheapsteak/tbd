@@ -64,6 +64,15 @@ struct GhosttyTerminalTests {
         #expect(line.hasPrefix("hello"), "row 0 reads \(line.debugDescription)")
     }
 
+    /// -1 is a real result, `GHOSTTY_OUT_OF_MEMORY` (`types.h`), so "no result" cannot be spelled
+    /// -1: it is nil, and the two read differently.
+    @Test func terminalInitTellsOutOfMemoryFromNoResult() {
+        let noResult = GhosttyError.terminalInit(nil).localizedDescription
+        let outOfMemory = GhosttyError.terminalInit(-1).localizedDescription
+        #expect(noResult.contains("no GhosttyResult"), "terminalInit(nil) reads \(noResult.debugDescription)")
+        #expect(outOfMemory.contains("out of memory"), "terminalInit(-1) reads \(outOfMemory.debugDescription)")
+    }
+
     @Test func effectCallbacksFireInsideFeed() throws {
         let recorder = CallbackRecorder()
         let terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: recorder.callbacks)
