@@ -3,6 +3,7 @@ import Foundation
 import SwiftTerm
 // Scoped, not a whole-module import: `TBDShared.Terminal` is the DB row model,
 // and every bare `Terminal` in this file means SwiftTerm's emulator.
+import enum TBDShared.ANSIEscape
 import struct TBDShared.SidecarScreenRequest
 import Testing
 @testable import TBDApp
@@ -198,6 +199,49 @@ struct TerminalSnapshotBlankRowTests {
         #expect(replay.components(separatedBy: "\r\n").count == 61)
     }
 
+    /// A capture's text with its SGR runs taken out holds nothing else a
+    /// terminal acts on: no other escape and no control character but the
+    /// `\r\n` that joins its rows. What `ANSIEscape.strip` leaves of it is
+    /// then the text a revive prints, gaps and all.
+    private static func expectTextAndSGROnly(
+        _ capture: String, sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        let text = capture.replacingOccurrences(
+            of: "\u{1b}\\[[0-9;:]*m", with: "", options: .regularExpression)
+        let others = text.unicodeScalars.filter {
+            ($0.value < 0x20 && $0 != "\r" && $0 != "\n") || $0.value == 0x7f
+        }
+        #expect(others.isEmpty, "the capture holds \(others.map { $0.value })",
+                sourceLocation: sourceLocation)
+    }
+
+    @Test("A capture keeps a coloured gap as spaces, so its text keeps the gap")
+    func captureKeepsAColouredGap() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // `left`, then the rest of the row erased under a background colour,
+        // then `right` at column 20: cells 4 to 18 are coloured blanks.
+        pair.source.feed(text: "left\u{1b}[44m\u{1b}[K\u{1b}[0m\u{1b}[20Gright")
+
+        let capture = TerminalCellWalk.styledCapture(of: pair.source, maxScrollbackLines: 500)
+        Self.expectTextAndSGROnly(capture)
+        #expect(ANSIEscape.strip(capture) == "left" + String(repeating: " ", count: 15) + "right",
+                "the Session History viewer shows the capture with its gap closed up")
+    }
+
+    @Test("A capture of an erased wrapped row holds no backspace")
+    func captureOfAnErasedWrappedRow() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // The input `erasedWrappedRowKeepsItsPlace` replays: a continuation
+        // with nothing in it, which a replay has to print onto.
+        pair.source.feed(
+            text: Self.numberedLines(30) + String(repeating: "a", count: 100) + "\r\u{1b}[2K")
+
+        let capture = TerminalCellWalk.styledCapture(of: pair.source, maxScrollbackLines: 500)
+        #expect(!capture.contains("\u{8}"), "a BS lands in the viewer's text as a raw U+0008")
+        Self.expectTextAndSGROnly(capture)
+        #expect(ANSIEscape.strip(capture).hasSuffix("\r\n" + String(repeating: "a", count: 80)))
+    }
+
     // MARK: - Blank cells with a background colour
 
     @Test("Erasing under a background colour keeps the colour", arguments: [
@@ -324,6 +368,9 @@ struct TerminalSnapshotBlankRowTests {
 @Suite("Closed-terminal capture of a cleared screen")
 @MainActor
 struct TerminalCaptureBlankRowTests {
+    // This passes on `origin/main` too, whose walk always dropped trailing
+    // blank rows. It guards this branch, which keeps them in a replay that
+    // holds history and must not let that reach a capture.
     @Test("A viewer's capture of a cleared screen ends at the prompt")
     func viewerCaptureEndsAtThePrompt() throws {
         // Isolated defaults, per `Tests/CLAUDE.md`, as `ViewerScreenProducerTests` does.

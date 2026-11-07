@@ -29,7 +29,7 @@ public enum TerminalCellWalk {
     public static func styledHistory(of terminal: Terminal, maxScrollbackLines: Int) -> String {
         join(
             lines(of: terminal, maxScrollbackLines: maxScrollbackLines, purpose: .replay),
-            cols: terminal.cols)
+            cols: terminal.cols, purpose: .replay)
     }
 
     /// The same walk for a capture that is printed rather than replayed: the
@@ -39,15 +39,27 @@ public enum TerminalCellWalk {
     /// go: kept, each would push the revived prompt one more line below the
     /// session's last line. Both stores call this, so their captures stay
     /// identical.
+    ///
+    /// A capture is read as text too: the Session History viewer, which a
+    /// dev server's "Show last output" also opens, shows it through
+    /// `ANSIEscape.strip`, which deletes every escape sequence and leaves
+    /// every other control character in place. So a capture holds only text
+    /// and SGR runs, and every blank it sends is a space: ECH and CUF would
+    /// strip to nothing and close up the gap they stand for, and a BS would
+    /// land in the text as a raw U+0008. A revive may also print a capture
+    /// into a tab narrower than the session's, where CUF stops at the last
+    /// column while a space wraps. For that tab, each row ends at its last
+    /// character, so a row coloured out to the edge does not wrap there into
+    /// an extra row of coloured spaces.
     public static func styledCapture(of terminal: Terminal, maxScrollbackLines: Int) -> String {
         join(
             lines(of: terminal, maxScrollbackLines: maxScrollbackLines, purpose: .capture),
-            cols: terminal.cols)
+            cols: terminal.cols, purpose: .capture)
     }
 
     public static func styledViewport(of terminal: Terminal) -> String {
         let rows = (0..<terminal.rows).compactMap { terminal.getLine(row: $0) }
-        return join(rows, cols: terminal.cols)
+        return join(rows, cols: terminal.cols, purpose: .replay)
     }
 
     /// Joins rendered lines with `\r\n` — but ONLY before a line that is not a
@@ -69,22 +81,24 @@ public enum TerminalCellWalk {
     /// is why `render` always prints a continuation's first cell, even on a
     /// row that holds nothing (see `continuation` there). The first walked row
     /// is never treated as a continuation, because nothing above it on the
-    /// receiver leaves a pending wrap to continue.
-    private static func join(_ lines: [BufferLine], cols: Int) -> String {
+    /// receiver leaves a pending wrap to continue. A capture has no receiver
+    /// to keep in step, so it sends rows as they are (see `styledCapture`).
+    private static func join(_ lines: [BufferLine], cols: Int, purpose: Purpose) -> String {
         var out = ""
         for (index, line) in lines.enumerated() {
             if index > 0 && !line.isWrapped { out += "\r\n" }
             let continuesPreviousLine = index > 0 && line.isWrapped
             let continuesToNextLine = index + 1 < lines.count && lines[index + 1].isWrapped
             out += render(
-                line: line, cols: cols,
-                fullWidth: continuesToNextLine, continuation: continuesPreviousLine)
+                line: line, cols: cols, fullWidth: continuesToNextLine,
+                continuation: continuesPreviousLine, purpose: purpose)
         }
         return out
     }
 
-    /// What a walk is for, which decides whether its trailing blank rows may
-    /// go.
+    /// What a walk is for: a replay into a receiver that must end up as the
+    /// source is, or a capture that is printed and read rather than replayed.
+    /// It decides whether trailing blank rows may go and how blanks are sent.
     private enum Purpose {
         case replay
         case capture
@@ -130,9 +144,10 @@ public enum TerminalCellWalk {
         // the cursor back wherever it was. There a trailing blank row adds
         // only a line ending, so dropping it lets a short screen walk as its
         // text instead of its text plus a run of empty lines. A row is blank
-        // when `visibleLength` is 0, so a row of coloured blanks stays. A
-        // wrapped continuation is never dropped, and a blank row earlier in
-        // the walk is real content and stays.
+        // when `render` sends none of it (`sentLength` is 0), so in a replay
+        // a row of coloured blanks stays. A wrapped continuation is never
+        // dropped, and a blank row earlier in the walk is real content and
+        // stays.
         //
         // A capture always drops them: it is printed, not replayed, so there
         // is no scroll to protect (see `styledCapture`).
@@ -142,12 +157,24 @@ public enum TerminalCellWalk {
         let holdsHistory = walked.count > viewportRows
         if purpose == .capture || !holdsHistory {
             while let last = walked.last, !last.isWrapped,
-                  visibleLength(of: last, cols: terminal.cols) == 0 {
+                  sentLength(of: last, cols: terminal.cols, purpose: purpose) == 0 {
                 walked.removeLast()
             }
         }
 
         return walked
+    }
+
+    /// How many leading cells `render` sends of a line that no later line
+    /// continues. A replay sends its `visibleLength`. A capture sends through
+    /// the last character only (see `styledCapture`).
+    private static func sentLength(of line: BufferLine, cols: Int, purpose: Purpose) -> Int {
+        switch purpose {
+        case .replay:
+            return visibleLength(of: line, cols: cols)
+        case .capture:
+            return min(line.getTrimmedLength(), cols)
+        }
     }
 
     /// How many leading cells a receiver needs to show `line` as the source
@@ -257,13 +284,13 @@ public enum TerminalCellWalk {
     }
 
     private static func render(
-        line: BufferLine, cols: Int, fullWidth: Bool, continuation: Bool
+        line: BufferLine, cols: Int, fullWidth: Bool, continuation: Bool, purpose: Purpose
     ) -> String {
         // A line the next one wraps from is emitted at full width; `join` is
         // what withholds its line ending so DECAWM re-wraps it in the
-        // receiver. Otherwise the line ends at its `visibleLength`, so a
-        // mostly-empty screen does not cost `cols` bytes/row and a coloured
-        // blank at the end of a line still arrives.
+        // receiver. Otherwise the line ends at its `sentLength`, so a
+        // mostly-empty screen does not cost `cols` bytes/row, and in a
+        // replay a coloured blank at the end of a line still arrives.
         //
         // The full-width branch caps at `line.count`, not just `cols`: a
         // scrollback line shorter than the terminal's current column count
@@ -272,19 +299,23 @@ public enum TerminalCellWalk {
         // its last cell instead of trapping, which would silently repeat
         // that cell out to `cols`.
         //
-        // A continuation always sends at least its first cell. The receiver
-        // reaches a continuation only by printing past the edge of the row
-        // above, because SwiftTerm wraps when it prints and at no other time,
-        // so a continuation that sent nothing would leave the receiver one row
-        // short, with the viewport one row low and the closing cursor address
-        // on the row above. EL never clears a row's wrap flag, so `ESC[2K` on
-        // a wrapped row leaves exactly that: a continuation with nothing in
-        // it. Sending a line break there instead would land the receiver on
-        // the row too, but as a hard break: reflow on a resize and selection
-        // would then split a line the source keeps whole, and a handback
-        // would carry that split to the daemon.
-        var limit = fullWidth ? min(cols, line.count) : visibleLength(of: line, cols: cols)
-        if continuation { limit = max(limit, min(1, line.count)) }
+        // In a replay, a continuation always sends at least its first cell.
+        // The receiver reaches a continuation only by printing past the edge
+        // of the row above, because SwiftTerm wraps when it prints and at no
+        // other time, so a continuation that sent nothing would leave the
+        // receiver one row short, with the viewport one row low and the
+        // closing cursor address on the row above. EL never clears a row's
+        // wrap flag, so `ESC[2K` on a wrapped row leaves exactly that: a
+        // continuation with nothing in it. Sending a line break there instead
+        // would land the receiver on the row too, but as a hard break: reflow
+        // on a resize and selection would then split a line the source keeps
+        // whole, and a handback would carry that split to the daemon. A
+        // capture has no receiver to keep in step, so an empty continuation
+        // sends nothing there.
+        var limit = fullWidth
+            ? min(cols, line.count)
+            : sentLength(of: line, cols: cols, purpose: purpose)
+        if purpose == .replay && continuation { limit = max(limit, min(1, line.count)) }
         guard limit > 0 else { return "" }
 
         // On a row the next one continues, ECH runs stop one cell short of
@@ -323,14 +354,17 @@ public enum TerminalCellWalk {
                 column += 1
                 continue
             }
-            // A blank goes one of two ways. A run `erasedRunEnd` accepts is
-            // erased with ECH under the run's SGR, which paints the
+            // In a replay a blank goes one of two ways. A run `erasedRunEnd`
+            // accepts is erased with ECH under the run's SGR, which paints the
             // background and moves nothing, then stepped over with CUF. The
             // CUF is left off when the run ends the row, because a line
             // ending or the end of the walk comes next. Any other blank goes
             // as a space, which moves the cursor one column under the open
-            // SGR, so a styled blank still shows.
-            let runEnd = erasedRunEnd(of: line, from: column, before: eraseLimit, trimmed: trimmed)
+            // SGR, so a styled blank still shows. In a capture every blank
+            // goes as a space (see `styledCapture`).
+            let runEnd = purpose == .replay
+                ? erasedRunEnd(of: line, from: column, before: eraseLimit, trimmed: trimmed)
+                : column
             guard runEnd > column else {
                 out.append(" ")
                 column += 1
