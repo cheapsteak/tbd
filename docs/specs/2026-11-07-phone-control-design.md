@@ -132,9 +132,17 @@ Research: `transports.md` section 7, `phone-clients.md` sections 1.3–1.5.
    '<phone name>' to control this laptop? Code 123 456". The phone shows "Check this code on your
    laptop: 123 456". The user names the phone before the handshake, starting from a name taken
    from the browser, such as "iPhone". The name travels encrypted in the first handshake message.
-5. On Allow, the daemon stores the phone's public key in a `phone_device` row, with the room ID as
-   that phone's permanent room. It then discards the offer. A QR code works once. On Deny or
-   expiry, the daemon discards the offer and the phone shows why.
+   The laptop shows this prompt only after the phone's first encrypted message, which the phone
+   sends right after the handshake, arrives and decrypts, so a replayed first handshake message can
+   never raise it.
+5. On Allow, the daemon makes a new 32-byte room ID for that phone and sends it to the phone
+   inside the encrypted channel. It stores the phone's public key in a `phone_device` row, with the
+   new room ID as that phone's permanent room, then closes its socket on the pairing room and never
+   listens there again. The phone keeps the new room ID and uses it for every later connection. The
+   QR code's room serves pairing only, because anyone who saw the code knows it, and anyone who
+   holds a room ID can open either role's socket there and knock the real peer off. The daemon then
+   discards the offer. A QR code works once. On Deny or expiry, the daemon discards the offer and
+   the phone shows why.
 
 **Every later connection.** The phone runs `Noise_IK_25519_AESGCM_SHA256` with the same prologue.
 The laptop accepts the handshake only when the phone's static key matches a non-revoked
