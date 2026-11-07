@@ -188,6 +188,7 @@ final class TerminalRenderer {
             width: texture.width,
             height: texture.height,
             presentViaCommandBuffer: true,
+            willEncode: {},
             forceEncode: false,
             acquire: { (texture, nil) })
     }
@@ -204,8 +205,19 @@ final class TerminalRenderer {
     /// method does the `waitUntilScheduled()` + `drawable.present()` itself, so the caller does not
     /// have to reach around the renderer to acquire drawables (which would also lose the
     /// `drawablesAcquired` accounting).
+    ///
+    /// - Parameters:
+    ///   - willEncode: called once the frame is known to be drawn, before anything is encoded.
+    ///     The view's draw-start hook.
+    ///   - onPresented: given to the drawable's `addPresentedHandler`, so it runs on whatever
+    ///     thread Metal reports the present on. Not called for a skipped frame.
     @discardableResult
-    func render(surface: TerminalSurface, layer: CAMetalLayer) throws -> RenderOutcome {
+    func render(
+        surface: TerminalSurface,
+        layer: CAMetalLayer,
+        willEncode: () -> Void = {},
+        onPresented: (@Sendable () -> Void)? = nil
+    ) throws -> RenderOutcome {
         let size = layer.drawableSize
         let synchronous = layer.presentsWithTransaction
         var acquired: (any CAMetalDrawable)?
@@ -214,6 +226,7 @@ final class TerminalRenderer {
             width: Int(size.width),
             height: Int(size.height),
             presentViaCommandBuffer: !synchronous,
+            willEncode: willEncode,
             // `presentsWithTransaction` is a promise to Core Animation that this transaction will
             // be completed by an explicit `present()`. Skipping the frame breaks that promise: the
             // transaction never completes, and a live resize visibly stalls until the flag goes
@@ -223,6 +236,7 @@ final class TerminalRenderer {
             acquire: { [weak self] in
                 guard let drawable = layer.nextDrawable() else { return (nil, nil) }
                 self?.stats.drawablesAcquired += 1
+                if let onPresented { drawable.addPresentedHandler { _ in onPresented() } }
                 acquired = drawable
                 return (drawable.texture, drawable)
             })
@@ -254,6 +268,7 @@ final class TerminalRenderer {
         width: Int,
         height: Int,
         presentViaCommandBuffer: Bool,
+        willEncode: () -> Void,
         forceEncode: Bool,
         acquire: () -> (MTLTexture?, CAMetalDrawable?)
     ) throws -> RenderOutcome {
@@ -272,6 +287,7 @@ final class TerminalRenderer {
                                  glyphCount: surface.glyphCount, rectCount: surface.rectCount)
         }
 
+        willEncode()
         let metrics = glyphCache.metrics
         let geometry = GridGeometry(metrics: metrics, viewportWidth: width, viewportHeight: height)
         let rectsBelow = surface.rectInstancesBelow(geometry: geometry)

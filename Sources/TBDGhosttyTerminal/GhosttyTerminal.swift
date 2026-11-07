@@ -276,6 +276,18 @@ final class TerminalCore {
         self.rows = rows
     }
 
+    /// The object bound to `raw`, made by `make` on first use. A bound object of another type is
+    /// released first, so a binding never outlives its terminal unreleased. Called under the lock.
+    func boundObject<Object: TerminalBoundObject>(
+        _ raw: VtTerminal, make: (VtTerminal) throws -> Object
+    ) rethrows -> Object {
+        if let existing = bound as? Object { return existing }
+        let object = try make(raw)
+        bound?.releaseBinding(raw)
+        bound = object
+        return object
+    }
+
     /// Takes everything the callbacks accumulated. Called under the lock.
     func harvest(signal: Bool) -> Delivery {
         let delivery = Delivery(
@@ -468,19 +480,34 @@ public final class GhosttyTerminal: @unchecked Sendable {
         var delivery = Delivery.none
         let value: T? = try locked { core in
             guard let raw = core.raw else { return nil }
-            let object: Object
-            if let existing = core.bound as? Object {
-                object = existing
-            } else {
-                object = try make(raw)
-                core.bound = object
-            }
-            let value = try body(raw, object)
+            let value = try body(raw, try core.boundObject(raw, make: make))
             delivery = core.harvest(signal: signalsRender)
             return value
         }
         delivery.run(callbacks)
         return value
+    }
+
+    /// `withBound`, except that what the C terminal writes to the pty while `body` runs is returned
+    /// instead of delivered to `writePty`. A paste is the one input libghostty writes through
+    /// `WRITE_PTY` itself; its bytes are the user's input, so the view sends them the way it sends
+    /// a key, and `writePty` keeps carrying only the program's replies. Nothing is captured while
+    /// the terminal is muted, because the C callback drops those writes.
+    func withBoundCapturingPty<Object: TerminalBoundObject, T>(
+        make: (VtTerminal) throws -> Object,
+        _ body: (VtTerminal, Object) throws -> T
+    ) rethrows -> (value: T, pty: [UInt8])? {
+        var delivery = Delivery.none
+        let result: (value: T, pty: [UInt8])? = try locked { core in
+            guard let raw = core.raw else { return nil }
+            let value = try body(raw, try core.boundObject(raw, make: make))
+            let pty = core.context.pendingPty
+            core.context.pendingPty.removeAll(keepingCapacity: true)
+            delivery = core.harvest(signal: false)
+            return (value, pty)
+        }
+        delivery.run(callbacks)
+        return result
     }
 
     /// The view's frame request. Called after the lock drops whenever the screen may have changed.
