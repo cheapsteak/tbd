@@ -144,6 +144,43 @@ let package = Package(
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
+        // libghostty-vt, Ghostty's terminal core, as the official vt-1.0.0
+        // xcframework: a static library plus a `module.modulemap` that names
+        // the module `GhosttyVt`, which is why the target has that name.
+        // SwiftPM checks the checksum on every resolve. Bumping the pin means
+        // reading the header diff, because a type change behind a `void*`
+        // getter is invisible to the compiler, and checking the release's
+        // minisign signature against Ghostty's published key.
+        .binaryTarget(
+            name: "GhosttyVt",
+            url: "https://release.files.ghostty.org/libghostty-vt/1.0.0/ghostty-vt-1.0.0.xcframework.zip",
+            checksum: "2c32b7409b2b6c2ef6cfd606526de357762ad458bdc27134ad074e86506a8bc2"
+        ),
+        // The structs the libghostty renderer shares byte for byte with its
+        // Metal shaders. Header only; the one C file makes the C compiler
+        // evaluate the header's layout assertions on every build.
+        .target(
+            name: "TBDGhosttyShaderTypes",
+            path: "Sources/TBDGhosttyShaderTypes",
+            publicHeadersPath: "include"
+        ),
+        // A terminal engine over libghostty-vt: the locked terminal wrapper,
+        // a Metal renderer and an AppKit view. Standalone on purpose: it knows
+        // nothing of TBDApp and exposes its own API. Adapted in part from
+        // tkzmux, whose MIT licence ships in the target directory.
+        .target(
+            name: "TBDGhosttyTerminal",
+            dependencies: [
+                "GhosttyVt",
+                "TBDGhosttyShaderTypes",
+                // `ProjectedScreen`, for the screen projection.
+                "TBDTerminalSerialization",
+            ],
+            path: "Sources/TBDGhosttyTerminal",
+            exclude: ["LICENSE-tkzmux.txt"],
+            // libghostty-vt is a static library with C++ inside.
+            linkerSettings: [.linkedLibrary("c++")]
+        ),
         // One-shot CLI that renders the default (no-ribbon) icon and writes
         // a multi-rep .icns file. Run `swift run IconBaker Resources/AppIcon.icns`
         // after changing TBDAppIcon/AppIcon.swift, then commit the result.
@@ -268,6 +305,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Markdown", package: "swift-markdown"),
                 "TBDTerminalSerialization",
+                "TBDGhosttyTerminal",
             ],
             path: "Sources/TBDApp",
             resources: [
@@ -423,6 +461,17 @@ let package = Package(
             ],
             resources: [
                 .copy("Fixtures")
+            ]
+        ),
+        // The libghostty engine's own suites. They need only the engine
+        // target and the generic test helpers (`TestSupport`, for the
+        // fast-pass time limit), so they compile against nothing in the app
+        // or the daemon.
+        .testTarget(
+            name: "TBDGhosttyTerminalTests",
+            dependencies: [
+                "TBDGhosttyTerminal",
+                "TestSupport",
             ]
         ),
         .testTarget(
