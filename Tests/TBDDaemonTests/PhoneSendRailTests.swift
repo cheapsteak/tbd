@@ -138,6 +138,22 @@ struct PhoneSendRailTests {
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }
 
+    /// An image part names a path on the laptop, which a phone cannot know.
+    /// The whole send is refused, so the text part beside it is not typed.
+    @Test func aPairedPhoneSendWithAnImagePartIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("hi"), .imagePath("/tmp/acme/shot.png")]),
+            deviceID: UUID())
+
+        #expect(response.error == RPCRouter.phoneNonTextPartRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+    }
+
     /// A terminal with no row is not the shell check's to judge: the send core
     /// reports it missing, as it does for every caller.
     @Test func aPairedPhoneSendToAMissingTerminalFallsThroughToTheSendCore() async throws {

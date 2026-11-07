@@ -3851,6 +3851,10 @@ extension RPCRouter {
     ///   refuses `verify` with parts.
     /// - `envelope` is dropped: this rail suppresses the envelope whatever the
     ///   request's own field says.
+    /// - The message is text only. An image part names a file path on the
+    ///   laptop, which a phone cannot know, so a send with any non-text part
+    ///   is refused whole, before anything is typed, rather than having the
+    ///   part dropped.
     ///
     /// **A shell is refused before anything is typed.** Shells are hidden from
     /// the phone (spec section 6), and a shell runs what is typed into it. A
@@ -3864,6 +3868,11 @@ extension RPCRouter {
         if try await db.terminals.get(id: params.terminalID)?.kind == .shell {
             return RPCResponse(error: Self.phoneShellSendRefusal)
         }
+        for part in params.parts ?? [] {
+            guard case .text = part else {
+                return RPCResponse(error: Self.phoneNonTextPartRefusal)
+            }
+        }
         let phoneParams = TerminalSendParams(
             terminalID: params.terminalID, text: params.text,
             submit: params.submit, parts: params.parts,
@@ -3873,6 +3882,9 @@ extension RPCRouter {
 
     /// What a paired phone hears when it sends to a shell tab.
     static let phoneShellSendRefusal = "a phone cannot send to a shell tab"
+
+    /// What a paired phone hears when its send carries a part that is not text.
+    static let phoneNonTextPartRefusal = "a phone can send text only"
 
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,
