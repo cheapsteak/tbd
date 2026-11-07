@@ -40,19 +40,29 @@ private extension PairingLink {
     }
 }
 
-/// The pairing state `status` showed each time the service called
-/// `onChange`, read just after the call.
-private actor PairingStateLog {
+/// The pairing state `status` held each time the service called `onChange`,
+/// read inside the call. The service calls `onChange` on its own actor, so
+/// the read sees exactly the state the call reports; a read in a task of its
+/// own could see a later one.
+private final class PairingStateLog: @unchecked Sendable {
+    private let lock = NSLock()
     private var service: PairingService?
-    private(set) var seen: [PhonePairingState?] = []
+    private var states: [PhonePairingState?] = []
 
     func attach(_ service: PairingService) {
-        self.service = service
+        lock.withLock { self.service = service }
     }
 
-    func capture() async {
-        let status = await service?.status
-        seen.append(status?.state)
+    /// Called only from `onChange`, which runs on the service's actor.
+    func capture() {
+        guard let service = lock.withLock({ self.service }) else { return }
+        let state = service.assumeIsolated { $0.status?.state }
+        lock.withLock { states.append(state) }
+    }
+
+    /// Every state captured so far, in order.
+    var seen: [PhonePairingState?] {
+        lock.withLock { states }
     }
 }
 
@@ -135,10 +145,10 @@ private func withPairing(laptopName: String = "acme-laptop", relayAddress: URL =
     let service = PairingService(
         relayURL: relayAddress, transport: sockets, laptopKey: laptopKey, laptopName: laptopName,
         devices: db.phoneDevices, preflight: preflight,
-        onChange: { Task { await states.capture() } },
+        onChange: { states.capture() },
         onPaired: { paired.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
-    await states.attach(service)
+    states.attach(service)
     let harness = PairingHarness(db: db, laptopKey: laptopKey, relay: relay, clock: clock, dates: dates,
                                  states: states, paired: paired, service: service)
     do {
@@ -247,6 +257,66 @@ struct PairingServiceTests {
             #expect(!h.clock.hasSleeper)
             let rows = try await h.db.phoneDevices.list()
             #expect(rows.isEmpty)
+        }
+    }
+
+    @Test func aStartDuringACancelLeavesTheLastChangeMatchingTheStatus() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            // However the test ends, nothing stays held for the calls to wait
+            // on.
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            _ = try await h.phoneAwaitingApproval(link)
+
+            // `pairDenied` cannot leave, so the Deny's closing task waits up
+            // to the flush limit, which the test clock never reaches.
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let denying = Task { try await service.deny(offerID: offerID) }
+            try await h.waitUntil("`pairDenied` to reach the socket") { transport.heldSends == 1 }
+
+            // `cancel` discards the denied offer at once, then waits for its
+            // closing.
+            let cancelling = Task { await service.cancel() }
+            try await h.waitUntil("the cancel to discard the denied offer") { await service.status == nil }
+            // A `start` lands while the cancel waits, and waits for the same
+            // closing.
+            let starting = Task { try await service.start(loaderURL: loaderURL) }
+            await settle()
+
+            transport.release()
+            try await denying.value
+            await cancelling.value
+            let started = try await starting.value
+            #expect(started.state == .waitingForPhone)
+
+            // Neither call is promised to win. Whichever reaches the service
+            // first once the closing ends decides whether the start's offer
+            // outlives the cancel: the cancel discards any offer made while
+            // it waited. Either way, the last `onChange` reported the state
+            // `status` holds, so a view that reads `status` on each one shows
+            // the truth.
+            let after = await service.status
+            let lastSeen: PhonePairingState? = try #require(h.states.seen.last)
+            #expect(lastSeen == after?.state)
+            #expect(!h.relay.laptopPresent(room: link.room))
+            if let after {
+                // The cancel finished first; the start's offer is the live
+                // one.
+                #expect(after == started)
+                let text = try #require(after.link)
+                let url = try #require(URL(string: text))
+                let newLink = try PairingLink.parse(url, now: h.dates.now)
+                try await h.waitUntil("the new offer's room to open") { h.relay.laptopPresent(room: newLink.room) }
+            } else {
+                // The start finished first, and the cancel discarded its offer
+                // too: no room is open and no task is left.
+                #expect(h.relay.openLaptopRooms().isEmpty)
+                #expect(!h.clock.hasSleeper)
+            }
         }
     }
 
@@ -525,7 +595,7 @@ struct PairingServiceTests {
             let (code, _) = try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
             let beforeHello = await h.service.status
             #expect(beforeHello?.state == .waitingForPhone)
-            let seen = await h.states.seen
+            let seen = h.states.seen
             #expect(!seen.contains(.awaitingApproval))
             try await phone.sendHello()
             try await h.waitForState(.awaitingApproval)
@@ -553,7 +623,7 @@ struct PairingServiceTests {
             }
             let rows = try await h.db.phoneDevices.list()
             #expect(rows.isEmpty)
-            let seen = await h.states.seen
+            let seen = h.states.seen
             #expect(!seen.contains(.awaitingApproval))
         }
     }
@@ -601,7 +671,7 @@ struct PairingServiceTests {
             #expect(shown?.deviceName == "iPhone")
             // Only message 2 went out: nothing answered the junk.
             #expect(h.relay.laptopFrames(room: link.room).count == 1)
-            let seen = await h.states.seen
+            let seen = h.states.seen
             #expect(!seen.contains(.interrupted))
             let device = try await h.service.allow(offerID: status.offerID)
             #expect(device.name == "iPhone")
@@ -617,13 +687,15 @@ struct PairingServiceTests {
             let (status, link) = try await h.startOffer()
             let phone = try await h.joinedPhone(link)
             // An earlier attempt by the phone, whose message 1 a replayer
-            // captured.
+            // captured. The page then reloads: its new socket drops that
+            // attempt, and the offer keeps waiting.
             try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
             let replayed = try #require(phone.lastMessage1)
+            try await phone.rejoin(room: link.room)
 
-            // The replay reaches the laptop first, on the phone's socket.
-            // Nothing has decrypted, so the laptop reads it as a message 1,
-            // accepts it, and answers with a message 2 the phone cannot use.
+            // The replay reaches the laptop first, on the phone's new socket.
+            // The laptop reads it as a message 1, accepts it, and answers
+            // with a message 2 the phone cannot use.
             try await phone.sendRaw(replayed)
             try await h.waitUntil("the laptop to answer the replay") {
                 h.relay.laptopFrames(room: link.room).count == 2
@@ -648,6 +720,33 @@ struct PairingServiceTests {
             #expect(message["type"] as? String == "paired")
             #expect(message["room"] as? String == device.roomID)
             #expect(device.publicKey == phone.key.publicKey.rawRepresentation)
+            // The pairing link never restarted.
+            #expect(h.relay.connectAttempts.count == 1)
+        }
+    }
+
+    @Test func aMessage1TheRelayDeliversTwiceIsAnsweredOnce() async throws {
+        try await withPairing { h in
+            let (status, link) = try await h.startOffer()
+            let phone = try await h.joinedPhone(link)
+            // The laptop gets the phone's message 1 twice. Answering the copy
+            // would replace the attempt with one the phone, which reads the
+            // first message 2, cannot complete, and its `hello` would be
+            // dropped.
+            h.relay.duplicateNextPhoneFrame(room: link.room)
+            let (code, _) = try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForState(.awaitingApproval)
+            let shown = await h.service.status
+            #expect(shown?.confirmationCode == code)
+            #expect(shown?.deviceName == "iPhone")
+            // One message 2: the copy got no answer.
+            #expect(h.relay.laptopFrames(room: link.room).count == 1)
+            let device = try await h.service.allow(offerID: status.offerID)
+            // The phone's next frame is `paired`. A second message 2 would
+            // come first and fail to decrypt here.
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "paired")
+            #expect(message["room"] as? String == device.roomID)
             // The pairing link never restarted.
             #expect(h.relay.connectAttempts.count == 1)
         }

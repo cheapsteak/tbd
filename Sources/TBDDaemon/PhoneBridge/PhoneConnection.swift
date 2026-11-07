@@ -26,12 +26,17 @@ import TBDShared
 ///   reloaded page needs nothing more: its socket makes the relay send
 ///   `peer-joined`, and its message 1 starts a fresh channel on the same
 ///   laptop socket.
-/// - While a channel is handshaken, a frame that fails to decrypt is tried
-///   as a new message 1 with a fresh responder: a valid replayed message 1
-///   can arrive before the phone's real one, and nothing tells the two apart
-///   until a transport message decrypts. A frame that is accepted replaces
-///   the handshaken channel, with a new message 2 and a new handshake timer;
-///   a frame that is refused is dropped, and the channel kept.
+/// - While a channel is handshaken, a frame identical to the message 1 that
+///   started it is a second copy, which the relay can deliver. It is
+///   dropped, and the channel kept: answering it would replace the channel
+///   with one the phone, which read the first message 2, cannot complete.
+/// - While a channel is handshaken, any other frame that fails to decrypt is
+///   tried as a new message 1 with a fresh responder: a valid replayed
+///   message 1 can arrive before the phone's real one, and nothing tells the
+///   two apart until a transport message decrypts. A frame that is accepted
+///   replaces the handshaken channel, with a new message 2 and a new
+///   handshake timer; a frame that is refused is dropped, and the channel
+///   kept.
 /// - A handshaken channel with nothing decrypted after
 ///   `PhoneBridgeConstants.handshakeTimeout` is dropped silently, and the
 ///   room waits for a new message 1.
@@ -70,6 +75,9 @@ actor PhoneConnection {
         static let storeFailed = "could not read the paired phones"
         static let invalidRoom = "the room ID is not valid"
         static let unanswerable = "could not answer the handshake"
+        /// The handshaken channel's own message 1 again: the relay delivered
+        /// it twice.
+        static let repeated = "repeated handshake message"
         /// Message 2 went out, but nothing decrypted within
         /// `PhoneBridgeConstants.handshakeTimeout`.
         static let timedOut = "handshake timed out"
@@ -78,6 +86,9 @@ actor PhoneConnection {
     /// One completed handshake with one phone page.
     private struct Channel {
         let id: UUID
+        /// The message 1 the channel answered. While the channel is
+        /// handshaken, a frame identical to it is a second copy.
+        let message1: Data
         var transport: NoiseTransport
         /// The paired row's name, read when the handshake was accepted.
         let deviceName: String
@@ -268,6 +279,13 @@ actor PhoneConnection {
         }
         guard let plaintext = try? channel?.transport.decrypt(frame) else {
             if current.established == nil {
+                // A second copy of the message 1 this channel answered.
+                // Answering it again would replace the channel with one the
+                // phone, which read the first message 2, cannot complete.
+                if frame == current.message1 {
+                    refuse(Refusal.repeated)
+                    return
+                }
                 // Nothing has decrypted on this channel, so it may be a
                 // replayed message 1's and this frame the phone's real one.
                 await answerHandshake(frame)
@@ -341,7 +359,7 @@ actor PhoneConnection {
         guard !isClosing, !isRevoked, channel?.established == nil else { return }
         let replacing = channel != nil
         let channelID = UUID()
-        channel = Channel(id: channelID, transport: reply.transport, deviceName: row.name)
+        channel = Channel(id: channelID, message1: message1, transport: reply.transport, deviceName: row.name)
         // Through the writer, behind any frame of an earlier channel still in
         // flight, so message 2 never overtakes one. A replaced channel's
         // message 2 still queued is dropped there.
@@ -351,13 +369,15 @@ actor PhoneConnection {
     }
 
     /// The first frame of channel `channelID` decrypted: the channel becomes
-    /// established and the app layer hears of it. False when `stop()` began
-    /// meanwhile, in which case nothing is called.
+    /// established and the app layer hears of it. False when `stop()` or
+    /// `revokeAndStop()` began meanwhile, in which case nothing is called: a
+    /// revoked phone never becomes connected, even for the moment before its
+    /// connection closes.
     private func establish(_ channelID: UUID) async -> Bool {
         channel?.confirmed = true
         await cancelHandshakeTimer()
         let handler = await appSlot.current()
-        guard !isClosing, let current = channel, current.id == channelID else { return false }
+        guard !isClosing, !isRevoked, let current = channel, current.id == channelID else { return false }
         let peer = PhonePeer(deviceID: deviceID, deviceName: current.deviceName)
         channel?.established = Established(peer: peer, handler: handler, loader: LoaderHandler(bundle: bundle))
         await touchLastSeen()

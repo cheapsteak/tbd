@@ -20,15 +20,20 @@ import TBDShared
 /// `PhoneBridgeConstants.handshakeTimeout`. The PSK enters IKpsk2 only at
 /// message 2, so a wrong secret shows up only here: the phone cannot read
 /// message 2 and sends nothing, or its first message fails to decrypt.
-/// - The attempt's first frame decrypts to a `hello`: the offer is
+/// - The first frame that decrypts on the attempt is a `hello`: the offer is
 ///   *consumed* and moves to `awaitingApproval`.
-/// - It decrypts to anything else: the attempt is dropped.
-/// - It fails to decrypt: the frame is tried as a new message 1, because a
-///   valid replayed message 1 can arrive before the phone's real one, and
-///   nothing tells the two apart until a transport message decrypts. A frame
-///   that reads and names an acceptable device replaces the attempt, with a
-///   new message 2 and a new handshake timer; any other is dropped, and the
-///   attempt kept. A phone retrying on the same socket is not lost either.
+/// - It is anything else: the attempt is dropped.
+/// - A frame identical to the message 1 the attempt answered is a second
+///   copy, which the relay can deliver. It is dropped, and the attempt kept:
+///   answering it would replace the attempt with one the phone, which read
+///   the first message 2, cannot complete.
+/// - Any other frame that fails to decrypt is tried as a new message 1,
+///   because a valid replayed message 1 can arrive before the phone's real
+///   one, and nothing tells the two apart until a transport message
+///   decrypts. A frame that reads and names an acceptable device replaces the
+///   attempt, with a new message 2 and a new handshake timer; any other is
+///   dropped, and the attempt kept. A phone retrying on the same socket is
+///   not lost either.
 /// - `peer-joined`, `peer-left`, a link `.closed`, or the handshake timer
 ///   drops the attempt.
 ///
@@ -68,12 +73,17 @@ actor PairingService {
         /// Message 1's payload has no acceptable `deviceName`.
         static let badDeviceName = "unacceptable device name"
         static let unanswerable = "could not answer the handshake"
+        /// The attempt's own message 1 again: the relay delivered it twice.
+        static let repeated = "repeated handshake message"
     }
 
     /// A handshake whose message 2 has gone out, waiting for the phone's
     /// first transport message. Its transport is the service's `channel`.
     private struct Attempt {
         let id: UUID
+        /// The message 1 the attempt answered. A frame identical to it is a
+        /// second copy.
+        let message1: Data
         let code: String
         let deviceName: String
         /// The phone's 32-byte X25519 public key.
@@ -414,6 +424,13 @@ actor PairingService {
         switch current.phase {
         case .waiting(.some(let attempt)):
             guard let plaintext = try? channel?.decrypt(frame) else {
+                // A second copy of the message 1 the attempt answered.
+                // Answering it again would replace the attempt with one the
+                // phone, which read the first message 2, cannot complete.
+                if frame == attempt.message1 {
+                    refuse(Refusal.repeated)
+                    return
+                }
                 // Nothing has decrypted on the attempt, so it may be a
                 // replayed message 1's and this frame the phone's real one.
                 await answerMessage1(frame, offerID: offerID)
@@ -476,7 +493,7 @@ actor PairingService {
             return
         }
         let attempt = Attempt(
-            id: UUID(), code: PhoneConfirmationCode.make(handshakeHash: reply.handshakeHash),
+            id: UUID(), message1: frame, code: PhoneConfirmationCode.make(handshakeHash: reply.handshakeHash),
             deviceName: deviceName, phoneKey: read.remoteStatic.rawRepresentation)
         offer?.phase = .waiting(attempt)
         // The replaced attempt's transport, if any, goes with it.
