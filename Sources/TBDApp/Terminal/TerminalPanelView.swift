@@ -1,5 +1,11 @@
 import SwiftUI
-import SwiftTerm
+// Scoped, not a whole-module import: the panel reaches its terminal through
+// `TerminalEngine`. What it still takes from SwiftTerm is not the emulator —
+// the tmux grouped-session viewer runs in a SwiftTerm `LocalProcess` pty, and
+// outgoing bytes are classified by SwiftTerm's own paste markers.
+import class SwiftTerm.LocalProcess
+import protocol SwiftTerm.LocalProcessDelegate
+import struct SwiftTerm.EscapeSequences
 import AppKit
 import Darwin
 import TBDShared
@@ -103,11 +109,12 @@ enum TerminalRecoveryPresentation {
     static let retryTitle = "Retry"
 }
 
-/// Sendable wrapper for a weak TerminalView reference, used to pass the
-/// reference into an `NSEvent` local monitor closure under strict concurrency.
-private final class WeakTerminalRef: @unchecked Sendable {
-    weak var view: TerminalView?
-    init(_ view: TerminalView) { self.view = view }
+/// Sendable wrapper for a weak terminal engine reference, used to pass the
+/// reference into an `NSEvent` local monitor closure, and into the control-mode
+/// reader, under strict concurrency.
+private final class WeakEngineRef: @unchecked Sendable {
+    weak var engine: (any TerminalEngine)?
+    init(_ engine: any TerminalEngine) { self.engine = engine }
 }
 
 // MARK: - TerminalPanelView
@@ -412,7 +419,8 @@ private struct TerminalRetryBanner: View {
 
 // MARK: - TerminalPanelRepresentable
 
-/// Wraps SwiftTerm's `TerminalView` in a SwiftUI `NSViewRepresentable`.
+/// Wraps a terminal engine's view (`TerminalEngine`) in a SwiftUI
+/// `NSViewRepresentable`.
 ///
 /// Uses tmux grouped sessions for session persistence:
 /// 1. TmuxBridge creates a grouped session pointing at the right window
@@ -453,42 +461,46 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         transport == .holder
     }
 
-    /// Applies the mouse routing to `view`: reporting per
+    /// Applies the mouse routing to `engine`: reporting per
     /// `reportsMouseToApps`, and Option-drag always bypassing it. Called from
     /// `makeNSView` and again from every `updateNSView`, because the transport
     /// can change under a live panel once AppState loads a terminal row that
     /// `panelTransport()` could not yet see (it falls back to `.tmux`).
     @MainActor
-    static func applyMouseRouting(to view: TBDTerminalView, transport: TerminalTransport) {
-        view.allowMouseReporting = reportsMouseToApps(transport: transport)
-        view.optionBypassesMouseReporting = true
+    static func applyMouseRouting(to engine: any TerminalEngine, transport: TerminalTransport) {
+        var configuration = engine.configuration
+        configuration.allowMouseReporting = reportsMouseToApps(transport: transport)
+        configuration.optionBypassesMouseReporting = true
+        engine.configuration = configuration
     }
 
-    func makeNSView(context: Context) -> TBDTerminalView {
-        let tv = TBDTerminalView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+    func makeNSView(context: Context) -> NSView {
+        let coordinator = context.coordinator
+        // Wire up Cmd+Click file path detection: the worktree path is what a
+        // clicked relative path resolves against.
+        let engine = TerminalEngineFactory.make(
+            kind: .swiftTerm,
             font: appearance.font,
             appearance: appearance,
-            terminalID: terminalID
-        )
+            configuration: TerminalEngineConfiguration(
+                terminalID: terminalID,
+                worktreePath: worktreePath,
+                remoteURL: remoteURL,
+                isCodexTerminal: appState.terminals.values
+                    .flatMap { $0 }
+                    .first(where: { $0.id == terminalID })?
+                    .isCodexTerminal == true))
 
         // Experimental GPU draw path (default off — Settings → Terminal →
         // Experimental). Requested here rather than in `updateNSView` so a
         // view never swaps renderers mid-life; flipping the toggle therefore
         // reaches terminals opened afterwards, and an app restart moves them
         // all. A throw leaves this view on CoreGraphics.
-        tv.applyMetalRendererPreference(enabled: AppState.metalTerminalRendererEnabled())
+        engine.applyRendererPreference(metalEnabled: AppState.metalTerminalRendererEnabled())
 
-        // Wire up Cmd+Click file path detection
-        tv.worktreePath = worktreePath
-        tv.remoteURL = remoteURL
-        tv.onFilePathClicked = onFilePathClicked
-        tv.onNotification = onTerminalNotification
-        tv.isCodexTerminal = appState.terminals.values
-            .flatMap { $0 }
-            .first(where: { $0.id == terminalID })?
-            .isCodexTerminal == true
-        tv.onCloseTab = {
+        coordinator.onFilePathClicked = onFilePathClicked
+        coordinator.onTerminalNotification = onTerminalNotification
+        coordinator.onCloseTab = {
             appState.closeFocusedTab()
         }
         // Program Status Protocol (OSC 7501) reports go to the app, which
@@ -496,14 +508,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // is set below, once the coordinator knows this panel.
         let programStatusAppState = appState
         let programStatusTerminalID = terminalID
-        tv.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in
+        coordinator.onProgramStatusReport = { [weak programStatusAppState] payload, observedAt in
             programStatusAppState?.forwardProgramStatusReport(
                 terminalID: programStatusTerminalID, payload: payload, observedAt: observedAt)
         }
 
         // Set delegate for terminal events
-        tv.terminalDelegate = context.coordinator
-        context.coordinator.terminalView = tv
+        engine.delegate = coordinator
+        coordinator.engine = engine
         context.coordinator.tmuxBridge = tmuxBridge
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
@@ -511,7 +523,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // Mouse reporting stays off — click-drag selects locally — unless
         // this is a holder panel. Decided once the coordinator can resolve
         // the panel's transport; re-applied in `updateNSView`.
-        Self.applyMouseRouting(to: tv, transport: context.coordinator.panelTransport())
+        Self.applyMouseRouting(to: engine, transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
@@ -522,8 +534,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // holder-transport panel — whatever agent the session runs, exactly as
         // the daemon's reader answers — so a tmux panel never answers. Set
         // before any byte is fed; re-evaluated in `updateNSView`.
-        tv.programStatusGate.set(
-            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+        engine.setProgramStatusReporting(
+            enabled: AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -542,13 +554,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 : nil
         let appStateRef = appState
         // Start tmux client as soon as the view has real dimensions from layout
-        tv.onReady = { [weak tv] in
-            guard let tv else { return }
+        coordinator.onEngineReady = { [weak coordinator] engine in
             // PARKED pane: compose the hibernate notice INTO the snapshot as
             // its last rows (a notice block overwriting the frozen status-bar
             // chrome), padded to the
             // view's REAL column count — onReady fires once layout has given
-            // the terminal its true dimensions, so `tv.terminalDimensions.cols` is the
+            // the terminal its true dimensions, so `engine.gridSize.cols` is the
             // same source the resize paths use. A nil snapshot still yields
             // the block alone (a capture-less parked pane used to be pitch
             // black). The live/wake path (`suspendedOnCreate == false`) feeds
@@ -556,7 +567,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let feedText: String?
             if suspendedOnCreate, let parkedMessage {
                 feedText = ParkedSnapshotComposer.compose(
-                    snapshot: snapshot, message: parkedMessage, columns: tv.terminalDimensions.cols)
+                    snapshot: snapshot, message: parkedMessage, columns: engine.gridSize.cols)
             } else {
                 feedText = snapshot
             }
@@ -568,7 +579,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let normalized = feedText
                     .replacingOccurrences(of: "\r\n", with: "\n")
                     .replacingOccurrences(of: "\n", with: "\r\n")
-                tv.feed(text: normalized)
+                engine.writeLocalText(normalized)
             }
             // Skip tmux connect for suspended terminals — the old window's shell
             // would overwrite the snapshot. The view will be recreated with a new
@@ -577,11 +588,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Detach to a Task so `prepareSession` (which spawns tmux subprocesses)
             // doesn't block the main thread. `startTmuxClient` hops back to
             // `@MainActor` once the tmux args come back.
-            Task { [weak coordinator = context.coordinator, weak tv] in
-                guard let coordinator, let tv else { return }
+            Task { [weak coordinator, weak engine] in
+                guard let coordinator, let engine else { return }
                 if let controlModeAttach {
                     await coordinator.startControlModeClient(
-                        terminalView: tv,
+                        engine: engine,
                         appState: appStateRef,
                         worktreeID: controlModeAttach.worktreeID,
                         paneID: controlModeAttach.paneID,
@@ -592,7 +603,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     )
                 } else {
                     await coordinator.startTmuxClient(
-                        terminalView: tv,
+                        engine: engine,
                         bridge: tmuxBridge,
                         server: tmuxServer,
                         windowID: tmuxWindowID,
@@ -602,19 +613,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        appState.registerTerminalView(tv, for: terminalID)
+        appState.registerTerminalView(engine.view, for: terminalID)
 
-        return tv
+        return engine.view
     }
 
-    func updateNSView(_ nsView: TBDTerminalView, context: Context) {
-        nsView.isCodexTerminal = appState.terminals.values
-            .flatMap { $0 }
-            .first(where: { $0.id == terminalID })?
-            .isCodexTerminal == true
-        nsView.programStatusGate.set(
-            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
-        Self.applyMouseRouting(to: nsView, transport: context.coordinator.panelTransport())
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let engine = context.coordinator.engine {
+            engine.configuration.isCodexTerminal = appState.terminals.values
+                .flatMap { $0 }
+                .first(where: { $0.id == terminalID })?
+                .isCodexTerminal == true
+            engine.setProgramStatusReporting(
+                enabled: AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+            Self.applyMouseRouting(to: engine, transport: context.coordinator.panelTransport())
+        }
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         // Re-assigned here as well as in `makeNSView`: the closure captures the
@@ -624,7 +637,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
     }
 
-    static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.appState?.unregisterTerminalView(nsView, for: coordinator.panelID)
         coordinator.cleanup()
     }
@@ -635,8 +648,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
-        weak var terminalView: TerminalView?
+    final class Coordinator: NSObject, TerminalEngineDelegate, LocalProcessDelegate, @unchecked Sendable {
+        /// The terminal this panel runs, and the owner of its view. Set once,
+        /// by `makeNSView`, and held for the coordinator's life: SwiftUI holds
+        /// the view, this holds the engine, and the engine holds the view, so a
+        /// handback still in flight after the view leaves the window reads the
+        /// screen it drew.
+        var engine: (any TerminalEngine)?
         weak var appState: AppState?
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
@@ -666,19 +684,35 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Cmd+clicks instead of the terminal. Set by
         /// `TerminalPanelRepresentable.makeNSView`.
         var shouldSuppressEvents: @MainActor () -> Bool = { false }
+        /// What a Cmd-click on a file path does. Set by `makeNSView` from the
+        /// panel's own closure; the engine reports both kinds of click — a path
+        /// it resolved itself, and an OSC 8 link this coordinator resolves to
+        /// a path — and both land here.
+        var onFilePathClicked: ((String) -> Void)?
+        /// Where an OSC 777 notification goes. Set by `makeNSView`.
+        var onTerminalNotification: ((String, String) -> Void)?
+        /// What the close-tab key equivalent does. Set by `makeNSView`.
+        var onCloseTab: (() -> Void)?
+        /// Where an OSC 7501 report goes. Set by `makeNSView`, which forwards
+        /// it to AppState under this panel's terminal ID.
+        var onProgramStatusReport: (([UInt8], Date) -> Void)?
+        /// What runs once the engine has its real size: feeding the parked or
+        /// initial snapshot and starting the transport. Set by `makeNSView`,
+        /// and cleared as it runs, so it runs once.
+        var onEngineReady: ((any TerminalEngine) -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,
         /// since everything else about this type needs a live `NSView`.
         var localProcess: LocalProcess?
-        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the view
+        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the engine
         /// through this lock-guarded holder rather than the main-confined
-        /// `terminalView` weak var. Written before `startProcess`, cleared by
+        /// `engine` var. Written before `startProcess`, cleared by
         /// `cleanup()` before the `LocalProcess` is released.
         private let viewHolder = TerminalViewHolder()
         /// Test seam: the holder both transports feed through, so a test can
         /// put this panel into the cleared-holder state a torn-down attach
-        /// leaves behind — a panel that still owns its NSView and can no
+        /// leaves behind — a panel that still owns its engine and can no
         /// longer read a byte back.
         var viewHolderForTesting: TerminalViewHolder { viewHolder }
         /// Drains the vended pty for a holder-backed panel. Held here rather
@@ -788,27 +822,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// carried here so the handback that ends this attach ends it too,
         /// and only once that handback has ended.
         private var holderAttach: (worktreeID: UUID, generation: UInt64, hold: HolderHold)?
-        /// While non-nil, terminal replies are collected here instead of being
-        /// routed to the session.
-        ///
-        /// Raised only around the handback's `DECRQM` probe, which is the one
-        /// place this app has to *read* what its terminal says rather than
-        /// forward it. It is checked before the ingest guard below because the
-        /// two mean opposite things: the ingest guard drops replies, and this
-        /// one is here to keep them.
-        private var modeReplyCollector: [UInt8]?
-        /// Test seam: raise and lower the handback's reply collector exactly as
-        /// `captureHandbackPreamble` does with its own two assignments.
-        ///
-        /// That method is `private` and `async`, and the window it opens is
-        /// closed by a main-queue hop inside it, so a test cannot drive it and
-        /// still observe the probe's `handbackinflight` refusal — which is the
-        /// refusal this seam exists to make reachable through the real
-        /// registered closure.
-        var isCollectingModeRepliesForTesting: Bool {
-            get { modeReplyCollector != nil }
-            set { modeReplyCollector = newValue ? [] : nil }
-        }
         /// Whether a handback task owns `viewHolder` and will clear it itself.
         ///
         /// Raised by `detachHolderSession` for the span between the reader's
@@ -915,78 +928,28 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// unobservable from a test — it is a pure Swift shim in the AppKit
         /// overlay, with no `+[NSSound beep]` in the Objective-C runtime and no
         /// `NSBeep()` interposition available in-process — so without this seam
-        /// the ingest guard in `bell(source:)` has no way to fail a test, which
-        /// is the same as having no evidence at all.
+        /// the engine's ingest guard on the bell has no way to fail a test,
+        /// which is the same as having no evidence at all.
         var ringBell: () -> Void = { NSSound.beep() }
 
-        /// Depth of the snapshot-preamble feeds currently in flight; > 0 while
-        /// `isIngestingSnapshot` is raised. A counter rather than a Bool so two
-        /// overlapping feeds cannot have the first one's restore lower the flag
-        /// out from under the second. MainActor-confined like `isTornDown`.
-        private var snapshotIngestDepth = 0
+        /// True only while a snapshot preamble is being fed into this panel's
+        /// engine; see `TerminalEngine.isIngestingSnapshot`. The mute itself,
+        /// and the depth counter behind it, live in the engine.
+        var isIngestingSnapshot: Bool { engine?.isIngestingSnapshot ?? false }
 
-        /// True only while a snapshot preamble is being fed.
-        ///
-        /// A preamble is replayed history, not live output. Its bytes still
-        /// *look* live to the emulator, so every query in it produces a reply
-        /// and every BEL rings — and the reply path here does not merely echo,
-        /// it types into the child's stdin. Feeding a snapshot without this
-        /// raised is how a cursor-report ends up as input to somebody's agent.
-        var isIngestingSnapshot: Bool { snapshotIngestDepth > 0 }
-
-        /// Feeds a snapshot preamble into `terminalView` with every side effect
-        /// its bytes imply suppressed: the delegate callbacks TBD owns return
-        /// early while `isIngestingSnapshot` is up, and the OSC 777 observer —
-        /// which is not a delegate callback and so is not covered by the flag —
-        /// is suspended for the duration.
-        ///
-        /// The flag is lowered a main-queue turn later, not on return, and that
-        /// is load-bearing. SwiftTerm hops every delegate callback through
-        /// `TerminalView.onMain`, an **unconditional** `DispatchQueue.main.async`
-        /// even when the parse already runs on main, so the replies this feed
-        /// provokes are queued behind us rather than delivered yet; lowering on
-        /// return would leave every one of them unguarded. The parse itself is
-        /// synchronous, so everything it enqueued is already on the main queue
-        /// by the time this block is appended, and a serial FIFO queue runs all
-        /// of it first.
+        /// Feeds a snapshot preamble into `engine` with every side effect its
+        /// bytes imply suppressed — `TerminalEngine.ingestSnapshot(_:)`, whose
+        /// doc carries why the mute is lowered a main-queue turn later rather
+        /// than on return.
         ///
         /// **Precondition: feed the preamble BEFORE live output is wired to
-        /// this view.** The mute is a property of the window, not of the bytes:
-        /// nothing here can tell a preamble-provoked callback from a live one,
-        /// so *everything* delivered while the flag is up is dropped regardless
-        /// of origin — including a batch already parsing on the IO thread when
-        /// the flag went up. `dataReceived` feeds synchronously off main, and
-        /// SwiftTerm's terminal lock serialises the two parses but not the
-        /// order their `onMain` blocks land in, so a live batch's callbacks can
-        /// be queued ahead of the restore and swallowed with the rest.
-        ///
-        /// What that costs if a caller ignores it: a live DA1, DSR or DECRQM
-        /// the agent is waiting on is answered by nobody, and the agent waits
-        /// forever for a reply that was silently dropped. A live OSC 777 in the
-        /// same window is worse than deferred — the observation is nil for the
-        /// whole ingest, so the notification is lost outright. Live keystrokes
-        /// land in the same hole.
-        ///
-        /// The window is **not** negligible: it is the preamble parse plus one
-        /// main-queue turn, and it is largest exactly when the preamble is a
-        /// full scrollback replay, which is the normal case. Order the attach
-        /// so the preamble goes in first and the live feed is connected after.
+        /// this engine.** The mute is a property of the window, not of the
+        /// bytes, so a live DA1, DSR or DECRQM delivered while it is up is
+        /// answered by nobody, and the agent waits forever. Order the attach so
+        /// the preamble goes in first and the live feed is connected after.
         @MainActor
-        func feedSnapshot(_ data: Data, into terminalView: TerminalView) {
-            snapshotIngestDepth += 1
-            let observation = (terminalView as? TBDTerminalView)?.suspendOscObservation()
-            terminalView.feed(byteArray: [UInt8](data)[...])
-            // NOT a `defer`, however much more obviously correct that reads:
-            // the parse returns before SwiftTerm has delivered a single one of
-            // the callbacks it queued, so a synchronous restore lowers the flag
-            // while every reply is still in flight. Measured against the
-            // `defer` shape, most of the tests in `QuietIngestTests` go red —
-            // including the replies escaping into the child's stdin, which is
-            // the hazard this whole method exists to prevent.
-            DispatchQueue.main.async { [weak self] in
-                observation?.resume()
-                self?.snapshotIngestDepth -= 1
-            }
+        func feedSnapshot(_ data: Data, into engine: any TerminalEngine) {
+            engine.ingestSnapshot(data)
         }
 
         @MainActor
@@ -1079,16 +1042,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Does nothing at all when the diagnostic is off, which is the
         /// default — that nil check is the whole gate for this panel. When it
         /// is on, one tap is shared by the feed seam (which stamps every
-        /// chunk) and the view (which reports the wait when it draws). Both
+        /// chunk) and the engine (which reports the wait when it draws). Both
         /// only observe bytes this panel is already being given, so this half
-        /// is safe to install the moment the panel has a view to feed.
+        /// is safe to install the moment the panel has an engine to feed.
         ///
         /// The probe — the half that *writes* — is `registerLatencyProbe()`,
         /// and on the holder transport it must wait for the attach ack. See
         /// its own comment.
         @MainActor
         private func installLatencyTap(
-            on terminalView: TerminalView, transport: TerminalTransport
+            on engine: any TerminalEngine, transport: TerminalTransport
         ) {
             guard let diagnostic = latencyDiagnosticForTesting ?? TerminalLatencyDiagnostic.shared
             else { return }
@@ -1096,7 +1059,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let tap = diagnostic.makeTap(terminalID: panelID, transport: transport)
             latencyTap = tap
             viewHolder.setTap(tap)
-            (terminalView as? TBDTerminalView)?.latencyTap = tap
+            engine.latencyTap = tap
         }
 
         /// Register this panel's echo probe, so the driver's request file can
@@ -1114,10 +1077,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ///
         /// The registered closure is what makes the echo comparable across
         /// transports: it enters the outbound path at `deliverOutgoing`, the
-        /// body of `send(source:data:)` — the delegate entry a keystroke
-        /// reaches after SwiftTerm's input hop — minus only the two guards it
-        /// checks itself, so the write pays whatever a keystroke pays on this
-        /// transport and reports what a keystroke cannot.
+        /// body of `engine(_:send:)` — the delegate entry a keystroke reaches
+        /// after the engine's input hop — minus only the two guards the engine
+        /// checks before it, which the closure checks itself, so the write pays
+        /// whatever a keystroke pays on this transport and reports what a
+        /// keystroke cannot.
         @MainActor
         private func registerLatencyProbe() {
             guard let diagnostic = latencyDiagnostic, let tap = latencyTap else { return }
@@ -1129,20 +1093,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // as nil then would refuse this panel for its whole life.
                 terminalID: panelID, kind: { [weak self] in self?.panelKind() }
             ) { [weak self] seq in
-                guard let self, self.terminalView != nil else { return "noview" }
-                // A panel whose holder was cleared still owns its NSView: an
+                guard let self, let engine = self.engine else { return "noview" }
+                // A panel whose holder was cleared still owns its engine: an
                 // attach that came apart after the reader started clears the
-                // holder and leaves the view. Nothing would read the echo back
+                // holder and leaves the engine. Nothing would read the echo back
                 // in that state, so the request is refused rather than counted
                 // as a token the transport lost.
                 guard self.viewHolder.hasView else { return "noview" }
-                // The two early exits in `send(source:data:)` that swallow
+                // The two early exits ahead of `engine(_:send:)` that swallow
                 // bytes, checked BEFORE the tap is armed. A token the panel
                 // eats is not a slow transport, and must never be reported as
                 // one: the handback's collector would fold it into
                 // `RecordedModeReplies`, and a snapshot preamble drops it.
-                if self.modeReplyCollector != nil { return "handbackinflight" }
-                guard !self.isIngestingSnapshot else { return "ingestingsnapshot" }
+                if engine.isCollectingHandbackReplies { return "handbackinflight" }
+                guard !engine.isIngestingSnapshot else { return "ingestingsnapshot" }
                 var token = TerminalLatencyTap.token(seq: seq)
                 // Armed BEFORE the write, and stamped at the same moment: a
                 // reply that came back between the write and the arm would
@@ -1177,12 +1141,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Covers both halves unconditionally, and must stay on every failure
         /// path for that reason: most of them give up before the probe was
         /// ever registered, and the passive tap they DID install still has to
-        /// come off the view and the holder.
+        /// come off the engine and the holder.
         @MainActor
         private func removeLatencyTap() {
             latencyTap = nil
             viewHolder.clearTap()
-            (terminalView as? TBDTerminalView)?.latencyTap = nil
+            engine?.latencyTap = nil
             let diagnostic = latencyDiagnostic
             latencyDiagnostic = nil
             guard let registration = latencyRegistration else { return }
@@ -1203,7 +1167,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// ended, or a daemon that can never serve the attach — offers none.
         @MainActor
         private func feedHolderAttachFailure(
-            reason: String, into terminalView: TerminalView,
+            reason: String, into engine: any TerminalEngine,
             message: String = TerminalPreparationPresentation.holderAttachFailedMessage,
             offersRetry: Bool
         ) {
@@ -1211,7 +1175,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             logger.error(
                 "holder attach failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderAttachFailed reason=\(reason, privacy: .public)"
             )
-            feedPreparationMessage(message, into: terminalView)
+            feedPreparationMessage(message, into: engine)
             if offersRetry { onHolderAttachRetryOffered?() }
         }
 
@@ -1229,12 +1193,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// its own body. Only the "is this even a tmux session" question is
         /// common, and it is answered here.
         @MainActor
-        private func handleHolderTransport(into terminalView: TerminalView) async -> Bool {
+        private func handleHolderTransport(into engine: any TerminalEngine) async -> Bool {
             guard panelTransport() == .holder else { return false }
             // A task of its own, kept so `cleanup()` can cancel it: the retry
             // loop inside can sleep for seconds, holding this coordinator.
             let attach = Task { @MainActor in
-                await self.startHolderClient(terminalView: terminalView)
+                await self.startHolderClient(engine: engine)
             }
             holderAttachTask = attach
             await attach.value
@@ -1284,11 +1248,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// panel out of retries waits for any resend still going for this
         /// terminal (`HolderHandbackLedger.awaitResends`) and asks once more.
         @MainActor
-        func startHolderClient(terminalView: TerminalView) async {
+        func startHolderClient(engine: any TerminalEngine) async {
             guard !isTornDown else { return }
             guard let appState, let worktreeID = worktreeIDForDiagnostics() else {
                 feedHolderAttachFailure(
-                    reason: "the panel's terminal is not loaded in AppState", into: terminalView,
+                    reason: "the panel's terminal is not loaded in AppState", into: engine,
                     offersRetry: true)
                 return
             }
@@ -1298,7 +1262,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             var retries = 0
             var waitedForResends = false
             while let failure = await attemptHolderAttach(
-                terminalView: terminalView, appState: appState, client: client,
+                engine: engine, appState: appState, client: client,
                 ledger: ledger, worktreeID: worktreeID
             ) {
                 guard !isTornDown else { return }
@@ -1334,7 +1298,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
                 feedHolderAttachFailure(
                     reason: "\(failure.step): \(failure.error.localizedDescription)",
-                    into: terminalView,
+                    into: engine,
                     message: TerminalPreparationPresentation.holderAttachFailureMessage(
                         for: failure.error, terminal: panelTerminal()),
                     offersRetry: !HolderAttachRetry.isPermanentRefusal(failure.error))
@@ -1356,7 +1320,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// it are not interchangeable with anything:
         ///
         /// - **The preamble is fed before live output is wired.** That is a
-        ///   documented precondition on `feedSnapshot`, whose mute is a
+        ///   documented precondition on `feedSnapshot` (the engine's
+        ///   `ingestSnapshot`), whose mute is a
         ///   property of the window rather than of the bytes: while the ingest
         ///   flag is up, every delegate callback is dropped *regardless of
         ///   origin*. A live DA1/DSR the agent is waiting on, answered by
@@ -1375,7 +1340,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ///   placard.
         @MainActor
         private func attemptHolderAttach(
-            terminalView: TerminalView, appState: AppState, client: any HolderAttaching,
+            engine: any TerminalEngine, appState: AppState, client: any HolderAttaching,
             ledger: HolderHandbackLedger, worktreeID: UUID
         ) async -> HolderAttachAttemptFailure? {
             // Empty by construction on a holder row, and passed anyway: it is
@@ -1471,7 +1436,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return nil
             }
             if !attachment.snapshotPreamble.isEmpty {
-                feedSnapshot(attachment.snapshotPreamble, into: terminalView)
+                // A view that drew something before this attach — a parked
+                // snapshot, a previous attempt — gets the engine's chance to
+                // start the preamble from a clean screen. A no-op on SwiftTerm,
+                // whose writer's reset prelude does that job; see
+                // `SwiftTermEngine.prepareForPreamble()`.
+                engine.prepareForPreamble()
+                feedSnapshot(attachment.snapshotPreamble, into: engine)
             }
             // `feedSnapshot` lowers its flag one main-queue turn later, not on
             // return. Hop through the same queue so this resumes strictly after
@@ -1493,8 +1464,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `DispatchQueue.main.async` per chunk. That hop is the shape the
             // terminal-lag investigation implicates in paint starvation; do not
             // "tidy" this into looking like its neighbour.
-            viewHolder.set(terminalView)
-            installLatencyTap(on: terminalView, transport: .holder)
+            viewHolder.set(engine)
+            installLatencyTap(on: engine, transport: .holder)
             // Taken BEFORE the reader owns the descriptor, because the reader
             // is the only thing allowed to close it afterwards. `dup` failing
             // is not fatal to rendering — the session still paints — so it is
@@ -1682,21 +1653,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // viewer moved: it is at whatever geometry it was spawned or last
             // resized at, so a viewport that differs from it paints mis-wrapped
             // until the user happens to drag the window. `sizeChanged` cannot
-            // be relied on to cover it — it fires when SwiftTerm's own size
+            // be relied on to cover it — it fires when the engine's own size
             // changes, and attaching to an already-correctly-sized view changes
             // nothing.
-            let dimensions = terminalView.terminalDimensions
+            let dimensions = engine.gridSize
             setHolderWindowSize(cols: dimensions.cols, rows: dimensions.rows)
             scheduleDaemonResize(cols: dimensions.cols, rows: dimensions.rows)
             // Wheel events are claimed from here on: the pty is this panel's
             // to write to, so the reports go out through `holderWriteFD` like
             // any keystroke.
-            installScrollMonitor(on: terminalView)
+            installScrollMonitor(on: engine)
             // And the keyboard, for the same reason and at the same moment.
             // A panel that skipped this was reachable only through the key
             // view loop: the session was live and painting, but the first
             // keystroke went nowhere until the user pressed Tab.
-            claimKeyboardFocusAndClickRouting(on: terminalView)
+            claimKeyboardFocusAndClickRouting(on: engine)
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
             return nil
         }
@@ -1761,9 +1732,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Project this panel's live terminal for one daemon screen request.
         ///
         /// Everything that makes the answer *one observation* is inside
-        /// `ViewerScreenProducer`, which takes a single `withTerminal` hold;
-        /// what belongs here is what only the panel knows — which view, when it
-        /// attached, and when its store last took a byte.
+        /// `ViewerScreenProducer`, which takes a single `withScreen` hold;
+        /// what belongs here is what only the panel knows — which engine, when
+        /// it attached, and when its store last took a byte.
         ///
         /// The view holder's reading is taken as a pair, never as two reads: a
         /// stamp read beside a cleared view would report an age for a store
@@ -1776,12 +1747,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             _ request: SidecarScreenRequest
         ) -> TerminalScreenRouter.Answer {
             let reading = viewHolder.feedReading
-            guard reading.hasView, let terminalView, let attachedAt = holderAttachedAt else {
+            guard reading.hasView, let engine, let attachedAt = holderAttachedAt else {
                 return .unavailable(.noTerminal)
             }
             let answer = ViewerScreenProducer.answer(
                 for: request,
-                terminalView: terminalView,
+                engine: engine,
                 lastByteAt: reading.lastByteAt,
                 attachedAt: attachedAt,
                 now: ContinuousClock.now)
@@ -1912,17 +1883,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 viewHolder.clear()
                 return
             }
-            // The view is captured, but its absence does **not** cancel the
-            // detach. `terminalView` is weak, so a panel whose view AppKit has
-            // already released would otherwise skip the handback entirely —
-            // and with it the release of the daemon's viewer claim, which is
-            // the bricked session this whole path exists to prevent. Losing
-            // the screen costs a repaint; losing the release costs the session.
-            let view = terminalView
-            if view == nil {
+            // The engine is captured, but its absence does **not** cancel the
+            // detach. A panel with no engine would otherwise skip the handback
+            // entirely — and with it the release of the daemon's viewer claim,
+            // which is the bricked session this whole path exists to prevent.
+            // Losing the screen costs a repaint; losing the release costs the
+            // session.
+            let engine = self.engine
+            if engine == nil {
                 logger.error("""
                     terminal \(self.panelID, privacy: .public) is handing its session back with \
-                    no screen: its view was released before the detach, so the daemon resumes \
+                    no screen: it has no terminal engine, so the daemon resumes \
                     from whatever it last saw
                     """)
             }
@@ -1946,7 +1917,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let handback = Task { @MainActor in
                 await reader?.awaitClosed()
                 var preamble = Data()
-                if let view { preamble = await self.captureHandbackPreamble(from: view) }
+                if let engine { preamble = await self.captureHandbackPreamble(from: engine) }
                 self.viewHolder.clear()
                 self.holderHandbackInFlight = false
                 // A detach lost in transit leaves the claim standing, and with
@@ -1981,59 +1952,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         /// Serialize this panel's terminal as the byte stream that reconstructs
-        /// it — `HolderReader.snapshotPreamble` in the other direction, through
-        /// the same `TerminalSnapshotWriter`.
+        /// it — `HolderReader.snapshotPreamble` in the other direction, at the
+        /// same scrollback depth the daemon sends out.
         ///
-        /// Two phases, and the hop between them is what makes the first one
-        /// work at all:
-        ///
-        /// 1. **Ask.** `TerminalModeCapture` needs a `DECRQM` answer for every
-        ///    mode SwiftTerm keeps private. A view delivers those answers
-        ///    through `onMain`, an unconditional `DispatchQueue.main.async`, so
-        ///    they have not arrived when `feed` returns. The whole batch goes
-        ///    out at once and the answers are read one main-queue turn later:
-        ///    main is serial FIFO, the parse enqueued every reply during the
-        ///    feed, and a block appended afterwards runs behind all of them.
-        ///    This is R16's shape, in the direction R16 said it would also be
-        ///    needed. Without the hop every mode reads "reset" — and wraparound
-        ///    and cursor-visible are *on* by default, so the daemon would be
-        ///    handed a screen with autowrap off and the cursor hidden.
-        /// 2. **Walk.** The serialization itself is synchronous inside the
-        ///    terminal's own lock, and it must be: the caller has already closed
-        ///    the descriptor, so nothing else is feeding this terminal.
-        ///
-        /// The ingest flag is raised for the second phase because the writer
-        /// **feeds this terminal** — the alt-screen toggle, and the queries the
-        /// capture would have made — and those callbacks are replies to
-        /// questions nobody asked. On a panel being torn down the toggle itself
-        /// is harmless (nobody paints it again) and the writer restores what it
-        /// can behind a `defer`; the residue it cannot restore — the selected
-        /// character set, kitty graphics on the alt buffer, two spurious
-        /// `bufferActivated` rounds — is the loss this snapshot path accepted on
-        /// the way in as well.
+        /// The engine does the work (`TerminalEngine.handbackPreamble`). On
+        /// SwiftTerm that is a `DECRQM` probe whose answers are read a
+        /// main-queue turn later, then a walk through `TerminalSnapshotWriter`
+        /// under the terminal's lock; `SwiftTermEngine.handbackPreamble` carries
+        /// why each phase has the shape it has.
         @MainActor
-        private func captureHandbackPreamble(from terminalView: TerminalView) async -> Data {
-            modeReplyCollector = []
-            terminalView.withTerminal { $0.feed(text: HolderHandback.modeProbe) }
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                DispatchQueue.main.async { continuation.resume() }
-            }
-            let replies = RecordedModeReplies(bytes: modeReplyCollector ?? [])
-            modeReplyCollector = nil
-
-            snapshotIngestDepth += 1
-            let preamble = terminalView.withTerminal { terminal in
-                TerminalSnapshotWriter.snapshot(
-                    of: terminal, reply: replies,
-                    maxScrollbackLines: HolderHandback.handbackScrollbackLines)
-            }
-            // Lowered a turn later, never on return, for `feedSnapshot`'s
-            // reason: the callbacks the walk provoked are queued behind us and
-            // a synchronous restore would leave every one of them unguarded.
-            DispatchQueue.main.async { [weak self] in
-                self?.snapshotIngestDepth -= 1
-            }
-            return preamble
+        private func captureHandbackPreamble(from engine: any TerminalEngine) async -> Data {
+            await engine.handbackPreamble(maxScrollbackLines: HolderHandback.handbackScrollbackLines)
         }
 
         nonisolated static func preparationAction(
@@ -2171,9 +2100,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
-        private func feedPreparationMessage(_ message: String, into terminalView: TerminalView) {
+        private func feedPreparationMessage(_ message: String, into engine: any TerminalEngine) {
             guard shouldFeedPreparationMessage(message) else { return }
-            terminalView.feed(text: "\r\n  \(message)\r\n")
+            engine.writeLocalText("\r\n  \(message)\r\n")
         }
 
         @MainActor
@@ -2267,17 +2196,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// edges) is likewise claimed and dropped, since there is no cell to
         /// report at.
         ///
-        /// The cell height comes from `TBDTerminalView.cellDimensions()`, the
-        /// font-metric mirror the grid math below already uses: SwiftTerm's
-        /// handler accumulates against its `cellDimension`, which is internal
-        /// to SwiftTerm.
+        /// The cell height comes from the engine's `cellSize` —
+        /// `TBDTerminalView.cellDimensions()` on SwiftTerm, the font-metric
+        /// mirror the grid math below already uses: SwiftTerm's handler
+        /// accumulates against its `cellDimension`, which is internal to
+        /// SwiftTerm.
         ///
-        /// The reports leave through `term.sendEvent`, which is SwiftTerm's
-        /// own mouse-reporting path: `Terminal` hands the bytes to the view,
-        /// the view to `send(source:data:)` on this coordinator, and from
-        /// there they take the same route as keystrokes on whichever
-        /// transport this panel is on — `performOutgoingWrite` picks the
-        /// holder pty, the local process, or the sidecar `.input` frame.
+        /// The reports leave through the screen reader's `sendWheelReports`,
+        /// which on SwiftTerm is `term.sendEvent`, SwiftTerm's own
+        /// mouse-reporting path: `Terminal` hands the bytes to the view, the
+        /// view to the engine, the engine to `engine(_:send:)` on this
+        /// coordinator, and from there they take the same route as keystrokes
+        /// on whichever transport this panel is on — `performOutgoingWrite`
+        /// picks the holder pty, the local process, or the sidecar `.input`
+        /// frame.
         ///
         /// Idempotent: a monitor already installed is removed first, so a
         /// transport that starts after another one on the same coordinator
@@ -2296,12 +2228,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// scrolling them invisibly. tv.window == nil ⇒ this terminal isn't
         /// visible right now ⇒ no-op the monitor.
         @MainActor
-        private func installScrollMonitor(on terminalView: TerminalView) {
+        private func installScrollMonitor(on engine: any TerminalEngine) {
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
             }
-            let ref = WeakTerminalRef(terminalView)
+            let ref = WeakEngineRef(engine)
             wheelAccumulator = ScrollWheelAccumulator()
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 let precise = event.hasPreciseScrollingDeltas
@@ -2315,7 +2247,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
                     guard let self else { return false }
-                    guard let tv = ref.view as? TBDTerminalView else { return false }
+                    guard let engine = ref.engine else { return false }
+                    let tv = engine.view
                     guard tv.window != nil else { return false }
                     // Short-circuit when a SwiftUI overlay is open on top of this
                     // terminal — pass the event through so the overlay can handle it.
@@ -2325,27 +2258,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
                     // Use actual scroll position so the session routes to the
                     // correct pane. Grid math runs OUTSIDE the lock (view API);
-                    // the mouseMode guard and the sends ride one `withTerminal`
+                    // the mouseMode guard and the sends ride one `withScreen`
                     // block — the same calls, under the same lock, as
                     // SwiftTerm's own native mouse-reporting path.
-                    let grid = tv.gridPosition(atWindowLocation: location)
-                    let cellHeight = tv.cellDimensions().height
+                    let grid = engine.gridPosition(atWindowLocation: location)
+                    let cellHeight = engine.cellSize.height
 
-                    return tv.withTerminal { term -> Bool in
+                    return engine.withScreen { screen -> Bool in
                         let wheel = self.wheelAccumulator.reports(
                             for: wheelEvent,
                             cellHeight: cellHeight,
-                            mouseReporting: term.mouseMode != .off,
-                            alternateScreen: term.isCurrentBufferAlternate)
+                            mouseReporting: screen.mouseReporting,
+                            alternateScreen: screen.isAlternateScreen)
                         guard wheel.claim else { return false }
                         if let (col, row) = grid, wheel.lines != 0 {
-                            let buttonFlags = term.encodeButton(
-                                button: wheel.lines > 0 ? 4 : 5,
-                                release: false, shift: false, meta: false, control: false
-                            )
-                            for _ in 0..<abs(wheel.lines) {
-                                term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
-                            }
+                            screen.sendWheelReports(lines: wheel.lines, column: col, row: row)
                         }
                         return true
                     }
@@ -2367,53 +2294,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// The click routing is uninstalled by `cleanup()`, which every
         /// transport reaches.
         @MainActor
-        private func claimKeyboardFocusAndClickRouting(on terminalView: TerminalView) {
+        private func claimKeyboardFocusAndClickRouting(on engine: any TerminalEngine) {
             // Focus on next run loop iteration (needs main actor for window access)
             // The tab is named by the focus hook below when the claim lands;
             // a detached keep-alive terminal has no window and names nothing.
             DispatchQueue.main.async {
-                terminalView.window?.makeFirstResponder(terminalView)
+                engine.view.window?.makeFirstResponder(engine.view)
             }
 
             // Clicks arrive through `TBDTerminalView`'s own mouse overrides, so
             // a view drawn over the terminal (a split divider's grab strip, an
             // overlay) takes its clicks by hit-testing. A detached keep-alive
-            // terminal receives no events at all.
-            guard let tv = terminalView as? TBDTerminalView else { return }
-            // Claim first responder on any click, so key equivalents (Cmd+W,
-            // Cmd+Arrow) route to this terminal. While a SwiftUI overlay owns
-            // this terminal's events (a transcript card inset over it, or a
-            // file frame over every terminal), a click on the part it leaves
-            // uncovered runs no Cmd+click behind it.
-            tv.onMouseDownClaimFocus = { [weak self, weak tv] in
-                guard let self, let tv else { return false }
-                if self.shouldSuppressEvents() { return false }
-                tv.window?.makeFirstResponder(tv)
-                return true
-            }
-            // Name this tab as the one Cmd+W closes exactly while the terminal
-            // is first responder, however focus arrives or leaves. AppKit
-            // resigns the old responder before the new one becomes, so a
-            // split sibling sharing this tab clears the context and this view
-            // then writes it back. The resign is equality-guarded so it never
-            // clears another tab's context, and the write is skipped when
-            // unchanged because every observable write re-evaluates the menu.
-            tv.onFocusChange = { [weak self] focused in
-                guard let self, let appState = self.appState else { return }
-                if focused {
-                    if appState.focusedTabCloseContext != self.tabCloseContext {
-                        appState.focusedTabCloseContext = self.tabCloseContext
-                    }
-                } else if let context = self.tabCloseContext,
-                          appState.focusedTabCloseContext == context {
-                    appState.focusedTabCloseContext = nil
-                }
-            }
+            // terminal receives no events at all. With routing on, the engine
+            // asks `engineMouseDownClaimsFocus` on every left mouse-down and
+            // reports every focus change to `engine(_:focusChanged:)`, below.
+            engine.setClickRouting(enabled: true)
         }
 
         @MainActor
         func startTmuxClient(
-            terminalView: TerminalView,
+            engine: any TerminalEngine,
             bridge: TmuxBridge,
             server: String,
             windowID: String,
@@ -2429,7 +2329,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // A session that is not carried by tmux is settled here, before any
             // tmux subprocess runs and before any classification — see
             // `transportPreparationNotice(for:)`.
-            if await handleHolderTransport(into: terminalView) { return }
+            if await handleHolderTransport(into: engine) { return }
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
@@ -2464,7 +2364,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 if case .failure(let failure) = result {
                     logPreparationFailure(failure)
                 }
-                feedPreparationMessage(message, into: terminalView)
+                feedPreparationMessage(message, into: engine)
                 return
             case .requestAutomaticRecovery(let failedStage):
                 if case .failure(let failure) = result {
@@ -2480,7 +2380,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 )
                 if let message = Self.recoveryMessage(for: outcome) {
                     recoveryGuidanceDidBecomeAvailable(message)
-                    feedPreparationMessage(message, into: terminalView)
+                    feedPreparationMessage(message, into: engine)
                 }
                 return
             case .startViewer(let value):
@@ -2512,8 +2412,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Written before startProcess; the IO thread reads it from
             // `dataReceived`. Cleared by `cleanup()` before the process is
             // released.
-            viewHolder.set(terminalView)
-            installLatencyTap(on: terminalView, transport: .tmux)
+            viewHolder.set(engine)
+            installLatencyTap(on: engine, transport: .tmux)
             // Single-step on this transport, deliberately: there is no ack to
             // wait for. The panel's viewer process owns its own pty from the
             // moment it is spawned, so there is no window in which a probe
@@ -2534,7 +2434,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // The enclosing function is `@MainActor async`, so we're already
             // main-isolated here — no `assumeIsolated` wrapper needed.
             do {
-                let dims = terminalView.terminalDimensions
+                let dims = engine.gridSize
                 let cols = dims.cols
                 let rows = dims.rows
                 if cols > 0 && rows > 0 && process.childfd >= 0 {
@@ -2544,8 +2444,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
             }
 
-            installScrollMonitor(on: terminalView)
-            claimKeyboardFocusAndClickRouting(on: terminalView)
+            installScrollMonitor(on: engine)
+            claimKeyboardFocusAndClickRouting(on: engine)
         }
 
         @MainActor
@@ -2569,10 +2469,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
             }
-            if let tv = terminalView as? TBDTerminalView {
-                tv.onMouseDownClaimFocus = nil
-                tv.onFocusChange = nil
-            }
+            engine?.setClickRouting(enabled: false)
             if let preparation = viewSessionReclaim.published {
                 preparation.bridge.cleanupSession(
                     panelID: panelID, generation: preparation.generation)
@@ -2591,7 +2488,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // by a viewer that no longer exists — nothing draining it, no
             // injection deliverable, and every later attach refused.
             detachHolderSession()
-            (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+            engine?.setControlModePasteInterception(enabled: false)
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
                 Task {
@@ -2636,7 +2533,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `ptyChildPid` is 0 for them and `shouldReap` rejects it.
             //
             // Clear the holder BEFORE releasing the process: a late IO batch
-            // then reads nil and drops instead of feeding a view whose
+            // then reads nil and drops instead of feeding an engine whose
             // session is being torn down.
             //
             // **Except while a holder handback is in flight**, where dropping a
@@ -2652,12 +2549,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         /// Render this panel through the control-mode path: request an attach
         /// (fd arrives via the sidecar), wire a long-lived reader that feeds
-        /// SwiftTerm, then ack `attach.ready` to open the daemon's write gate.
+        /// the engine, then ack `attach.ready` to open the daemon's write gate.
         /// Any failure falls back to the grouped-sessions path — Phase 2 is
         /// opt-in and read-only, so degradation must be invisible.
         @MainActor
         func startControlModeClient(
-            terminalView: TerminalView,
+            engine: any TerminalEngine,
             appState: AppState,
             worktreeID: UUID,
             paneID: String,
@@ -2670,7 +2567,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // has no pane for control mode to attach to, and falling through to
             // the fallback would only reach the tmux classifier by a longer
             // route. It attaches to its own pty instead.
-            if await handleHolderTransport(into: terminalView) { return }
+            if await handleHolderTransport(into: engine) { return }
             // Reader-registry key: one reader per PANE (worktree/pane), not per
             // attach — a re-attach replaces the pane's reader. Distinct from
             // the sidecar's per-request demux key, which also carries the
@@ -2692,12 +2589,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     return
                 }
                 controlModeAttach = (worktreeID, paneID, windowID, routingKey, generation)
-                let weakTV = WeakTerminalRef(terminalView)
+                let weakEngine = WeakEngineRef(engine)
                 await appState.controlModeReaders.registerReader(
                     routingKey: routingKey, fd: fd, generation: generation) { chunk in
                         let bytes = [UInt8](chunk)
                         DispatchQueue.main.async {
-                            weakTV.view?.feed(byteArray: bytes[...])
+                            weakEngine.engine?.feed(bytes[...])
                         }
                     }
                 // Teardown during registration: cleanup() ran its attach
@@ -2725,7 +2622,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // otherwise stuck at whatever size it had until the user first
                 // drags, so fullscreen Claude would render at the wrong width.
                 // Same debounced path as live resizes.
-                let dims = terminalView.terminalDimensions
+                let dims = engine.gridSize
                 scheduleDaemonResize(cols: dims.cols, rows: dims.rows)
                 // Intercept ALL pastes at the view level while attached (the
                 // paste ruling v2) and ship them as a `.paste` sidecar frame.
@@ -2744,47 +2641,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // 2004 on → wrapped, 2004 off → verbatim.
                 // Returns true → the paste is consumed here (frame sent, or
                 // oversize refused); false → not attached, SwiftTerm's normal
-                // local paste runs.
-                (terminalView as? TBDTerminalView)?.onControlModePaste = { [weak self] data in
-                    guard let self else { return false }
-                    switch PasteInterception.decide(
-                        controlModeAttached: self.controlModeAttach != nil, byteCount: data.count) {
-                    case .passthrough:
-                        return false
-                    case .interceptAsPaste:
-                        // Empty pasteboard → consume with no frame: there is
-                        // nothing to paste and zero-byte `.paste` frames are
-                        // never sent — but SwiftTerm must not run either.
-                        if !data.isEmpty {
-                            // The one write that does NOT go through
-                            // `outgoingQueue` (Task 10). Defensible: in
-                            // control mode the daemon injects into tmux
-                            // rather than through the app, so the two writers
-                            // this queue serializes never coexist on this
-                            // path — but it is a second writer on paper, and
-                            // worth naming as one.
-                            self.appState?.daemonClient.fdSidecar.sendPaste(
-                                worktreeID: worktreeID, paneID: paneID, bytes: data)
-                        }
-                        return true
-                    case .refuseOversize:
-                        logger.error("""
-                            control-mode paste refused: \(data.count, privacy: .public) bytes \
-                            exceeds the \(SidecarFrameCodec.maxPasteBytes, privacy: .public)-byte \
-                            cap; paste dropped — split the content into smaller pastes
-                            """)
-                        // The log alone is invisible to the user — surface the
-                        // refusal in the pane itself, same "\r\n[...]\r\n"
-                        // status-line style as processTerminated's messages.
-                        self.terminalView?.feed(
-                            text: PasteInterception.refusalMessage(byteCount: data.count))
-                        return true
-                    }
-                }
+                // local paste runs. The decision is
+                // `engine(_:controlModePaste:)`, below.
+                engine.setControlModePasteInterception(enabled: true)
                 // Wheel events are claimed from here on: `controlModeAttach` is
                 // set, so the reports go out as sidecar `.input` frames like
                 // any keystroke.
-                installScrollMonitor(on: terminalView)
+                installScrollMonitor(on: engine)
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
                 // Gate the input-health indicator open for this pane (#318
                 // polish): failing deltas only surface while attached. The
@@ -2828,7 +2691,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     let tornDownGeneration = ControlModeAttachAbort.tornDownTeardownGeneration(
                         committed: controlModeAttach?.generation, error: error)
                     controlModeAttach = nil
-                    (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                    engine.setControlModePasteInterception(enabled: false)
                     if let tornDownGeneration {
                         // Mirrors abortLateAttach's post-await teardown: clear
                         // any generation-scoped AppState record, then the
@@ -2853,7 +2716,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let failedGeneration = ControlModeAttachAbort.teardownGeneration(
                     committed: controlModeAttach?.generation, error: error)
                 controlModeAttach = nil
-                (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                engine.setControlModePasteInterception(enabled: false)
                 // Clear any attach record / stale failing flag for this pane
                 // — the indicator must never show over the grouped-sessions
                 // fallback rendering. Scoped to this attach's generation when
@@ -2871,7 +2734,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         routingKey: routingKey, generation: failedGeneration)
                 }
                 await startTmuxClient(
-                    terminalView: terminalView,
+                    engine: engine,
                     bridge: bridge,
                     server: server,
                     windowID: windowID,
@@ -2897,7 +2760,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 view teardown — self-detaching (gen \(generation ?? 0, privacy: .public))
                 """)
             controlModeAttach = nil
-            (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+            engine?.setControlModePasteInterception(enabled: false)
             // Clear any attach record / failing-input flag (generation-scoped;
             // normally none exists yet — the record is created only after the
             // last teardown checkpoint).
@@ -2969,7 +2832,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         // MARK: - LocalProcessDelegate
         //
-        // `nonisolated`: the Coordinator's `TerminalViewDelegate` conformance
+        // `nonisolated`: the Coordinator's `TerminalEngineDelegate` conformance
         // makes the class MainActor-isolated, but `LocalProcess` calls
         // `dataReceived` inline on the IO thread (`directDelivery: true`) and
         // the exit monitor's callback contract is queue-, not actor-based.
@@ -3004,16 +2867,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 } else {
                     message = "\r\n[View detached — session is still running in the background. Reopen this tab to reattach.]\r\n"
                 }
-                self?.terminalView?.feed(text: message)
+                self?.engine?.writeLocalText(message)
             }
         }
 
         nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
             // Feed synchronously on the calling (IO) thread — this is the
             // off-main parse the 2.0 bump exists for; `feed` is thread-safe
-            // (the parse runs under SwiftTerm's terminal lock) and the view
+            // (the parse runs under the engine's lock) and the engine
             // reference is owned by the holder, so a batch racing teardown
-            // either completes against a live view or reads nil and drops.
+            // either completes against a live engine or reads nil and drops.
             viewHolder.feed(slice)
             // The viewer-MRU signal keeps its main hop.
             DispatchQueue.main.async { [weak self] in
@@ -3027,7 +2890,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `assumeIsolated` is sound: the only callers are `LocalProcess`'s
             // `startProcess` paths, which TBD invokes from main.
             return MainActor.assumeIsolated {
-                let dims = terminalView?.terminalDimensions
+                let dims = engine?.gridSize
                 if let dims, dims.cols > 0 && dims.rows > 0 {
                     debugLog("PANEL: getWindowSize \(dims.cols)x\(dims.rows)")
                     return winsize(
@@ -3039,35 +2902,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        // MARK: - TerminalViewDelegate
+        // MARK: - TerminalEngineDelegate
 
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            // The handback's mode probe, and it comes first because it is the
-            // one window where a reply is wanted rather than suppressed: these
-            // bytes are the terminal answering questions this panel asked about
-            // itself, on their way to `RecordedModeReplies`. They are never
-            // input for the child — the same rule the ingest guard below
-            // enforces for replayed history — so they stop here either way.
-            if modeReplyCollector != nil {
-                modeReplyCollector?.append(contentsOf: data)
-                return
-            }
-            // This guard precedes all routing: anything arriving while a
-            // snapshot preamble is in flight is replayed history or a keystroke
-            // aimed at history — neither is input for the live child.
-            guard !isIngestingSnapshot else { return }
+        /// The handback's reply collector and the snapshot ingest guard have
+        /// already run, in the engine, by the time bytes reach here: replies to
+        /// the handback's own probe are kept for the handback, and anything
+        /// arriving while a preamble is in flight is dropped. See
+        /// `SwiftTermEngine.send(source:data:)`.
+        func engine(_ e: any TerminalEngine, send data: ArraySlice<UInt8>) {
             deliverOutgoing(data)
         }
 
-        /// Everything `send(source:data:)` does once its two swallowing guards
-        /// have let the bytes through, and the answer to whether a transport
-        /// took them.
+        /// Everything `engine(_:send:)` does once the engine's two swallowing
+        /// guards have let the bytes through, and the answer to whether a
+        /// transport took them.
         ///
         /// Factored out for the latency probe, which enters here rather than at
         /// `send` because it has already made those two checks itself and needs
         /// the verdict `send` has nobody to report to. Every other caller is
         /// `send`, and for them the result is still discardable: a synchronous
-        /// SwiftTerm delegate callback has nowhere to put a transport failure,
+        /// engine delegate callback has nowhere to put a transport failure,
         /// which is what `noteUserWriteOutcome` exists to say instead.
         @discardableResult
         func deliverOutgoing(_ data: ArraySlice<UInt8>) -> Bool {
@@ -3123,7 +2977,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// own to do that capture in.
         ///
         /// Reaching it needs no synchronization of its own: this Coordinator
-        /// is `@MainActor` by inference through its `TerminalViewDelegate`
+        /// is `@MainActor` by inference through its `TerminalEngineDelegate`
         /// conformance (see the `LocalProcessDelegate` note above), so every
         /// access — including the first, which may come from `cleanup()` on a
         /// panel that never typed rather than from `send` — is
@@ -3172,7 +3026,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
 
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
-        /// reports what took it. Same two destinations `send(source:data:)`
+        /// reports what took it. Same two destinations `engine(_:send:)`
         /// used before the queue existed — `OutgoingInputRoute.decide` is
         /// unchanged, and it still runs in the same main-actor turn the bytes
         /// arrived in, so a tab switch cannot nil `controlModeAttach` between
@@ -3335,21 +3189,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         /// Test-only: lets a test drive the production marker-detection path
-        /// in `send(source:data:)` and then observe what the queue decided,
+        /// in `engine(_:send:)` and then observe what the queue decided,
         /// rather than calling `beginUserPaste()`/`endUserPaste()` directly
         /// and bypassing the classification the detection actually performs.
         var outgoingQueueForTesting: OutgoingInputQueue { outgoingQueue }
 
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        func engine(_ e: any TerminalEngine, sizeChanged newCols: Int, rows newRows: Int) {
             // A replayed DECCOLM (or any other size-changing sequence in a
             // preamble) must not reach the child's `TIOCSWINSZ` or the daemon's
             // `pane.resize`: the pane's real size is whatever the live view
-            // already has.
-            guard !isIngestingSnapshot else { return }
-            // SwiftTerm delivers delegate callbacks on the main thread; the
+            // already has. The engine drops it before it gets here.
+            //
+            // The engine delivers delegate callbacks on the main thread; the
             // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
             // `controlModeAttach`) is MainActor-confined like the rest of the
-            // coordinator — same guard as `getWindowSize`/`requestOpenLink`.
+            // coordinator — same guard as `getWindowSize`.
             MainActor.assumeIsolated {
                 // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
                 // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
@@ -3480,38 +3334,32 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        func setTerminalTitle(source: TerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func scrolled(source: TerminalView, position: Double) {}
+        func engine(_ e: any TerminalEngine, openLink link: String, params: [String: String]) {
+            // Try to resolve as a file path (absolute, file://, or relative to worktree)
+            if let resolved = ClickedPathResolver.resolve(
+                link, worktreePath: e.configuration.worktreePath) {
+                logger.debug("file-click[requestOpenLink/file]: \(resolved, privacy: .public) raw=\(link, privacy: .public)")
+                onFilePathClicked?(resolved)
+                return
+            }
 
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            MainActor.assumeIsolated {
-                // Try to resolve as a file path (absolute, file://, or relative to worktree)
-                if let tv = source as? TBDTerminalView,
-                   let resolved = tv.resolveAsFilePath(link) {
-                    logger.debug("file-click[requestOpenLink/file]: \(resolved, privacy: .public) raw=\(link, privacy: .public)")
-                    tv.onFilePathClicked?(resolved)
-                    return
-                }
-
-                // Only open as external URL if it has a real scheme
-                if link.contains("://"), let url = URL(string: link) {
-                    NSWorkspace.shared.open(url)
-                }
+            // Only open as external URL if it has a real scheme
+            if link.contains("://"), let url = URL(string: link) {
+                NSWorkspace.shared.open(url)
             }
         }
 
-        func bell(source: TerminalView) {
-            // A BEL in replayed history rang minutes ago; ringing it again on
-            // restore is noise the user cannot act on.
-            guard !isIngestingSnapshot else { return }
+        /// A BEL in replayed history is dropped by the engine before it gets
+        /// here: it rang minutes ago, and ringing it again on restore is noise
+        /// the user cannot act on.
+        func engineBell(_ e: any TerminalEngine) {
             ringBell()
         }
 
-        func clipboardCopy(source: TerminalView, content: Data) {
-            // An OSC 52 in replayed history would silently overwrite whatever
-            // the user has on the pasteboard right now.
-            guard !isIngestingSnapshot else { return }
+        /// An OSC 52 in replayed history is dropped by the engine before it
+        /// gets here: it would silently overwrite whatever the user has on the
+        /// pasteboard right now.
+        func engine(_ e: any TerminalEngine, clipboardCopy content: Data) {
             if let text = String(data: content, encoding: .utf8) {
                 let pb = NSPasteboard.general
                 pb.clearContents()
@@ -3519,8 +3367,107 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+        func engine(_ e: any TerminalEngine, notification title: String, body: String) {
+            onTerminalNotification?(title, body)
+        }
+
+        func engine(_ e: any TerminalEngine, programStatusPayload payload: [UInt8], observedAt: Date) {
+            onProgramStatusReport?(payload, observedAt)
+        }
+
+        func engine(_ e: any TerminalEngine, filePathClicked path: String) {
+            onFilePathClicked?(path)
+        }
+
+        func engineRequestsCloseTab(_ e: any TerminalEngine) {
+            onCloseTab?()
+        }
+
+        func engineReady(_ e: any TerminalEngine) {
+            let ready = onEngineReady
+            onEngineReady = nil
+            ready?(e)
+        }
+
+        /// Asked on every left mouse-down while click routing is on (from
+        /// `claimKeyboardFocusAndClickRouting` until `cleanup()`). Claim first
+        /// responder on any click, so key equivalents (Cmd+W, Cmd+Arrow) route
+        /// to this terminal. While a SwiftUI overlay owns this terminal's
+        /// events (a transcript card inset over it, or a file frame over every
+        /// terminal), a click on the part it leaves uncovered runs no
+        /// Cmd+click behind it.
+        func engineMouseDownClaimsFocus(_ e: any TerminalEngine) -> Bool {
+            if shouldSuppressEvents() { return false }
+            e.view.window?.makeFirstResponder(e.view)
+            return true
+        }
+
+        /// Name this tab as the one Cmd+W closes exactly while the terminal
+        /// is first responder, however focus arrives or leaves. AppKit
+        /// resigns the old responder before the new one becomes, so a
+        /// split sibling sharing this tab clears the context and this view
+        /// then writes it back. The resign is equality-guarded so it never
+        /// clears another tab's context, and the write is skipped when
+        /// unchanged because every observable write re-evaluates the menu.
+        func engine(_ e: any TerminalEngine, focusChanged focused: Bool) {
+            guard let appState else { return }
+            if focused {
+                if appState.focusedTabCloseContext != tabCloseContext {
+                    appState.focusedTabCloseContext = tabCloseContext
+                }
+            } else if let context = tabCloseContext,
+                      appState.focusedTabCloseContext == context {
+                appState.focusedTabCloseContext = nil
+            }
+        }
+
+        /// A panel's view has no window hook of its own; focus on a tab switch
+        /// comes from `AppState.focusTerminalAfterSelectionChange`.
+        func engineMovedToWindow(_ e: any TerminalEngine) {}
+
+        /// Intercept ALL pastes at the view level while attached (the paste
+        /// ruling v2) and ship them as a `.paste` sidecar frame. Asked only
+        /// while `startControlModeClient` has turned interception on. Returns
+        /// true → the paste is consumed here (frame sent, or oversize
+        /// refused); false → not attached, SwiftTerm's normal local paste runs.
+        ///
+        /// The pane is `controlModeAttach`'s: interception is turned on right
+        /// after that attach is recorded and off wherever it is cleared, and a
+        /// paste is only intercepted while it is set.
+        func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool {
+            switch PasteInterception.decide(
+                controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
+            case .passthrough:
+                return false
+            case .interceptAsPaste:
+                // Empty pasteboard → consume with no frame: there is
+                // nothing to paste and zero-byte `.paste` frames are
+                // never sent — but SwiftTerm must not run either.
+                if !data.isEmpty, let attach = controlModeAttach {
+                    // The one write that does NOT go through
+                    // `outgoingQueue` (Task 10). Defensible: in
+                    // control mode the daemon injects into tmux
+                    // rather than through the app, so the two writers
+                    // this queue serializes never coexist on this
+                    // path — but it is a second writer on paper, and
+                    // worth naming as one.
+                    appState?.daemonClient.fdSidecar.sendPaste(
+                        worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
+                }
+                return true
+            case .refuseOversize:
+                logger.error("""
+                    control-mode paste refused: \(data.count, privacy: .public) bytes \
+                    exceeds the \(SidecarFrameCodec.maxPasteBytes, privacy: .public)-byte \
+                    cap; paste dropped — split the content into smaller pastes
+                    """)
+                // The log alone is invisible to the user — surface the
+                // refusal in the pane itself, same "\r\n[...]\r\n"
+                // status-line style as processTerminated's messages.
+                e.writeLocalText(PasteInterception.refusalMessage(byteCount: data.count))
+                return true
+            }
+        }
 
     }
 }

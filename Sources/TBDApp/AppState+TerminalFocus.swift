@@ -2,17 +2,20 @@ import AppKit
 import Foundation
 import TBDShared
 
+/// A weak reference to a mounted terminal's view, for focus. An `NSView`
+/// rather than a concrete terminal view type, because a panel's view is
+/// whatever its terminal engine draws with.
 @MainActor
 final class TerminalFocusTarget {
-    weak var view: TBDTerminalView?
+    weak var view: NSView?
 
-    init(_ view: TBDTerminalView) {
+    init(_ view: NSView) {
         self.view = view
     }
 }
 
 extension AppState {
-    func registerTerminalView(_ view: TBDTerminalView, for terminalID: UUID) {
+    func registerTerminalView(_ view: NSView, for terminalID: UUID) {
         terminalFocusTargets[terminalID] = TerminalFocusTarget(view)
     }
 
@@ -24,7 +27,7 @@ extension AppState {
         }
     }
 
-    func unregisterTerminalView(_ view: TBDTerminalView, for terminalID: UUID) {
+    func unregisterTerminalView(_ view: NSView, for terminalID: UUID) {
         guard terminalFocusTargets[terminalID]?.view === view else { return }
         terminalFocusTargets.removeValue(forKey: terminalID)
         terminalTabCloseContexts.removeValue(forKey: terminalID)
@@ -56,7 +59,7 @@ extension AppState {
         if terminalFocusTargets.isEmpty {
             return lastFocused
         }
-        guard let terminalView = NSApp.keyWindow?.firstResponder as? TBDTerminalView else {
+        guard let terminalView = NSApp.keyWindow?.firstResponder as? NSView else {
             return nil
         }
         guard let terminalID = terminalFocusTargets.first(where: { $0.value.view === terminalView })?.key else {

@@ -488,7 +488,7 @@ struct ProgramStatusAppTests {
         defer { harness.terminalView.onProgramStatusReport = nil }
 
         harness.coordinator.feedSnapshot(
-            Data((Self.probe + Self.report).utf8), into: harness.terminalView)
+            Data((Self.probe + Self.report).utf8), into: harness.engine)
         await harness.settle()
         #expect(harness.sentBytes.isEmpty, "a replayed probe's reply reached the child")
         #expect(reports.payloads.isEmpty, "a replayed report was forwarded")

@@ -161,6 +161,7 @@ struct TerminalLatencyPanelTests {
         let worktreeID: UUID
         let terminalID: UUID
         let sessionEnd: Int32
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let defaults: UserDefaults
         let suite: TestDefaultsSuite
@@ -238,8 +239,9 @@ struct TerminalLatencyPanelTests {
         coordinator.appState = state
         coordinator.panelID = terminalID
         // `makeNSView` does this in production, and the probe's first guard
-        // reads it: this reference is weak, so the fixture holds the view too.
-        coordinator.terminalView = view
+        // reads it.
+        let engine = SwiftTermEngine(view: view)
+        coordinator.engine = engine
         coordinator.latencyDiagnosticForTesting = diagnostic
         // One attempt: a refused ack is the end of this panel's attach here,
         // and the stub would hand a retry the descriptor its reader closed.
@@ -255,17 +257,17 @@ struct TerminalLatencyPanelTests {
         // would never return.
         var attaching: Task<Void, Never>?
         if readyGate == nil {
-            await coordinator.startHolderClient(terminalView: view)
+            await coordinator.startHolderClient(engine: engine)
         } else {
             attaching = Task { @MainActor in
-                await coordinator.startHolderClient(terminalView: view)
+                await coordinator.startHolderClient(engine: engine)
             }
         }
 
         return Panel(
             state: state, coordinator: coordinator, diagnostic: diagnostic, lines: lines,
-            worktreeID: worktreeID, terminalID: terminalID, sessionEnd: sessionEnd, view: view,
-            defaults: defaults, suite: suite, attaching: attaching)
+            worktreeID: worktreeID, terminalID: terminalID, sessionEnd: sessionEnd,
+            engine: engine, view: view, defaults: defaults, suite: suite, attaching: attaching)
     }
 
     // MARK: - The write the panel could not place
@@ -404,7 +406,7 @@ struct TerminalLatencyPanelTests {
         let panel = try await makePanel()
         defer { panel.tearDown() }
 
-        panel.coordinator.feedSnapshot(Data("preamble".utf8), into: panel.view)
+        panel.coordinator.feedSnapshot(Data("preamble".utf8), into: panel.engine)
         #expect(panel.coordinator.isIngestingSnapshot)
 
         panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 9))
@@ -427,12 +429,12 @@ struct TerminalLatencyPanelTests {
         let panel = try await makePanel()
         defer { panel.tearDown() }
 
-        panel.coordinator.isCollectingModeRepliesForTesting = true
+        panel.engine.isCollectingModeRepliesForTesting = true
         panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 13))
         #expect(panel.lines.all == [panel.refusal("handbackinflight")])
         #expect(readAvailable(from: panel.sessionEnd).isEmpty)
 
-        panel.coordinator.isCollectingModeRepliesForTesting = false
+        panel.engine.isCollectingModeRepliesForTesting = false
         panel.diagnostic.handleRequest(request(terminalID: panel.terminalID, seq: 14))
         #expect(panel.lines.all == [panel.refusal("handbackinflight")])
         #expect(readAvailable(from: panel.sessionEnd) == Data("lp14z\r".utf8))

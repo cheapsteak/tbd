@@ -193,6 +193,7 @@ struct TerminalHolderTransportGateTests {
     private struct Panel {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let bridge: TmuxBridge
         let runner: RefusingTmuxRunner
@@ -209,7 +210,7 @@ struct TerminalHolderTransportGateTests {
     /// An OSC 777 rides the preamble on purpose. It is the discriminator
     /// between `feedSnapshot` and a bare `feed`: the observer that raises a
     /// user notification is NOT a `TerminalViewDelegate` callback, so the
-    /// coordinator's ingest flag does not cover it — `feedSnapshot` suspends
+    /// engine's ingest flag does not cover it — `feedSnapshot` suspends
     /// the observation outright, and nothing else does. Replayed history must
     /// not raise a notification for a message the agent sent minutes ago.
     private static let preamble =
@@ -251,6 +252,7 @@ struct TerminalHolderTransportGateTests {
             font: TBDTerminalView.defaultMonospaceFont,
             appearance: AppearanceSettings(defaults: defaults)
         )
+        let engine = SwiftTermEngine(view: view)
 
         let runner = RefusingTmuxRunner()
         let bridge = TmuxBridge(
@@ -267,6 +269,7 @@ struct TerminalHolderTransportGateTests {
         return Panel(
             state: state,
             coordinator: coordinator,
+            engine: engine,
             view: view,
             bridge: bridge,
             runner: runner,
@@ -342,12 +345,12 @@ struct TerminalHolderTransportGateTests {
         // such probe is behind a hop that already ran that block. This is the
         // one place the ordering is visible.
         var ingestAtWiring: Bool?
-        panel.coordinator.onHolderReaderWillStart = { [coordinator = panel.coordinator] in
-            ingestAtWiring = coordinator.isIngestingSnapshot
+        panel.coordinator.onHolderReaderWillStart = { [engine = panel.engine] in
+            ingestAtWiring = engine.isIngestingSnapshot
         }
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -425,7 +428,7 @@ struct TerminalHolderTransportGateTests {
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -469,7 +472,7 @@ struct TerminalHolderTransportGateTests {
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -501,7 +504,7 @@ struct TerminalHolderTransportGateTests {
         panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -649,7 +652,7 @@ struct TerminalHolderTransportGateTests {
         panel.coordinator.holderAttachRetryDelays = []
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -700,7 +703,7 @@ struct TerminalHolderTransportGateTests {
 
         let attaching = Task { @MainActor in
             await panel.coordinator.startTmuxClient(
-                terminalView: panel.view,
+                engine: panel.engine,
                 bridge: panel.bridge,
                 server: Self.server,
                 windowID: "",
@@ -738,7 +741,7 @@ struct TerminalHolderTransportGateTests {
         #expect(!panel.state.holderHandbackLedger.isInFlight(terminalID: panel.terminalID))
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: "",
@@ -758,7 +761,7 @@ struct TerminalHolderTransportGateTests {
         defer { tearDown(panel) }
 
         await panel.coordinator.startTmuxClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             bridge: panel.bridge,
             server: Self.server,
             windowID: Self.windowID,
@@ -799,7 +802,7 @@ struct TerminalHolderTransportGateTests {
         let paneKey = ControlModePaneKey(worktreeID: panel.worktreeID, paneID: Self.paneID)
 
         await panel.coordinator.startControlModeClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             appState: panel.state,
             worktreeID: panel.worktreeID,
             paneID: Self.paneID,
@@ -837,7 +840,7 @@ struct TerminalHolderTransportGateTests {
         let paneKey = ControlModePaneKey(worktreeID: panel.worktreeID, paneID: Self.paneID)
 
         await panel.coordinator.startControlModeClient(
-            terminalView: panel.view,
+            engine: panel.engine,
             appState: panel.state,
             worktreeID: panel.worktreeID,
             paneID: Self.paneID,

@@ -33,6 +33,7 @@ struct HolderAttachRetryTests {
     private struct Fixture {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let stub: ScriptedHolderDaemon
         let retryOffers: Counter
@@ -74,13 +75,14 @@ struct HolderAttachRetryTests {
         let coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
         coordinator.appState = state
         coordinator.panelID = terminalID
-        coordinator.terminalView = view
+        let engine = SwiftTermEngine(view: view)
+        coordinator.engine = engine
         coordinator.holderAttachClient = stub
         coordinator.holderAttachRetryDelays = delays
         let retryOffers = Counter()
         coordinator.onHolderAttachRetryOffered = { retryOffers.value += 1 }
         return Fixture(
-            state: state, coordinator: coordinator, view: view, stub: stub,
+            state: state, coordinator: coordinator, engine: engine, view: view, stub: stub,
             retryOffers: retryOffers, defaults: defaults, suite: suite)
     }
 
@@ -142,7 +144,7 @@ struct HolderAttachRetryTests {
         defer { fixture.tearDown() }
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         // The first wait is exactly the schedule's first step: advancing by it
         // must be what releases the second attempt.
@@ -164,7 +166,7 @@ struct HolderAttachRetryTests {
         let fixture = makeFixture(clock: ImmediateClock<Duration>(), stub: stub)
         defer { fixture.tearDown() }
 
-        await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        await fixture.coordinator.startHolderClient(engine: fixture.engine)
 
         #expect(stub.attaches == HolderAttachRetry.delays.count + 1,
                 "one attempt, then one per scheduled wait, and no more: \(stub.attaches)")
@@ -182,7 +184,7 @@ struct HolderAttachRetryTests {
         let fixture = makeFixture(clock: ImmediateClock<Duration>(), stub: stub)
         defer { fixture.tearDown() }
 
-        await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        await fixture.coordinator.startHolderClient(engine: fixture.engine)
 
         #expect(stub.attaches == 1, "a session that has ended has nothing to retry against")
         #expect(fixture.didFeed(TerminalPreparationPresentation.holderSessionEndedMessage))
@@ -205,7 +207,7 @@ struct HolderAttachRetryTests {
         let fixture = makeFixture(clock: ImmediateClock<Duration>(), stub: stub)
         defer { fixture.tearDown() }
 
-        await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        await fixture.coordinator.startHolderClient(engine: fixture.engine)
 
         #expect(stub.events == ["attach", "ready", "ready", "detach", "attach", "ready"], """
             the first attempt's attach must be released — acked again, then detached — before \
@@ -246,7 +248,7 @@ struct HolderAttachRetryTests {
         let ledger = fixture.state.holderHandbackLedger
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await waitFor("the panel to wait for its release's resend", observed: {
             "\(stub.attaches) attempts"
@@ -280,7 +282,7 @@ struct HolderAttachRetryTests {
         let finished = Flag()
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
             finished.isSet = true
         }
         // The first attempt fails at 3 s; a retry at 4 s is inside the deadline.
@@ -320,7 +322,7 @@ struct HolderAttachRetryTests {
         defer { fixture.tearDown() }
         let terminalID = fixture.coordinator.panelID
 
-        await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        await fixture.coordinator.startHolderClient(engine: fixture.engine)
 
         #expect(stub.events == ["attach", "ready"], "\(stub.events)")
         let snapshot = try #require(atRequest.values.first)
@@ -352,7 +354,7 @@ struct HolderAttachRetryTests {
         let terminalID = fixture.coordinator.panelID
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         #expect(stub.attaches == 1)
@@ -385,7 +387,7 @@ struct HolderAttachRetryTests {
         let terminalID = fixture.coordinator.panelID
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         #expect(stub.attaches == 1)
@@ -418,7 +420,7 @@ struct HolderAttachRetryTests {
         defer { fixture.tearDown() }
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         fixture.coordinator.cleanup()
@@ -454,7 +456,7 @@ struct HolderAttachRetryTests {
         fixture.state.isConnected = true
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         fixture.state.isConnected = false
@@ -486,7 +488,7 @@ struct HolderAttachRetryTests {
         defer { fixture.tearDown() }
 
         let attaching = Task { @MainActor in
-            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            await fixture.coordinator.startHolderClient(engine: fixture.engine)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         attaching.cancel()
@@ -520,7 +522,7 @@ struct HolderAttachRetryTests {
         // `cleanup()` cancels is started.
         let attaching = Task { @MainActor in
             await fixture.coordinator.startTmuxClient(
-                terminalView: fixture.view, bridge: fixture.state.tmuxBridge,
+                engine: fixture.engine, bridge: fixture.state.tmuxBridge,
                 server: "", windowID: "", panelID: fixture.coordinator.panelID)
             finished.isSet = true
         }
