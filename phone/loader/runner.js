@@ -98,7 +98,7 @@
     script.addEventListener('load', () => {
       window.removeEventListener('error', onWindowError);
       port.postMessage(threw ? { t: 'fault', reason: 'script' } : { t: 'started' });
-      URL.revokeObjectURL(url);
+      // The URL is not revoked: once it is, WebKit reports every later app error as "Script error.".
     });
     // Engines without Trusted Types take the plain string.
     script.src = policy ? policy.createScriptURL(url) : url;
