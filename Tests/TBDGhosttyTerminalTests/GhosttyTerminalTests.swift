@@ -44,6 +44,17 @@ private let streamChunk: [UInt8] = {
     return Array(bytes.prefix(4096))
 }()
 
+/// Starts `feed` as the IO thread's side of a test, on a thread the tests own. A feeder parses
+/// megabytes in one synchronous loop. On the cooperative pool that loop would hold one of the
+/// pool's few threads for its whole run, so it goes to `GateExecutor`, as `Tests/CLAUDE.md` says.
+/// The task is detached so the operation is nonisolated. Started from a main-actor test, a plain
+/// `Task` would run it on the main actor, whatever the preference.
+private func startFeeder<Fed: Sendable>(_ feed: @escaping @Sendable () -> Fed) -> Task<Fed, Never> {
+    Task.detached {
+        await withTaskExecutorPreference(GateExecutor.shared) { feed() }
+    }
+}
+
 @Suite(.fastPassBounded)
 struct GhosttyTerminalTests {
     @Test func feedThenReadCellText() throws {
@@ -142,7 +153,7 @@ struct GhosttyTerminalTests {
         let chunk = streamChunk
         let chunkCount = (4 * 1024 * 1024) / chunk.count
 
-        let feeder = Task.detached {
+        let feeder = startFeeder {
             for index in 0..<chunkCount {
                 terminal.feed(chunk[...])
                 // A quarter of the way in, let the main actor close the terminal under the feed.
@@ -170,7 +181,7 @@ struct GhosttyTerminalTests {
         let (started, startedContinuation) = AsyncStream<Void>.makeStream()
         let chunk = streamChunk
 
-        let feeder = Task.detached {
+        let feeder = startFeeder {
             for index in 0..<512 {
                 terminal.feed(chunk[...])
                 if index == 0 { startedContinuation.yield() }
@@ -205,7 +216,7 @@ struct GhosttyTerminalTests {
         let (started, startedContinuation) = AsyncStream<Void>.makeStream()
         let probeCount = 2000
 
-        let feeder = Task.detached {
+        let feeder = startFeeder {
             for index in 0..<probeCount {
                 terminal.feed(text: "\u{1b}[18t\u{1b}[c")
                 if index == 0 { startedContinuation.yield() }
