@@ -100,4 +100,34 @@ struct IncrementalTranscriptTests {
         var incremental = IncrementalTranscript()
         #expect(incremental.ingest(lines: []).isEmpty)
     }
+
+    private func toolResultLine(id: String, text: String) -> String {
+        """
+        {"type":"user","uuid":"res-\(id)","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"\(id)","content":"\(text)"}]}}
+        """
+    }
+
+    private func toolUseLine(id: String) -> String {
+        """
+        {"type":"assistant","uuid":"call-\(id)","message":{"role":"assistant","content":[{"type":"tool_use","id":"\(id)","name":"Bash","input":{"command":"ls"}}]}}
+        """
+    }
+
+    @Test("a result for a call it never saw is reported")
+    func aResultForACallItNeverSawIsReported() {
+        var t = IncrementalTranscript()
+        let c = t.ingest(lines: [toolResultLine(id: "toolu_9", text: "ok")])
+        #expect(c.resolvedToolUseIDs == ["toolu_9"])
+        #expect(t.toolResult(for: "toolu_9")?.text == "ok")
+    }
+
+    @Test("a result for an earlier call is both updated and reported")
+    func aResultForAnEarlierCallIsBothUpdatedAndReported() {
+        var t = IncrementalTranscript()
+        t.ingest(lines: [toolUseLine(id: "toolu_1")])
+        let c = t.ingest(lines: [toolResultLine(id: "toolu_1", text: "done")])
+        #expect(c.updated == [0])
+        #expect(c.resolvedToolUseIDs == ["toolu_1"])
+        #expect(t.toolResult(for: "toolu_1")?.text == "done")
+    }
 }
