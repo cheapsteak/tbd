@@ -5,7 +5,8 @@
 // `resume()` runs through one promise chain, one at a time and in arrival order. Decrypting is
 // asynchronous, so a `peer-left` right behind a frame waits until that frame is handled.
 // Within one chain task only `stop()` can change what is current, and each task checks for it
-// after every await.
+// after every await. The bundle cache read is the one wait kept off the chain: IndexedDB can
+// stall, so the read runs beside it, and its answer or its timeout comes back as a task.
 //
 // Sessions. Each `peer-joined` starts a new session: a fresh initiator, and later its
 // transport, welcome and bundle assembly. Anything an older session started that finishes
@@ -13,9 +14,9 @@
 
 import { NoiseError, createInitiator, phonePrologue, MAX_PLAINTEXT_LENGTH } from './channel/noise.js';
 import { base64urlDecode } from './channel/pairingLink.js';
-import { BundleAssembler, BundleError } from './bundle.js';
+import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { systemClock } from './clock.js';
-import { HANDSHAKE_TIMEOUT_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
+import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relaySocketURL } from './links.js';
 import {
   ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage,
@@ -45,6 +46,7 @@ import { RelaySocket, reconnectDelay } from './relay.js';
 /**
  * What a LaptopConnection reports. A state is never reported twice in a row. After `fatal`,
  * `replaced` or `stop()` (even one called from inside `onEvent`), nothing more is reported.
+ * `app` is reported only while the state is `ready`.
  * @typedef {{ kind: 'state', state: ConnectionState }
  *   | { kind: 'connected', laptopName: string }
  *   | { kind: 'bundle', sha256: string, text: string }
@@ -54,8 +56,10 @@ import { RelaySocket, reconnectDelay } from './relay.js';
 
 /**
  * The bundle cache, as `main.js` adapts the store to it. `get` may resolve null or undefined
- * for a miss, or reject (read as a miss). `put` may resolve false (the laptop was forgotten
- * meanwhile) or reject, and `markUsed` may reject: neither is ever fatal.
+ * for a miss, or reject (read as a miss). A `get` that has not answered within
+ * CACHE_READ_TIMEOUT_MS is a miss too, and so is a row whose text does not hash to its name.
+ * `put` may resolve false (the laptop was forgotten meanwhile) or reject, and `markUsed` may
+ * reject: neither is ever fatal.
  * @typedef {object} BundleCache
  * @property {(laptopID: string, sha: string) => Promise<BundleRecord | null | undefined>} get
  * @property {(record: BundleRecord) => Promise<unknown>} put
@@ -91,6 +95,8 @@ import { RelaySocket, reconnectDelay } from './relay.js';
  * @property {NoiseInitiator | null} initiator Set once message 1 is out, until message 2.
  * @property {NoiseTransport | null} transport Set by message 2.
  * @property {Timer | null} timer The handshake timeout.
+ * @property {Timer | null} cacheTimer Armed while the bundle cache is read; null before the
+ *   read, and again once it has answered or timed out.
  * @property {WelcomeMessage | null} welcome
  * @property {BundleAssembler | null} assembler While a `bundle.get` is being answered.
  * @property {boolean} ready
@@ -102,6 +108,7 @@ const MAX_ATTEMPT = 32;
 // IK message 1's payload. The laptop ignores it (plan 3 change 7).
 const IK_PAYLOAD = encodeMessage({});
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+const utf8Encoder = new TextEncoder();
 
 export class LaptopConnection {
   #record;
@@ -184,20 +191,22 @@ export class LaptopConnection {
   }
 
   /**
-   * The page became visible again, or was shown from the back-forward cache. With no socket
-   * (a reconnect is waiting), it reconnects at once and the backoff starts over. An open
-   * socket gets a liveness probe, and a dead one reconnects at once.
+   * The page became visible again, or was shown from the back-forward cache. An open socket
+   * gets a liveness probe, and a dead one reconnects at once. Otherwise (a reconnect is
+   * waiting, or a socket is still connecting, perhaps one frozen while the page was hidden)
+   * a fresh socket replaces it at once and the backoff starts over.
    */
   resume() {
     if (!this.#started) return;
     this.#enqueue(() => {
-      if (this.#socket === null) {
-        this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
-        this.#attempt = 0;
-        this.#connect();
-      } else if (this.#socketOpen) {
-        this.#socket.probe();
+      if (this.#socketOpen) {
+        this.#socket?.probe();
+        return;
       }
+      this.#closeSocket();
+      this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
+      this.#attempt = 0;
+      this.#connect();
     });
   }
 
@@ -246,6 +255,15 @@ export class LaptopConnection {
     this.#socketOpen = false;
     this.#gotSignal = false;
     this.#peerAbsent = false;
+    // One bound for the WebSocket connecting and the first relay signal together: every phone
+    // join gets a signal at once, so a socket without one by now is no use.
+    this.#signalTimer = this.#arm(SIGNAL_TIMEOUT_MS, () => {
+      this.#signalTimer = null;
+      if (socket !== this.#socket || this.#gotSignal) return;
+      this.#closeSocket();
+      this.#setState(this.#everOpened ? 'reconnecting' : 'relayUnreachable');
+      this.#reconnectWithBackoff();
+    });
     socket.open();
   }
 
@@ -259,14 +277,6 @@ export class LaptopConnection {
       case 'open':
         this.#socketOpen = true;
         this.#everOpened = true;
-        this.#signalTimer = this.#arm(SIGNAL_TIMEOUT_MS, () => {
-          this.#signalTimer = null;
-          if (socket !== this.#socket || this.#gotSignal) return;
-          // Every phone join gets a signal; without one the socket is no use.
-          this.#closeSocket();
-          this.#setState('reconnecting');
-          this.#reconnectWithBackoff();
-        });
         return;
       case 'signal':
         this.#gotSignal = true;
@@ -346,7 +356,7 @@ export class LaptopConnection {
     this.#endSession();
     /** @type {Session} */
     const session = {
-      socket, initiator: null, transport: null, timer: null, welcome: null, assembler: null, ready: false,
+      socket, initiator: null, transport: null, timer: null, cacheTimer: null, welcome: null, assembler: null, ready: false,
     };
     this.#session = session;
     this.#setState('handshaking');
@@ -416,7 +426,6 @@ export class LaptopConnection {
     session.initiator = null;
     session.transport = result.transport;
     const laptopName = readLaptopName(result.payload);
-    this.#attempt = 0;
     this.#emit({ kind: 'connected', laptopName });
     // The laptop counts the phone as connected once this first transport message decrypts.
     await this.#send(session, makeHello());
@@ -429,7 +438,7 @@ export class LaptopConnection {
   async #onMessage(session, message) {
     switch (message.type) {
       case 'welcome':
-        await this.#onWelcome(session, message);
+        this.#onWelcome(session, message);
         return;
       case 'bundle.chunk':
         await this.#onChunk(session, message);
@@ -441,8 +450,10 @@ export class LaptopConnection {
         this.#fail('revoked');
         return;
       case 'app':
-        // Passed on unread and uncopied: a body can carry its own `__proto__` key.
-        if (session.welcome !== null) this.#emit({ kind: 'app', body: message.body });
+        // Only once the bundle runs: the app subscribes after its channel comes up, so nothing
+        // it asked for arrives earlier. Passed on unread and uncopied: a body can carry its
+        // own `__proto__` key.
+        if (this.#state === 'ready') this.#emit({ kind: 'app', body: message.body });
         return;
       default:
         // `paired` and `pairDenied` belong to pairing; an unknown type is for a newer loader.
@@ -450,10 +461,13 @@ export class LaptopConnection {
   }
 
   /**
+   * Starts the cache read beside the chain, so a store that stalls holds up no signal, timer
+   * or `resume()`. A read with no answer within CACHE_READ_TIMEOUT_MS is a miss, and an answer
+   * after that is dropped.
    * @param {Session} session
    * @param {WelcomeMessage} welcome
    */
-  async #onWelcome(session, welcome) {
+  #onWelcome(session, welcome) {
     if (session.welcome !== null) {
       throw new ProtocolError('welcome.repeated');
     }
@@ -462,13 +476,25 @@ export class LaptopConnection {
       this.#fail('incompatibleLoader');
       return;
     }
+    session.cacheTimer = this.#arm(CACHE_READ_TIMEOUT_MS, () => this.#onCacheRead(session, welcome, null));
+    this.#readCache(welcome.bundle.sha256)
+      .then((text) => this.#enqueue(() => this.#onCacheRead(session, welcome, text)));
+  }
+
+  /**
+   * The cache read answered or timed out, whichever came first.
+   * @param {Session} session
+   * @param {WelcomeMessage} welcome
+   * @param {string | null} text the cached bundle, or null for a miss
+   */
+  async #onCacheRead(session, welcome, text) {
+    if (!this.#isCurrent(session) || session.cacheTimer === null) return;
+    session.cacheTimer = this.#disarm(session.cacheTimer);
     const { sha256 } = welcome.bundle;
-    const cached = await this.#cacheGet(sha256);
-    if (!this.#isCurrent(session)) return;
-    if (cached !== null) {
+    if (text !== null) {
       const at = this.#clock.now();
       settle(() => this.#cache.markUsed(this.#record.id, sha256, at));
-      this.#bundleReady(session, sha256, cached.text);
+      this.#bundleReady(session, sha256, text);
       return;
     }
     session.assembler = new BundleAssembler(welcome.bundle);
@@ -504,24 +530,30 @@ export class LaptopConnection {
    */
   #bundleReady(session, sha256, text) {
     session.ready = true;
+    // Only a connection that got this far starts the backoff over, so one that keeps failing
+    // after its handshake (a frame that will not decrypt, say) keeps backing off.
+    this.#attempt = 0;
     this.#emit({ kind: 'bundle', sha256, text });
     this.#setState('ready');
   }
 
   /**
+   * Reads the cached bundle and checks its text still hashes to its name. Never rejects.
    * @param {string} sha256
-   * @returns {Promise<BundleRecord | null>} null for a miss, including a failed read
+   * @returns {Promise<string | null>} the bundle text, or null for a miss: no row, a failed
+   *   read, or a row whose text is damaged (the fetch that follows replaces it)
    */
-  async #cacheGet(sha256) {
+  async #readCache(sha256) {
     try {
       const record = await this.#cache.get(this.#record.id, sha256);
-      if (record != null && typeof record.text === 'string' && record.sha256 === sha256) {
-        return record;
+      if (record == null || typeof record.text !== 'string' || record.sha256 !== sha256) {
+        return null;
       }
+      return await sha256Hex(utf8Encoder.encode(record.text)) === sha256 ? record.text : null;
     } catch {
       // A cache that cannot be read is a miss.
+      return null;
     }
-    return null;
   }
 
   /**
@@ -543,6 +575,7 @@ export class LaptopConnection {
     const session = this.#session;
     if (session === null) return;
     session.timer = this.#disarm(session.timer);
+    session.cacheTimer = this.#disarm(session.cacheTimer);
     this.#session = null;
   }
 
@@ -585,7 +618,7 @@ export class LaptopConnection {
 
   /**
    * @param {number} ms
-   * @param {() => void} fn runs on the chain
+   * @param {() => void | Promise<void>} fn runs on the chain
    * @returns {Timer}
    */
   #arm(ms, fn) {
@@ -593,9 +626,7 @@ export class LaptopConnection {
     const timer = { id: null, cancelled: false };
     timer.id = this.#clock.setTimeout(() => {
       timer.id = null;
-      this.#enqueue(() => {
-        if (!timer.cancelled) fn();
-      });
+      this.#enqueue(() => (timer.cancelled ? undefined : fn()));
     }, ms);
     return timer;
   }

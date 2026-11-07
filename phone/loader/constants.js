@@ -12,6 +12,7 @@ export const RECONNECT_MAX_MS = 60_000;
 
 export const SIGNAL_TIMEOUT_MS = 10_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
+export const CACHE_READ_TIMEOUT_MS = 3_000;
 export const RUNNER_START_TIMEOUT_MS = 10_000;
 export const PAIRING_EXPIRY_GRACE_MS = 120_000;
 

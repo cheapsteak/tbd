@@ -7,7 +7,8 @@ import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../chan
 import { base64urlDecode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_PONG_TIMEOUT_MS,
+  SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { relaySocketURL } from '../../links.js';
@@ -132,6 +133,61 @@ function intercept(ws, name, before, after) {
       handler = fn;
     },
   });
+}
+
+/**
+ * A socket factory whose sockets stay connecting forever, as on a network that swallows the
+ * WebSocket handshake. Each socket records the codes `close()` was called with.
+ */
+function hangingSockets() {
+  /** @type {any[]} */
+  const sockets = [];
+  return {
+    sockets,
+    /** @param {string} url */
+    factory(url) {
+      const ws = {
+        url,
+        binaryType: 'blob',
+        readyState: 0,
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        /** @type {Array<number | undefined>} */ closes: [],
+        send() {
+          throw new DOMException('the WebSocket is still connecting', 'InvalidStateError');
+        },
+        /** @param {number} [code] */
+        close(code) {
+          ws.closes.push(code);
+          ws.readyState = 3;
+        },
+      };
+      sockets.push(ws);
+      return ws;
+    },
+  };
+}
+
+/**
+ * Steps the clock through a run of reconnects and checks that each waits exactly its delay:
+ * no join 1 ms early, a join on time. Call it once the first socket has failed.
+ * @param {{ clock: FakeClock, joins: () => number }} env
+ * @param {number[]} delays
+ * @param {(n: number) => Promise<void>} failed waits until the n-th socket has failed and armed
+ *   its reconnect timer
+ */
+async function checkBackoff(env, delays, failed) {
+  const first = env.joins();
+  for (const [i, delay] of delays.entries()) {
+    await env.clock.advance(delay - 1);
+    await quiet();
+    assert.equal(env.joins(), first + i, `no join ${delay - 1} ms after failure ${first + i}`);
+    await env.clock.advance(1);
+    await until(() => env.joins() === first + i + 1, `join ${first + i + 1} after ${delay} ms`);
+    await failed(first + i + 1);
+  }
 }
 
 /** An in-memory cache with the adapter interface LaptopConnection takes. */
@@ -589,6 +645,66 @@ test('a cache that misses with null or rejects, or refuses or fails to write, ne
   c.conn.stop();
 });
 
+test('a cache read that never answers is a miss after 3 s, a late answer is dropped, and a peer-left during the read reads offline at once', async () => {
+  const env = await setup();
+  const text = 'globalThis.tbdScriptedLaptop = true;\n';
+  const sha256 = sha256Hex(text);
+  /** @type {Array<(record: object) => void>} */
+  const answers = [];
+  const c = connection(env, {
+    cache: { ...env.cache, get: () => new Promise((resolve) => { answers.push(resolve); }) },
+  });
+  c.conn.start();
+  await until(() => answers.length === 1, 'the cache read');
+  await quiet();
+  await env.clock.advance(CACHE_READ_TIMEOUT_MS - 1);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking']);
+  assert.equal(env.laptop.counts.bundleGet, 0);
+  await env.clock.advance(1);
+  await until(() => c.states().includes('ready'), 'ready through bundle.get');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+  assert.equal(env.laptop.counts.bundleGet, 1);
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.equal(env.cache.calls.put.length, 1);
+
+  // The read answering after its timeout changes nothing.
+  answers[0]({ laptopID: env.record.id, sha256, text, size: 1, usedAt: 0 });
+  await quiet();
+  assert.equal(c.of('bundle').length, 1);
+  assert.deepEqual(env.cache.calls.markUsed, []);
+
+  // While a read hangs, signals are still handled, and the connection ends without it.
+  env.laptop.leave(env.room);
+  await until(() => c.count('offline') === 1, 'offline');
+  env.laptop.join(env.room);
+  await until(() => answers.length === 2, 'the second cache read');
+  env.laptop.leave(env.room);
+  await until(() => c.count('offline') === 2, 'offline while the read hangs');
+  await env.clock.advance(CACHE_READ_TIMEOUT_MS);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready', 'offline', 'handshaking', 'offline']);
+  assert.equal(env.laptop.counts.bundleGet, 1, 'no bundle.get for the session that ended');
+  c.conn.stop();
+});
+
+test('a cached bundle whose text does not hash to its name is a miss, and the fetch replaces the row', async () => {
+  const env = await setup();
+  const text = 'globalThis.tbdScriptedLaptop = true;\n';
+  const sha256 = sha256Hex(text);
+  const key = `${env.record.id} ${sha256}`;
+  env.cache.rows.set(key, { laptopID: env.record.id, sha256, text: 'globalThis.acme = "changed";\n', size: 10, usedAt: 0 });
+  const c = connection(env);
+  c.conn.start();
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.equal(env.laptop.counts.bundleGet, 1);
+  assert.deepEqual(env.cache.calls.markUsed, []);
+  assert.equal(env.cache.rows.get(key).text, text);
+  c.conn.stop();
+});
+
 test('a transfer cut by the laptop leaving caches nothing; after it rejoins the bundle completes and is cached once', async () => {
   const text = textWithChunks(2);
   const env = await setup({ bundleText: text });
@@ -764,6 +880,7 @@ test('paired, pairDenied, unknown types and an app before welcome are ignored', 
   await peer.send({ type: 'pairDenied', reason: 'denied' });
   await peer.send({ type: 'acme.future', anything: [1, 2] });
   await peer.send({ type: 'welcome', protocol: 1, minProtocol: 1, tbdVersion: '0.0.0-test', bundle: { sha256, size: 10 } });
+  await until(() => c.states().includes('ready'), 'ready from the cache');
   await peer.send({ type: 'app', body: { late: true } });
   await until(() => c.of('app').length > 0, 'the app message');
   assert.deepEqual(c.of('app'), [{ kind: 'app', body: { late: true } }]);
@@ -771,6 +888,31 @@ test('paired, pairDenied, unknown types and an app before welcome are ignored', 
   assert.deepEqual(c.of('fatal'), []);
   assert.deepEqual(c.states(), ['connecting', 'handshaking', 'ready']);
   assert.deepEqual(laptop.frames, [], 'no bundle.get on a cache hit');
+  c.conn.stop();
+});
+
+test('an app message while the bundle loads is dropped; app messages pass once ready', async () => {
+  const env = await setup();
+  const text = 'globalThis.acme = 1;\n';
+  const compressed = deflateRawSync(Buffer.from(text));
+  const sha256 = sha256Hex(text);
+  const laptop = await manualLaptop(env);
+  const c = connection(env);
+  c.conn.start();
+  const peer = await laptop.accept();
+  await peer.hello();
+  await peer.send({ type: 'welcome', protocol: 1, minProtocol: 1, tbdVersion: '0.0.0-test', bundle: { sha256, size: compressed.length } });
+  assert.deepEqual(await peer.read(), { type: 'bundle.get', sha256 });
+  await peer.send({ type: 'app', body: { seq: 1 } });
+  await peer.send({ type: 'bundle.chunk', sha256, index: 0, count: 1, data: compressed.toString('base64') });
+  await until(() => c.states().includes('ready'), 'ready');
+  await peer.send({ type: 'app', body: { seq: 2 } });
+  await until(() => c.of('app').length > 0, 'the app message');
+  await quiet();
+  assert.deepEqual(c.of('app'), [{ kind: 'app', body: { seq: 2 } }]);
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+  assert.deepEqual(c.of('fatal'), []);
   c.conn.stop();
 });
 
@@ -919,14 +1061,7 @@ test('closes back off 1 s, 2 s, 4 s … capped at 60 s', async () => {
   await closed(1);
   assert.deepEqual(c.states(), ['connecting', 'reconnecting']);
   const delays = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000, 60_000];
-  for (const [i, delay] of delays.entries()) {
-    await env.clock.advance(delay - 1);
-    await quiet();
-    assert.equal(env.joins(), i + 1, `no join ${delay - 1} ms after close ${i + 1}`);
-    await env.clock.advance(1);
-    await until(() => env.joins() === i + 2, `join ${i + 2} after ${delay} ms`);
-    await closed(i + 2);
-  }
+  await checkBackoff(env, delays, closed);
 
   // resume() reconnects at once and starts the backoff over.
   c.conn.resume();
@@ -938,6 +1073,56 @@ test('closes back off 1 s, 2 s, 4 s … capped at 60 s', async () => {
   await env.clock.advance(1);
   await until(() => env.joins() === delays.length + 3, 'a join 1 s later');
   assert.deepEqual(c.states(), ['connecting', 'reconnecting']);
+  c.conn.stop();
+});
+
+test('the backoff jitter adds up to a quarter, and the cap holds at 60 s', async () => {
+  const env = await setup();
+  env.laptop.leave(env.room);
+  env.net.hooks.afterOpen = (ws) => ws.close(1000);
+  const c = connection(env, { random: () => 0.99 });
+  c.conn.start();
+  const closed = (/** @type {number} */ n) => until(() => env.net.count('closed') === n && env.clock.pending === 1, `close ${n}`);
+  await closed(1);
+  // 1,000 ms × 2^attempt × 1.2475, rounded, and never above 60,000 ms.
+  await checkBackoff(env, [1248, 2495, 4990, 9980, 19_960, 39_920, 60_000, 60_000], closed);
+  c.conn.stop();
+});
+
+test('decrypt failures back off until a connection reaches ready', async () => {
+  const env = await setup();
+  /** @param {Uint8Array} frame */
+  const flip = (frame) => {
+    const changed = frame.slice();
+    changed[changed.length - 1] ^= 1;
+    return changed;
+  };
+  // Each connection gets message 2 and then welcome, its first transport frame, which arrives
+  // changed: every handshake succeeds and every connection fails before ready.
+  let frames = 0;
+  env.relay.tamper(env.room, (frame) => (++frames % 2 === 0 ? flip(frame) : frame));
+  const c = connection(env);
+  c.conn.start();
+  /** Waits until the phone has closed socket n and armed its reconnect timer. */
+  const failed = (/** @type {number} */ n) => until(() => env.net.count('close()') === n && env.clock.pending === 1, `failure ${n}`);
+  await failed(1);
+  await checkBackoff(env, [1000, 2000, 4000, 8000], failed);
+  assert.equal(c.of('connected').length, 5);
+  assert.equal(c.count('ready'), 0);
+
+  // A connection that reaches ready starts the backoff over.
+  env.relay.tamper(env.room, null);
+  await env.clock.advance(16_000);
+  await until(() => c.states().includes('ready'), 'ready');
+  env.relay.tamper(env.room, flip);
+  assert.equal(await env.laptop.sendApp(env.room, { kind: 'event' }), true);
+  await failed(6);
+  await env.clock.advance(999);
+  await quiet();
+  assert.equal(env.joins(), 6);
+  await env.clock.advance(1);
+  await until(() => env.joins() === 7, 'a join 1 s after the failure');
+  assert.deepEqual(c.of('fatal'), []);
   c.conn.stop();
 });
 
@@ -972,6 +1157,32 @@ test('a relay that refuses the first socket reads relayUnreachable', async () =>
   c.conn.stop();
 });
 
+test('a socket that never opens is closed 10 s after it was made, and the next one connects', async () => {
+  const env = await setup();
+  const hanging = hangingSockets();
+  let hang = true;
+  const c = connection(env, { openSocket: (/** @type {string} */ url) => (hang ? hanging.factory(url) : env.net.factory(url)) });
+  c.conn.start();
+  await quiet();
+  assert.equal(hanging.sockets.length, 1);
+  await env.clock.advance(SIGNAL_TIMEOUT_MS - 1);
+  await quiet();
+  assert.deepEqual(hanging.sockets[0].closes, []);
+  assert.deepEqual(c.states(), ['connecting']);
+  await env.clock.advance(1);
+  await until(() => c.states().includes('relayUnreachable'), 'relayUnreachable');
+  assert.deepEqual(hanging.sockets[0].closes, [1000]);
+  assert.equal(env.clock.pending, 1, 'only the reconnect timer');
+
+  hang = false;
+  await env.clock.advance(1000);
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(c.states(), ['connecting', 'relayUnreachable', 'handshaking', 'loading', 'ready']);
+  assert.equal(hanging.sockets.length, 1);
+  assert.equal(env.joins(), 1);
+  c.conn.stop();
+});
+
 test('resume with a black-holed socket reconnects within 3 s', async () => {
   const env = await setup();
   const c = connection(env);
@@ -996,6 +1207,28 @@ test('resume with a black-holed socket reconnects within 3 s', async () => {
   await quiet();
   assert.equal(env.joins(), 3);
   assert.equal(c.states().at(-1), 'ready');
+  c.conn.stop();
+});
+
+test('resume replaces a socket that is still connecting', async () => {
+  const env = await setup();
+  const hanging = hangingSockets();
+  let hang = true;
+  const c = connection(env, { openSocket: (/** @type {string} */ url) => (hang ? hanging.factory(url) : env.net.factory(url)) });
+  c.conn.start();
+  await quiet();
+  assert.equal(hanging.sockets.length, 1);
+  hang = false;
+  c.conn.resume();
+  // No time passes: the replacement is made at once.
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(hanging.sockets[0].closes, [1000]);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+  assert.equal(env.joins(), 1);
+  await env.clock.advance(SIGNAL_TIMEOUT_MS);
+  await quiet();
+  assert.equal(c.states().at(-1), 'ready', 'no timer of the replaced socket fires');
+  assert.equal(env.joins(), 1);
   c.conn.stop();
 });
 
@@ -1082,10 +1315,27 @@ test('stop closes the socket, cancels its timers and reports nothing more', asyn
   await until(() => second.laptop.counts.hello === 2, 'hello on the device room');
   await quiet();
   d.conn.stop();
+  assert.equal(second.clock.pending, 0, 'the cache read timeout is cancelled');
   const before = d.events.length;
   answer(null);
   await quiet();
   assert.equal(d.events.length, before);
   assert.equal(second.laptop.counts.bundleGet, 0);
   assert.deepEqual(d.states(), ['connecting', 'handshaking']);
+});
+
+test('stop during a backoff wait cancels the reconnect timer', async () => {
+  const env = await setup();
+  const c = connection(env);
+  c.conn.start();
+  await until(() => c.states().includes('ready'), 'ready');
+  env.net.sockets[0].close(1000);
+  await until(() => c.states().includes('reconnecting') && env.clock.pending === 1, 'the reconnect timer');
+  c.conn.stop();
+  assert.equal(env.clock.pending, 0);
+  const seen = c.events.length;
+  await env.clock.advance(120_000);
+  await quiet();
+  assert.equal(env.joins(), 1);
+  assert.equal(c.events.length, seen);
 });
