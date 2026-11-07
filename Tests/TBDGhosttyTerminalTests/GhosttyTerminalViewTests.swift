@@ -321,6 +321,11 @@ struct GhosttyTerminalViewTests {
 
     /// The tracking area and the responder chain each deliver the same move. Under any-event
     /// tracking a move is a report, so a repeat would reach the program twice.
+    ///
+    /// The encoder also drops a report that repeats the last one, which would hide a missing
+    /// check here. So the encoder is made to forget between the two deliveries: a mode bit
+    /// changes while SGR-Pixels, set last, stays in force. Only the controller's check that the
+    /// second delivery is the same event then stops it.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func moveDeliveredOnBothPathsIsReportedOnce() throws {
         let fixture = try ViewFixture()
@@ -333,10 +338,11 @@ struct GhosttyTerminalViewTests {
         view.setFrameSize(NSSize(width: 400, height: 200))
         content.addSubview(view)
         view.onSend = { recorder.sent.append($0) }
-        fixture.terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        fixture.terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1016h")
 
         let move = try mouseEvent(.mouseMoved, at: NSPoint(x: 20, y: 100), in: window)
         view.mouseMoved(with: move)
+        fixture.terminal.feed(text: "\u{1b}[?1006h\u{1b}[?1016h")
         view.mouseController.mouseMoved(with: move)
 
         #expect(recorder.sent.count == 1, "one move was reported \(recorder.sent.count) times")
