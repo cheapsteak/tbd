@@ -109,6 +109,15 @@ struct GhosttyTerminalTests {
         #expect(firstLine == "plain preamble")
     }
 
+    /// The byte ceiling is the line count times 4 KiB; an unclamped `Int.max` would overflow there.
+    @Test func hugeScrollbackRequestIsClampedRatherThanTrapping() throws {
+        let terminal = try GhosttyTerminal(
+            cols: 80, rows: 24, scrollbackLines: Int.max, callbacks: GhosttyTerminalCallbacks())
+        terminal.feed(text: "still works")
+        let line = terminal.withLocked { $0.lineText(0) }
+        #expect(line == "still works")
+    }
+
     @Test func feedAfterCloseIsANoOp() throws {
         let recorder = CallbackRecorder()
         let terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: recorder.callbacks)

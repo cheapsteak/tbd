@@ -391,6 +391,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     deinit { close() }
 
+    /// The most scrollback lines a terminal keeps, whatever it is asked for. A million lines is
+    /// beyond any real setting, and keeps the byte ceiling (lines × 4 KiB, about 4 GB) far inside
+    /// `Int`.
+    static let maxScrollbackLines = 1_000_000
+    /// The byte ceiling allowed per scrollback line, generous for wide, styled rows.
+    private static let scrollbackBytesPerLine = 4096
+
     /// Sets every option a new terminal needs. Runs before any byte is fed.
     private static func configure(_ terminal: VtTerminal, context: IOContext, scrollbackLines: Int) throws {
         func set(_ option: GhosttyTerminalOption, _ value: UnsafeRawPointer?, _ name: String) throws {
@@ -452,10 +459,12 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
         // The byte limit must be set explicitly, and before the line limit: its library default is
         // only 10,000 bytes (about 550 rows at 120 columns) and would otherwise win silently.
-        // Whichever limit is reached first applies, so the byte limit is a generous ceiling.
-        var scrollbackBytes = max(scrollbackLines, 256) * 4096
+        // Whichever limit is reached first applies, so the byte limit is a generous ceiling. The
+        // line count is clamped first, so the multiplication cannot overflow.
+        let lines = min(scrollbackLines, maxScrollbackLines)
+        var scrollbackBytes = max(lines, 256) * scrollbackBytesPerLine
         try set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollbackBytes, "SCROLLBACK_MAX_BYTES")
-        var scrollbackMaxLines = scrollbackLines
+        var scrollbackMaxLines = lines
         try set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollbackMaxLines, "SCROLLBACK_MAX_LINES")
         // Mode 2027: grapheme clustering, set as the reset default too so RIS does not lose it.
         var graphemes = GhosttyTerminalModeConfig(mode: ghostty_mode_new(2027, false), value: true)
@@ -622,11 +631,20 @@ public final class GhosttyTerminal: @unchecked Sendable {
         drainOutbox()
     }
 
-    /// Runs `body` with a read-only view of the terminal, under the lock. The state is valid only
-    /// inside `body`; do not keep it. `body` must not call back into this terminal. After `close()`
-    /// the state reports a closed terminal: `isClosed` is true and every reading is empty.
+    /// Runs `body` with a read-only view of the terminal, under the lock. `body` must not call back
+    /// into this terminal. After `close()` the state reports a closed terminal: `isClosed` is true
+    /// and every reading is empty.
+    ///
+    /// **The state must not escape `body`.** Do not return it, store it, or capture it in a
+    /// closure that outlives the call: it reads the C terminal directly, and once the lock drops
+    /// another thread may be changing or freeing that terminal. Copy out the values you need
+    /// instead. Debug builds enforce this: every reading asserts that `body` has not returned.
     public func withLocked<T>(_ body: (GhosttyTerminalState) throws -> T) rethrows -> T {
-        try locked { core in try body(GhosttyTerminalState(raw: core.raw)) }
+        try locked { core in
+            let state = GhosttyTerminalState(raw: core.raw, scoped: true)
+            defer { state.invalidate() }
+            return try body(state)
+        }
     }
 
     /// While true, `writePty` and the effect callbacks are dropped, and the queries are not asked.

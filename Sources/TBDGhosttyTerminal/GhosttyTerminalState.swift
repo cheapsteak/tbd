@@ -5,14 +5,40 @@
 // change to the terminal, which is why no reading here hands one out.
 import GhosttyVt
 
-/// The terminal as seen from inside `GhosttyTerminal.withLocked`. Do not keep it past the closure.
+/// The terminal as seen from inside `GhosttyTerminal.withLocked`. Do not keep it past the closure:
+/// it reads the C terminal directly, and only the lock `withLocked` holds keeps that terminal
+/// still. In debug builds a reading made after the closure returned is an assertion failure.
 /// After `close()` it reports a closed terminal: `isClosed` is true and every reading is empty.
 public struct GhosttyTerminalState {
-    /// The C terminal, or nil once closed. Internal: the projection and the snapshot writer read it.
-    let raw: VtTerminal?
+    private let storedRaw: VtTerminal?
+    #if DEBUG
+    /// Debug builds only: cleared when `withLocked` returns, so a state that escaped is caught.
+    private let validity: StateValidity?
+    #endif
 
-    init(raw: VtTerminal?) {
-        self.raw = raw
+    /// The C terminal, or nil once closed. Internal: the projection and the snapshot writer read it.
+    var raw: VtTerminal? {
+        #if DEBUG
+        assert(validity?.isValid ?? true, "GhosttyTerminalState was used after withLocked returned")
+        #endif
+        return storedRaw
+    }
+
+    /// - Parameter scoped: true for the state `withLocked` hands out, which `invalidate()` ends.
+    ///   A state made elsewhere, under a lock its maker holds, is never invalidated.
+    init(raw: VtTerminal?, scoped: Bool = false) {
+        self.storedRaw = raw
+        #if DEBUG
+        self.validity = scoped ? StateValidity() : nil
+        #endif
+    }
+
+    /// Ends a scoped state's validity. Called by `withLocked` as its closure returns. A no-op in
+    /// release builds.
+    func invalidate() {
+        #if DEBUG
+        validity?.isValid = false
+        #endif
     }
 
     /// The formats `formatted(_:trim:unwrap:)` can produce.
@@ -188,3 +214,11 @@ public struct GhosttyTerminalState {
         return ref
     }
 }
+
+#if DEBUG
+/// Whether a scoped `GhosttyTerminalState` may still be read. Written by `withLocked` under the
+/// terminal's lock; a state is not `Sendable`, so a correct caller only reads it on that thread.
+final class StateValidity {
+    var isValid = true
+}
+#endif
