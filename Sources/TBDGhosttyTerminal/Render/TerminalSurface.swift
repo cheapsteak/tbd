@@ -394,11 +394,28 @@ final class TerminalSurface {
     }
 
     /// The cell whose glyph must be drawn in `cursorTextColor`: only a *filled block* cursor covers
-    /// its glyph completely. On a wide grapheme's tail cell that is the lead cell: the block covers
-    /// both (see `cursorRect`), and the grapheme's glyph is anchored on the lead.
+    /// its glyph completely. On either half of a wide grapheme that is the lead cell: the block
+    /// covers both (see `cursorCells`), and the grapheme's glyph is anchored on the lead.
     var filledCursorCell: (column: Int, row: Int)? {
         guard isCursorDrawn, isFocused, cursor.style == .block else { return nil }
-        return (cursor.isWideTail ? max(0, cursor.column - 1) : cursor.column, cursor.row)
+        return (cursorCells.column, cursor.row)
+    }
+
+    /// The cells a block or underline cursor covers: the first column and how many columns, one or
+    /// two. On either half of a wide grapheme it covers both halves, as most terminals draw it.
+    /// Covering one half would leave the grapheme's whole glyph drawn in `cursorTextColor`, the
+    /// background, with only that half behind the block, so the other half would vanish.
+    ///
+    /// libghostty reports a cursor on the tail. A lead is known by the glyph anchored on it, which
+    /// carries `TKZ_GLYPH_FLAG_WIDE`; a lead with no glyph has nothing to hide, so one cell does.
+    private var cursorCells: (column: Int, width: Int) {
+        if cursor.isWideTail { return (max(0, cursor.column - 1), 2) }
+        guard cursor.row >= 0, cursor.row < rowGlyphs.count else { return (cursor.column, 1) }
+        let column = cursor.column
+        let isWideLead = rowGlyphs[cursor.row].contains { glyph in
+            Int(glyph.gridPos.x) == column && glyph.flags & UInt32(TKZ_GLYPH_FLAG_WIDE) != 0
+        }
+        return (column, isWideLead ? 2 : 1)
     }
 
     /// Suppresses the cursor entirely, whatever the terminal's own modes say.
@@ -436,11 +453,10 @@ final class TerminalSurface {
         rect.thicknessPx = thickness
         rect.reserved0 = 0
 
-        // A cursor parked on the SPACER_TAIL of a wide grapheme covers both cells, and its origin
-        // shifts one column left onto the lead cell -- otherwise the block sits on the right half of
-        // a CJK character or emoji and hides nothing that is actually there.
-        let boxOrigin = cursor.isWideTail ? SIMD2<Float>(origin.x - cellWidth, origin.y) : origin
-        let boxWidth = cursor.isWideTail ? cellWidth * 2 : cellWidth
+        // On either half of a wide grapheme the box covers both cells, starting on the lead.
+        let cells = cursorCells
+        let boxOrigin = geometry.origin(ofColumn: cells.column, row: cursor.row)
+        let boxWidth = cellWidth * Float(cells.width)
 
         let effectiveStyle: SurfaceCursorStyle = isFocused ? cursor.style : .blockHollow
         switch effectiveStyle {
