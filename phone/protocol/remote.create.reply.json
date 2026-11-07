@@ -1,0 +1,11 @@
+{
+  "kind": "reply",
+  "requestID": "E9FE3A3E-2A2F-5C22-B232-69D283673D6B",
+  "result": {
+    "session": {
+      "kind": "remote",
+      "provider": "acme-cloud",
+      "sessionID": "rs-1043"
+    }
+  }
+}

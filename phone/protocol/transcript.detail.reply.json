@@ -1,0 +1,13 @@
+{
+  "kind": "reply",
+  "requestID": "4020F8FC-707D-5A86-A28D-F067C9400675",
+  "result": {
+    "chunk": 0,
+    "chunkCount": 3,
+    "itemID": "fb8527c5-21a1-5e74-98a1-50961cbee757",
+    "part": "result",
+    "text": "> acme@1.4.0 test\n> jest login\n\nPASS src/auth/redirect.test.ts\n",
+    "tooLarge": false,
+    "totalBytes": 151552
+  }
+}

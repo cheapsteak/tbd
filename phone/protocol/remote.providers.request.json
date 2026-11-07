@@ -1,0 +1,8 @@
+{
+  "kind": "request",
+  "method": "remote.providers",
+  "params": {
+    "repoID": "16E7737E-5C20-548E-81FC-5DD3F9A51D36"
+  },
+  "requestID": "53A0DDBB-E08B-508F-B757-504971EBB962"
+}

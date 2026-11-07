@@ -1,0 +1,38 @@
+{
+  "kind": "reply",
+  "requestID": "2ED19EB5-A1FA-5FDE-910B-87782ED58B01",
+  "result": {
+    "page": {
+      "cursor": "184320",
+      "items": [
+        {
+          "at": 1762499460000,
+          "id": "dbc288e7-08d1-5a50-b9a4-51b48f64b2e7",
+          "kind": "user",
+          "text": "The login page loops back to itself after sign-in. Can you fix it?",
+          "truncated": false
+        },
+        {
+          "at": 1762499460000,
+          "id": "abf9ad0c-0702-5b65-adfa-e32f4ae2ea3c",
+          "kind": "assistant",
+          "text": "I'll look at the redirect handling first.",
+          "truncated": false
+        },
+        {
+          "at": 1762499520000,
+          "id": "fb8527c5-21a1-5e74-98a1-50961cbee757",
+          "kind": "tool",
+          "target": "npm test -- login",
+          "toolName": "Bash",
+          "toolStatus": "ok",
+          "truncated": false
+        }
+      ],
+      "omittedItems": 0,
+      "reachedStart": false
+    },
+    "resumed": false,
+    "seq": 0
+  }
+}

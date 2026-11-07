@@ -1,0 +1,12 @@
+{
+  "kind": "request",
+  "method": "session.switchProfile",
+  "params": {
+    "profileID": "8DFEE22E-09D8-5BE1-B331-221F570DC1C6",
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "requestID": "0CFA6887-B18F-506F-B77D-B6E6180AD27A"
+}

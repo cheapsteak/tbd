@@ -1,0 +1,17 @@
+{
+  "kind": "request",
+  "method": "prompt.answer",
+  "params": {
+    "answer": {
+      "decision": "deny",
+      "kind": "permission",
+      "message": "Run it against the staging database instead."
+    },
+    "promptID": "299B8A9E-2281-5593-ADF7-09109D794A86",
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "requestID": "614CAAF4-C3B8-5595-9923-CD4ACC539014"
+}

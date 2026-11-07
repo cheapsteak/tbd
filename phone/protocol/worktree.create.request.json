@@ -1,0 +1,9 @@
+{
+  "kind": "request",
+  "method": "worktree.create",
+  "params": {
+    "message": "Add a search box to the orders page.",
+    "repoID": "16E7737E-5C20-548E-81FC-5DD3F9A51D36"
+  },
+  "requestID": "6B3F23F2-C6DC-5CA9-ADDD-DB630C3A6F0B"
+}

@@ -1,0 +1,11 @@
+{
+  "kind": "reply",
+  "requestID": "6B3F23F2-C6DC-5CA9-ADDD-DB630C3A6F0B",
+  "result": {
+    "session": {
+      "kind": "local",
+      "terminalID": "08A7FA53-E9FD-5ACA-8D10-6F6F0E189F62"
+    },
+    "worktreeID": "6F81CDDB-0E1D-56C0-AFD2-F255B3598C18"
+  }
+}

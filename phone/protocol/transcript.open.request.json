@@ -1,0 +1,13 @@
+{
+  "kind": "request",
+  "method": "transcript.open",
+  "params": {
+    "resume": false,
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    },
+    "showDetails": false
+  },
+  "requestID": "2ED19EB5-A1FA-5FDE-910B-87782ED58B01"
+}
