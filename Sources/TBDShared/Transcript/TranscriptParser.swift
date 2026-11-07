@@ -215,24 +215,22 @@ public enum TranscriptParser {
     /// tail path passes only the lines inside its byte window, so any such
     /// state starts empty there and the tail would emit rows the full parse
     /// suppresses.
-    ///
-    /// Subagent (sidechain) lines are dropped unless `includeSidechain` is
-    /// true, in which case they build items like any other line.
     static func buildItems(
         rawLines: [[String: Any]],
         stableIDs: [String],
-        toolResultsByID: [String: ToolResult],
-        includeSidechain: Bool = false
+        toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
         buildItemsWithLineIndices(
-            rawLines: rawLines, stableIDs: stableIDs,
-            toolResultsByID: toolResultsByID, includeSidechain: includeSidechain
+            rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID
         ).items
     }
 
     /// `buildItems`, plus the index into `rawLines` of the line each item came
     /// from. `lineIndices` is parallel to `items` and never decreases, since
     /// lines are visited in order; one line can yield several items.
+    ///
+    /// Subagent (sidechain) lines are dropped unless `includeSidechain` is
+    /// true, in which case they build items like any other line.
     static func buildItemsWithLineIndices(
         rawLines: [[String: Any]],
         stableIDs: [String],

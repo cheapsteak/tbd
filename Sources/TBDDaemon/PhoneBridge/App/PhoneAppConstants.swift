@@ -88,9 +88,7 @@ enum PhoneFrameBudget {
         var length = 0
         for scalar in s {
             switch scalar.value {
-            case 0x22, 0x5C:
-                length += 2
-            case 0x08, 0x09, 0x0A, 0x0C, 0x0D:
+            case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
                 length += 2
             case 0x00..<0x20:
                 length += 6

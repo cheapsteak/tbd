@@ -1690,7 +1690,7 @@ extension AppState {
 
     /// The sidebar's walk of every repo: each repo's main row (if any), then
     /// a depth-first walk of its top-level active and creating worktrees in
-    /// sibling order, each with its descendants (`appendSubtree`), in
+    /// sibling order, each with its descendants (`SidebarOrder.walk`), in
     /// `order`. Both orders visit the same rows; only where a row stands
     /// against its nested worktrees differs.
     func sidebarWalk(_ order: SidebarWalkOrder) -> [Worktree] {
@@ -1706,24 +1706,20 @@ extension AppState {
 
     /// Depth-first append of the worktree and its active and creating
     /// children (across all repos, since a child can have a different
-    /// `repoID` from its parent), recursively, with the worktree before its
-    /// children or after them as `order` says. Used by `sidebarWalk` to match
-    /// sidebar order, and by `selectionArchiveRunOrder` for the rows that walk
-    /// leaves out. Caps recursion at 50 to mirror
-    /// `SidebarTreeBuilder.maxSubtreeDepth` in case a cyclic parent chain
+    /// `repoID` from its parent), with the worktree before its children or
+    /// after them as `order` says: `SidebarOrder.subtree` over
+    /// `childrenIndex()`, the same walk `sidebarWalk` makes. Used by
+    /// `selectionArchiveRunOrder` for the rows that walk leaves out.
+    /// Recursion stops at `SidebarOrder.maxDepth`, which mirrors
+    /// `SidebarTreeBuilder.maxSubtreeDepth`, in case a cyclic parent chain
     /// ever makes it into the in-memory state (DB-side cycle guards make this
     /// unlikely, but the keyboard-nav path shouldn't blow the stack while the
     /// renderer gracefully degrades).
     func appendSubtree(
         _ wt: Worktree, depth: Int, order: SidebarWalkOrder, into result: inout [Worktree]
     ) {
-        if order == .parentsFirst { result.append(wt) }
-        if depth < SidebarOrder.maxDepth {
-            for child in children(of: wt.id) {
-                appendSubtree(child, depth: depth + 1, order: order, into: &result)
-            }
-        }
-        if order == .childrenFirst { result.append(wt) }
+        result += SidebarOrder.subtree(wt, depth: depth, children: childrenIndex(), order: order)
+            .map(\.worktree)
     }
 
     /// The repo ID of the first selected worktree (used as "focused repo").

@@ -71,6 +71,17 @@ public enum SidebarOrder {
         return result
     }
 
+    /// `worktree` at `depth` and its nested worktrees from `children`,
+    /// depth-first, with the row before or after them as `order` says. Stops
+    /// descending at `maxDepth`.
+    public static func subtree(
+        _ worktree: Worktree, depth: Int, children: [UUID: [Worktree]], order: Walk
+    ) -> [(worktree: Worktree, depth: Int)] {
+        var result: [(worktree: Worktree, depth: Int)] = []
+        appendSubtree(worktree, depth: depth, order: order, children: children, into: &result)
+        return result
+    }
+
     private static func appendSubtree(
         _ worktree: Worktree, depth: Int, order: Walk, children: [UUID: [Worktree]],
         into result: inout [(worktree: Worktree, depth: Int)]

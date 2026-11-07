@@ -28,7 +28,7 @@ public enum TerminalTabLabel {
                     .map(\.id)
             )
             let sameProfileTabs = orderedTerminalIDs.filter { sameProfileTerminalIDs.contains($0) }
-            let position = (sameProfileTabs.firstIndex { $0 == terminal.id } ?? 0) + 1
+            let position = (sameProfileTabs.firstIndex(of: terminal.id) ?? 0) + 1
             return "\(profile.tabDisplayName) \(position)"
         }
 

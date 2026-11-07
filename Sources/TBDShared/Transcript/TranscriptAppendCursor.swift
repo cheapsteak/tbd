@@ -103,7 +103,6 @@ public struct TranscriptAppendCursor: Sendable {
     public init(path: String, offset: UInt64, captureTail: @escaping @Sendable (String, UInt64) -> Data?) {
         self.path = path
         self.offset = offset
-        self.stamp = nil
         self.captureTail = captureTail
         self.consumedTail = .captured(Data())
         if offset > 0 {
@@ -111,8 +110,7 @@ public struct TranscriptAppendCursor: Sendable {
         }
     }
 
-    /// One refresh: the decision `TranscriptSource.refresh` makes, in the same
-    /// order.
+    /// One refresh of the file at `path`.
     ///
     /// In order: a failed stat is `.unreadable`. For a cursor that has read
     /// before, a different path, a shrink, a modification date that moved
@@ -183,8 +181,9 @@ public struct TranscriptAppendCursor: Sendable {
         return .appended(lines: read.lines)
     }
 
-    /// After a known prepend (remote cache `head` moved): find the captured tail window
-    /// by scanning forward from `offset`, at most `limit` bytes; move offset past it. False means reset.
+    /// After a known prepend (the remote cache's `head` moved), finds the
+    /// consumed window again within `limit` bytes past `offset`, and moves
+    /// `offset` to just past it. False means the caller resets.
     ///
     /// A prepend of `k` bytes moves the consumed window from ending at
     /// `offset` to ending at `offset + k`. So the scan reads from the window's
@@ -216,11 +215,10 @@ public struct TranscriptAppendCursor: Sendable {
         let tailLength = UInt64(tail.count)
         let scanStart = offset >= tailLength ? offset - tailLength : 0
         let scanEnd = offset + UInt64(limit)
-        do {
-            try handle.seek(toOffset: scanStart)
-        } catch {
-            return false
-        }
+        guard (try? handle.seek(toOffset: scanStart)) != nil else { return false }
+        // Keep only what could still begin a match that ends in the next
+        // step: one byte fewer than the window.
+        let keep = tail.count - 1
 
         // `buffer` holds the file's bytes from `bufferStart` on.
         var buffer = Data()
@@ -244,9 +242,6 @@ public struct TranscriptAppendCursor: Sendable {
                 return true
             }
 
-            // Keep only what could still begin a match that ends in the next
-            // step: one byte fewer than the window.
-            let keep = tail.count - 1
             if buffer.count > keep {
                 bufferStart += UInt64(buffer.count - keep)
                 buffer = Data(buffer.suffix(keep))

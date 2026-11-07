@@ -17,11 +17,13 @@ struct TranscriptAppendCursorTests {
         TranscriptAppendCursor.diskTailWindow(path: path, endingAt: offset)
     }
 
-    private func makeDirectory() throws -> URL {
+    /// A temp directory of the test's own, and the path of `session.jsonl`
+    /// inside it.
+    private func makeSessionFile() throws -> (dir: URL, path: String) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-append-cursor-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return (dir, dir.appendingPathComponent("session.jsonl").path)
     }
 
     /// Replaces the file's contents and stamps it `seconds` after `base`.
@@ -49,9 +51,8 @@ struct TranscriptAppendCursorTests {
     private let lineC = #"{"type":"user","uuid":"c","message":"the third prompt of the session"}"#
 
     @Test func appendedLinesArriveOnce() throws {
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(lineA + "\n" + lineB + "\n", to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
 
@@ -68,9 +69,8 @@ struct TranscriptAppendCursorTests {
     }
 
     @Test func aShrinkResets() throws {
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(lineA + "\n" + lineB + "\n", to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
         _ = cursor.step(path: path)
@@ -84,9 +84,8 @@ struct TranscriptAppendCursorTests {
         let replacement = #"{"type":"user","uuid":"z","message":"the first prompt of the session"}"#
         #expect(replacement.utf8.count == lineA.utf8.count,
                 "the fixture only exercises the rule if both lines weigh the same")
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(lineA + "\n", to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
         _ = cursor.step(path: path)
@@ -101,9 +100,8 @@ struct TranscriptAppendCursorTests {
         let replacement = lineC + "\n" + lineB + "\n"
         #expect(replacement.utf8.count > original.utf8.count,
                 "the fixture only exercises the tail check if the rewrite is larger")
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(original, to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
         _ = cursor.step(path: path)
@@ -121,9 +119,8 @@ struct TranscriptAppendCursorTests {
         // Fewer bytes than the window the cursor captured, so the window's new
         // position starts before the old offset.
         let prepended = "p1\np2\np3\n"
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(original, to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
         _ = cursor.step(path: path)
@@ -140,9 +137,8 @@ struct TranscriptAppendCursorTests {
 
     @Test func rebaseFailsAfterARewrite() throws {
         let original = lineA + "\n" + lineB + "\n"
-        let dir = try makeDirectory()
+        let (dir, path) = try makeSessionFile()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let path = dir.appendingPathComponent("session.jsonl").path
         try write(original, to: path, at: 0)
         var cursor = TranscriptAppendCursor(path: path, offset: 0, captureTail: diskTail)
         _ = cursor.step(path: path)
