@@ -123,23 +123,41 @@ test('transport: size limits, with no nonce spent on a refused message', async (
   assert.deepEqual(await b.decrypt(await a.encrypt(p)), p);
 });
 
-test('transport: concurrent encrypts keep call order and consecutive nonces', async () => {
+// The loader sends each frame when its encrypt resolves, so what reaches the
+// relay is the order the calls finish in. The first plaintext is much larger,
+// so it would finish last if the two encrypts raced; the loop gives a race
+// many chances to show.
+test('transport: concurrent encrypts finish in call order with consecutive nonces', async () => {
   const { a, b } = await pair();
-  // The first plaintext is the larger, so it would finish last if the two
-  // encrypts raced.
-  const large = pattern(60000, 4);
-  const [c0, c1] = await Promise.all([a.encrypt(large), a.encrypt(p1)]);
-  assert.deepEqual(await b.decrypt(c0), large);
-  assert.deepEqual(await b.decrypt(c1), p1);
+  const large = pattern(65000, 4);
+  const small = pattern(1, 3);
+  for (let i = 0; i < 20; i += 1) {
+    /** @type {Uint8Array[]} */
+    const sent = [];
+    await Promise.all([a.encrypt(large).then((c) => sent.push(c)), a.encrypt(small).then((c) => sent.push(c))]);
+    assert.deepEqual(await b.decrypt(sent[0]), large, `round ${i}: first frame sent`);
+    assert.deepEqual(await b.decrypt(sent[1]), small, `round ${i}: second frame sent`);
+  }
 });
 
-test('transport: concurrent decrypts keep call order', async () => {
+test('transport: concurrent decrypts finish in call order', async () => {
   const { a, b } = await pair();
-  const c0 = await a.encrypt(pattern(60000, 5));
-  const c1 = await a.encrypt(p1);
-  const [d0, d1] = await Promise.all([b.decrypt(c0), b.decrypt(c1)]);
-  assert.deepEqual(d0, pattern(60000, 5));
-  assert.deepEqual(d1, p1);
+  const large = pattern(65000, 5);
+  const small = pattern(1, 6);
+  for (let i = 0; i < 20; i += 1) {
+    const c0 = await a.encrypt(large);
+    const c1 = await a.encrypt(small);
+    /** @type {Uint8Array[]} */
+    const received = [];
+    await Promise.all([b.decrypt(c0).then((d) => received.push(d)), b.decrypt(c1).then((d) => received.push(d))]);
+    assert.deepEqual(
+      received.map((d) => d.length),
+      [large.length, small.length],
+      `round ${i}: frames handled in call order`,
+    );
+    assert.deepEqual(received[0], large, `round ${i}: first frame handled`);
+    assert.deepEqual(received[1], small, `round ${i}: second frame handled`);
+  }
 });
 
 test('transport: a failed decrypt does not stall the queue', async () => {

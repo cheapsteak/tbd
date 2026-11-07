@@ -103,17 +103,19 @@ export async function createTransport({ sendKey, receiveKey, sendNonce = 0n, rec
  *   with `decryptFailed` when the tag does not verify;
  * - the nonce advances only when an operation succeeds.
  *
- * Operations run one at a time in call order. Each reads `key` and `nonce`
+ * Operations run one at a time in call order. Each reads the key and `nonce`
  * when it starts, after the one before it has settled, so overlapping calls
  * never share a nonce. Inputs are copied when the call is made.
  *
- * `key` and `nonce` are plain fields, so a handshake can save and restore
- * them between operations. Replace `key` with another array; never write
- * into it, because the imported Web Crypto key is cached against it.
+ * `key` is an accessor over a private copy: the setter copies the bytes and
+ * drops the cached Web Crypto key, and the getter returns a fresh copy, so
+ * writing into an array never changes the key in use. `nonce` is a plain
+ * field. Save and restore the pair only while no operation is in flight,
+ * because a running operation writes `nonce + 1n` when it finishes.
  */
 class CipherState {
-  /** @type {Uint8Array | null} 32 raw bytes, or null for no key */
-  key;
+  /** @type {Uint8Array<ArrayBuffer> | null} 32 raw bytes, or null for no key */
+  #key = null;
   /** @type {bigint} the counter the next operation uses */
   nonce;
   #queue = new SerialQueue();
@@ -126,14 +128,28 @@ class CipherState {
    * @throws {RangeError} for a key that is not 32 bytes, or a nonce outside 0 through 2^64 - 1
    */
   constructor(key, nonce = 0n) {
-    if (key !== null && key.length !== KEY_BYTES) {
-      throw new RangeError(`a cipher key must be ${KEY_BYTES} bytes, got ${key.length}`);
-    }
     if (typeof nonce !== 'bigint' || nonce < 0n || nonce > RESERVED_NONCE) {
       throw new RangeError('a nonce must be a bigint from 0 through 2^64 - 1');
     }
-    this.key = key === null ? null : copyBytes(key);
+    this.key = key;
     this.nonce = nonce;
+  }
+
+  /** @returns {Uint8Array<ArrayBuffer> | null} a copy of the 32 key bytes, or null for no key */
+  get key() {
+    return this.#key === null ? null : copyBytes(this.#key);
+  }
+
+  /**
+   * @param {Uint8Array | null} key 32 raw bytes, copied; null for no key
+   * @throws {RangeError} for a key that is not 32 bytes
+   */
+  set key(key) {
+    if (key !== null && key.length !== KEY_BYTES) {
+      throw new RangeError(`a cipher key must be ${KEY_BYTES} bytes, got ${key.length}`);
+    }
+    this.#key = key === null ? null : copyBytes(key);
+    this.#imported = null;
   }
 
   /**
@@ -143,8 +159,8 @@ class CipherState {
    * @returns {Promise<void>}
    */
   async prepare(usage) {
-    if (this.key !== null) {
-      await this.#cryptoKey(this.key, usage);
+    if (this.#key !== null) {
+      await this.#cryptoKey(this.#key, usage);
     }
   }
 
@@ -157,7 +173,8 @@ class CipherState {
     const associatedData = copyBytes(ad);
     const input = copyBytes(plaintext);
     return this.#queue.run(async () => {
-      const { key, nonce } = this;
+      const key = this.#key;
+      const nonce = this.nonce;
       if (key === null) {
         return input;
       }
@@ -180,7 +197,8 @@ class CipherState {
     const associatedData = copyBytes(ad);
     const input = copyBytes(ciphertext);
     return this.#queue.run(async () => {
-      const { key, nonce } = this;
+      const key = this.#key;
+      const nonce = this.nonce;
       if (key === null) {
         return input;
       }
@@ -207,7 +225,8 @@ class CipherState {
 
   /**
    * The key imported non-extractable for one usage, cached until `key` is
-   * replaced or another usage is asked for.
+   * set or another usage is asked for. `key` is the private copy, which
+   * nothing writes into, so its identity names its bytes.
    * @param {Uint8Array} key
    * @param {KeyUsage} usage
    * @returns {Promise<CryptoKey>}
