@@ -98,6 +98,15 @@ describe("routes", () => {
     expect(res.status).toBe(405);
   });
 
+  it("checks the room ID, then the method, then the role", async () => {
+    // 404 before 405: a malformed room ID is missing whatever the method.
+    const malformed = `/v1/rooms/${newRoomID().slice(0, 42)}?role=laptop`;
+    expect((await request(malformed, { method: "POST" })).status).toBe(404);
+    // 405 before 400: a POST is refused before its role is read.
+    const badRole = `/v1/rooms/${newRoomID()}?role=admin`;
+    expect((await request(badRole, { method: "POST" })).status).toBe(405);
+  });
+
   it("a valid room URL opens a WebSocket", async () => {
     // `connect` asserts the 101.
     const socket = await connect(newRoomID(), "laptop");

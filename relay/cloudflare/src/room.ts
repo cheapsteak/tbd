@@ -26,7 +26,8 @@ const OPEN = 1;
  * - Message: binary frames up to MAX_FRAME_BYTES pass unchanged to the other
  *   role, or are dropped when it is absent. Text from a client is never
  *   forwarded, so no client can forge a relay signal; `ping` is answered by the
- *   runtime's auto-response. A larger frame closes its sender with 1009.
+ *   runtime's auto-response. A larger frame closes its sender with 1009, and
+ *   the other role gets `peer-left` at once.
  * - Leave: when the last open socket of a role goes, the other role gets `peer-left`.
  */
 export class Room extends DurableObject<Env> {
@@ -75,6 +76,9 @@ export class Room extends DurableObject<Env> {
       } catch {
         // Closed meanwhile.
       }
+      // Signal now rather than when the client answers the Close, which it may
+      // never do. The close event repeats the `peer-left`, which receivers ignore.
+      this.leave(ws);
       return;
     }
     const role = this.roleOf(ws);

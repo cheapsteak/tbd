@@ -27,6 +27,15 @@ async function finishClosing(room: string, role: Role): Promise<void> {
   });
 }
 
+/**
+ * A binary frame for a direct `webSocketMessage` call. Tests that expect such a
+ * call to be dropped first show that a frame built this way passes, so the drop
+ * cannot come from the frame failing the handler's type check.
+ */
+function frame(...values: number[]): ArrayBuffer {
+  return new Uint8Array(values).buffer;
+}
+
 /** Random bytes of any length; `getRandomValues` fills at most 65,536 per call. */
 function randomBytes(length: number): Uint8Array {
   const out = new Uint8Array(length);
@@ -48,6 +57,14 @@ describe("room", () => {
       expect(server).toBeDefined();
       expect(state.getWebSocketAutoResponseTimestamp(server!)).not.toBeNull();
     });
+  });
+
+  it("keepalive is answered after hibernation", async () => {
+    const room = newRoomID();
+    const laptop = await connect(room, "laptop");
+    await evictDurableObject(stub(room));
+    laptop.send(PING);
+    expect(await laptop.next()).toBe(PONG);
   });
 
   it("a phone joining an empty room gets peer-absent", async () => {
@@ -125,18 +142,38 @@ describe("room", () => {
     expect(await phone2.next()).toBe(SIGNAL.peerJoined);
   });
 
+  it("an error on the last socket of a role sends peer-left", async () => {
+    const room = newRoomID();
+    const { laptop } = await pair(room);
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [server] = state.getWebSockets("phone");
+      // The socket still reads as open, so the signal depends on `leave`
+      // leaving the failed socket itself out of the count.
+      expect(server!.readyState).toBe(OPEN);
+      instance.webSocketError(server!, new Error("x"));
+    });
+    expect(await laptop.next()).toBe(SIGNAL.peerLeft);
+  });
+
   it("frames are dropped when the peer is absent", async () => {
     const room = newRoomID();
-    const laptop = await connect(room, "laptop");
+    const { laptop, phone } = await pair(room);
     await runInDurableObject(stub(room), (instance, state) => {
-      const [server] = state.getWebSockets("laptop");
-      instance.webSocketMessage(server!, new Uint8Array([9]).buffer);
+      instance.webSocketMessage(state.getWebSockets("laptop")[0]!, frame(8));
+    });
+    expect(bytes(await phone.next())).toEqual(new Uint8Array([8]));
+
+    phone.close(1000);
+    expect(await laptop.next()).toBe(SIGNAL.peerLeft);
+    await runInDurableObject(stub(room), (instance, state) => {
+      instance.webSocketMessage(state.getWebSockets("laptop")[0]!, frame(9));
     });
 
-    const phone = await connect(room, "phone");
+    // The dropped frame was not queued for the next phone.
+    const phone2 = await connect(room, "phone");
     const m = marker();
     laptop.send(m);
-    expect(await phone.until(m)).toEqual([SIGNAL.peerJoined]);
+    expect(await phone2.until(m)).toEqual([SIGNAL.peerJoined]);
   });
 
   it("text from a client is never forwarded", async () => {
@@ -169,13 +206,33 @@ describe("room", () => {
     expect(await laptop.next()).toBe(SIGNAL.peerLeft);
   });
 
+  it("a frame too large sends peer-left without waiting for the close", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    const m = marker();
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [server] = state.getWebSockets("phone");
+      instance.webSocketMessage(server!, new Uint8Array(MAX_FRAME_BYTES + 1).buffer);
+      // No close event can run before this callback returns, so whatever the
+      // laptop hears before this marker came from the oversize frame itself.
+      state.getWebSockets("laptop")[0]!.send(m);
+    });
+    expect(await laptop.until(m)).toEqual([SIGNAL.peerLeft]);
+    expect(await phone.closed).toEqual(CLOSE_TOO_LARGE);
+  });
+
   it("frames from a socket the relay is closing are dropped", async () => {
     const room = newRoomID();
     const { laptop } = await pair(room);
     await runInDurableObject(stub(room), (instance, state) => {
+      instance.webSocketMessage(state.getWebSockets("phone")[0]!, frame(4));
+    });
+    expect(bytes(await laptop.next())).toEqual(new Uint8Array([4]));
+
+    await runInDurableObject(stub(room), (instance, state) => {
       const [server] = state.getWebSockets("phone");
       server!.close(CLOSE_REPLACED.code, CLOSE_REPLACED.reason);
-      instance.webSocketMessage(server!, new Uint8Array([5]).buffer);
+      instance.webSocketMessage(server!, frame(5));
       instance.webSocketClose(server!, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
     });
     expect(await laptop.next()).toBe(SIGNAL.peerLeft);
@@ -196,6 +253,25 @@ describe("room", () => {
     await evictDurableObject(stub(room));
     phone.close(1000);
     expect(await laptop.next()).toBe(SIGNAL.peerLeft);
+  });
+
+  it("a phone that joins after hibernation replaces the old one", async () => {
+    const room = newRoomID();
+    const { laptop, phone: phone1 } = await pair(room);
+    // The eviction wipes memory, so the join must find the old phone among the
+    // room's sockets rather than in a field.
+    await evictDurableObject(stub(room));
+
+    const phone2 = await connect(room, "phone");
+    expect(await phone1.closed).toEqual(CLOSE_REPLACED);
+    await finishClosing(room, "phone");
+    const m = marker();
+    phone2.send(m);
+    expect(await laptop.until(m)).toEqual([SIGNAL.peerJoined]);
+    expect(await phone2.next()).toBe(SIGNAL.peerJoined);
+
+    laptop.send(new Uint8Array([7]));
+    expect(bytes(await phone2.next())).toEqual(new Uint8Array([7]));
   });
 
   it("rooms are separate", async () => {
