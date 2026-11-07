@@ -54,6 +54,51 @@ struct MouseEncoderTests {
         #expect(encoder.pressEncodings.isEmpty, "the release left \(encoder.pressEncodings) recorded")
     }
 
+    /// libghostty encodes under the mouse mode set last, and resetting any of them turns tracking
+    /// off, whatever bits are still set. After `?1000h ?1003h ?1003l` the bits still say 1000 but
+    /// clicks go unreported. The held button's release must still go out, and clicks must go out
+    /// again once the program sets 1000 again, although that changes no bit.
+    @Test func trackingFollowsTheModeSetLastNotTheModeBits() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        let down = MousePress(action: .press, button: .left, position: Self.point)
+        let up = MousePress(action: .release, button: .left, position: Self.point)
+        terminal.feed(text: "\u{1b}[?1006h\u{1b}[?1000h\u{1b}[?1003h")
+
+        let press = try encode(down, with: encoder, on: terminal)
+        #expect(press == Array("\u{1b}[<0;1;1M".utf8), "the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1003l")
+        let release = try encode(up, with: encoder, on: terminal)
+        #expect(release == Array("\u{1b}[<0;1;1m".utf8), "the held button's release encoded as \(String(describing: release))")
+
+        // Tracking is off in libghostty now, though the 1000 bit is still set.
+        let unreportedPress = try encode(down, with: encoder, on: terminal)
+        let unreportedRelease = try encode(up, with: encoder, on: terminal)
+        #expect(unreportedPress == nil, "with tracking off a press encoded as \(String(describing: unreportedPress))")
+        #expect(unreportedRelease == nil, "with tracking off a release encoded as \(String(describing: unreportedRelease))")
+
+        terminal.feed(text: "\u{1b}[?1000h")
+        let click = try encode(down, with: encoder, on: terminal)
+        #expect(click == Array("\u{1b}[<0;1;1M".utf8), "after 1000 was set again a press encoded as \(String(describing: click))")
+    }
+
+    /// Of two report formats the one set last wins, not the widest: after `?1006h ?1015h` reports
+    /// are urxvt. A press's release keeps its format once reporting is off, so it is urxvt too.
+    @Test func formatFollowsTheModeSetLast() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h\u{1b}[?1015h")
+
+        let press = try encode(MousePress(action: .press, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(press == Array("\u{1b}[32;1;1M".utf8), "the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1000l")
+        let release = try encode(
+            MousePress(action: .release, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(release == Array("\u{1b}[35;1;1M".utf8), "the release encoded as \(String(describing: release))")
+    }
+
     /// Only a reported press earns a release. With tracking off throughout there is nothing to close.
     @Test func releaseWithNoReportedPressStaysSilent() throws {
         let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())

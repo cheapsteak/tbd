@@ -186,6 +186,16 @@ enum WheelOutcome: Sendable, Equatable {
 
 /// Wraps `GhosttyMouseEncoder` plus one reusable `GhosttyMouseEvent`.
 ///
+/// ## Where the encoder's options come from
+///
+/// libghostty encodes under a tracking mode and a report format that it keeps as terminal flags,
+/// not as the DEC mode bits. A program that sets a mouse mode makes it the current one, and one
+/// that resets any of them turns tracking (or the format) off, whatever other bits are still set:
+/// after `?1000h ?1003h ?1003l` the bits still say 1000 but the flags say no tracking, and after
+/// `?1006h ?1015h` both format bits are set but urxvt is in force. Only `set_from_terminal` reads
+/// the flags; there is no getter. So the encoder is set from the terminal on every event, and the
+/// encoding a press went out under is kept as a second encoder, set from the terminal at the press.
+///
 /// Not `Sendable`: the C objects are not thread-safe. Only used under the terminal's lock.
 final class MouseEncoder {
     private let handle: GhosttyMouseEncoderHandle
@@ -194,19 +204,14 @@ final class MouseEncoder {
     /// `OPT_ANY_BUTTON_PRESSED`, so the encoder has to keep this itself and push it on every
     /// encode. Internal rather than private so tests can assert it never leaks a wheel "press".
     private(set) var heldButtons: Set<MouseButton> = []
-    /// The encoding each reported, still-held button was pressed under. A program can turn
-    /// reporting off while a button is down; the press already went out, so its release must go
-    /// out too, encoded as the press was.
-    private(set) var pressEncodings: [MouseButton: ReportEncoding] = [:]
+    /// For each reported, still-held button, an encoder set from the terminal as its press went
+    /// out. The release is encoded with it, so a program that turned reporting off, or changed
+    /// format, while the button was down still gets the release, in the press's encoding.
+    private(set) var pressEncodings: [MouseButton: GhosttyMouseEncoderHandle] = [:]
 
-    /// The tracking mode and report format an event is encoded under.
-    struct ReportEncoding: Equatable {
-        var tracking: GhosttyMouseTrackingMode
-        var format: GhosttyMouseFormat
-    }
-
-    /// The DEC private modes the encoder's options come from: four tracking modes and four report
-    /// formats. `set_from_terminal` reads the same state, but libghostty has no getter for it.
+    /// The DEC private mouse modes a program has set: four tracking modes and four report formats.
+    /// Not what the encoder encodes under (see the type's documentation): a change in them only
+    /// tells the encoder to forget `lastMotion`.
     struct MouseModes: OptionSet, Sendable {
         let rawValue: UInt8
 
@@ -238,51 +243,18 @@ final class MouseEncoder {
             }
             self = modes
         }
-
-        /// The tracking mode and format these modes imply. When a program has set several
-        /// tracking modes the widest wins, as programs enable them narrowest first; likewise for
-        /// the formats.
-        var encoding: ReportEncoding {
-            var encoding = ReportEncoding(tracking: GHOSTTY_MOUSE_TRACKING_NONE, format: GHOSTTY_MOUSE_FORMAT_X10)
-            if contains(.any) {
-                encoding.tracking = GHOSTTY_MOUSE_TRACKING_ANY
-            } else if contains(.button) {
-                encoding.tracking = GHOSTTY_MOUSE_TRACKING_BUTTON
-            } else if contains(.normal) {
-                encoding.tracking = GHOSTTY_MOUSE_TRACKING_NORMAL
-            } else if contains(.x10) {
-                encoding.tracking = GHOSTTY_MOUSE_TRACKING_X10
-            }
-            if contains(.sgrPixels) {
-                encoding.format = GHOSTTY_MOUSE_FORMAT_SGR_PIXELS
-            } else if contains(.sgr) {
-                encoding.format = GHOSTTY_MOUSE_FORMAT_SGR
-            } else if contains(.urxvt) {
-                encoding.format = GHOSTTY_MOUSE_FORMAT_URXVT
-            } else if contains(.utf8) {
-                encoding.format = GHOSTTY_MOUSE_FORMAT_UTF8
-            }
-            return encoding
-        }
     }
 
-    /// The modes the encoder's options were last set from, or nil when they were set some other
-    /// way. A change of modes ends `lastMotion`, so the modes are compared here rather than set
-    /// from the terminal again on every event.
-    private var syncedModes: MouseModes?
-
-    /// A motion report that went out, and the tracking mode and format it went out under.
-    private struct ReportedMotion: Equatable {
-        var bytes: [UInt8]
-        var encoding: ReportEncoding
-    }
+    /// The mouse modes last seen, so a change in them is noticed.
+    private var observedModes: MouseModes?
 
     /// The last motion report sent since the last press, release, mode change or resize. A motion
     /// whose report repeats it is dropped: the bytes carry the cell, the button bits and the
-    /// modifiers, so under the same mode the program would learn nothing from it. SGR-Pixels
-    /// reports carry pixels, so every pixel of motion still goes out there, as the mode asks.
+    /// modifiers, and the modes have not changed since, so the program would learn nothing from
+    /// it. SGR-Pixels reports carry pixels, so every pixel of motion still goes out there, as the
+    /// mode asks.
     // libghostty-vt drops repeats only with OPT_TRACK_LAST_CELL, off by default and keyed on the cell alone.
-    private var lastMotion: ReportedMotion?
+    private var lastMotion: [UInt8]?
 
     /// Rendered geometry. Assign on every resize; it is pushed to `OPT_SIZE` immediately. A resize
     /// moves what a cell means, so it also forgets the last motion.
@@ -307,9 +279,13 @@ final class MouseEncoder {
 
     deinit { ghostty_mouse_event_free(event) }
 
+    /// Pushes the geometry to the encoder and to every press's encoder, so a release after a
+    /// resize lands in the right cell.
     private func applyGeometry() {
         var size = geometry.ghostty
-        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+        for encoder in [handle] + Array(pressEncodings.values) {
+            _ = ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+        }
     }
 
     /// Forget motion de-duplication state and which buttons are held. Call on focus loss and when
@@ -321,9 +297,11 @@ final class MouseEncoder {
         _ = ghostty_mouse_encoder_reset(handle.raw)
     }
 
-    /// Is any mouse tracking mode (X10 / normal / button / any-event) active?
+    /// Is any mouse tracking mode (X10 / normal / button / any-event) set?
     ///
-    /// The view layer uses this to decide reporting-vs-selection: report unless Shift is held.
+    /// Read from the mode bits, so after `?1000h ?1003h ?1003l` it is true although libghostty
+    /// reports nothing: see the type's documentation. The view layer uses it to decide
+    /// reporting-vs-selection, and the wheel to decide reporting-vs-scrolling.
     /// Caller holds the terminal lock.
     static func isTrackingEnabled(_ terminal: VtTerminal) -> Bool {
         var tracking = false
@@ -332,12 +310,16 @@ final class MouseEncoder {
         return tracking
     }
 
-    /// Sets the encoder's tracking mode and format from `terminal` if its mouse modes differ
-    /// from the ones they were last set from. Caller holds the lock.
-    private func syncModes(_ modes: MouseModes, terminal: VtTerminal) {
-        guard modes != syncedModes else { return }
+    /// Sets the encoder from the terminal's current mouse flags, and forgets the last motion if
+    /// the mouse modes changed. Every event runs this first. Caller holds the lock.
+    private func syncFromTerminal(_ terminal: VtTerminal) {
         _ = ghostty_mouse_encoder_set_from_terminal(handle.raw, terminal)
-        syncedModes = modes
+        noteModes(MouseModes(of: terminal))
+    }
+
+    private func noteModes(_ modes: MouseModes) {
+        guard modes != observedModes else { return }
+        observedModes = modes
         lastMotion = nil
     }
 
@@ -346,63 +328,70 @@ final class MouseEncoder {
     /// between events still forgets the last motion. The view sends the encoder no events while
     /// tracking is off, so the events alone would never see the gap. Caller holds the lock.
     func terminalModesMayHaveChanged(_ terminal: VtTerminal) {
-        syncModes(MouseModes(of: terminal), terminal: terminal)
+        noteModes(MouseModes(of: terminal))
     }
 
-    private func apply(_ encoding: ReportEncoding) {
-        var tracking = encoding.tracking
-        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking)
-        var format = encoding.format
-        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format)
-        // Set by hand, so the next event sets them from the terminal again.
-        syncedModes = nil
+    /// A new encoder set from `terminal` as it is now, with this encoder's size: the record of
+    /// the encoding a press went out under. nil, logged, if it cannot be made.
+    private func pressEncoder(from terminal: VtTerminal) -> GhosttyMouseEncoderHandle? {
+        do {
+            let encoder = try GhosttyMouseEncoderHandle()
+            _ = ghostty_mouse_encoder_set_from_terminal(encoder.raw, terminal)
+            var size = geometry.ghostty
+            _ = ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+            return encoder
+        } catch {
+            terminalEngineLog.error(
+                "recording a press's encoding failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
     }
 
     /// Encode one pointer event using the terminal's current tracking mode and report format.
     ///
     /// Returns `nil` when the terminal wants no report at all — tracking off, a motion event in a
     /// mode that only reports buttons, or a motion whose report repeats the last one (see
-    /// `lastMotion`). The one exception is the release of a press that was reported: that goes out
-    /// even if the program has since turned tracking off, in the encoding the press had.
+    /// `lastMotion`). A release of a press that was reported is encoded as the press was, so it
+    /// goes out even if the program has since turned reporting off.
     ///
     /// Every report goes through here, the view's and `GhosttyTerminal.encodeMouse`'s alike, so
     /// this is the one place repeated motion is dropped. Caller holds the terminal lock.
     func encode(_ press: MousePress, terminal: VtTerminal) throws -> [UInt8]? {
-        // Options (tracking mode + format) come from the terminal, and are set again only when its
-        // mouse modes changed; size and any-button do not come from it.
-        let modes = MouseModes(of: terminal)
-        syncModes(modes, terminal: terminal)
+        syncFromTerminal(terminal)
 
         switch press.action {
         case .press:
             lastMotion = nil
-            if let button = press.button {
-                heldButtons.insert(button)
-                pressEncodings[button] = Self.isTrackingEnabled(terminal) ? modes.encoding : nil
-            }
+            guard let button = press.button else { return try encodeEvent(press, with: handle) }
+            heldButtons.insert(button)
+            pressEncodings[button] = nil
+            let bytes = try encodeEvent(press, with: handle)
+            // Only a reported press earns a release.
+            if bytes != nil { pressEncodings[button] = pressEncoder(from: terminal) }
+            return bytes
+
         case .release:
             lastMotion = nil
-            if let button = press.button {
-                heldButtons.remove(button)
-                if let pressed = pressEncodings.removeValue(forKey: button), !Self.isTrackingEnabled(terminal) {
-                    apply(pressed)
-                }
-            }
-        case .motion: break
+            guard let button = press.button else { return try encodeEvent(press, with: handle) }
+            heldButtons.remove(button)
+            let encoder = pressEncodings.removeValue(forKey: button) ?? handle
+            return try encodeEvent(press, with: encoder)
+
+        case .motion:
+            guard let bytes = try encodeEvent(press, with: handle), bytes != lastMotion else { return nil }
+            lastMotion = bytes
+            return bytes
         }
-        guard let bytes = try encodeEvent(press) else { return nil }
-        guard press.action == .motion else { return bytes }
-        let motion = ReportedMotion(bytes: bytes, encoding: modes.encoding)
-        guard motion != lastMotion else { return nil }
-        lastMotion = motion
-        return bytes
     }
 
-    /// Hands `press` to libghostty under the options already set, and returns the report it
-    /// wrote. nil when it wrote none.
-    private func encodeEvent(_ press: MousePress) throws -> [UInt8]? {
-        var anyPressed = !heldButtons.isEmpty
-        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &anyPressed)
+    /// Hands `press` to libghostty through `encoder`, whose options are already set, and returns
+    /// the report it wrote. nil when it wrote none. `anyPressed` defaults to the held buttons,
+    /// which a press has already joined and a release has already left.
+    private func encodeEvent(
+        _ press: MousePress, with encoder: GhosttyMouseEncoderHandle, anyPressed: Bool? = nil
+    ) throws -> [UInt8]? {
+        var pressed = anyPressed ?? !heldButtons.isEmpty
+        _ = ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed)
 
         _ = ghostty_mouse_event_set_action(event, press.action.ghostty)
         if let button = press.button {
@@ -420,12 +409,12 @@ final class MouseEncoder {
         var stack = [UInt8](repeating: 0, count: 64)
         var written = 0
         var result = stack.withUnsafeMutableBufferPointer { buffer in
-            ghostty_mouse_encoder_encode(handle.raw, event, buffer.baseAddress, buffer.count, &written)
+            ghostty_mouse_encoder_encode(encoder.raw, event, buffer.baseAddress, buffer.count, &written)
         }
         if result == GHOSTTY_OUT_OF_SPACE {
             var heap = [UInt8](repeating: 0, count: written)
             result = heap.withUnsafeMutableBufferPointer { buffer in
-                ghostty_mouse_encoder_encode(handle.raw, event, buffer.baseAddress, buffer.count, &written)
+                ghostty_mouse_encoder_encode(encoder.raw, event, buffer.baseAddress, buffer.count, &written)
             }
             try ghosttyCheck(result, "ghostty_mouse_encoder_encode")
             guard written > 0 else { return nil }
@@ -461,18 +450,15 @@ final class MouseEncoder {
             return .scrolledViewport(rows: rows)
         }
 
-        let button: MouseButton = rows < 0 ? .four : .five
+        syncFromTerminal(terminal)
+        lastMotion = nil
+        let press = MousePress(action: .press, button: rows < 0 ? .four : .five, mods: mods, position: position)
         var bytes: [UInt8] = []
         for _ in 0..<abs(rows) {
-            // A wheel "click" is a press with no matching release; do not let it leak into
-            // `heldButtons`, or button-event motion tracking would think a button is held, nor
-            // into `pressEncodings`.
-            let press = MousePress(action: .press, button: button, mods: mods, position: position)
-            let held = heldButtons
-            let encodings = pressEncodings
-            if let encoded = try encode(press, terminal: terminal) { bytes += encoded }
-            heldButtons = held
-            pressEncodings = encodings
+            // A wheel "click" is a press with no release. It goes straight to the encoder, so it
+            // never joins `heldButtons`, where button-event tracking would think a button is held,
+            // nor `pressEncodings`. The encoder is still told a button is down, as for any press.
+            if let encoded = try encodeEvent(press, with: handle, anyPressed: true) { bytes += encoded }
         }
         return bytes.isEmpty ? .none : .report(bytes)
     }
