@@ -156,11 +156,10 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
     /// Nothing, on purpose. SwiftTerm's RIS does not give a used terminal a
     /// fresh screen: its reset activates the normal buffer with
     /// `clearAlt: false`, so stale alternate-screen content survives it, and the
-    /// preamble's own `?1049h` shows it again. Measured in the libghostty proof
-    /// of concept (`spikes/libghostty-vt/check/RESULTS.md`, "S to G into a used
-    /// receiver"): SwiftTerm into a used SwiftTerm scored 213 of 213 with no
-    /// reset and 135 of 213 with RIS first. The writer's own reset prelude is
-    /// what makes a reused SwiftTerm view correct.
+    /// preamble's own `?1049h` shows it again. Measured: a preamble into a used
+    /// SwiftTerm view reproduced 213 of 213 checks with no reset, and 135 of
+    /// 213 with RIS first. The writer's own reset prelude is what makes a
+    /// reused SwiftTerm view correct.
     func prepareForPreamble() {}
 
     /// Depth of the snapshot-preamble feeds currently in flight; > 0 while
