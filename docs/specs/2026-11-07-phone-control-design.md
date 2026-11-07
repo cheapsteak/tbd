@@ -372,6 +372,9 @@ carries message text or answers. Pairing, Allow, Deny and Revoke are logged the 
 **Laptop-side RPCs** are app-only, so no other local process can approve a pairing: `phone.status`,
 `phone.pairStart`, `phone.pairAllow`, `phone.pairDeny`, `phone.devices`, `phone.revoke`,
 `config.setPhoneControlEnabled`, `config.setPhoneRelayURL` and `config.setPhoneLoaderURL`.
+App-only phone RPCs also check that the caller's executable is one of TBD's own app binaries: the
+one beside the daemon, its bundle, or /Applications/TBD.app. A process that can reach the daemon's
+sockets but cannot write those locations, such as a sandboxed agent, cannot pair a phone.
 
 ## 6. Sessions the phone can reach
 
