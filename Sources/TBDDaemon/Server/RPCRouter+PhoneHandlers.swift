@@ -14,15 +14,26 @@ private let phoneRPCLog = Logger(subsystem: "com.tbd.daemon", category: "phone-b
 extension RPCRouter {
     static let phoneNotFromAppRefusal = "phone control is managed only from the TBD app"
     static let phoneUnavailableRefusal = "phone control is not available in this daemon"
+    /// The refusal when the caller passed the envelope check but its
+    /// executable is not one of TBD's app binaries, or could not be read. The
+    /// Phone settings pane shows it as it stands.
+    static let phoneNotFromAppBinaryRefusal = "Couldn't confirm this request came from the TBD app"
 
     /// Answers one of `RPCMethod.phoneAppOnlyMethods`.
     ///
-    /// The caller must be the TBD app, through the check `prompt.answer` and
-    /// `terminal.send`'s envelope suppression use
-    /// (`authenticatesEnvelopeSuppression`): the kernel-named peer pid must be
-    /// the recorded app identity, re-verified. A nil context, which every
-    /// caller that did not arrive over the socket has, is refused, as is any
-    /// other process on the socket.
+    /// The caller must be the TBD app, in two checks.
+    ///
+    /// - **The envelope check** that `prompt.answer` and `terminal.send`'s
+    ///   envelope suppression use (`authenticatesEnvelopeSuppression`): the
+    ///   kernel-named peer pid must be the recorded app identity, re-verified.
+    ///   A nil context, which every caller that did not arrive over the socket
+    ///   has, is refused, as is any other process on the socket. Refused with
+    ///   `phoneNotFromAppRefusal`.
+    /// - **The binary check** (`PhoneAppBinaryCheck`): that pid's executable
+    ///   must be one of TBD's own app binaries, by device and inode. The
+    ///   recorded identity is only "the sidecar's current client", and the
+    ///   sidecar adopts whichever process connects. Refused with
+    ///   `phoneNotFromAppBinaryRefusal`, logged at `.error`.
     ///
     /// A bridge error reaches the caller as its `localizedDescription`, which
     /// the Phone pane shows as it stands.
@@ -36,6 +47,20 @@ extension RPCRouter {
             phoneRPCLog.debug(
                 "\(request.method, privacy: .public) refused: \(reason, privacy: .public)")
             return RPCResponse(error: Self.phoneNotFromAppRefusal)
+        }
+
+        // `.authenticated` means the peer pid is the recorded app's, just
+        // re-verified, so this checks that same pid's executable.
+        let binaryVerdict: PhoneAppBinaryCheck.Verdict
+        if let pid = connection?.peerPID {
+            binaryVerdict = phoneAppBinaryCheck.verify(pid: pid)
+        } else {
+            binaryVerdict = .refused(reason: "the caller's pid is not established")
+        }
+        if case .refused(let reason) = binaryVerdict {
+            phoneRPCLog.error(
+                "\(request.method, privacy: .public) refused: \(reason, privacy: .public)")
+            return RPCResponse(error: Self.phoneNotFromAppBinaryRefusal)
         }
 
         let paramsData = request.paramsData

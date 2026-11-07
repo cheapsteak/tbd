@@ -9,7 +9,9 @@ import Testing
 ///
 /// Every method is app-only, so the first two tests run all nine: each one
 /// refuses every caller that is not the TBD app with no side effect at all,
-/// and answers the app. The rest pin what each method does for the app.
+/// and answers the app. The app-binary tests then run all nine against each
+/// way the caller's executable can pass or fail `PhoneAppBinaryCheck`. The
+/// rest pin what each method does for the app.
 @Suite("PhoneRPC")
 struct PhoneRPCTests {
 
@@ -24,9 +26,15 @@ struct PhoneRPCTests {
     }
 
     /// A router built as `RPCRouterPromptHandlerTests` builds one, on which
-    /// `SendHarness.AuthenticatedApp.connection` authenticates as the app.
-    /// `withBridge: false` leaves `phoneBridge` nil, as in mock mode.
-    private func makeFixture(withBridge: Bool = true) async throws -> Fixture {
+    /// `SendHarness.AuthenticatedApp.connection` authenticates as the app, and
+    /// whose app binary check sees the installed layout, where the app runs
+    /// `/Applications/TBD.app`. `withBridge: false` leaves `phoneBridge` nil,
+    /// as in mock mode.
+    private func makeFixture(
+        withBridge: Bool = true,
+        processSignaller: any ProcessSignaller = SendHarness.AuthenticatedApp.Signaller(),
+        binaryCheck: PhoneAppBinaryCheck = PhoneRPCTests.installedLayout
+    ) async throws -> Fixture {
         let logPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-phone-rpc-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("actuations.jsonl").path
@@ -38,8 +46,9 @@ struct PhoneRPCTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             recordedAppIdentity: { SendHarness.AuthenticatedApp.identity },
-            processSignaller: SendHarness.AuthenticatedApp.Signaller(),
+            processSignaller: processSignaller,
             actuationLog: ActuationLog(path: logPath))
+        router.phoneAppBinaryCheck = binaryCheck
         let fake = FakePhoneBridgeController()
         if withBridge {
             router.phoneBridge = fake
@@ -77,6 +86,80 @@ struct PhoneRPCTests {
         default:
             return RPCRequest(method: method)
         }
+    }
+
+    // MARK: - The app binary check's world
+
+    /// Where the fixture's daemon runs from, and the candidates beside it.
+    static let daemonExecutable = URL(fileURLWithPath: "/acme/tree/.build/debug/TBDDaemon")
+    static let siblingAppBinary = "/acme/tree/.build/debug/TBDApp"
+    static let siblingBundleBinary = "/acme/tree/.build/debug/TBD.app/Contents/MacOS/TBDApp"
+    static let installedAppBinary = PhoneAppBinaryCheck.installedAppBinaryPath
+
+    /// The file the app runs.
+    static let appFile = PhoneAppBinaryCheck.FileIdentity(device: 1, inode: 1001)
+    /// The build output, which the installed copy in `/Applications` does not share.
+    static let buildOutputFile = PhoneAppBinaryCheck.FileIdentity(device: 1, inode: 2002)
+
+    /// A check over a stated process table and file system: the app's pid
+    /// runs `callerPath` (nil: the path cannot be read), each path in `files`
+    /// exists as that file, and every other path does not exist. The
+    /// candidates are the ones production derives from `daemonExecutable`.
+    static func binaryCheck(
+        callerPath: String?, files: [String: PhoneAppBinaryCheck.FileIdentity]
+    ) -> PhoneAppBinaryCheck {
+        let appPID = SendHarness.AuthenticatedApp.pid
+        let candidates = PhoneAppBinaryCheck.candidatePaths(besideDaemonAt: PhoneRPCTests.daemonExecutable)
+        return PhoneAppBinaryCheck(
+            executablePath: { pid in pid == appPID ? callerPath : nil },
+            fileIdentity: { files[$0] },
+            appBinaryPaths: { candidates })
+    }
+
+    /// `scripts/restart.sh` on an install-ready tree, and `tbd update`: the
+    /// app runs the cloned copy in `/Applications`, a file apart from the
+    /// build output beside the daemon.
+    static let installedLayout = binaryCheck(
+        callerPath: installedAppBinary,
+        files: [
+            siblingAppBinary: buildOutputFile,
+            siblingBundleBinary: buildOutputFile,
+            installedAppBinary: appFile,
+        ])
+
+    /// Calls each of the nine as the app, with the params it sends, and
+    /// checks that every one answers.
+    private func expectEveryMethodAnswers(_ f: Fixture) async throws {
+        let device = Self.device()
+        try await f.db.phoneDevices.insert(device)
+        for method in RPCMethod.phoneAppOnlyMethods {
+            let request = try Self.validRequest(method, deviceID: device.id)
+            let r = await f.router.handle(request, connection: SendHarness.AuthenticatedApp.connection)
+            #expect(r.success, "\(method): \(r.error ?? "no error")")
+        }
+    }
+
+    /// Calls each of the nine as the app, with the params it sends, and
+    /// checks that every one is refused with `refusal` before anything
+    /// happens: no bridge call, no config write, no row deleted, no delta.
+    private func expectEveryMethodRefused(_ f: Fixture, with refusal: String) async throws {
+        let device = Self.device()
+        try await f.db.phoneDevices.insert(device)
+        for method in RPCMethod.phoneAppOnlyMethods {
+            let request = try Self.validRequest(method, deviceID: device.id)
+            let r = await f.router.handle(request, connection: SendHarness.AuthenticatedApp.connection)
+            #expect(r.success == false)
+            #expect(r.error == refusal, "\(method)")
+        }
+        let calls = await f.fake.calls
+        #expect(calls.isEmpty)
+        let config = try await f.db.config.get()
+        #expect(config.phoneControlEnabled == false)
+        #expect(config.phoneRelayURL == nil)
+        #expect(config.phoneLoaderURL == nil)
+        let rows = try await f.db.phoneDevices.list()
+        #expect(rows == [device])
+        #expect(f.deltas.count == 0)
     }
 
     /// Calls `method` as the TBD app, with no params.
@@ -141,6 +224,106 @@ struct PhoneRPCTests {
         let request = try Self.validRequest(method, deviceID: device.id)
         let r = await f.router.handle(request, connection: SendHarness.AuthenticatedApp.connection)
         #expect(r.success, "\(method): \(r.error ?? "no error")")
+    }
+
+    /// The recorded app's pid now holds a process that started a second
+    /// later: the pid was reused. The envelope check refuses it, though its
+    /// executable is the installed app.
+    @Test func aReusedAppPIDIsRefused() async throws {
+        let f = try await makeFixture(processSignaller: ReusedAppPIDSignaller())
+        try await expectEveryMethodRefused(f, with: RPCRouter.phoneNotFromAppRefusal)
+    }
+
+    // MARK: - The app binary
+
+    @Test func theCandidatesAreTheDaemonsSiblingItsBundleAndTheInstalledApp() {
+        let candidates = PhoneAppBinaryCheck.candidatePaths(besideDaemonAt: Self.daemonExecutable)
+        #expect(candidates == [Self.siblingAppBinary, Self.siblingBundleBinary, Self.installedAppBinary])
+        let withoutADaemonPath = PhoneAppBinaryCheck.candidatePaths(besideDaemonAt: nil)
+        #expect(withoutADaemonPath == [Self.installedAppBinary])
+    }
+
+    /// The app run straight from the build output beside the daemon.
+    @Test func theAppBinaryBesideTheDaemonIsAccepted() async throws {
+        let check = Self.binaryCheck(
+            callerPath: Self.siblingAppBinary,
+            files: [Self.siblingAppBinary: Self.appFile, Self.installedAppBinary: Self.buildOutputFile])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodAnswers(f)
+    }
+
+    /// A WIP restart: the app runs the bundle beside the daemon. The build
+    /// output was rebuilt since the bundle linked it, so only the bundle
+    /// matches.
+    @Test func theAppBundleBesideTheDaemonIsAccepted() async throws {
+        let check = Self.binaryCheck(
+            callerPath: Self.siblingBundleBinary,
+            files: [
+                Self.siblingAppBinary: Self.buildOutputFile,
+                Self.siblingBundleBinary: Self.appFile,
+            ])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodAnswers(f)
+    }
+
+    /// The installed layout: the app runs `/Applications/TBD.app`, a copy
+    /// that shares no inode with the build output beside the daemon.
+    @Test func theInstalledAppIsAccepted() async throws {
+        let f = try await makeFixture(binaryCheck: Self.installedLayout)
+        try await expectEveryMethodAnswers(f)
+    }
+
+    /// The caller runs another file: one with another inode on the app's
+    /// device, and one with the app's inode number on another device.
+    @Test func aDifferentExecutableIsRefused() async throws {
+        let strangers = [
+            PhoneAppBinaryCheck.FileIdentity(device: 1, inode: 3003),
+            PhoneAppBinaryCheck.FileIdentity(device: 2, inode: Self.appFile.inode),
+        ]
+        for stranger in strangers {
+            let caller = "/acme/elsewhere/TBD.app/Contents/MacOS/TBDApp"
+            let check = Self.binaryCheck(
+                callerPath: caller,
+                files: [
+                    caller: stranger,
+                    Self.siblingAppBinary: Self.buildOutputFile,
+                    Self.siblingBundleBinary: Self.buildOutputFile,
+                    Self.installedAppBinary: Self.appFile,
+                ])
+            let f = try await makeFixture(binaryCheck: check)
+            try await expectEveryMethodRefused(f, with: RPCRouter.phoneNotFromAppBinaryRefusal)
+        }
+    }
+
+    /// None of the candidates exists, so there is nothing to compare with.
+    @Test func noAppBinaryPresentIsRefused() async throws {
+        let caller = "/acme/elsewhere/TBDApp"
+        let check = Self.binaryCheck(callerPath: caller, files: [caller: Self.appFile])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodRefused(f, with: RPCRouter.phoneNotFromAppBinaryRefusal)
+    }
+
+    /// `proc_pidpath` could not name the caller's executable.
+    @Test func anUnreadableCallerPathIsRefused() async throws {
+        let check = Self.binaryCheck(
+            callerPath: nil,
+            files: [
+                Self.siblingAppBinary: Self.appFile,
+                Self.siblingBundleBinary: Self.appFile,
+                Self.installedAppBinary: Self.appFile,
+            ])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodRefused(f, with: RPCRouter.phoneNotFromAppBinaryRefusal)
+    }
+
+    /// The caller's path was read but cannot be stat'ed, as when its file was
+    /// removed while it runs.
+    @Test func anUnstatableCallerIsRefused() async throws {
+        let check = Self.binaryCheck(
+            callerPath: Self.installedAppBinary,
+            files: [Self.siblingAppBinary: Self.appFile, Self.siblingBundleBinary: Self.appFile])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodRefused(f, with: RPCRouter.phoneNotFromAppBinaryRefusal)
     }
 
     // MARK: - Settings
@@ -369,6 +552,21 @@ struct PhoneRPCTests {
         #expect(config.phoneRelayURL == nil)
         #expect(f.deltas.count == 2)
     }
+}
+
+/// The recorded app's pid, now held by a process that started a second after
+/// the recorded one: the same pid and command line, a different process. Inert
+/// on the signalling half, like `SendHarness.AuthenticatedApp.Signaller`.
+private struct ReusedAppPIDSignaller: ProcessSignaller {
+    func isAlive(_ pid: Int32) -> Bool { true }
+    func startTime(_ pid: Int32) -> Date? {
+        SendHarness.AuthenticatedApp.startedAt.addingTimeInterval(1)
+    }
+    func commandLine(_ pid: Int32) -> String? { SendHarness.AuthenticatedApp.commandLine }
+    func stat(_ pid: Int32) -> String? { nil }
+    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+    func terminate(_ pid: Int32) {}
+    func forceKill(_ pid: Int32) {}
 }
 
 /// Records each bridge call by name and answers with canned values.

@@ -327,6 +327,11 @@ public final class RPCRouter: Sendable {
     /// methods that need it answer `phoneUnavailableRefusal`.
     nonisolated(unsafe) var phoneBridge: (any PhoneBridgeControlling)?
 
+    /// How the `phone.*` methods confirm that the caller runs one of TBD's own
+    /// app binaries, after the envelope check has named it the app. Tests
+    /// replace it with a stated process table and file system.
+    nonisolated(unsafe) var phoneAppBinaryCheck: PhoneAppBinaryCheck = .production
+
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
