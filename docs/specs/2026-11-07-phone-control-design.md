@@ -436,16 +436,30 @@ attack.
 
 ## 8. Phone UI
 
-This section fixes what each screen shows and does. How the screens look is settled in a review of
-visual mocks with the maintainer before the app UI is built (see "Build order"). That review may
-change layout and styling freely. A change to what a screen shows or does updates this section.
+This section fixes what each screen shows and does. How the screens look and respond is fixed by
+the reviewed mocks in [`docs/design/phone-control/`](../design/phone-control/README.md):
+`phone-control-mocks.html`, one self-contained page that runs every screen and state below in a
+browser, and a screenshot of each state in light and dark mode at phone size. Its README lists the
+states and how to open each one.
+
+The phone UI is built to the mocks, not designed again from this section's words (see "Build
+order"). It copies the mocks' colour tokens, sizes, spacing, glyphs and UI text as they are. Where
+this section and the mocks differ on how a screen looks or what a tap does, the mocks win, and the
+PR that finds the difference updates this section to match. A change to what a screen shows or
+does updates this section and the mocks together. A change to how it looks updates the mocks and
+their screenshots.
+
+The look follows the TBD laptop sidebar: compact one-line rows, small text, and the sidebar's
+status symbols (an amber hand for Waiting for you, dots for Working, a moon for Parked, a red
+octagon for Error, an hourglass for Rate limited) at the end of each row.
 
 ### 8.1 Loader screens
 
 The loader's screens hold the keys, so they come from the loader origin, not from a laptop.
 
 - **Laptops** – one row per paired laptop: name, online or offline, and last connected. "Pair a
-  laptop" at the top. Forget on each row. With one laptop paired, this screen is skipped.
+  laptop" at the top. Forget on each row, with a confirmation. A hint suggests adding the page to
+  the Home Screen (see 8.3). With one laptop paired, this screen is skipped.
 - **Pair** – a camera view scans the QR code. "Paste link" is the fallback. Then a field to name
   the phone, prefilled from the browser, then "Check this code on your laptop: 123 456" and a wait
   for Allow.
@@ -455,58 +469,87 @@ The loader's screens hold the keys, so they come from the loader origin, not fro
   - "Reload this page"
   - "This phone was removed from <laptop>", with Forget
   - "Can't reach the relay"
-- **Header strip** – a thin strip owned by the loader, outside the app frame, shows the laptop's
-  name and a switch button. App code cannot fake which laptop the user is on.
+- **Header strip** – a thin strip owned by the loader, outside the app frame. It shows the
+  laptop's name with a dropdown caret. Tapping the name opens a menu of the paired laptops, each
+  with online or offline and a check on the current one, then "Pair a laptop" and "Manage
+  laptops", which opens the Laptops screen. While the channel is down, the strip shows
+  "Reconnecting…". The loader draws the strip and its menu, so app code cannot fake which laptop
+  the user is on.
 
 ### 8.2 App screens
 
 These come from the laptop's bundle.
 
 - **Sessions.**
-  - Repos in sidebar order, and one row per worktree within each.
-  - A row shows the worktree's name, a status chip, and the time since its last status change.
-  - A worktree with several sessions shows a count, such as "(3)". Its chip is the most urgent of
-    its sessions, in this order: Waiting for you, Error, Rate limited, Working, Idle, Parked,
+  - Repos as groups, with one row per worktree within each.
+  - Newest first, at both levels. Within a repo, the worktree with the most recent status change
+    comes first. The repos are ordered by their most recently changed worktree. The laptop sidebar
+    keeps a stable order; the phone does not, so whatever just changed is at the top of the
+    screen.
+  - A row shows the worktree's name, the time since the newest status change among its sessions,
+    and a status symbol at its end. The symbol has a text label for screen readers.
+  - A worktree with several sessions shows a count, such as "(3)". Its symbol is the most urgent
+    of its sessions, in this order: Waiting for you, Error, Rate limited, Working, Idle, Parked,
     Exited, Unknown.
   - Tapping a row opens the session that shows that status. Ties go to the most recently active
     session.
   - Remote sessions sit in the group the laptop sidebar gives them, one row each, with a "remote"
     badge.
-  - A "New" button opens the New sheet. The list updates live.
+  - Each repo's header row has a "+" that opens the New sheet for that repo. Tapping the repo's
+    name collapses or expands its rows. The list updates live.
 - **Session.**
-  - **Header** – back, the worktree's name, the status chip, a "Show details" switch, and a menu
-    with Switch account, Fork, and Model where the session supports them.
+  - **Header** – back and the worktree's name, with a line below: the status in words, the time
+    since the last status change, the account and the model. A remote session shows its provider
+    in place of the account. Error and Rate limited show their reason in a band under the header,
+    and Exited and Unknown say what they mean in the same band.
+    Then a "Show details" switch, and a menu with Switch account, Fork, and Model where the
+    session supports them.
+  - **Account and model menus** – where the session supports Switch account, the account name in
+    the header opens a menu of profiles, with a check on the current one. Picking another asks
+    the Switch account question below, in the menu. Where the session supports Model, the model
+    name opens a menu with the Model list below, and a pick applies at once.
   - **Tab strip** – shown when the worktree has more than one session. One tab per session, each
     with a status dot. Switching tabs opens that session's transcript.
   - **Transcript** – section 7's items, newest at the bottom. A "Working…" line with the elapsed
     time shows while the agent works.
   - **Prompt card** – pinned above the composer while a prompt is open.
     - A question shows its options as buttons, or as checkboxes for multi-select, plus free text
-      where the laptop allows it. Several questions step through one at a time.
+      where the laptop allows it. Several questions step through one at a time, then a review
+      step lists the answers before they are sent.
     - A permission shows the tool, its full target with wrapping, and every choice the laptop
-      offers, including rules such as "don't ask again", and Deny.
-    - After answering, the card shows "Answered", or "Already answered on the laptop".
+      offers, including rules such as "don't ask again", and Deny. Deny takes an optional
+      message telling Claude what to do instead.
+    - The card can be hidden to a one-line strip and shown again, so the transcript behind it can
+      be read.
+    - After answering, the card shows "Answered", or "Already answered on the laptop". The
+      transcript then keeps a receipt line: "Answered on this phone: <answer>", or "Answered on the
+      laptop".
   - **Composer** – multi-line text and Send. On a parked session the button reads "Send and wake".
     A refusal shows its reason. Text only.
-- **Switch account** – a profile list, then a confirmation: "Restart this session under
-  <profile>?".
+- **Switch account** – a profile list, then the question "Restart this session under
+  <profile>?" with three answers: Restart, "Fork into a new tab" (the Fork action below, under
+  that profile, which leaves this session running), and Cancel. The question says when a running
+  turn would stop.
 - **Fork** – a profile list, with the current profile first. The fork opens as a new tab, and the
   phone switches to it.
 - **Model** – `default`, `opus`, `sonnet` and `haiku`, plus a field for any other name. The list is a
   constant in the app bundle, so it updates with TBD releases.
-- **New sheet** – two choices:
-  - **Local worktree** – pick a repo, type the first message, then Create. TBD uses its defaults
-    for everything else. The new session opens when it is ready.
+- **New sheet** – opened from a repo's "+", so the repo is already chosen and the sheet names it.
+  Two choices:
+  - **Local worktree** – type the first message, then Create. TBD uses its defaults for
+    everything else. The new session opens when it is ready.
   - **Remote session** – pick a provider, type the first message, and fill any extra required
-    fields. Field types are text, multi-line text, on/off, number, and a choice list.
+    fields. Field types are text, multi-line text, on/off, number, and a choice list. The repo
+    from the "+" is the `repo` that TBD fills (section 6).
 
 ### 8.3 General rules
 
 - Built for phones. The safe-area insets are honored, and the composer stays above the keyboard.
   The loader forwards both measurements into the frame, because inside it they can read wrong.
 - Follows the system's dark or light mode, forwarded by the loader.
-- Primary tap targets are at least 44 points. Composer text is 16 px, so focusing it does not zoom
-  the page.
+- Send, prompt choices, menu items and sheet rows are at least 44 points tall. List rows, tabs and
+  header buttons follow the compact laptop-sidebar size instead, so more of the list fits on one
+  screen. Composer text is 16 px, so focusing it does not zoom the page.
 - Semantic HTML with labeled controls, so screen readers work.
 - Works in a Safari tab. Adding the page to the Home Screen is optional. It stops Safari from
   clearing the stored keys after 7 days without a visit, and v1.1's push alerts will need it.
@@ -733,11 +776,17 @@ The parts with no UI come first, so work can start before the phone's visual des
    loader handler, the app protocol with every action and the transcript feed, the Settings pane,
    the menu item and the status-bar chip. Tests drive the app protocol directly, with no phone UI.
 4. **Loader and runner** – pairing, the laptop list, keys, the channel, bundle delivery and the
-   sandboxed frame. Their screens are built plainly first, so the whole path can be tested from end
-   to end with a minimal app bundle, and restyled after the mock review.
-5. **Mock review** – visual mocks of the phone screens in section 8, reviewed with the maintainer.
-   It can happen any time before step 6, alongside steps 1 to 4.
+   sandboxed frame. Their screens are built to the Loader group of the reviewed mocks. A minimal
+   app bundle lets the whole path be tested from end to end before step 6.
+5. **Mock review** – visual mocks of the phone screens in section 8, reviewed with the maintainer
+   before any step builds a screen. It can run alongside steps 1 to 3. The reviewed mocks and their
+   screenshots are in `docs/design/phone-control/`.
 6. **Phone app UI** – the screens in section 8, built to the reviewed mocks.
+
+Steps 4 and 6 build to the mocks, not to a reading of section 8. Each PR that builds or changes a
+phone screen shows, for every state it touches, a screenshot of the built screen beside the mock's
+screenshot of that state, in light and dark mode at the same size. A visible difference needs a
+stated reason, and the maintainer reviews the pairs.
 
 ## 17. Rollout
 
