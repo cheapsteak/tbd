@@ -3893,17 +3893,21 @@ extension RPCRouter {
     /// phone can name one. A kindless row with a session id is Claude's and is
     /// sent.
     ///
-    /// **An empty text message is refused before anything is typed.** Text
-    /// that is empty or whitespace would reach the pane as a bare Enter (or as
-    /// blank space and then Enter), which submits whatever draft the person
-    /// left in the laptop's composer. A phone answers a prompt through
-    /// `prompt.answer`, never by pressing Enter, so the rail refuses such text
-    /// whatever `submit` says. Only a message sent as `text` alone is judged
-    /// here. A message with `parts` is the send core's shape check's to judge
-    /// (`validateSendShape`): it refuses parts whose every text part is empty
-    /// or whitespace as malformed, and refuses `text` and `parts` together,
-    /// each with no row. It refuses a send that names no message at all
-    /// (neither `text` nor `parts`) the same way.
+    /// **A blank message is refused before anything is typed.** A message is
+    /// blank when every scalar of its `text`, or of every one of its text
+    /// parts, is whitespace or a format character (general category Cf, such
+    /// as a zero-width space, a word joiner or a byte-order mark). It types
+    /// nothing a person could see, and reaches the pane as a bare Enter (or
+    /// as blank or invisible characters and then Enter), which submits
+    /// whatever draft the person left in the laptop's composer. A phone
+    /// answers a prompt through `prompt.answer`, never by pressing Enter, so
+    /// the rail refuses a blank message whatever `submit` says. The send
+    /// core's shape check (`validateSendShape`) already refuses parts whose
+    /// every text part is empty or whitespace as malformed, with no row, so
+    /// for parts this refusal is reached by text parts of format characters,
+    /// which the shape check counts as content. The shape check also refuses
+    /// `text` and `parts` together, and a send that names no message at all
+    /// (neither `text` nor `parts`), each with no row.
     ///
     /// **A control character is refused before anything is typed.** The rail
     /// drops `keys`, but text can carry a key's byte. When the pane's child
@@ -3966,8 +3970,8 @@ extension RPCRouter {
     /// itself (see `sendFromPairedPhone`), so it reads nothing and checks no
     /// shape. The payload has passed `validateSendShape`, and the row exists
     /// in a local worktree. The refusals, in this order: a shell (by effective
-    /// kind), a part that is not text, a blank text message, a control
-    /// character in any text.
+    /// kind), a part that is not text, a blank message, a control character
+    /// in any text.
     private static func phoneSendRefusal(
         row: TBDShared.Terminal, payload: TerminalSendPayload
     ) -> String? {
@@ -3990,7 +3994,7 @@ extension RPCRouter {
             // Refused rather than passed, should one ever arrive.
             return Self.phoneNonTextPartRefusal
         }
-        if case .text(let text, _, _) = payload, Self.phoneMessageIsBlank(text: text) {
+        if texts.allSatisfy({ text in Self.phoneTextIsBlank(text) }) {
             return Self.phoneEmptySendRefusal
         }
         if texts.contains(where: { text in Self.phoneTextHasControlCharacter(text) }) {
@@ -3999,12 +4003,16 @@ extension RPCRouter {
         return nil
     }
 
-    /// Whether `text`, a phone message sent as text, is empty or whitespace,
-    /// so it would type nothing a person wrote. Parts are not judged here:
-    /// `validateSendShape` already refuses parts that carry no non-empty text
-    /// and no image.
-    private static func phoneMessageIsBlank(text: String) -> Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// Whether `text`, a phone message's `text` or one of its text parts,
+    /// types nothing a person could see: every scalar is whitespace or a
+    /// format character (general category Cf, such as U+200B ZERO WIDTH
+    /// SPACE, U+2060 WORD JOINER or U+FEFF, the byte-order mark). Empty text
+    /// is blank. Whitespace is the set the shape check trims.
+    private static func phoneTextIsBlank(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || scalar.properties.generalCategory == .format
+        }
     }
 
     /// `text` with every CRLF made a bare LF, for a phone message. A lone CR
@@ -4038,7 +4046,8 @@ extension RPCRouter {
     /// What a paired phone hears when its send carries a part that is not text.
     static let phoneNonTextPartRefusal = "a phone can send text only"
 
-    /// What a paired phone hears when its message is empty or whitespace.
+    /// What a paired phone hears when its message is blank: empty, or only
+    /// whitespace and invisible format characters.
     static let phoneEmptySendRefusal = "a phone message cannot be empty"
 
     /// What a paired phone hears when its message holds a control character.

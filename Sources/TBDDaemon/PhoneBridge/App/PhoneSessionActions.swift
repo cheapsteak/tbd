@@ -50,9 +50,10 @@ protocol PhoneSessionActions: Sendable {
     /// `parts`) and `submit`, with no dispatch marker, always gated on
     /// awaiting input, never verified and never keys, whatever `p` asks for.
     /// Every CRLF in the message becomes LF. A shell terminal, a part that is
-    /// not text, an empty message or a message holding a control character
-    /// (a scalar below U+0020 other than LF and tab, DEL, or a C1 control) is
-    /// refused before anything is typed.
+    /// not text, an empty message (one of only whitespace and invisible format
+    /// characters, such as a zero-width space) or a message holding a control
+    /// character (a scalar below U+0020 other than LF and tab, DEL, or a C1
+    /// control) is refused before anything is typed.
     ///
     /// The phone's refusals run inside the send core and the terminal's send
     /// lane, on the terminal row the core itself read, so the row they judge

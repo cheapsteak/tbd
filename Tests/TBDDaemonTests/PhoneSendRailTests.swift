@@ -298,6 +298,49 @@ struct PhoneSendRailTests {
         #expect(requests.first?.message == " \n\t")
     }
 
+    /// A message of invisible characters types nothing a person could see,
+    /// and with submit it would press Enter on the laptop's draft. So a
+    /// message whose every scalar is whitespace or a format character (a
+    /// zero-width space, a word joiner, a byte-order mark) is empty, in `text`
+    /// and in a text part. The shape check counts such a part as content, so
+    /// the phone's refusal is what stops it, and the refusal is recorded.
+    @Test(arguments: ["\u{200B}", "\u{2060}", "\u{FEFF}", " \u{200B}\n"])
+    func aPairedPhoneSendOfInvisibleCharactersIsRefusedAsEmpty(text: String) async throws {
+        let textHarness = try await SendHarness.make()
+        let partsHarness = try await SendHarness.make()
+        let device = UUID()
+
+        let textResponse = try await textHarness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: textHarness.terminal.id, text: text, submit: true),
+            deviceID: device)
+        let partsResponse = try await partsHarness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: partsHarness.terminal.id, submit: true, parts: [.text(text)]),
+            deviceID: device)
+
+        #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
+        for harness in [textHarness, partsHarness] {
+            #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+            #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+            try await harness.expectRecordedRefusal(
+                device: device, message: text, error: RPCRouter.phoneEmptySendRefusal)
+        }
+    }
+
+    /// A format character beside visible text is part of what a person wrote,
+    /// so that message is delivered as written.
+    @Test func aPairedPhoneSendKeepsAZeroWidthSpaceBesideText() async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "a\u{200B}b", submit: true),
+            deviceID: UUID())
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == ["a\u{200B}b"])
+    }
+
     /// The rail drops keys, but text can carry a key's byte. A pane whose
     /// child has bracketed paste off reads ESC as Escape, so a message holding
     /// a control character is refused before anything is typed. It is a
