@@ -109,6 +109,26 @@ struct RendererTests {
         #expect(MemoryLayout<TkzRectInstance>.stride == 32)
     }
 
+    /// Clearing a full atlas makes a new texture, as growing does. A frame already encoded may
+    /// still be sampling the old one on the GPU, and clearing that in place would tear its glyphs.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func rebuildingAFullAtlasMakesANewTexture() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let atlas = GlyphAtlas(kind: .grayscale, device: device, initialSize: AtlasKind.grayscale.maxSize)
+        let edge = atlas.size
+        // A column as tall as the atlas takes its only possible shelf...
+        let column = atlas.insert(pixels: [UInt8](repeating: 255, count: edge), width: 1, height: edge, bytesPerRow: 1)
+        try #require(column != nil, "a one-pixel column did not fit an empty atlas")
+        let before = try #require(atlas.texture)
+
+        // ...so a row as wide as the atlas fits nowhere, and the atlas is cleared to take it.
+        let row = atlas.insert(pixels: [UInt8](repeating: 255, count: edge), width: edge, height: 1, bytesPerRow: edge)
+        #expect(row != nil, "the row did not fit even an atlas cleared for it")
+        #expect(atlas.rebuildCount == 1, "the atlas was rebuilt \(atlas.rebuildCount) times, not once")
+        let after = try #require(atlas.texture)
+        #expect(after !== before, "the rebuild cleared, in place, the texture an encoded frame may be sampling")
+    }
+
     /// A frame that acquires a slot and bails before committing must not move the ring on: the
     /// next frame takes the same slot. Only committed frames advance it.
     @Test func frameRingAdvancesOnlyOnCommit() {

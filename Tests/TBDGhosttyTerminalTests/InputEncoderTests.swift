@@ -143,6 +143,36 @@ struct MouseEncoderTests {
                 "after tracking went off and on, the move gave \(String(describing: afterToggle)): the encoder was not reset")
     }
 
+    /// A resize changes what a cell is, and a press or a release changes what a move means. After
+    /// each, the same move is reported again, not dropped as a repeat of the one before.
+    @Test func aRepeatedMoveIsReportedAgainAfterAResizeAPressOrARelease() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let move = Self.motion(toX: 5)
+        let report = Array("\u{1b}[<35;1;1M".utf8)
+
+        let first = terminal.encodeMouse(move)
+        let repeated = terminal.encodeMouse(move)
+        #expect(first == report, "the first move encoded as \(String(describing: first))")
+        #expect(repeated == nil, "a repeated move encoded as \(String(describing: repeated))")
+
+        // Twice the cell size: the point is still in cell 1;1, so the report is the same bytes.
+        terminal.setMousePixelGeometry(
+            TerminalPixelGeometry(screenWidth: 200, screenHeight: 200, cellWidth: 20, cellHeight: 20))
+        let afterResize = terminal.encodeMouse(move)
+        #expect(afterResize == report, "after a resize the move encoded as \(String(describing: afterResize))")
+
+        _ = terminal.encodeMouse(MousePress(action: .press, button: .left, position: Self.point))
+        let afterPress = terminal.encodeMouse(move)
+        #expect(afterPress == report, "after a press the move encoded as \(String(describing: afterPress))")
+
+        _ = terminal.encodeMouse(MousePress(action: .release, button: .left, position: Self.point))
+        let afterRelease = terminal.encodeMouse(move)
+        #expect(afterRelease == report, "after a release the move encoded as \(String(describing: afterRelease))")
+    }
+
     /// A button-less move to `x` on the first row.
     private static func motion(toX x: Double) -> MousePress {
         MousePress(action: .motion, button: nil, position: SurfacePoint(x: x, y: 5))
