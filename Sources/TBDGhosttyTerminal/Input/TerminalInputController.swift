@@ -44,9 +44,17 @@ final class TerminalInputController {
     /// The view this controller types into. Weak: the view owns the controller.
     weak var view: GhosttyTerminalView?
 
-    /// The preedit string changed. The renderer has no preedit overlay yet, so this is the hook
-    /// the overlay will hang off.
+    /// The preedit string changed. The view draws the preedit itself, from its `NSTextInputClient`
+    /// methods; this hook is for anything else that wants to know.
     var onPreeditChange: (@MainActor (String) -> Void)?
+
+    /// Hands a key event to the input method, which may call the view's `NSTextInputClient`
+    /// methods (`setMarkedText`, `insertText`, `doCommand`) before it returns. In the app this is
+    /// the view's own input context. No input method runs in a test process, so the tests replace
+    /// it with one that makes those calls the way a dead key or an IME does.
+    var inputMethod: @MainActor (NSEvent, GhosttyTerminalView) -> Void = { event, view in
+        _ = view.inputContext?.handleEvent(event)
+    }
 
     /// How the Option key behaves. `.never` is the macOS-native default and the only setting under
     /// which dead keys work (Option+u, u → `ü`). The view's `optionAsMeta` drives it.
@@ -135,7 +143,7 @@ final class TerminalInputController {
         let markedBefore = hasMarkedText
 
         keyTextAccumulator = []
-        _ = view.inputContext?.handleEvent(translation)
+        inputMethod(translation, view)
         let accumulated = keyTextAccumulator ?? []
         keyTextAccumulator = nil
 
