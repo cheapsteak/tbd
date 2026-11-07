@@ -4,6 +4,7 @@
 // None of these is Sendable and none is thread-safe: the C objects are not. `GhosttyTerminal`
 // serialises every access to the C terminal with its lock, and the objects bound to a terminal
 // (key and mouse encoders, the selection gesture) are only used while that lock is held.
+import Foundation
 import GhosttyVt
 
 /// The C terminal handle. `GhosttyTerminal` is this module's Swift class, which shadows the C
@@ -12,7 +13,7 @@ typealias VtTerminal = GhosttyVt.GhosttyTerminal
 
 /// A libghostty-vt call returned something other than `GHOSTTY_SUCCESS`. Internal: the public
 /// surface reports `GhosttyError`, and this is what goes in the log line.
-struct GhosttyCallError: Error, Equatable, Sendable, CustomStringConvertible {
+struct GhosttyCallError: Error, LocalizedError, Equatable, Sendable, CustomStringConvertible {
     let result: Int32
     let operation: String
 
@@ -21,7 +22,10 @@ struct GhosttyCallError: Error, Equatable, Sendable, CustomStringConvertible {
         self.operation = operation
     }
 
-    var description: String { "\(operation) returned \(result)" }
+    var description: String { "\(operation) returned GhosttyResult \(result)" }
+
+    /// What `localizedDescription` returns, so the operation and the result reach the log line.
+    var errorDescription: String? { description }
 }
 
 @inline(__always)
