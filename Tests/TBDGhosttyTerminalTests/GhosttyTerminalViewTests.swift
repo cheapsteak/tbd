@@ -539,7 +539,7 @@ struct GhosttyTerminalViewTests {
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
 
         fixture.terminal.close()
-        let stopped = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { !clock.hasSleeper }
+        let stopped = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in !clock.hasSleeper }
         if stopped == .timedOut { Issue.record("the blink timer was still running after the close") }
         let committedAtClose = view.framesCommitted
 
