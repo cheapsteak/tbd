@@ -220,21 +220,86 @@ struct PhoneAppServiceTests {
         #expect(h.actions.sends.count == 1)
     }
 
-    /// The pure reads skip the request memory; everything else goes through it.
-    @Test func pureReadsAreNotRemembered() async throws {
+    /// Only the methods that act on a session or create something go through
+    /// the request memory. A pure read and a state request skip it.
+    @Test func onlyActionsAreRemembered() async throws {
         let h = try await PhoneServiceHarness.make()
         let listStub = PhoneAppService.typed(PhoneEmpty.self) { _, _ in ProfilesListResult(profiles: []) }
         await h.service.setHandler(listStub, for: .profilesList)
         await h.service.setHandler(Self.closeStub, for: .transcriptClose)
+        await h.service.setHandler(Self.sendStub(h.actions), for: .messageSend)
         let outbox = await h.connect()
 
         let (read, _) = try await h.request(.profilesList, id: "read", params: PhoneEmpty(), on: outbox)
         let (close, _) = try await h.request(.transcriptClose, id: "close", params: PhoneEmpty(), on: outbox)
+        let (send, _) = try await h.request(.messageSend, id: "send", params: sendParams, on: outbox)
 
         #expect(read.error == nil)
         #expect(close.error == nil)
+        #expect(send.error == nil)
         #expect(await !h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "read"))
-        #expect(await h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "close"))
+        #expect(await !h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "close"))
+        #expect(await h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "send"))
+        let remembered = PhoneAppMethod.allCases.filter { PhoneAppService.remembersReplies(of: $0) }
+        #expect(Set(remembered) == [
+            .messageSend, .promptAnswer, .sessionSwitchProfile, .sessionFork, .sessionSetModel,
+            .worktreeCreate, .remoteCreate,
+        ])
+    }
+
+    /// A resend of a request still running, here after the device filled up
+    /// to the in-flight limit, starts nothing, is not refused, and gets no
+    /// reply of its own: the held request replies once.
+    @Test func aResendOfARunningRequestStartsNothingAndRepliesOnce() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let gate = PhoneTestGate()
+        defer { gate.open() }
+        await h.service.setHandler(Self.sendStub(h.actions, gate: gate), for: .messageSend)
+        let pageStub = PhoneAppService.typed(TranscriptPageParams.self) { _, _ -> TranscriptPage in
+            await gate.wait()
+            return TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0)
+        }
+        await h.service.setHandler(pageStub, for: .transcriptPage)
+        let outbox = await h.connect()
+        let held = try PhoneTestRequests.body(.messageSend, id: "held", params: sendParams)
+        let page = TranscriptPageParams(session: .local(terminalID: terminalID), cursor: "0")
+
+        let limit = PhoneAppConstants.requestsInFlightPerDevice
+        await h.service.handleAppMessage(held, from: h.peer)
+        for index in 0..<(limit - 1) {
+            let body = try PhoneTestRequests.body(.transcriptPage, id: "page-\(index)", params: page)
+            await h.service.handleAppMessage(body, from: h.peer)
+        }
+        #expect(await h.service.requestsRunning(for: h.peer.deviceID) == limit)
+
+        // The resend starts no task and queues nothing. The probe after it is
+        // refused, and its refusal is the first body out, so the resend sent
+        // nothing before it.
+        await h.service.handleAppMessage(held, from: h.peer)
+        #expect(await h.service.requestsRunning(for: h.peer.deviceID) == limit)
+        let (probe, _) = try await h.request(.transcriptPage, id: "probe", params: page, on: outbox)
+        #expect(probe.requestID == "probe")
+        #expect(probe.error?.code == .refused)
+
+        gate.open()
+        try await waitUntil("the held requests to end") {
+            await h.service.requestsRunning(for: h.peer.deviceID) == 0
+        }
+        // Every reply is queued by now, and the outbox sends in order: the
+        // probe's refusal, the 32 replies, then this last request's reply.
+        let flush = Data(#"{"kind":"request","method":"acme.unknown","params":{},"requestID":"flush"}"#.utf8)
+        await h.service.handleAppMessage(flush, from: h.peer)
+        let last = try await outbox.body(at: limit + 1)
+        #expect(try JSONDecoder().decode(PhoneTestReply.self, from: last).requestID == "flush")
+
+        let replies = try outbox.bodies.map { try JSONDecoder().decode(PhoneTestReply.self, from: $0) }
+        let heldReplies = replies.filter { $0.requestID == "held" }
+        #expect(heldReplies.count == 1)
+        #expect(heldReplies.first?.error == nil)
+        #expect(replies.count == limit + 2)
+        #expect(h.actions.sends.count == 1)
+        let sendRecords = h.recorder.records.filter { $0.action == "message.send" }
+        #expect(sendRecords.count == 1)
     }
 
     /// A device with the most requests running is refused at once; the
@@ -292,6 +357,13 @@ struct PhoneAppServiceTests {
         #expect(target.unicodeScalars.count == PhoneActionRecord.targetLimit)
     }
 
+    /// Format characters (a bidirectional override, a zero-width space) and
+    /// the line and paragraph separators become `?` too; other text stays.
+    @Test func aTargetLosesFormatCharactersAndSeparators() {
+        let raw = "remote:acme/\u{202E}gpj.exe\u{200B}x\u{2028}y\u{2029}z-é"
+        #expect(PhoneActionRecord.loggableTarget(raw) == "remote:acme/?gpj.exe?x?y?z-é")
+    }
+
     // MARK: - Replies across a reconnect
 
     /// A disconnect in the middle of a send does not cut it short. Its reply
@@ -332,13 +404,15 @@ struct PhoneAppServiceTests {
         let stream = try await subscribedStream(h, on: outbox)
 
         await h.service.phoneDisconnected(h.peer)
-        // The subscribe's retention timer and the grace.
-        try await h.clock.requireSleepersArmed(count: 2)
+        // The grace. A subscribe is not remembered, so it armed no retention
+        // timer.
+        try await h.clock.requireSleeperArmed()
+        #expect(h.clock.sleeperCount == 1)
         await h.clock.advance(by: .seconds(60))
         let again = await h.connect()
 
-        // Reconnecting cancelled the grace; only the retention timer is left.
-        #expect(h.clock.sleeperCount == 1)
+        // Reconnecting cancelled the grace.
+        #expect(h.clock.sleeperCount == 0)
         #expect(try await subscribedStream(h, on: again) == stream)
     }
 
@@ -349,8 +423,8 @@ struct PhoneAppServiceTests {
         let stream = try await subscribedStream(h, on: outbox)
 
         await h.service.phoneDisconnected(h.peer)
-        // The subscribe's retention timer and the grace.
-        try await h.clock.requireSleepersArmed(count: 2)
+        // The grace.
+        try await h.clock.requireSleeperArmed()
         await h.clock.advance(by: .seconds(119))
         #expect(await h.service.streamID(for: h.peer.deviceID) == stream)
         await h.clock.advance(by: .seconds(1))
@@ -415,22 +489,31 @@ struct PhoneAppServiceTests {
     }
 
     /// A revoke cancels the device's requests still running. The held send
-    /// sees its cancellation, and no reply goes out.
+    /// sees its cancellation, and its run sends no reply, even through a
+    /// connection made after the revoke and before the run ended.
     @Test func revokeCancelsTheDevicesRunningRequests() async throws {
         let h = try await PhoneServiceHarness.make()
         let gate = PhoneTestGate()
-        defer { gate.open() }
+        let afterCancel = PhoneTestGate()
+        defer {
+            gate.open()
+            afterCancel.open()
+        }
         let cancellations = FireRecorder<String>()
         let heldSend = PhoneAppService.typed(MessageSendParams.self) { _, _ -> ActionOutcomeResult in
             await gate.wait()
             if Task.isCancelled {
                 cancellations.record("send")
+                // Hold the cancelled run until the test has a new connection.
+                // An unstructured task does not inherit the cancellation, so
+                // this waits for the gate.
+                await Task { await afterCancel.wait() }.value
                 throw CancellationError()
             }
             return ActionOutcomeResult(outcome: "sent")
         }
         await h.service.setHandler(heldSend, for: .messageSend)
-        let outbox = await h.connect()
+        _ = await h.connect()
 
         let body = try PhoneTestRequests.body(.messageSend, id: "r1", params: sendParams)
         await h.service.handleAppMessage(body, from: h.peer)
@@ -440,9 +523,18 @@ struct PhoneAppServiceTests {
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
 
         #expect(await cancellations.next() == "send")
+        // A connection current when the cancelled run ends.
+        let fresh = await h.connect()
+        afterCancel.open()
         try await waitUntil("the request to end") {
             await h.service.requestsRunning(for: h.peer.deviceID) == 0
         }
-        #expect(outbox.bodies.isEmpty)
+        // Anything the run had sent was queued before this probe's reply, so
+        // the probe's reply being the only body proves the run sent nothing.
+        let probe = Data(#"{"kind":"request","method":"acme.unknown","params":{},"requestID":"probe"}"#.utf8)
+        await h.service.handleAppMessage(probe, from: h.peer)
+        let first = try await fresh.body(at: 0)
+        #expect(try JSONDecoder().decode(PhoneTestReply.self, from: first).requestID == "probe")
+        #expect(fresh.bodies.count == 1)
     }
 }

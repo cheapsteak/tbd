@@ -117,14 +117,24 @@ final class PhoneOutboxQueue: Sendable {
 /// the connection the phone has when the reply is ready; while it is
 /// disconnected, the reply is dropped.
 ///
+/// **A resend of a request still running starts nothing.** A phone resends
+/// the requests it has no reply for when it reconnects. A request whose ID is
+/// still running for that device, whatever its method, starts no task, does
+/// not count against `PhoneAppConstants.requestsInFlightPerDevice`, and gets
+/// no reply of its own: the running request's reply goes to whichever
+/// connection the phone has when it finishes.
+///
 /// **The work, in order:**
 /// 1. **The flag.** `phone_control_enabled` is read for every request. Off:
 ///    the reply is `phone_control_off` and nothing else happens, with the
 ///    request memory untouched, so a resend after the flag is turned on is not
 ///    answered "off" from memory. A failed read fails closed with `internal`.
-/// 2. **The request memory**, for every method but the pure reads (see
-///    `remembersReplies(of:)`). The steps below run once per request ID; a
-///    repeat gets the first run's reply.
+///    The flag is read once, when the request starts. Turning it off stops the
+///    bridge, which ends the phone's connection: requests already running
+///    finish, as they do after a disconnect. Only a revoke cancels them.
+/// 2. **The request memory**, for the methods that act on a session or create
+///    something (see `remembersReplies(of:)`). The steps below run once per
+///    request ID; a repeat gets the first run's reply.
 /// 3. **The pairing.** The phone's `phone_device` row must still exist, or the
 ///    reply is `refused`. A failed read fails closed with `internal`. This
 ///    closes the window where a request starts just before a revoke and
@@ -160,8 +170,15 @@ actor PhoneAppService: PhoneAppHandling {
     var devices: [UUID: PhoneDeviceState] = [:]
     /// Handlers a test put in place of a method's own.
     private var replacedHandlers: [PhoneAppMethod: PhoneMethodHandler] = [:]
-    /// Each device's requests still running, by a token per request.
-    private var requests: [UUID: [UInt64: Task<Void, Never>]] = [:]
+    /// One request still running: its ID, which a resend repeats, and its
+    /// task.
+    private struct RunningRequest {
+        let requestID: String
+        let task: Task<Void, Never>
+    }
+    /// Each device's requests still running, by a token per request. No two
+    /// of a device's running requests share an ID.
+    private var requests: [UUID: [UInt64: RunningRequest]] = [:]
     private var nextToken: UInt64 = 0
 
     init(db: TBDDatabase, actions: any PhoneSessionActions, subscriptions: StateSubscriptionManager,
@@ -236,7 +253,7 @@ actor PhoneAppService: PhoneAppHandling {
     func phoneRevoked(deviceID: UUID) async {
         let state = devices.removeValue(forKey: deviceID)
         for request in (requests[deviceID] ?? [:]).values {
-            request.cancel()
+            request.task.cancel()
         }
         await state?.shutDown()
         await memory.forget(deviceID: deviceID)
@@ -257,8 +274,9 @@ actor PhoneAppService: PhoneAppHandling {
     /// request's work. It never waits for the reply.
     ///
     /// Nothing runs for a message that is not a request, for a phone with no
-    /// connection, or for a request whose ID is longer than
-    /// `PhoneAppConstants.requestIDMaxBytes`; a device with
+    /// connection, for a request whose ID is longer than
+    /// `PhoneAppConstants.requestIDMaxBytes`, or for a resend of a request
+    /// still running, which gets no reply of its own; a device with
     /// `PhoneAppConstants.requestsInFlightPerDevice` requests running is
     /// refused. None of these reach the request memory or the flag.
     func handleAppMessage(_ body: Data, from peer: PhonePeer) async {
@@ -286,6 +304,13 @@ actor PhoneAppService: PhoneAppHandling {
             if PhoneAppCoding.framedSize(reply) <= PhoneFrameBudget.maxPlaintext {
                 send(reply, to: deviceID)
             }
+            return
+        }
+        // A resend after a reconnect, while the first run is still going. The
+        // first run's reply goes to whichever connection is current when it
+        // finishes, so this one starts nothing and sends nothing.
+        if requests[deviceID]?.values.contains(where: { $0.requestID == requestID }) == true {
+            Self.logger.debug("Phone app: a resent request from phone \(deviceID, privacy: .public) is still running")
             return
         }
         guard let method = PhoneAppMethod(rawValue: head.method) else {
@@ -332,10 +357,11 @@ actor PhoneAppService: PhoneAppHandling {
         nextToken &+= 1
         // The task runs on this actor between its suspensions, so it cannot
         // finish before it is stored.
-        requests[deviceID, default: [:]][token] = Task {
+        let task = Task {
             let reply = await self.serve(method, body: body, context: context)
             self.requestFinished(token, deviceID: deviceID, reply: reply)
         }
+        requests[deviceID, default: [:]][token] = RunningRequest(requestID: context.requestID, task: task)
     }
 
     /// Sends a finished request's reply through the connection the phone has
@@ -358,7 +384,8 @@ actor PhoneAppService: PhoneAppHandling {
         do {
             enabled = try await db.config.get().phoneControlEnabled
         } catch {
-            Self.logger.error("Phone app: could not read the phone control setting: \(error.localizedDescription, privacy: .public)")
+            Self.logger.error(
+                "Phone app: could not read the phone control setting: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return Self.failure(requestID, .internalError, "TBD could not read its phone control setting. Try again.")
         }
         guard enabled else {
@@ -383,6 +410,8 @@ actor PhoneAppService: PhoneAppHandling {
 
     /// The part of a request that acts, run once per request ID when its
     /// replies are remembered: the pairing check, the record, the handler.
+    /// A request cancelled by a revoke before its record stops there, so it
+    /// neither records nor acts.
     private nonisolated func perform(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> Data {
         let requestID = context.requestID
         do {
@@ -390,12 +419,14 @@ actor PhoneAppService: PhoneAppHandling {
                 return Self.failure(requestID, .refused, "This phone is no longer paired.")
             }
         } catch {
-            Self.logger.error("Phone app: could not read a phone's pairing: \(error.localizedDescription, privacy: .public)")
+            Self.logger.error(
+                "Phone app: could not read a phone's pairing: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again.")
         }
         guard let handler = await registeredHandler(for: method) else {
             return PhoneAppCoding.errorReply(requestID: requestID, Self.notServed)
         }
+        guard !Task.isCancelled else { return Self.stopped(requestID) }
         do {
             if let target = try Self.recordTarget(for: method, body: body) {
                 recorder.record(PhoneActionRecord(deviceName: context.peer.deviceName, action: method.rawValue, target: target))
@@ -410,9 +441,17 @@ actor PhoneAppService: PhoneAppHandling {
         } catch is CancellationError {
             return Self.stopped(requestID)
         } catch {
-            Self.logger.error("Phone app: \(method.rawValue, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            // Only the error's type is public: its description can quote what
+            // the handler was working on, such as a path or a message.
+            Self.logger.error(
+                "Phone app: \(method.rawValue, privacy: .public) failed: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return Self.failure(requestID, .internalError, "Something went wrong on the laptop.")
         }
+    }
+
+    /// The error's type name, the part of an error the log keeps public.
+    static func errorType(_ error: any Error) -> String {
+        String(describing: type(of: error))
     }
 
     // MARK: - Handlers
@@ -463,17 +502,25 @@ actor PhoneAppService: PhoneAppHandling {
 
     /// Whether `method`'s replies go through the request memory.
     ///
-    /// Every method that can change something does, so a resend acts once.
-    /// The pure reads do not: their replies can be about 60 KB, and keeping
-    /// them could crowd an action's entry out of the device's limit, while a
-    /// repeated read only reads again.
+    /// Only the methods that act on a session or create something do, so a
+    /// resend of one of them acts once. That narrows spec section 4.4, which
+    /// says every request; the rest run again on a resend, which is safe:
+    /// - **The pure reads** (`transcript.page`, `transcript.detail`,
+    ///   `profiles.list`, `remote.providers`) only read again. Their replies
+    ///   can be about 60 KB, and keeping them could crowd an action's entry
+    ///   out of the device's limit.
+    /// - **The state requests** (`sessions.subscribe`, `transcript.open`,
+    ///   `transcript.close`) set up or tear down what the phone is sent. A
+    ///   remembered `sessions.subscribe` reply would hand back a stale
+    ///   snapshot, and after the grace a stream ID that no longer exists.
     static func remembersReplies(of method: PhoneAppMethod) -> Bool {
         switch method {
-        case .transcriptPage, .transcriptDetail, .profilesList, .remoteProviders:
-            return false
-        case .sessionsSubscribe, .transcriptOpen, .transcriptClose, .messageSend, .promptAnswer,
-             .sessionSwitchProfile, .sessionFork, .sessionSetModel, .worktreeCreate, .remoteCreate:
+        case .messageSend, .promptAnswer, .sessionSwitchProfile, .sessionFork, .sessionSetModel,
+             .worktreeCreate, .remoteCreate:
             return true
+        case .sessionsSubscribe, .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
+             .profilesList, .remoteProviders:
+            return false
         }
     }
 
@@ -529,7 +576,8 @@ actor PhoneAppService: PhoneAppHandling {
         do {
             bytes = try devices[deviceID]?.stream.append(name, data: data)
         } catch {
-            Self.logger.error("Phone app: could not encode a \(name.rawValue, privacy: .public) event: \(error.localizedDescription, privacy: .public)")
+            Self.logger.error(
+                "Phone app: could not encode a \(name.rawValue, privacy: .public) event: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return
         }
         guard let bytes else { return }
