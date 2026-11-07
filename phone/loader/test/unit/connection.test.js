@@ -919,30 +919,47 @@ test('an app message while the bundle loads is dropped; app messages pass once r
 // --- the transport --------------------------------------------------------------------------
 
 test('a flipped byte or a duplicated frame ends the connection and the next one handshakes again', async () => {
-  /** @type {Array<[string, (frame: Uint8Array) => Uint8Array | Uint8Array[], string[]]>} */
+  /** @type {Array<[string, (frame: Uint8Array) => Uint8Array | Uint8Array[]]>} */
   const cases = [
     ['a flipped byte', (frame) => {
       const changed = frame.slice();
       changed[changed.length - 1] ^= 1;
       return changed;
-    }, ['connecting', 'handshaking', 'reconnecting', 'handshaking', 'loading', 'ready']],
-    ['a duplicated frame', (frame) => [frame, frame],
-      ['connecting', 'handshaking', 'loading', 'reconnecting', 'handshaking', 'loading', 'ready']],
+    }],
+    ['a duplicated frame', (frame) => [frame, frame]],
   ];
-  for (const [name, tamper, states] of cases) {
+  for (const [name, tamper] of cases) {
     const env = await setup();
     let frames = 0;
     // Frame 1 is message 2 and frame 2 is welcome.
     env.relay.tamper(env.room, (frame) => (++frames === 2 ? tamper(frame) : frame));
-    const c = connection(env);
+    // A duplicated welcome decrypts once and starts the cache read beside the chain. Whether
+    // that read's miss (bundle.get, then loading) or the duplicate's decrypt failure is handled
+    // first is a race the spec leaves open, so the read is held until the connection has ended.
+    /** @type {(value?: unknown) => void} */
+    let release = () => {};
+    const held = new Promise((resolve) => { release = resolve; });
+    const cache = {
+      ...env.cache,
+      /** @param {string} laptopID @param {string} sha */
+      get: async (laptopID, sha) => {
+        await held;
+        return env.cache.get(laptopID, sha);
+      },
+    };
+    const c = connection(env, { cache });
     c.conn.start();
     await until(() => c.states().includes('reconnecting'), `${name}: reconnecting`);
     assert.deepEqual(env.net.log.filter((e) => e.dir === 'close()'), [{ dir: 'close()', code: 1000 }], name);
+    // The ended connection's read answers late, and nothing comes of it.
+    release();
     await quiet();
     assert.equal(env.joins(), 1, name);
+    assert.deepEqual(c.states(), ['connecting', 'handshaking', 'reconnecting'], name);
     await env.clock.advance(1000);
     await until(() => c.states().includes('ready'), `${name}: ready`);
-    assert.deepEqual(c.states(), states, name);
+    assert.deepEqual(c.states(), ['connecting', 'handshaking', 'reconnecting', 'handshaking', 'loading', 'ready'], name);
+    assert.equal(env.laptop.counts.bundleGet, 1, `${name}: no bundle.get from the connection that ended`);
     assert.equal(env.joins(), 2, name);
     assert.equal(env.laptop.counts.ikHandshakes, 2, name);
     assert.equal(c.of('connected').length, 2, name);
