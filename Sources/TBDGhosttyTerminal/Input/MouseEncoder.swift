@@ -205,6 +205,73 @@ final class MouseEncoder {
         var format: GhosttyMouseFormat
     }
 
+    /// The DEC private modes the encoder's options come from: four tracking modes and four report
+    /// formats. `set_from_terminal` reads the same state, but libghostty has no getter for it.
+    struct MouseModes: OptionSet, Sendable {
+        let rawValue: UInt8
+
+        init(rawValue: UInt8) { self.rawValue = rawValue }
+
+        static let x10 = MouseModes(rawValue: 1 << 0)
+        static let normal = MouseModes(rawValue: 1 << 1)
+        static let button = MouseModes(rawValue: 1 << 2)
+        static let any = MouseModes(rawValue: 1 << 3)
+        static let utf8 = MouseModes(rawValue: 1 << 4)
+        static let sgr = MouseModes(rawValue: 1 << 5)
+        static let urxvt = MouseModes(rawValue: 1 << 6)
+        static let sgrPixels = MouseModes(rawValue: 1 << 7)
+
+        private static let numbers: [(mode: MouseModes, number: UInt16)] = [
+            (.x10, 9), (.normal, 1000), (.button, 1002), (.any, 1003),
+            (.utf8, 1005), (.sgr, 1006), (.urxvt, 1015), (.sgrPixels, 1016),
+        ]
+
+        /// The modes `terminal` has set. Caller holds the lock.
+        init(of terminal: VtTerminal) {
+            var modes: MouseModes = []
+            for entry in Self.numbers {
+                var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(entry.number, false), value: false)
+                if ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS,
+                   config.value {
+                    modes.insert(entry.mode)
+                }
+            }
+            self = modes
+        }
+
+        /// The tracking mode and format these modes imply. When a program has set several
+        /// tracking modes the widest wins, as programs enable them narrowest first; likewise for
+        /// the formats.
+        var encoding: ReportEncoding {
+            var encoding = ReportEncoding(tracking: GHOSTTY_MOUSE_TRACKING_NONE, format: GHOSTTY_MOUSE_FORMAT_X10)
+            if contains(.any) {
+                encoding.tracking = GHOSTTY_MOUSE_TRACKING_ANY
+            } else if contains(.button) {
+                encoding.tracking = GHOSTTY_MOUSE_TRACKING_BUTTON
+            } else if contains(.normal) {
+                encoding.tracking = GHOSTTY_MOUSE_TRACKING_NORMAL
+            } else if contains(.x10) {
+                encoding.tracking = GHOSTTY_MOUSE_TRACKING_X10
+            }
+            if contains(.sgrPixels) {
+                encoding.format = GHOSTTY_MOUSE_FORMAT_SGR_PIXELS
+            } else if contains(.sgr) {
+                encoding.format = GHOSTTY_MOUSE_FORMAT_SGR
+            } else if contains(.urxvt) {
+                encoding.format = GHOSTTY_MOUSE_FORMAT_URXVT
+            } else if contains(.utf8) {
+                encoding.format = GHOSTTY_MOUSE_FORMAT_UTF8
+            }
+            return encoding
+        }
+    }
+
+    /// The modes the encoder's options were last set from, or nil when they were set some other
+    /// way. `set_from_terminal` also forgets the last cell a motion was reported in, so it runs
+    /// only when the modes change. Run on every event, it made every pixel of motion under mode
+    /// 1003 a report.
+    private var syncedModes: MouseModes?
+
     /// Rendered geometry. Assign on every resize; it is pushed to `OPT_SIZE` immediately.
     var geometry: TerminalPixelGeometry {
         didSet { applyGeometry() }
@@ -248,37 +315,20 @@ final class MouseEncoder {
         return tracking
     }
 
-    /// The tracking mode and report format the terminal's mode bits imply.
-    ///
-    /// `set_from_terminal` reads the same state but libghostty has no getter for the result, so
-    /// this asks for the modes. When a program has set several tracking modes, the widest wins,
-    /// as programs enable them narrowest first; likewise for the formats. Caller holds the lock.
-    static func reportEncoding(of terminal: VtTerminal) -> ReportEncoding {
-        func isSet(_ mode: UInt16) -> Bool {
-            var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(mode, false), value: false)
-            return ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS
-                && config.value
-        }
-        var encoding = ReportEncoding(tracking: GHOSTTY_MOUSE_TRACKING_NONE, format: GHOSTTY_MOUSE_FORMAT_X10)
-        if isSet(1003) {
-            encoding.tracking = GHOSTTY_MOUSE_TRACKING_ANY
-        } else if isSet(1002) {
-            encoding.tracking = GHOSTTY_MOUSE_TRACKING_BUTTON
-        } else if isSet(1000) {
-            encoding.tracking = GHOSTTY_MOUSE_TRACKING_NORMAL
-        } else if isSet(9) {
-            encoding.tracking = GHOSTTY_MOUSE_TRACKING_X10
-        }
-        if isSet(1016) {
-            encoding.format = GHOSTTY_MOUSE_FORMAT_SGR_PIXELS
-        } else if isSet(1006) {
-            encoding.format = GHOSTTY_MOUSE_FORMAT_SGR
-        } else if isSet(1015) {
-            encoding.format = GHOSTTY_MOUSE_FORMAT_URXVT
-        } else if isSet(1005) {
-            encoding.format = GHOSTTY_MOUSE_FORMAT_UTF8
-        }
-        return encoding
+    /// Sets the encoder's tracking mode and format from `terminal` if its mouse modes differ
+    /// from the ones they were last set from. Caller holds the lock.
+    private func syncModes(_ modes: MouseModes, terminal: VtTerminal) {
+        guard modes != syncedModes else { return }
+        _ = ghostty_mouse_encoder_set_from_terminal(handle.raw, terminal)
+        syncedModes = modes
+    }
+
+    /// Re-reads the terminal's mouse modes. The binding calls this after the terminal has parsed
+    /// program output or been reset, so a mode the program turns off and on again in two writes
+    /// between events still starts the encoder afresh. The view sends the encoder no events
+    /// while tracking is off, so the events alone would never see the gap. Caller holds the lock.
+    func terminalModesMayHaveChanged(_ terminal: VtTerminal) {
+        syncModes(MouseModes(of: terminal), terminal: terminal)
     }
 
     private func apply(_ encoding: ReportEncoding) {
@@ -286,6 +336,8 @@ final class MouseEncoder {
         _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking)
         var format = encoding.format
         _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format)
+        // Set by hand, so the next event sets them from the terminal again.
+        syncedModes = nil
     }
 
     /// Encode one pointer event using the terminal's current tracking mode and report format.
@@ -296,18 +348,16 @@ final class MouseEncoder {
     /// has since turned tracking off, in the encoding the press had.
     /// Caller holds the terminal lock.
     func encode(_ press: MousePress, terminal: VtTerminal) throws -> [UInt8]? {
-        // Options (tracking mode + format) come from the terminal; size and any-button do not.
-        _ = ghostty_mouse_encoder_set_from_terminal(handle.raw, terminal)
+        // Options (tracking mode + format) come from the terminal, and are set again only when its
+        // mouse modes changed; size and any-button do not come from it.
+        let modes = MouseModes(of: terminal)
+        syncModes(modes, terminal: terminal)
 
         switch press.action {
         case .press:
             if let button = press.button {
                 heldButtons.insert(button)
-                if Self.isTrackingEnabled(terminal) {
-                    pressEncodings[button] = Self.reportEncoding(of: terminal)
-                } else {
-                    pressEncodings[button] = nil
-                }
+                pressEncodings[button] = Self.isTrackingEnabled(terminal) ? modes.encoding : nil
             }
         case .release:
             if let button = press.button {

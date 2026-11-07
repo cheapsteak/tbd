@@ -102,6 +102,10 @@ final class InputBinding: TerminalBoundObject {
     func releaseBinding(_ terminal: VtTerminal) {
         selection.release()
     }
+
+    func terminalModesMayHaveChanged(_ terminal: VtTerminal) {
+        mouseEncoder.terminalModesMayHaveChanged(terminal)
+    }
 }
 
 // MARK: - The input seam

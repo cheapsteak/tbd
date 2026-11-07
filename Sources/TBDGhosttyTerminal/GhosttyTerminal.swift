@@ -263,6 +263,9 @@ private func cbClipboardRead(
 /// `releaseBinding` once, under its lock, just before it frees the C terminal.
 protocol TerminalBoundObject: AnyObject {
     func releaseBinding(_ terminal: VtTerminal)
+    /// The terminal parsed program output or was reset, so its modes may have changed. Called
+    /// under the lock, once per `feed` or `reset`.
+    func terminalModesMayHaveChanged(_ terminal: VtTerminal)
 }
 
 // MARK: - Locked state
@@ -517,12 +520,16 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     /// Runs `body` with the live C terminal under the lock, then delivers whatever the terminal
     /// produced after the lock drops. Returns nil, without running `body`, once the terminal is
-    /// closed. `body` must not call back into this terminal.
+    /// closed. `body` must not call back into this terminal. With `changesModes`, the bound
+    /// object hears about it after `body`, still under the lock.
     @discardableResult
-    func withRaw<T>(signalsRender: Bool = false, _ body: (VtTerminal) throws -> T) rethrows -> T? {
+    func withRaw<T>(
+        signalsRender: Bool = false, changesModes: Bool = false, _ body: (VtTerminal) throws -> T
+    ) rethrows -> T? {
         let value: T? = try locked { core in
             guard let raw = core.raw else { return nil }
             let value = try body(raw)
+            if changesModes { core.bound?.terminalModesMayHaveChanged(raw) }
             core.harvest(signal: signalsRender)
             return value
         }
@@ -606,7 +613,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// bytes caused run after the lock drops and before this returns. Does nothing once closed.
     public func feed(_ bytes: ArraySlice<UInt8>) {
         guard !bytes.isEmpty else { return }
-        withRaw(signalsRender: true) { raw in
+        withRaw(signalsRender: true, changesModes: true) { raw in
             bytes.withUnsafeBufferPointer { buffer in
                 ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
             }
@@ -617,7 +624,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// state. The size is kept. Use before replaying a snapshot into a terminal that was used
     /// before, so nothing from its earlier life (an alternate screen, a colour) survives.
     public func reset() {
-        withRaw(signalsRender: true) { raw in ghostty_terminal_reset(raw) }
+        withRaw(signalsRender: true, changesModes: true) { raw in ghostty_terminal_reset(raw) }
     }
 
     /// Resizes the grid. The primary screen reflows; the alternate screen does not.

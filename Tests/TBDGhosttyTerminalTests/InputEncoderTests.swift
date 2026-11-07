@@ -67,6 +67,42 @@ struct MouseEncoderTests {
         #expect(release == nil, "with tracking off the release encoded as \(String(describing: release))")
     }
 
+    /// Under any-event tracking a move is reported once per cell, not once per pixel. libghostty
+    /// forgets the last reported cell whenever the encoder's modes are set from the terminal, so
+    /// they may be set only when the modes change. Driven through the terminal's own input seam,
+    /// so the encoder is the one bound to the terminal, which hears about every write.
+    @Test func motionIsReportedOncePerCellUnderAnyEventTracking() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let firstCell = Array("\u{1b}[<35;1;1M".utf8)
+        let secondCell = Array("\u{1b}[<35;2;1M".utf8)
+
+        // Twenty moves inside cell 1;1, x from 0.5 to 9.05 px, then one into cell 2;1.
+        let inside = (0..<20).compactMap { step in
+            terminal.encodeMouse(Self.motion(toX: 0.5 + Double(step) * 0.45))
+        }
+        #expect(inside == [firstCell], "twenty moves inside one cell gave \(inside.count) reports: \(inside)")
+        let crossing = terminal.encodeMouse(Self.motion(toX: 15))
+        #expect(crossing == secondCell, "the move into the next cell gave \(String(describing: crossing))")
+        let again = terminal.encodeMouse(Self.motion(toX: 16))
+        #expect(again == nil, "a second move inside cell 2;1 gave \(String(describing: again))")
+
+        // Off and on again, in two writes with no event between. The encoder starts afresh, so the
+        // same move that was just dropped as a repeat is reported.
+        terminal.feed(text: "\u{1b}[?1003l")
+        terminal.feed(text: "\u{1b}[?1003h")
+        let afterToggle = terminal.encodeMouse(Self.motion(toX: 16))
+        #expect(afterToggle == secondCell,
+                "after tracking went off and on, the move gave \(String(describing: afterToggle)): the encoder was not reset")
+    }
+
+    /// A button-less move to `x` on the first row.
+    private static func motion(toX x: Double) -> MousePress {
+        MousePress(action: .motion, button: nil, position: SurfacePoint(x: x, y: 5))
+    }
+
     /// A wheel click is a press with no release, so it must leave no button held or recorded.
     @Test func wheelLeavesNoButtonHeld() throws {
         let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
