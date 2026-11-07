@@ -18,6 +18,23 @@ async function request(path: string, init?: RequestInit): Promise<Drained> {
 
 const upgrade = { headers: { Upgrade: "websocket" } };
 
+/**
+ * An `env` whose `ROOM` binding fails the way a Durable Object call can. With
+ * `"rejects"`, the stub's `presence()` and `fetch` reject, as on an overload
+ * or a reset; with `"throws"`, getting the stub throws at once.
+ */
+function failingEnv(how: "rejects" | "throws"): Env {
+  const fail = () => Promise.reject(new Error("Durable Object overloaded"));
+  const room = {
+    idFromName: (name: string) => env.ROOM.idFromName(name),
+    get: () => {
+      if (how === "throws") throw new Error("Durable Object reset");
+      return { presence: fail, fetch: fail };
+    },
+  };
+  return { ROOM: room } as unknown as Env;
+}
+
 describe("routes", () => {
   it("info returns the name, version and API list", async () => {
     const res = await request("/v1/info");
@@ -134,6 +151,24 @@ describe("routes", () => {
       const res = await request(path, init);
       expect(res.status, label).toBe(status);
       expect(res.headers.get("access-control-allow-origin"), label).toBe("*");
+    }
+  });
+
+  it("a failed Durable Object call is a 500 any origin can read", async () => {
+    const id = newRoomID();
+    const routes: [label: string, path: string, init: typeof upgrade | undefined][] = [
+      ["presence", `/v1/rooms/${id}/presence`, undefined],
+      ["a room socket", `/v1/rooms/${id}?role=phone`, upgrade],
+    ];
+    for (const how of ["rejects", "throws"] as const) {
+      for (const [route, path, init] of routes) {
+        const label = `${route}, when the binding ${how}`;
+        const res = await worker.fetch(new Request(BASE_URL + path, init), failingEnv(how));
+        expect(res.status, label).toBe(500);
+        expect(res.headers.get("access-control-allow-origin"), label).toBe("*");
+        expect(res.headers.get("content-type"), label).toMatch(/^text\/plain/);
+        expect(await res.text(), label).toBe("Internal Server Error\n");
+      }
     }
   });
 });

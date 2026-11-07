@@ -80,8 +80,23 @@ function route(request: Request, env: Env): Response | Promise<Response> {
   return env.ROOM.get(env.ROOM.idFromName(roomID)).fetch(request);
 }
 
+/**
+ * A Durable Object call can fail: the `presence()` RPC or the room's `fetch`
+ * rejects when the object is overloaded or reset. The runtime's own 500 for a
+ * thrown handler would carry no CORS header, so a page on another origin
+ * would see an opaque error; this 500 goes through the same wrapper as every
+ * other response.
+ */
+async function routeOrFail(request: Request, env: Env): Promise<Response> {
+  try {
+    return await route(request, env);
+  } catch {
+    return text(500, "Internal Server Error");
+  }
+}
+
 export default {
   async fetch(request, env) {
-    return readableFromAnyOrigin(await route(request, env));
+    return readableFromAnyOrigin(await routeOrFail(request, env));
   },
 } satisfies ExportedHandler<Env>;
