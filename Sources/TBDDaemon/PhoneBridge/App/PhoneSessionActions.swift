@@ -16,9 +16,8 @@ import TBDShared
 /// keep shells, which spec section 6 hides from the phone, out of its reach,
 /// and keep its messages to text: `phoneSessionStates` drops every report on
 /// a shell, and the send rail refuses a shell, a message part that is not
-/// text, an empty message and a message holding a control character, after
-/// the core's shape check and before the rest of the send core (see
-/// `phoneSend`).
+/// text, an empty message and a message holding a control character, inside
+/// the send core, on the terminal row the core sends to (see `phoneSend`).
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -55,15 +54,18 @@ protocol PhoneSessionActions: Sendable {
     /// (a scalar below U+0020 other than LF and tab, DEL, or a C1 control) is
     /// refused before anything is typed.
     ///
-    /// The order, all inside the terminal's send lane: the core's shape
-    /// check, then the phone's refusals, then the send core. A malformed
-    /// payload gets the shape error `terminal.send` gives, with no actuation
-    /// row, whatever its target. A terminal with no row, or one whose
-    /// worktree is not local, gets the send core's own not-found error, with
-    /// no actuation row, whatever its message. Only a well-formed payload
-    /// aimed at a terminal with a row in a local worktree meets the phone's
-    /// refusals: a shell, then a part that is not text, then an empty
-    /// message, then a control character.
+    /// The phone's refusals run inside the send core and the terminal's send
+    /// lane, on the terminal row the core itself read, so the row they judge
+    /// is the row the paste is addressed by. The order:
+    /// the core's shape check, the core's terminal and worktree lookup, the
+    /// phone's refusals, then the rest of the send core. A malformed payload
+    /// gets the shape error `terminal.send` gives, with no actuation row,
+    /// whatever its target. A terminal with no row, or one whose worktree is
+    /// not local, gets the send core's own not-found error, with no actuation
+    /// row, whatever its message. Only a well-formed payload aimed at a
+    /// terminal with a row in a local worktree meets the phone's refusals: a
+    /// shell, then a part that is not text, then an empty message, then a
+    /// control character. Each is recorded as a refused `terminal.send`.
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.wake` with only the terminal and the message the wake

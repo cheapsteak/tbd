@@ -3806,19 +3806,17 @@ extension RPCRouter {
     /// `params.gateOnAwaitingInput` asks for it, the pane consultation and the
     /// actuation row, which records `actor`.
     ///
-    /// `preSend` is a rail's own refusals, run inside the lane right before
-    /// the send core, so a send that queued behind an earlier one is judged on
-    /// what the daemon holds once its turn comes, as `handleTerminalSend` runs
-    /// its whole target check inside the lane. A response from it is the
-    /// answer and the core never runs; nil hands the send to the core. The
-    /// queued prompt passes none.
+    /// `phoneCheck` is the phone rail's own refusals, handed through to the
+    /// send core (`performTerminalSend`), which runs it on the terminal row
+    /// and the payload it resolved itself, inside the lane. The queued prompt
+    /// passes none.
     private func sendOnInternalRail(
         _ params: TerminalSendParams, actor: ActuationActor,
-        preSend: (@Sendable () async throws -> RPCResponse?)? = nil
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> String?)? = nil
     ) async throws -> RPCResponse {
         try await terminalSendSerializer.run(terminalID: params.terminalID) {
-            if let preSend, let refusal = try await preSend() { return refusal }
-            return try await self.performTerminalSend(params, actor: actor, envelope: .suppressed)
+            try await self.performTerminalSend(
+                params, actor: actor, envelope: .suppressed, phoneCheck: phoneCheck)
         }
     }
 
@@ -3920,27 +3918,30 @@ extension RPCRouter {
     ///
     /// **These refusals are recorded as the send core records its own.** A
     /// well-formed act the daemon declined gets a `terminal.send` row naming
-    /// the phone and a refusal outcome; a payload whose shape names no act
-    /// gets none (see `recordPhoneSendRefusal`).
+    /// the phone and a `refused(.notEligible)` outcome carrying the refusal,
+    /// written by the send core; a payload whose shape names no act gets
+    /// none.
     ///
-    /// **The phone's refusals judge only a target the send core would
-    /// record.** They run only when the terminal has a row and its worktree
-    /// is local, the point at which the core writes its own request row. A
-    /// terminal with no row, or one whose worktree is not local, falls
-    /// through to the send core, which answers with its own error ("Terminal
-    /// not found", "Worktree not found for terminal") and writes no row,
-    /// whatever the message holds.
+    /// **The phone's refusals run on the row the send core sends to.** The
+    /// send core runs them itself (`performTerminalSend`'s `phoneCheck`),
+    /// inside the terminal's send lane, right after its own shape check and
+    /// its own terminal and local-worktree lookup, and before any other rail
+    /// runs or anything is typed. So they judge the very row the core then
+    /// pastes into, read once this send's turn in the lane has come. A check
+    /// that read the row for itself would not be enough: the lane orders
+    /// sends only, and `terminal.recreateWindow` runs outside it, under the
+    /// worktree's server lock, where its shell branch can turn a Claude row
+    /// into a shell with a new pane between the two reads.
     ///
-    /// **The order is the core's shape check, then the phone's refusals, then
-    /// the send core**, all inside the terminal's send lane
-    /// (`sendOnInternalRail`'s `preSend`). A malformed payload therefore gets
-    /// the core's own shape error and no row, as it would from
-    /// `terminal.send`, even when it is also aimed at a shell. A well-formed
-    /// one aimed at a recorded local target meets the shell, text-only, blank
-    /// and control-character refusals in that order, each judged on the
-    /// terminal row read once this send's turn in the lane has come, so a
-    /// send queued behind another is never admitted on a row read before its
-    /// wait.
+    /// **So the order is the core's shape check, the core's lookup, the
+    /// phone's refusals, then the rest of the send core.** A malformed
+    /// payload gets the core's own shape error and no row, as it would from
+    /// `terminal.send`, even when it is also aimed at a shell. A terminal with
+    /// no row, or one whose worktree is not local, gets the core's own error
+    /// ("Terminal not found", "Worktree not found for terminal") and no row,
+    /// whatever the message holds. A well-formed payload aimed at a terminal
+    /// with a row in a local worktree meets the shell, text-only, blank and
+    /// control-character refusals in that order (`phoneSendRefusal`).
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
@@ -3953,47 +3954,47 @@ extension RPCRouter {
                 return .text(Self.phoneLineEndingsNormalized(value))
             },
             gateOnAwaitingInput: true)
-        let actor = ActuationActor.phone(deviceID: deviceID)
-        return try await sendOnInternalRail(phoneParams, actor: actor) {
-            try await self.phoneSendRefusal(phoneParams, actor: actor)
-        }
+        return try await sendOnInternalRail(
+            phoneParams, actor: .phone(deviceID: deviceID),
+            phoneCheck: { row, payload in RPCRouter.phoneSendRefusal(row: row, payload: payload) })
     }
 
-    /// The phone rail's refusals of `params`, already rebuilt by
-    /// `sendFromPairedPhone`, or nil to hand the send to the send core. Runs
-    /// inside the terminal's send lane, right before the core.
+    /// The phone rail's refusal of a send of `payload` to the terminal `row`,
+    /// or nil to let the send core go on.
     ///
-    /// The core's shape check comes first. A malformed payload is left to the
-    /// core, whose own shape check refuses it with its own error before any
-    /// row exists, exactly as it does for `terminal.send`. So is a target the
-    /// core would not record: a terminal with no row, or one whose worktree is
-    /// not local, gets the core's own not-found error. Only a well-formed
-    /// payload aimed at a terminal with a row in a local worktree meets the
-    /// phone's refusals, in this order: a shell, a part that is not text, a
-    /// blank text message, a control character in any text.
-    private func phoneSendRefusal(
-        _ params: TerminalSendParams, actor: ActuationActor
-    ) async throws -> RPCResponse? {
-        guard case .valid(let payload) = Self.validateSendShape(params),
-              let row = try await db.terminals.get(id: params.terminalID),
-              try await db.worktrees.getLocal(id: row.worktreeID) != nil else { return nil }
+    /// Pure: the send core calls it with the row and the payload it resolved
+    /// itself (see `sendFromPairedPhone`), so it reads nothing and checks no
+    /// shape. The payload has passed `validateSendShape`, and the row exists
+    /// in a local worktree. The refusals, in this order: a shell (by effective
+    /// kind), a part that is not text, a blank text message, a control
+    /// character in any text.
+    private static func phoneSendRefusal(
+        row: TBDShared.Terminal, payload: TerminalSendPayload
+    ) -> String? {
         if Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
-            return try await recordPhoneSendRefusal(
-                payload, terminal: row, actor: actor, message: Self.phoneShellSendRefusal)
+            return Self.phoneShellSendRefusal
         }
-        for part in params.parts ?? [] {
-            guard case .text = part else {
-                return try await recordPhoneSendRefusal(
-                    payload, terminal: row, actor: actor, message: Self.phoneNonTextPartRefusal)
+        let texts: [String]
+        switch payload {
+        case .text(let text, _, _):
+            texts = [text]
+        case .parts(let parts, _):
+            var partTexts: [String] = []
+            for part in parts {
+                guard case .text(let value) = part else { return Self.phoneNonTextPartRefusal }
+                partTexts.append(value)
             }
+            texts = partTexts
+        case .keys:
+            // `sendFromPairedPhone` drops keys, so no phone payload is keys.
+            // Refused rather than passed, should one ever arrive.
+            return Self.phoneNonTextPartRefusal
         }
-        if params.parts == nil, let text = params.text, Self.phoneMessageIsBlank(text: text) {
-            return try await recordPhoneSendRefusal(
-                payload, terminal: row, actor: actor, message: Self.phoneEmptySendRefusal)
+        if case .text(let text, _, _) = payload, Self.phoneMessageIsBlank(text: text) {
+            return Self.phoneEmptySendRefusal
         }
-        if Self.phoneMessageHasControlCharacter(params) {
-            return try await recordPhoneSendRefusal(
-                payload, terminal: row, actor: actor, message: Self.phoneControlCharacterRefusal)
+        if texts.contains(where: { text in Self.phoneTextHasControlCharacter(text) }) {
+            return Self.phoneControlCharacterRefusal
         }
         return nil
     }
@@ -4012,17 +4013,11 @@ extension RPCRouter {
         text.replacingOccurrences(of: "\r\n", with: "\n")
     }
 
-    /// Whether the message in `params`, its `text` or any text part, holds a
-    /// control character a phone message may not carry
+    /// Whether `text`, a phone message's `text` or one of its text parts,
+    /// holds a control character a phone message may not carry
     /// (`isPhoneRefusedControl`).
-    private static func phoneMessageHasControlCharacter(_ params: TerminalSendParams) -> Bool {
-        var texts: [String] = params.text.map { text in [text] } ?? []
-        for case .text(let value) in params.parts ?? [] {
-            texts.append(value)
-        }
-        return texts.contains { text in
-            text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
-        }
+    private static func phoneTextHasControlCharacter(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
     }
 
     /// Whether `scalar` is a control character a phone message may not carry:
@@ -4049,33 +4044,25 @@ extension RPCRouter {
     /// What a paired phone hears when its message holds a control character.
     static let phoneControlCharacterRefusal = "a phone message cannot contain control characters"
 
-    /// Refuse a phone send of `payload` with `message`, writing the rows the
-    /// send core writes when it declines a well-formed act: a `terminal.send`
-    /// request row naming `actor` and the payload, then a
-    /// `refused(.notEligible)` outcome carrying `message`.
+    /// The send core every `terminal.send` caller runs, inside the terminal's
+    /// send lane.
     ///
-    /// `payload` is the one the shape check (`validateSendShape`) validated,
-    /// so the act is well-formed, and `terminal` is a row whose worktree is
-    /// local: `phoneSendRefusal` judges no other target, so every refusal it
-    /// makes is one the core would have reached its own `beginActuation` for.
-    private func recordPhoneSendRefusal(
-        _ payload: TerminalSendPayload, terminal: Terminal,
-        actor: ActuationActor, message: String
-    ) async throws -> RPCResponse {
-        let actuationID = try await beginActuation(
-            .terminalSend, actor: actor,
-            target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
-            message: payload.recordedMessage,
-            submit: payload.recordedSubmit,
-            verify: payload.recordedVerify)
-        await finishActuation(actuationID, .refused(.notEligible), error: message)
-        return RPCResponse(error: message)
-    }
-
+    /// `phoneCheck` is the paired phone's refusals (`phoneSendRefusal`), and
+    /// nil for every other caller. The core calls it with the terminal row
+    /// and the payload it resolved itself, right after its shape check and
+    /// its terminal and local-worktree lookup succeed, and before any other
+    /// rail runs or anything is typed, so the phone's checks judge the very
+    /// row this send goes to (see `sendFromPairedPhone`). A refusal it returns
+    /// is recorded as the core records a declined well-formed act — a request
+    /// row naming `actor`, then a `refused(.notEligible)` outcome carrying the
+    /// refusal — and is the answer. It is synchronous on purpose: it cannot
+    /// await, so it cannot read a row of its own from the database, and
+    /// judges only the values it is handed.
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,
         envelope: DispatchEnvelopeDisposition = .attached,
-        connection: RPCConnectionContext? = nil
+        connection: RPCConnectionContext? = nil,
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> String?)? = nil
     ) async throws -> RPCResponse {
         // ─── The first of two refusal lines, and the reason they differ ───
         //
@@ -4108,6 +4095,15 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
+        // ─── The paired phone's own refusals ───
+        //
+        // Judged on THIS `terminal`, the row every rail below reads and the
+        // pane is addressed through, never on a row the phone rail read for
+        // itself: the send lane orders sends only, and `terminal.recreateWindow`
+        // can turn a Claude row into a shell outside it. Recorded below, once
+        // the request row exists, as a declined well-formed act.
+        let phoneRefusal = phoneCheck?(terminal, payload)
+
         // Request row first: the target is resolved and the payload is known,
         // and nothing has touched the pane yet. The paste and the Enter are
         // sub-steps of one send, so they share this one row.
@@ -4122,6 +4118,11 @@ extension RPCRouter {
             message: payload.recordedMessage,
             submit: payload.recordedSubmit,
             verify: payload.recordedVerify)
+
+        if let phoneRefusal {
+            await finishActuation(actuationID, .refused(.notEligible), error: phoneRefusal)
+            return RPCResponse(error: phoneRefusal)
+        }
 
         // ─── The transport's own declining rail ───
         //
