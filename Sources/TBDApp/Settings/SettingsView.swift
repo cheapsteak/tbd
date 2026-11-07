@@ -3,6 +3,16 @@ import SwiftUI
 import TBDShared
 import UniformTypeIdentifiers
 
+/// The Settings window's tabs. `AppState.settingsTab` holds the selected one,
+/// so a menu item or a chip can open Settings on a given tab.
+enum SettingsTab: Hashable {
+    case general
+    case repositories
+    case terminal
+    case modelProfiles
+    case phone
+}
+
 struct SettingsView: View {
     var body: some View {
         TabView {

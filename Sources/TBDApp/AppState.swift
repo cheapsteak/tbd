@@ -1282,6 +1282,24 @@ final class AppState {
     /// Worktrees with a dev server running by a live running file or a live
     /// TBD server tab (`server.summary`) — the sidebar's green dot.
     var devServerRunningWorktreeIDs: Set<UUID> = []
+    /// Phone control's status from `phone.status`: the settings, the relay,
+    /// the connected phones and any pairing offer. Nil until the first read
+    /// succeeds; a failed read keeps the last one. See `AppState+Phone.swift`.
+    var phoneStatus: PhoneStatusResult?
+    /// The paired phones, from `phone.devices`.
+    var phoneDevices: [PhoneDevice] = []
+    /// Why the last phone read failed, in the daemon's words; nil once one
+    /// succeeds.
+    var phoneStatusError: String?
+    /// The Settings window's selected tab, so the Phone menu item and the
+    /// status-bar chip can open it on Phone.
+    var settingsTab: SettingsTab = .general
+    /// Set by "Set Up Phone Relay…": the Phone pane presents its relay setup
+    /// sheet and clears the flag.
+    var phoneRelaySetupRequested = false
+    /// The newest phone refresh started. Refreshes overlap (a delta, an
+    /// action, the pane appearing); an answer from an older one is dropped.
+    @ObservationIgnored var phoneRefreshGeneration: UInt64 = 0
     /// Failures from the last Start/Stop/Restart per worktree, shown at the
     /// bottom of the Servers menu.
     var devServerActionMessages: [UUID: [String]] = [:]
@@ -2598,6 +2616,14 @@ final class AppState {
             try await daemonClient.listDevServers(worktreeID: id, runStatusCommands: runStatus) }
     @ObservationIgnored lazy var devServerSummaryFetcher: @MainActor () async throws -> DevServerSummaryResult =
         { [daemonClient] in try await daemonClient.devServerSummary() }
+    /// The phone control RPCs, behind a protocol so tests drive them without
+    /// a daemon.
+    @ObservationIgnored lazy var phoneClient: any PhoneControlClient = daemonClient
+    /// Opens the Settings window. Under `swift test` `NSApp` is nil, and tests
+    /// replace this to see that it was asked.
+    @ObservationIgnored var settingsWindowOpener: @MainActor () -> Void = {
+        _ = NSApp?.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
     @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
         { [daemonClient] action, id, names in
             switch action {
@@ -3510,6 +3536,8 @@ final class AppState {
             )
         case .devServersChanged:
             Task { [weak self] in await self?.refreshDevServersAfterChange() }
+        case .phoneStatusChanged:
+            Task { [weak self] in await self?.refreshPhone() }
         case .panelSurfaceChanged(let delta):
             applyPanelSurfaceDelta(delta)
         default:
@@ -4316,6 +4344,7 @@ final class AppState {
             startSubscription()
             await refreshPRStatuses()
             await refreshDevServerSummary()
+            await refreshPhone()
             pushClaudeSpawnPreferences()
             pushForegroundState()
             // Last, so the initial load never waits on it.
