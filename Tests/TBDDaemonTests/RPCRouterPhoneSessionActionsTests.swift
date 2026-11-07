@@ -54,7 +54,7 @@ struct RPCRouterPhoneSessionActionsTests {
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         return try await f.db.worktrees.create(
             repoID: repo.id, name: name, branch: "main",
-            path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
+            path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
     }
 
     // MARK: - Handler-backed methods carry the phone actor
