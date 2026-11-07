@@ -135,6 +135,30 @@ struct ClaudeTranscriptLocatorTests {
         #expect(path == nil, "path was \(path ?? "nil")")
     }
 
+    /// A profile's `projects/` is usually a symlink into the host store, so
+    /// the two roots are one, and the answer is the host root's path even
+    /// when the session file can be reached through the profile root too.
+    @Test func aProfileRootLinkedToTheHostRootGivesTheHostPath() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let hostRoot = tmp.appendingPathComponent("host-projects", isDirectory: true)
+        let profileRoot = tmp.appendingPathComponent("profile-projects", isDirectory: true)
+        let worktreePath = "/acme/locator-\(UUID().uuidString.prefix(8))"
+        let folder = Self.projectFolder(for: worktreePath)
+        let projectDir = hostRoot.appendingPathComponent(folder, isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let hostFile = projectDir.appendingPathComponent("sess-7.jsonl")
+        try Data().write(to: hostFile)
+        try FileManager.default.createSymbolicLink(at: profileRoot, withDestinationURL: hostRoot)
+
+        let t = terminal(sessionID: "sess-7", transcriptPath: nil)
+        let path = ClaudeTranscriptLocator.filePath(
+            terminal: t, worktreePath: worktreePath,
+            projectsBase: hostRoot, profileProjectsBase: profileRoot)
+
+        #expect(path == hostFile.path, "path was \(path ?? "nil")")
+    }
+
     /// The stored path still wins over a profile root.
     @Test func aStoredPathWinsOverAProfileRoot() {
         let t = terminal(sessionID: "sess-1", transcriptPath: "/acme/stored/sess-1.jsonl")
