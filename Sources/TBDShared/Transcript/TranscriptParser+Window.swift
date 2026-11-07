@@ -299,13 +299,8 @@ extension TranscriptParser {
             lines.offsets.append(offset)
             lines.stableIDs.append((json["uuid"] as? String) ?? "at-\(offset)")
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                for block in array where (block["type"] as? String) == "tool_result" {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    lines.toolResultsByID[id] = extractToolResult(from: block)
-                }
+            for toolResult in toolResults(fromLine: json) {
+                lines.toolResultsByID[toolResult.id] = toolResult.result
             }
             lines.fileEdits.merge(fileEditStats(fromLine: json)) { _, newer in newer }
             lines.subagentAgentIDs.merge(subagentAgentIDs(fromLine: json)) { _, newer in newer }

@@ -63,14 +63,8 @@ public enum TranscriptParser {
             rawLines.append(json)
             stableIDs.append((json["uuid"] as? String) ?? "line-\(lineIndex)")
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
-                for block in toolResultBlocks {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = extractToolResult(from: block)
-                }
+            for toolResult in toolResults(fromLine: json) {
+                toolResultsByID[toolResult.id] = toolResult.result
             }
         }
 
@@ -190,14 +184,8 @@ public enum TranscriptParser {
             rawLines.append(json)
             stableIDs.append((json["uuid"] as? String) ?? "tail-\(lineIndex)")
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
-                for block in toolResultBlocks {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = extractToolResult(from: block)
-                }
+            for toolResult in toolResults(fromLine: json) {
+                toolResultsByID[toolResult.id] = toolResult.result
             }
         }
 
@@ -721,6 +709,23 @@ public enum TranscriptParser {
 
     public static let bodyCharCap = 2000
     static let bodyLineCap = 20
+
+    /// The `tool_result` blocks of a user line's `message.content`, in block
+    /// order, each with its `tool_use_id` and its result from
+    /// `extractToolResult(from:)`. A block with no string `tool_use_id` is
+    /// skipped. Any other line, or a user line whose content is not an array
+    /// of blocks, has none. Sidechain lines are not told apart.
+    static func toolResults(fromLine json: [String: Any]) -> [(id: String, result: ToolResult)] {
+        guard json["type"] as? String == "user",
+              let message = json["message"] as? [String: Any],
+              let blocks = message["content"] as? [[String: Any]] else { return [] }
+        var results: [(id: String, result: ToolResult)] = []
+        for block in blocks where (block["type"] as? String) == "tool_result" {
+            guard let id = block["tool_use_id"] as? String else { continue }
+            results.append((id: id, result: extractToolResult(from: block)))
+        }
+        return results
+    }
 
     public static func extractToolResult(from block: [String: Any]) -> ToolResult {
         let isError = (block["is_error"] as? Bool) ?? false

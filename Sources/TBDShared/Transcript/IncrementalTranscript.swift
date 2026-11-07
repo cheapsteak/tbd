@@ -144,18 +144,14 @@ public struct IncrementalTranscript: Sendable {
                 rowUUIDs.insert(uuid)
             }
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                for block in array where (block["type"] as? String) == "tool_result" {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = TranscriptParser.extractToolResult(from: block)
-                    if seenResolved.insert(id).inserted { resolvedToolUseIDs.append(id) }
-                    // A result for a call built in an EARLIER ingest must patch
-                    // that item. One for a call in THIS batch is picked up by
-                    // buildItems below and needs no patch.
-                    if toolCallIndexByID[id] != nil { newlyResolved.append(id) }
-                }
+            for entry in TranscriptParser.toolResults(fromLine: json) {
+                let id = entry.id
+                toolResultsByID[id] = entry.result
+                if seenResolved.insert(id).inserted { resolvedToolUseIDs.append(id) }
+                // A result for a call built in an EARLIER ingest must patch
+                // that item. One for a call in THIS batch is picked up by
+                // buildItems below and needs no patch.
+                if toolCallIndexByID[id] != nil { newlyResolved.append(id) }
             }
         }
 
