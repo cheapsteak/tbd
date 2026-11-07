@@ -178,6 +178,9 @@ enum WheelOutcome: Sendable, Equatable {
     case none
     /// Write these bytes to the pty (mouse tracking is on).
     case report([UInt8])
+    /// Write these bytes to the pty: one cursor-up or cursor-down key per row, because a program
+    /// on the alternate screen with alternate scroll (`?1007h`) asked for the wheel as arrow keys.
+    case cursorKeys([UInt8])
     /// Mouse tracking is off and the viewport was scrolled by this many rows (negative = up).
     case scrolledViewport(rows: Int)
 }
@@ -462,14 +465,19 @@ final class MouseEncoder {
         return Array(stack.prefix(written))
     }
 
-    /// Turn accumulated whole rows of scrolling into either mouse reports or a viewport scroll.
+    /// Turn accumulated whole rows of scrolling into mouse reports, arrow keys or a viewport scroll.
     ///
     /// - Parameter rows: whole rows to scroll; **negative = up**, matching
     ///   `GHOSTTY_SCROLL_VIEWPORT_DELTA` ("up is negative"). Feed it from `ScrollAccumulator`.
     ///
-    /// With tracking on, one *press* report per row is emitted for button four (up) / five (down);
-    /// that is what xterm-style wheel reporting is — see the measured bytes in the tests.
-    /// With tracking off the viewport is scrolled instead and no bytes are produced.
+    /// The order is Ghostty's own (`Surface.zig`, `scrollCallback`):
+    ///   * With tracking on, one *press* report per row is emitted for button four (up) / five
+    ///     (down); that is what xterm-style wheel reporting is — see the measured bytes in the tests.
+    ///   * Otherwise, on the alternate screen, the wheel is arrow keys when the program has
+    ///     alternate scroll (`?1007`) set, which is how `less`, `man` and vim scroll by wheel, and
+    ///     nothing when it has not: the alternate screen has no scrollback to move through.
+    ///   * Otherwise the viewport is scrolled and no bytes are produced.
+    ///
     /// Caller holds the terminal lock.
     func wheel(
         rows: Int,
@@ -480,6 +488,11 @@ final class MouseEncoder {
         guard rows != 0 else { return .none }
 
         guard isReporting(terminal: terminal) else {
+            if Self.isAlternateScreen(terminal) {
+                guard Self.mode(Self.alternateScrollMode, of: terminal) else { return .none }
+                return .cursorKeys(Self.alternateScrollKeys(
+                    rows: rows, applicationCursorKeys: Self.mode(Self.applicationCursorKeysMode, of: terminal)))
+            }
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
             behavior.value.delta = rows
@@ -498,6 +511,35 @@ final class MouseEncoder {
             if let encoded = try encodeEvent(press, with: handle, anyPressed: true) { bytes += encoded }
         }
         return bytes.isEmpty ? .none : .report(bytes)
+    }
+
+    // MARK: Alternate scroll
+
+    /// DEC private mode 1007, alternate scroll. On in a new terminal, as in Ghostty and SwiftTerm.
+    static let alternateScrollMode: UInt16 = 1007
+    /// DEC private mode 1, DECCKM: the cursor keys send `ESC O A` rather than `ESC [ A`.
+    static let applicationCursorKeysMode: UInt16 = 1
+
+    /// The keys `rows` of wheel scrolling type under alternate scroll: one cursor key per row, up
+    /// for negative rows. Under DECCKM they are the application form, as the real keys are.
+    static func alternateScrollKeys(rows: Int, applicationCursorKeys: Bool) -> [UInt8] {
+        let key: [UInt8] = [0x1B, UInt8(ascii: applicationCursorKeys ? "O" : "["), UInt8(ascii: rows < 0 ? "A" : "B")]
+        return Array([[UInt8]](repeating: key, count: abs(rows)).joined())
+    }
+
+    /// True while `terminal` shows the alternate screen. Caller holds the lock.
+    private static func isAlternateScreen(_ terminal: VtTerminal) -> Bool {
+        var screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY
+        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) == GHOSTTY_SUCCESS
+        else { return false }
+        return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
+    }
+
+    /// Whether DEC private mode `number` is set on `terminal`. Caller holds the lock.
+    private static func mode(_ number: UInt16, of terminal: VtTerminal) -> Bool {
+        var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(number, false), value: false)
+        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS else { return false }
+        return config.value
     }
 }
 

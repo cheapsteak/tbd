@@ -1,0 +1,343 @@
+import AppKit
+import Foundation
+import GhosttyVt
+import Metal
+@testable import TBDGhosttyTerminal
+import TestSupport
+import Testing
+
+// This file imports `GhosttyVt` for the Kitty storage limit and build info, and the C terminal type
+// is also named `GhosttyTerminal`, so the Swift class is spelled with its module name throughout.
+
+/// What a view sent. Main-actor isolated, so a `@MainActor` callback can append to it without
+/// capturing a mutable local.
+@MainActor
+private final class WheelSent {
+    var sent: [[UInt8]] = []
+}
+
+private func makeTerminal(
+    cols: Int = 80, rows: Int = 24, callbacks: GhosttyTerminalCallbacks = GhosttyTerminalCallbacks()
+) throws -> TBDGhosttyTerminal.GhosttyTerminal {
+    try TBDGhosttyTerminal.GhosttyTerminal(cols: cols, rows: rows, scrollbackLines: 100, callbacks: callbacks)
+}
+
+/// Ten-pixel cells, so the point (5, 5) is cell 1;1.
+private let wheelGeometry = TerminalPixelGeometry(screenWidth: 800, screenHeight: 240, cellWidth: 10, cellHeight: 10)
+private let wheelPoint = SurfacePoint(x: 5, y: 5)
+
+/// `count` copies of `key`, back to back.
+private func repeated(_ key: String, _ count: Int) -> [UInt8] {
+    Array(String(repeating: key, count: count).utf8)
+}
+
+private func describe(_ outcome: WheelOutcome) -> String {
+    switch outcome {
+    case .none: "nothing"
+    case .report(let bytes): "the report \(String(decoding: bytes, as: UTF8.self).debugDescription)"
+    case .cursorKeys(let bytes): "the keys \(String(decoding: bytes, as: UTF8.self).debugDescription)"
+    case .scrolledViewport(let rows): "a viewport scroll of \(rows) rows"
+    }
+}
+
+private func scrollMetrics(of terminal: TBDGhosttyTerminal.GhosttyTerminal) throws -> TerminalScrollMetrics {
+    try terminal.withLocked { state in
+        TerminalScrollMetrics.read(try #require(state.raw, "the terminal is closed"))
+    }
+}
+
+/// The Kitty image storage limit of the active screen, or nil when the library was built without
+/// Kitty graphics.
+private func kittyStorageLimit(of terminal: TBDGhosttyTerminal.GhosttyTerminal) throws -> UInt64? {
+    try terminal.withLocked { state -> UInt64? in
+        let raw = try #require(state.raw, "the terminal is closed")
+        var limit: UInt64 = .max
+        let result = ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, &limit)
+        if result == GHOSTTY_UNSUPPORTED { return nil }
+        try #require(result == GHOSTTY_SUCCESS, "reading the Kitty storage limit returned \(result.rawValue)")
+        return limit
+    }
+}
+
+/// True when this build of libghostty has Kitty graphics at all.
+private func libraryHasKittyGraphics() -> Bool {
+    var enabled = false
+    guard ghostty_build_info(GHOSTTY_BUILD_INFO_KITTY_GRAPHICS, &enabled) == GHOSTTY_SUCCESS else { return false }
+    return enabled
+}
+
+/// A Kitty graphics query that a terminal with the protocol answers `OK`: one 1×1 RGB pixel, sent
+/// directly, for image 31.
+private let kittyQuery = "\u{1b}_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\u{1b}\\"
+/// The plan's shorter query, with no image size. A terminal with the protocol answers it with an
+/// error rather than `OK`; one without it answers nothing.
+private let shortKittyQuery = "\u{1b}_Gi=1,a=q;AAAA\u{1b}\\"
+
+private func repliesText(_ recorder: CallbackRecorder) -> String {
+    recorder.writes.map { String(decoding: $0, as: UTF8.self) }.joined()
+}
+
+@Suite(.fastPassBounded)
+@MainActor
+struct WheelPowerlineKittyTests {
+    // MARK: - Wheel
+
+    /// On the alternate screen, with alternate scroll on and no mouse reporting, each wheel row is
+    /// an arrow key: the application form under DECCKM, nothing once the program turns alternate
+    /// scroll off, and mouse reports once it turns reporting on.
+    @Test func wheelSendsArrowsOnAlternateScreenWithAlternateScroll() throws {
+        let terminal = try makeTerminal()
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(wheelGeometry)
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[?1007h")
+
+        let down = terminal.mouseWheel(rows: 3, at: wheelPoint, mods: [])
+        #expect(down == .cursorKeys(repeated("\u{1b}[B", 3)), "three rows down gave \(describe(down))")
+        let up = terminal.mouseWheel(rows: -2, at: wheelPoint, mods: [])
+        #expect(up == .cursorKeys(repeated("\u{1b}[A", 2)), "two rows up gave \(describe(up))")
+
+        terminal.feed(text: "\u{1b}[?1h")
+        let application = terminal.mouseWheel(rows: 1, at: wheelPoint, mods: [])
+        #expect(application == .cursorKeys(Array("\u{1b}OB".utf8)), "under DECCKM a row down gave \(describe(application))")
+
+        terminal.feed(text: "\u{1b}[?1007l")
+        let off = terminal.mouseWheel(rows: 3, at: wheelPoint, mods: [])
+        #expect(off == .none, "with alternate scroll off the wheel gave \(describe(off))")
+
+        terminal.feed(text: "\u{1b}[?1007h\u{1b}[?1000h\u{1b}[?1006h")
+        let tracked = terminal.mouseWheel(rows: 1, at: wheelPoint, mods: [])
+        guard case .report(let bytes) = tracked, bytes.starts(with: Array("\u{1b}[<65;".utf8)) else {
+            Issue.record("with mouse reporting on the wheel gave \(describe(tracked)), not a button-5 report")
+            return
+        }
+    }
+
+    /// A new terminal has alternate scroll on, as Ghostty and SwiftTerm do, so `less` scrolls by wheel
+    /// without asking. Through the view: three wheel-down lines send three cursor-down keys.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func wheelLinesReachTheProgramAsArrowKeys() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h")
+        #expect(terminal.withLocked { $0.mode(1007) }, "a new terminal starts with alternate scroll off")
+
+        let outcome = view.mouseController.handleWheel(
+            deltaY: -3, hasPreciseDeltas: false, gestureEnded: false, at: wheelPoint, mods: [], in: view)
+        #expect(recorder.sent == [repeated("\u{1b}[B", 3)], "three wheel-down lines sent \(recorder.sent), from \(describe(outcome))")
+    }
+
+    /// A trackpad moves by fractions of a line. They add up to whole lines, and the fraction left
+    /// when a gesture ends is dropped, so a short flick sends nothing.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func trackpadFractionsBuildUpIntoWholeLines() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h")
+        // Points down, as `scrollingDeltaY` reports a scroll toward the end.
+        let fraction = -0.3 * Double(view.cellSize.height)
+
+        Self.trackpadScroll(view, deltaY: fraction, ended: true)
+        #expect(recorder.sent.isEmpty, "a 0.3-line flick sent \(recorder.sent)")
+
+        // Had the flick's fraction been kept, the third of these would make a whole line.
+        for _ in 0..<3 { Self.trackpadScroll(view, deltaY: fraction, ended: false) }
+        #expect(recorder.sent.isEmpty, "0.9 of a line sent \(recorder.sent)")
+        Self.trackpadScroll(view, deltaY: fraction, ended: false)
+        #expect(recorder.sent == [Array("\u{1b}[B".utf8)], "1.2 lines sent \(recorder.sent)")
+    }
+
+    /// On the primary screen the wheel moves the viewport through scrollback and sends the program
+    /// nothing, alternate scroll or not.
+    @Test func wheelScrollsViewportOnPrimaryScreen() throws {
+        let recorder = CallbackRecorder()
+        let terminal = try makeTerminal(callbacks: recorder.callbacks)
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(wheelGeometry)
+        terminal.feed(text: (0..<60).map { "line \($0)\r\n" }.joined() + "\u{1b}[?1007h")
+        let bottom = try scrollMetrics(of: terminal)
+        try #require(bottom.scrollableRows >= 3, "60 lines left only \(bottom.scrollableRows) rows of scrollback")
+
+        let up = terminal.mouseWheel(rows: -3, at: wheelPoint, mods: [])
+        #expect(up == .scrolledViewport(rows: -3), "three rows up gave \(describe(up))")
+        let scrolled = try scrollMetrics(of: terminal)
+        #expect(scrolled.offset == bottom.offset - 3, "the viewport went from row \(bottom.offset) to \(scrolled.offset)")
+
+        let down = terminal.mouseWheel(rows: 3, at: wheelPoint, mods: [])
+        #expect(down == .scrolledViewport(rows: 3), "three rows down gave \(describe(down))")
+        #expect(try scrollMetrics(of: terminal).offset == bottom.offset, "the viewport did not come back to the bottom")
+        #expect(recorder.writes.isEmpty, "scrolling the primary screen sent \(recorder.writes)")
+    }
+
+    // MARK: - Powerline
+
+    /// The four separators are drawn as sprites that fill the cell: the solid arrows have a full
+    /// edge on their base side and reach the other edge at mid-height, and the outlines are hollow.
+    @Test func powerlineSpritesFillTheCell() throws {
+        let fontSet = FontSet(font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular), scale: 2)
+        let metrics = CellMetrics(fontSet: fontSet)
+        let sprites = BoxSprites(metrics: metrics, padding: 1)
+        let width = metrics.width
+        let height = metrics.height
+        for value: UInt32 in 0xE0B0...0xE0B3 {
+            #expect(BoxSprites.covers(try #require(Unicode.Scalar(value))), "U+\(String(value, radix: 16)) is not a sprite")
+        }
+        #expect(!BoxSprites.covers("\u{E0B4}"), "U+E0B4, which nothing draws, was taken as a sprite")
+
+        let right = try #require(sprites.rasterize("\u{E0B0}"))
+        let rightOutline = try #require(sprites.rasterize("\u{E0B1}"))
+        let left = try #require(sprites.rasterize("\u{E0B2}"))
+        let leftOutline = try #require(sprites.rasterize("\u{E0B3}"))
+        for glyph in [right, rightOutline, left, leftOutline] {
+            #expect(glyph.width == width + 2 && glyph.height == height + 2, "a sprite is \(glyph.width)×\(glyph.height)")
+        }
+
+        /// The coverage of cell pixel (x, y), y from the top. The bitmap's first row is its top.
+        func alpha(_ glyph: RasterizedGlyph, _ x: Int, _ y: Int) -> UInt8 {
+            glyph.pixels[(y + 1) * glyph.bytesPerRow + (x + 1) * glyph.bytesPerPixel]
+        }
+        func solidRows(_ glyph: RasterizedGlyph, column: Int) -> Int {
+            (0..<height).filter { alpha(glyph, column, $0) > 128 }.count
+        }
+        func ink(_ glyph: RasterizedGlyph) -> Int { glyph.pixels.reduce(0) { $0 + Int($1) } }
+
+        #expect(solidRows(right, column: 0) >= height - 4, "U+E0B0's base is solid in \(solidRows(right, column: 0)) of \(height) rows")
+        #expect(alpha(right, width - 1, height / 2) > 64, "U+E0B0 does not reach the right edge")
+        #expect(alpha(right, width - 1, 0) == 0 && alpha(right, width - 1, height - 1) == 0, "U+E0B0 fills its right corners")
+
+        #expect(solidRows(left, column: width - 1) >= height - 4,
+                "U+E0B2's base is solid in \(solidRows(left, column: width - 1)) of \(height) rows")
+        #expect(alpha(left, 0, height / 2) > 64, "U+E0B2 does not reach the left edge")
+        #expect(alpha(left, 0, 0) == 0 && alpha(left, 0, height - 1) == 0, "U+E0B2 fills its left corners")
+
+        #expect(alpha(rightOutline, width - 1, height / 2) > 64, "U+E0B1 does not reach the right edge")
+        #expect(alpha(rightOutline, 0, height / 2) == 0, "U+E0B1 is filled where it should be hollow")
+        #expect(alpha(leftOutline, 0, height / 2) > 64, "U+E0B3 does not reach the left edge")
+        #expect(alpha(leftOutline, width - 1, height / 2) == 0, "U+E0B3 is filled where it should be hollow")
+        #expect(ink(rightOutline) < ink(right) / 2 && ink(leftOutline) < ink(left) / 2,
+                "an outline carries as much ink as the solid arrow")
+    }
+
+    /// The separators reach the screen: each cell of a frame holding them has ink, and the solid
+    /// arrows are heavy on their base side.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func powerlineGlyphsRender() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let glyphCache = GlyphCache(fontSet: FontSet(font: font, scale: 2), device: device)
+        let renderer = try TerminalRenderer(device: device, glyphCache: glyphCache)
+
+        let terminal = try makeTerminal(cols: 5, rows: 1)
+        defer { terminal.close() }
+        // White on black, with a blank control cell at the end.
+        terminal.feed(text: "\u{1b}[38;2;255;255;255;48;2;0;0;0m\u{E0B0}\u{E0B1}\u{E0B2}\u{E0B3} \u{1b}[0m")
+
+        let surface = TerminalSurface()
+        try surface.attach(terminal)
+        let size = renderer.drawableSize(columns: 5, rows: 1)
+        let texture = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
+        let outcome = try renderer.render(surface: surface, to: texture)
+        #expect(outcome.didEncode, "the first frame after attach was skipped")
+        outcome.commandBuffer?.waitUntilCompleted()
+
+        let pixels = TerminalRenderer.bgraBytes(of: texture)
+        let metrics = glyphCache.metrics
+        /// Light pixels in `column`, between `from` and `to` thirds of its width.
+        func inked(column: Int, thirds: Range<Int> = 0..<3) -> Int {
+            let start = column * metrics.width + metrics.width * thirds.lowerBound / 3
+            let end = column * metrics.width + metrics.width * thirds.upperBound / 3
+            var count = 0
+            for y in 0..<metrics.height {
+                for x in start..<end {
+                    let offset = (y * texture.width + x) * 4
+                    if max(pixels[offset], pixels[offset + 1], pixels[offset + 2]) > 64 { count += 1 }
+                }
+            }
+            return count
+        }
+
+        let blank = inked(column: 4)
+        for column in 0..<4 {
+            #expect(inked(column: column) > blank, "cell \(column) holds no more light than the blank cell (\(blank))")
+        }
+        let rightBase = inked(column: 0, thirds: 0..<1)
+        let rightPoint = inked(column: 0, thirds: 2..<3)
+        #expect(rightBase > rightPoint * 2, "U+E0B0 has \(rightBase) light pixels on its base side and \(rightPoint) at its point")
+        let leftBase = inked(column: 2, thirds: 2..<3)
+        let leftPoint = inked(column: 2, thirds: 0..<1)
+        #expect(leftBase > leftPoint * 2, "U+E0B2 has \(leftBase) light pixels on its base side and \(leftPoint) at its point")
+    }
+
+    // MARK: - Kitty graphics
+
+    /// Nothing draws Kitty images, so a program asking whether they are supported gets no answer,
+    /// on either screen and after either kind of reset: the storage limit is zero.
+    @Test func kittyGraphicsQueryGetsNoOK() throws {
+        let recorder = CallbackRecorder()
+        let terminal = try makeTerminal(callbacks: recorder.callbacks)
+        defer { terminal.close() }
+
+        try Self.expectNoKittyReply("on the primary screen", terminal: terminal, recorder: recorder)
+        terminal.feed(text: "\u{1b}[?1049h")
+        try Self.expectNoKittyReply("on the alternate screen", terminal: terminal, recorder: recorder)
+        terminal.feed(text: "\u{1b}[?1049l")
+        terminal.reset()
+        try Self.expectNoKittyReply("after a reset", terminal: terminal, recorder: recorder)
+        terminal.feed(text: "\u{1b}c")
+        try Self.expectNoKittyReply("after a RIS", terminal: terminal, recorder: recorder)
+        terminal.feed(text: "\u{1b}[?1049h")
+        try Self.expectNoKittyReply("on the alternate screen after a RIS", terminal: terminal, recorder: recorder)
+    }
+
+    /// Feeds both Kitty queries and expects no reply to either, and a storage limit of zero.
+    private static func expectNoKittyReply(
+        _ situation: String, terminal: TBDGhosttyTerminal.GhosttyTerminal, recorder: CallbackRecorder
+    ) throws {
+        let before = recorder.writes.count
+        terminal.feed(text: kittyQuery + shortKittyQuery)
+        let replies = recorder.writes.dropFirst(before).map { String(decoding: $0, as: UTF8.self) }.joined()
+        #expect(!replies.contains("OK"), "\(situation), a Kitty query was answered OK: \(replies.debugDescription)")
+        #expect(!replies.contains("\u{1b}_G"), "\(situation), a Kitty query was answered: \(replies.debugDescription)")
+        if let limit = try kittyStorageLimit(of: terminal) {
+            #expect(limit == TBDGhosttyTerminal.GhosttyTerminal.kittyImageStorageLimit,
+                    "\(situation), the Kitty storage limit is \(limit) bytes")
+        }
+    }
+
+    /// The control for the test above: with the library's own limit put back, the same query is
+    /// answered OK, so the silence there comes from the limit and not from the query.
+    @Test(.enabled(if: libraryHasKittyGraphics(), "this libghostty was built without Kitty graphics"))
+    func kittyGraphicsQueryIsAnsweredWithTheLibraryDefault() throws {
+        let recorder = CallbackRecorder()
+        let terminal = try makeTerminal(callbacks: recorder.callbacks)
+        defer { terminal.close() }
+
+        let restored = terminal.withRaw { raw in
+            ghostty_terminal_set(raw, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, nil)
+        }
+        try #require(restored == GHOSTTY_SUCCESS, "putting the default Kitty limit back returned \(String(describing: restored))")
+        terminal.feed(text: kittyQuery)
+        let replies = repliesText(recorder)
+        #expect(replies.contains("OK"), "with the library's limit the query was answered \(replies.debugDescription)")
+    }
+
+    // MARK: - Fixture
+
+    /// One trackpad wheel event of `deltaY` points through the view's mouse controller.
+    private static func trackpadScroll(_ view: GhosttyTerminalView, deltaY: Double, ended: Bool) {
+        view.mouseController.handleWheel(
+            deltaY: deltaY, hasPreciseDeltas: true, gestureEnded: ended, at: wheelPoint, mods: [], in: view)
+    }
+
+    /// A terminal and a windowless view over it, 400×200 points, recording what it sends.
+    private func makeView() throws -> (TBDGhosttyTerminal.GhosttyTerminal, GhosttyTerminalView, WheelSent) {
+        let terminal = try makeTerminal()
+        let appearance = GhosttyAppearance(
+            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            foreground: .init(r: 0xDD, g: 0xDD, b: 0xDD),
+            background: .init(r: 0x10, g: 0x10, b: 0x10),
+            cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
+        let view = try GhosttyTerminalView(terminal: terminal, appearance: appearance)
+        view.setFrameSize(NSSize(width: 400, height: 200))
+        let recorder = WheelSent()
+        view.onSend = { recorder.sent.append($0) }
+        return (terminal, view, recorder)
+    }
+}

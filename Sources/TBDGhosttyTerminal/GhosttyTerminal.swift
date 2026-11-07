@@ -427,6 +427,9 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// in the middle of it fails.
     /// 64 KiB: the tracker allocates 4 KiB up front, grows on demand, and keeps its largest size.
     static let continuationMaxBytes = 64 << 10
+    /// The Kitty image storage limit every terminal is given. Zero disables the protocol: nothing
+    /// draws images, so no program should be told they are shown.
+    static let kittyImageStorageLimit: UInt64 = 0
 
     /// Sets every option a new terminal needs. Runs before any byte is fed.
     private static func configure(_ terminal: VtTerminal, context: IOContext, scrollbackLines: Int) throws {
@@ -507,6 +510,17 @@ public final class GhosttyTerminal: @unchecked Sendable {
         // to be on before the sequence starts, so it is set here, before the first byte.
         var retainedBytes = continuationMaxBytes
         try set(GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &retainedBytes, "CONTINUATION_MAX_BYTES")
+        // Kitty graphics off. The renderer draws no images, but libghostty stores them by default
+        // (a 10 MB limit) and answers a program's support query with OK, so the program sends
+        // images nobody sees. A limit of zero turns the protocol off on both screens, and through
+        // a reset: libghostty then answers no Kitty graphics command at all, as a terminal without
+        // the protocol does. A library built without Kitty graphics has nothing to turn off, and
+        // says so with GHOSTTY_UNSUPPORTED.
+        var kittyImageLimit = kittyImageStorageLimit
+        let kitty = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &kittyImageLimit)
+        if kitty != GHOSTTY_UNSUPPORTED {
+            try ghosttyCheck(kitty, "ghostty_terminal_set(KITTY_IMAGE_STORAGE_LIMIT)")
+        }
     }
 
     // MARK: Locking

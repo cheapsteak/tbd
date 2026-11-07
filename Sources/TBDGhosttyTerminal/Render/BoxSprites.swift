@@ -7,6 +7,12 @@
 // stripes), the eighth-blocks do not line up into a ramp, and `┌──┐` corners miss each other by a
 // pixel. Ghostty, kitty and Terminal.app all synthesize these; so do we.
 //
+// The four Powerline separators, U+E0B0…U+E0B3, are drawn here too. They live in the Private Use
+// Area, so a font without Powerline glyphs has nothing for them, and a shell prompt or a vim status
+// line full of them turns into missing-glyph boxes. A font that does have them draws them on its em
+// box, so the arrow stops short of the next cell's background, or overlaps it. Ghostty and kitty
+// draw these four as sprites for the same reasons.
+//
 // Every sprite is drawn at exactly `metrics.width × metrics.height` with `appliedScale = 1`, so it
 // tiles with its neighbours by construction and never goes through the rasterizer's fit/shrink
 // pass. Fills are integer rects with antialiasing off (crisp edges, no half-covered seam pixels);
@@ -17,7 +23,8 @@
 import CoreGraphics
 import Foundation
 
-/// Draws the box-drawing and block-element ranges as cell-exact bitmaps.
+/// Draws the box-drawing and block-element ranges, and the Powerline separators, as cell-exact
+/// bitmaps.
 ///
 /// Not `Sendable` (CoreGraphics state); owned by `GlyphCache` on the render thread.
 struct BoxSprites {
@@ -38,8 +45,12 @@ struct BoxSprites {
     }
 
     static func covers(_ scalar: Unicode.Scalar) -> Bool {
-        (0x2500...0x259F).contains(scalar.value)
+        (0x2500...0x259F).contains(scalar.value) || powerline.contains(scalar.value)
     }
+
+    /// The Powerline separators drawn here: U+E0B0 is a solid arrow pointing right and U+E0B1 its
+    /// outline; U+E0B2 and U+E0B3 are the same pointing left.
+    static let powerline: ClosedRange<UInt32> = 0xE0B0...0xE0B3
 
     // MARK: - Geometry
 
@@ -75,7 +86,9 @@ struct BoxSprites {
         let value = scalar.value
         guard BoxSprites.covers(scalar) else { return nil }
         return makeBitmap { ctx in
-            if value >= 0x2580 {
+            if BoxSprites.powerline.contains(value) {
+                self.drawPowerline(value, ctx)
+            } else if value >= 0x2580 {
                 self.drawBlock(value, ctx)
             } else {
                 self.drawBox(value, ctx)
@@ -455,5 +468,37 @@ struct BoxSprites {
         ctx.strokePath()
         ctx.setShouldAntialias(false)
         ctx.setAllowsAntialiasing(false)
+    }
+
+    // MARK: - Powerline (U+E0B0…U+E0B3)
+
+    /// U+E0B0 and U+E0B2 fill the whole cell with a triangle, its base on one edge and its point
+    /// at the middle of the other, so the arrow meets the next cell's background with no gap.
+    /// U+E0B1 and U+E0B3 are the same shape as a light stroke, cut off at the cell edges.
+    /// Antialiased: these are diagonals, and a stair-stepped one shows.
+    private func drawPowerline(_ value: UInt32, _ ctx: CGContext) {
+        let width = CGFloat(w)
+        let height = CGFloat(h)
+        let pointsRight = value == 0xE0B0 || value == 0xE0B1
+        let baseX: CGFloat = pointsRight ? 0 : width
+        let pointX: CGFloat = pointsRight ? width : 0
+
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        // A stroke's mitre at the point, and its ends, reach past the cell; the clip keeps them in.
+        ctx.clip(to: CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.setShouldAntialias(true)
+        ctx.setAllowsAntialiasing(true)
+        ctx.move(to: CGPoint(x: baseX, y: 0))
+        ctx.addLine(to: CGPoint(x: pointX, y: height / 2))
+        ctx.addLine(to: CGPoint(x: baseX, y: height))
+        if value == 0xE0B0 || value == 0xE0B2 {
+            ctx.closePath()
+            ctx.fillPath()
+        } else {
+            ctx.setLineWidth(CGFloat(light))
+            ctx.setLineJoin(.miter)
+            ctx.strokePath()
+        }
     }
 }

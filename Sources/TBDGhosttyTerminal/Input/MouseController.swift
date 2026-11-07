@@ -408,27 +408,49 @@ final class MouseController: NSObject {
     // MARK: Wheel
 
     private func scrollWheel(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
-        let mods = terminalModifiers(from: event.modifierFlags)
-        let position = surfacePoint(of: event, in: view)
-        let geometry = pushedGeometry ?? pixelGeometry(of: view)
-
-        let rows = wheelRows(
+        handleWheel(
             deltaY: event.scrollingDeltaY,
             hasPreciseDeltas: event.hasPreciseScrollingDeltas,
+            gestureEnded: event.phase.contains(.ended) || event.momentumPhase.contains(.ended),
+            at: surfacePoint(of: event, in: view),
+            mods: terminalModifiers(from: event.modifierFlags),
+            in: view)
+        return true
+    }
+
+    /// One wheel event, from its deltas on: whole rows from the accumulator, then a report or
+    /// arrow keys sent to the program, or a viewport scroll. Returns what the terminal decided.
+    ///
+    /// Separate from `scrollWheel` because `NSEvent.phase` is not settable on a synthesized event,
+    /// so the tests drive the whole path from here, the end of a gesture included.
+    @discardableResult
+    func handleWheel(
+        deltaY: Double,
+        hasPreciseDeltas: Bool,
+        gestureEnded: Bool,
+        at position: SurfacePoint,
+        mods: TerminalModifiers,
+        in view: GhosttyTerminalView
+    ) -> WheelOutcome {
+        let geometry = pushedGeometry ?? pixelGeometry(of: view)
+        let rows = wheelRows(
+            deltaY: deltaY,
+            hasPreciseDeltas: hasPreciseDeltas,
             backingScale: Double(view.backingScale),
             cellHeightPx: Double(geometry.cellHeight),
-            gestureEnded: event.phase.contains(.ended) || event.momentumPhase.contains(.ended))
-        guard rows != 0 else { return true }
+            gestureEnded: gestureEnded)
+        guard rows != 0 else { return .none }
 
-        switch view.terminal.mouseWheel(rows: rows, at: position, mods: mods) {
-        case .report(let bytes):
+        let outcome = view.terminal.mouseWheel(rows: rows, at: position, mods: mods)
+        switch outcome {
+        case .report(let bytes), .cursorKeys(let bytes):
             send(bytes)
         case .scrolledViewport:
             view.requestFrame()
         case .none:
             break
         }
-        return true
+        return outcome
     }
 
     /// Turns one wheel event into whole rows, carrying the sub-row remainder between events.
