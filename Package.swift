@@ -479,6 +479,9 @@ let package = Package(
                 "TBDGhosttyShaderTypes",
                 "GhosttyVt",
                 "TestSupport",
+                // The handover suites hold the libghostty walks and handback to SwiftTerm's.
+                "TBDTerminalSerialization",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
         .testTarget(
