@@ -478,6 +478,32 @@ struct GhosttyTerminalViewTests {
         #expect(!heldPastTimeout, "mode 2026 held 1.5 s past the show was not forced off")
     }
 
+    /// A skipped DEC 2026 frame keeps the link running so the watchdog is checked each tick. A
+    /// terminal that closes while the mode is held, common when a session ends mid-frame, has no
+    /// deadline left to wait out: the next tick must park the link, not leave it at 120 Hz.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aTerminalClosedDuringSyncOutputParksTheDisplayLink() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+
+        fixture.terminal.feed(text: "\u{1b}[?2026h")
+        view.renderTick(now: .seconds(100))
+        try #require(view.frameDriver.demand.hasSyncDeadline, "a frame under mode 2026 was not skipped")
+        try #require(!view.frameDriver.isPaused, "the link paused on a skipped frame")
+
+        fixture.terminal.close()
+        view.renderTick(now: .seconds(100.01))
+        #expect(!view.frameDriver.demand.hasSyncDeadline, "the closed terminal kept a sync deadline")
+        #expect(view.frameDriver.isPaused, "the link kept running after the terminal closed")
+    }
+
     /// A steady cursor set while the blink is in its off phase must show. DECSCUSR 1 is a
     /// blinking block and DECSCUSR 2 a steady one.
     @Test(.clockDriven, .enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

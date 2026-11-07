@@ -813,7 +813,14 @@ public final class GhosttyTerminalView: NSView {
     func renderTick(now: Duration = .seconds(CACurrentMediaTime())) {
         applyPendingGridResize()
         guard canBuildFrames else {
-            frameDriver.update { $0.needsUpdate = false }
+            // Nothing can be drawn, so there is no DEC 2026 deadline to wait out either. A kept
+            // deadline would hold the link running: a terminal closed right after a skipped frame
+            // would tick at 120 Hz for good. Every way back to drawable asks for a frame, and that
+            // tick reads the mode afresh.
+            frameDriver.update {
+                $0.needsUpdate = false
+                $0.hasSyncDeadline = false
+            }
             return
         }
         switch terminal.syncOutputDecision(now: now) {
