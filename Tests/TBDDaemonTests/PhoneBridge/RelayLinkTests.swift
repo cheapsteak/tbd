@@ -342,7 +342,8 @@ struct RelayLinkTests {
             #expect(await h.events.next() == .opened)
             let phone = try h.relay.joinAsPhone(room: h.room)
             #expect(await h.events.next() == .peerJoined)
-            #expect(try await phone.next() == .text("peer-joined"))
+            let awaited1 = try await phone.next()
+            #expect(awaited1 == .text("peer-joined"))
             try phone.send(.binary(Data([1, 2, 3])))
             #expect(await h.events.next() == .frame(Data([1, 2, 3])))
             phone.close()
@@ -373,9 +374,11 @@ struct RelayLinkTests {
             #expect(await h.events.next() == .opened)
             let phone = try h.relay.joinAsPhone(room: h.room)
             #expect(await h.events.next() == .peerJoined)
-            #expect(try await phone.next() == .text("peer-joined"))
+            let awaited2 = try await phone.next()
+            #expect(awaited2 == .text("peer-joined"))
             try await h.link.send(Data([9]))
-            #expect(try await phone.next() == .binary(Data([9])))
+            let awaited3 = try await phone.next()
+            #expect(awaited3 == .binary(Data([9])))
             await h.link.restart()
             await #expect(throws: RelayLinkError.notOpen) { try await h.link.send(Data([2])) }
         }
@@ -390,17 +393,20 @@ struct RelayLinkTests {
             #expect(await h.events.next() == .opened)
             let phone = try relay.joinAsPhone(room: h.room)
             #expect(await h.events.next() == .peerJoined)
-            #expect(try await phone.next() == .text("peer-joined"))
+            let awaited4 = try await phone.next()
+            #expect(awaited4 == .text("peer-joined"))
             await h.link.restart()
             #expect(await h.link.isOpen == false)
-            #expect(try await phone.next() == .text("peer-left"))
+            let awaited5 = try await phone.next()
+            #expect(awaited5 == .text("peer-left"))
             #expect(relay.laptopCloseCodes(room: h.room) == [1000])
             #expect(await h.events.next() == .closed)
             let waited = try await h.backoff(until: "the reconnect") { relay.connectAttempts.count == 2 }
             #expect(waited == .seconds(1))
             #expect(await h.events.next() == .opened)
             #expect(await h.events.next() == .peerJoined)
-            #expect(try await phone.next() == .text("peer-joined"))
+            let awaited6 = try await phone.next()
+            #expect(awaited6 == .text("peer-joined"))
         }
     }
 

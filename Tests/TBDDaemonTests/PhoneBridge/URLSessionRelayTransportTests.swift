@@ -74,9 +74,11 @@ struct URLSessionRelayTransportTests {
         try await withLoopbackRelay { server in
             try await withRoomSocket(server) { socket, _ in
                 try await socket.send(.binary(Data([1, 2, 3])))
-                #expect(try await socket.receive() == .binary(Data([1, 2, 3])))
+                let awaited1 = try await socket.receive()
+                #expect(awaited1 == .binary(Data([1, 2, 3])))
                 try await socket.send(.text("ping"))
-                #expect(try await socket.receive() == .text("pong"))
+                let awaited2 = try await socket.receive()
+                #expect(awaited2 == .text("pong"))
             }
         }
     }
@@ -86,7 +88,8 @@ struct URLSessionRelayTransportTests {
             try await withRoomSocket(server) { socket, _ in
                 let frame = Data((0..<65_536).map { UInt8(truncatingIfNeeded: $0) })
                 try await socket.send(.binary(frame))
-                #expect(try await socket.receive() == .binary(frame))
+                let awaited3 = try await socket.receive()
+                #expect(awaited3 == .binary(frame))
             }
         }
     }
@@ -142,9 +145,11 @@ struct URLSessionRelayTransportTests {
                 // A task receive the cancelled call started may still be in
                 // flight; the frame it brings goes to the next receive.
                 try await socket.send(.binary(Data([7])))
-                #expect(try await socket.receive() == .binary(Data([7])))
+                let awaited4 = try await socket.receive()
+                #expect(awaited4 == .binary(Data([7])))
                 try await socket.send(.binary(Data([8])))
-                #expect(try await socket.receive() == .binary(Data([8])))
+                let awaited5 = try await socket.receive()
+                #expect(awaited5 == .binary(Data([8])))
             }
         }
     }
@@ -216,8 +221,8 @@ struct URLSessionRelayTransportTests {
     @Test func infoReadsATBDRelay() async throws {
         try await withLoopbackRelay { server in
             try await withInfoClient { client in
-                #expect(try await client.info(relay: server.baseURL)
-                    == PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [1]))
+                let info = try await client.info(relay: server.baseURL)
+                #expect(info == PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [1]))
             }
             let infoRequests = server.requests.filter { $0.path == "/v1/info" }
             #expect(infoRequests.map(\.method) == ["GET"])
@@ -249,7 +254,8 @@ struct URLSessionRelayTransportTests {
                 // The check reads the relay every time: a fixed relay is
                 // seen as fixed at once.
                 server.setInfoResponse(status: 200, body: #"{"name":"tbd-relay","version":"1.1.0","api":[1]}"#)
-                #expect(try await client.info(relay: server.baseURL).version == "1.1.0")
+                let awaited6 = try await client.info(relay: server.baseURL).version
+                #expect(awaited6 == "1.1.0")
             }
         }
     }
