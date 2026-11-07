@@ -1003,7 +1003,13 @@ public enum TranscriptParser {
 /// newline resumes where the last one stopped instead of rescanning the line.
 /// The consumed bytes at the front of `buffer` are dropped only once they are
 /// more than half of it, so each byte is copied a bounded number of times.
+///
+/// A read that throws ends the scan as end of file does, after one `.error`
+/// log line naming the error, so a scan cut short by an I/O failure is not
+/// silent.
 struct ForwardLineReader {
+    private static let log = Logger(subsystem: "com.tbd.shared", category: "transcript")
+
     private let handle: FileHandle
     private let chunkSize: Int
     /// Zero-based: indices are offsets from the first byte `buffer` holds.
@@ -1040,7 +1046,17 @@ struct ForwardLineReader {
             }
             // The unread tail of `buffer` is a partial line; the next chunk
             // goes after it so the line comes out whole.
-            guard let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty else {
+            let readChunk: Data?
+            do {
+                readChunk = try handle.read(upToCount: chunkSize)
+            } catch {
+                // Logged once: `reachedEnd` is set below, so this reader never
+                // reads again.
+                Self.log.error(
+                    "transcript read failed, ending the scan: \(String(describing: error), privacy: .public)")
+                readChunk = nil
+            }
+            guard let chunk = readChunk, !chunk.isEmpty else {
                 reachedEnd = true
                 continue
             }
