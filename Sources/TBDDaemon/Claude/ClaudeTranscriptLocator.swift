@@ -4,11 +4,13 @@ import TBDShared
 /// Chooses the transcript file for a terminal's Claude session.
 enum ClaudeTranscriptLocator {
     /// `terminal.transcriptPath` when non-empty; else
-    /// `<project directory>/<claudeSessionID>.jsonl`, where the project
-    /// directory is the one `ClaudeProjectDirectory.resolve(worktreePath:)`
-    /// finds under the profile's `projects/` root, or failing that under
-    /// `projectsBase`; nil when the terminal has no `claudeSessionID` or no
-    /// project directory resolves under either root.
+    /// `<project directory>/<claudeSessionID>.jsonl` under the first root,
+    /// the profile's `projects/` and then `projectsBase`, where
+    /// `ClaudeProjectDirectory.resolve(worktreePath:)` finds the project
+    /// directory and that file exists. When no root holds the file, the
+    /// host-root lookup decides as if no profile root were given: the path
+    /// under `projectsBase`'s project directory, or nil when none resolves
+    /// there. Nil, too, when the terminal has no `claudeSessionID`.
     ///
     /// The stored path is the absolute path captured by the SessionStart hook.
     /// It is immune to `/clear` and `/compact` rollovers that move the session
@@ -17,15 +19,20 @@ enum ClaudeTranscriptLocator {
     ///
     /// A terminal on a model profile runs Claude with that profile's
     /// `CLAUDE_CONFIG_DIR`, so its JSONL is under the profile's `projects/`,
-    /// and that root is searched first. It is only a first try, because a
-    /// profile with no isolated config dir (Bedrock) runs Claude in the host
-    /// store and has no project directory under its own root; the search then
-    /// falls through to `projectsBase`, in the order a fork's source search
-    /// (`RPCRouter.locateForkSourceTranscript`) tries the same two roots.
+    /// and that root is tried first. A project directory there is not enough,
+    /// because a profile with no isolated config dir (Bedrock) runs Claude in
+    /// the host store, and its own root can hold the worktree's project
+    /// directory without this session's file. So each root must hold
+    /// `<claudeSessionID>.jsonl` itself, in the order and by the test a fork's
+    /// source search (`RPCRouter.locateForkSourceTranscript`) applies to the
+    /// same two roots.
     ///
     /// - Parameters:
-    ///   - projectsBase: the `projects/` root to search, or `nil` for the host
-    ///     Claude store's. Tests pass a temporary root.
+    ///   - projectsBase: the host `projects/` root, or `nil` for the host
+    ///     Claude store's as `ClaudeProjectDirectory.resolve` finds it. The
+    ///     router passes `RPCRouter.claudeProjectsRoot(forProfileID: nil)`, so
+    ///     its injected config-dir manager decides; tests pass a temporary
+    ///     root.
     ///   - profileProjectsBase: the `projects/` root of the terminal's model
     ///     profile, tried before `projectsBase`, or `nil` for a terminal with
     ///     no profile. The router passes
@@ -40,12 +47,17 @@ enum ClaudeTranscriptLocator {
         if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
             return storedPath
         }
-        let profileProjectDir = profileProjectsBase.flatMap {
-            ClaudeProjectDirectory.resolve(worktreePath: worktreePath, projectsBase: $0)
-        }
-        guard let projectDir = profileProjectDir ?? ClaudeProjectDirectory.resolve(
+        let fileName = "\(sessionID).jsonl"
+        let hostPath = ClaudeProjectDirectory.resolve(
             worktreePath: worktreePath, projectsBase: projectsBase
-        ) else { return nil }
-        return projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        )?.appendingPathComponent(fileName).path
+        let profilePath = profileProjectsBase.flatMap {
+            ClaudeProjectDirectory.resolve(worktreePath: worktreePath, projectsBase: $0)
+        }?.appendingPathComponent(fileName).path
+        for candidate in [profilePath, hostPath].compactMap({ $0 })
+        where FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
+        return hostPath
     }
 }

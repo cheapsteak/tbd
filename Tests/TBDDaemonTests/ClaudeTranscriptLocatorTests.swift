@@ -39,8 +39,8 @@ struct ClaudeTranscriptLocatorTests {
 
     /// A terminal on a model profile that has had no SessionStart hook yet
     /// keeps its JSONL under the profile's own `projects/`, so that root is
-    /// searched before the host store's, even when both hold the project
-    /// directory.
+    /// searched before the host store's, even when both hold the session's
+    /// file.
     @Test func aProfileRootIsSearchedBeforeTheHostRoot() throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -49,9 +49,9 @@ struct ClaudeTranscriptLocatorTests {
         let worktreePath = "/acme/locator-\(UUID().uuidString.prefix(8))"
         let folder = Self.projectFolder(for: worktreePath)
         for root in [hostRoot, profileRoot] {
-            try FileManager.default.createDirectory(
-                at: root.appendingPathComponent(folder, isDirectory: true),
-                withIntermediateDirectories: true)
+            let projectDir = root.appendingPathComponent(folder, isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try Data().write(to: projectDir.appendingPathComponent("sess-3.jsonl"))
         }
 
         let t = terminal(sessionID: "sess-3", transcriptPath: nil)
@@ -84,6 +84,55 @@ struct ClaudeTranscriptLocatorTests {
 
         #expect(path?.hasPrefix(hostRoot.path + "/") == true, "path was \(path ?? "nil")")
         #expect(path?.hasSuffix("/\(folder)/sess-4.jsonl") == true, "path was \(path ?? "nil")")
+    }
+
+    /// A project directory under the profile root is not enough: a profile
+    /// that runs Claude in the host store can hold the worktree's project
+    /// directory without this session's file. The session file in the host
+    /// root wins over a profile root that lacks it.
+    @Test func aProfileRootWithoutTheSessionFileFallsThroughToTheHostFile() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let hostRoot = tmp.appendingPathComponent("host-projects", isDirectory: true)
+        let profileRoot = tmp.appendingPathComponent("profile-projects", isDirectory: true)
+        let worktreePath = "/acme/locator-\(UUID().uuidString.prefix(8))"
+        let folder = Self.projectFolder(for: worktreePath)
+        for root in [hostRoot, profileRoot] {
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(folder, isDirectory: true),
+                withIntermediateDirectories: true)
+        }
+        let hostFile = hostRoot.appendingPathComponent(folder, isDirectory: true)
+            .appendingPathComponent("sess-5.jsonl")
+        try Data().write(to: hostFile)
+
+        let t = terminal(sessionID: "sess-5", transcriptPath: nil)
+        let path = ClaudeTranscriptLocator.filePath(
+            terminal: t, worktreePath: worktreePath,
+            projectsBase: hostRoot, profileProjectsBase: profileRoot)
+
+        #expect(path == hostFile.path, "path was \(path ?? "nil")")
+    }
+
+    /// When no root holds the session's file, the answer is the host-only
+    /// lookup's: nil while the host root has no project directory, even when
+    /// the profile root has one.
+    @Test func noSessionFileAndNoHostProjectDirGivesNil() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let hostRoot = tmp.appendingPathComponent("host-projects", isDirectory: true)
+        let profileRoot = tmp.appendingPathComponent("profile-projects", isDirectory: true)
+        let worktreePath = "/acme/locator-\(UUID().uuidString.prefix(8))"
+        try FileManager.default.createDirectory(
+            at: profileRoot.appendingPathComponent(Self.projectFolder(for: worktreePath), isDirectory: true),
+            withIntermediateDirectories: true)
+
+        let t = terminal(sessionID: "sess-6", transcriptPath: nil)
+        let path = ClaudeTranscriptLocator.filePath(
+            terminal: t, worktreePath: worktreePath,
+            projectsBase: hostRoot, profileProjectsBase: profileRoot)
+
+        #expect(path == nil, "path was \(path ?? "nil")")
     }
 
     /// The stored path still wins over a profile root.

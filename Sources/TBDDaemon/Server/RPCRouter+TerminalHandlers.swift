@@ -5752,10 +5752,12 @@ extension RPCRouter {
     /// The transcript file both `terminal.transcript` handlers read for a
     /// terminal: `ClaudeTranscriptLocator`'s stored-path-wins rule, with the
     /// terminal's profile `projects/` root searched before the host store's
-    /// when the row names a profile.
+    /// when the row names a profile. Both roots come from `configDirManager`,
+    /// so the host root is the injected manager's, never a static lookup.
     func claudeTranscriptFilePath(terminal: Terminal, worktreePath: String) -> String? {
         ClaudeTranscriptLocator.filePath(
             terminal: terminal, worktreePath: worktreePath,
+            projectsBase: claudeProjectsRoot(forProfileID: nil),
             profileProjectsBase: terminal.profileID.map { claudeProjectsRoot(forProfileID: $0) })
     }
 
