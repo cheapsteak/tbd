@@ -1,3 +1,10 @@
 # Recipe files require review from someone who understands architectural intent.
 # Recipes have more leverage than code — they guide all future generation.
 /recipe/ @cheapsteak
+
+# The loader holds the phone's keys and merging it to main deploys it; the
+# deploy workflow holds the key that starts that deploy. The relay is the code
+# users deploy to their own Cloudflare accounts.
+/phone/loader/ @cheapsteak
+/.github/workflows/phone-loader-deploy.yml @cheapsteak
+/relay/ @cheapsteak

@@ -65,7 +65,7 @@ The merge is a `stackMerge` mutation, but its input type is not exposed by intro
 
 ## Keep it green
 
-1. **Dispatch tests for upper PRs.** `.github/workflows/test.yml` runs on `pull_request` only for PRs based on `main`, so a PR whose base is another branch gets no test run on push. Dispatch it: `gh workflow run test.yml --ref <branch> -f scope=full`. The resulting check runs land on the head SHA and do satisfy main's required checks (`claude-review`, `test`, `Lint`), even though `gh pr checks` will not list them. Confirm with `gh api repos/{owner}/{repo}/commits/<sha>/check-runs`.
+1. **Dispatch tests for upper PRs.** `.github/workflows/test.yml` runs on `pull_request` only for PRs based on `main`, so a PR whose base is another branch gets no test run on push. Dispatch it: `gh workflow run test.yml --ref <branch> -f scope=full`. The resulting check runs land on the head SHA and do satisfy main's required checks (`claude-review`, `test`, `Lint`), even though `gh pr checks` will not list them. Confirm with `gh api repos/{owner}/{repo}/commits/<sha>/check-runs`. `phone.yml` has no branch filter, so it runs on every PR in a stack by itself; dispatch it (`gh workflow run phone.yml --ref <branch>`) only to re-run it.
 2. **`claude-review` needs nothing extra.** It is `pull_request_target` with no branch filter, so it fires for every PR in the stack.
 3. **Every PR needs its own approval.** The stack merge bypasses nothing.
 4. **Restack after a lower branch changes.** `git rebase --onto <newLower> <oldLower>` on each branch above, bottom-up, then `git push --force-with-lease`. With local tracking, `gh stack sync` does it.

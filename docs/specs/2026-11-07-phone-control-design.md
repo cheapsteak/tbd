@@ -175,16 +175,46 @@ Durable Object time.
 
 **API v1.** This is a stable contract. TBD supports it for good.
 
-- **`GET /v1/info`** – returns `{"name":"tbd-relay","version":"<semver>","api":[1]}`.
+- **Every HTTP response carries `Access-Control-Allow-Origin: *`,** refusals included, so a page on
+  another origin, such as the loader, reads the real status rather than an opaque CORS error. The
+  relay sets no cookies and reads no credentials, so this exposes nothing. CORS does not govern the
+  WebSocket upgrade.
+- **`GET /v1/info`** – returns `{"name":"tbd-relay","version":"<semver>","api":[1]}` with
+  `Content-Type: application/json` and `Cache-Control: no-store`.
 - **`GET /v1/rooms/<roomID>?role=laptop|phone`** – opens a WebSocket. A room ID is 43 base64url
-  characters (32 bytes), and anything else gets 404. Each role has one socket per room. A new socket
-  for a role closes the old one with code 4000.
-- **Forwarded frames are binary,** at most 64 KiB, and pass to the other role unchanged. When the
-  other role is not connected, the relay drops the frame. It never queues.
-- **Relay signals are text,** so they cannot be confused with forwarded frames: `peer-joined`,
-  `peer-left`, and `peer-absent`. The last is sent to a joining phone when no laptop is connected.
-- **Keepalive** uses Cloudflare's WebSocket auto-response for a `ping` text frame, so a keepalive
-  never wakes the Durable Object. Both sides send one every 30 seconds.
+  characters (32 bytes). Each role has one socket per room. A new socket for a role closes the old
+  one with code 4000 and reason `replaced`.
+- **`GET /v1/rooms/<roomID>/presence`** – returns `{"laptop":true}` while the room has an open
+  laptop socket and `{"laptop":false}` otherwise, with `Content-Type: application/json` and
+  `Cache-Control: no-store`. The room ID rule is the same. It opens no socket and displaces no one,
+  so the loader's laptops list asks it whether each paired laptop is online: joining the room as a
+  phone would close another tab's phone socket with code 4000.
+- **HTTP status codes.** A path that is not `/`, `/v1/info`, `/v1/rooms/<roomID>` or
+  `/v1/rooms/<roomID>/presence` gets 404, and a malformed room ID is checked first, whatever the
+  method. A method other than GET gets 405 with `Allow: GET`. A room URL without exactly one `role`
+  parameter equal to `laptop` or `phone` gets 400. A room URL without `Upgrade: websocket` gets 426.
+  `GET /` answers 200 with a one-line text page and is not part of the API.
+- **Forwarded frames are binary,** at most 65,536 bytes, and pass to the other role unchanged. When
+  the other role is not connected, the relay drops the frame. It never queues. A larger frame is
+  not forwarded: the relay closes the sender with code 1009 and reason `frame too large`, and the
+  other role gets `peer-left` at once. A socket the relay is closing sends nothing more, so a
+  replaced socket's last frames never reach the new session.
+- **Text frames from clients are never forwarded,** so no client can forge a relay signal. The one
+  exception is the keepalive below, which the runtime answers.
+- **Relay signals are text,** so they cannot be confused with forwarded frames.
+  - `peer-joined` goes to both sockets when a socket joins and the other role has an open socket.
+    It always means a new peer socket, so the receiver resets its channel: any Noise session with
+    the previous peer socket is over.
+  - `peer-absent` goes to a joining phone when no laptop socket is open. A laptop that joins an
+    empty room gets no signal.
+  - `peer-left` goes to the other role when a socket closes or errors and no open socket of its
+    role remains. A socket the relay closes signals nothing more when its close completes: one
+    closed with 4000 because a new one replaced it causes no `peer-left`, and one closed with 1009
+    caused its `peer-left` when the relay closed it. So a peer that joins after the relay closed a
+    socket never hears that socket leave. A `peer-left` can repeat in rare races, so receivers
+    treat it as idempotent.
+- **Keepalive** uses Cloudflare's WebSocket auto-response: the text frame `ping` gets the answer
+  `pong`, and a keepalive never wakes the Durable Object. Both sides send one every 30 seconds.
 
 **Versions and updates.**
 
@@ -740,29 +770,58 @@ Home Screen app, and on Android Chrome:
 
 Research: `ci-layout.md`.
 
-- **A new workflow, `phone.yml`,** with its own concurrency group:
-  - a `changes` job runs a new classifier, `scripts/ci/phone-parts-needed.sh`, modelled on
-    `scripts/ci/swift-suite-needed.sh`. It outputs `relay`, `loader` and `phone_app`, and runs every
-    part for any path it does not recognize;
-  - a `harness` job tests the classifier;
-  - `relay`, `loader` and `phone-app` jobs each run only when the classifier says so. The
-    `phone-app` job rebuilds the bundle and fails if the committed file differs;
-  - an always-running `Phone checks` job passes when each part either succeeded or was skipped by
-    the classifier. An admin adds it as a required check after the workflow lands.
+- **The `Phone` workflow, `phone.yml`,** tests the relay, the loader and the phone app on Linux, so
+  it takes none of the macOS runners the Swift suite competes for:
+  - it runs on pushes to `main`, on dispatch, and on every pull request, with no branch filter, so a
+    stacked phone PR whose base is another PR's branch gets its own run. It has no path filter,
+    because a workflow that a path filter keeps from starting never reports, and a required check
+    that never reports blocks the merge. The `changes` job is the path filter;
+  - its concurrency group is its own, apart from `test.yml`'s, and is keyed on the pull request's
+    number, or on the ref for any other event. Only a pull request's newer push cancels its older
+    run. A run for any other event, such as a push to `main`, waits for the one in progress, since a
+    cancelled run fails `Phone checks`;
+  - a `changes` job runs the classifier, `scripts/ci/phone-parts-needed.sh`, modelled on
+    `scripts/ci/swift-suite-needed.sh`. It outputs `relay`, `loader` and `phone_app`. It answers
+    `true` for all three on any event but a pull request, and runs every part for any path it does
+    not recognize and whenever it cannot compute the diff;
+  - a `harness` job, with no `if:`, runs the classifier's harness and the bundle check's harness.
+    The classifier's harness also pins the wiring of both phone workflows line by line;
+  - the `relay`, `loader` and `phone-app` jobs are each skipped only on the classifier's explicit
+    `false`, so a failed gate runs every part rather than none. The `phone-app` job runs the app's
+    tests, rebuilds the bundle with `npm run build:app`, and fails if the result differs from the
+    committed bundle under `Sources/`. While `phone/package.json` names no `build:app` script, it
+    passes only if no bundle is committed;
+  - an always-running `Phone checks` job passes when the harness job passed and each part either
+    succeeded or was skipped by the classifier's `false`. A cancelled part, or one skipped for any
+    other reason, fails it. It is the one context branch protection requires, so exactly one job
+    across `.github/workflows/` carries that name. An admin adds it as a required check after the
+    workflow lands.
 - **Inputs that run more than one part:** `phone/protocol/**` and `phone/test-vectors/**` run the
-  Swift suite and every JavaScript part. A change to `phone.yml` or the classifier runs every part.
-- **The Swift gate** gains three narrow skip rules: `relay/**`, `phone/loader/**` and
-  `phone/app/**`. A change to the committed bundle under `Sources/` still runs the Swift suite.
-  `test.yml` does not change, because the release workflow, the flake fixer and the remote
-  verification valve all read its result.
+  Swift suite, the loader and the phone app, and not the relay, which is a self-contained package. A change to `phone.yml`, or to a script under `scripts/`
+  named for the phone (the classifier, the bundle check and their harnesses), runs every part. The
+  rest of `phone/` outside `loader/` and `app/` is the workspace's shared tooling, such as
+  `phone/package.json`, its lockfile, `.nvmrc` and `tsconfig.json`, and runs the loader and the app.
+- **The Swift gate's rule:** the Swift suite skips `relay/**` and every path under `phone/` except
+  `phone/protocol/**` and `phone/test-vectors/**`. Every path under those two runs it, Markdown
+  included, because Swift tests read them. The committed app bundle lives under `Sources/`, so a
+  change to it runs the Swift suite. The rule lives in `scripts/ci/swift-suite-needed.sh`, and
+  `test.yml` carries nothing phone-specific, because the release workflow, the flake fixer and the
+  remote verification valve all read its result.
 - **Loader deploy, `phone-loader-deploy.yml`:**
-  - runs on pushes to `main` that touch `phone/loader/**`, and only while a repository variable
-    turns it on;
-  - runs in an environment limited to `main`;
-  - mints a GitHub App token that can only trigger the loader repo's deploy workflow;
-  - the loader repo's workflow checks that the commit is on `main` and still current, then
-    publishes with GitHub's Pages deploy action. A leaked token can trigger a redeploy but cannot
-    change what is served.
+  - runs on pushes to `main` that touch `phone/loader/**` or the workflow itself, and on dispatch.
+    No pull request event can start it;
+  - a `verify` job runs `npm ci`, `npm run typecheck` and `npm test` in `phone/`. It does not run
+    `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR that edits only this workflow
+    runs no phone part, so the classifier's harness pins `verify`'s Node setup and working directory
+    to the `loader` job's, and requires each of its npm commands to be one the `loader` job runs;
+  - a `dispatch` job runs only after `verify` passed, only while the repository variable
+    `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`, in an environment whose
+    deployment branches admit only `main`;
+  - that job mints a GitHub App token scoped to the loader repo, whose one permission is Actions:
+    write, and asks the loader repo's deploy workflow to publish this commit;
+  - the loader repo's workflow checks that the commit is on `main` and that its loader is still the
+    newest, then publishes with GitHub's Pages deploy action. A leaked token can start, cancel,
+    re-run or disable the loader repo's workflow runs, but cannot change what is served.
 
 ## 16. Build order
 
@@ -771,7 +830,7 @@ The parts with no UI come first, so work can start before the phone's visual des
 1. **Secure channel** – the Swift and JavaScript Noise code, the test vectors, and the app-protocol
    fixtures.
 2. **Relay and CI** – `relay/cloudflare/`, `phone.yml` with its classifier, and the Swift gate's
-   skip rules.
+   skip rule.
 3. **Daemon bridge and laptop UI** – the migration and flag, pairing, devices, the relay link, the
    loader handler, the app protocol with every action and the transcript feed, the Settings pane,
    the menu item and the status-bar chip. Tests drive the app protocol directly, with no phone UI.

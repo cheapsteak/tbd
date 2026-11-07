@@ -1,0 +1,21 @@
+{
+  "name": "tbd-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Self-hosted relay that pairs a TBD laptop with a phone over end-to-end encrypted WebSockets.",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "check": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "vitest run --max-workers=1 --no-isolate"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.7",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.152.0"
+  }
+}
