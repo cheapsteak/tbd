@@ -15,10 +15,11 @@
 #     sees: a part passes when it succeeded or the gate's exact `false`
 #     skipped it, and every other shape — a cancelled part, a skip after a
 #     failed gate, a job missing from or added to the list — fails.
-#   - THE WIRING, read from this checkout's `.github/workflows/phone.yml`: the
-#     gate fails closed and the verdict sees every result only because of how
-#     the workflow is written, and no fixture can evaluate a GitHub
-#     expression, so the lines that make it so are pinned as written.
+#   - THE WIRING, read from this checkout's `.github/workflows/phone.yml` and
+#     `phone-loader-deploy.yml`: the gate fails closed, the verdict sees every
+#     result, and the deploy key stays behind main only because of how the
+#     workflows are written, and no fixture can evaluate a GitHub expression,
+#     so the lines that make it so are pinned as written.
 #
 # RUN WITH `/bin/bash`, WHICH ON MACOS IS 3.2. Every nested run of the script
 # under test goes through `$BASH`, this harness's own interpreter, so the whole
@@ -638,8 +639,9 @@ test_verdict_the_summary_names_each_part() {
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 WORKFLOWS="$REPO_ROOT/.github/workflows"
 PHONE_YML="$WORKFLOWS/phone.yml"
+DEPLOY_YML="$WORKFLOWS/phone-loader-deploy.yml"
 # The workflows that hold the phone parts' jobs. Each must exist.
-PHONE_WORKFLOWS="phone.yml"
+PHONE_WORKFLOWS="phone.yml phone-loader-deploy.yml"
 
 # FILE without its comment lines, and with trailing whitespace stripped.
 wf_code() { grep -v '^[[:space:]]*#' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'; }
@@ -952,6 +954,85 @@ test_phone_workflow_uses_no_local_action() {
     echo "     Add a rule in judge() in scripts/ci/phone-parts-needed.sh that runs every part for its files first, then update this check."
     FAIL=1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# 6. The loader deploy wiring, on this checkout
+# ---------------------------------------------------------------------------
+#
+# `phone-loader-deploy.yml` holds the key that starts a deploy of the code
+# that handles the phone's keys. Each pin below is one of the fences between
+# that key and anything but a tested commit on main.
+
+# A push to main that touches the loader, and a dispatch: nothing else. No
+# pull request event can start it, `pull_request_target` least of all, which
+# runs in the base branch's context, where `github.ref` is main.
+test_deploy_workflow_triggers() {
+  local on push paths
+  phone_workflow_exists phone-loader-deploy.yml || return
+  on="$(top_lines "$DEPLOY_YML" on)"
+  assert_eq "the deploy runs on a push and a dispatch, and on nothing else" "  push:
+  workflow_dispatch:" "$(printf '%s\n' "$on" | grep -E '^  [^[:space:]]')"
+  push="$(printf '%s\n' "$on" | under '  push:')"
+  assert_line "the deploy's push trigger is limited to main" "$push" "    branches: [main]"
+  paths="$(printf '%s\n' "$push" | under '    paths:')"
+  assert_line "the deploy's push trigger runs for the loader" "$paths" "      - 'phone/loader/**'"
+  assert_line "the deploy's push trigger runs for this workflow" "$paths" \
+    "      - '.github/workflows/phone-loader-deploy.yml'"
+}
+
+# Nothing in the workflow can write to this repo: no job gets a permission it
+# does not name, the verify job names only `contents: read`, and the App token
+# asks for nothing on contents.
+test_deploy_workflow_permissions() {
+  local verify writes
+  phone_workflow_exists phone-loader-deploy.yml || return
+  assert_eq "the deploy's top-level permissions are empty" "permissions: {}" \
+    "$(wf_code "$DEPLOY_YML" | grep -E '^permissions:')"
+  verify="$(job_lines "$DEPLOY_YML" verify | under '    permissions:')"
+  assert_eq "the verify job reads contents and has no other permission" "      contents: read" "$verify"
+  writes="$(grep -nE 'contents:[[:space:]]*write|permission-contents' "$DEPLOY_YML")"
+  assert_eq "no line of the deploy workflow asks to write contents" "" "$writes"
+}
+
+# The dispatch runs only after the loader passed, only while the variable is
+# exactly `true`, only from main, and only in the environment whose
+# deployment branches admit only main. The `if:` is pinned whole: a line
+# holding both halves joined by `||` would deploy whenever either held.
+test_deploy_dispatch_is_gated() {
+  local keys
+  phone_workflow_exists phone-loader-deploy.yml || return
+  keys="$(job_keys "$DEPLOY_YML" dispatch)"
+  assert_line "the dispatch job waits for the loader to pass" "$keys" "    needs: verify"
+  assert_line "the dispatch job runs in the phone-loader environment" "$keys" "    environment: phone-loader"
+  assert_line "the dispatch job's own token has no permissions" "$keys" "    permissions: {}"
+  assert_line "the dispatch job runs only while deploys are on, and only from main" "$keys" \
+    "    if: \${{ vars.PHONE_LOADER_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' }}"
+}
+
+# One App token in the workflow, minted for the one loader repo with one
+# permission, Actions: write. Without `owner:` and `repositories:` the token
+# would cover whatever the installation covers. The App key is the
+# workflow's only secret, and only the token step reads it.
+test_deploy_token_can_only_dispatch() {
+  local step
+  phone_workflow_exists phone-loader-deploy.yml || return
+  assert_eq "exactly one step mints an App token" "1" \
+    "$(wf_code "$DEPLOY_YML" | grep -cE '^[[:space:]]+(- )?uses:[[:space:]]*actions/create-github-app-token@')"
+  step="$(step_lines "$DEPLOY_YML" dispatch 'uses: actions/create-github-app-token@v2')"
+  assert_line "the dispatch job's token step uses create-github-app-token@v2" "$step" \
+    "        uses: actions/create-github-app-token@v2"
+  assert_eq "the token's one permission is actions: write" "          permission-actions: write" \
+    "$(wf_code "$DEPLOY_YML" | grep -E '^[[:space:]]+permission-')"
+  assert_line "the token step reads the loader org from a variable" "$step" \
+    "          owner: \${{ vars.PHONE_LOADER_OWNER }}"
+  assert_line "the token step reads the loader repo from a variable" "$step" \
+    "          repositories: \${{ vars.PHONE_LOADER_REPO }}"
+  assert_eq "the App key is the workflow's only secret" \
+    "          private-key: \${{ secrets.PHONE_LOADER_APP_PRIVATE_KEY }}" \
+    "$(wf_code "$DEPLOY_YML" | grep -E 'secrets\.')"
+  assert_line "the token step is the one that reads the App key" "$step" \
+    "          private-key: \${{ secrets.PHONE_LOADER_APP_PRIVATE_KEY }}"
 }
 
 # ---------------------------------------------------------------------------
