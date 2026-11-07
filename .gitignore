@@ -26,3 +26,6 @@ rust/comrak-ffi/target/
 
 # Python bytecode (review-v2 scripts and any future Python tooling)
 __pycache__/
+
+# Node dev tooling for phone/ and relay/
+node_modules/
