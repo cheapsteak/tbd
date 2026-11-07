@@ -5,6 +5,12 @@ import Testing
 import DaemonTestSupport
 import TestSupport
 
+// Nested under TBDHomeSerialized: the continue-in-Claude path resolves
+// `TBD_HOME` per call through static members with no seam (the continuation
+// packet and the per-session overlay under the runtime dir), so this suite must
+// not run while a sibling suite has `TBD_HOME` pointed at a temp dir it is about
+// to delete. See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
 @Suite("Continue in Claude transaction")
 struct ContinueInClaudeTransactionTests {
     private final class CommandRecorder: @unchecked Sendable {
@@ -1315,4 +1321,5 @@ struct ContinueInClaudeTransactionTests {
         let terminal = try #require(try await db.terminals.get(id: created.id))
         return StoreFixture(root: root, rollout: rollout, db: db, terminal: terminal)
     }
+}
 }
