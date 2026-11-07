@@ -97,8 +97,8 @@ func terminalModifiers(from flags: NSEvent.ModifierFlags) -> TerminalModifiers {
 enum WheelPhase: Sendable, Equatable {
     /// Neither phase set: a classic wheel notch, or a precise device that reports no gesture.
     case unphased
-    /// Fingers touched down or started moving (`.mayBegin`, `.began`): a new gesture, which must
-    /// not inherit the last one's remainder.
+    /// Fingers touched down or started moving (`.mayBegin`, `.began`): a new gesture, whose rows
+    /// for the program must not inherit the last one's remainder.
     case gestureBegan
     /// The rest of a gesture with fingers on the surface (`.changed`, `.stationary`, `.ended`,
     /// `.cancelled`).
@@ -505,10 +505,15 @@ final class MouseController: NSObject {
         in view: GhosttyTerminalView
     ) -> WheelOutcome {
         let geometry = pushedGeometry ?? pixelGeometry(of: view)
+        // The arithmetic depends on where the rows go, which the terminal decides again under its
+        // lock as it encodes. A mode change between the two reads costs one event the other
+        // arithmetic, nothing more.
+        let movesViewport = view.terminal.withLocked { !$0.isMouseTrackingEnabled && !$0.isAlternateScreen }
         let rows = wheelRows(
             deltaY: deltaY,
             hasPreciseDeltas: hasPreciseDeltas,
             phase: phase,
+            movesViewport: movesViewport,
             backingScale: Double(view.backingScale),
             cellHeightPx: Double(geometry.cellHeight))
         guard rows != 0 else { return .none }
@@ -530,27 +535,34 @@ final class MouseController: NSObject {
         return outcome
     }
 
-    /// Turns one wheel event into whole rows, carrying the sub-row remainder between events. The
-    /// arithmetic is that of SwiftTerm's `scrollWheel`, which the app's wheel monitor also uses:
+    /// Turns one wheel event into whole rows, carrying the sub-row remainder between events.
     ///
-    /// - A classic wheel's notch is one row, whatever its delta, and it ends any precise motion in
-    ///   progress. Its `scrollingDeltaY` carries the system's wheel acceleration, which is not a
-    ///   row count. On the primary screen the viewport moves one row a notch as well.
-    /// - Precise deltas (trackpad, Magic Mouse) accumulate against the cell height. The remainder
-    ///   is dropped when a new gesture begins and when the direction reverses, so a stale fraction
-    ///   never joins motion it did not belong to. Momentum continues the gesture it follows.
+    /// Rows that move the viewport follow SwiftTerm's `scrollWheel`, so shell scrollback scrolls
+    /// as fast as in a SwiftTerm panel. Rows the program receives, as reports or arrow keys,
+    /// follow the app's wheel monitor (`ScrollWheelAccumulator`), because each one is input the
+    /// program redraws for:
+    ///
+    /// - A classic wheel's notch moves the viewport by its delta rounded, and at least one row,
+    ///   as SwiftTerm does. For the program it is one row, whatever its delta, which carries the
+    ///   system's wheel acceleration. Either way it ends any precise motion in progress.
+    /// - Precise deltas (trackpad, Magic Mouse) accumulate against the cell height, one row per
+    ///   whole cell. For the program the remainder is dropped when a new gesture begins and when
+    ///   the direction reverses, so a stale fraction never becomes a key; the viewport keeps it,
+    ///   as SwiftTerm does. Momentum continues the gesture it follows.
     ///
     /// - Parameters:
     ///   - deltaY: `NSEvent.scrollingDeltaY`, **points** when precise; positive = content moves
     ///     down.
     ///   - hasPreciseDeltas: trackpad / Magic Mouse.
     ///   - phase: where the event sits in its gesture.
+    ///   - movesViewport: true when the rows scroll the viewport rather than reach the program.
     ///   - backingScale: points → device pixels, because `cellHeightPx` is in device pixels.
     /// - Returns: whole rows, **negative = up**, matching `GHOSTTY_SCROLL_VIEWPORT_DELTA`.
     func wheelRows(
         deltaY: Double,
         hasPreciseDeltas: Bool,
         phase: WheelPhase,
+        movesViewport: Bool,
         backingScale: Double,
         cellHeightPx: Double
     ) -> Int {
@@ -559,13 +571,16 @@ final class MouseController: NSObject {
         guard hasPreciseDeltas else {
             accumulator.reset()
             guard deltaY != 0 else { return 0 }
-            return deltaY > 0 ? -1 : 1
+            guard movesViewport else { return deltaY > 0 ? -1 : 1 }
+            let rounded = Int(deltaY.rounded())
+            return rounded != 0 ? -rounded : (deltaY > 0 ? -1 : 1)
         }
-        if phase == .gestureBegan { accumulator.reset() }
+        // Before the zero check: a gesture's first event, `.mayBegin`, usually has no delta.
+        if !movesViewport, phase == .gestureBegan { accumulator.reset() }
         guard deltaY != 0, cellHeightPx > 0 else { return 0 }
         let rows = -deltaY * backingScale / cellHeightPx
         // A reversal starts from zero rather than netting against a fraction banked the other way.
-        if accumulator.remainder * rows < 0 { accumulator.reset() }
+        if !movesViewport, accumulator.remainder * rows < 0 { accumulator.reset() }
         return accumulator.consume(rows: rows)
     }
 

@@ -177,6 +177,38 @@ struct WheelPowerlineKittyTests {
         #expect(recorder.sent == [cursorUp], "after the reversal, 1.1 lines up sent \(recorder.sent), from \(describe(up))")
     }
 
+    /// On the primary screen the wheel moves the viewport as far as SwiftTerm's `scrollWheel` (at
+    /// the pinned fedbcac) moves its scrollback, so shell scrollback is as fast in either engine.
+    /// The expected lines are SwiftTerm's formula worked by hand, not this view's arithmetic.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theViewportScrollsAtSwiftTermsWheelSpeed() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: (0..<60).map { "line \($0)\r\n" }.joined())
+        let line = Double(view.cellSize.height)
+        // SwiftTerm, positive = up: a notch scrolls `Int(scrollingDeltaY.rounded())` lines, or one
+        // line its way when that rounds to 0, and empties the bank. Precise points add to the bank,
+        // and `Int(bank / cellHeight)` lines are taken from it; a reversal nets against it.
+        let steps: [(deltaY: Double, precise: Bool, phase: WheelPhase, swiftTermLines: Int)] = [
+            (1, false, .unphased, 1),
+            (0.3, false, .unphased, 1),
+            (2.5, false, .unphased, 3),
+            (7, false, .unphased, 7),
+            (-4.4, false, .unphased, -4),
+            (2.5 * line, true, .gestureBegan, 2),       // bank 0.5 of a cell
+            (0.75 * line, true, .gestureChanged, 1),    // bank 0.25
+            (-1.1 * line, true, .gestureChanged, 0),    // bank -0.85: netted, not dropped
+            (-0.25 * line, true, .gestureChanged, -1),  // bank -0.1
+        ]
+        for (index, step) in steps.enumerated() {
+            let before = try scrollMetrics(of: terminal).offset
+            let outcome = Self.wheel(view, deltaY: step.deltaY, precise: step.precise, phase: step.phase, at: Double(index))
+            let moved = try scrollMetrics(of: terminal).offset - before
+            #expect(moved == -step.swiftTermLines,
+                    "deltaY \(step.deltaY) moved the viewport \(moved) rows, SwiftTerm \(-step.swiftTermLines): \(describe(outcome))")
+        }
+        #expect(recorder.sent.isEmpty, "scrolling the primary screen sent \(recorder.sent)")
+    }
+
     /// A flick's momentum tail, 60 events of two lines each within 100 ms, types no more arrow keys
     /// than the bound lets through: the burst at once, then 100 a second, so at most 16 of the 120.
     /// The keys over the bound are dropped, not queued: an event after the tail sends only its own.
