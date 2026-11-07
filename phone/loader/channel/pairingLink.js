@@ -3,6 +3,15 @@
 // A pairing link is `<loaderURL>#p=<base64url(UTF-8 JSON)>`. The checks and
 // their order match the daemon's `PairingLink.parse`, so both sides give the
 // same error code for every link in `phone/test-vectors/pairing-link.json`.
+//
+// Parity contract: for every input except those below, `parsePairingLink` and
+// the daemon's `PairingLink.parse` return the same link or fail with the same
+// error code. Outside the contract, either side's answer is acceptable,
+// because the daemon never builds such a link:
+// - duplicate object keys (the daemon keeps the first, `JSON.parse` the last);
+// - nesting depth within a few levels of 512;
+// - numbers whose decimal text differs from the IEEE-754 double they round
+//   to in ways only one side observes.
 
 /**
  * @typedef {{ v: number, relay: string, room: string, secret: string, key: string, name: string, exp: number }} PairingLink
@@ -15,7 +24,30 @@
 const LINK_VERSION = 1;
 const MAX_NAME_BYTES = 256;
 const KEY_BYTES = 32;
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1']);
+// Deeper JSON is badJSON. The daemon's JSONDecoder has the same limit, and the
+// walk that enforces it here is recursive, so it also bounds the stack.
+const MAX_JSON_DEPTH = 512;
+const MAX_RELAY_HOST_LENGTH = 253;
+const MAX_RELAY_PORT = 65535;
+
+// The relay grammar, matched against the whole string in lowercase ASCII,
+// with nothing after the host or port: no path, not even `/`, and no query,
+// fragment or user info.
+// - `https://` HOST [`:` PORT]
+// - `http://localhost` [`:` PORT] or `http://127.0.0.1` [`:` PORT], for a
+//   local test relay
+// HOST is one or more labels joined by `.`, at most 253 characters in all.
+// Each label is 1 to 63 of `a-z`, `0-9` and `-`, neither starting nor ending
+// with `-` and not starting with `xn--`. The last label starts with a letter,
+// so a dotted IPv4 address is refused. PORT is 1 to 5 digits with no leading
+// zero, from 1 to 65535; the pattern bounds its digits and isAllowedRelay its
+// value. The daemon scans the same grammar byte by byte. Without the `m` flag,
+// `$` matches only at the very end, never before a trailing newline.
+const HOST_LABEL = '(?!xn--)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const LAST_HOST_LABEL = '(?!xn--)[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const RELAY_PATTERN = new RegExp(
+  `^(?:https://((?:${HOST_LABEL}\\.)*${LAST_HOST_LABEL})|http://(?:localhost|127\\.0\\.0\\.1))(?::([1-9][0-9]{0,4}))?$`,
+);
 
 // 8,192 bytes per String.fromCharCode call keeps the argument count far
 // below every engine's limit, so large inputs never overflow the stack.
@@ -25,6 +57,10 @@ const BASE64URL_TEXT = /^[A-Za-z0-9_-]*$/;
 // `fatal` makes invalid UTF-8 throw instead of decoding to U+FFFD.
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const utf8Encoder = new TextEncoder();
+// For the well-formedness round trip only. `ignoreBOM` keeps a string that
+// starts with U+FEFF intact, where the default would drop it and make a
+// well-formed string look malformed.
+const roundTripDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 
 export class PairingLinkError extends Error {
   /**
@@ -154,7 +190,10 @@ export function parsePairingLink(url, { now = Date.now() } = {}) {
 
 /**
  * UTF-8 JSON that must be a plain object; anything else is `badJSON`.
- * TextDecoder drops a leading UTF-8 byte order mark, as RFC 8259 permits.
+ * TextDecoder drops one leading UTF-8 byte order mark, as RFC 8259 permits,
+ * and `JSON.parse` refuses a second one and any 00 byte. A string or object
+ * key anywhere in the value that is not well-formed UTF-16 is also `badJSON`,
+ * as is nesting deeper than MAX_JSON_DEPTH.
  * @param {Uint8Array} bytes
  * @returns {Record<string, unknown>}
  */
@@ -165,6 +204,9 @@ function decodeJSONObject(bytes) {
   } catch {
     throw new PairingLinkError('badJSON');
   }
+  if (!isWellFormedValue(value, 1)) {
+    throw new PairingLinkError('badJSON');
+  }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new PairingLinkError('badJSON');
   }
@@ -172,20 +214,55 @@ function decodeJSONObject(bytes) {
 }
 
 /**
- * `https:`, or `http:` on a loopback host for local test relays. `hostname`
- * excludes the port, which `host` would include.
+ * Whether every string and object key in `value` is well-formed UTF-16, with
+ * no lone surrogate such as a `\ud800` escape gives, and no array or object
+ * is nested deeper than MAX_JSON_DEPTH.
+ * @param {unknown} value
+ * @param {number} depth the nesting depth of `value` if it is an array or object, 1 at the top
+ * @returns {boolean}
+ */
+function isWellFormedValue(value, depth) {
+  if (typeof value === 'string') {
+    return isWellFormedString(value);
+  }
+  if (value === null || typeof value !== 'object') {
+    return true;
+  }
+  if (depth > MAX_JSON_DEPTH) {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.every((item) => isWellFormedValue(item, depth + 1));
+  }
+  return Object.entries(value).every(([key, item]) => isWellFormedString(key) && isWellFormedValue(item, depth + 1));
+}
+
+/**
+ * Encoding replaces a lone surrogate with U+FFFD, so only a well-formed
+ * string survives the round trip. `String.prototype.isWellFormed` would say
+ * the same, but postdates the loader's oldest supported browsers.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isWellFormedString(text) {
+  return roundTripDecoder.decode(utf8Encoder.encode(text)) === text;
+}
+
+/**
+ * Whether the relay matches RELAY_PATTERN, with a host of at most
+ * MAX_RELAY_HOST_LENGTH characters and a port of at most MAX_RELAY_PORT. The
+ * relay is never trimmed or lowercased, so the caller gets it back as sent.
  * @param {string} relay
  * @returns {boolean}
  */
 function isAllowedRelay(relay) {
-  let parsed;
-  try {
-    parsed = new URL(relay);
-  } catch {
+  const match = RELAY_PATTERN.exec(relay);
+  if (match === null) {
     return false;
   }
-  if (parsed.hostname === '') {
+  const [, host, port] = match;
+  if (host !== undefined && host.length > MAX_RELAY_HOST_LENGTH) {
     return false;
   }
-  return parsed.protocol === 'https:' || (parsed.protocol === 'http:' && LOOPBACK_HOSTS.has(parsed.hostname));
+  return port === undefined || Number(port) <= MAX_RELAY_PORT;
 }

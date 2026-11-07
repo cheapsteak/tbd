@@ -8,6 +8,10 @@ const file = JSON.parse(readFileSync(new URL('../../test-vectors/pairing-link.js
 const nowMs = file.now * 1000;
 /** @param {string} hex */
 const fromHex = (hex) => new Uint8Array(Buffer.from(hex, 'hex'));
+/** A link whose payload is this JSON text. @param {string} json */
+const linkWithJSON = (json) => `${file.loaderURL}#p=${base64urlEncode(new TextEncoder().encode(json))}`;
+/** V1's JSON text, which ends with its closing }. */
+const v1JSON = Buffer.from(file.valid[0].url.split('#p=')[1], 'base64url').toString('utf8');
 
 test('base64url: shared valid vectors encode and decode', () => {
   assert.equal(file.base64url.valid.length, 5);
@@ -41,14 +45,14 @@ test('pairing link: URL parsing leaves every vector fragment unchanged', () => {
 });
 
 test('pairing link: shared valid vectors parse', () => {
-  assert.equal(file.valid.length, 3);
+  assert.equal(file.valid.length, 9);
   for (const c of file.valid) {
     assert.deepEqual(parsePairingLink(c.url, { now: nowMs }), c.link, c.description);
   }
 });
 
 test('pairing link: shared invalid vectors fail with their code and field', () => {
-  assert.equal(file.invalid.length, 20);
+  assert.equal(file.invalid.length, 38);
   for (const c of file.invalid) {
     // c.field is undefined unless the code is badField, so this also checks
     // that other errors carry no field.
@@ -99,6 +103,50 @@ test('pairing link: a JSON value that is not an object is badJSON', () => {
     const url = `${file.loaderURL}#p=${base64urlEncode(new TextEncoder().encode(json))}`;
     assert.throws(() => parsePairingLink(url, { now: nowMs }), { name: 'PairingLinkError', code: 'badJSON' }, json);
   }
+});
+
+test('pairing link: JSON nested 10,000 deep is badJSON, not a RangeError', () => {
+  const depth = 10_000;
+  const json = `${v1JSON.slice(0, -1)},"future":${'['.repeat(depth)}${']'.repeat(depth)}}`;
+  assert.throws(() => parsePairingLink(linkWithJSON(json), { now: nowMs }), { name: 'PairingLinkError', code: 'badJSON' });
+  // The same field nested shallowly is an unknown field, and ignored.
+  const shallow = `${v1JSON.slice(0, -1)},"future":[[[]]]}`;
+  assert.deepEqual(parsePairingLink(linkWithJSON(shallow), { now: nowMs }), file.valid[0].link);
+});
+
+test('pairing link: a lone surrogate in an object key is badJSON', () => {
+  const json = `${v1JSON.slice(0, -1)},"\\udc00":1}`;
+  assert.throws(() => parsePairingLink(linkWithJSON(json), { now: nowMs }), { code: 'badJSON' });
+});
+
+test('pairing link: a name that starts with U+FEFF parses', () => {
+  // The well-formedness round trip must not drop a leading U+FEFF.
+  const [v1] = file.valid;
+  const link = { ...v1.link, name: '\ufeffAcme' };
+  assert.deepEqual(parsePairingLink(linkWithJSON(JSON.stringify(link)), { now: nowMs }), link);
+});
+
+test('pairing link: one leading byte order mark is dropped, a second is badJSON', () => {
+  const [v1] = file.valid;
+  const mark = [0xef, 0xbb, 0xbf];
+  const json = [...new TextEncoder().encode(v1JSON)];
+  /** @param {number[]} bytes */
+  const linkWithBytes = (bytes) => `${file.loaderURL}#p=${base64urlEncode(Uint8Array.from(bytes))}`;
+  assert.deepEqual(parsePairingLink(linkWithBytes([...mark, ...json]), { now: nowMs }), v1.link);
+  assert.throws(() => parsePairingLink(linkWithBytes([...mark, ...mark, ...json]), { now: nowMs }), { code: 'badJSON' });
+});
+
+test('pairing link: the relay host is at most 253 characters', () => {
+  // No vector pins this limit, so check both sides of it.
+  const [v1] = file.valid;
+  const longestHost = `${'a.'.repeat(126)}a`;
+  const longest = { ...v1.link, relay: `https://${longestHost}` };
+  assert.deepEqual(parsePairingLink(linkWithJSON(JSON.stringify(longest)), { now: nowMs }), longest);
+  const tooLong = { ...v1.link, relay: `https://${longestHost}a` };
+  assert.throws(() => parsePairingLink(linkWithJSON(JSON.stringify(tooLong)), { now: nowMs }), {
+    code: 'badField',
+    field: 'relay',
+  });
 });
 
 test('pairing link: errors are PairingLinkError instances', () => {
