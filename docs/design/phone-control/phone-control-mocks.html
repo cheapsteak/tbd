@@ -1,0 +1,1502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!--
+  Reviewed mocks for the phone UI in docs/specs/2026-11-07-phone-control-design.md, section 8.
+  One self-contained page: open it in any browser. On a phone it fills the screen, and the
+  MOCK tab at the top opens the controls. On a wider screen the controls sit beside a phone frame.
+  The first option in each "Design choices" row is the chosen design. All names are placeholders.
+-->
+<title>TBD Phone Control Mocks</title>
+<meta name="color-scheme" content="light dark">
+<style>
+/* Layout: one phone frame beside a mock panel on wide screens; on a phone the frame fills the screen and the panel opens from a tab at the top. */
+:root{
+  /* review page around the frame */
+  --page:#DADAD5; --page-fg:#1B1C1E; --page-muted:#5C5E63; --page-line:#BDBDB6; --frame:#1F2023;
+  /* look B: laptop-sidebar surfaces */
+  --side:#E8E8EB; --pane:#FFFFFF; --fg:#1D1D1F; --muted:#6E6E73; --sep:#D3D3D8; --sel:#D2D2D8; --box:#F1F1F3;
+  --accent:#2F6FE4; --on-accent:#FFFFFF; --scrim:rgba(18,18,22,.34); --shadow:rgba(0,0,0,.16);
+  --cam:#0D0E10; --cam-fg:#EDEDED; --qr-bg:#FFFFFF; --qr-fg:#111111;
+  /* status colours: from the laptop sidebar (amber hand, red octagon, orange triangle, dots, moon) */
+  --wait-fg:#8F5300; --wait-bg:#FFEFD1; --wait:#E39514;
+  --err-fg:#BE1A20; --err-bg:#FDE3E3; --err:#E0484D;
+  --rate-fg:#A84508; --rate-bg:#FDE8D8; --rate:#EE6A12;
+  --work-fg:#0A56C2; --work-bg:#E1ECFF; --work:#3B7EF0;
+  --idle-fg:#55585E; --idle-bg:#EBECEE; --idle:#9A9DA3;
+  --park-fg:#5E616A; --park-bg:#ECECF1; --park:#8E919A;
+  --add:#1F8A3B; --del:#C92A2A;
+  --sys:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  /* density (compact = look B as shown) */
+  --row-h:30px; --fs:13px; --small:11px; --tool-h:24px; --tool-fs:12px; --ib:40px; --home:30px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#101112; --page-fg:#E8E8E5; --page-muted:#9A9CA1; --page-line:#34353A; --frame:#3A3B40;
+    --side:#262628; --pane:#1C1C1E; --fg:#E8E8EA; --muted:#8F8F95; --sep:#3A3A3E; --sel:#3A3A40; --box:#2A2A2D;
+    --accent:#4C8DFF; --on-accent:#FFFFFF; --scrim:rgba(0,0,0,.5); --shadow:rgba(0,0,0,.5);
+    --wait-fg:#FFC468; --wait-bg:#3A2A0D; --wait:#F2A93B;
+    --err-fg:#FF8F8F; --err-bg:#3E1517; --err:#F0595E;
+    --rate-fg:#FFA66E; --rate-bg:#3D2110; --rate:#F57D2E;
+    --work-fg:#8DB9FF; --work-bg:#14294A; --work:#5B95F5;
+    --idle-fg:#B7BAC1; --idle-bg:#2A2B2F; --idle:#7D8087;
+    --park-fg:#9FA2AA; --park-bg:#27282C; --park:#80838B;
+    --add:#4CC56B; --del:#FF6B6B;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+    --page:#101112; --page-fg:#E8E8E5; --page-muted:#9A9CA1; --page-line:#34353A; --frame:#3A3B40;
+    --side:#262628; --pane:#1C1C1E; --fg:#E8E8EA; --muted:#8F8F95; --sep:#3A3A3E; --sel:#3A3A40; --box:#2A2A2D;
+    --accent:#4C8DFF; --on-accent:#FFFFFF; --scrim:rgba(0,0,0,.5); --shadow:rgba(0,0,0,.5);
+    --wait-fg:#FFC468; --wait-bg:#3A2A0D; --wait:#F2A93B;
+    --err-fg:#FF8F8F; --err-bg:#3E1517; --err:#F0595E;
+    --rate-fg:#FFA66E; --rate-bg:#3D2110; --rate:#F57D2E;
+    --work-fg:#8DB9FF; --work-bg:#14294A; --work:#5B95F5;
+    --idle-fg:#B7BAC1; --idle-bg:#2A2B2F; --idle:#7D8087;
+    --park-fg:#9FA2AA; --park-bg:#27282C; --park:#80838B;
+    --add:#4CC56B; --del:#FF6B6B;
+    color-scheme:dark;
+}
+body.d-comfy{--row-h:44px; --fs:15px; --small:12.5px; --tool-h:36px; --tool-fs:13.5px; --ib:44px}
+
+*{box-sizing:border-box}
+html{height:100%;box-sizing:border-box}
+body{height:100%;margin:0;background:var(--page);color:var(--page-fg);font-family:var(--sys);font-size:14px;-webkit-text-size-adjust:100%}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:inherit}
+button:disabled{cursor:default}
+input,textarea,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+svg.i{width:1em;height:1em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.dots{display:inline-flex;gap:2px;align-items:center;justify-content:center;width:14px;flex:none}
+.dots b{width:3px;height:3px;border-radius:50%;background:currentColor;animation:dot 1.2s infinite ease-in-out}
+.dots b:nth-child(2){animation-delay:.15s}.dots b:nth-child(3){animation-delay:.3s}
+@keyframes dot{0%,80%,100%{opacity:.3}40%{opacity:1}}
+.spin{width:18px;height:18px;flex:none;border:2px solid var(--sep);border-top-color:var(--accent);border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.dots b,.spin,.tdot.st-work{animation:none}}
+.plus{color:var(--add);font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:.95em}
+.minus{color:var(--del);font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:.95em}
+
+/* status classes set three colours each */
+.st-wait{--sf:var(--wait-fg);--sb:var(--wait-bg);--sd:var(--wait)}
+.st-err{--sf:var(--err-fg);--sb:var(--err-bg);--sd:var(--err)}
+.st-rate{--sf:var(--rate-fg);--sb:var(--rate-bg);--sd:var(--rate)}
+.st-work{--sf:var(--work-fg);--sb:var(--work-bg);--sd:var(--muted)}
+.st-idle{--sf:var(--idle-fg);--sb:var(--idle-bg);--sd:var(--idle)}
+.st-park{--sf:var(--park-fg);--sb:var(--park-bg);--sd:var(--park)}
+.st-gone{--sf:var(--idle-fg);--sb:var(--idle-bg);--sd:var(--idle)}
+.st-unk{--sf:var(--idle-fg);--sb:var(--idle-bg);--sd:var(--idle)}
+
+/* ---------- page and frame ---------- */
+#page{min-height:100%;display:flex;justify-content:center;align-items:flex-start;gap:32px;padding:24px 16px}
+#frame{width:390px;height:844px;flex:none;border:7px solid var(--frame);border-radius:50px;overflow:hidden;position:relative;display:flex;flex-direction:column;background:var(--side);color:var(--fg);font-size:var(--fs);line-height:1.4}
+#frame[data-screen="session"]{background:var(--pane)}
+.sim-sb{height:47px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:4px 30px 0 34px;font-size:15px;font-weight:600;background:var(--side)}
+.sim-sb .bat{display:flex;gap:6px;align-items:center}
+.sim-sb .bat i{display:block;width:24px;height:12px;border:1.5px solid currentColor;border-radius:4px;opacity:.85;position:relative}
+.sim-sb .bat i::after{content:"";position:absolute;inset:1.5px;right:6px;background:currentColor;border-radius:1.5px}
+.sim-home{height:var(--home);flex:none;display:grid;place-items:center}
+.sim-home::before{content:"";width:134px;height:5px;border-radius:3px;background:currentColor;opacity:.3}
+#screen{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.mocktab{display:none}
+
+/* ---------- loader strip ---------- */
+#strip{height:28px;flex:none;display:flex;align-items:center;gap:6px;padding:0 6px 0 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--sep);background:var(--side)}
+#strip b{color:var(--fg);font-weight:600}
+#strip{position:relative;z-index:25}
+#strip .re{display:inline-flex;align-items:center;gap:5px;margin-left:auto;padding-right:8px;color:var(--wait-fg);font-weight:600}
+#strip svg.i{font-size:13px}
+.lapbtn{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 8px 0 6px;margin-left:-6px;border-radius:6px;color:var(--muted)}
+.lapbtn:active,.lapbtn[aria-expanded="true"]{background:var(--sel)}
+.lapbtn b{color:var(--fg);font-weight:600}
+.lapbtn svg.car{font-size:11px;transition:transform .15s}
+.lapbtn[aria-expanded="true"] svg.car{transform:rotate(180deg)}
+.lapdrop{position:absolute;top:calc(100% + 4px);left:8px;width:260px;max-width:calc(100% - 16px);background:var(--pane);border:1px solid var(--sep);border-radius:12px;box-shadow:0 8px 28px var(--shadow);padding:6px;display:flex;flex-direction:column;font-size:var(--fs);color:var(--fg)}
+.ldi{display:flex;align-items:center;gap:10px;min-height:44px;padding:4px 10px;border-radius:8px;text-align:left;width:100%}
+.ldi:active{background:var(--box)}
+.ldi > svg.i{font-size:17px;color:var(--muted)}
+.ldi span{flex:1;display:flex;flex-direction:column;min-width:0}
+.ldi small{color:var(--muted);font-size:var(--small);display:flex;align-items:center;gap:5px}
+.ldi .tick{color:var(--accent);font-size:16px}
+.ldi.act{color:var(--accent);font-weight:600}
+.ldi.act > svg.i{color:var(--accent)}
+.ldsep{height:1px;background:var(--sep);margin:4px 6px}
+.prof{display:inline-flex;align-items:center;gap:2px;height:20px;padding:0 4px 0 6px;border-radius:5px;background:var(--box);color:var(--fg);font-weight:500;font-size:var(--small);flex:none}
+.prof svg.i{width:10px;height:10px;color:var(--muted)}
+.prof[aria-expanded="true"]{background:var(--sel)}
+.profdrop{top:52px;left:40px;z-index:22}
+.modeldrop{top:52px;left:auto;right:8px;z-index:22}
+.md-other{display:flex;gap:6px;padding:6px 6px 2px}
+.md-other input{flex:1;min-width:0;min-height:40px;border:1px solid var(--sep);border-radius:8px;background:var(--side);padding:8px 10px;font-size:16px}
+.pd-lbl{font-size:var(--small);font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;padding:4px 10px 2px}
+.pd-ask{display:flex;flex-direction:column;gap:6px;padding:6px 8px 4px;line-height:1.4}
+.pd-ask span{color:var(--muted);font-size:var(--small)}
+.pd-ask div{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+
+/* ---------- sessions list ---------- */
+.l-head{display:flex;align-items:center;justify-content:space-between;padding:8px 8px 4px 14px;flex:none}
+.l-head h1{margin:0;font-size:var(--fs);font-weight:700;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.newbtn{display:inline-flex;align-items:center;gap:4px;height:var(--ib);padding:0 10px;border-radius:8px;color:var(--accent);font-weight:600}
+.list{flex:1;overflow-y:auto;padding-bottom:12px;-webkit-overflow-scrolling:touch}
+.repo-row{display:flex;align-items:center;padding-right:6px}
+.repo{display:flex;align-items:center;gap:4px;flex:1;min-width:0;height:30px;padding:0 10px;font-size:12px;font-weight:700;color:var(--muted)}
+.repo-add{width:40px;height:30px;display:grid;place-items:center;border-radius:6px;color:var(--muted);font-size:15px;flex:none}
+.repo-add:active{background:var(--sel)}
+body.d-comfy .repo{height:44px;font-size:13px}
+body.d-comfy .repo-add{width:44px;height:44px;font-size:17px}
+.repo svg.i{width:12px;height:12px;transition:transform .15s}
+.repo[aria-expanded="false"] svg.i{transform:rotate(-90deg)}
+.rows{list-style:none;margin:0 0 6px;padding:0 6px}
+.row{display:flex;align-items:center;gap:8px;width:100%;height:var(--row-h);padding:0 8px 0 24px;border-radius:6px;text-align:left}
+.row:active,.row.sel{background:var(--sel)}
+.row .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .n small{color:var(--muted);font-size:.92em}
+.row .rb{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--sep);border-radius:5px;padding:0 4px;height:16px;flex:none}
+.row .rb svg.i{width:11px;height:11px}
+.row .t{font-size:var(--small);color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+.row .g{display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;min-width:16px;color:var(--sd);flex:none}
+.row .g svg.i{width:14px;height:14px}
+.row .g .w{display:none;font-size:var(--small);font-weight:600;color:var(--sf)}
+body.w-words .row .g .w{display:inline}
+body.w-words .row .g{min-width:72px}
+.list-foot{padding:10px 14px;font-size:var(--small);color:var(--muted)}
+
+/* ---------- session ---------- */
+.s-head{display:flex;align-items:center;gap:2px;min-height:48px;padding:2px 4px;background:var(--side);border-bottom:1px solid var(--sep);flex:none}
+.ib{width:var(--ib);height:var(--ib);display:grid;place-items:center;border-radius:8px;color:var(--muted);font-size:18px;flex:none}
+.s-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;padding:0 2px}
+.t1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px}
+.t1 span{overflow:hidden;text-overflow:ellipsis}
+.t2{font-size:var(--small);color:var(--muted);display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden}
+.t2 .w{color:var(--sf);font-weight:600;display:inline-flex;align-items:center;gap:3px}
+.t2 .w svg.i{color:var(--sd);width:12px;height:12px}
+.rb2{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--sep);border-radius:5px;padding:0 4px;height:16px;flex:none}
+.rb2 svg.i{width:11px;height:11px}
+.tg{display:flex;align-items:center;gap:6px;font-size:var(--small);color:var(--muted);height:var(--ib);padding:0 4px;cursor:pointer;flex:none;position:relative}
+.tg input{position:absolute;opacity:0;width:1px;height:1px}
+.tg i{width:30px;height:18px;border-radius:9px;background:var(--sep);display:block;position:relative;transition:background .15s}
+.tg i::after{content:"";position:absolute;width:14px;height:14px;top:2px;left:2px;border-radius:50%;background:var(--pane);box-shadow:0 1px 2px var(--shadow);transition:transform .15s}
+.tg input:checked + i{background:var(--accent)}
+.tg input:checked + i::after{transform:translateX(12px)}
+.tg input:focus-visible + i{outline:2px solid var(--accent);outline-offset:2px}
+.banner{display:flex;gap:7px;align-items:flex-start;padding:7px 12px;font-size:var(--small);background:var(--sb);color:var(--sf);flex:none}
+.banner svg.i{margin-top:1px;color:var(--sd)}
+.tabs{display:flex;overflow-x:auto;background:var(--side);border-bottom:1px solid var(--sep);padding:0 6px;flex:none;scrollbar-width:none}
+.tab{height:36px;padding:0 12px;display:flex;align-items:center;gap:6px;color:var(--muted);border-bottom:2px solid transparent;white-space:nowrap;flex:none}
+.tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
+body.tabs-pills .tabs{padding:6px 8px;gap:6px}
+body.tabs-pills .tab{height:32px;border:1px solid transparent;border-radius:16px;padding:0 12px}
+body.tabs-pills .tab[aria-selected="true"]{background:var(--pane);border-color:var(--sep);box-shadow:0 1px 2px var(--shadow)}
+body.d-comfy .tab{height:44px}
+body.d-comfy.tabs-pills .tab{height:36px}
+.tdot{width:7px;height:7px;border-radius:50%;background:var(--sd);flex:none}
+.tdot.st-work{background:var(--work);animation:pulse 1.4s infinite ease-in-out}
+@keyframes pulse{50%{opacity:.35}}
+.tx-wrap{flex:1;min-height:0;position:relative}
+.tx{position:absolute;inset:0;overflow-y:auto;padding:12px 12px 14px;display:flex;flex-direction:column;gap:8px;background:var(--pane);-webkit-overflow-scrolling:touch}
+.tx > :first-child{margin-top:auto}
+.me{background:var(--box);border-radius:8px;padding:7px 10px;line-height:1.45;overflow-wrap:anywhere}
+.who{display:block;font-size:var(--small);font-weight:700;color:var(--muted);margin-bottom:2px}
+.say{line-height:1.5;overflow-wrap:anywhere}
+.say p{margin:0 0 6px}.say p:last-child{margin-bottom:0}
+.say ul{margin:0 0 6px;padding-left:18px}
+.say code,.me code{font-family:var(--mono);font-size:.9em;background:var(--box);padding:0 4px;border-radius:4px}
+.lnk{color:var(--accent);text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+.morebtn{color:var(--accent);font-weight:600;font-size:var(--small);min-height:32px}
+.tool{display:flex;align-items:center;gap:6px;width:calc(100% + 8px);margin:0 -4px;padding:0 4px;min-height:var(--tool-h);font-size:var(--tool-fs);color:var(--muted);border-radius:6px;text-align:left}
+button.tool:active{background:var(--box)}
+.tool .tri{width:9px;height:9px;opacity:.8}
+.tool .sp{width:9px;flex:none}
+.tool svg.ti{width:13px;height:13px}
+.tool b{color:var(--fg);font-weight:600;flex:none}
+.tool code{font-family:var(--mono);font-size:.95em;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool .fs{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
+.tool .cnt{flex:none;font-size:var(--small)}
+.tool .okm{color:var(--add);display:inline-flex}
+.tool .fail{color:var(--del);font-weight:600;flex:none}
+.tool .dots{color:var(--muted)}
+.detail{margin:0 0 4px 15px;border:1px solid var(--sep);border-radius:8px;background:var(--box);padding:8px;display:flex;flex-direction:column;gap:5px;font-size:var(--small);color:var(--muted)}
+.detail pre{margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg)}
+.dl{font-weight:700;color:var(--muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+.toobig{display:flex;gap:6px;align-items:center;color:var(--wait-fg);font-weight:600}
+.loading{display:flex;gap:8px;align-items:center}
+.nest{margin:0 0 2px 6px;padding-left:10px;border-left:2px solid var(--sep);display:flex;flex-direction:column;gap:6px}
+.slash{display:flex;flex-direction:column;gap:2px;font-size:var(--tool-fs);color:var(--muted)}
+.slash code{font-family:var(--mono);color:var(--fg);background:var(--box);border-radius:4px;padding:1px 6px;align-self:flex-start}
+.peer{border:1px dashed var(--sep);border-radius:8px;padding:7px 10px;line-height:1.45}
+.peer .who{display:flex;align-items:center;gap:4px}
+.extra{font-size:var(--small);color:var(--muted);line-height:1.45;padding:2px 0}
+.extra .dl{margin-right:6px}
+.receipt{display:flex;gap:5px;align-items:center;justify-content:center;font-size:var(--small);color:var(--muted);padding:2px 0}
+.receipt svg.i{color:var(--add)}
+.errrow{display:flex;gap:7px;align-items:flex-start;border-radius:8px;padding:7px 10px;font-size:var(--small);background:var(--sb);color:var(--sf)}
+.errrow svg.i{margin-top:2px;color:var(--sd)}
+.working{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:var(--tool-fs);min-height:22px}
+.working span{font-variant-numeric:tabular-nums}
+.pill{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);height:36px;padding:0 16px;border-radius:18px;background:var(--fg);color:var(--pane);font-size:13px;font-weight:600;box-shadow:0 2px 10px var(--shadow);display:flex;align-items:center;gap:6px;white-space:nowrap;z-index:2}
+.codex-note{margin:auto;max-width:28ch;text-align:center;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:8px;padding:24px}
+.codex-note b{color:var(--fg)}
+
+/* dock: prompt card and composer */
+.dock{flex:none;background:var(--pane);border-top:1px solid var(--sep);padding:8px 10px 10px;display:flex;flex-direction:column;gap:8px}
+.card{border:1px solid var(--sep);border-radius:10px;background:var(--box);padding:10px;display:flex;flex-direction:column;gap:8px;max-height:430px;overflow-y:auto}
+.c-head{display:flex;align-items:center;gap:6px;font-size:var(--small);font-weight:700;color:var(--wait-fg);min-height:24px}
+.c-head svg.i{color:var(--wait)}
+.c-head .hide{margin-left:auto;color:var(--muted);font-weight:500;height:28px;padding:0 4px;display:inline-flex;align-items:center;gap:3px}
+.steps{display:flex;gap:4px}
+.steps i{flex:1;height:3px;border-radius:2px;background:var(--sep)}
+.steps i.on{background:var(--wait)}
+.q{font-weight:600;line-height:1.4;font-size:calc(var(--fs) + 1px)}
+.opts{display:flex;flex-wrap:wrap;gap:6px}
+body.ch-stack .opts{flex-direction:column}
+.opt{min-height:44px;padding:6px 12px;border-radius:8px;border:1px solid var(--sep);background:var(--pane);text-align:left;display:flex;flex-direction:column;justify-content:center;gap:1px;max-width:100%}
+.opt small{color:var(--muted);font-size:var(--small);line-height:1.3}
+.opt.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.opt.pri small{color:inherit;opacity:.85}
+.opt.danger{color:var(--err-fg)}
+.opt.ghost{color:var(--muted)}
+.chk{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 12px;border:1px solid var(--sep);border-radius:8px;background:var(--pane);cursor:pointer}
+.chk input{width:20px;height:20px;margin:0;accent-color:var(--accent);flex:none}
+.c-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.btn{min-height:44px;padding:0 16px;border-radius:10px;border:1px solid var(--sep);background:var(--pane);font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.danger{color:var(--err-fg)}
+.btn.wide{width:100%}
+.btn:disabled{opacity:.45}
+.perm-tool{display:flex;gap:6px;align-items:center;font-weight:700}
+.perm-desc{color:var(--muted);font-size:var(--small);line-height:1.4}
+.perm-target{font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--pane);border:1px solid var(--sep);border-radius:6px;padding:8px;margin:0}
+.review{display:flex;flex-direction:column;gap:4px}
+.review button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-height:44px;padding:6px 10px;border-radius:8px;background:var(--pane);border:1px solid var(--sep);text-align:left}
+.review small{color:var(--muted);font-size:var(--small)}
+.ta{width:100%;min-height:44px;resize:none;border-radius:8px;border:1px solid var(--sep);background:var(--pane);padding:9px 10px;font-size:16px;line-height:1.35}
+.card.done{flex-direction:row;align-items:center;gap:10px}
+.card.done .ok{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:var(--add);color:var(--on-accent);flex:none}
+.card.done div{display:flex;flex-direction:column;min-width:0;flex:1}
+.card.done small{color:var(--muted);font-size:var(--small);overflow-wrap:anywhere}
+.card-strip{display:flex;align-items:center;gap:7px;min-height:44px;padding:0 12px;border-radius:10px;border:1px solid var(--sep);background:var(--wait-bg);color:var(--wait-fg);font-weight:600;width:100%}
+.card-strip svg.i{color:var(--wait)}
+.card-strip span{margin-left:auto;font-weight:500}
+.comp{display:flex;gap:6px;align-items:flex-end}
+.field{flex:1;min-height:44px;max-height:140px;resize:none;border-radius:10px;border:1px solid var(--sep);background:var(--pane);color:var(--fg);padding:11px 12px;font-size:16px;line-height:1.3}
+.send{min-height:44px;padding:0 14px;border-radius:10px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:14px;white-space:nowrap;flex:none}
+.send:disabled{opacity:.4}
+.refusal{display:flex;gap:7px;align-items:flex-start;font-size:var(--small);color:var(--rate-fg);background:var(--rate-bg);border-radius:8px;padding:7px 10px}
+.refusal svg.i{margin-top:1px}
+.dock-note{font-size:var(--small);color:var(--muted);text-align:center;padding:6px}
+
+/* ---------- sheets ---------- */
+.scrim{position:absolute;inset:0;background:var(--scrim);z-index:20}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:21;background:var(--side);border-radius:14px 14px 0 0;padding:6px 12px calc(12px + var(--home));max-height:90%;overflow-y:auto;display:flex;flex-direction:column;gap:8px;box-shadow:0 -4px 20px var(--shadow)}
+.sheet.tall{top:7%}
+.grab{width:36px;height:5px;border-radius:3px;background:var(--sep);margin:2px auto 2px;flex:none}
+.sh-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sh-title{font-weight:700;font-size:calc(var(--fs) + 3px);margin:0}
+.sh-sub{color:var(--muted);font-size:var(--small);margin:0;line-height:1.4}
+.navbtn{min-height:44px;padding:0 6px;color:var(--accent);font-weight:500}
+.navbtn.b{font-weight:700}
+.navbtn:disabled{color:var(--muted);opacity:.6}
+.group{display:flex;flex-direction:column;background:var(--pane);border-radius:10px;overflow:hidden}
+.group > * + *{border-top:1px solid var(--sep)}
+.mi{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 12px;text-align:left;width:100%}
+.mi > svg.i{font-size:18px;color:var(--muted)}
+.mi span{flex:1;display:flex;flex-direction:column;min-width:0}
+.mi small{color:var(--muted);font-size:var(--small)}
+.mi:disabled{opacity:.5}
+.mi .chev{color:var(--sep);font-size:14px}
+.mi .cur{font-size:var(--small);color:var(--muted)}
+.mi .tick{color:var(--accent);font-size:17px}
+.lbl{font-size:var(--small);font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:6px 4px 0}
+.segc{display:flex;background:var(--box);border-radius:9px;padding:2px;gap:2px;flex:none}
+.segc button{flex:1;min-height:36px;border-radius:7px;font-weight:600;color:var(--muted);text-align:center}
+.segc button[aria-pressed="true"]{background:var(--pane);color:var(--fg);box-shadow:0 1px 2px var(--shadow)}
+.frow{display:flex;flex-direction:column;gap:4px;padding:8px 12px}
+.frow label{font-size:var(--small);color:var(--muted);font-weight:600}
+.frow .req{color:var(--err-fg)}
+.frow input[type=text],.frow input[type=number],.frow select,.frow textarea{width:100%;min-height:40px;border:1px solid var(--sep);border-radius:8px;background:var(--side);padding:8px 10px;font-size:16px}
+.frow textarea{resize:none;min-height:72px;line-height:1.35}
+.frow.sw{flex-direction:row;align-items:center;justify-content:space-between;min-height:48px}
+.frow.sw label{font-size:var(--fs);color:var(--fg);font-weight:400}
+.frow .hint{font-size:var(--small);color:var(--muted)}
+.creating{display:flex;flex-direction:column;align-items:center;gap:12px;padding:40px 16px;color:var(--muted);text-align:center}
+.confirm{display:flex;flex-direction:column;gap:10px;padding:6px 2px}
+.confirm h3{margin:0;font-size:calc(var(--fs) + 3px);text-wrap:balance}
+.confirm p{margin:0;color:var(--muted);line-height:1.45}
+.toast{position:absolute;left:50%;bottom:calc(96px + var(--home));transform:translateX(-50%);background:var(--fg);color:var(--pane);padding:9px 14px;border-radius:10px;font-size:13px;z-index:30;max-width:85%;text-align:center;box-shadow:0 4px 14px var(--shadow)}
+
+/* ---------- loader screens ---------- */
+.ld{flex:1;display:flex;flex-direction:column;min-height:0;overflow-y:auto}
+.ld-head{padding:16px 16px 4px}
+.ld-head h1{margin:0;font-size:24px;letter-spacing:-.01em}
+.ld-nav{display:flex;align-items:center;justify-content:space-between;min-height:44px;padding:0 6px;border-bottom:1px solid var(--sep);flex:none}
+.ld-nav b{font-size:15px}
+.ld-nav span{width:60px}
+.ld-body{padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+.ld-body p{margin:0;color:var(--muted);line-height:1.45}
+.lap{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;background:var(--pane);border-radius:10px;overflow:hidden}
+.lap li{display:flex;align-items:center}
+.lap li + li{border-top:1px solid var(--sep)}
+.lap-row{flex:1;display:flex;align-items:center;gap:10px;min-height:62px;padding:8px 4px 8px 12px;text-align:left;min-width:0}
+.lap-row > svg.i{font-size:20px;color:var(--muted)}
+.lap-row span{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.lap-row small{color:var(--muted);font-size:var(--small);display:flex;align-items:center;gap:5px}
+.odot{width:7px;height:7px;border-radius:50%;background:var(--idle);flex:none}
+.odot.on{background:var(--add)}
+.forget{min-height:44px;padding:0 12px;color:var(--err-fg);font-size:13px;flex:none}
+.ask{display:flex;flex-direction:column;gap:8px;padding:12px;width:100%}
+.ask p{margin:0;color:var(--fg)}
+.ask div{display:flex;gap:6px}
+.cam{position:relative;aspect-ratio:4/5;width:100%;max-width:100%;border-radius:14px;background:var(--cam);overflow:hidden;display:grid;place-items:center;color:var(--cam-fg)}
+.cam .qr{width:48%;aspect-ratio:1;background:var(--qr-bg);padding:6px;border-radius:4px;transform:rotate(-4deg)}
+.cam .qr svg{display:block;width:100%;height:100%}
+.cam .brk{position:absolute;width:64%;aspect-ratio:1;border-radius:18px}
+.cam .brk::before,.cam .brk::after{content:"";position:absolute;inset:0;border:3px solid var(--cam-fg);border-radius:18px;clip-path:polygon(0 0,28% 0,28% 6%,6% 6%,6% 28%,0 28%,0 72%,6% 72%,6% 94%,28% 94%,28% 100%,72% 100%,72% 94%,94% 94%,94% 72%,100% 72%,100% 28%,94% 28%,94% 6%,72% 6%,72% 0,100% 0,100% 100%,0 100%)}
+.cam .brk::after{display:none}
+.cam .hint{position:absolute;bottom:12px;left:12px;right:12px;text-align:center;font-size:12px;opacity:.8}
+.code{font-family:var(--mono);font-size:42px;font-weight:700;letter-spacing:.06em;text-align:center;font-variant-numeric:tabular-nums;color:var(--fg);padding:10px 0;background:var(--pane);border-radius:12px}
+.waitline{display:flex;gap:10px;align-items:center;justify-content:center;color:var(--muted)}
+.center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:12px;padding:24px 24px 48px}
+.center h2{margin:0;font-size:19px;text-wrap:balance;color:var(--fg)}
+.center p{margin:0;color:var(--muted);max-width:32ch;line-height:1.45}
+.center .acts{display:flex;flex-direction:column;gap:8px;width:100%;max-width:260px;margin-top:6px}
+.e-ic{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;font-size:24px;background:var(--sb,var(--box));color:var(--sd,var(--muted))}
+.mockbtns{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.mockb{border:1px dashed var(--muted);color:var(--muted);border-radius:8px;padding:0 10px;min-height:32px;font-size:12px}
+.homehint{font-size:var(--small);color:var(--muted);display:flex;gap:6px;align-items:flex-start;line-height:1.4}
+
+/* ---------- mock panel ---------- */
+#panel{width:320px;flex:none;display:flex;flex-direction:column;gap:18px;position:sticky;top:24px;max-height:calc(100vh - 48px);overflow-y:auto;padding:2px 6px 24px 2px;font-size:13px;color:var(--page-fg)}
+#panel h1{margin:0;font-size:18px;text-wrap:balance}
+#panel > p{margin:0;color:var(--page-muted);line-height:1.45}
+#panel h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--page-muted);margin:0 0 6px}
+.ix{display:flex;flex-wrap:wrap;gap:4px}
+.ix button{padding:5px 9px;border-radius:7px;border:1px solid var(--page-line);color:var(--page-fg);font-size:12.5px;line-height:1.3}
+.ix button:hover{border-color:var(--page-fg)}
+.oprow{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.oprow > span{font-weight:600}
+.oprow small{color:var(--page-muted)}
+.pseg{display:flex;flex-wrap:wrap;border:1px solid var(--page-line);border-radius:8px;padding:2px;gap:2px;align-self:flex-start}
+.pseg button{padding:5px 10px;border-radius:6px;font-size:12.5px;color:var(--page-muted)}
+.pseg button[aria-pressed="true"]{background:var(--page-fg);color:var(--page)}
+.panel-close{display:none}
+.rules{margin:0;padding-left:16px;color:var(--page-muted);line-height:1.5}
+
+@media (max-width: 620px){
+  body{background:var(--side)}
+  #page{padding:0;display:block;height:100%;min-height:0}
+  #frame{width:100%;height:100%;border:0;border-radius:0;--home:0px}
+  .sim-sb,.sim-home{display:none}
+  .mocktab{display:flex;position:absolute;top:0;left:50%;transform:translateX(-50%);z-index:40;height:16px;padding:0 10px;align-items:center;border:1px dashed var(--muted);border-top:0;border-radius:0 0 8px 8px;font-size:10px;color:var(--muted);background:var(--side);letter-spacing:.06em}
+  #panel{position:fixed;inset:0;z-index:60;width:auto;max-height:none;top:0;background:var(--page);padding:calc(14px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) calc(24px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+  #panel:not(.open){display:none}
+  .panel-close{display:inline-flex;align-self:flex-end;min-height:40px;padding:0 12px;border:1px solid var(--page-line);border-radius:8px;align-items:center;font-weight:600}
+}
+</style>
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-6-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
+  <symbol id="moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="octa" viewBox="0 0 24 24"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86Z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+  <symbol id="glass" viewBox="0 0 24 24"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.17a2 2 0 0 0-.59-1.42L12 12l-4.41 4.41A2 2 0 0 0 7 17.83V22"/><path d="M7 2v4.17a2 2 0 0 0 .59 1.42L12 12l4.41-4.41A2 2 0 0 0 17 6.17V2"/></symbol>
+  <symbol id="power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="unk" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" stroke-dasharray="3 2.6"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.8.8c0 1.7-2.3 2.2-2.3 3.4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="chev-l" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="chev-u" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/></symbol>
+  <symbol id="laptop" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></symbol>
+  <symbol id="term" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+  <symbol id="eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20"/></symbol>
+  <symbol id="bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><path d="M9 13v2M15 13v2"/></symbol>
+  <symbol id="tri-r" viewBox="0 0 24 24"><path d="M8 4v16l12-8Z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="tri-d" viewBox="0 0 24 24"><path d="M4 7h16l-8 12Z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3Z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+  <symbol id="link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></symbol>
+  <symbol id="warn" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="wifi-off" viewBox="0 0 24 24"><path d="M2 2l20 20"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M5 12.9a10 10 0 0 1 5.2-2.8"/><path d="M19 12.9a10 10 0 0 0-2.3-1.6"/><path d="M2 8.8a15 15 0 0 1 4.2-2.6"/><path d="M22 8.8A15 15 0 0 0 11 5"/><path d="M12 20h.01"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+  <symbol id="user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+  <symbol id="fork" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="12" cy="19" r="2.5"/><path d="M6 7.5V9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7.5"/><path d="M12 12v4.5"/></symbol>
+  <symbol id="cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+  <symbol id="layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></symbol>
+  <symbol id="msg" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12Z"/></symbol>
+  <symbol id="down" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="m5 12 7 7 7-7"/></symbol>
+  <symbol id="swap" viewBox="0 0 24 24"><path d="M7 4 3 8l4 4"/><path d="M3 8h14"/><path d="m17 20 4-4-4-4"/><path d="M21 16H7"/></symbol>
+</svg>
+
+<div id="page">
+  <div id="frame">
+    <div class="sim-sb" aria-hidden="true"><span>9:41</span><span class="bat"><i></i></span></div>
+    <button class="mocktab" type="button" data-act="panel-open">MOCK</button>
+    <div id="strip"></div>
+    <div id="screen"></div>
+    <div id="sheet-root"></div>
+    <div id="toast-root"></div>
+    <div class="sim-home" aria-hidden="true"></div>
+  </div>
+  <aside id="panel" aria-label="Mock controls"></aside>
+</div>
+
+<script>
+(function () {
+'use strict';
+var $ = function (s) { return document.querySelector(s); };
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function ic(id, cls) { return '<svg class="i ' + (cls || '') + '" aria-hidden="true"><use href="#' + id + '"/></svg>'; }
+function dots() { return '<span class="dots" aria-hidden="true"><b></b><b></b><b></b></span>'; }
+var MIN = 60000;
+var now = function () { return Date.now(); };
+function ago(t) { var m = (now() - t) / MIN; if (m < 1) return 'now'; if (m < 60) return Math.floor(m) + 'm'; if (m < 1440) return Math.floor(m / 60) + 'h'; return Math.floor(m / 1440) + 'd'; }
+function dur(ms) { var s = Math.max(0, Math.floor(ms / 1000)); var m = Math.floor(s / 60); return m ? m + 'm ' + (s % 60) + 's' : s + 's'; }
+
+/* ---------- status vocabulary (spec section 6, ranks from section 8.2) ---------- */
+var ST = {
+  wait: { word: 'Waiting for you', short: 'Waiting', icon: 'hand', rank: 0 },
+  err:  { word: 'Error', short: 'Error', icon: 'octa', rank: 1 },
+  rate: { word: 'Rate limited', short: 'Limited', icon: 'glass', rank: 2 },
+  work: { word: 'Working', short: 'Working', icon: null, rank: 3 },
+  idle: { word: 'Idle', short: 'Idle', icon: null, rank: 4 },
+  park: { word: 'Parked', short: 'Parked', icon: 'moon', rank: 5 },
+  gone: { word: 'Exited', short: 'Exited', icon: 'power', rank: 6 },
+  unk:  { word: 'Unknown', short: 'Unknown', icon: 'unk', rank: 7 }
+};
+function glyph(st) { if (st === 'work') return dots(); var i = ST[st].icon; return i ? ic(i) : ''; }
+
+/* ---------- sample data (acme placeholders) ---------- */
+var T0 = now();
+var at = function (m) { return T0 - m * MIN; };
+var laptops = [
+  { id: 'acme-laptop', online: true, last: 'now' },
+  { id: 'acme-studio', online: false, last: '2 days ago' }
+];
+var repos = [{ id: 'web', name: 'acme-web' }, { id: 'api', name: 'acme-api' }, { id: 'mob', name: 'acme-mobile' }];
+var rows = [
+  { id: 'w-main', repo: 'web', name: 'main', sids: ['s-main'] },
+  { id: 'w-login', repo: 'web', name: 'Login redirect fix', sids: ['s-login'] },
+  { id: 'w-co', repo: 'web', name: 'Checkout v2', sids: ['s-co', 's-co-rev', 's-co-codex'] },
+  { id: 'w-docs', repo: 'web', name: 'Docs refresh', sids: ['s-docs'] },
+  { id: 'w-rate', repo: 'api', name: 'Rate limit retry', sids: ['s-rate'] },
+  { id: 'w-bulk', repo: 'api', name: 'Bulk import', sids: ['s-bulk'] },
+  { id: 'w-sse', repo: 'api', name: 'SSE reconnect', sids: ['s-sse'] },
+  { id: 'w-schema', repo: 'api', name: 'Schema migration', sids: ['s-schema'] },
+  { id: 'r-triage', repo: 'api', name: 'Triage flaky test', sids: ['s-triage'], remote: 'acme-cloud' },
+  { id: 'w-onb', repo: 'mob', name: 'Onboarding copy', sids: ['s-onb'] },
+  { id: 'w-set', repo: 'mob', name: 'Settings screen', sids: ['s-set'] },
+  { id: 'w-legacy', repo: 'mob', name: 'Legacy pane', sids: ['s-legacy'] }
+];
+var profiles = [
+  { id: 'personal', name: 'Personal', kind: 'Claude subscription', def: true },
+  { id: 'acme-work', name: 'acme-work', kind: 'Claude subscription' },
+  { id: 'acme-bedrock', name: 'acme-bedrock', kind: 'Amazon Bedrock' }
+];
+var providers = [
+  { id: 'acme-cloud', name: 'acme-cloud', fields: [
+    { id: 'branch', label: 'Branch', type: 'text', req: true, val: 'main' },
+    { id: 'size', label: 'Machine size', type: 'choice', req: true, opts: ['Small', 'Medium', 'Large'], val: 'Medium' },
+    { id: 'setup', label: 'Run the setup script', type: 'bool', val: true },
+    { id: 'hours', label: 'Time limit, hours', type: 'number', val: 4 },
+    { id: 'notes', label: 'Notes for the agent', type: 'long', val: '' }
+  ] },
+  { id: 'acme-sandbox', name: 'acme-sandbox', fields: [] }
+];
+var CLAUDE = { tx: 1, send: 1, answer: 1, sw: 1, fork: 1, model: 1 };
+var REMOTE = { tx: 1, send: 1, answer: 1, sw: 0, fork: 0, model: 1 };
+
+var testOut = 'PASS src/checkout/AddressStep.test.tsx\n  ✓ keeps the saved address (31 ms)\n  ✓ shows field errors on blur (18 ms)\nPASS src/checkout/ShippingStep.test.tsx\n  ✓ parses the shipping method (6 ms)\n';
+var S = {
+  's-login': { tab: 'Claude', kind: 'claude', status: 'wait', at: at(2), profile: 'Personal', model: 'opus', caps: CLAUDE,
+    reply: 'Added three open-redirect tests. The auth tests pass, 12 of 12.',
+    items: [
+      { t: 'me', text: 'After sign-in we always land on /home, even when someone came from a deep link. Send people back to where they started.' },
+      { t: 'think', text: 'The redirect target is probably lost in the sign-in callback. Look at finishLogin first.' },
+      { t: 'agent', type: 'Explore', desc: 'Find where the post-login redirect is decided', count: 14, items: [
+        { t: 'tool', name: 'Grep', target: 'finishLogin', status: 'ok', input: 'pattern: finishLogin\npath: src/', result: 'src/auth/redirect.ts:41\nsrc/auth/callback.ts:18\nsrc/auth/redirect.test.ts:7' },
+        { t: 'tool', name: 'Read', target: 'src/auth/callback.ts', status: 'ok', input: 'file_path: src/auth/callback.ts', result: 'export async function onCallback(req) {\n  const session = await exchangeCode(req.query.code)\n  return finishLogin(session, req.query.next)\n}' },
+        { t: 'say', text: '`finishLogin` in `src/auth/redirect.ts` receives `next` but never uses it.' }
+      ] },
+      { t: 'tool', name: 'Read', target: 'src/auth/redirect.ts', status: 'ok', input: 'file_path: src/auth/redirect.ts', result: "export function finishLogin(session, next) {\n  saveSession(session)\n  router.push('/home')\n}" },
+      { t: 'say', text: 'Found it. `finishLogin` gets the `next` value from the sign-in link, then ignores it and always opens `/home`.' },
+      { t: 'edit', name: 'Edit', file: 'src/auth/redirect.ts', add: 12, del: 3 },
+      { t: 'edit', name: 'Write', file: 'src/auth/isLocalPath.ts', add: 18, del: 0 },
+      { t: 'tool', name: 'Bash', target: 'npm test -- auth', status: 'ok', input: 'command: npm test -- auth\ndescription: Run the auth tests', result: 'PASS src/auth/redirect.test.ts\n  ✓ keeps next after sign-in (12 ms)\n  ✓ falls back to /home when next is missing (3 ms)\n  ✓ refuses next on another site (2 ms)\n\nTests: 9 passed, 9 total' },
+      { t: 'sys', label: 'Hook', text: 'PostToolUse: eslint src/auth passed.' },
+      { t: 'say', text: 'Fixed. Here is what changed:\n\n- `finishLogin` now keeps the `next` value from the sign-in link.\n- A new `isLocalPath` check refuses any link to another site, so `next=https://evil.example` falls back to `/home`.\n- The auth tests pass, 9 of 9.',
+        more: 'The [OWASP cheat sheet on open redirects](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html) describes the attack this check blocks.\n\nThe check also refuses `//evil.example`, which browsers read as a link to another site, and `/\\evil.example`, which some browsers fix up the same way. Both cases have a line in `isLocalPath` with a comment that says why.' }
+    ] },
+  's-co': { tab: 'Claude', kind: 'claude', status: 'work', at: at(0.2), workStart: T0 - 72000, profile: 'Personal', model: 'sonnet', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Split the checkout form into three steps: address, shipping and payment. Keep the old form behind the checkout_v1 flag.' },
+      { t: 'tool', name: 'Glob', target: 'src/checkout/**/*.tsx', status: 'ok', input: 'pattern: src/checkout/**/*.tsx', result: 'src/checkout/CheckoutForm.tsx\nsrc/checkout/SavedCards.tsx\nsrc/checkout/Summary.tsx' },
+      { t: 'tool', name: 'Read', target: 'src/checkout/CheckoutForm.tsx', status: 'ok', input: 'file_path: src/checkout/CheckoutForm.tsx', result: '(612 lines)\nexport function CheckoutForm() {\n  const [address, setAddress] = useState(...)\n  ...' },
+      { t: 'say', text: 'The form is one 600-line component. I will move each section into its own step and keep a small `CheckoutSteps` wrapper that holds the shared state.' },
+      { t: 'edit', name: 'Write', file: 'src/checkout/AddressStep.tsx', add: 84, del: 0 },
+      { t: 'edit', name: 'Edit', file: 'src/checkout/CheckoutForm.tsx', add: 9, del: 212 },
+      { t: 'peer', from: 'Checkout v2 · Review', text: 'Review note: the payment step must keep the saved-card list. It is easy to drop when that section moves.' },
+      { t: 'say', text: 'Thanks, noted. The saved-card list moves with the payment section.' },
+      { t: 'edit', name: 'Write', file: 'src/checkout/ShippingStep.tsx', add: 67, del: 0 },
+      { t: 'tool', name: 'Bash', target: 'npm run typecheck', status: 'fail', exit: 2, input: 'command: npm run typecheck', result: "src/checkout/ShippingStep.tsx(14,7): error TS2322: Type 'string' is not assignable to type 'ShippingMethod'.\n\nFound 1 error." },
+      { t: 'think', text: 'ShippingMethod is a union of literals. The select gives a string, so parse it before setting state.' },
+      { t: 'edit', name: 'Edit', file: 'src/checkout/ShippingStep.tsx', add: 6, del: 2 },
+      { t: 'tool', name: 'Bash', target: 'npm run typecheck', status: 'ok', input: 'command: npm run typecheck', result: 'No errors.' },
+      { t: 'tool', name: 'Bash', target: 'npm test -- checkout --reporter=verbose', status: 'ok', big: true, input: 'command: npm test -- checkout --reporter=verbose', result: testOut + '… (the first 64 KB of 2.4 MB)' }
+    ] },
+  's-co-rev': { tab: 'Review', kind: 'claude', status: 'idle', at: at(20), profile: 'acme-work', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Review the checkout split as it lands. Send notes to the main tab.' },
+      { t: 'say', text: 'I will read each change as it lands and send notes to the main tab.' },
+      { t: 'tool', name: 'Read', target: 'src/checkout/CheckoutForm.tsx', status: 'ok', input: 'file_path: src/checkout/CheckoutForm.tsx', result: '(612 lines)' },
+      { t: 'say', text: 'Sent one note to the main tab: keep the saved-card list on the payment step.' }
+    ] },
+  's-co-codex': { tab: 'Codex', kind: 'codex', status: 'work', at: at(4), caps: {}, items: [] },
+  's-docs': { tab: 'Claude', kind: 'claude', status: 'park', at: at(180), profile: 'Personal', model: 'sonnet', caps: CLAUDE,
+    items: [
+      { t: 'me', text: "Rewrite the README's setup section for the new dev container." },
+      { t: 'tool', name: 'Read', target: 'README.md', status: 'ok', input: 'file_path: README.md', result: '# acme-web\n\n## Setup\n1. Install Node 22\n...' },
+      { t: 'edit', name: 'Edit', file: 'README.md', add: 31, del: 44 },
+      { t: 'edit', name: 'Write', file: 'docs/manual-setup.md', add: 52, del: 0 },
+      { t: 'say', text: 'Done. The setup section now starts with the dev container. The old manual steps moved to `docs/manual-setup.md`.' }
+    ] },
+  's-main': { tab: 'Claude', kind: 'claude', status: 'idle', at: at(1500), profile: 'Personal', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'What changed on main this week?' },
+      { t: 'tool', name: 'Bash', target: 'git log --since=1.week --oneline', status: 'ok', input: 'command: git log --since=1.week --oneline', result: 'a41c2e9 feat: checkout_v1 flag\n93be001 feat: rate limiter for webhooks\n71d0c3a docs: move manual setup\n... 9 more' },
+      { t: 'say', text: 'Twelve commits landed. The biggest three: the `checkout_v1` flag, a rate limiter for webhooks, and the docs move.' }
+    ] },
+  's-rate': { tab: 'Claude', kind: 'claude', status: 'err', at: at(12), reason: 'API error 529: the model is overloaded. The turn stopped.', profile: 'Personal', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Add retry with backoff to the outgoing webhook client.' },
+      { t: 'tool', name: 'Read', target: 'src/webhooks/client.ts', status: 'ok', input: 'file_path: src/webhooks/client.ts', result: 'export async function send(hook, body) {\n  return fetch(hook.url, { method: "POST", body })\n}' },
+      { t: 'edit', name: 'Edit', file: 'src/webhooks/client.ts', add: 27, del: 2 },
+      { t: 'error', text: 'API error 529: the model is overloaded. The turn stopped. Send a message to try again.' }
+    ] },
+  's-bulk': { tab: 'Claude', kind: 'claude', status: 'rate', at: at(40), reason: 'Usage limit reached. It resets at 3:00 pm.', profile: 'Personal', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Import the March CSV into staging and report the rows that fail.' },
+      { t: 'tool', name: 'Bash', target: 'node scripts/import.js --file march.csv --dry-run', status: 'ok', input: 'command: node scripts/import.js --file march.csv --dry-run', result: 'Read 18,204 rows\n41 rows failed validation (see import-errors.csv)' },
+      { t: 'say', text: 'The dry run found 41 bad rows. Most have a date in the wrong format. Starting the real import now.' },
+      { t: 'error', text: 'Usage limit reached. It resets at 3:00 pm.' }
+    ] },
+  's-sse': { tab: 'Claude', kind: 'claude', status: 'wait', at: at(6), profile: 'acme-work', model: 'opus', caps: CLAUDE,
+    reply: 'The reconnect tests pass. Two files changed: the client and the new test.',
+    items: [
+      { t: 'me', text: 'The event stream drops after 30 seconds idle. Make the client reconnect, and add an integration test.' },
+      { t: 'tool', name: 'Read', target: 'src/stream/client.ts', status: 'ok', input: 'file_path: src/stream/client.ts', result: 'export function connect(url) {\n  const es = new EventSource(url)\n  ...' },
+      { t: 'edit', name: 'Edit', file: 'src/stream/client.ts', add: 22, del: 4 },
+      { t: 'edit', name: 'Write', file: 'test/stream.reconnect.test.ts', add: 56, del: 0 },
+      { t: 'say', text: 'The client now expects a heartbeat every 15 seconds and reconnects when one is missed. Next I want to run the integration tests.' }
+    ] },
+  's-schema': { tab: 'Claude', kind: 'claude', status: 'gone', at: at(120), profile: 'Personal', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Write the migration that splits users.name into first and last name.' },
+      { t: 'edit', name: 'Write', file: 'migrations/0042_split_name.sql', add: 24, del: 0 },
+      { t: 'tool', name: 'Bash', target: 'make migrate-test', status: 'ok', input: 'command: make migrate-test', result: 'Applied 0042 on a copy of staging: ok\nRolled back: ok' },
+      { t: 'say', text: 'The migration is written. It applies and rolls back cleanly on a copy of staging.' }
+    ] },
+  's-triage': { tab: 'acme-cloud', kind: 'remote', status: 'work', at: at(5), workStart: T0 - 5 * MIN, provider: 'acme-cloud', model: 'opus', caps: REMOTE,
+    items: [
+      { t: 'me', text: 'Find why test_checkout_total fails about one run in ten.' },
+      { t: 'tool', name: 'Bash', target: 'pytest tests/test_checkout.py -k total --count=50', status: 'ok', input: 'command: pytest tests/test_checkout.py -k total --count=50', result: '45 passed, 5 failed' },
+      { t: 'say', text: 'It fails when two discounts apply in the same second. The discount list has no stable order, so the rounding differs. Checking where the list is built.' }
+    ] },
+  's-onb': { tab: 'Claude', kind: 'claude', status: 'wait', at: at(25), profile: 'Personal', model: 'opus', caps: CLAUDE,
+    reply: 'Thanks. Writing the copy now.',
+    items: [
+      { t: 'me', text: 'Write the onboarding copy for the new welcome flow.' },
+      { t: 'tool', name: 'Read', target: 'design/welcome-flow.md', status: 'ok', input: 'file_path: design/welcome-flow.md', result: '# Welcome flow\nScreens: hello, permissions, account, done.' },
+      { t: 'say', text: 'Before I write it, I have three questions.' }
+    ] },
+  's-set': { tab: 'Claude', kind: 'claude', status: 'wait', at: at(52), profile: 'Personal', model: 'sonnet', caps: CLAUDE,
+    reply: 'Moving those sections to the new screen now.',
+    items: [
+      { t: 'me', text: 'Plan the new Settings screen.' },
+      { t: 'tool', name: 'Grep', target: 'SettingsSection', status: 'ok', input: 'pattern: SettingsSection', result: 'src/profile/ProfileScreen.tsx\nsrc/app/Drawer.tsx\nsrc/legacy/Prefs.tsx' },
+      { t: 'say', text: 'Settings live in three places today: the profile screen, the drawer, and an old preferences page. Pick what moves to the new screen.' }
+    ] },
+  's-legacy': { tab: 'Claude', kind: 'claude', status: 'unk', at: at(420), profile: 'Personal', model: 'opus', caps: CLAUDE,
+    items: [
+      { t: 'me', text: 'Watch the worker logs and tell me about errors.' },
+      { t: 'tool', name: 'Bash', target: 'tail -n 200 logs/worker.log', status: 'ok', input: 'command: tail -n 200 logs/worker.log', result: '(200 lines, no ERROR entries)' },
+      { t: 'say', text: 'No errors in the last 200 lines.' }
+    ] }
+};
+
+var PROMPTS = {
+  's-login': { kind: 'question', questions: [
+    { header: 'Tests', text: 'Add a test for open-redirect attempts too?', other: true, options: [
+      { label: 'Yes, add the test', desc: 'Covers next=https://… and next=//… links' },
+      { label: 'No, this is enough' }
+    ] }
+  ] },
+  's-onb': { kind: 'question', questions: [
+    { header: 'Tone', text: 'Which tone should the welcome screen use?', options: [{ label: 'Friendly and short' }, { label: 'Plain and formal' }, { label: 'Match the current app' }] },
+    { header: 'Steps', text: 'How many onboarding steps?', other: true, options: [{ label: '3 steps', desc: 'Hello, account, done' }, { label: '4 steps', desc: 'Adds permissions' }] },
+    { header: 'Skip', text: 'Can people skip onboarding?', options: [{ label: 'Yes, show a Skip button' }, { label: 'No, every step is required' }] }
+  ] },
+  's-set': { kind: 'question', questions: [
+    { header: 'Sections', text: 'Which settings should move to the new screen?', multi: true, options: [
+      { label: 'Notifications' }, { label: 'Privacy' }, { label: 'Account' }, { label: 'Appearance' }, { label: 'Storage', desc: 'Only on the old preferences page today' }
+    ] }
+  ] },
+  's-sse': { kind: 'permission', tool: 'Bash', desc: 'Run the reconnect integration tests, then show which files changed', target: 'npm run test:integration -- --grep "reconnects after 30 s idle" --reporter=dot && git diff --stat origin/main...HEAD',
+    choices: [
+      { label: 'Yes', kind: 'allow' },
+      { label: "Yes, and don't ask again for npm run test:integration commands in acme-api", kind: 'rule' },
+      { label: 'No', kind: 'deny' }
+    ] }
+};
+var LIVE = [
+  { t: 'edit', name: 'Write', file: 'src/checkout/PaymentStep.tsx', add: 121, del: 0 },
+  { t: 'tool', name: 'Read', target: 'src/checkout/SavedCards.tsx', status: 'ok', input: 'file_path: src/checkout/SavedCards.tsx', result: 'export function SavedCards({ cards, onPick }) { ... }' },
+  { t: 'say', text: 'The payment step now shows the saved-card list first, then the form for a new card.' },
+  { t: 'tool', name: 'Bash', target: 'npm test -- checkout', status: 'ok', input: 'command: npm test -- checkout', result: testOut + '\nTests: 14 passed, 14 total' },
+  { t: 'edit', name: 'Edit', file: 'src/checkout/CheckoutSteps.tsx', add: 18, del: 5 }
+];
+var liveIx = 0;
+
+var seq = 0;
+function mk(it) { it.id = 'i' + (++seq); if (it.items) it.items.forEach(mk); return it; }
+function freshPS() { return { step: 0, picks: [], checks: [], otherOpen: false, otherText: '', collapsed: false, state: 'open', answerText: '', denyOpen: false, denyText: '' }; }
+Object.keys(S).forEach(function (id) {
+  var s = S[id]; s.id = id; s.items.forEach(mk); s.draft = ''; s.refusal = null;
+  if (PROMPTS[id]) { s.prompt = PROMPTS[id]; s.ps = freshPS(); } else { s.prompt = null; s.ps = null; }
+});
+var R = {}; rows.forEach(function (r) { R[r.id] = r; });
+function rowOf(sid) { for (var i = 0; i < rows.length; i++) if (rows[i].sids.indexOf(sid) >= 0) return rows[i]; return null; }
+function rowStatus(r) {
+  var best = null;
+  r.sids.forEach(function (sid) { var s = S[sid]; if (!best || ST[s.status].rank < ST[best.status].rank || (ST[s.status].rank === ST[best.status].rank && s.at > best.at)) best = s; });
+  return best;
+}
+function rowNewest(r) { return Math.max.apply(null, r.sids.map(function (sid) { return S[sid].at; })); }
+
+/* ---------- state ---------- */
+var state = {
+  screen: 'sessions', laptop: 'acme-laptop', sid: null, lastRow: null, sheet: null, sd: {},
+  stick: true, newPill: false, details: false, open: {}, more: {}, collapsed: {}, conn: 'ok', forgetAsk: null, lapMenu: false,
+  panelOpen: false,
+  opt: { theme: '', density: 'compact', words: 'symbol', tools: 'rows', tabs: 'line', choices: 'wrap' }
+};
+try { var saved = JSON.parse(localStorage.getItem('tbd-phone-mock-opt') || 'null'); if (saved) Object.keys(state.opt).forEach(function (k) { if (saved[k] != null) state.opt[k] = saved[k]; }); } catch (e) {}
+
+function applyOpt() {
+  var b = document.body, o = state.opt;
+  if (o.theme) document.documentElement.setAttribute('data-theme', o.theme); else document.documentElement.removeAttribute('data-theme');
+  b.classList.toggle('d-comfy', o.density === 'comfy');
+  b.classList.toggle('w-words', o.words === 'words');
+  b.classList.toggle('tabs-pills', o.tabs === 'pills');
+  b.classList.toggle('ch-stack', o.choices === 'stack');
+  try { localStorage.setItem('tbd-phone-mock-opt', JSON.stringify(o)); } catch (e) {}
+}
+
+/* ---------- markdown (tokens only; links never become raw hrefs) ---------- */
+function inline(s) {
+  return esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<span class="lnk" role="link" tabindex="0" data-act="link" data-url="$2">$1</span>');
+}
+function md(src) {
+  return src.split(/\n\n+/).map(function (block) {
+    var lines = block.split('\n');
+    if (lines.every(function (l) { return /^- /.test(l); })) return '<ul>' + lines.map(function (l) { return '<li>' + inline(l.slice(2)) + '</li>'; }).join('') + '</ul>';
+    return '<p>' + lines.map(inline).join('<br>') + '</p>';
+  }).join('');
+}
+
+/* ---------- strip ---------- */
+var STRIP_SCREENS = ['sessions', 'session', 'connecting', 'err-offline', 'err-update', 'err-reload', 'err-removed', 'err-relay'];
+function stripHTML() {
+  var drop = '';
+  if (state.lapMenu) {
+    drop = '<div class="lapdrop" role="menu" aria-label="Laptops">' + laptops.map(function (l) {
+      var cur = l.id === state.laptop;
+      return '<button class="ldi" type="button" role="menuitemradio" aria-checked="' + cur + '" data-act="pick-laptop" data-id="' + l.id + '">' + ic('laptop') +
+        '<span>' + esc(l.id) + '<small><i class="odot' + (l.online ? ' on' : '') + '"></i>' + (l.online ? 'Online' : 'Offline · last connected ' + esc(l.last)) + '</small></span>' + (cur ? ic('check', 'tick') : '') + '</button>';
+    }).join('') + '<div class="ldsep"></div>' +
+      '<button class="ldi act" type="button" role="menuitem" data-act="pair">' + ic('plus') + '<span>Pair a laptop</span></button>' +
+      '<button class="ldi act" type="button" role="menuitem" data-act="to-laptops">' + ic('laptop') + '<span>Manage laptops</span></button></div>';
+  }
+  return '<button class="lapbtn" type="button" data-act="lap-menu" aria-haspopup="menu" aria-expanded="' + !!state.lapMenu + '" aria-label="Laptop: ' + esc(state.laptop) + '. Switch laptop">' +
+    ic('laptop') + '<b>' + esc(state.laptop) + '</b>' + ic('chev-d', 'car') + '</button>' +
+    (state.conn === 're' ? '<span class="re"><span class="spin" style="width:10px;height:10px;border-width:1.5px"></span>Reconnecting…</span>' : '') + drop;
+}
+
+/* ---------- loader screens ---------- */
+function laptopsHTML() {
+  var list = laptops.map(function (l) {
+    if (state.forgetAsk === l.id) {
+      return '<li><div class="ask"><p><b>Forget ' + esc(l.id) + '?</b> This phone deletes its keys for that laptop. You can pair again later.</p><div><button class="btn danger" type="button" data-act="forget-yes" data-id="' + l.id + '">Forget</button><button class="btn" type="button" data-act="forget-no">Cancel</button></div></div></li>';
+    }
+    return '<li><button class="lap-row" type="button" data-act="pick-laptop" data-id="' + l.id + '">' + ic('laptop') +
+      '<span><b>' + esc(l.id) + '</b><small><i class="odot' + (l.online ? ' on' : '') + '"></i>' + (l.online ? 'Online' : 'Offline') + ' · last connected ' + esc(l.last) + '</small></span></button>' +
+      '<button class="forget" type="button" data-act="forget" data-id="' + l.id + '">Forget</button></li>';
+  }).join('');
+  return '<div class="ld"><div class="ld-head"><h1>Laptops</h1></div><div class="ld-body">' +
+    '<button class="btn pri wide" type="button" data-act="pair">' + ic('plus') + 'Pair a laptop</button>' +
+    (laptops.length ? '<ul class="lap">' + list + '</ul>' : '<p>No laptops yet. Pair one to start.</p>') +
+    '<p class="homehint">' + ic('download') + '<span>Add this page to your Home Screen. Safari then keeps this phone\'s keys, even after a week without a visit.</span></p>' +
+    '</div></div>';
+}
+function qrSVG() {
+  var n = 25, out = '', x, y, r = 7;
+  var seed = 11; function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+  function finder(cx, cy) { return '<rect x="' + cx + '" y="' + cy + '" width="7" height="7" fill="var(--qr-fg)"/><rect x="' + (cx + 1) + '" y="' + (cy + 1) + '" width="5" height="5" fill="var(--qr-bg)"/><rect x="' + (cx + 2) + '" y="' + (cy + 2) + '" width="3" height="3" fill="var(--qr-fg)"/>'; }
+  for (y = 0; y < n; y++) for (x = 0; x < n; x++) {
+    var inF = (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+    if (!inF && rnd() > 0.52) out += '<rect x="' + x + '" y="' + y + '" width="1" height="1" fill="var(--qr-fg)"/>';
+  }
+  return '<svg viewBox="0 0 ' + n + ' ' + n + '" shape-rendering="crispEdges" aria-hidden="true">' + out + finder(0, 0) + finder(n - r, 0) + finder(0, n - r) + '</svg>';
+}
+function navHTML(title, leftAct, leftLabel) {
+  return '<div class="ld-nav"><button class="navbtn" type="button" data-act="' + leftAct + '">' + leftLabel + '</button><b>' + title + '</b><span></span></div>';
+}
+function pairScanHTML() {
+  return '<div class="ld">' + navHTML('Pair a laptop', 'to-laptops', 'Cancel') + '<div class="ld-body">' +
+    '<button class="cam" type="button" data-act="scan" aria-label="Camera view. Tap to simulate a scan"><span class="qr">' + qrSVG() + '</span><span class="brk"></span><span class="hint">Mock: tap to scan</span></button>' +
+    '<p>On the laptop, open TBD Settings, then Phone, then <b>Pair a Phone…</b> Point this camera at the code it shows.</p>' +
+    '<button class="btn wide" type="button" data-act="paste">' + ic('link') + 'Paste link instead</button>' +
+    '</div></div>';
+}
+function pairPasteHTML() {
+  return '<div class="ld">' + navHTML('Paste link', 'pair', 'Back') + '<div class="ld-body">' +
+    '<p>On the laptop, the pairing sheet shows the same link as text. Copy it there, then paste it here.</p>' +
+    '<textarea id="paste-link" class="ta" rows="3" placeholder="https://…/#…" data-in="paste"></textarea>' +
+    '<button class="btn pri wide" type="button" data-act="paste-go">Continue</button></div></div>';
+}
+function pairNameHTML() {
+  return '<div class="ld">' + navHTML('Name this phone', 'pair', 'Back') + '<div class="ld-body">' +
+    '<p>Found <b>acme-laptop</b>. The laptop shows this name when it asks you to allow this phone.</p>' +
+    '<div class="group"><div class="frow"><label for="phone-name">Phone name</label><input id="phone-name" type="text" value="iPhone" autocomplete="off"></div></div>' +
+    '<button class="btn pri wide" type="button" data-act="name-go">Continue</button></div></div>';
+}
+function pairCodeHTML() {
+  return '<div class="ld">' + navHTML('Confirm', 'to-laptops', 'Cancel') + '<div class="ld-body">' +
+    '<p style="color:var(--fg);font-weight:600;text-align:center">Check this code on your laptop</p>' +
+    '<div class="code" aria-label="1 2 3 4 5 6">123 456</div>' +
+    '<p style="text-align:center">The laptop asks: "Allow \'iPhone\' to control this laptop?" Choose <b>Allow</b> there if the codes match.</p>' +
+    '<div class="waitline"><span class="spin"></span>Waiting for Allow on acme-laptop…</div>' +
+    '<div class="mockbtns"><button class="mockb" type="button" data-act="allow">Mock: laptop allows</button><button class="mockb" type="button" data-act="deny">Mock: laptop denies</button><button class="mockb" type="button" data-act="expire">Mock: code expires</button></div>' +
+    '</div></div>';
+}
+function centerHTML(o) {
+  return '<div class="center ' + (o.cls || '') + '"><div class="e-ic">' + o.icon + '</div><h2>' + o.title + '</h2><p>' + o.body + '</p><div class="acts">' +
+    o.acts.map(function (a) { return '<button class="btn ' + (a[2] || '') + '" type="button" data-act="' + a[0] + '">' + a[1] + '</button>'; }).join('') + '</div></div>';
+}
+function lapLast() { var l = laptops.filter(function (x) { return x.id === state.laptop; })[0]; return l ? l.last : 'a while ago'; }
+function loaderScreen() {
+  var L = esc(state.laptop);
+  switch (state.screen) {
+    case 'laptops': return laptopsHTML();
+    case 'pair-scan': return pairScanHTML();
+    case 'pair-paste': return pairPasteHTML();
+    case 'pair-name': return pairNameHTML();
+    case 'pair-code': return pairCodeHTML();
+    case 'pair-denied': return '<div class="ld">' + navHTML('Pair a laptop', 'to-laptops', 'Close') + centerHTML({ cls: 'st-err', icon: ic('x'), title: 'acme-laptop did not allow this phone', body: 'Someone chose Deny on the laptop. If that was a mistake, pair again.', acts: [['pair', 'Pair again', 'pri'], ['to-laptops', 'Back to laptops']] }) + '</div>';
+    case 'pair-expired': return '<div class="ld">' + navHTML('Pair a laptop', 'to-laptops', 'Close') + centerHTML({ cls: 'st-rate', icon: ic('glass'), title: 'The pairing code expired', body: 'A code works for 5 minutes. On the laptop, choose Pair a Phone… again to get a new one.', acts: [['pair', 'Scan a new code', 'pri']] }) + '</div>';
+    case 'connecting': return '<div class="center"><span class="spin" style="width:28px;height:28px;border-width:3px"></span><p>Connecting to ' + L + '…</p></div>';
+    case 'err-offline': return centerHTML({ cls: 'st-idle', icon: ic('moon'), title: 'Laptop offline', body: L + ' last connected ' + esc(lapLast()) + '. It may be asleep or closed, or Phone control may be off in TBD.', acts: [['retry', 'Try again', 'pri'], ['to-laptops', 'Switch laptop']] });
+    case 'err-update': return centerHTML({ cls: 'st-rate', icon: ic('download'), title: 'Update TBD on this laptop', body: 'This page is newer than TBD on ' + L + '. On the laptop, run <code>tbd update</code>, then try again.', acts: [['retry', 'Try again', 'pri'], ['to-laptops', 'Switch laptop']] });
+    case 'err-reload': return centerHTML({ cls: 'st-work', icon: ic('refresh'), title: 'Reload this page', body: 'TBD on ' + L + ' is newer than this page. Reload to get the new page.', acts: [['retry', 'Reload', 'pri']] });
+    case 'err-removed': return centerHTML({ cls: 'st-err', icon: ic('x'), title: 'This phone was removed from ' + L, body: 'Someone chose Revoke for this phone in TBD Settings on the laptop. Forget the laptop here. To use it again, pair again.', acts: [['forget-cur', 'Forget ' + L, 'danger'], ['to-laptops', 'Back to laptops']] });
+    case 'err-relay': return centerHTML({ cls: 'st-err', icon: ic('wifi-off'), title: "Can't reach the relay", body: 'Check that this phone is online. If it is, the relay may be down. TBD on the laptop shows the relay status in Settings, under Phone.', acts: [['retry', 'Try again', 'pri'], ['to-laptops', 'Switch laptop']] });
+  }
+  return '';
+}
+
+/* ---------- sessions list ---------- */
+function sortedGroups() {
+  var groups = repos.map(function (rp) {
+    var rs = rows.filter(function (r) { return r.repo === rp.id; }).sort(function (a, b) { return rowNewest(b) - rowNewest(a); });
+    return { repo: rp, rows: rs, newest: rs.length ? rowNewest(rs[0]) : 0 };
+  }).filter(function (g) { return g.rows.length; });
+  return groups.sort(function (a, b) { return b.newest - a.newest; });
+}
+function sessionsHTML() {
+  var html = '<div class="l-head"><h1>Sessions</h1></div><div class="list" id="list">';
+  sortedGroups().forEach(function (g) {
+    var shut = state.collapsed[g.repo.id];
+    html += '<div class="repo-row"><button class="repo" type="button" data-act="repo" data-id="' + g.repo.id + '" aria-expanded="' + !shut + '">' + ic('chev-d') + esc(g.repo.name) + '</button>' +
+      '<button class="repo-add" type="button" data-act="new" data-repo="' + g.repo.id + '" aria-label="New session in ' + esc(g.repo.name) + '">' + ic('plus') + '</button></div>';
+    if (shut) return;
+    html += '<ul class="rows">';
+    g.rows.forEach(function (r) {
+      var best = rowStatus(r), st = best.status, n = r.sids.length;
+      html += '<li><button class="row st-' + st + (state.lastRow === r.id ? ' sel' : '') + '" type="button" data-act="open-row" data-id="' + r.id + '">' +
+        '<span class="n">' + esc(r.name) + (n > 1 ? ' <small>(' + n + ')</small>' : '') + '</span>' +
+        (r.remote ? '<span class="rb">' + ic('cloud') + 'remote</span>' : '') +
+        '<span class="t">' + ago(rowNewest(r)) + '</span>' +
+        '<span class="g">' + glyph(st) + '<span class="w">' + ST[st].short + '</span><span class="sr">' + ST[st].word + '</span></span>' +
+        '</button></li>';
+    });
+    html += '</ul>';
+  });
+  return html + '<div class="list-foot">Newest changes first. Shell and note tabs, and archived worktrees, are not shown.</div></div>';
+}
+
+/* ---------- transcript ---------- */
+var TOOL_IC = { Read: 'eye', Grep: 'search', Glob: 'search', Bash: 'term', Edit: 'pen', Write: 'pen', MultiEdit: 'pen', WebFetch: 'globe' };
+function detailHTML(it) {
+  var o = state.open[it.id];
+  if (o === 'loading') return '<div class="detail"><div class="loading"><span class="spin"></span>Loading from the laptop…</div></div>';
+  if (o !== 'open') return '';
+  return '<div class="detail"><span class="dl">Input</span><pre>' + esc(it.input) + '</pre><span class="dl">Result</span><pre>' + esc(it.result) + '</pre>' +
+    (it.big ? '<div class="toobig">' + ic('laptop') + 'Too large for the phone. Open on the laptop.</div>' : '') + '</div>';
+}
+function triHTML(open) { return ic(open ? 'tri-d' : 'tri-r', 'tri'); }
+function itemHTML(it) {
+  var o;
+  switch (it.t) {
+    case 'me': return '<div class="me"><span class="who">You</span>' + inline(it.text) + '</div>';
+    case 'say':
+      var full = it.more && state.more[it.id];
+      return '<div class="say">' + md(full ? it.text + '\n\n' + it.more : it.text) +
+        (it.more && !full ? '<button class="morebtn" type="button" data-act="more" data-id="' + it.id + '">Show more</button>' : '') + '</div>';
+    case 'tool':
+      o = state.open[it.id];
+      var mark = it.status === 'run' ? dots() : it.status === 'fail' ? '<span class="fail">exit ' + (it.exit || 1) + '</span>' : (it.name === 'Bash' ? '<span class="okm">' + ic('check') + '</span>' : '');
+      return '<button class="tool" type="button" data-act="tool" data-id="' + it.id + '" aria-expanded="' + !!o + '">' + triHTML(o) + ic(TOOL_IC[it.name] || 'term', 'ti') +
+        '<b>' + esc(it.name) + '</b><code>' + esc(it.target) + '</code>' + mark + '</button>' + detailHTML(it);
+    case 'edit':
+      return '<div class="tool"><span class="sp"></span>' + ic('pen', 'ti') + '<b>' + esc(it.name) + '</b><code>' + esc(it.file) + '</code><span class="plus">+' + it.add + '</span><span class="minus">−' + it.del + '</span></div>';
+    case 'agent':
+      o = state.open[it.id];
+      return '<button class="tool" type="button" data-act="agent" data-id="' + it.id + '" aria-expanded="' + !!o + '">' + triHTML(o) + ic('bot', 'ti') +
+        '<b>' + esc(it.type) + ' agent</b><code>' + esc(it.desc) + '</code><span class="cnt">' + it.count + ' items</span></button>' +
+        (o === 'loading' ? '<div class="detail"><div class="loading"><span class="spin"></span>Loading from the laptop…</div></div>' : o === 'open' ? '<div class="nest">' + it.items.map(itemHTML).join('') + '</div>' : '');
+    case 'slash': return '<div class="slash"><code>' + esc(it.text) + '</code>' + (it.out ? '<span>' + esc(it.out) + '</span>' : '') + '</div>';
+    case 'peer': return '<div class="peer"><span class="who">' + ic('msg') + 'From ' + esc(it.from) + '</span>' + inline(it.text) + '</div>';
+    case 'think': return '<div class="extra"><span class="dl">Thinking</span>' + esc(it.text) + '</div>';
+    case 'sys': return '<div class="extra"><span class="dl">' + esc(it.label || 'System') + '</span>' + esc(it.text) + '</div>';
+    case 'receipt': return '<div class="receipt">' + ic('check') + esc(it.text) + '</div>';
+    case 'error': return '<div class="errrow st-' + (S[state.sid] && S[state.sid].status === 'rate' ? 'rate' : 'err') + '">' + ic('octa') + '<span>' + esc(it.text) + '</span></div>';
+  }
+  return '';
+}
+function foldHTML(run) {
+  var key = 'fold:' + run[0].id, o = state.open[key];
+  var c = { read: 0, search: 0, cmd: 0, edit: 0, agent: 0 }, add = 0, del = 0, fail = 0;
+  run.forEach(function (it) {
+    if (it.t === 'edit') { c.edit++; add += it.add; del += it.del; }
+    else if (it.t === 'agent') c.agent++;
+    else if (it.name === 'Read') c.read++;
+    else if (it.name === 'Grep' || it.name === 'Glob') c.search++;
+    else c.cmd++;
+    if (it.status === 'fail') fail++;
+  });
+  var pl = function (n, one, many) { return n + ' ' + (n === 1 ? one : many); };
+  var parts = [];
+  if (c.read) parts.push('read ' + pl(c.read, 'file', 'files'));
+  if (c.search) parts.push('searched ' + pl(c.search, 'time', 'times'));
+  if (c.edit) parts.push('edited ' + pl(c.edit, 'file', 'files'));
+  if (c.cmd) parts.push('ran ' + pl(c.cmd, 'command', 'commands'));
+  if (c.agent) parts.push('ran ' + pl(c.agent, 'agent', 'agents'));
+  var sentence = parts.join(', '); sentence = sentence.charAt(0).toUpperCase() + sentence.slice(1);
+  return '<button class="tool" type="button" data-act="fold" data-id="' + key + '" aria-expanded="' + !!o + '">' + triHTML(o) + ic('layers', 'ti') +
+    '<span class="fs">' + sentence + '</span>' + (add || del ? '<span class="plus">+' + add + '</span><span class="minus">−' + del + '</span>' : '') +
+    (fail ? '<span class="fail">' + fail + ' failed</span>' : '') + '</button>' +
+    (o ? '<div class="nest">' + run.map(itemHTML).join('') + '</div>' : '');
+}
+function txHTML(s) {
+  var vis = s.items.filter(function (it) { return state.details || (it.t !== 'think' && it.t !== 'sys'); });
+  var out = '', run = [];
+  function flush() {
+    if (!run.length) return;
+    if (state.opt.tools === 'fold' && run.length > 1) out += foldHTML(run); else run.forEach(function (it) { out += itemHTML(it); });
+    run = [];
+  }
+  vis.forEach(function (it) { if (it.t === 'tool' || it.t === 'edit' || it.t === 'agent') run.push(it); else { flush(); out += itemHTML(it); } });
+  flush();
+  if (s.status === 'work') out += '<div class="working">' + dots() + 'Working… <span id="elapsed">' + dur(now() - (s.workStart || s.at)) + '</span></div>';
+  return out;
+}
+
+/* ---------- prompt card ---------- */
+function promptHTML(s) {
+  var p = s.prompt, ps = s.ps;
+  if (!p) return '';
+  if (ps.state === 'answered') return '<div class="card done" role="status"><span class="ok">' + ic('check') + '</span><div><b>Answered</b><small>' + esc(ps.answerText) + '</small></div></div>';
+  if (ps.state === 'elsewhere') return '<div class="card done" role="status"><span class="ok">' + ic('laptop') + '</span><div><b>Already answered on the laptop</b><small>Someone answered this ' + (p.kind === 'permission' ? 'permission' : 'question') + ' at the laptop first.</small></div><button class="btn" type="button" data-act="p-ok">OK</button></div>';
+  var label = p.kind === 'permission' ? 'Permission' : 'Claude asks';
+  if (ps.collapsed) return '<button class="card-strip" type="button" data-act="p-expand">' + ic('hand') + (p.kind === 'permission' ? 'Permission waiting' : 'Question waiting') + '<span>Show ' + ic('chev-u') + '</span></button>';
+  var hide = '<button class="hide" type="button" data-act="p-hide">Hide ' + ic('chev-d') + '</button>';
+  if (p.kind === 'permission') {
+    var body = '<div class="c-head">' + ic('hand') + label + hide + '</div>' +
+      '<div class="perm-tool">' + ic(TOOL_IC[p.tool] || 'term') + esc(p.tool) + '</div><div class="perm-desc">' + esc(p.desc) + '</div>' +
+      '<pre class="perm-target">' + esc(p.target) + '</pre>';
+    if (ps.denyOpen) {
+      body += '<label class="perm-desc" for="deny-text">Tell Claude what to do instead (optional)</label><textarea id="deny-text" class="ta" rows="2" data-in="deny">' + esc(ps.denyText) + '</textarea>' +
+        '<div class="c-actions"><button class="btn" type="button" data-act="p-deny-cancel">Back</button><button class="btn danger" type="button" data-act="p-deny-send">Deny</button></div>';
+    } else {
+      body += '<div class="opts">' + p.choices.map(function (c, i) {
+        var cls = c.kind === 'allow' ? 'pri' : c.kind === 'deny' ? 'danger' : '';
+        return '<button class="opt ' + cls + '" type="button" data-act="' + (c.kind === 'deny' ? 'p-deny-open' : 'p-allow') + '" data-i="' + i + '">' + esc(c.label) + '</button>';
+      }).join('') + '</div>';
+    }
+    return '<div class="card" role="region" aria-label="Permission prompt">' + body + '</div>';
+  }
+  var qs = p.questions, total = qs.length;
+  var head = '<div class="c-head">' + ic('hand') + label + (total > 1 ? ' · ' + Math.min(ps.step + 1, total) + ' of ' + total : '') + hide + '</div>' +
+    (total > 1 ? '<div class="steps">' + qs.map(function (q, i) { return '<i class="' + (i <= ps.step ? 'on' : '') + '"></i>'; }).join('') + '</div>' : '');
+  if (ps.step >= total) {
+    return '<div class="card" role="region" aria-label="Questions">' + head + '<div class="q">Send these answers?</div><div class="review">' +
+      qs.map(function (q, i) { return '<button type="button" data-act="p-goto" data-i="' + i + '"><small>' + esc(q.header) + '</small>' + esc(ps.picks[i]) + '</button>'; }).join('') +
+      '</div><div class="c-actions"><button class="btn" type="button" data-act="p-back">Back</button><button class="btn pri" type="button" data-act="p-submit-all">Send answers</button></div></div>';
+  }
+  var q = qs[ps.step], body2 = head + '<div class="q">' + esc(q.text) + '</div>';
+  if (q.multi) {
+    body2 += '<div class="opts">' + q.options.map(function (o, i) {
+      var on = ps.checks.indexOf(i) >= 0;
+      return '<label class="chk"><input type="checkbox" data-change="p-check" data-i="' + i + '"' + (on ? ' checked' : '') + '><span>' + esc(o.label) + (o.desc ? '<br><small style="color:var(--muted)">' + esc(o.desc) + '</small>' : '') + '</span></label>';
+    }).join('') + '</div><div class="c-actions"><button class="btn pri" type="button" data-act="p-submit-multi"' + (ps.checks.length ? '' : ' disabled') + '>Send ' + (ps.checks.length ? ps.checks.length + ' selected' : 'answer') + '</button></div>';
+  } else {
+    body2 += '<div class="opts">' + q.options.map(function (o, i) {
+      return '<button class="opt" type="button" data-act="p-pick" data-i="' + i + '">' + esc(o.label) + (o.desc ? '<small>' + esc(o.desc) + '</small>' : '') + '</button>';
+    }).join('') + (q.other && !ps.otherOpen ? '<button class="opt ghost" type="button" data-act="p-other">Other answer…</button>' : '') + '</div>';
+    if (q.other && ps.otherOpen) {
+      body2 += '<textarea id="other-text" class="ta" rows="2" placeholder="Type your answer" data-in="other">' + esc(ps.otherText) + '</textarea>' +
+        '<div class="c-actions"><button class="btn" type="button" data-act="p-other-cancel">Cancel</button><button class="btn pri" type="button" data-act="p-other-send">Send answer</button></div>';
+    }
+    if (total > 1 && ps.step > 0 && !ps.otherOpen) body2 += '<div class="c-actions"><button class="btn" type="button" data-act="p-back">Back</button></div>';
+  }
+  return '<div class="card" role="region" aria-label="Question">' + body2 + '</div>';
+}
+
+/* ---------- composer ---------- */
+function composerHTML(s) {
+  if (s.kind === 'codex') return '';
+  if (!s.caps.send) return '<div class="dock-note">Sending is not available for this session.</div>';
+  var label = s.status === 'park' ? 'Send and wake' : 'Send';
+  return (s.refusal ? '<div class="refusal" role="alert">' + ic('warn') + '<span>' + esc(s.refusal) + '</span></div>' : '') +
+    '<div class="comp"><textarea id="draft" class="field" rows="1" placeholder="Message" aria-label="Message" data-in="draft">' + esc(s.draft) + '</textarea>' +
+    '<button class="send" type="button" data-act="send"' + (s.draft.trim() ? '' : ' disabled') + '>' + label + '</button></div>';
+}
+
+/* ---------- session screen ---------- */
+function sessionHTML() {
+  var s = S[state.sid], r = rowOf(s.id), st = s.status;
+  var modelHTML = s.caps.model ? '<button class="prof" type="button" data-act="model-menu" aria-haspopup="menu" aria-expanded="' + !!state.modelMenu + '" aria-label="Model: ' + esc(s.model) + '. Change model">' + esc(s.model) + ic('chev-d') + '</button>' : esc(s.model);
+  var meta = s.kind === 'remote' ? esc(s.provider) + ' · ' + modelHTML : s.kind === 'codex' ? 'Codex'
+    : (s.caps.sw ? '<button class="prof" type="button" data-act="prof-menu" aria-haspopup="menu" aria-expanded="' + !!state.profMenu + '" aria-label="Account: ' + esc(s.profile) + '. Switch account">' + esc(s.profile) + ic('chev-d') + '</button>' : esc(s.profile)) + ' · ' + modelHTML;
+  var html = '<div class="s-head st-' + st + '"><button class="ib" type="button" data-act="back" aria-label="Back to sessions">' + ic('chev-l') + '</button>' +
+    '<div class="s-title"><span class="t1"><span>' + esc(r.name) + '</span>' + (r.remote ? '<span class="rb2">' + ic('cloud') + 'remote</span>' : '') + '</span>' +
+    '<span class="t2"><span class="w">' + glyph(st) + ST[st].word + '</span>· ' + ago(s.at) + ' · ' + meta + '</span></div>' +
+    (s.kind !== 'codex' ? '<label class="tg"><span>Details</span><input type="checkbox" role="switch" aria-label="Show details" data-change="details"' + (state.details ? ' checked' : '') + '><i></i></label>' +
+      '<button class="ib" type="button" data-act="menu" aria-label="Session menu">' + ic('more') + '</button>' : '') + '</div>';
+  if (st === 'err' || st === 'rate') html += '<div class="banner st-' + st + '">' + ic(ST[st].icon) + '<span>' + esc(s.reason) + '</span></div>';
+  if (st === 'unk') html += '<div class="banner st-unk">' + ic('unk') + '<span>TBD cannot read this tab\'s status, so it shows as Unknown.</span></div>';
+  if (st === 'gone') html += '<div class="banner st-gone">' + ic('power') + '<span>This session has exited. Restart it on the laptop.</span></div>';
+  if (r.sids.length > 1) {
+    html += '<div class="tabs" role="tablist">' + r.sids.map(function (sid) {
+      var t = S[sid];
+      return '<button class="tab" type="button" role="tab" data-act="tab" data-sid="' + sid + '" aria-selected="' + (sid === s.id) + '"><span class="tdot st-' + t.status + '"></span>' + esc(t.tab) + '<span class="sr">' + ST[t.status].word + '</span></button>';
+    }).join('') + '</div>';
+  }
+  if (s.kind === 'codex') {
+    return html + '<div class="tx-wrap"><div class="tx"><div class="codex-note">' + ic('term', '') + '<b>Codex transcripts arrive in a later TBD release.</b><span>This tab shows its status only. Open it on the laptop to read or reply.</span></div></div></div>';
+  }
+  html += '<div class="tx-wrap"><div class="tx" id="tx" aria-live="polite">' + txHTML(s) + '</div>' +
+    '<button class="pill" id="pill" type="button" data-act="pill"' + (state.newPill ? '' : ' hidden') + '>New messages ' + ic('down') + '</button></div>';
+  html += '<div class="dock">' + promptHTML(s) + composerHTML(s) + '</div>';
+  if (state.profMenu && s.caps.sw) html += profDropHTML(s);
+  if (state.modelMenu && s.caps.model) html += modelDropHTML(s);
+  return html;
+}
+function modelDropHTML(s) {
+  return '<div class="lapdrop modeldrop" role="menu" aria-label="Model for this session"><div class="pd-lbl">Model for this session</div>' +
+    ['default', 'opus', 'sonnet', 'haiku'].map(function (m) {
+      var cur = m === s.model;
+      return '<button class="ldi" type="button" role="menuitemradio" aria-checked="' + cur + '" data-act="mm-pick" data-m="' + m + '">' + ic('cpu') + '<span>' + m + '</span>' + (cur ? ic('check', 'tick') : '') + '</button>';
+    }).join('') +
+    '<div class="ldsep"></div><div class="md-other"><input id="mm-other" type="text" placeholder="Other model name" aria-label="Other model name" autocomplete="off" autocapitalize="off" data-in="mm-other" value="' + esc(state.modelOther || '') + '">' +
+    '<button class="btn pri" type="button" data-act="mm-set"' + ((state.modelOther || '').trim() ? '' : ' disabled') + '>Set</button></div></div>';
+}
+function setModel(s, m) {
+  state.sheet = null; state.modelMenu = false; state.modelOther = '';
+  if (s.status === 'work') { s.refusal = 'Not sent. Claude is still working. Change the model when it stops.'; render(); return; }
+  s.items.push(mk({ t: 'slash', text: '/model ' + m, out: 'Set model to ' + m })); s.model = m; state.stick = true; render(); toast('Model set to ' + m);
+}
+function profDropHTML(s) {
+  var html = '<div class="lapdrop profdrop" role="menu" aria-label="Account for this session"><div class="pd-lbl">Account for this session</div>';
+  if (state.profAsk) {
+    html += '<div class="pd-ask"><b>Restart this session under ' + esc(state.profAsk) + '?</b><span>' + restartNote(s) + '</span>' +
+      '<span>To keep this session as it is, fork instead. A copy opens in a new tab under ' + esc(state.profAsk) + '.</span>' +
+      '<div><button class="btn pri" type="button" data-act="prof-restart">Restart</button><button class="btn" type="button" data-act="prof-fork">' + ic('fork') + 'Fork into a new tab</button><button class="btn" type="button" data-act="prof-cancel">Cancel</button></div></div>';
+  } else {
+    html += profiles.map(function (p) {
+      var cur = p.name === s.profile;
+      return '<button class="ldi" type="button" role="menuitemradio" aria-checked="' + cur + '" data-act="prof-pick" data-id="' + p.name + '">' + ic('user') +
+        '<span>' + esc(p.name) + '<small>' + esc(p.kind) + (p.def ? ' · default' : '') + '</small></span>' + (cur ? ic('check', 'tick') : '') + '</button>';
+    }).join('');
+  }
+  return html + '</div>';
+}
+function restartNote(s) {
+  return 'The conversation stays. ' + (s.status === 'work' ? 'The turn that is running now stops.' : 'Claude restarts in this tab.');
+}
+function forkSession(s, to) {
+  var r = rowOf(s.id), n = r.sids.length + 1, sid = s.id + '-fork' + n;
+  S[sid] = { id: sid, tab: s.tab + ' ' + n, kind: 'claude', status: 'idle', at: now(), profile: to, model: s.model, caps: CLAUDE, draft: '', refusal: null, prompt: null, ps: null,
+    items: JSON.parse(JSON.stringify(s.items)).map(mk).concat([mk({ t: 'receipt', text: 'Forked from ' + s.tab + ', under ' + to })]) };
+  r.sids.push(sid); openSession(sid); toast('Forked into a new tab, under ' + to);
+}
+function switchProfile(s, to) {
+  s.profile = to; s.items.push(mk({ t: 'receipt', text: 'Restarted under ' + to })); s.status = 'idle'; s.at = now();
+  state.stick = true; state.sheet = null; state.profMenu = false; state.profAsk = null; render(); toast('Restarted under ' + to);
+}
+
+/* ---------- sheets ---------- */
+function sheetHTML() {
+  if (!state.sheet) return '';
+  var s = S[state.sid], body = '', tall = false;
+  switch (state.sheet) {
+    case 'menu':
+      var why = s.kind === 'remote' ? 'Not available for remote sessions' : '';
+      body = '<div class="sh-top"><p class="sh-title">' + esc(rowOf(s.id).name) + (rowOf(s.id).sids.length > 1 ? ' · ' + esc(s.tab) : '') + '</p></div><div class="group">' +
+        '<button class="mi" type="button" data-act="sh-switch"' + (s.caps.sw ? '' : ' disabled') + '>' + ic('user') + '<span>Switch account<small>' + (s.caps.sw ? 'Now ' + esc(s.profile) + '. Restarts in this tab.' : why) + '</small></span>' + ic('chev-r', 'chev') + '</button>' +
+        '<button class="mi" type="button" data-act="sh-fork"' + (s.caps.fork ? '' : ' disabled') + '>' + ic('fork') + '<span>Fork<small>' + (s.caps.fork ? 'Copy this conversation into a new tab' : why) + '</small></span>' + ic('chev-r', 'chev') + '</button>' +
+        '<button class="mi" type="button" data-act="sh-model"' + (s.caps.model ? '' : ' disabled') + '>' + ic('cpu') + '<span>Model<small>Now ' + esc(s.model) + '</small></span>' + ic('chev-r', 'chev') + '</button>' +
+        '</div><button class="btn wide" type="button" data-act="close">Cancel</button>';
+      break;
+    case 'switch':
+      body = '<div class="sh-top"><button class="navbtn" type="button" data-act="sh-menu">Back</button><p class="sh-title">Switch account</p><span style="width:44px"></span></div>' +
+        '<p class="sh-sub">Restarts this session under another profile, in the same tab. The conversation stays.</p><div class="group">' +
+        profiles.map(function (p) {
+          var cur = p.name === s.profile;
+          return '<button class="mi" type="button" data-act="pick-profile" data-id="' + p.name + '"' + (cur ? ' disabled' : '') + '>' + ic('user') + '<span>' + esc(p.name) + '<small>' + esc(p.kind) + (p.def ? ' · default' : '') + '</small></span>' + (cur ? '<span class="cur">Current</span>' : ic('chev-r', 'chev')) + '</button>';
+        }).join('') + '</div>';
+      break;
+    case 'switch-confirm':
+      body = '<div class="confirm"><h3>Restart this session under ' + esc(state.sd.target) + '?</h3><p>' + restartNote(s) + '</p>' +
+        '<p>To keep this session as it is, fork instead. A copy opens in a new tab under ' + esc(state.sd.target) + '.</p>' +
+        '<button class="btn pri wide" type="button" data-act="switch-yes">Restart</button>' +
+        '<button class="btn wide" type="button" data-act="switch-fork">' + ic('fork') + 'Fork into a new tab</button>' +
+        '<button class="btn wide" type="button" data-act="sh-switch">Cancel</button></div>';
+      break;
+    case 'fork':
+      var list = profiles.slice().sort(function (a, b) { return (b.name === s.profile) - (a.name === s.profile); });
+      body = '<div class="sh-top"><button class="navbtn" type="button" data-act="sh-menu">Back</button><p class="sh-title">Fork</p><span style="width:44px"></span></div>' +
+        '<p class="sh-sub">Copies this conversation into a new tab, under the account you pick. The phone switches to the new tab.</p><div class="group">' +
+        list.map(function (p) {
+          var cur = p.name === s.profile;
+          return '<button class="mi" type="button" data-act="fork-under" data-id="' + p.name + '">' + ic('fork') + '<span>' + esc(p.name) + '<small>' + (cur ? 'Same account as now' : esc(p.kind)) + '</small></span>' + ic('chev-r', 'chev') + '</button>';
+        }).join('') + '</div>';
+      break;
+    case 'model':
+      var pick = state.sd.model == null ? s.model : state.sd.model;
+      var named = ['default', 'opus', 'sonnet', 'haiku'];
+      var other = named.indexOf(pick) < 0;
+      body = '<div class="sh-top"><button class="navbtn" type="button" data-act="sh-menu">Back</button><p class="sh-title">Model</p><button class="navbtn b" type="button" data-act="model-set"' + ((other && !(state.sd.other || '').trim()) ? ' disabled' : '') + '>Set</button></div>' +
+        '<p class="sh-sub">Sends <code>/model</code> to the session.</p><div class="group">' +
+        named.map(function (m) { return '<button class="mi" type="button" data-act="model-pick" data-m="' + m + '">' + ic('cpu') + '<span>' + m + (m === s.model ? '<small>Current</small>' : '') + '</span>' + (pick === m ? ic('check', 'tick') : '') + '</button>'; }).join('') +
+        '<div class="frow"><label for="model-other">Other model name</label><input id="model-other" type="text" placeholder="for example claude-opus-5-5" autocomplete="off" autocapitalize="off" data-in="model-other" value="' + esc(state.sd.other || '') + '"></div></div>';
+      break;
+    case 'new':
+      tall = true; body = newSheetHTML();
+      break;
+  }
+  return '<div class="scrim" data-act="close"></div><div class="sheet' + (tall ? ' tall' : '') + '" role="dialog" aria-modal="true"><div class="grab"></div>' + body + '</div>';
+}
+function newSheetHTML() {
+  var d = state.sd;
+  if (d.creating) return '<div class="creating"><span class="spin" style="width:28px;height:28px;border-width:3px"></span><b style="color:var(--fg)">' + (d.mode === 'remote' ? 'Starting the remote session…' : 'Creating the worktree…') + '</b><span>The session opens when it is ready.</span></div>';
+  var ok = (d.msg || '').trim() && d.repo && (d.mode !== 'remote' || d.prov);
+  var repoName = repos.filter(function (rp) { return rp.id === d.repo; })[0].name;
+  var html = '<div class="sh-top"><button class="navbtn" type="button" data-act="close">Cancel</button><p class="sh-title">New in ' + esc(repoName) + '</p><button class="navbtn b" type="button" data-act="create"' + (ok ? '' : ' disabled') + '>Create</button></div>' +
+    '<div class="segc" role="group" aria-label="Kind"><button type="button" data-act="new-mode" data-m="local" aria-pressed="' + (d.mode !== 'remote') + '">Local worktree</button><button type="button" data-act="new-mode" data-m="remote" aria-pressed="' + (d.mode === 'remote') + '">Remote session</button></div>';
+  if (d.mode === 'remote') {
+    html += '<div class="lbl">Provider</div><div class="group">' + providers.map(function (p) {
+      return '<button class="mi" type="button" data-act="new-prov" data-id="' + p.id + '">' + ic('cloud') + '<span>' + esc(p.name) + '<small>' + (p.fields.length ? p.fields.length + ' more fields' : 'Needs nothing else') + '</small></span>' + (d.prov === p.id ? ic('check', 'tick') : '') + '</button>';
+    }).join('') + '</div>';
+  }
+  html += '<div class="lbl">First message</div><div class="group"><div class="frow"><textarea id="new-msg" rows="3" placeholder="What should Claude do?" aria-label="First message" data-in="new-msg">' + esc(d.msg || '') + '</textarea></div></div>';
+  if (d.mode === 'remote' && d.prov) {
+    var prov = providers.filter(function (p) { return p.id === d.prov; })[0];
+    if (prov.fields.length) {
+      html += '<div class="lbl">' + esc(prov.name) + ' needs</div><div class="group">' + prov.fields.map(function (f) {
+        var id = 'f-' + f.id, req = f.req ? ' <span class="req">required</span>' : '';
+        if (f.type === 'bool') return '<div class="frow sw"><label for="' + id + '">' + esc(f.label) + '</label><label class="tg"><input id="' + id + '" type="checkbox" role="switch"' + (f.val ? ' checked' : '') + '><i></i></label></div>';
+        if (f.type === 'choice') return '<div class="frow"><label for="' + id + '">' + esc(f.label) + req + '</label><select id="' + id + '">' + f.opts.map(function (o) { return '<option' + (o === f.val ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select></div>';
+        if (f.type === 'long') return '<div class="frow"><label for="' + id + '">' + esc(f.label) + req + '</label><textarea id="' + id + '" rows="2"></textarea></div>';
+        return '<div class="frow"><label for="' + id + '">' + esc(f.label) + req + '</label><input id="' + id + '" type="' + (f.type === 'number' ? 'number' : 'text') + '" inputmode="' + (f.type === 'number' ? 'numeric' : 'text') + '" value="' + esc(f.val) + '"></div>';
+      }).join('') + '</div>';
+    }
+  } else if (d.mode !== 'remote') {
+    html += '<p class="sh-sub">TBD picks the branch, the worktree name and everything else from its defaults.</p>';
+  }
+  return html;
+}
+
+/* ---------- panel ---------- */
+var IXG = [
+  ['Loader', [['lapmenu', 'Laptop menu'], ['laptops', 'Laptops'],['scan', 'Scan the QR code'], ['paste', 'Paste link'], ['name', 'Name this phone'], ['code', 'Confirm code'], ['denied', 'Denied'], ['expired', 'Code expired'], ['connecting', 'Connecting'], ['offline', 'Laptop offline'], ['update', 'Update TBD'], ['reload', 'Reload this page'], ['removed', 'Phone removed'], ['relay', "Can't reach the relay"], ['reconnect', 'Connection drops']]],
+  ['Sessions', [['sessions', 'Session list'], ['bump', 'A status changes now']]],
+  ['Session', [['q1', 'Question'], ['qm', 'Multi-select'], ['q3', 'Three questions'], ['perm', 'Permission'], ['answered', 'Answered'], ['elsewhere', 'Answered on the laptop'], ['working', 'Working, with tabs'], ['pill', 'New messages pill'], ['details', 'Show details on'], ['codex', 'Codex tab'], ['parked', 'Parked: Send and wake'], ['refused', 'Send refused'], ['error', 'Error'], ['rate', 'Rate limited'], ['gone', 'Exited'], ['remote', 'Remote session'], ['unknown', 'Unknown status']]],
+  ['Sheets', [['profmenu', 'Account dropdown'], ['modelmenu', 'Model dropdown'],['menu', 'Session menu'],['switch', 'Switch account'], ['fork', 'Fork'], ['model', 'Model'], ['new-local', 'New: local worktree'], ['new-remote', 'New: remote session']]]
+];
+var OPTS = [
+  ['theme', 'Colours', [['', 'System'], ['light', 'Light'], ['dark', 'Dark']]],
+  ['density', 'Row size', [['compact', 'Compact, 30 pt'], ['comfy', 'Roomy, 44 pt']], 'Compact is chosen. List rows, tabs and header buttons follow the laptop sidebar. Send, prompt choices, menus and sheet rows stay at least 44 pt.'],
+  ['words', 'Row status', [['symbol', 'Symbol only'], ['words', 'Symbol and word']]],
+  ['tools', 'Tool calls', [['rows', 'One row each'], ['fold', 'Folded per turn']], 'Folded joins a run of tool rows into one line, such as "Read 2 files, ran 1 command". Tap to open.'],
+  ['tabs', 'Tab strip', [['line', 'Underline'], ['pills', 'Pills']]],
+  ['choices', 'Prompt choices', [['wrap', 'Wrapped buttons'], ['stack', 'Stacked list']]]
+];
+function panelHTML() {
+  return '<button class="panel-close" type="button" data-act="panel-close">Close</button>' +
+    '<div><h1>TBD phone control mocks</h1></div>' +
+    '<p>The reviewed mocks for section 8 of the phone control spec. Every button in the phone works. Jump to any screen or state below.</p>' +
+    '<section><h2>Design choices</h2><p style="margin:0 0 10px;color:var(--page-muted)">The first option in each row is the chosen design. The others stay for comparison.</p>' + OPTS.map(function (o) {
+      return '<div class="oprow"><span>' + o[1] + '</span><div class="pseg" role="group" aria-label="' + o[1] + '">' + o[2].map(function (v) {
+        return '<button type="button" data-act="opt" data-k="' + o[0] + '" data-v="' + v[0] + '" aria-pressed="' + (state.opt[o[0]] === v[0]) + '">' + v[1] + '</button>';
+      }).join('') + '</div>' + (o[3] ? '<small>' + o[3] + '</small>' : '') + '</div>';
+    }).join('') + '</section>' +
+    IXG.map(function (g) {
+      return '<section><h2>' + g[0] + '</h2><div class="ix">' + g[1].map(function (e) { return '<button type="button" data-act="ix" data-k="' + e[0] + '">' + e[1] + '</button>'; }).join('') + '</div></section>';
+    }).join('') +
+    '<section><h2>Rules the mock follows</h2><ul class="rules"><li>System fonts and inline SVG icons only. No remote images or fonts.</li><li>Composer text is 16 px, so focusing it does not zoom.</li><li>Send, prompt choices and sheet rows are at least 44 pt tall.</li><li>Links open through the loader in a new tab.</li><li>No stop button, diffs, syntax colours or attachments.</li></ul></section>' +
+    '<section><div class="ix"><button type="button" data-act="reset">Reset the mock</button></div></section>';
+}
+
+/* ---------- render ---------- */
+function render() {
+  var frame = $('#frame');
+  frame.dataset.screen = state.screen;
+  var ae = document.activeElement, aeId = ae && ae.id, selS = null, selE = null;
+  try { if (ae && ae.selectionStart != null) { selS = ae.selectionStart; selE = ae.selectionEnd; } } catch (e) {}
+  var tx = $('#tx'), txTop = tx ? tx.scrollTop : 0, list = $('#list'), listTop = list ? list.scrollTop : 0;
+  var sheetEl = document.querySelector('.sheet'), sheetTop = sheetEl ? sheetEl.scrollTop : 0;
+  var strip = $('#strip');
+  strip.hidden = STRIP_SCREENS.indexOf(state.screen) < 0;
+  strip.innerHTML = strip.hidden ? '' : stripHTML();
+  $('#screen').innerHTML = state.screen === 'sessions' ? sessionsHTML() : state.screen === 'session' ? sessionHTML() : loaderScreen();
+  $('#sheet-root').innerHTML = state.screen === 'session' || state.screen === 'sessions' ? sheetHTML() : '';
+  var nl = $('#list'); if (nl) nl.scrollTop = listTop;
+  var ns = document.querySelector('.sheet'); if (ns) ns.scrollTop = sheetTop;
+  var nt = $('#tx');
+  if (nt) {
+    nt.scrollTop = state.stick ? nt.scrollHeight : txTop;
+    nt.addEventListener('scroll', function () {
+      var bottom = nt.scrollHeight - nt.scrollTop - nt.clientHeight < 30;
+      state.stick = bottom;
+      if (bottom && state.newPill) { state.newPill = false; var p = $('#pill'); if (p) p.hidden = true; }
+    }, { passive: true });
+  }
+  document.querySelectorAll('textarea.field').forEach(autosize);
+  if (aeId) { var el = document.getElementById(aeId); if (el) { el.focus({ preventScroll: true }); try { if (selS != null) el.setSelectionRange(selS, selE); } catch (e) {} } }
+}
+function renderPanel() { $('#panel').innerHTML = panelHTML(); $('#panel').classList.toggle('open', state.panelOpen); }
+function autosize(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight + 2, 140) + 'px'; }
+var toastTimer;
+function toast(msg) {
+  $('#toast-root').innerHTML = '<div class="toast" role="status">' + esc(msg) + '</div>';
+  clearTimeout(toastTimer); toastTimer = setTimeout(function () { $('#toast-root').innerHTML = ''; }, 2600);
+}
+
+/* ---------- navigation helpers ---------- */
+function go(patch) { Object.keys(patch).forEach(function (k) { state[k] = patch[k]; }); render(); }
+function openSession(sid) {
+  state.screen = 'session'; state.sid = sid; state.stick = true; state.newPill = false; state.sheet = null; state.profMenu = false; state.profAsk = null; state.modelMenu = false; state.modelOther = '';
+  state.lastRow = rowOf(sid).id; render();
+}
+function openRow(id) { openSession(rowStatus(R[id]).id); }
+function openSheet(name, data) { state.sheet = name; state.sd = data || {}; render(); }
+function connect() {
+  go({ screen: 'connecting', sheet: null });
+  setTimeout(function () { if (state.screen === 'connecting') go({ screen: 'sessions' }); }, 1100);
+}
+function ensurePrompt(sid) {
+  var s = S[sid];
+  if (!s.prompt || s.ps.state !== 'open') { s.prompt = PROMPTS[sid]; s.ps = freshPS(); s.status = 'wait'; }
+}
+function finishTurn(s, text) {
+  setTimeout(function () {
+    if (s.status !== 'work') return;
+    s.items.push(mk({ t: 'say', text: text || 'Got it.' }));
+    s.status = 'idle'; s.at = now();
+    if (state.screen === 'session' && state.sid === s.id && !state.stick) state.newPill = true;
+    render();
+  }, 3200);
+}
+function answer(s, text, hold) {
+  s.ps.state = 'answered'; s.ps.answerText = text; render();
+  if (hold) return;
+  setTimeout(function () {
+    if (!s.prompt || s.ps.state !== 'answered') return;
+    s.prompt = null; s.ps = null;
+    s.items.push(mk({ t: 'receipt', text: 'Answered on this phone: ' + text }));
+    s.status = 'work'; s.at = s.workStart = now(); state.stick = true; render();
+    finishTurn(s, s.reply);
+  }, 2200);
+}
+function liveAppend() {
+  var s = S['s-co'];
+  var it = JSON.parse(JSON.stringify(LIVE[liveIx++ % LIVE.length]));
+  s.items.push(mk(it)); s.at = now();
+  if (!state.stick) state.newPill = true;
+  render();
+}
+function send() {
+  var s = S[state.sid], text = s.draft.trim();
+  if (!text) return;
+  if (s.status === 'work') { s.refusal = 'Not sent. Claude is still working. Send again when it stops.'; render(); return; }
+  if (s.status === 'gone') { s.refusal = 'Not sent. This session has exited. Restart it on the laptop.'; render(); return; }
+  var wake = s.status === 'park';
+  s.refusal = null; s.draft = '';
+  s.items.push(mk({ t: 'me', text: text }));
+  s.status = 'work'; s.at = s.workStart = now(); state.stick = true;
+  if (wake) toast('Waking the session, then sending…');
+  render(); finishTurn(s, 'Got it. On it now.');
+}
+function newRowFrom(d) {
+  var names = ['brave-otter', 'quiet-heron', 'swift-lynx', 'amber-finch'];
+  var name = d.mode === 'remote' ? 'Remote: ' + d.msg.trim().split(/\s+/).slice(0, 3).join(' ') : names[(seq) % names.length];
+  var rid = 'w-new-' + seq, sid = 's-new-' + seq;
+  S[sid] = { id: sid, tab: d.mode === 'remote' ? d.prov : 'Claude', kind: d.mode === 'remote' ? 'remote' : 'claude', status: 'work', at: now(), workStart: now(),
+    profile: 'Personal', provider: d.prov, model: 'opus', caps: d.mode === 'remote' ? REMOTE : CLAUDE, draft: '', refusal: null, prompt: null, ps: null,
+    items: [mk({ t: 'me', text: d.msg.trim() })] };
+  var row = { id: rid, repo: d.repo, name: name, sids: [sid] };
+  if (d.mode === 'remote') row.remote = d.prov;
+  rows.push(row); R[rid] = row;
+  return sid;
+}
+
+/* ---------- index entries ---------- */
+var IX = {
+  lapmenu: function () { if (state.screen !== 'session') state.screen = 'sessions'; state.laptop = 'acme-laptop'; state.sheet = null; state.lapMenu = true; render(); },
+  laptops: function () { go({ screen: 'laptops', sheet: null, forgetAsk: null }); },
+  scan: function () { go({ screen: 'pair-scan' }); },
+  paste: function () { go({ screen: 'pair-paste' }); },
+  name: function () { go({ screen: 'pair-name' }); },
+  code: function () { go({ screen: 'pair-code' }); },
+  denied: function () { go({ screen: 'pair-denied' }); },
+  expired: function () { go({ screen: 'pair-expired' }); },
+  connecting: function () { state.laptop = 'acme-laptop'; connect(); },
+  offline: function () { go({ laptop: 'acme-studio', screen: 'err-offline' }); },
+  update: function () { go({ laptop: 'acme-laptop', screen: 'err-update' }); },
+  reload: function () { go({ laptop: 'acme-laptop', screen: 'err-reload' }); },
+  removed: function () { go({ laptop: 'acme-laptop', screen: 'err-removed' }); },
+  relay: function () { go({ laptop: 'acme-laptop', screen: 'err-relay' }); },
+  reconnect: function () {
+    if (STRIP_SCREENS.indexOf(state.screen) < 0 || state.screen.indexOf('err') === 0) go({ laptop: 'acme-laptop', screen: 'sessions' });
+    state.conn = 're'; render(); setTimeout(function () { state.conn = 'ok'; render(); }, 3500);
+  },
+  sessions: function () { go({ laptop: 'acme-laptop', screen: 'sessions', sheet: null }); },
+  bump: function () {
+    if (state.screen !== 'sessions') go({ laptop: 'acme-laptop', screen: 'sessions', sheet: null });
+    var gs = sortedGroups(), last = gs[gs.length - 1], r = last.rows[last.rows.length - 1], s = rowStatus(r);
+    s.at = now(); if (s.status === 'unk' || s.status === 'gone') s.status = 'idle';
+    toast(r.name + ' changed. Its repo moves to the top.'); render();
+  },
+  q1: function () { ensurePrompt('s-login'); openSession('s-login'); },
+  qm: function () { ensurePrompt('s-set'); openSession('s-set'); },
+  q3: function () { ensurePrompt('s-onb'); openSession('s-onb'); },
+  perm: function () { ensurePrompt('s-sse'); openSession('s-sse'); },
+  answered: function () { ensurePrompt('s-login'); openSession('s-login'); answer(S['s-login'], 'Yes, add the test', true); },
+  elsewhere: function () { ensurePrompt('s-login'); openSession('s-login'); S['s-login'].ps.state = 'elsewhere'; render(); },
+  working: function () { openSession('s-co'); },
+  pill: function () {
+    S['s-co'].status = 'work'; openSession('s-co');
+    var t = $('#tx'); if (t) t.scrollTop = 0; state.stick = false; liveAppend();
+  },
+  details: function () { state.details = true; openSession('s-co'); },
+  codex: function () { openSession('s-co-codex'); },
+  parked: function () { openSession('s-docs'); },
+  refused: function () { var s = S['s-co']; s.status = 'work'; s.draft = 'Also add a progress bar above the steps.'; s.refusal = null; openSession('s-co'); send(); },
+  error: function () { openSession('s-rate'); },
+  rate: function () { openSession('s-bulk'); },
+  gone: function () { openSession('s-schema'); },
+  remote: function () { openSession('s-triage'); },
+  unknown: function () { openSession('s-legacy'); },
+  profmenu: function () { openSession('s-co-rev'); state.profMenu = true; render(); },
+  modelmenu: function () { openSession('s-co-rev'); state.modelMenu = true; render(); },
+  menu: function () { ensurePrompt('s-login'); openSession('s-login'); openSheet('menu'); },
+  switch: function () { openSession('s-co-rev'); openSheet('switch'); },
+  fork: function () { openSession('s-co-rev'); openSheet('fork'); },
+  model: function () { openSession('s-co-rev'); openSheet('model'); },
+  'new-local': function () { go({ laptop: 'acme-laptop', screen: 'sessions' }); openSheet('new', { mode: 'local', repo: 'web', msg: 'Add a dark mode toggle to the settings screen.' }); },
+  'new-remote': function () { go({ laptop: 'acme-laptop', screen: 'sessions' }); openSheet('new', { mode: 'remote', prov: 'acme-cloud', repo: 'api', msg: 'Profile the slow orders query and suggest an index.' }); }
+};
+
+/* ---------- events ---------- */
+var A = {
+  'panel-open': function () { state.panelOpen = true; renderPanel(); },
+  'panel-close': function () { state.panelOpen = false; renderPanel(); },
+  ix: function (el) { state.panelOpen = false; renderPanel(); IX[el.dataset.k](); },
+  opt: function (el) { state.opt[el.dataset.k] = el.dataset.v; applyOpt(); renderPanel(); render(); },
+  reset: function () { try { localStorage.removeItem('tbd-phone-mock-opt'); } catch (e) {} location.reload(); },
+  'to-laptops': function () { go({ screen: 'laptops', sheet: null, forgetAsk: null }); },
+  pair: function () { go({ screen: 'pair-scan' }); },
+  scan: function () { toast('Found the code for acme-laptop'); go({ screen: 'pair-name' }); },
+  paste: function () { go({ screen: 'pair-paste' }); },
+  'paste-go': function () { go({ screen: 'pair-name' }); },
+  'name-go': function () { go({ screen: 'pair-code' }); },
+  allow: function () { state.laptop = 'acme-laptop'; toast('Paired with acme-laptop'); connect(); },
+  deny: function () { go({ screen: 'pair-denied' }); },
+  expire: function () { go({ screen: 'pair-expired' }); },
+  'lap-menu': function () { state.lapMenu = !state.lapMenu; render(); },
+  'pick-laptop': function (el) {
+    var l = laptops.filter(function (x) { return x.id === el.dataset.id; })[0];
+    if (l.id === state.laptop && (state.screen === 'sessions' || state.screen === 'session')) { render(); return; }
+    state.laptop = l.id; if (l.online) connect(); else go({ screen: 'err-offline' });
+  },
+  forget: function (el) { go({ forgetAsk: el.dataset.id }); },
+  'forget-no': function () { go({ forgetAsk: null }); },
+  'forget-yes': function (el) { var id = el.dataset.id; laptops = laptops.filter(function (x) { return x.id !== id; }); toast('Forgot ' + id); go({ forgetAsk: null }); },
+  'forget-cur': function () { var id = state.laptop; laptops = laptops.filter(function (x) { return x.id !== id; }); toast('Forgot ' + id); go({ screen: 'laptops' }); },
+  retry: function () { if (state.laptop === 'acme-studio') { toast('Still offline'); return; } connect(); },
+  repo: function (el) { state.collapsed[el.dataset.id] = !state.collapsed[el.dataset.id]; render(); },
+  'open-row': function (el) { openRow(el.dataset.id); },
+  new: function (el) { openSheet('new', { mode: 'local', repo: el.dataset.repo, msg: '' }); },
+  back: function () { go({ screen: 'sessions', sheet: null }); },
+  tab: function (el) { openSession(el.dataset.sid); },
+  menu: function () { openSheet('menu'); },
+  close: function () { if (state.sd && state.sd.creating) return; go({ sheet: null }); },
+  'sh-menu': function () { openSheet('menu'); },
+  'sh-switch': function () { openSheet('switch'); },
+  'sh-fork': function () { openSheet('fork'); },
+  'sh-model': function () { openSheet('model', { model: null, other: '' }); },
+  'pick-profile': function (el) { openSheet('switch-confirm', { target: el.dataset.id }); },
+  'switch-yes': function () { switchProfile(S[state.sid], state.sd.target); },
+  'prof-menu': function () { state.profMenu = !state.profMenu; state.profAsk = null; state.modelMenu = false; render(); },
+  'prof-pick': function (el) {
+    if (el.dataset.id === S[state.sid].profile) { state.profMenu = false; render(); return; }
+    state.profAsk = el.dataset.id; render();
+  },
+  'prof-cancel': function () { state.profAsk = null; render(); },
+  'prof-restart': function () { switchProfile(S[state.sid], state.profAsk); },
+  'fork-under': function (el) { forkSession(S[state.sid], el.dataset.id); },
+  'switch-fork': function () { forkSession(S[state.sid], state.sd.target); },
+  'prof-fork': function () { forkSession(S[state.sid], state.profAsk); },
+  'model-pick': function (el) { state.sd.model = el.dataset.m; state.sd.other = ''; render(); },
+  'model-set': function () { var s = S[state.sid]; setModel(s, (state.sd.other || '').trim() || state.sd.model || s.model); },
+  'model-menu': function () { state.modelMenu = !state.modelMenu; state.modelOther = ''; state.profMenu = false; state.profAsk = null; render(); },
+  'mm-pick': function (el) { var s = S[state.sid]; if (el.dataset.m === s.model) { state.modelMenu = false; render(); return; } setModel(s, el.dataset.m); },
+  'mm-set': function () { var m = (state.modelOther || '').trim(); if (m) setModel(S[state.sid], m); },
+  'new-mode': function (el) { state.sd.mode = el.dataset.m; if (el.dataset.m === 'remote' && !state.sd.prov) state.sd.prov = 'acme-cloud'; render(); },
+  'new-prov': function (el) { state.sd.prov = el.dataset.id; render(); },
+  create: function () {
+    var d = state.sd; d.creating = true; render();
+    setTimeout(function () { var sid = newRowFrom(d); state.sd = {}; openSession(sid); toast(d.mode === 'remote' ? 'Remote session started on ' + d.prov : 'Created ' + R[rowOf(sid).id].name); finishTurn(S[sid], 'Starting. I will read the code first.'); }, 1300);
+  },
+  tool: function (el) { toggleDetail(el.dataset.id); },
+  agent: function (el) { toggleDetail(el.dataset.id); },
+  fold: function (el) { var k = el.dataset.id; state.open[k] = state.open[k] ? null : 'open'; keepPlace(); },
+  more: function (el) { state.more[el.dataset.id] = true; keepPlace(); },
+  link: function (el) { var u = el.dataset.url; var host = u.replace(/^https?:\/\//, '').split('/')[0]; toast('Opens ' + host + ' in a new Safari tab'); },
+  pill: function () { state.stick = true; state.newPill = false; render(); },
+  send: function () { send(); },
+  'p-hide': function () { S[state.sid].ps.collapsed = true; render(); },
+  'p-expand': function () { S[state.sid].ps.collapsed = false; render(); },
+  'p-ok': function () { var s = S[state.sid]; s.prompt = null; s.ps = null; s.items.push(mk({ t: 'receipt', text: 'Answered on the laptop' })); s.status = 'work'; s.at = s.workStart = now(); state.stick = true; render(); finishTurn(s, s.reply); },
+  'p-pick': function (el) {
+    var s = S[state.sid], ps = s.ps, q = s.prompt.questions[ps.step], label = q.options[+el.dataset.i].label;
+    if (s.prompt.questions.length === 1) { answer(s, label); return; }
+    ps.picks[ps.step] = label; ps.step++; ps.otherOpen = false; render();
+  },
+  'p-other': function () { S[state.sid].ps.otherOpen = true; render(); var t = $('#other-text'); if (t) t.focus(); },
+  'p-other-cancel': function () { S[state.sid].ps.otherOpen = false; render(); },
+  'p-other-send': function () {
+    var s = S[state.sid], ps = s.ps, text = ps.otherText.trim(); if (!text) return;
+    if (s.prompt.questions.length === 1) { answer(s, text); return; }
+    ps.picks[ps.step] = text; ps.otherText = ''; ps.otherOpen = false; ps.step++; render();
+  },
+  'p-back': function () { var ps = S[state.sid].ps; ps.step = Math.max(0, ps.step - 1); ps.otherOpen = false; render(); },
+  'p-goto': function (el) { S[state.sid].ps.step = +el.dataset.i; render(); },
+  'p-submit-all': function () { var s = S[state.sid]; answer(s, s.ps.picks.join(' · ')); },
+  'p-submit-multi': function () { var s = S[state.sid], q = s.prompt.questions[0]; answer(s, s.ps.checks.slice().sort().map(function (i) { return q.options[i].label; }).join(', ')); },
+  'p-allow': function (el) { var s = S[state.sid]; answer(s, s.prompt.choices[+el.dataset.i].label); },
+  'p-deny-open': function () { S[state.sid].ps.denyOpen = true; render(); var t = $('#deny-text'); if (t) t.focus(); },
+  'p-deny-cancel': function () { S[state.sid].ps.denyOpen = false; render(); },
+  'p-deny-send': function () { var s = S[state.sid], t = s.ps.denyText.trim(); s.status = 'idle'; answer(s, 'No' + (t ? ': ' + t : '')); }
+};
+function keepPlace() { var keep = state.stick; state.stick = false; render(); state.stick = keep; }
+function toggleDetail(id) {
+  if (state.open[id]) { state.open[id] = null; keepPlace(); return; }
+  state.open[id] = 'loading'; keepPlace();
+  setTimeout(function () { if (state.open[id] === 'loading') { state.open[id] = 'open'; keepPlace(); } }, 450);
+}
+document.addEventListener('click', function (e) {
+  var el = e.target.closest('[data-act]');
+  if (state.lapMenu && !e.target.closest('#panel') && (!el || el.dataset.act !== 'lap-menu')) {
+    state.lapMenu = false;
+    if (!el || !e.target.closest('.lapdrop')) { e.preventDefault(); render(); return; }
+  }
+  if (state.profMenu && !e.target.closest('#panel') && !e.target.closest('.profdrop') && (!el || (el.dataset.act !== 'prof-menu' && el.dataset.act !== 'model-menu'))) {
+    state.profMenu = false; state.profAsk = null; e.preventDefault(); render(); return;
+  }
+  if (state.modelMenu && !e.target.closest('#panel') && !e.target.closest('.modeldrop') && (!el || (el.dataset.act !== 'model-menu' && el.dataset.act !== 'prof-menu'))) {
+    state.modelMenu = false; state.modelOther = ''; e.preventDefault(); render(); return;
+  }
+  if (!el || el.disabled) return;
+  var fn = A[el.dataset.act];
+  if (fn) { e.preventDefault(); fn(el); }
+});
+document.addEventListener('keydown', function (e) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.lnk')) { e.preventDefault(); A.link(e.target); }
+});
+document.addEventListener('change', function (e) {
+  var el = e.target, k = el.dataset.change;
+  if (k === 'details') { state.details = el.checked; state.stick = true; render(); }
+  if (k === 'p-check') {
+    var ps = S[state.sid].ps, i = +el.dataset.i, at2 = ps.checks.indexOf(i);
+    if (el.checked && at2 < 0) ps.checks.push(i); if (!el.checked && at2 >= 0) ps.checks.splice(at2, 1);
+    var b = document.querySelector('[data-act="p-submit-multi"]');
+    if (b) { b.disabled = !ps.checks.length; b.textContent = 'Send ' + (ps.checks.length ? ps.checks.length + ' selected' : 'answer'); }
+  }
+});
+document.addEventListener('input', function (e) {
+  var el = e.target, k = el.dataset.in, s = S[state.sid];
+  if (k === 'draft') {
+    s.draft = el.value; autosize(el);
+    var b = document.querySelector('[data-act="send"]'); if (b) b.disabled = !el.value.trim();
+    if (s.refusal) { s.refusal = null; var r = document.querySelector('.refusal'); if (r) r.remove(); }
+  }
+  if (k === 'other') s.ps.otherText = el.value;
+  if (k === 'deny') s.ps.denyText = el.value;
+  if (k === 'mm-other') {
+    state.modelOther = el.value; var mb = document.querySelector('[data-act="mm-set"]'); if (mb) mb.disabled = !el.value.trim();
+  }
+  if (k === 'model-other') {
+    state.sd.other = el.value; var set = document.querySelector('[data-act="model-set"]');
+    if (set) set.disabled = false;
+    document.querySelectorAll('.sheet .tick').forEach(function (t) { if (el.value.trim()) t.style.visibility = 'hidden'; else t.style.visibility = ''; });
+  }
+  if (k === 'new-msg') {
+    state.sd.msg = el.value; var c = document.querySelector('[data-act="create"]');
+    if (c) c.disabled = !(el.value.trim() && state.sd.repo && (state.sd.mode !== 'remote' || state.sd.prov));
+  }
+});
+
+/* ---------- live behaviour ---------- */
+setInterval(function () {
+  var el = $('#elapsed');
+  if (el && state.sid) { var s = S[state.sid]; el.textContent = dur(now() - (s.workStart || s.at)); }
+}, 1000);
+setInterval(function () {
+  if (state.screen === 'session' && state.sid === 's-co' && S['s-co'].status === 'work' && !state.sheet && document.activeElement && document.activeElement.id !== 'draft') liveAppend();
+}, 8000);
+setInterval(function () { if (state.screen === 'sessions' && !state.sheet) render(); }, 30000);
+
+applyOpt();
+renderPanel();
+render();
+})();
+</script>
+</body>
+</html>
