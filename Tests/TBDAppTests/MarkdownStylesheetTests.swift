@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDShared
 import TestSupport
 
 /// Tier 1, except for `themesDirectoryWatchSeesAStylesheetCreatedLater`, which

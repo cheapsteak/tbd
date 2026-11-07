@@ -4,6 +4,7 @@ import os
 import Testing
 
 @testable import TBDApp
+import TBDShared
 import TestSupport
 
 /// Tier 2 throughout: a real temp file and a real `DispatchSource` deliver the
