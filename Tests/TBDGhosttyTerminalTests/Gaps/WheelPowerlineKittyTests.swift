@@ -231,14 +231,16 @@ struct WheelPowerlineKittyTests {
         let glyphCache = GlyphCache(fontSet: FontSet(font: font, scale: 2), device: device)
         let renderer = try TerminalRenderer(device: device, glyphCache: glyphCache)
 
-        let terminal = try makeTerminal(cols: 5, rows: 1)
+        // Six columns, so the cursor ends on column 5, past the blank reference cell at column 4,
+        // and hidden as well: a block cursor on the reference cell lights all of it.
+        let terminal = try makeTerminal(cols: 6, rows: 1)
         defer { terminal.close() }
-        // White on black, with a blank control cell at the end.
-        terminal.feed(text: "\u{1b}[38;2;255;255;255;48;2;0;0;0m\u{E0B0}\u{E0B1}\u{E0B2}\u{E0B3} \u{1b}[0m")
+        // White on black, with a blank control cell of the same black after the glyphs.
+        terminal.feed(text: "\u{1b}[?25l\u{1b}[38;2;255;255;255;48;2;0;0;0m\u{E0B0}\u{E0B1}\u{E0B2}\u{E0B3} \u{1b}[0m")
 
         let surface = TerminalSurface()
         try surface.attach(terminal)
-        let size = renderer.drawableSize(columns: 5, rows: 1)
+        let size = renderer.drawableSize(columns: 6, rows: 1)
         let texture = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
         let outcome = try renderer.render(surface: surface, to: texture)
         #expect(outcome.didEncode, "the first frame after attach was skipped")
@@ -246,23 +248,34 @@ struct WheelPowerlineKittyTests {
 
         let pixels = TerminalRenderer.bgraBytes(of: texture)
         let metrics = glyphCache.metrics
-        /// Light pixels in `column`, between `from` and `to` thirds of its width.
+        /// The pixel at (`x`, `y`) as red, green and blue. The texture is BGRA.
+        func rgb(_ x: Int, _ y: Int) -> [Int] {
+            let offset = (y * texture.width + x) * 4
+            return [Int(pixels[offset + 2]), Int(pixels[offset + 1]), Int(pixels[offset])]
+        }
+        // The cells' background, as drawn: the middle of the blank cell.
+        let background = rgb(4 * metrics.width + metrics.width / 2, metrics.height / 2)
+        /// Pixels in `column`, between `from` and `to` thirds of its width, more than a quarter of
+        /// the range away from the background in some channel.
         func inked(column: Int, thirds: Range<Int> = 0..<3) -> Int {
             let start = column * metrics.width + metrics.width * thirds.lowerBound / 3
             let end = column * metrics.width + metrics.width * thirds.upperBound / 3
             var count = 0
             for y in 0..<metrics.height {
-                for x in start..<end {
-                    let offset = (y * texture.width + x) * 4
-                    if max(pixels[offset], pixels[offset + 1], pixels[offset + 2]) > 64 { count += 1 }
+                for x in start..<end where zip(rgb(x, y), background).contains(where: { abs($0 - $1) > 64 }) {
+                    count += 1
                 }
             }
             return count
         }
 
+        // A twentieth of a cell. An outline, the thinnest of the four, inks about a fifth.
+        let minimumInk = metrics.width * metrics.height / 20
         let blank = inked(column: 4)
         for column in 0..<4 {
-            #expect(inked(column: column) > blank, "cell \(column) holds no more light than the blank cell (\(blank))")
+            let ink = inked(column: column)
+            #expect(ink > blank + minimumInk,
+                    "cell \(column) has \(ink) pixels off the background \(background), the blank cell \(blank)")
         }
         let rightBase = inked(column: 0, thirds: 0..<1)
         let rightPoint = inked(column: 0, thirds: 2..<3)
