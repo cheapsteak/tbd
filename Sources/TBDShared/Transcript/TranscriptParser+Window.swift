@@ -199,9 +199,17 @@ extension TranscriptParser {
     /// `buildItems` makes carry input whose strings `truncateInputStrings`
     /// capped, so the stats must come from the line itself.
     ///
-    /// - **Edit** – `new_string`'s lines diffed against `old_string`'s, with
-    ///   `Array.difference(from:)`: `added` is the insertion count and
-    ///   `removed` the removal count.
+    /// - **Edit** – `new_string`'s lines diffed against `old_string`'s. The
+    ///   lines common to the start and to the end of both are neither added
+    ///   nor removed, and the lines between them, the middles, are diffed
+    ///   with `difference(from:)`: `added` is the insertion count and
+    ///   `removed` the removal count. The diff costs about (N + M) · D for
+    ///   middles of N and M lines that differ in D, which is seconds for a
+    ///   rewrite of thousands of lines, paid on every window read that holds
+    ///   the edit. So when the old middle's line count times the new one's is
+    ///   above `editDiffLinePairLimit`, the middles are not diffed: every old
+    ///   middle line counts as removed and every new one as added. A huge
+    ///   rewrite reports these upper bounds.
     /// - **MultiEdit** – the same for each entry of `edits`, summed.
     /// - **Write** – `added` is the line count of `content`, `removed` 0.
     ///
@@ -418,10 +426,24 @@ extension TranscriptParser {
         return 0
     }
 
+    /// The most old-middle × new-middle line pairs `editStats` diffs. Above
+    /// it, the middles count as wholly removed and added.
+    static let editDiffLinePairLimit = 4_000_000
+
     private static func editStats(old: Any?, new: Any?) -> FileEditStats {
         let oldLines = editLines((old as? String) ?? "")
         let newLines = editLines((new as? String) ?? "")
-        let difference = newLines.difference(from: oldLines)
+        let commonPrefix = zip(oldLines, newLines).prefix(while: { pair in pair.0 == pair.1 }).count
+        let oldRest = oldLines.dropFirst(commonPrefix)
+        let newRest = newLines.dropFirst(commonPrefix)
+        let commonSuffix = zip(oldRest.reversed(), newRest.reversed())
+            .prefix(while: { pair in pair.0 == pair.1 }).count
+        let oldMiddle = oldRest.dropLast(commonSuffix)
+        let newMiddle = newRest.dropLast(commonSuffix)
+        guard oldMiddle.count * newMiddle.count <= editDiffLinePairLimit else {
+            return FileEditStats(added: newMiddle.count, removed: oldMiddle.count)
+        }
+        let difference = newMiddle.difference(from: oldMiddle)
         return FileEditStats(added: difference.insertions.count, removed: difference.removals.count)
     }
 

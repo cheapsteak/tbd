@@ -305,6 +305,49 @@ struct TranscriptParserWindowTests {
         #expect(stats == ["toolu_write": FileEditStats(added: 3, removed: 0)])
     }
 
+    /// A rewrite of a whole 5,000-line file shares no line, so every line is
+    /// removed and added. An edit of one line in the middle of the same file
+    /// shares the lines around it, which trimming leaves out of the diff.
+    @Test func aHugeEditCountsOnlyTheLinesBetweenItsCommonEnds() throws {
+        let original = (0..<5000).map { "old line \($0)" }
+        let rewritten = (0..<5000).map { "new line \($0)" }
+        var oneChanged = original
+        oneChanged[2500] = "changed line"
+        let rewrite = try WindowLine.decoded(WindowLine.toolUse("a1", id: "toolu_rewrite", name: "Edit", input: [
+            "file_path": "/acme/widget.swift",
+            "old_string": original.joined(separator: "\n"),
+            "new_string": rewritten.joined(separator: "\n"),
+        ]))
+        let oneLine = try WindowLine.decoded(WindowLine.toolUse("a2", id: "toolu_one", name: "Edit", input: [
+            "file_path": "/acme/widget.swift",
+            "old_string": original.joined(separator: "\n"),
+            "new_string": oneChanged.joined(separator: "\n"),
+        ]))
+
+        let rewriteStats = TranscriptParser.fileEditStats(fromLine: rewrite)
+        let oneLineStats = TranscriptParser.fileEditStats(fromLine: oneLine)
+
+        #expect(rewriteStats == ["toolu_rewrite": FileEditStats(added: 5000, removed: 5000)])
+        #expect(oneLineStats == ["toolu_one": FileEditStats(added: 1, removed: 1)])
+    }
+
+    /// Middles too large to diff are counted whole, even where a diff would
+    /// find lines they share: this edit changes only its first and last
+    /// lines, and reports the upper bounds.
+    @Test func middlesTooLargeToDiffAreCountedWhole() throws {
+        let shared = (0..<2500).map { "shared line \($0)" }
+        let old = (["old first"] + shared + ["old last"]).joined(separator: "\n")
+        let new = (["new first"] + shared + ["new last"]).joined(separator: "\n")
+        let line = try WindowLine.decoded(WindowLine.toolUse("a1", id: "toolu_edit", name: "Edit", input: [
+            "file_path": "/acme/widget.swift", "old_string": old, "new_string": new,
+        ]))
+
+        let stats = TranscriptParser.fileEditStats(fromLine: line)
+
+        #expect(2502 * 2502 > TranscriptParser.editDiffLinePairLimit)
+        #expect(stats == ["toolu_edit": FileEditStats(added: 2502, removed: 2502)])
+    }
+
     // MARK: - subagent IDs
 
     @Test func subagentResultsMapToTheirAgentID() throws {
