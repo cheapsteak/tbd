@@ -1,0 +1,234 @@
+name: Phone
+
+# Tests the phone-control code that runs off the Mac: the relay under
+# `relay/cloudflare/`, the loader under `phone/loader/`, and the phone app's
+# committed bundle. Everything here runs on Linux, so none of it takes one of
+# the five macOS slots the Swift suite in `test.yml` competes for.
+# Design: docs/specs/2026-11-07-phone-control-design.md, section 15.
+#
+# The shape copies the Swift suite gate in `test.yml`: a `changes` job runs a
+# fail-closed classifier, `scripts/ci/phone-parts-needed.sh`; each part job is
+# skipped only by its own `if:`, and only on the classifier's explicit `false`;
+# and one always-running job, `Phone checks`, judges every result. That one
+# context is what branch protection requires. The part jobs are not required
+# by name, so one can be added, split or renamed without touching branch
+# protection; the classifier's PART_JOBS and `Phone checks`' `needs:` must
+# move with it, and the classifier's `--verdict` fails when they disagree.
+#
+# The wiring below is pinned line by line by the wiring cases in
+# `scripts/ci/phone-parts-needed.test.sh`, which the `harness` job runs on
+# every pull request. No fixture can evaluate a GitHub expression, so the
+# lines that make the gate fail closed are checked as written.
+
+on:
+  # No branch filter, unlike test.yml: a stacked phone PR, whose base is
+  # another PR's branch, needs its own Phone run, and the gate skips every part
+  # when no phone path changed, so the cost on any other PR is three short
+  # Linux jobs: the gate, the harnesses and the verdict.
+  #
+  # And no `paths:` or `paths-ignore:` filter, here or on `push`. A workflow
+  # that a path filter keeps from starting never reports at all, and a
+  # required `Phone checks` that never reports stays pending forever, so every
+  # PR that touched no phone path could not merge. The `changes` job is the
+  # path filter, and it fails closed.
+  pull_request:
+  # A push to main and a dispatch run every part: the classifier answers
+  # `true` for all three on any event but `pull_request`, without reading a
+  # diff.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Its own group, distinct from test.yml's `test-` group, so a push to a branch
+# cancels only this workflow's older run and never the Swift suite's, or the
+# reverse.
+concurrency:
+  group: phone-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every job carries a job-level `timeout-minutes`, as in test.yml: GitHub's
+# default is 360 minutes, and an untimed job that wedges leaves its check
+# unreported for six hours. Each bound is several times the job's normal run,
+# a bound on a wedge rather than a performance budget.
+jobs:
+  # Answers which parts this run needs. Its three outputs are the decide
+  # step's; a gate that fails, or ends before writing all three, leaves them
+  # empty, and an empty answer runs the part.
+  changes:
+    name: Phone parts gate
+    runs-on: ubuntu-latest
+    # 5: a full-history checkout and one `git diff`, well under a minute.
+    # Every part job waits for this one.
+    timeout-minutes: 5
+    outputs:
+      relay: ${{ steps.decide.outputs.relay }}
+      loader: ${{ steps.decide.outputs.loader }}
+      phone_app: ${{ steps.decide.outputs.phone_app }}
+    steps:
+      # `fetch-depth: 0` puts `origin/<base>` and the history to find a merge
+      # base with in the clone, whatever branch the PR targets. Without it the
+      # base does not resolve and the gate answers `true` for every part on
+      # every PR: never red, and nothing ever skips again.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide which phone parts this run needs
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/phone-parts-needed.sh
+
+  # The classifier's harness and the bundle check's harness. They run here,
+  # with no `if:`, rather than in test.yml's `script-harnesses` job, for two
+  # reasons: `Script harnesses` is not a required check, so a red one there
+  # would not stop a merge, while this job's result feeds `Phone checks`; and
+  # adding a step to test.yml makes the Swift gate run the full Swift suite,
+  # since test.yml is one of its inputs. The classifier's harness also pins
+  # this file's wiring and the loader deploy workflow's, so it runs on every
+  # PR, phone paths or not.
+  #
+  # `!cancelled()` on each step so one harness going red does not cost the
+  # other its verdict.
+  harness:
+    name: Phone CI harnesses
+    runs-on: ubuntu-latest
+    # 5: two bash harnesses over throwaway git repos and stub npm, well under
+    # a minute together.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the phone parts gate
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/phone-parts-needed.test.sh
+      - name: Test the phone app bundle check
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/phone-app-bundle-check.test.sh
+
+  # The three part jobs share one wiring, pinned by the harness:
+  #
+  #   needs: changes
+  #   if: ${{ !cancelled() && needs.changes.outputs.<key> != 'false' }}
+  #
+  # Skipped only when the gate answered an explicit `false`. When the gate
+  # fails, is skipped, or ends without writing an answer, its output is empty,
+  # `!= 'false'` holds, and the part runs: a broken gate costs a full run,
+  # never a missed one. `!cancelled()` is what lets a part run after a FAILED
+  # gate: with no status function in a job's `if:`, GitHub adds an implicit
+  # `success()`, and a failed dependency would skip the part. It still skips
+  # when the run itself is cancelled, which `Phone checks` then fails.
+  relay:
+    name: Relay tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relay != 'false' }}
+    runs-on: ubuntu-latest
+    # 10: `npm ci`, a type check, the Workers-runtime tests and a dry-run
+    # bundle, a few minutes cold.
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: relay/cloudflare
+    env:
+      # Wrangler and the Workers test runner otherwise send usage metrics.
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      # The relay pins its own Node, the one Cloudflare's Workers Builds image
+      # preinstalls, so it reads its own `.nvmrc` and lockfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: relay/cloudflare/.nvmrc
+          cache: npm
+          cache-dependency-path: relay/cloudflare/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      # `!cancelled()` so a red type check does not cost the tests or the
+      # bundle their verdicts.
+      - name: Test in the Workers runtime
+        if: ${{ !cancelled() }}
+        run: npm test
+      - name: Bundle the Worker without deploying
+        if: ${{ !cancelled() }}
+        run: npm run check
+
+  loader:
+    name: Loader tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.loader != 'false' }}
+    runs-on: ubuntu-latest
+    # 10: `npm ci`, a type check, the loader's tests and the vector check, a
+    # few minutes cold.
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: phone
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: phone/.nvmrc
+          cache: npm
+          cache-dependency-path: phone/package-lock.json
+      - run: npm ci
+      - name: Type check the loader
+        run: npm run typecheck
+      - name: Test the loader
+        if: ${{ !cancelled() }}
+        run: npm test
+      - name: Check the generated test vectors
+        if: ${{ !cancelled() }}
+        run: npm run vectors:check
+
+  phone-app:
+    name: Phone app tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.phone_app != 'false' }}
+    runs-on: ubuntu-latest
+    # 10: `npm ci`, the app's tests and one bundle build, a few minutes cold.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: phone/.nvmrc
+          cache: npm
+          cache-dependency-path: phone/package-lock.json
+      - name: Rebuild the app bundle and compare it with the committed one
+        run: bash scripts/ci/phone-app-bundle-check.sh
+
+  # The one context branch protection requires. Exactly one job across
+  # `.github/workflows/` may carry this name, because branch protection matches
+  # a required check by job name, and a second job named `Phone checks` would
+  # report into the same context.
+  #
+  # `always()` on the job: a job skipped for any reason reports success to
+  # branch protection, so in a cancelled run, or after a failed dependency,
+  # this job must still run, and fail, rather than be skipped into a pass.
+  # `always()` on every step as well: a step's default `success()` would skip
+  # the verdict after a failed checkout, or in a cancelled run, and a job whose
+  # steps were all skipped reports success too.
+  #
+  # `needs:` lists `changes`, `harness` and every part job, and the verdict
+  # fails unless it sees exactly those, so a part added here but not to the
+  # classifier, or the reverse, fails instead of going unchecked. The verdict
+  # passes a skipped part only when the gate's answer for it is exactly
+  # `false`.
+  phone-checks:
+    name: Phone checks
+    needs: [changes, harness, relay, loader, phone-app]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    # 5: a checkout and one `jq` pass over the `needs` context.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ always() }}
+      - name: Pass only when every part passed or the gate skipped it
+        if: ${{ always() }}
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash scripts/ci/phone-parts-needed.sh --verdict

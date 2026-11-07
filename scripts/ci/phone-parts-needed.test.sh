@@ -2,7 +2,7 @@
 # Tests for scripts/ci/phone-parts-needed.sh — run:
 #   /bin/bash scripts/ci/phone-parts-needed.test.sh
 #
-# Three kinds of case, all needed:
+# Four kinds of case, all needed:
 #
 #   - THE RULE, through `--classify`: each part's own paths run that part
 #     alone, the shared inputs run every part, the paths no part reads run
@@ -15,6 +15,10 @@
 #     sees: a part passes when it succeeded or the gate's exact `false`
 #     skipped it, and every other shape — a cancelled part, a skip after a
 #     failed gate, a job missing from or added to the list — fails.
+#   - THE WIRING, read from this checkout's `.github/workflows/phone.yml`: the
+#     gate fails closed and the verdict sees every result only because of how
+#     the workflow is written, and no fixture can evaluate a GitHub
+#     expression, so the lines that make it so are pinned as written.
 #
 # RUN WITH `/bin/bash`, WHICH ON MACOS IS 3.2. Every nested run of the script
 # under test goes through `$BASH`, this harness's own interpreter, so the whole
@@ -620,6 +624,334 @@ test_verdict_the_summary_names_each_part() {
   assert_line "verdict: the summary names a cancelled part" "$V_SUMMARY" \
     "- loader: cancelled – the gate answered nothing"
   assert_contains "verdict: the failure is an ::error::" "$V_STDERR" "::error::Phone checks fail"
+}
+
+# ---------------------------------------------------------------------------
+# 5. The workflow wiring, on this checkout
+# ---------------------------------------------------------------------------
+#
+# The readers below take a workflow as this repo writes them: two-space
+# indentation, one key per line, each step a `      - ` item. A workflow
+# written another way gives them nothing to match, and every pin on it fails
+# rather than passes.
+
+REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+WORKFLOWS="$REPO_ROOT/.github/workflows"
+PHONE_YML="$WORKFLOWS/phone.yml"
+# The workflows that hold the phone parts' jobs. Each must exist.
+PHONE_WORKFLOWS="phone.yml"
+
+# FILE without its comment lines, and with trailing whitespace stripped.
+wf_code() { grep -v '^[[:space:]]*#' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'; }
+
+# The lines on stdin below the line exactly HEAD, up to the next non-blank
+# line indented no deeper than HEAD.
+under() {
+  awk -v head="$1" '
+    BEGIN { match(head, /^ */); depth = RLENGTH }
+    inside && NF { match($0, /^ */); if (RLENGTH <= depth) inside = 0 }
+    $0 == head { inside = 1; next }
+    inside { print }
+  '
+}
+
+# The lines of top-level key KEY in workflow FILE, such as `on`.
+top_lines() { wf_code "$1" | under "$2:"; }
+
+# The lines of job JOB in workflow FILE.
+job_lines() { wf_code "$1" | under "jobs:" | under "  $2:"; }
+
+# The job-level key lines of job JOB in workflow FILE.
+job_keys() { job_lines "$1" "$2" | grep -E '^    [^[:space:]]'; }
+
+# The job IDs of workflow FILE, one per line.
+job_ids() {
+  wf_code "$1" | under "jobs:" | grep -E '^  [^[:space:]]' | sed -E 's/^  ([^:]*):.*$/\1/'
+}
+
+# The lines of the first step in job JOB of workflow FILE that holds the key
+# line WANT, such as `id: decide` — or, when the fourth argument is `prefix`,
+# a key line that starts with WANT. The step's first line is printed with its
+# `- ` turned into two spaces, so each of its keys reads at the same
+# indentation whichever comes first.
+step_lines() {
+  job_lines "$1" "$2" | awk -v want="$3" -v prefix="${4:-}" '
+    function flush() {
+      if (open && hit && !done) { printf "%s", block; done = 1 }
+      open = 0; block = ""
+    }
+    /^    [^[:space:]]/ { flush(); insteps = ($0 == "    steps:"); next }
+    !insteps { next }
+    /^      - / { flush(); open = 1; hit = 0; $0 = "        " substr($0, 9) }
+    open {
+      block = block $0 "\n"
+      if ($0 == "        " want || (prefix == "prefix" && index($0, "        " want) == 1)) hit = 1
+    }
+    END { flush() }
+  '
+}
+
+# The first line of each step in job JOB of workflow FILE that lacks the key
+# line WANT, then a last line `steps=<how many steps the job has>`.
+steps_lacking() {
+  job_lines "$1" "$2" | awk -v want="$3" '
+    function flush() { if (open && !hit) print first; open = 0 }
+    /^    [^[:space:]]/ { flush(); insteps = ($0 == "    steps:"); next }
+    !insteps { next }
+    /^      - / { flush(); n++; open = 1; hit = 0; first = $0; $0 = "        " substr($0, 9) }
+    open && $0 == ("        " want) { hit = 1 }
+    END { flush(); print "steps=" (n + 0) }
+  '
+}
+
+# Sets PARTS_LIST to `--list-parts`' output, and fails the run when it is
+# empty, since every loop over it would then pass by checking nothing.
+read_parts() {
+  PARTS_LIST="$("$BASH" "$SCRIPT" --list-parts 2>/dev/null)"
+  if [ -z "$PARTS_LIST" ]; then
+    echo "FAIL - --list-parts printed no parts to check the wiring of"
+    FAIL=1
+  fi
+}
+
+# Succeeds when workflow NAME, one of PHONE_WORKFLOWS, exists. Fails the run
+# when it does not, since its pins would otherwise read an empty file.
+phone_workflow_exists() {
+  if [ -f "$WORKFLOWS/$1" ]; then return 0; fi
+  echo "FAIL - .github/workflows/$1 is missing"
+  FAIL=1
+  return 1
+}
+
+# The gate's three outputs are the decide step's, the decide step runs the
+# classifier in its default mode with the two inputs it reads, and the
+# checkout holds the history the three-dot diff needs. Without `fetch-depth: 0`
+# `origin/<base>` does not resolve and the gate answers `true` for every part
+# on every PR: no red anywhere, and nothing ever skips again.
+test_phone_workflow_gate_wiring() {
+  local outputs job key checkout decide
+  read_parts
+  outputs="$(job_lines "$PHONE_YML" changes | under '    outputs:')"
+  while read -r job key; do
+    [ -n "$key" ] || continue
+    assert_line "the gate's $key output is the decide step's" "$outputs" \
+      "      $key: \${{ steps.decide.outputs.$key }}"
+  done <<< "$PARTS_LIST"
+
+  checkout="$(step_lines "$PHONE_YML" changes 'uses: actions/checkout@' prefix)"
+  assert_line "the gate's checkout keeps full history (fetch-depth: 0)" "$checkout" "          fetch-depth: 0"
+
+  decide="$(step_lines "$PHONE_YML" changes 'id: decide')"
+  assert_line "the step with id: decide runs the classifier with no arguments" "$decide" \
+    "        run: bash scripts/ci/phone-parts-needed.sh"
+  assert_line "the decide step passes the event name" "$decide" \
+    "          EVENT_NAME: \${{ github.event_name }}"
+  assert_line "the decide step passes the PR's base branch" "$decide" \
+    "          BASE_REF: \${{ github.base_ref }}"
+}
+
+# Each part is skipped only by its own `if:`, and only on the gate's exact
+# `false`. Without `!cancelled()` GitHub adds an implicit `success()`, so a
+# failed gate would skip every part. `continue-on-error` anywhere would let a
+# failure read as a pass: on a step, the job no longer fails; on a job, its
+# result in `needs` is no longer its failure.
+test_phone_workflow_part_wiring() {
+  local job key keys tolerant
+  read_parts
+  while read -r job key; do
+    [ -n "$key" ] || continue
+    keys="$(job_keys "$PHONE_YML" "$job")"
+    if [ -z "$keys" ]; then
+      echo "FAIL - phone.yml has no job \`$job\`, which --list-parts names"
+      FAIL=1
+      continue
+    fi
+    assert_line "the $job job waits for the gate" "$keys" "    needs: changes"
+    assert_line "the $job job skips only on the gate's explicit false, and still runs after a failed gate" \
+      "$keys" "    if: \${{ !cancelled() && needs.changes.outputs.$key != 'false' }}"
+  done <<< "$PARTS_LIST"
+
+  tolerant="$(wf_code "$PHONE_YML" | grep -E '^[[:space:]]+(- )?continue-on-error:')"
+  assert_eq "no job or step in phone.yml sets continue-on-error" "" "$tolerant"
+}
+
+# `Phone checks` runs, and its verdict runs, whatever happened before it. A
+# job skipped for any reason reports success to branch protection, and so does
+# a job whose every step was skipped, so a missing `always()` on the job or on
+# any step lets a cancelled or half-run workflow pass.
+test_phone_checks_wiring() {
+  local keys job key want lacking steps verdict
+  read_parts
+  keys="$(job_keys "$PHONE_YML" phone-checks)"
+  assert_line "the phone-checks job is named Phone checks, the required context" "$keys" "    name: Phone checks"
+  assert_line "the phone-checks job runs whatever happened before it" "$keys" "    if: \${{ always() }}"
+  want="changes, harness"
+  while read -r job key; do
+    [ -n "$job" ] || continue
+    want="$want, $job"
+  done <<< "$PARTS_LIST"
+  assert_line "the phone-checks job needs the gate, the harness and every part, in order" "$keys" "    needs: [$want]"
+
+  # shellcheck disable=SC2016 # a GitHub expression, matched literally
+  lacking="$(steps_lacking "$PHONE_YML" phone-checks 'if: ${{ always() }}')"
+  steps="$(printf '%s\n' "$lacking" | sed -n 's/^steps=//p')"
+  if [ "${steps:-0}" -gt 0 ]; then
+    echo "ok   - the phone-checks job has $steps steps to check"
+  else
+    echo "FAIL - found no steps in the phone-checks job"
+    FAIL=1
+  fi
+  assert_eq "every step of the phone-checks job carries if: \${{ always() }}" "" \
+    "$(printf '%s\n' "$lacking" | grep -v '^steps=')"
+
+  verdict="$(step_lines "$PHONE_YML" phone-checks 'run: bash scripts/ci/phone-parts-needed.sh --verdict')"
+  assert_line "a phone-checks step runs the verdict" "$verdict" \
+    "        run: bash scripts/ci/phone-parts-needed.sh --verdict"
+  assert_line "the verdict step reads the needs context" "$verdict" \
+    "          NEEDS: \${{ toJSON(needs) }}"
+}
+
+# Both harnesses run here, where their result reaches the required check.
+test_harness_job_runs_both_harnesses() {
+  local harness step
+  for harness in phone-parts-needed phone-app-bundle-check; do
+    step="$(step_lines "$PHONE_YML" harness "run: bash scripts/ci/$harness.test.sh")"
+    if [ -n "$step" ]; then
+      echo "ok   - the harness job runs scripts/ci/$harness.test.sh"
+    else
+      echo "FAIL - the harness job does not run scripts/ci/$harness.test.sh"
+      FAIL=1
+    fi
+  done
+}
+
+# A workflow that a path filter keeps from starting never reports, and a
+# required `Phone checks` that never reports stays pending, so every PR that
+# touched no phone path could not merge. The `changes` job is the filter.
+test_phone_workflow_has_no_path_filter() {
+  assert_eq "phone.yml has no paths: or paths-ignore: filter" "" \
+    "$(wf_code "$PHONE_YML" | grep -E '^[[:space:]]*(paths|paths-ignore):')"
+}
+
+# A branch filter on `pull_request` would give a stacked PR, whose base is
+# another PR's branch, no Phone run, and so no `Phone checks`.
+test_phone_workflow_runs_on_every_pr() {
+  local on
+  on="$(top_lines "$PHONE_YML" on)"
+  assert_line "phone.yml runs on pull_request" "$on" "  pull_request:"
+  assert_eq "the pull_request trigger has no branches: or branches-ignore: filter" "" \
+    "$(printf '%s\n' "$on" | under '  pull_request:' | grep -E '^[[:space:]]+(branches|branches-ignore):')"
+  assert_line "phone.yml runs on push" "$on" "  push:"
+  assert_line "the push trigger is limited to main" \
+    "$(printf '%s\n' "$on" | under '  push:')" "    branches: [main]"
+  assert_line "phone.yml can be dispatched" "$on" "  workflow_dispatch:"
+}
+
+# Its own group: sharing test.yml's would let a push cancel the other
+# workflow's run, and with it a required check.
+test_phone_workflow_concurrency() {
+  # shellcheck disable=SC2016 # a GitHub expression, matched literally
+  local want='  group: phone-${{ github.head_ref || github.ref_name }}'
+  assert_line "phone.yml has its own concurrency group" "$(top_lines "$PHONE_YML" concurrency)" "$want"
+  if has_line "$(top_lines "$WORKFLOWS/test.yml" concurrency)" "$want"; then
+    echo "FAIL - phone.yml's concurrency group is test.yml's"
+    FAIL=1
+  else
+    echo "ok   - phone.yml's concurrency group differs from test.yml's"
+  fi
+}
+
+# GitHub's default is 360 minutes, and a job that wedges without a bound
+# leaves its check unreported for six hours.
+test_every_new_job_has_a_timeout() {
+  local name file ids job timeout
+  for name in $PHONE_WORKFLOWS; do
+    phone_workflow_exists "$name" || continue
+    file="$WORKFLOWS/$name"
+    ids="$(job_ids "$file")"
+    if [ -z "$ids" ]; then
+      echo "FAIL - found no jobs in $name"
+      FAIL=1
+      continue
+    fi
+    while read -r job; do
+      # No `grep -q`: under `pipefail`, its early exit can SIGPIPE the writer
+      # and turn a match into a miss.
+      timeout="$(job_keys "$file" "$job" | grep -E '^    timeout-minutes:[[:space:]]*[0-9]+$')"
+      if [ -n "$timeout" ]; then
+        echo "ok   - $name: the $job job has a timeout-minutes"
+      else
+        echo "FAIL - $name: the $job job has no job-level timeout-minutes"
+        FAIL=1
+      fi
+    done <<< "$ids"
+  done
+}
+
+# Branch protection matches a required check by job name: a job keyed `test`
+# with no name reports as `test`. A second `Phone checks`, or a new job that
+# reports as `test`, `Lint` or `claude-review`, would report into a required
+# context that it does not own.
+test_required_names_are_not_reused() {
+  local hits name file taken
+  hits="$(grep -HnE "^    name:[[:space:]]*[\"']?Phone checks[\"']?[[:space:]]*$" \
+    "$WORKFLOWS"/*.yml "$WORKFLOWS"/*.yaml 2>/dev/null)"
+  assert_eq "exactly one job across .github/workflows is named Phone checks" "1" \
+    "$(printf '%s\n' "$hits" | grep -c .)"
+  assert_contains "the one job named Phone checks is in phone.yml" "$hits" "$PHONE_YML:"
+
+  for name in $PHONE_WORKFLOWS; do
+    phone_workflow_exists "$name" || continue
+    file="$WORKFLOWS/$name"
+    taken="$(
+      {
+        job_ids "$file"
+        wf_code "$file" | under "jobs:" | grep -E '^    name:' |
+          sed -E "s/^    name:[[:space:]]*//; s/^[\"']//; s/[\"']$//"
+      } | tr '[:upper:]' '[:lower:]' | grep -xE 'test|lint|claude-review'
+    )"
+    assert_eq "$name: no job is keyed or named test, lint or claude-review" "" "$taken"
+  done
+}
+
+# The classifier runs every part for `scripts/*phone*` and none for other
+# scripts. A step here that ran some other script would leave a change to that
+# script, which changes what a part tests, skipping that part. Every
+# `scripts/…` path on a code line counts, not only `run:` lines, so a
+# multi-line `run: |` block is read too.
+test_phone_workflow_scripts_run_every_part() {
+  local paths path got
+  paths="$(wf_code "$PHONE_YML" | grep -oE 'scripts/[A-Za-z0-9_./-]+' | sed 's/\.*$//' | sort -u)"
+  if [ -z "$paths" ]; then
+    echo "FAIL - phone.yml names no script, so this check would check nothing"
+    FAIL=1
+    return
+  fi
+  while read -r path; do
+    got="$(printf '%s\n' "$path" | "$BASH" "$SCRIPT" --classify 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    if [ "$got" = "$ALL" ]; then
+      echo "ok   - phone.yml runs $path, and a change to it runs every part"
+    else
+      echo "FAIL - phone.yml runs $path, but a change to it alone answers [$got], so a part could skip while its test changed."
+      echo "     Give it a rule in judge() in scripts/ci/phone-parts-needed.sh that runs every part."
+      FAIL=1
+    fi
+  done <<< "$paths"
+}
+
+# A local action's files would live under `.github/`, which runs no part, so
+# a change to one would skip every part that uses it.
+test_phone_workflow_uses_no_local_action() {
+  local local_uses
+  local_uses="$(wf_code "$PHONE_YML" | grep -E "uses:[[:space:]]*[\"']?\\./")"
+  if [ -z "$local_uses" ]; then
+    echo "ok   - phone.yml uses no local action or reusable workflow"
+  else
+    echo "FAIL - phone.yml uses a local action or reusable workflow, whose files run no part:"
+    printf '%s\n' "$local_uses" | sed 's/^/       /'
+    echo "     Add a rule in judge() in scripts/ci/phone-parts-needed.sh that runs every part for its files first, then update this check."
+    FAIL=1
+  fi
 }
 
 # ---------------------------------------------------------------------------
