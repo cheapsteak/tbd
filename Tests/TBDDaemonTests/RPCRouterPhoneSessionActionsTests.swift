@@ -218,6 +218,72 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(narrowed.paramsJSON == #"{"repo": "acme/api"}"#)
     }
 
+    /// A phone's profile swap keeps the terminal, the new profile and the
+    /// mode, so it never picks the window size.
+    @Test func phoneSwapProfileParamsKeepOnlyTheTerminalTheProfileAndTheMode() throws {
+        let full = TerminalSwapProfileParams(
+            terminalID: UUID(), newProfileID: UUID(), cols: 80, rows: 24, mode: .fork)
+        let narrowed = RPCRouter.phoneSwapProfileParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["terminalID", "newProfileID", "mode"])
+        #expect(narrowed.terminalID == full.terminalID)
+        #expect(narrowed.newProfileID == full.newProfileID)
+        #expect(narrowed.mode == .fork)
+    }
+
+    /// A phone's remote message keeps the provider, the session and the text.
+    @Test func phoneRemoteSendMessageParamsKeepTheProviderTheSessionAndTheText() throws {
+        let full = RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "hi")
+        let narrowed = RPCRouter.phoneRemoteSendMessageParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["provider", "sessionID", "text"])
+        #expect(narrowed.provider == "agentbox")
+        #expect(narrowed.sessionID == "s-1")
+        #expect(narrowed.text == "hi")
+    }
+
+    /// A phone's answer keeps the terminal, the prompt and the answer.
+    @Test func phonePromptAnswerParamsKeepTheTerminalThePromptAndTheAnswer() throws {
+        let full = PromptAnswerParams(
+            terminalID: UUID(), promptID: "p-1", answer: .permission(decision: .allow, message: "ok"))
+        let narrowed = RPCRouter.phonePromptAnswerParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["terminalID", "promptID", "answer"])
+        #expect(narrowed.terminalID == full.terminalID)
+        #expect(narrowed.promptID == "p-1")
+        #expect(narrowed.answer == .permission(decision: .allow, message: "ok"))
+    }
+
+    /// A phone's remote answer keeps the provider, the session, the prompt and
+    /// the answer.
+    @Test func phoneRemoteAnswerParamsKeepTheProviderTheSessionThePromptAndTheAnswer() throws {
+        let full = RemoteAnswerParams(
+            provider: "agentbox", sessionID: "s-1", promptID: "p-1",
+            answer: .question(answers: ["Which?": "A"]))
+        let narrowed = RPCRouter.phoneRemoteAnswerParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["provider", "sessionID", "promptID", "answer"])
+        #expect(narrowed.provider == "agentbox")
+        #expect(narrowed.sessionID == "s-1")
+        #expect(narrowed.promptID == "p-1")
+        #expect(narrowed.answer == .question(answers: ["Which?": "A"]))
+    }
+
+    /// A phone's remote transcript reads keep the provider and the session.
+    @Test func phoneRemoteTranscriptParamsKeepOnlyTheProviderAndTheSession() throws {
+        let sync = RPCRouter.phoneRemoteTranscriptSyncParams(
+            RemoteTranscriptSyncParams(provider: "agentbox", sessionID: "s-1"))
+        #expect(try encodedKeys(sync) == ["provider", "sessionID"])
+        #expect(sync.provider == "agentbox")
+        #expect(sync.sessionID == "s-1")
+
+        let earlier = RPCRouter.phoneRemoteTranscriptLoadEarlierParams(
+            RemoteTranscriptLoadEarlierParams(provider: "agentbox", sessionID: "s-2"))
+        #expect(try encodedKeys(earlier) == ["provider", "sessionID"])
+        #expect(earlier.provider == "agentbox")
+        #expect(earlier.sessionID == "s-2")
+    }
+
     // MARK: - Remote sessions
 
     private struct RemoteFixture {

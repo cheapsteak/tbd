@@ -22,23 +22,25 @@ import TBDShared
 /// disagree. Take it from the bridge's verified peer, never from anything the
 /// phone sent. The read-only methods take none: their RPCs record nothing.
 ///
-/// **The conformance keeps only the fields a phone may set.** Where a params
-/// struct holds fields a phone may not set, the conformance builds fresh params
-/// from the fields it may, and everything else takes TBD's defaults, whatever
-/// the bridge passed (spec section 5). It names the fields it keeps, never the
-/// ones it drops, so a field added to a params struct later stays off the
-/// phone by default.
+/// **The conformance keeps only the fields a phone may set.** It builds fresh
+/// params for every call, field by field from the fields a phone may set, and
+/// everything else takes TBD's defaults, whatever the bridge passed (spec
+/// section 5). It does so even where a phone may set every field a params
+/// struct has today. It names the fields it keeps, never the ones it drops, so
+/// a field added to a params struct later stays off the phone by default.
 protocol PhoneSessionActions: Sendable {
     /// `session.states` over every worktree. A `SessionStatesResult`, which
     /// never reports a plain shell.
     func phoneSessionStates() async throws -> RPCResponse
 
-    /// The `prompt.answer` core under the phone's pairing: the
-    /// `transcript_prompt_answer_enabled` check, then no socket check.
+    /// The `prompt.answer` core under the phone's pairing, with the terminal,
+    /// the prompt and the answer: the `transcript_prompt_answer_enabled`
+    /// check, then no socket check.
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// The `remote.answer` core under the phone's pairing: every gate the
-    /// socket handler runs, except the socket check.
+    /// The `remote.answer` core under the phone's pairing, with the provider,
+    /// the session, the prompt and the answer: every gate the socket handler
+    /// runs, except the socket check.
     func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse
 
     /// The paired-phone send rail: the terminal, the message (`text` or
@@ -52,7 +54,8 @@ protocol PhoneSessionActions: Sendable {
     /// carries. A `TerminalWakeResult`.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `terminal.swapProfile`, in the mode `p` names.
+    /// `terminal.swapProfile` with only the terminal, the new profile and the
+    /// mode `p` names. The window size takes its default.
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `worktree.create` with only the repo and the first message.
@@ -68,12 +71,14 @@ protocol PhoneSessionActions: Sendable {
     /// session's `RemoteSessionPayload`.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `remote.sendMessage`, which refuses a session waiting on a prompt.
+    /// `remote.sendMessage` with only the provider, the session and the text.
+    /// It refuses a session waiting on a prompt.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `remote.transcriptSync`.
+    /// `remote.transcriptSync` with only the provider and the session.
     func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse
 
-    /// `remote.transcriptLoadEarlier`. A `RemoteTranscriptLoadEarlierResult`.
+    /// `remote.transcriptLoadEarlier` with only the provider and the session.
+    /// A `RemoteTranscriptLoadEarlierResult`.
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse
 }

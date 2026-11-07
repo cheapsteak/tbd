@@ -11,12 +11,13 @@ import TBDShared
 /// checks of the RPC it mirrors, in that RPC's order, and returns that RPC's
 /// response.
 ///
-/// **The rebuild names what a phone keeps, never what it loses.** A create, a
-/// wake and a remote create get fresh params holding only the fields spec
-/// section 5 gives a phone, and every other field takes TBD's default. So a
-/// field added to one of those params structs later stays off the phone until
-/// someone adds it here. The send rail rebuilds its params the same way, in
-/// `sendFromPairedPhone`.
+/// **The rebuild names what a phone keeps, never what it loses.** Every params
+/// value the bridge passes is rebuilt field by field into fresh params holding
+/// only the fields spec section 5 gives a phone, and every other field takes
+/// TBD's default. That holds for a struct whose every field a phone may set
+/// today, too, so a field added to any of these params structs later stays off
+/// the phone until someone adds it here. The send rail rebuilds its params the
+/// same way, in `sendFromPairedPhone`.
 ///
 /// None of the handlers called here takes a socket connection, because none is
 /// limited to the app at the socket edge. The three RPCs that are,
@@ -29,12 +30,14 @@ extension RPCRouter: PhoneSessionActions {
 
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
         try await answerPrompt(
-            p, actor: .phone(deviceID: deviceID), authority: .pairedPhone(deviceID: deviceID))
+            Self.phonePromptAnswerParams(p),
+            actor: .phone(deviceID: deviceID), authority: .pairedPhone(deviceID: deviceID))
     }
 
     func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
         try await answerRemotePrompt(
-            p, actor: .phone(deviceID: deviceID), authority: .pairedPhone(deviceID: deviceID))
+            Self.phoneRemoteAnswerParams(p),
+            actor: .phone(deviceID: deviceID), authority: .pairedPhone(deviceID: deviceID))
     }
 
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {
@@ -47,7 +50,8 @@ extension RPCRouter: PhoneSessionActions {
     }
 
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleTerminalSwapProfile(encoder.encode(p), actor: .phone(deviceID: deviceID))
+        try await handleTerminalSwapProfile(
+            encoder.encode(Self.phoneSwapProfileParams(p)), actor: .phone(deviceID: deviceID))
     }
 
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
@@ -69,15 +73,17 @@ extension RPCRouter: PhoneSessionActions {
     }
 
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteSendMessage(encoder.encode(p), actor: .phone(deviceID: deviceID))
+        try await handleRemoteSendMessage(
+            encoder.encode(Self.phoneRemoteSendMessageParams(p)), actor: .phone(deviceID: deviceID))
     }
 
     func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
-        try await handleRemoteTranscriptSync(encoder.encode(p))
+        try await handleRemoteTranscriptSync(encoder.encode(Self.phoneRemoteTranscriptSyncParams(p)))
     }
 
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
-        try await handleRemoteTranscriptLoadEarlier(encoder.encode(p))
+        try await handleRemoteTranscriptLoadEarlier(
+            encoder.encode(Self.phoneRemoteTranscriptLoadEarlierParams(p)))
     }
 
     // MARK: - The fields a phone may set
@@ -102,5 +108,43 @@ extension RPCRouter: PhoneSessionActions {
     /// seed and a parent worktree take their defaults, none.
     static func phoneRemoteCreateParams(_ p: RemoteCreateParams) -> RemoteCreateParams {
         RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
+    }
+
+    /// A profile swap from a phone: the terminal, the profile to move it to
+    /// (none for the ambient account) and the mode. The window size takes its
+    /// default.
+    static func phoneSwapProfileParams(_ p: TerminalSwapProfileParams) -> TerminalSwapProfileParams {
+        TerminalSwapProfileParams(terminalID: p.terminalID, newProfileID: p.newProfileID, mode: p.mode)
+    }
+
+    /// A remote message from a phone: the provider, the session and the text.
+    static func phoneRemoteSendMessageParams(_ p: RemoteSendMessageParams) -> RemoteSendMessageParams {
+        RemoteSendMessageParams(provider: p.provider, sessionID: p.sessionID, text: p.text)
+    }
+
+    /// An answer from a phone: the terminal, the prompt and the answer.
+    static func phonePromptAnswerParams(_ p: PromptAnswerParams) -> PromptAnswerParams {
+        PromptAnswerParams(terminalID: p.terminalID, promptID: p.promptID, answer: p.answer)
+    }
+
+    /// A remote answer from a phone: the provider, the session, the prompt and
+    /// the answer.
+    static func phoneRemoteAnswerParams(_ p: RemoteAnswerParams) -> RemoteAnswerParams {
+        RemoteAnswerParams(
+            provider: p.provider, sessionID: p.sessionID, promptID: p.promptID, answer: p.answer)
+    }
+
+    /// A remote transcript sync from a phone: the provider and the session.
+    static func phoneRemoteTranscriptSyncParams(
+        _ p: RemoteTranscriptSyncParams
+    ) -> RemoteTranscriptSyncParams {
+        RemoteTranscriptSyncParams(provider: p.provider, sessionID: p.sessionID)
+    }
+
+    /// Earlier remote history from a phone: the provider and the session.
+    static func phoneRemoteTranscriptLoadEarlierParams(
+        _ p: RemoteTranscriptLoadEarlierParams
+    ) -> RemoteTranscriptLoadEarlierParams {
+        RemoteTranscriptLoadEarlierParams(provider: p.provider, sessionID: p.sessionID)
     }
 }
