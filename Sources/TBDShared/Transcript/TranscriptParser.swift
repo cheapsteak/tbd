@@ -151,14 +151,17 @@ public enum TranscriptParser {
 
     /// Whether `itemID` comes from a line with no `uuid`, whose stable ID is a
     /// positional fallback: `line-<n>` in the full parse (and
-    /// `IncrementalTranscript`), `tail-<n>` in a tail read, with an item's
-    /// `#<block>` suffix when it has one. `<n>` counts lines in whatever was
-    /// read, so a tail read numbers its window from zero each time, and the
-    /// same such ID can name different lines in two reads. Real Claude lines
-    /// always carry a `uuid`, so their items never match.
+    /// `IncrementalTranscript`), `tail-<n>` in a tail read, `at-<n>` in a
+    /// `parseWindow` read, with an item's `#<block>` suffix when it has one.
+    /// For `line-` and `tail-`, `<n>` counts lines in whatever was read, so a
+    /// tail read numbers its window from zero each time, and the same such ID
+    /// can name different lines in two reads. For `at-`, `<n>` is the line's
+    /// absolute byte offset in the file, so every window names a line the
+    /// same way, but the full parse names that line differently. Real Claude
+    /// lines always carry a `uuid`, so their items never match.
     public static func isPositionalFallbackID(_ itemID: String) -> Bool {
         let lineID = itemID.prefix(while: { $0 != "#" })
-        guard let prefix = ["line-", "tail-"].first(where: { lineID.hasPrefix($0) }) else { return false }
+        guard let prefix = ["line-", "tail-", "at-"].first(where: { lineID.hasPrefix($0) }) else { return false }
         let position = lineID.dropFirst(prefix.count)
         return !position.isEmpty && position.allSatisfy { ("0"..."9").contains($0) }
     }
@@ -212,12 +215,32 @@ public enum TranscriptParser {
     /// tail path passes only the lines inside its byte window, so any such
     /// state starts empty there and the tail would emit rows the full parse
     /// suppresses.
+    ///
+    /// Subagent (sidechain) lines are dropped unless `includeSidechain` is
+    /// true, in which case they build items like any other line.
     static func buildItems(
         rawLines: [[String: Any]],
         stableIDs: [String],
-        toolResultsByID: [String: ToolResult]
+        toolResultsByID: [String: ToolResult],
+        includeSidechain: Bool = false
     ) -> [TranscriptItem] {
+        buildItemsWithLineIndices(
+            rawLines: rawLines, stableIDs: stableIDs,
+            toolResultsByID: toolResultsByID, includeSidechain: includeSidechain
+        ).items
+    }
+
+    /// `buildItems`, plus the index into `rawLines` of the line each item came
+    /// from. `lineIndices` is parallel to `items` and never decreases, since
+    /// lines are visited in order; one line can yield several items.
+    static func buildItemsWithLineIndices(
+        rawLines: [[String: Any]],
+        stableIDs: [String],
+        toolResultsByID: [String: ToolResult],
+        includeSidechain: Bool = false
+    ) -> (items: [TranscriptItem], lineIndices: [Int]) {
         var items: [TranscriptItem] = []
+        var lineIndices: [Int] = []
 
         // Local, not shared. This was a `nonisolated(unsafe)` static justified
         // by a comment claiming `ISO8601DateFormatter` "is documented as
@@ -245,9 +268,14 @@ public enum TranscriptParser {
         iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         for (i, json) in rawLines.enumerated() {
+            // Every item this iteration appends came from line `i`, whichever
+            // branch below appends it or `continue`s past the rest.
+            let itemsBefore = items.count
+            defer { lineIndices.append(contentsOf: repeatElement(i, count: items.count - itemsBefore)) }
+
             // Subagent (sidechain) lines belong to a nested agent's own
             // conversation; the parent transcript drops them entirely.
-            if json["isSidechain"] as? Bool == true { continue }
+            if !includeSidechain, json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
@@ -396,7 +424,7 @@ public enum TranscriptParser {
             }
         }
 
-        return items
+        return (items, lineIndices)
     }
 
     /// The item one prompt renders as, given its body and its classification.
@@ -673,7 +701,7 @@ public enum TranscriptParser {
     /// that identifies it. Intentionally a small local summarizer: the richer
     /// app-side one lives in `ActivityRowFormatter` (module `TBDApp`) and is
     /// not reachable from the daemon.
-    static func toolInputSummary(name: String, input: [String: Any]) -> String {
+    public static func toolInputSummary(name: String, input: [String: Any]) -> String {
         func short(_ s: String, limit: Int = 40) -> String {
             let oneLine = s.replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
@@ -792,8 +820,29 @@ public enum TranscriptParser {
     /// `lookupFullBody` plus the injection metadata. Same single pass, same id
     /// forms — see `lookupFullBody` for the id grammar.
     public static func lookupDetail(filePath: String, itemID: String) -> ItemDetail {
-        guard let data = FileManager.default.contents(atPath: filePath),
-              let content = String(data: data, encoding: .utf8) else {
+        lookupDetail(filePath: filePath, itemID: itemID, startingAt: 0)
+    }
+
+    /// How much `lookupDetail` reads from the file at a time.
+    static let detailChunkBytes = 1 << 20
+
+    /// `lookupDetail`, scanning forward from `offset` and stopping at the
+    /// first match. Same id forms as `lookupFullBody`.
+    ///
+    /// The file is read in `detailChunkBytes` chunks and split on `"\n"`, each
+    /// line decoded on its own, so a lookup near the end of a large file
+    /// touches only the bytes after `offset`. `offset` should be a line start,
+    /// such as `TranscriptWindow.Entry.lineOffset`; bytes before the first
+    /// `"\n"` of a mid-line offset are a fragment that fails to decode and is
+    /// skipped. An attachment row's `triggeredBy` resolves only through
+    /// `tool_use` lines the scan passed, so a scan that starts after the
+    /// triggering call reports it as nil.
+    public static func lookupDetail(filePath: String, itemID: String, startingAt offset: UInt64) -> ItemDetail {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else {
+            return ItemDetail(text: nil, attachment: nil)
+        }
+        defer { try? handle.close() }
+        guard var lines = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
             return ItemDetail(text: nil, attachment: nil)
         }
 
@@ -824,9 +873,8 @@ public enum TranscriptParser {
         // line is always already behind us when its attachment row appears.
         var toolSummaries: [String: String] = [:]
 
-        for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+        while let lineData = lines.next() {
+            guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
 
@@ -938,5 +986,51 @@ public enum TranscriptParser {
         let name = raw.hasPrefix("/") ? String(raw.dropFirst()) : raw
         let args = extract("command-args")
         return (name, args?.isEmpty == true ? nil : args)
+    }
+}
+
+/// Reads a file forward from an offset one line at a time, `chunkSize` bytes
+/// per read, so a scan holds one chunk and the line it is decoding rather
+/// than the whole file. Lines are split on `"\n"` and returned without it.
+/// Empty lines are skipped, and a last line with no trailing newline is
+/// returned like any other.
+private struct ForwardLineReader {
+    private let handle: FileHandle
+    private let chunkSize: Int
+    private var buffer = Data()
+    private var cursor = 0
+    private var reachedEnd = false
+
+    init?(handle: FileHandle, from offset: UInt64, chunkSize: Int) {
+        guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
+        self.handle = handle
+        self.chunkSize = chunkSize
+    }
+
+    mutating func next() -> Data? {
+        while true {
+            if let newline = buffer[cursor...].firstIndex(of: UInt8(ascii: "\n")) {
+                let line = buffer[cursor..<newline]
+                cursor = newline + 1
+                if line.isEmpty { continue }
+                return Data(line)
+            }
+            if reachedEnd {
+                guard cursor < buffer.endIndex else { return nil }
+                let line = Data(buffer[cursor...])
+                cursor = buffer.endIndex
+                return line
+            }
+            // The unread tail of `buffer` is a partial line; carry it into the
+            // next chunk so the line comes out whole.
+            guard let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty else {
+                reachedEnd = true
+                continue
+            }
+            var refilled = Data(buffer[cursor...])
+            refilled.append(chunk)
+            buffer = refilled
+            cursor = 0
+        }
     }
 }

@@ -1,0 +1,336 @@
+import Foundation
+
+/// Lines a file-editing tool call adds and removes, measured from its
+/// untruncated input.
+public struct FileEditStats: Sendable, Equatable {
+    public let added: Int
+    public let removed: Int
+
+    public init(added: Int, removed: Int) {
+        self.added = added
+        self.removed = removed
+    }
+}
+
+/// A run of whole transcript lines that ends at a byte offset, read by
+/// `TranscriptParser.parseWindow`. Offsets are absolute byte offsets into the
+/// transcript file, so a window and the next older one meet exactly at
+/// `startOffset`.
+public struct TranscriptWindow: Sendable {
+    /// One item, and the offset of the first byte of the line it came from.
+    public struct Entry: Sendable {
+        public let item: TranscriptItem
+        public let lineOffset: UInt64
+
+        public init(item: TranscriptItem, lineOffset: UInt64) {
+            self.item = item
+            self.lineOffset = lineOffset
+        }
+    }
+
+    public let entries: [Entry]
+    /// The first byte of the first kept line. The next older window ends here.
+    public let startOffset: UInt64
+    /// The window's exclusive end.
+    public let endOffset: UInt64
+    /// Whether the window reaches back to the start of the file.
+    public var reachedStart: Bool { startOffset == 0 }
+    /// Every tool result in the bytes read, including results on lines the
+    /// window trimmed from its front.
+    public let toolResultsByID: [String: ToolResult]
+    /// `tool_use` id → line stats from the untruncated input, for every
+    /// Edit, MultiEdit and Write call in the bytes read.
+    public let fileEdits: [String: FileEditStats]
+    /// `tool_use` id → the subagent's `agentId`, for every subagent call whose
+    /// result is in the bytes read.
+    public let subagentAgentIDs: [String: String]
+
+    public init(
+        entries: [Entry], startOffset: UInt64, endOffset: UInt64,
+        toolResultsByID: [String: ToolResult],
+        fileEdits: [String: FileEditStats],
+        subagentAgentIDs: [String: String]
+    ) {
+        self.entries = entries
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.toolResultsByID = toolResultsByID
+        self.fileEdits = fileEdits
+        self.subagentAgentIDs = subagentAgentIDs
+    }
+}
+
+extension TranscriptParser {
+    /// The first read size of `parseWindow`. Each retry doubles it.
+    static let windowInitialChunkBytes: UInt64 = 64 * 1024
+
+    /// The newest whole lines before `end`, built into items, holding at most
+    /// `messageLimit` messages and about `itemLimit` items.
+    ///
+    /// `end` is a byte offset, nil for the end of the file, and is clamped to
+    /// the file's size. Below the file's size it must be a line start: the
+    /// byte before it must be `"\n"`. Otherwise this returns nil, as it does
+    /// when the file cannot be read. A window's `startOffset` is always a line
+    /// start, so it is the `end` of the next older window.
+    ///
+    /// The read goes backwards from `end`, `windowInitialChunkBytes` at first.
+    /// A read that starts inside the file drops its bytes up to and including
+    /// the first `"\n"`, since they may be the tail of a line that began
+    /// earlier; a read with no `"\n"` at all holds none of a line, and is
+    /// retried. Every whole line is decoded as JSON, and lines that fail to
+    /// decode are skipped. A line's item ID comes from its `uuid`, or from
+    /// `at-<lineOffset>` when it has none, so two windows that hold the same
+    /// line give it the same ID. The read is accepted when its items hold
+    /// `messageLimit` messages (`.userPrompt`, `.assistantText`,
+    /// `.peerMessage`), or reach `itemLimit` items, or the read starts at the
+    /// first byte of the file. Otherwise the read size doubles, never past
+    /// `end`, and the lines are read again.
+    ///
+    /// Then the front is trimmed, by whole lines only:
+    /// - Everything from the line that holds the `messageLimit`-th message
+    ///   counted from the end is kept, back to and including that message.
+    ///   When there are fewer messages, nothing is trimmed by this rule.
+    /// - If more than `itemLimit` items remain, the oldest lines are dropped
+    ///   until at most `itemLimit` remain. The newest line is always kept,
+    ///   so a single line with more than `itemLimit` items is returned whole.
+    /// - `startOffset` is the offset of the line of the first kept item.
+    ///   Lines before it that build no item, such as the results of older
+    ///   tool calls, belong to the next older window, where those calls are.
+    ///   The one exception: when the read started at the first byte of the
+    ///   file and no item was trimmed, `startOffset` is 0.
+    ///
+    /// `toolResultsByID`, `fileEdits` and `subagentAgentIDs` cover every line
+    /// read, trimmed lines included. Sidechain (subagent) lines build items
+    /// only when `includeSidechain` is true. Limits below 1 count as 1.
+    public static func parseWindow(
+        filePath: String, endingBefore end: UInt64?, messageLimit: Int,
+        itemLimit: Int, includeSidechain: Bool = false
+    ) -> TranscriptWindow? {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
+        defer { try? handle.close() }
+        guard let fileSize = try? handle.seekToEnd() else { return nil }
+
+        let end = min(end ?? fileSize, fileSize)
+        if end > 0, end < fileSize {
+            guard let before = readBytes(handle, in: (end - 1)..<end),
+                  before.first == UInt8(ascii: "\n") else { return nil }
+        }
+        let messageLimit = max(1, messageLimit)
+        let itemLimit = max(1, itemLimit)
+
+        var chunk = min(windowInitialChunkBytes, end)
+        while true {
+            let start = end - chunk
+            guard let bytes = readBytes(handle, in: start..<end) else { return nil }
+
+            var kept = bytes
+            var keptStart = start
+            if start > 0 {
+                guard let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) else {
+                    chunk = min(chunk * 2, end)
+                    continue
+                }
+                kept = bytes[(newline + 1)...]
+                keptStart = start + UInt64(newline + 1 - bytes.startIndex)
+            }
+
+            let lines = decodeWindowLines(kept, firstLineOffset: keptStart)
+            let built = buildItemsWithLineIndices(
+                rawLines: lines.rawLines, stableIDs: lines.stableIDs,
+                toolResultsByID: lines.toolResultsByID, includeSidechain: includeSidechain)
+            let messageCount = built.items.filter(isWindowMessage).count
+
+            if messageCount >= messageLimit || built.items.count >= itemLimit || start == 0 {
+                return trimmedWindow(
+                    lines: lines, items: built.items, lineIndices: built.lineIndices,
+                    keptStart: keptStart, end: end, messageLimit: messageLimit, itemLimit: itemLimit)
+            }
+            chunk = min(chunk * 2, end)
+        }
+    }
+
+    /// Line stats for every Edit, MultiEdit and Write `tool_use` block on an
+    /// assistant line, keyed by `tool_use` id, from the raw input. The items
+    /// `buildItems` makes carry input whose strings `truncateInputStrings`
+    /// capped, so the stats must come from the line itself.
+    ///
+    /// - **Edit** – `new_string`'s lines diffed against `old_string`'s, with
+    ///   `Array.difference(from:)`: `added` is the insertion count and
+    ///   `removed` the removal count.
+    /// - **MultiEdit** – the same for each entry of `edits`, summed.
+    /// - **Write** – `added` is the line count of `content`, `removed` 0.
+    ///
+    /// Text splits into lines at `"\n"` (or `"\r\n"`), and a final newline
+    /// ends the last line rather than starting an empty one.
+    public static func fileEditStats(fromLine json: [String: Any]) -> [String: FileEditStats] {
+        guard json["type"] as? String == "assistant",
+              let message = json["message"] as? [String: Any],
+              let blocks = message["content"] as? [[String: Any]] else { return [:] }
+
+        var stats: [String: FileEditStats] = [:]
+        for block in blocks where block["type"] as? String == "tool_use" {
+            guard let id = block["id"] as? String,
+                  let input = block["input"] as? [String: Any] else { continue }
+            switch block["name"] as? String {
+            case "Edit":
+                stats[id] = editStats(old: input["old_string"], new: input["new_string"])
+            case "MultiEdit":
+                let edits = (input["edits"] as? [[String: Any]]) ?? []
+                let each = edits.map { editStats(old: $0["old_string"], new: $0["new_string"]) }
+                stats[id] = FileEditStats(
+                    added: each.reduce(0) { $0 + $1.added },
+                    removed: each.reduce(0) { $0 + $1.removed })
+            case "Write":
+                let content = (input["content"] as? String) ?? ""
+                stats[id] = FileEditStats(added: editLines(content).count, removed: 0)
+            default:
+                continue
+            }
+        }
+        return stats
+    }
+
+    /// `tool_use` id → subagent `agentId`, from a user line that returns a
+    /// subagent call's result.
+    ///
+    /// Claude Code records the subagent beside the result, not inside it: the
+    /// line's `message.content` holds one `tool_result` block, and the line's
+    /// top-level `toolUseResult.agentId` names the agent, whose transcript is
+    /// `<sessionID>/subagents/agent-<agentId>.jsonl`. `toolUseResult`
+    /// describes the line's one result, so a line with several `tool_result`
+    /// blocks, or with an empty or non-string `agentId`, maps nothing.
+    public static func subagentAgentIDs(fromLine json: [String: Any]) -> [String: String] {
+        guard json["type"] as? String == "user",
+              let toolUseResult = json["toolUseResult"] as? [String: Any],
+              let agentID = toolUseResult["agentId"] as? String, !agentID.isEmpty,
+              let message = json["message"] as? [String: Any],
+              let blocks = message["content"] as? [[String: Any]] else { return [:] }
+        let results = blocks.filter { $0["type"] as? String == "tool_result" }
+        guard results.count == 1, let toolUseID = results[0]["tool_use_id"] as? String else { return [:] }
+        return [toolUseID: agentID]
+    }
+
+    // MARK: - window helpers
+
+    /// The decoded lines of one read, each with its absolute offset, and the
+    /// per-line facts a window reports.
+    private struct WindowLines {
+        var rawLines: [[String: Any]] = []
+        /// Parallel to `rawLines`.
+        var offsets: [UInt64] = []
+        /// Parallel to `rawLines`.
+        var stableIDs: [String] = []
+        var toolResultsByID: [String: ToolResult] = [:]
+        var fileEdits: [String: FileEditStats] = [:]
+        var subagentAgentIDs: [String: String] = [:]
+    }
+
+    /// Splits `bytes`, which start at a line start whose file offset is
+    /// `firstLineOffset`, on `"\n"`, and decodes each line. A last line with
+    /// no trailing newline is decoded like the rest.
+    private static func decodeWindowLines(_ bytes: Data, firstLineOffset: UInt64) -> WindowLines {
+        var lines = WindowLines()
+        var lineStart = bytes.startIndex
+        while lineStart < bytes.endIndex {
+            let lineEnd = bytes[lineStart...].firstIndex(of: UInt8(ascii: "\n")) ?? bytes.endIndex
+            let offset = firstLineOffset + UInt64(lineStart - bytes.startIndex)
+            let lineData = Data(bytes[lineStart..<lineEnd])
+            lineStart = lineEnd + 1
+            guard !lineData.isEmpty,
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+            lines.rawLines.append(json)
+            lines.offsets.append(offset)
+            lines.stableIDs.append((json["uuid"] as? String) ?? "at-\(offset)")
+
+            if json["type"] as? String == "user",
+               let message = json["message"] as? [String: Any],
+               let array = message["content"] as? [[String: Any]] {
+                for block in array where (block["type"] as? String) == "tool_result" {
+                    guard let id = block["tool_use_id"] as? String else { continue }
+                    lines.toolResultsByID[id] = extractToolResult(from: block)
+                }
+            }
+            lines.fileEdits.merge(fileEditStats(fromLine: json)) { _, newer in newer }
+            lines.subagentAgentIDs.merge(subagentAgentIDs(fromLine: json)) { _, newer in newer }
+        }
+        return lines
+    }
+
+    /// Applies `parseWindow`'s front-trim rules to an accepted read whose
+    /// first whole line starts at `keptStart`, which is 0 exactly when the
+    /// read started at the first byte of the file.
+    private static func trimmedWindow(
+        lines: WindowLines, items: [TranscriptItem], lineIndices: [Int],
+        keptStart: UInt64, end: UInt64, messageLimit: Int, itemLimit: Int
+    ) -> TranscriptWindow {
+        var first = 0
+
+        // Back to and including the `messageLimit`-th message from the end,
+        // from the first item of its line.
+        let messageIndices = items.indices.filter { isWindowMessage(items[$0]) }
+        if messageIndices.count >= messageLimit {
+            let cutLine = lineIndices[messageIndices[messageIndices.count - messageLimit]]
+            first = lineIndices.firstIndex(of: cutLine) ?? 0
+        }
+
+        // Whole oldest lines off the front while over `itemLimit`, never the
+        // newest line. `lineIndices` never decreases, so the inner loop stops
+        // on the newest line at the latest.
+        if let newestLine = lineIndices.last {
+            while items.count - first > itemLimit, lineIndices[first] != newestLine {
+                let line = lineIndices[first]
+                while lineIndices[first] == line { first += 1 }
+            }
+        }
+
+        let startOffset: UInt64
+        if items.isEmpty || (first == 0 && keptStart == 0) {
+            startOffset = keptStart
+        } else {
+            startOffset = lines.offsets[lineIndices[first]]
+        }
+
+        let entries = (first..<items.count).map {
+            TranscriptWindow.Entry(item: items[$0], lineOffset: lines.offsets[lineIndices[$0]])
+        }
+        return TranscriptWindow(
+            entries: entries, startOffset: startOffset, endOffset: end,
+            toolResultsByID: lines.toolResultsByID,
+            fileEdits: lines.fileEdits,
+            subagentAgentIDs: lines.subagentAgentIDs)
+    }
+
+    /// Whether `item` counts toward `parseWindow`'s `messageLimit`.
+    private static func isWindowMessage(_ item: TranscriptItem) -> Bool {
+        switch item {
+        case .userPrompt, .assistantText, .peerMessage: return true
+        default: return false
+        }
+    }
+
+    /// The bytes in `range`, or nil when they cannot all be read, such as
+    /// when the file shrank since its size was taken.
+    private static func readBytes(_ handle: FileHandle, in range: Range<UInt64>) -> Data? {
+        guard !range.isEmpty else { return Data() }
+        let count = Int(range.upperBound - range.lowerBound)
+        guard (try? handle.seek(toOffset: range.lowerBound)) != nil,
+              let data = try? handle.read(upToCount: count),
+              data.count == count else { return nil }
+        return data
+    }
+
+    private static func editStats(old: Any?, new: Any?) -> FileEditStats {
+        let oldLines = editLines((old as? String) ?? "")
+        let newLines = editLines((new as? String) ?? "")
+        let difference = newLines.difference(from: oldLines)
+        return FileEditStats(added: difference.insertions.count, removed: difference.removals.count)
+    }
+
+    private static func editLines(_ text: String) -> [Substring] {
+        var lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" })
+        if lines.last?.isEmpty == true { lines.removeLast() }
+        return lines
+    }
+}
