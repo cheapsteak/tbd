@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# usage: stage-loader.sh <loader-dir> <site-dir> <origin>
+#
+# Copies the files the phone loader serves, and nothing else, from <loader-dir> into
+# <site-dir>, and stamps <origin> into runner.html's policy in place of its placeholder.
+# The loader repo's deploy and the Playwright test server both run it.
+#
+# Served: top-level *.html, *.js, *.css and *.webmanifest; channel/*.js; and each `file`
+# row of vendor/vendor.lock, as vendor/<name>/<path>. Never served: *.test.js, test/,
+# vendor.lock, *.md, dotfiles, symlinks. The only pages are index.html and runner.html: any
+# other page would run with the loader's origin and could read its IndexedDB.
+#
+# <site-dir> must be absent or empty. The site is built in a scratch directory and copied
+# into <site-dir> only once every check passes, so a refusal leaves <site-dir> untouched.
+# The source tree is never written to.
+#
+# Exit status: 0 staged (the staged paths are printed, one per line, sorted), 1 refused,
+# 64 bad usage.
+set -euo pipefail
+export LC_ALL=C
+
+placeholder='https://loader-origin.invalid'
+placeholder_sed='https://loader-origin[.]invalid' # the same text, as a sed pattern
+work=''
+
+finish() {
+  local rc=$?
+  if [ -n "$work" ]; then rm -rf -- "$work"; fi
+  # Any failure that is not a usage error is a refusal.
+  case "$rc" in 0 | 64) ;; *) rc=1 ;; esac
+  exit "$rc"
+}
+trap finish EXIT
+
+refuse() {
+  echo "stage-loader: $*" >&2
+  exit 1
+}
+
+if [ "$#" -ne 3 ]; then
+  echo "usage: stage-loader.sh <loader-dir> <site-dir> <origin>" >&2
+  exit 64
+fi
+loader="$1"
+site="$2"
+origin="$3"
+
+# 1. The origin: a scheme, a host and an optional port. No path (so no trailing slash),
+#    quotes, spaces, ';' or anything else a policy or sed would read specially.
+https_origin='^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$'
+local_origin='^http://(127\.0\.0\.1|localhost)(:[0-9]{1,5})?$'
+if ! [[ "$origin" =~ $https_origin || "$origin" =~ $local_origin ]]; then
+  refuse "origin must be https://<host>[:<port>], or http:// with 127.0.0.1 or localhost, and nothing more: '$origin'"
+fi
+
+# 2. The site directory: absent or empty.
+if [ -e "$site" ]; then
+  if [ ! -d "$site" ]; then refuse "$site exists and is not a directory"; fi
+  if [ -n "$(ls -A -- "$site")" ]; then refuse "$site is not empty"; fi
+fi
+if [ ! -d "$loader" ]; then refuse "$loader is not a directory"; fi
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/stage-loader.XXXXXX")"
+stage="$work/site"
+mkdir -- "$stage"
+
+# True for a path under the loader directory whose every component exists and is not a
+# symlink, and whose last component is a regular file. $1 is relative to the loader.
+served_file() {
+  local rest="$1" cur="$loader" part
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=''; else rest="${rest#*/}"; fi
+    cur="$cur/$part"
+    if [ -L "$cur" ]; then return 1; fi
+  done
+  [ -f "$cur" ]
+}
+
+# Copies $1, relative to the loader directory, to the same path in the stage.
+copy() {
+  case "$1" in */*) mkdir -p -- "$stage/${1%/*}" ;; esac
+  cp -- "$loader/$1" "$stage/$1"
+}
+
+# 3. The allowlist, and nothing else.
+for path in "$loader"/*; do
+  name="${path##*/}"
+  case "$name" in
+    .* | *.test.js) continue ;;
+    *.html | *.js | *.css | *.webmanifest) ;;
+    *) continue ;;
+  esac
+  if served_file "$name"; then copy "$name"; fi
+done
+
+if [ -d "$loader/channel" ] && [ ! -L "$loader/channel" ]; then
+  for path in "$loader"/channel/*.js; do
+    name="${path##*/}"
+    case "$name" in .* | *.test.js) continue ;; esac
+    if served_file "channel/$name"; then copy "channel/$name"; fi
+  done
+fi
+
+lock='vendor/vendor.lock'
+if ! served_file "$lock"; then refuse "$loader/$lock is missing"; fi
+segment='[A-Za-z0-9_][A-Za-z0-9._-]*' # no leading dot, so no '..' and no dotfiles
+lib_name="^$segment\$"
+lib_path="^$segment(/$segment)*\$"
+tab="$(printf '\t')"
+while IFS="$tab" read -r name _ kind value _ || [ -n "$name" ]; do
+  case "$name" in '' | '#'*) continue ;; esac
+  [ "$kind" = file ] || continue
+  if ! [[ "$name" =~ $lib_name && "$value" =~ $lib_path ]]; then
+    refuse "$lock: bad file row '$name' '$value'"
+  fi
+  rel="vendor/$name/$value"
+  if ! served_file "$rel"; then
+    refuse "$lock lists $rel, which is missing, not a regular file, or behind a symlink"
+  fi
+  copy "$rel"
+done <"$loader/$lock"
+
+(cd "$stage" && find . -type f) | sed 's|^\./||' | sort >"$work/list"
+
+# 4. No page but index.html and runner.html.
+while IFS= read -r rel; do
+  case "$rel" in index.html | runner.html) continue ;; esac
+  case "$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')" in
+    *.html | *.htm | *.xhtml | *.svg | *.xml)
+      refuse "$rel would be served as a page; only index.html and runner.html may be"
+      ;;
+  esac
+done <"$work/list"
+
+# 5. Stamp the origin into the staged runner.html, and only there.
+occurrences() { # $1 = text, $2 = file
+  { grep -aoF -- "$1" "$2" || true; } | wc -l | tr -d '[:space:]'
+}
+runner="$stage/runner.html"
+if [ ! -f "$runner" ]; then refuse "runner.html is missing"; fi
+n="$(occurrences "$placeholder" "$runner")"
+if [ "$n" != 1 ]; then refuse "runner.html must carry $placeholder exactly once (found $n)"; fi
+while IFS= read -r rel; do
+  [ "$rel" != runner.html ] || continue
+  if grep -aqF -- "$placeholder" "$stage/$rel"; then
+    refuse "$rel carries $placeholder; only runner.html may"
+  fi
+done <"$work/list"
+
+# The origin passed step 1, so it holds no '|', '&', '\' or newline for sed to read.
+sed -i.bak "s|$placeholder_sed|$origin|" "$runner"
+rm -- "$runner.bak"
+
+n="$(occurrences "$placeholder" "$runner")"
+if [ "$n" != 0 ]; then refuse "runner.html still carries $placeholder after stamping"; fi
+n="$(occurrences "$origin" "$runner")"
+if [ "$n" != 1 ]; then refuse "runner.html must name $origin exactly once after stamping (found $n)"; fi
+
+mkdir -p -- "$site"
+cp -R -- "$stage/." "$site/"
+
+# 6. Report.
+cat -- "$work/list"
