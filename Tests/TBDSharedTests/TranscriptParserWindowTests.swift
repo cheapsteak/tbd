@@ -73,6 +73,22 @@ struct TranscriptParserWindowTests {
         #expect(accepted, "the line start before it must be accepted")
     }
 
+    @Test func aCursorPastTheFileEndIsStale() throws {
+        // A cursor taken before the file was rewritten or truncated can name
+        // bytes the file no longer holds. It must not read as "the end".
+        let fixture = try WindowFixture(WindowLine.conversation(messages: 3))
+        defer { fixture.remove() }
+
+        let pastTheEnd = TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: fixture.size + 1, messageLimit: 4, itemLimit: 256)
+        let stale = pastTheEnd == nil
+        let atTheEnd = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: fixture.size, messageLimit: 4, itemLimit: 256))
+
+        #expect(stale, "a cursor one byte past the file's end must be refused")
+        #expect(atTheEnd.endOffset == fixture.size, "a cursor at the file's end is still the end")
+    }
+
     @Test func theWindowStopsAtTheItemLimit() throws {
         var objects = [WindowLine.prompt("m1", "placeholder prompt")]
         for n in 1...600 {

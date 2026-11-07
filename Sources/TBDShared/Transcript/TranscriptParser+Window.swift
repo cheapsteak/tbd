@@ -69,16 +69,18 @@ extension TranscriptParser {
     /// `messageLimit` messages and about `itemLimit` items.
     ///
     /// `end` (`endingBefore`) is a byte offset. Below the file's size it must
-    /// be a line start: the byte before it must be `"\n"`. Otherwise this
-    /// returns nil, as it does when the file cannot be read. Nil, or an offset
-    /// at or past the file's size, means the end of the file's complete lines:
-    /// just past its last `"\n"`, or 0 when it has none. A last line with no
-    /// newline yet is one Claude Code is still writing, so the window leaves
-    /// it out and `endOffset` stops before it. A live append cursor started at
-    /// `endOffset` then reads that line whole once it is finished, the way
-    /// `TranscriptFileWindow.read(path:from:)` withholds a partial line. A
-    /// window's `startOffset` is always a line start, so it is the `end` of
-    /// the next older window.
+    /// be a line start: the byte before it must be `"\n"`. Past the file's
+    /// size it is stale: it names bytes the file no longer holds, such as a
+    /// cursor taken before the file was rewritten or truncated. In either
+    /// case this returns nil, as it does when the file cannot be read. Nil,
+    /// or an offset equal to the file's size, means the end of the file's
+    /// complete lines: just past its last `"\n"`, or 0 when it has none. A
+    /// last line with no newline yet is one Claude Code is still writing, so
+    /// the window leaves it out and `endOffset` stops before it. A live append
+    /// cursor started at `endOffset` then reads that line whole once it is
+    /// finished, the way `TranscriptFileWindow.read(path:from:)` withholds a
+    /// partial line. A window's `startOffset` is always a line start, so it is
+    /// the `end` of the next older window.
     ///
     /// The read goes backwards from `end`, `windowInitialChunkBytes` at first.
     /// A read that starts inside the file drops its bytes up to and including
@@ -130,6 +132,7 @@ extension TranscriptParser {
         guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
         defer { try? handle.close() }
         guard let fileSize = try? handle.seekToEnd() else { return nil }
+        if let requestedEnd, requestedEnd > fileSize { return nil }
 
         let end: UInt64
         if let requestedEnd, requestedEnd < fileSize {
