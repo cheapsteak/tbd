@@ -36,7 +36,28 @@ func terminalMouseRoute(trackingEnabled: Bool, shiftHeld: Bool) -> MouseRoute {
     trackingEnabled && !shiftHeld ? .report : .select
 }
 
-/// `NSEvent.buttonNumber` → libghostty's button numbering.
+/// The terminal button a button event is for. nil for an event that is not a button event, and for
+/// an "other" button event numbered 0 or 1, which names no other button.
+///
+/// Left and right come from the event's type, which AppKit always sets. `buttonNumber` is read
+/// only for the other buttons: AppKit documents it for those, and an event built with
+/// `NSEvent.mouseEvent(with:…)`, which takes no button, has `buttonNumber` 0 whatever its type, so
+/// reading it for a right-button event turns a right-click into a left one.
+func terminalMouseButton(for event: NSEvent) -> MouseButton? {
+    switch event.type {
+    case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
+        .left
+    case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+        .right
+    case .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+        event.buttonNumber >= 2 ? terminalMouseButton(nsEventButtonNumber: event.buttonNumber) : nil
+    default:
+        nil
+    }
+}
+
+/// `NSEvent.buttonNumber` → libghostty's button numbering. For an "other" button event: left and
+/// right are mapped from the event's type, by `terminalMouseButton(for:)`.
 ///
 /// AppKit numbers back/forward 3/4; the terminal protocol puts them at buttons 8/9, and the
 /// remaining physical buttons are *not* in numeric order. Mirrors Ghostty's own table
@@ -266,7 +287,7 @@ final class MouseController: NSObject {
             trackingEnabled: terminal.withLocked { $0.isMouseTrackingEnabled }, shiftHeld: mods.contains(.shift))
         lastRoute = route
 
-        guard let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber) else {
+        guard let button = terminalMouseButton(for: event) else {
             return false
         }
 
@@ -297,7 +318,7 @@ final class MouseController: NSObject {
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
-        if let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber),
+        if let button = terminalMouseButton(for: event),
            pendingReportReleases.contains(button) {
             // Motion must carry the *held* button: button-event tracking (1002) encodes it into
             // the drag report, and a nil button there makes the whole drag silent.
@@ -322,7 +343,7 @@ final class MouseController: NSObject {
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
-        let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber)
+        let button = terminalMouseButton(for: event)
         if let button, pendingReportReleases.remove(button) != nil {
             // Every reported press needs a matching release, including a mouseUp outside the
             // view, one with Shift now held, and one after the program turned reporting off: the

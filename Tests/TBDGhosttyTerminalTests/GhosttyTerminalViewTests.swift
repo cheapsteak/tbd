@@ -78,6 +78,24 @@ private func mouseEvent(
         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
 }
 
+/// A mouse event of `type` for no window. Its `buttonNumber` is 0 whatever the type.
+private func windowlessMouseEvent(_ type: NSEvent.EventType) throws -> NSEvent {
+    try #require(NSEvent.mouseEvent(
+        with: type, location: .zero, modifierFlags: [], timestamp: 0,
+        windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+}
+
+/// An "other" button event carrying `number` as its `buttonNumber`, built as a `CGEvent` because
+/// `NSEvent.mouseEvent(with:…)` takes no button.
+private func otherButtonEvent(_ type: CGEventType, number: Int64) throws -> NSEvent {
+    let cgEvent = try #require(CGEvent(
+        mouseEventSource: nil, mouseType: type, mouseCursorPosition: .zero, mouseButton: .center))
+    cgEvent.setIntegerValueField(.mouseEventButtonNumber, value: number)
+    let event = try #require(NSEvent(cgEvent: cgEvent))
+    try #require(event.buttonNumber == Int(number), "the event carries button \(event.buttonNumber)")
+    return event
+}
+
 /// True when `bytes` is one SGR mouse report for `button`: `ESC [ < button ; … final`.
 private func isSGRReport(_ bytes: [UInt8], button: Int, final: Character) -> Bool {
     bytes.starts(with: Array("\u{1b}[<\(button);".utf8)) && bytes.last == final.asciiValue
@@ -243,6 +261,29 @@ struct GhosttyTerminalViewTests {
                 "the last report was \(String(describing: recorder.sent.last)), not a right release")
         #expect(view.mouseController.pendingReportReleases.isEmpty,
                 "\(view.mouseController.pendingReportReleases) still wait for a release")
+    }
+
+    /// Left and right come from the event's type, every phase of it. An event built with
+    /// `NSEvent.mouseEvent(with:…)` has `buttonNumber` 0 whatever its type, so a mapping that read
+    /// the number would call these right-button events left. Only an "other" event is read by its
+    /// number, which a `CGEvent` sets.
+    @Test func buttonComesFromTheEventTypeAndTheNumberOnlyForOtherButtons() throws {
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp, .leftMouseDragged] {
+            let button = terminalMouseButton(for: try windowlessMouseEvent(type))
+            #expect(button == .left, "\(type) mapped to \(String(describing: button))")
+        }
+        for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp, .rightMouseDragged] {
+            let button = terminalMouseButton(for: try windowlessMouseEvent(type))
+            #expect(button == .right, "\(type) mapped to \(String(describing: button))")
+        }
+        let middle = terminalMouseButton(for: try otherButtonEvent(.otherMouseDown, number: 2))
+        #expect(middle == .middle, "other button 2 mapped to \(String(describing: middle))")
+        let back = terminalMouseButton(for: try otherButtonEvent(.otherMouseUp, number: 3))
+        #expect(back == .eight, "other button 3 mapped to \(String(describing: back))")
+        let numberless = terminalMouseButton(for: try windowlessMouseEvent(.otherMouseDragged))
+        #expect(numberless == nil, "an other event numbered 0 mapped to \(String(describing: numberless))")
+        let notAButton = terminalMouseButton(for: try windowlessMouseEvent(.mouseMoved))
+        #expect(notAButton == nil, "a move mapped to \(String(describing: notAButton))")
     }
 
     /// The tracking area and the responder chain each deliver the same move. Under any-event
