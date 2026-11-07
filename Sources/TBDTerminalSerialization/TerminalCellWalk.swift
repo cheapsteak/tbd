@@ -174,8 +174,31 @@ public enum TerminalCellWalk {
         case .replay:
             return visibleLength(of: line, cols: cols)
         case .capture:
-            return min(line.getTrimmedLength(), cols)
+            return trimmedLength(of: line, cols: cols)
         }
+    }
+
+    /// How many leading cells of `line`, within its first `cols`, run
+    /// through its last character.
+    ///
+    /// `getTrimmedLength()` measures the whole line, and a line can be wider
+    /// than the screen (see `visibleLength`). Capping its answer at `cols` is
+    /// not the same thing: a character past the last column, which the
+    /// screen does not show, would still stretch the row out to the edge
+    /// with blanks. So when the last character lies past the width, this
+    /// counts through the last one within it instead. A wide character that
+    /// starts in the last column counts to the edge.
+    private static func trimmedLength(of line: BufferLine, cols: Int) -> Int {
+        let width = min(line.count, cols)
+        let trimmed = line.getTrimmedLength()
+        guard trimmed > width else { return trimmed }
+        for column in (0..<width).reversed() {
+            let cell = line[column]
+            if cell.getCharacter() != Character(Unicode.Scalar(0)) {
+                return min(column + Int(cell.width), width)
+            }
+        }
+        return 0
     }
 
     /// How many leading cells a receiver needs to show `line` as the source
@@ -198,12 +221,12 @@ public enum TerminalCellWalk {
     /// Only the first `cols` cells count, because `render` never sends one
     /// past them. A line can hold more: the alternate screen has no
     /// scrollback, so narrowing the terminal does not reflow it, and its rows
-    /// keep their old width. A coloured blank out there is off screen, and
-    /// counting it would stretch the row to the last column with blanks the
-    /// source shows as nothing.
+    /// keep their old width. A character or coloured blank out there is off
+    /// screen, and counting it would stretch the row to the last column with
+    /// blanks the source shows as nothing.
     private static func visibleLength(of line: BufferLine, cols: Int) -> Int {
         let width = min(line.count, cols)
-        let trimmed = min(line.getTrimmedLength(), width)
+        let trimmed = trimmedLength(of: line, cols: cols)
         // Every cell from `trimmed` on has no character, so only attributes
         // can make one of them visible.
         var length = width
@@ -332,7 +355,7 @@ public enum TerminalCellWalk {
         // pending wrap, which is what lets the continuation's first print
         // wrap onto the next row.
         let eraseLimit = fullWidth ? limit - 1 : limit
-        let trimmed = line.getTrimmedLength()
+        let trimmed = trimmedLength(of: line, cols: cols)
 
         var out = ""
         // In a replay, a continuation whose first cell is a character on the

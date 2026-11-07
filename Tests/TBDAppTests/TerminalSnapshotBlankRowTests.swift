@@ -373,19 +373,27 @@ struct TerminalSnapshotBlankRowTests {
         Self.expectSameScreen(pair)
     }
 
-    @Test("Coloured blanks past the last column do not stretch the row they sit in")
-    func colouredBlanksPastTheLastColumn() {
+    // The coloured-blank input passes on `origin/main` too, whose walk never
+    // looked past a row's last character. It guards this branch, which looks
+    // for coloured blanks there and must stop at the screen's edge. The
+    // character input fails on `origin/main` as well.
+    @Test("Cells past the last column do not stretch the row they sit in", arguments: [
+        // Coloured blanks from column 74.
+        "\u{1b}[?1049hx\u{1b}[1;75H\u{1b}[44m\u{1b}[K\u{1b}[0m",
+        // A `y` in column 75.
+        "\u{1b}[?1049hx\u{1b}[1;76Hy",
+    ])
+    func cellsPastTheLastColumn(input: String) {
         let pair = SnapshotPair(cols: 80, rows: 24)
         // The alternate screen has no scrollback, so narrowing the terminal
         // does not reflow it and its rows keep their old width. Row 0 holds
-        // an `x`, then coloured blanks from column 74, which the 70-column
+        // an `x`, then cells from column 74 or 75 on, which the 70-column
         // screen leaves past its last column.
-        pair.source.feed(text: "\u{1b}[?1049hx\u{1b}[1;75H\u{1b}[44m\u{1b}[K\u{1b}[0m")
+        pair.source.feed(text: input)
         pair.source.resize(cols: 70, rows: 24)
         pair.fresh.resize(cols: 70, rows: 24)
         #expect(pair.source.getLine(row: 0)?.count == 80,
                 "the fixture must leave a row wider than the screen")
-        #expect(pair.source.getLine(row: 0)?.getTrimmedLength() == 1)
 
         // Read before the transfer, which repaints the source's alt screen
         // from what it sends. With its SGR runs taken out, the row is the `x`
