@@ -3832,25 +3832,47 @@ extension RPCRouter {
     /// adds no authority check of its own (see `sendOnInternalRail`). The
     /// actuation row records `.phone(deviceID:)`.
     ///
-    /// **Always gated on awaiting input, and never verified, whatever the
-    /// caller passes.** Every phone send is gated on awaiting input (spec
-    /// section 5): an ungated send into an open dialog would commit one of its
-    /// options, bypassing the `prompt.answer` core and the setting it obeys. So
-    /// `gateOnAwaitingInput` is forced to true, and the send core's existing
-    /// gate does the refusing. `verify` is stripped to nil rather than forced:
-    /// a suppressed send carries no dispatch id, so delivery verification could
-    /// never confirm it, and the shape check refuses `verify` with parts.
-    /// Every other field passes through unchanged.
+    /// **The params are rebuilt from the fields a phone may set**: the
+    /// terminal, the message (`text` or `parts`) and `submit`. Every other
+    /// field takes its default, whatever the caller passes, so a field added
+    /// to `TerminalSendParams` later stays off the phone until it is named
+    /// here. The fields that matter today:
+    ///
+    /// - `gateOnAwaitingInput` is forced to true. Every phone send is gated on
+    ///   awaiting input (spec section 5): an ungated send into an open dialog
+    ///   would commit one of its options, bypassing the `prompt.answer` core
+    ///   and the setting it obeys, so the send core's existing gate does the
+    ///   refusing.
+    /// - `keys` is dropped. Keys skip the park and foreground rails, and they
+    ///   are not part of a message. A send that carried only keys then has no
+    ///   payload, and the shape check refuses it before any row exists.
+    /// - `verify` is dropped: a suppressed send carries no dispatch id, so
+    ///   delivery verification could never confirm it, and the shape check
+    ///   refuses `verify` with parts.
+    /// - `envelope` is dropped: this rail suppresses the envelope whatever the
+    ///   request's own field says.
+    ///
+    /// **A shell is refused before anything is typed.** Shells are hidden from
+    /// the phone (spec section 6), and a shell runs what is typed into it. A
+    /// row with no recorded kind is not refused, because `session.states`,
+    /// which is how the phone learns of a terminal, reports such a row. A
+    /// terminal with no row falls through to the send core, which reports it
+    /// missing.
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
+        if try await db.terminals.get(id: params.terminalID)?.kind == .shell {
+            return RPCResponse(error: Self.phoneShellSendRefusal)
+        }
         let phoneParams = TerminalSendParams(
-            terminalID: params.terminalID, text: params.text, keys: params.keys,
-            submit: params.submit, verify: nil,
-            parts: params.parts, envelope: params.envelope,
+            terminalID: params.terminalID, text: params.text,
+            submit: params.submit, parts: params.parts,
             gateOnAwaitingInput: true)
         return try await sendOnInternalRail(phoneParams, actor: .phone(deviceID: deviceID))
     }
+
+    /// What a paired phone hears when it sends to a shell tab.
+    static let phoneShellSendRefusal = "a phone cannot send to a shell tab"
 
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,

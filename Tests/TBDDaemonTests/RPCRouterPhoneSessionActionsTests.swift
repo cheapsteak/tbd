@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// The router's conformance to `PhoneSessionActions`, the phone bridge's one
@@ -131,15 +132,198 @@ struct RPCRouterPhoneSessionActionsTests {
                 message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
                 notificationType: "permission_prompt"))
         let actions: any PhoneSessionActions = harness.router
+        let d = UUID()
 
         let response = try await actions.phoneSend(
             TerminalSendParams(
                 terminalID: harness.terminal.id, submit: true,
                 parts: [.text("hi")], envelope: .suppressed, gateOnAwaitingInput: false),
-            deviceID: UUID())
+            deviceID: d)
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+
+        let logPath = await harness.router.actuationLog.path
+        let request = try #require(
+            ActuationRecordReader(activePath: logPath).readRows()
+                .first { $0.method == RPCMethod.terminalSend })
+        #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
+    }
+
+    // MARK: - The conformance keeps only the fields a phone may set
+
+    /// The keys `params` encodes. A nil optional encodes no key, so these are
+    /// exactly the fields that are set.
+    private func encodedKeys(_ params: some Encodable) throws -> Set<String> {
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(params))
+        return Set(try #require(object as? [String: Any]).keys)
+    }
+
+    /// A phone's create keeps the repo and the first message, and nothing
+    /// else, whatever the bridge passed. Every field is set, so the rebuild has
+    /// something to drop from each.
+    @Test func phoneWorktreeCreateParamsKeepOnlyTheRepoAndTheFirstMessage() throws {
+        let full = WorktreeCreateParams(
+            repoID: UUID(), folder: "acme-folder", branch: "acme-branch", displayName: "Acme",
+            prompt: "first message", cols: 80, rows: 24, parentWorktreeID: UUID(),
+            siblingOfWorktreeID: UUID(), callerWorktreeID: UUID(), suppressAutoParent: true,
+            useExistingBranch: true, profileID: UUID(), model: "opus",
+            primaryAgentPreference: .codex, claudeSettingsOverlay: "{}", prNumber: 7,
+            checkoutPRHead: true, autoArchiveOnMerge: true, codexModel: "acme-model",
+            pluginDirs: ["/nonexistent"])
+        let narrowed = RPCRouter.phoneWorktreeCreateParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["repoID", "prompt"])
+        #expect(narrowed.repoID == full.repoID)
+        #expect(narrowed.prompt == "first message")
+    }
+
+    /// The socket's create refuses a missing plugin folder before it looks for
+    /// the repo. The phone's create never carries the folder, so it gets past
+    /// that check and stops at the missing repo instead.
+    @Test func phoneCreateWorktreeIsNotRefusedForAPluginFolderItCannotSet() async throws {
+        let f = try makeFixture()
+        let params = WorktreeCreateParams(repoID: UUID(), prompt: "hi", pluginDirs: ["/nonexistent"])
+
+        let socket = try await f.router.handleWorktreeCreate(JSONEncoder().encode(params))
+        #expect(socket.error?.contains("plugin folder does not exist") == true)
+
+        await #expect(throws: WorktreeLifecycleError.self) {
+            _ = try await f.actions.phoneCreateWorktree(params, deviceID: UUID())
+        }
+    }
+
+    /// A phone's wake keeps the terminal and the message, so it can never
+    /// resume a session on the default account or pick its window size.
+    @Test func phoneWakeParamsKeepOnlyTheTerminalAndTheMessage() throws {
+        let full = TerminalWakeParams(
+            terminalID: UUID(), cols: 80, rows: 24, fallbackToDefaultProfile: true, prompt: "hi")
+        let narrowed = RPCRouter.phoneWakeParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["terminalID", "prompt"])
+        #expect(narrowed.terminalID == full.terminalID)
+        #expect(narrowed.prompt == "hi")
+    }
+
+    /// A phone's remote create keeps the provider and its form values.
+    @Test func phoneRemoteCreateParamsKeepOnlyTheProviderAndItsFormValues() throws {
+        let full = RemoteCreateParams(
+            provider: "agentbox", paramsJSON: #"{"repo": "acme/api"}"#,
+            parentWorktreeID: UUID(), seedRetainedKey: "acme-key")
+        let narrowed = RPCRouter.phoneRemoteCreateParams(full)
+
+        #expect(try encodedKeys(narrowed) == ["provider", "paramsJSON"])
+        #expect(narrowed.provider == "agentbox")
+        #expect(narrowed.paramsJSON == #"{"repo": "acme/api"}"#)
+    }
+
+    // MARK: - Remote sessions
+
+    private struct RemoteFixture {
+        let router: RPCRouter
+        let manager: RemoteProviderManager
+        let invoker: FakeProviderInvoker
+        let logPath: String
+
+        var actions: any PhoneSessionActions { router }
+
+        func actuationRows() -> [ActuationRow] {
+            ActuationRecordReader(activePath: logPath).readRows()
+        }
+    }
+
+    /// The router fixture of `RPCRouterRemoteSeedTests`, with remote backends
+    /// on and one provider, `agentbox`, that has already described itself.
+    /// The router records no app identity, so the socket check refuses every
+    /// caller that reaches it.
+    private func makeRemoteFixture(_ script: [ProviderResult]) async throws -> RemoteFixture {
+        let directory = URL(
+            fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-actions-remote"), isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let registryURL = directory.appendingPathComponent("agent-providers.json")
+        try #"[{"name": "agentbox", "exec": "/nonexistent"}]"#
+            .write(to: registryURL, atomically: true, encoding: .utf8)
+        let logPath = directory.appendingPathComponent("actuations.jsonl").path
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setRemoteBackendsEnabled(true)
+        let subs = StateSubscriptionManager()
+        let invoker = FakeProviderInvoker(script: script)
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL,
+            actuationLog: makeTestActuationLog())
+        await manager.loadRegistryAndDescribe()
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                subscriptions: subs),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            subscriptions: subs,
+            remoteManager: manager,
+            actuationLog: ActuationLog(path: logPath))
+        return RemoteFixture(router: router, manager: manager, invoker: invoker, logPath: logPath)
+    }
+
+    private static func describeDeclaring(_ capabilities: [String]) -> ProviderResult {
+        let caps = capabilities.map { "\"\($0)\"" }.joined(separator: ", ")
+        return providerOK(#"{"contract_versions": [1], "name": "agentbox", "capabilities": [\#(caps)]}"#)
+    }
+
+    /// The socket's create refuses a seed for a provider that never declared
+    /// `seed`. The phone's create never carries the seed, so the same params
+    /// create a session, and the provider's stdin holds no `seed` field.
+    @Test func phoneRemoteCreateIsNotRefusedForASeedItCannotSet() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": []}"#),
+        ])
+        let params = RemoteCreateParams(
+            provider: "agentbox", paramsJSON: "{}", seedRetainedKey: "acme-key")
+        let d = UUID()
+
+        let socket = try await f.router.handleRemoteCreate(JSONEncoder().encode(params))
+        #expect(socket.error?.contains("has not declared capability 'seed'") == true)
+
+        let response = try await f.actions.phoneRemoteCreate(params, deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        #expect(f.invoker.callsSnapshot() == [["describe"], ["create"], ["list"]])
+        let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
+        let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
+        #expect(body.keys.sorted() == ["idempotency_key", "params"])
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteCreate })
+        #expect(request.actor == ActuationActor.phone(deviceID: d))
+    }
+
+    /// The `remote.answer` core under the phone's pairing, through the door:
+    /// no socket peer, delivered, and the record names the phone.
+    @Test func phoneAnswerRemotePromptIsDeliveredAndRecordsThePhone() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([RemoteCapability.answer]),
+            providerOK(#"""
+                {"sessions": [{"id": "s-1", "state": "running", "agent_state": "waiting_input", \#
+                "pending_prompt": {"id": "p-1", "kind": "permission", "tool_name": "Bash", \#
+                "tool_input": {"command": "touch x"}}}]}
+                """#),
+            providerOK("{}"),
+        ])
+        try await f.router.db.config.setTranscriptPromptAnswerEnabled(true)
+        await f.manager.pollOnce(provider: RemoteProviderConfig(name: "agentbox", exec: "/nonexistent"))
+        let d = UUID()
+
+        let response = try await f.actions.phoneAnswerRemotePrompt(
+            RemoteAnswerParams(
+                provider: "agentbox", sessionID: "s-1", promptID: "p-1",
+                answer: .permission(decision: .allow, message: nil)),
+            deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .delivered)
+        #expect(f.invoker.callsSnapshot().filter { $0.first == "answer" } == [["answer", "s-1", "p-1"]])
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
     }
 }

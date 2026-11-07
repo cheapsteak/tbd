@@ -10,7 +10,8 @@ import TBDShared
 /// still grants suppression only to the authenticated app
 /// (`EnvelopeSuppressionAuthTests`). Every phone send is gated on awaiting
 /// input, whatever its params ask for, so a send into an open prompt is refused
-/// by the existing gate and types nothing.
+/// by the existing gate and types nothing. A phone send carries no keys and
+/// never reaches a shell.
 ///
 /// Tier 2: the router runs in full over an in-memory database and a dry-run
 /// tmux, and the actuation log is a real file under the run's scratch dir.
@@ -83,6 +84,71 @@ struct PhoneSendRailTests {
 
         #expect(!response.success)
         #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+    }
+
+    /// Keys are not part of a phone's message, so the rail drops them. A send
+    /// that carried nothing else has no payload left, and the shape check
+    /// refuses it before any row is written.
+    @Test func aPairedPhoneSendOfKeysAloneIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, keys: "Escape"),
+            deviceID: UUID())
+
+        #expect(!response.success)
+        #expect(try #require(response.error).contains("needs a payload"))
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        let logPath = await harness.router.actuationLog.path
+        let rows = ActuationRecordReader(activePath: logPath).readRows()
+        #expect(!rows.contains { $0.method == RPCMethod.terminalSend })
+    }
+
+    /// Keys beside a message are dropped, not refused: the message is
+    /// delivered and the keys are never pressed. With the keys kept, the shape
+    /// check would refuse two payloads in one call.
+    @Test func aPairedPhoneSendDropsKeysBesideAMessage() async throws {
+        let harness = try await SendHarness.make()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "hi", keys: "Escape"),
+            deviceID: UUID())
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == ["hi"])
+        #expect(!harness.tmux.sentKeys.contains("Escape"))
+    }
+
+    /// Shells are hidden from the phone, and a shell runs what is typed into
+    /// it, so the rail refuses one before anything is typed. Without the
+    /// refusal this send would reach the pane: a shell has no agent for the
+    /// foreground rail to look for, and no prompt for the gate to find.
+    @Test func aPairedPhoneSendToAShellIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make(kind: .shell)
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true, parts: [.text("ls")]),
+            deviceID: UUID())
+
+        #expect(response.error == RPCRouter.phoneShellSendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+    }
+
+    /// A terminal with no row is not the shell check's to judge: the send core
+    /// reports it missing, as it does for every caller.
+    @Test func aPairedPhoneSendToAMissingTerminalFallsThroughToTheSendCore() async throws {
+        let harness = try await SendHarness.make()
+        let missing = UUID()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: missing, submit: true, parts: [.text("hi")]),
+            deviceID: UUID())
+
+        #expect(response.error == "Terminal not found: \(missing)")
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
     }
 

@@ -4,11 +4,19 @@ import TBDShared
 /// The router behind the phone bridge's one door (`PhoneSessionActions`).
 ///
 /// Every method is one call to an existing core function or handler. It adds
-/// nothing but the encoding of params for a handler that decodes them, with
-/// the router's own `encoder` to match the router's own `decoder`, and the
-/// phone's identity, built from the one `deviceID` it is given. So each runs
-/// the checks of the RPC it mirrors, in that RPC's order, and returns that
-/// RPC's response.
+/// only three things: the params a phone may set, rebuilt from those fields
+/// alone; the encoding of params for a handler that decodes them, with the
+/// router's own `encoder` to match the router's own `decoder`; and the phone's
+/// identity, built from the one `deviceID` it is given. So each runs the
+/// checks of the RPC it mirrors, in that RPC's order, and returns that RPC's
+/// response.
+///
+/// **The rebuild names what a phone keeps, never what it loses.** A create, a
+/// wake and a remote create get fresh params holding only the fields spec
+/// section 5 gives a phone, and every other field takes TBD's default. So a
+/// field added to one of those params structs later stays off the phone until
+/// someone adds it here. The send rail rebuilds its params the same way, in
+/// `sendFromPairedPhone`.
 ///
 /// None of the handlers called here takes a socket connection, because none is
 /// limited to the app at the socket edge. The three RPCs that are,
@@ -34,7 +42,8 @@ extension RPCRouter: PhoneSessionActions {
     }
 
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleTerminalWake(encoder.encode(p), actor: .phone(deviceID: deviceID))
+        try await handleTerminalWake(
+            encoder.encode(Self.phoneWakeParams(p)), actor: .phone(deviceID: deviceID))
     }
 
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
@@ -42,7 +51,8 @@ extension RPCRouter: PhoneSessionActions {
     }
 
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleWorktreeCreate(encoder.encode(p), actor: .phone(deviceID: deviceID))
+        try await handleWorktreeCreate(
+            encoder.encode(Self.phoneWorktreeCreateParams(p)), actor: .phone(deviceID: deviceID))
     }
 
     func phoneRemoteProviders() async throws -> RPCResponse {
@@ -54,7 +64,8 @@ extension RPCRouter: PhoneSessionActions {
     }
 
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteCreate(encoder.encode(p), actor: .phone(deviceID: deviceID))
+        try await handleRemoteCreate(
+            encoder.encode(Self.phoneRemoteCreateParams(p)), actor: .phone(deviceID: deviceID))
     }
 
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
@@ -67,5 +78,29 @@ extension RPCRouter: PhoneSessionActions {
 
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
         try await handleRemoteTranscriptLoadEarlier(encoder.encode(p))
+    }
+
+    // MARK: - The fields a phone may set
+
+    /// A worktree a phone creates: the repo and the first message. The folder,
+    /// branch, name, parent, profile, model, agent, settings, plugin folders,
+    /// pull request and window size all take TBD's defaults, as spec section 5
+    /// says.
+    static func phoneWorktreeCreateParams(_ p: WorktreeCreateParams) -> WorktreeCreateParams {
+        WorktreeCreateParams(repoID: p.repoID, prompt: p.prompt)
+    }
+
+    /// A wake from a phone: the terminal and the message it carries. The
+    /// window size and the default-profile fallback take their defaults, so a
+    /// session pinned to a missing profile stays parked rather than resuming
+    /// on another account.
+    static func phoneWakeParams(_ p: TerminalWakeParams) -> TerminalWakeParams {
+        TerminalWakeParams(terminalID: p.terminalID, prompt: p.prompt)
+    }
+
+    /// A remote session a phone creates: the provider and its form values. A
+    /// seed and a parent worktree take their defaults, none.
+    static func phoneRemoteCreateParams(_ p: RemoteCreateParams) -> RemoteCreateParams {
+        RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
     }
 }

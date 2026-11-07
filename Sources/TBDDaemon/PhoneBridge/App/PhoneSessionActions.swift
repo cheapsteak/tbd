@@ -12,7 +12,9 @@ import TBDShared
 /// **Each method is an existing RPC, minus its socket edge.** It returns the
 /// `RPCResponse` that RPC returns, refusal text included, so the phone hears a
 /// refusal in the words the app hears. It runs exactly the checks the matching
-/// core function or handler runs, in the same order, and adds none.
+/// core function or handler runs, in the same order. The one check it adds is
+/// the send rail's refusal of a shell, which spec section 6 hides from the
+/// phone.
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -20,9 +22,12 @@ import TBDShared
 /// disagree. Take it from the bridge's verified peer, never from anything the
 /// phone sent. The read-only methods take none: their RPCs record nothing.
 ///
-/// **The params pass through unchanged.** The bridge builds them, so the
-/// bridge decides which fields a phone may set (spec section 5); nothing here
-/// filters them.
+/// **The conformance keeps only the fields a phone may set.** Where a params
+/// struct holds fields a phone may not set, the conformance builds fresh params
+/// from the fields it may, and everything else takes TBD's defaults, whatever
+/// the bridge passed (spec section 5). It names the fields it keeps, never the
+/// ones it drops, so a field added to a params struct later stays off the
+/// phone by default.
 protocol PhoneSessionActions: Sendable {
     /// `session.states` over every worktree. A `SessionStatesResult`, which
     /// never reports a plain shell.
@@ -36,17 +41,20 @@ protocol PhoneSessionActions: Sendable {
     /// socket handler runs, except the socket check.
     func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// The paired-phone send rail: no dispatch marker, always gated on
-    /// awaiting input, never verified, whatever `p` asks for.
+    /// The paired-phone send rail: the terminal, the message (`text` or
+    /// `parts`) and `submit`, with no dispatch marker, always gated on
+    /// awaiting input, never verified and never keys, whatever `p` asks for.
+    /// A shell terminal is refused before anything is typed.
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `terminal.wake`. A `TerminalWakeResult`.
+    /// `terminal.wake` with only the terminal and the message the wake
+    /// carries. A `TerminalWakeResult`.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.swapProfile`, in the mode `p` names.
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `worktree.create`.
+    /// `worktree.create` with only the repo and the first message.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.providers`. A `RemoteProvidersResult`.
@@ -55,7 +63,8 @@ protocol PhoneSessionActions: Sendable {
     /// `remote.sessions`. A `RemoteSessionsResult`.
     func phoneRemoteSessions() async throws -> RPCResponse
 
-    /// `remote.create`. The new session's `RemoteSessionPayload`.
+    /// `remote.create` with only the provider and its form values. The new
+    /// session's `RemoteSessionPayload`.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.sendMessage`, which refuses a session waiting on a prompt.
