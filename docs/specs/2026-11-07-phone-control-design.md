@@ -390,8 +390,8 @@ the phone does not show it until tapped.
   your message or a block of assistant text. The tool rows between those messages come along. A
   page is capped at 16 KB. A typical first page is 5–10 KB, one frame.
 - **Older pages** load only when the user scrolls within about two screens of the top, so a steady
-  scroll never waits. Each holds the next 20 messages and the rows between them, at most 64 KB,
-  which is one frame. Twenty messages fill several phone screens. A larger page would mostly carry
+  scroll never waits. Each holds the next 20 messages and the rows between them, at most 60 KB,
+  so a page fits one frame. Twenty messages fill several phone screens. A larger page would mostly carry
   history the user never reaches, and the virtual list renders only what is on screen anyway. A
   page is asked for with a cursor, which is a byte offset into the transcript file.
 - **One new parser function** is needed: parse the window that ends before a byte offset. A tool
@@ -675,7 +675,7 @@ The starting values are named constants in one place:
 
 - **Pairing offer life** – 5 minutes.
 - **First page** – back to the 4th-last message, at most 16 KB.
-- **Older pages** – 20 messages, at most 64 KB, fetched within two screens of the top.
+- **Older pages** – 20 messages, at most 60 KB, fetched within two screens of the top.
 - **Message preview** – 4 KB.
 - **Detail limit** – 1 MB.
 - **Request-ID memory** – 10 minutes.
