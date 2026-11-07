@@ -7,8 +7,9 @@
 #
 # Served: top-level *.html, *.js, *.css and *.webmanifest; channel/*.js; and each `file`
 # row of vendor/vendor.lock, as vendor/<name>/<path>. Never served: *.test.js, test/,
-# vendor.lock, *.md, dotfiles, symlinks. The only pages are index.html and runner.html: any
-# other page would run with the loader's origin and could read its IndexedDB.
+# vendor.lock, *.md, dotfiles, symlinks. A served file whose path holds anything but
+# A-Z a-z 0-9 . _ / - refuses. The only pages are index.html and runner.html: any other
+# page would run with the loader's origin and could read its IndexedDB.
 #
 # <site-dir> must be absent or empty. The site is built in a scratch directory and copied
 # into <site-dir> only once every check passes, so a refusal leaves <site-dir> untouched.
@@ -77,8 +78,15 @@ served_file() {
   [ -f "$cur" ]
 }
 
-# Copies $1, relative to the loader directory, to the same path in the stage.
+# Copies $1, relative to the loader directory, to the same path in the stage. Every
+# staged path is plain: letters, digits, '.', '_', '-' and '/'. A name holding a newline
+# would read as two paths in the listing below, and could slip a page past step 4.
+safe_path='^[A-Za-z0-9._/-]+$'
 copy() {
+  if ! [[ "$1" =~ $safe_path ]]; then
+    # Name it with every other byte shown as '?', so the message carries no control bytes.
+    refuse "refusing to stage a path with a character other than A-Z a-z 0-9 . _ / -: $(printf '%s' "$1" | tr -c 'A-Za-z0-9._/-' '?')"
+  fi
   case "$1" in */*) mkdir -p -- "$stage/${1%/*}" ;; esac
   cp -- "$loader/$1" "$stage/$1"
 }
@@ -134,16 +142,26 @@ while IFS= read -r rel; do
 done <"$work/list"
 
 # 5. Stamp the origin into the staged runner.html, and only there.
-occurrences() { # $1 = text, $2 = file
-  { grep -aoF -- "$1" "$2" || true; } | wc -l | tr -d '[:space:]'
+#
+# grep exits 0 on a match and 1 on none. Anything above 1 is an error, such as a file it
+# could not read, and is a refusal: read as "no match", it would let a check pass.
+count() { # $1 = text, $2 = file; sets n to how many times $1 occurs in $2
+  local rc=0
+  grep -aoF -- "$1" "$2" >"$work/matches" || rc=$?
+  if [ "$rc" -gt 1 ]; then refuse "grep could not read $2 (exit $rc)"; fi
+  n="$(wc -l <"$work/matches" | tr -d '[:space:]')"
+}
+carries() { # $1 = text, $2 = file; true when $2 holds $1
+  count "$1" "$2"
+  [ "$n" -gt 0 ]
 }
 runner="$stage/runner.html"
 if [ ! -f "$runner" ]; then refuse "runner.html is missing"; fi
-n="$(occurrences "$placeholder" "$runner")"
+count "$placeholder" "$runner"
 if [ "$n" != 1 ]; then refuse "runner.html must carry $placeholder exactly once (found $n)"; fi
 while IFS= read -r rel; do
   [ "$rel" != runner.html ] || continue
-  if grep -aqF -- "$placeholder" "$stage/$rel"; then
+  if carries "$placeholder" "$stage/$rel"; then
     refuse "$rel carries $placeholder; only runner.html may"
   fi
 done <"$work/list"
@@ -152,9 +170,9 @@ done <"$work/list"
 sed -i.bak "s|$placeholder_sed|$origin|" "$runner"
 rm -- "$runner.bak"
 
-n="$(occurrences "$placeholder" "$runner")"
+count "$placeholder" "$runner"
 if [ "$n" != 0 ]; then refuse "runner.html still carries $placeholder after stamping"; fi
-n="$(occurrences "$origin" "$runner")"
+count "$origin" "$runner"
 if [ "$n" != 1 ]; then refuse "runner.html must name $origin exactly once after stamping (found $n)"; fi
 
 mkdir -p -- "$site"

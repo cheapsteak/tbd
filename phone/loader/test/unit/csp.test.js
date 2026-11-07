@@ -40,8 +40,8 @@ test('runner policy names an origin, never self', () => {
   const p = parseMetaPolicy(read('runner.html'));
   assert.deepEqual(p, {
     'default-src': ["'none'"], 'script-src': ['https://loader-origin.invalid', 'blob:'],
-    'style-src': ['blob:'], 'img-src': ['data:', 'blob:'], 'connect-src': ["'none'"],
-    'base-uri': ["'none'"], 'form-action': ["'none'"],
+    'worker-src': ["'none'"], 'style-src': ['blob:'], 'img-src': ['data:', 'blob:'],
+    'connect-src': ["'none'"], 'base-uri': ["'none'"], 'form-action': ["'none'"],
     'require-trusted-types-for': ["'script'"], 'trusted-types': ['runner'] });
   assert.ok(!read('runner.html').includes("'self'"));
 });

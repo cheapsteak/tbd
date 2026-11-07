@@ -169,6 +169,61 @@ refuses "a lock-listed file that is missing refuses" lock_missing_file
 refuses "a lock-listed file behind a symlinked directory refuses" lock_symlink_dir
 refuses "a lock-listed symlink refuses" lock_symlink_file
 
+# --- Names -----------------------------------------------------------------------------
+
+# Without the name check, this page would list as the two lines index.html and runner.html,
+# pass the page check and be served with the loader's origin.
+newline_page() { printf '<p>x</p>\n' >"$1/$(printf 'index.html\nrunner.html')"; }
+newline_channel() { printf '//\n' >"$1/channel/$(printf 'a\nb.js')"; }
+space_name() { printf '//\n' >"$1/a b.js"; }
+non_ascii_name() { printf '//\n' >"$1/$(printf 'caf\303\251.js')"; }
+refuses "a page named with a newline refuses" newline_page
+refuses "a channel file named with a newline refuses" newline_channel
+refuses "a file named with a space refuses" space_name
+refuses "a file named with a non-ASCII letter refuses" non_ascii_name
+
+t="$tmp/newline-message"
+make_tree "$t"
+newline_page "$t"
+run "$t" "$t-site" https://acme.github.io
+if [ "$rc" -eq 1 ] && [ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" = 1 ] &&
+  grep -Fq 'index.html?runner.html' <<<"$err"; then
+  ok "the refusal names the file on one line, with the newline shown as '?'"
+else
+  bad "newline message: rc=$rc err=$err"
+fi
+
+# --- grep errors -----------------------------------------------------------------------
+
+# A grep that cannot read a file exits 2, which must refuse rather than read as "no
+# match". The shim stands in for an unreadable staged file: it fails, as grep does, for
+# any path ending in /$FAIL_GREP_ON, and runs the real grep otherwise.
+shim="$tmp/shim"
+mkdir -p "$shim"
+real_grep="$(command -v grep)"
+cat >"$shim/grep" <<'EOF'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in */"$FAIL_GREP_ON") echo "grep: $a: Permission denied" >&2; exit 2 ;; esac
+done
+exec "$REAL_GREP" "$@"
+EOF
+chmod +x "$shim/grep"
+
+grep_fails_on() { # $1 = the staged file grep cannot read, $2 = description
+  local t="$tmp/case$((++cases))"
+  make_tree "$t"
+  FAIL_GREP_ON="$1" REAL_GREP="$real_grep" PATH="$shim:$PATH" \
+    run "$t" "$t-site" https://acme.github.io
+  if [ "$rc" -eq 1 ] && untouched "$t-site" && grep -Fq 'grep could not read' <<<"$err"; then
+    ok "$2"
+  else
+    bad "$2: rc=$rc out=$out err=$err"
+  fi
+}
+grep_fails_on main.js "a staged file grep cannot read refuses, rather than passing the placeholder check"
+grep_fails_on runner.html "a runner.html grep cannot read refuses"
+
 # --- HTML ------------------------------------------------------------------------------
 
 other_html() { printf '<p>x</p>\n' >"$1/other.html"; }
