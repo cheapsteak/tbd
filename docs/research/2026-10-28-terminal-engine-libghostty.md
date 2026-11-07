@@ -1,11 +1,14 @@
 # Terminal engine: SwiftTerm or libghostty
 
 *Evidence record gathered 2026-11-06, the day `libghostty-vt` 1.0.0 was tagged,
-against TBD at `43a009132`. Sources are the library's announcement, its
-documentation and headers at the `vt-1.0.0` tag, Ghostty's release notes, its
-maintainer's public statements, the repositories and write-ups of projects that
-embed libghostty, and TBD's own tree. Statements carrying a date are evidence
-about that date. The record makes a recommendation; it changes no behavior.
+against TBD at `43a009132`, with a proof of concept run on 2026-11-07 against
+TBD at `5891dd294`. Sources are the library's announcement, its documentation
+and headers at the `vt-1.0.0` tag, Ghostty's release notes, its maintainer's
+public statements, the repositories and write-ups of projects that embed
+libghostty, TBD's own tree, and the proof of concept on the branch
+[`spike/libghostty-vt-poc`](https://github.com/cheapsteak/tbd/tree/spike/libghostty-vt-poc/spikes/libghostty-vt).
+Statements carrying a date are evidence about that date. The record makes a
+recommendation; it changes no behavior.
 Companion record:
 [`docs/perf/2026-08-25-terminal-engine-options.md`](../perf/2026-08-25-terminal-engine-options.md),
 which surveys the same options as of 2026-08-25 in more depth, including prior
@@ -13,25 +16,36 @@ art and migration paths this record only summarizes.*
 
 ## Answer
 
-Stay on SwiftTerm, and reopen the question when the Ghostty project publishes a
-Swift renderer package for `libghostty-vt`.
+Stay on SwiftTerm for now. TBD could move to stock `libghostty-vt`, and the
+viewer could move before the daemon. But what a move buys does not yet pay for
+what it costs.
 
-A move needs two things, and one of them exists:
+The proof of concept measured both sides ("Proof of concept"):
 
-1. **A stable library – met.** `libghostty-vt` 1.0.0 was tagged on 2026-11-06
-   with a declared ABI promise.
-2. **A Swift renderer from the Ghostty project – not met.** No package was found
-   on 2026-11-06, and the 1.0 announcement does not mention one.
+- **Cost** – about 9,400 lines of renderer and view code for TBD to own, plus an
+  estimated 1,000 to 2,000 lines to close the gaps it found. Both come before
+  the work on TBD's transport and handover.
+- **Gain** – parsing 1.1 to 6.3 times as fast as TBD's SwiftTerm fork, and about
+  4 times as fast on real Claude Code output. Half the memory for idle
+  terminals, which is about 12 MB per 100 terminals. A full scrollback 15%
+  smaller, or under 2 MB after a compress that the host calls.
 
-Until the second is true, every route to libghostty costs either a fork of
-Ghostty or a renderer TBD writes itself, and the performance problem that first
-raised the question turned out not to live in the engine. Once it is true, the
-cost falls to a trial behind a default-off flag. The move still has to cover the
-daemon's headless emulator and the app's viewer together, for the reason given
-under "Two emulators, one snapshot format".
+Neither gain answers a problem TBD has. The terminal lag that first raised the
+question was traced to causes outside the engine ("Why TBD has stayed on
+SwiftTerm").
 
-TBD has written no code toward the move ("What TBD has in place"). One check is
-worth running either way ("One check worth running sooner").
+The library itself is ready: `libghostty-vt` 1.0.0 was tagged on 2026-11-06
+with a declared ABI promise. Reopen the question when one of these becomes true:
+
+1. **The Ghostty project publishes a Swift renderer package for
+   `libghostty-vt`.** That removes most of the cost. No package was found on
+   2026-11-06, and the 1.0 announcement does not mention one.
+2. **A measured TBD problem lives in the engine.** Examples are parse time in a
+   profile of real use, memory held by many long scrollbacks, or defects in
+   TBD's SwiftTerm fork that cost more to fix than a move would.
+
+Either way, the move starts with `/tbd-brainstorming` and ships behind a
+default-off flag ("Before a move").
 
 ## Two embedding surfaces
 
@@ -94,14 +108,38 @@ On attach, the daemon writes its screen out as an escape-sequence preamble
 viewer replays it before any live output. When the viewer detaches, it hands a
 preamble back the same way (`HolderHandback`). Each preamble is written from
 one emulator's grid and parsed by the other. Both are SwiftTerm, so writer and
-reader agree by construction.
-
-Moving only the viewer would put two VT implementations on either side of that
-format, and their disagreements would show up as screens that change on attach
-or detach. The holder transport design
+reader share one parser. The holder transport design
 (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`) rejects a
-third-party headless VT for the daemon for this reason, and the argument runs
-the other way too: the engine changes on both sides or on neither.
+third-party headless VT for the daemon for that reason: SwiftTerm there gives
+one parser for the daemon's screen reads and for the viewer's picture.
+
+Moving only the viewer puts two VT implementations on either side of the
+format. The proof of concept tested that at byte level, in 213 states:
+
+- **Daemon to viewer** – TBD's unchanged writer, read by a fresh `libghostty-vt`
+  terminal, gives the same screen as a fresh SwiftTerm in 211 states. The other
+  2 are grapheme differences that also appear when the two engines read the raw
+  stream.
+- **Viewer to daemon** – `libghostty-vt`'s VT formatter, read by SwiftTerm,
+  keeps the screen in 210 states. The other 3 hold content that SwiftTerm
+  cannot represent.
+
+So the format does not force both sides to change at once, and the viewer can
+move first. That costs three things:
+
+- **A reset before each preamble** – a reused viewer must be reset before it
+  reads a preamble.
+- **A writer on the viewer side** – the formatter covers the active screen and
+  all its scrollback, but only the active screen. On an alternate screen, the
+  writer formats a snapshot copy that has left the alternate screen, then adds
+  the alternate screen. It must also send `?25l` after `?1049h`, because
+  SwiftTerm shows the cursor on every switch to an alternate screen.
+- **Two parsers in use** – while only the viewer has moved, the daemon's screen
+  reads and the viewer's picture can differ where the engines differ, such as
+  grapheme clustering or `CSI S` on the primary screen ("Proof of concept").
+
+The live attach and detach flow did not run, so a trial through the real daemon
+and app is still owed.
 
 `libghostty-vt` fits the daemon's side with no renderer at all. The renderer is
 the cost of the viewer's side alone.
@@ -112,39 +150,41 @@ and scrollback, and can restore in pieces so a viewer draws before old history
 arrives. The ABI promise excludes them, though: the snapshot functions are part
 of the C ABI, "but the bytes they produce and accept may change in any release",
 and "Snapshot format version 1 is a work in progress and doesn't carry a
-binary-compatibility guarantee."
+binary-compatibility guarantee." In the proof of concept, a binary snapshot
+kept all 213 states between two `libghostty-vt` terminals of the same version.
 
 The daemon and the app can run different builds, because `scripts/restart.sh
 --app` restarts only the app, from whatever binary is on disk. A static library
 ties each build to its own version, so a binary snapshot could reach a build
 that cannot read it. The preamble therefore stays VT text unless a spec designs
-a fallback. The VT formatter is the candidate, and its header describes it as
-covering "a terminal's active screen" without saying whether that includes
-scrollback, which a trial has to establish.
+a fallback.
 
 ## What TBD has in place
 
-Research, and no code. Measured at `43a009132`:
+No code in the shipped tree. Measured at `43a009132`:
 
 - **No engine boundary** – 17 source files import SwiftTerm, 9,963 lines in all,
   as do 32 test files. `withTerminal` appears 21 times, 12 of them in
   `TBDTerminalView.swift`. No protocol separates the engine from its callers.
 - **No flag** – nothing gates an engine change. `useMetalTerminalRenderer`
   chooses a renderer inside SwiftTerm only.
-- **No recorded sessions** – the tree holds no recorded pty byte streams, and
-  both the first trial and the check below need them.
-- **No comparison** – the check under "One check worth running sooner" has not
-  been run.
+- **A proof of concept, outside the build** – `spikes/libghostty-vt/` on the
+  branch `spike/libghostty-vt-poc` (commit `4bc474f59`) holds a headless engine
+  check (`check/`) and a standalone window (`view/`). The branch never merges.
+  Its recorded sessions are git-ignored, and its `vtcheck corpus` command
+  records them again.
 
 ## Why TBD has stayed on SwiftTerm
 
 - **Every route to libghostty costs a fork or a renderer.** `ghostty.h` cannot
   be fed bytes without patching Ghostty. `libghostty-vt` can, but leaves TBD to
   write a Metal or CoreText renderer and the view work around it: keyboard and
-  IME input, selection, mouse, scrolling and accessibility.
-  `Aqothy/ghost-swiftly` shows the scale: its Swift port of Ghostty's renderer,
-  with its views and bindings, is about 520 KB of source before bundled fonts,
-  some of it generated tables.
+  IME input, selection, mouse, scrolling and accessibility. The proof of
+  concept sized that work: a renderer and view adapted from tkzmux, an
+  MIT-licensed macOS app on `libghostty-vt`, of which TBD would own about 9,400
+  lines. `Aqothy/ghost-swiftly` shows the scale another way: its Swift port of
+  Ghostty's renderer, with its views and bindings, is about 520 KB of source
+  before bundled fonts, some of it generated tables.
 - **The performance motive is gone.** The terminal lag that raised the question
   was traced to three causes, none of them in the engine:
   - SwiftUI view-graph flushes stalling the main thread, fixed by per-property
@@ -158,6 +198,9 @@ Research, and no code. Measured at `43a009132`:
   SwiftTerm never appeared in a main-thread hang stack. TBD's fork tracks
   upstream SwiftTerm's `main`, whose display-link `FrameDriver` replaces the
   fixed 16.67 ms repaint timer and moves Metal rendering off the main thread.
+  Against TBD's fork, `libghostty-vt` parses 1.1 to 6.3 times as fast. That is
+  well below the 6 to 21 times that `side-terminal-bench` measured against stock
+  SwiftTerm, because the fork is already much faster than stock.
 - **Embedders of `ghostty.h` have reported serious defects.** These were
   gathered on 2026-08-25 from those projects' own trackers and are recorded
   in the companion record, except where another date is given:
@@ -180,6 +223,119 @@ Research, and no code. Measured at `43a009132`:
   These concern `ghostty.h` surfaces. A `libghostty-vt` embedder writes its own
   renderer and surface lifecycle, so it inherits neither these defects nor
   anyone's fixes for them.
+
+## Proof of concept
+
+Run on 2026-11-07 on the branch `spike/libghostty-vt-poc`. It used the official
+`libghostty-vt` 1.0.0 xcframework through a SwiftPM `binaryTarget`, with no
+fork, no patches and no Zig, against TBD's SwiftTerm fork at `c6b544f8`. The
+machine was shared, and other work ran throughout.
+
+**What ran.**
+
+- **Engine check** – the same bytes went through both engines: six synthetic
+  streams of 16 to 36 MB, and four recordings. Two recordings are of the real
+  Claude Code TUI on the fake model API, and two are of `vim` and `less`.
+  Screens were compared cell by cell at 432 checkpoints. The check also replayed
+  213 handover states in each direction, and fed each sequence TBD relies on to
+  both engines.
+- **Window** – a standalone macOS window that draws `libghostty-vt` with a Metal
+  renderer and runs a real command in a real pty.
+
+**Speed.** Each ratio is the median of 7 runs, at the same grid and scrollback.
+Two more runs under heavier load gave the same order.
+
+| workload | `libghostty-vt` ÷ SwiftTerm fork |
+|---|---|
+| TUI redraws | 6.3 |
+| Unicode text | 5.1 |
+| Claude Code, classic renderer | 4.4 |
+| Claude Code, fullscreen renderer | 3.9 |
+| Colours | 3.7 |
+| `vim` | 3.0 |
+| `less` | 2.7 |
+| Scrolling | 1.7 |
+| ASCII text | 1.2 |
+| Cursor movement | 1.1 |
+
+**Memory.** At 200 by 60 with a 10,000-line limit, `libghostty-vt` used 0.64 of
+the fork's memory for one idle terminal, and 0.48 to 0.50 for 20 or 100. That
+saves about 12 MB per 100 terminals. One full scrollback used 0.85 to 0.87. A
+compress that the host calls took that scrollback from about 17 MB to between
+0.7 and 1.9 MB. The cost of reading compressed history back was not measured.
+
+**Same screen.** Most of the corpus matched at cell level, and every difference
+has a named cause. Where the engines disagreed, SwiftTerm was wrong more often.
+For example, `CSI S` on the primary screen pushes rows into scrollback on
+`libghostty-vt`, as on xterm, and not on SwiftTerm. Two kinds of grapheme
+cluster could not be ruled either way: Devanagari conjuncts, and VS16 at the
+right edge. Which one suits a program depends on that program's own width
+calculation.
+
+**Handover.** See "Two emulators, one snapshot format".
+
+**TBD's signals.** OSC 7501 reports and the OSC 7501 support query both work.
+Once the host sets the callback, the library answers the query itself during
+parsing, which is the timing Claude Code needs. OSC 777, titles, OSC 7, OSC 8,
+OSC 52, BEL, DECRQM, device attributes, cursor reports, Kitty keyboard flags and
+synchronized output all reach the host.
+
+**Real use.** The real Claude Code TUI ran in the window with typing, a streamed
+answer, Shift+Return, paste, wheel scrolling, selection and resize. 120 resizes
+while streaming lost none of 4,481 lines. 20 panes kept up with paced output.
+Real key events posted through AppKit reached `zsh`.
+
+**Gaps the window found.** Most are for the renderer or the host to close:
+
+- Ctrl-I, Ctrl-M and Ctrl-[ reach a shell as CSI u sequences. The key encoder
+  does this on purpose, following the fixterms specification, so the host has to
+  send the C0 byte when no Kitty keyboard flags are active.
+- The wheel does nothing in `less` or `vim`, because alternate scroll (mode
+  1007) is not handled.
+- Powerline and Nerd Font glyphs draw as empty boxes with Menlo.
+- IME composition text is invisible while typing.
+- Kitty image commands are answered `OK` and never drawn.
+- Overline, blink, ligatures and BiDi are absent.
+
+**Library settings a host must get right.**
+
+- **Scrollback** – the default `GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES` is
+  10,000 bytes, and it wins over any line limit. Set it first.
+- **Retained rows** – the count can fall below the line limit: 4,792 at a limit
+  of 5,000. Ask for more lines than are needed.
+- **Grapheme clustering** – turning mode 2027 on matches SwiftTerm, whose
+  clustering is always on.
+- **ABI** – the getters and setters take `void*`, so the compiler cannot see a
+  type change. One happened between tkzmux's pin and 1.0.0, to the
+  `GRAPHEMES_BUF` getter. Pin a tag and read each header diff.
+
+**Not tested.**
+
+- A frame seen on the screen. The screen was locked during the live run, so
+  every picture is an offscreen render.
+- Real mouse events, a real input method, and dragging the window edge.
+- Key-to-paint latency.
+- Attach and detach through TBD's real daemon and app.
+- Long real sessions. The recordings are three turns on the fake model API.
+
+**Defects found in TBD.** With no Ghostty involved, the check found defects in
+TBD's own handover and in its SwiftTerm fork:
+
+- **Rows shift on reattach** – the cell walk dropped trailing blank rows even
+  with history above them, so the replayed screen landed too low and the cursor
+  pointed at the wrong line. It hit 6 of 24 checkpoints in a Claude Code
+  recording. Fixed in #1393.
+- **Background colour lost on blank cells** – a blank cell with only a
+  background colour was trimmed from the end of its line. Fixed in #1393.
+- **Hidden cursor shown again** – the writer sent `?25l` before `?1049h`, on
+  both the holder and the tmux attach paths. Fixed in #1392.
+- **No tab stops past column 80** – on a SwiftTerm terminal created wider than
+  80 columns, which is how the daemon creates its terminal. Fixed in #1394.
+- **Colour lost after 65,535 styles** – the fork's style table never reclaimed
+  entries, so new styles fell back to the default. Fixed in #1394.
+
+The check also found state that TBD's writer never carries, such as a cursor
+left in pending wrap. It bounds what any viewer can show after attach.
 
 ## Ghostty on 2026-11-06
 
@@ -218,10 +374,9 @@ Research, and no code. Measured at `43a009132`:
 **TBD's needs against the 1.0 headers.**
 
 - **OSC 7501** – `GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS` delivers each report to a
-  callback, and the terminal stores none of them. TBD implements the protocol
-  already (`docs/specs/2026-10-10-program-status-protocol-design.md`). The
-  headers read do not say whether the library answers the support query itself,
-  so a trial has to test it.
+  callback, and the terminal stores none of them. The library answers the
+  support query itself ("Proof of concept"). TBD implements the protocol
+  already (`docs/specs/2026-10-10-program-status-protocol-design.md`).
 - **Pty replies** – `GHOSTTY_TERMINAL_OPT_WRITE_PTY` carries them. Without it,
   queries go unanswered.
 - **OSC 9;4** – the library draws nothing, and the progress callback can be left
@@ -285,44 +440,36 @@ No evidence supports a date. The announcement said "Coming soon..." on
 2026-07-02, and the 1.0 announcement's stated direction does not include it. The
 C API underneath is stable, so an ABI break is not a reason to hold it back.
 
-If it never ships, the alternative is a renderer TBD writes on `render.h`, path
-B in the companion record. That would be a new decision needing its own motive,
-since performance is not one.
+If it never ships, the alternative is a renderer TBD writes or adapts on
+`render.h`, path B in the companion record. The proof of concept sized that
+path. Taking it would be a new decision needing its own motive, since
+performance is not one.
 
-## When the renderer ships
+## Before a move
 
 - **Spec and flag** – replacing the terminal engine replaces a load-bearing
   path, so it starts with `/tbd-brainstorming` and ships behind a default-off
   flag.
-- **The package itself** – check its licence, its version pin against
+- **The renderer** – for a package, check its licence, its version pin against
   `libghostty-vt`, and what it covers of IME, selection, scrolling and
-  accessibility.
+  accessibility. Without a package, start from the proof of concept's window
+  and close its gaps.
 - **Engine boundary** – add one first. The companion record describes a
   runtime-switchable dual backend of about 240 lines in another project.
-- **First trial** – put both the daemon's reader and one viewer on
-  `libghostty-vt` in a scratch build, replay recorded sessions through both,
-  and compare the screens on attach and detach.
-- **What has to move** – `TerminalSnapshotWriter` and `SGREncoder`, or their
-  replacement by libghostty's VT formatter; the mode readings that holder
-  sends depend on; the OSC 7501 probe and reports; OSC 9;4 suppression; mouse
-  reporting, including the Option-drag bypass; selection; and every
-  `withTerminal` read in `TBDTerminalView`.
+- **First trial** – move one viewer behind the flag, keep the daemon on
+  SwiftTerm, and run attach, detach and resize through the real daemon and app.
+  The proof of concept checked the bytes. The trial checks the flow.
+- **What has to move with the viewer** – the reset before each preamble and a
+  writer for detach ("Two emulators, one snapshot format"); the OSC 7501 probe
+  and reports; OSC 9;4 suppression; mouse reporting, including the Option-drag
+  bypass; selection; and every `withTerminal` read in `TBDTerminalView`.
+- **What has to move with the daemon, later** – `TerminalSnapshotWriter` and
+  `SGREncoder`, or libghostty's VT formatter in their place, and the mode
+  readings that holder sends depend on.
 - **Images** – decide whether losing Sixel and iTerm2 inline images is
   acceptable.
 - **The pager** – check that the renderer releases GPU resources for hidden
   views. The 1.4 GUI does; a Swift renderer package may not.
-
-## One check worth running sooner
-
-Feed the same recorded sessions to SwiftTerm and to `libghostty-vt`, and diff
-the VT that each one's formatter writes. That tests `TerminalSnapshotWriter`
-against an independent VT implementation, a check TBD cannot run today, and it
-is useful whether or not the engine ever changes.
-
-`vt-1.0.0` gives the check a stable version to pin. It starts by capturing the
-sessions, because the tree holds none. It belongs in a one-off script, because
-adding a binary dependency to `Package.swift` for one check is a separate
-decision.
 
 ## Sources
 
@@ -341,3 +488,6 @@ decision.
 - `Aqothy/ghost-swiftly` – https://github.com/Aqothy/ghost-swiftly
 - `caelyreth/libghostty-vt-spm` – https://swiftpackageregistry.com/caelyreth/libghostty-vt-spm
 - `termio-sh/libghostty-swift` – https://github.com/termio-sh/libghostty-swift
+- The proof of concept – https://github.com/cheapsteak/tbd/tree/spike/libghostty-vt-poc/spikes/libghostty-vt
+- tkzmux, the source of the proof of concept's renderer – https://github.com/tkz0/tkzmux
+- `side-terminal-bench` – https://github.com/gazishahi/side-terminal-bench
