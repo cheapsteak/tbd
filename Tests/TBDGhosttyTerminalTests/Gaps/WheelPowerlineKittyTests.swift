@@ -73,6 +73,12 @@ private let kittyQuery = "\u{1b}_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\u{1b}\\"
 /// error rather than `OK`; one without it answers nothing.
 private let shortKittyQuery = "\u{1b}_Gi=1,a=q;AAAA\u{1b}\\"
 
+/// A wheel outcome other than the one a test expected, recorded as an error so its description
+/// reaches the CI summary.
+private struct UnexpectedWheelOutcome: Error, CustomStringConvertible {
+    let description: String
+}
+
 private func repliesText(_ recorder: CallbackRecorder) -> String {
     recorder.writes.map { String(decoding: $0, as: UTF8.self) }.joined()
 }
@@ -107,7 +113,8 @@ struct WheelPowerlineKittyTests {
         terminal.feed(text: "\u{1b}[?1007h\u{1b}[?1000h\u{1b}[?1006h")
         let tracked = terminal.mouseWheel(rows: 1, at: wheelPoint, mods: [])
         guard case .report(let bytes) = tracked, bytes.starts(with: Array("\u{1b}[<65;".utf8)) else {
-            Issue.record("with mouse reporting on the wheel gave \(describe(tracked)), not a button-5 report")
+            Issue.record(UnexpectedWheelOutcome(
+                description: "with mouse reporting on the wheel gave \(describe(tracked)), not a button-5 report"))
             return
         }
     }

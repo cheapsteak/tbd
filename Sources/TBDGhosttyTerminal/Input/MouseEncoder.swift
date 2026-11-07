@@ -488,10 +488,11 @@ final class MouseEncoder {
         guard rows != 0 else { return .none }
 
         guard isReporting(terminal: terminal) else {
-            if Self.isAlternateScreen(terminal) {
-                guard Self.mode(Self.alternateScrollMode, of: terminal) else { return .none }
+            let state = GhosttyTerminalState(raw: terminal)
+            if state.isAlternateScreen {
+                guard state.mode(Self.alternateScrollMode) else { return .none }
                 return .cursorKeys(Self.alternateScrollKeys(
-                    rows: rows, applicationCursorKeys: Self.mode(Self.applicationCursorKeysMode, of: terminal)))
+                    rows: rows, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode)))
             }
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
@@ -525,21 +526,6 @@ final class MouseEncoder {
     static func alternateScrollKeys(rows: Int, applicationCursorKeys: Bool) -> [UInt8] {
         let key: [UInt8] = [0x1B, UInt8(ascii: applicationCursorKeys ? "O" : "["), UInt8(ascii: rows < 0 ? "A" : "B")]
         return Array([[UInt8]](repeating: key, count: abs(rows)).joined())
-    }
-
-    /// True while `terminal` shows the alternate screen. Caller holds the lock.
-    private static func isAlternateScreen(_ terminal: VtTerminal) -> Bool {
-        var screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY
-        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) == GHOSTTY_SUCCESS
-        else { return false }
-        return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
-    }
-
-    /// Whether DEC private mode `number` is set on `terminal`. Caller holds the lock.
-    private static func mode(_ number: UInt16, of terminal: VtTerminal) -> Bool {
-        var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(number, false), value: false)
-        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS else { return false }
-        return config.value
     }
 }
 

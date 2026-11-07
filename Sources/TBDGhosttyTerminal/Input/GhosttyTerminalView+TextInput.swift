@@ -82,11 +82,10 @@ extension GhosttyTerminalView: @preconcurrency NSTextInputClient {
         case let value as String: text = value
         default: return
         }
-        // The commit ends the composition: the overlay goes, and the text goes to the program.
+        // The commit ends the composition: the overlay goes, and the text goes to the program,
+        // whose echo is what redraws the grid.
         inputController.insertFromInputContext(text)
         updatePreeditOverlay()
-        surface.markNeedsDisplay()
-        requestFrame()
     }
 
     /// Deliberately empty.

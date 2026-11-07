@@ -269,17 +269,9 @@ final class KeyEncoder {
                 "key_encoder_set(OPTION_AS_ALT)")
 
             let encoded = try encodeCurrentEvent()
-            return Self.legacyControlBytes(replacing: encoded, kittyFlags: Self.kittyKeyboardFlags(of: terminal))
-                ?? encoded
+            let kittyFlags = GhosttyTerminalState(raw: terminal).kittyKeyboardFlags
+            return Self.legacyControlBytes(replacing: encoded, kittyFlags: kittyFlags) ?? encoded
         }
-    }
-
-    /// The Kitty keyboard flags the program has set, or nil when libghostty cannot say.
-    private static func kittyKeyboardFlags(of terminal: VtTerminal) -> UInt8? {
-        var flags: UInt8 = 0
-        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &flags) == GHOSTTY_SUCCESS
-        else { return nil }
-        return flags
     }
 
     /// Control bytes in place of the CSI u that libghostty encoded some Ctrl keys as, for a program
@@ -304,7 +296,7 @@ final class KeyEncoder {
     /// Meta (`;7u`), the C0 byte follows an ESC, as libghostty does for every other control key.
     ///
     /// - Returns: the bytes to send instead, or nil to send `encoded` unchanged.
-    static func legacyControlBytes(replacing encoded: [UInt8], kittyFlags: UInt8?) -> [UInt8]? {
+    static func legacyControlBytes(replacing encoded: [UInt8], kittyFlags: UInt8) -> [UInt8]? {
         guard kittyFlags == 0 else { return nil }
         // ESC [ <codepoint> ; <modifiers> u
         guard encoded.count >= 6, encoded[0] == 0x1B, encoded[1] == UInt8(ascii: "["),
