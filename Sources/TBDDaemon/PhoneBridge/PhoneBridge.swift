@@ -20,6 +20,15 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     case messageTooLarge
     /// An `app` body handed to the bridge is not exactly one JSON object.
     case notAJSONObject
+    /// No pairing offer with that ID is open: it was never made, another
+    /// offer replaced it, or it ended without expiring (paired, denied or
+    /// interrupted).
+    case noSuchOffer
+    /// The pairing offer reached the end of its 5 minutes.
+    case offerExpired
+    /// The pairing offer is open, but no phone has finished pairing with it
+    /// yet, so there is nothing to allow.
+    case notAwaitingApproval
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +43,12 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
             return "A message for the phone is larger than one encrypted frame can carry."
         case .notAJSONObject:
             return "A message for the phone app is not one JSON object."
+        case .noSuchOffer:
+            return "That pairing request is no longer open. Start pairing again."
+        case .offerExpired:
+            return "The pairing code expired. Start pairing again for a new code."
+        case .notAwaitingApproval:
+            return "No phone has finished pairing yet. Wait until the phone shows its code."
         }
     }
 }
