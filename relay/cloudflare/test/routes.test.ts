@@ -112,6 +112,30 @@ describe("routes", () => {
     const socket = await connect(newRoomID(), "laptop");
     socket.close();
   });
+
+  it("every HTTP response is readable from any origin", async () => {
+    const id = newRoomID();
+    const cases: [label: string, path: string, init: RequestInit | undefined, status: number][] = [
+      ["the root", "/", undefined, 200],
+      ["info", "/v1/info", undefined, 200],
+      ["presence", `/v1/rooms/${id}/presence`, undefined, 200],
+      ["an unknown path", "/favicon.ico", undefined, 404],
+      ["a malformed room ID", `/v1/rooms/${id.slice(0, 42)}?role=phone`, upgrade, 404],
+      // What a cross-origin loader sees when it asks presence for a bad room ID.
+      ["presence for a malformed room ID", `/v1/rooms/${id.slice(0, 42)}/presence`, undefined, 404],
+      ["another method on the root", "/", { method: "POST" }, 405],
+      ["another method on info", "/v1/info", { method: "POST" }, 405],
+      ["another method on a room", `/v1/rooms/${id}?role=laptop`, { method: "POST" }, 405],
+      ["another method on presence", `/v1/rooms/${id}/presence`, { method: "POST" }, 405],
+      ["a bad role", `/v1/rooms/${id}?role=admin`, upgrade, 400],
+      ["a room URL without an upgrade", `/v1/rooms/${id}?role=laptop`, undefined, 426],
+    ];
+    for (const [label, path, init, status] of cases) {
+      const res = await request(path, init);
+      expect(res.status, label).toBe(status);
+      expect(res.headers.get("access-control-allow-origin"), label).toBe("*");
+    }
+  });
 });
 
 describe("presence route", () => {

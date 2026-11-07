@@ -175,17 +175,20 @@ Durable Object time.
 
 **API v1.** This is a stable contract. TBD supports it for good.
 
+- **Every HTTP response carries `Access-Control-Allow-Origin: *`,** refusals included, so a page on
+  another origin, such as the loader, reads the real status rather than an opaque CORS error. The
+  relay sets no cookies and reads no credentials, so this exposes nothing. CORS does not govern the
+  WebSocket upgrade.
 - **`GET /v1/info`** – returns `{"name":"tbd-relay","version":"<semver>","api":[1]}` with
   `Content-Type: application/json` and `Cache-Control: no-store`.
 - **`GET /v1/rooms/<roomID>?role=laptop|phone`** – opens a WebSocket. A room ID is 43 base64url
   characters (32 bytes). Each role has one socket per room. A new socket for a role closes the old
   one with code 4000 and reason `replaced`.
 - **`GET /v1/rooms/<roomID>/presence`** – returns `{"laptop":true}` while the room has an open
-  laptop socket and `{"laptop":false}` otherwise, with `Content-Type: application/json`,
-  `Access-Control-Allow-Origin: *` and `Cache-Control: no-store`. The room ID rule is the same. It
-  opens no socket and displaces no one, so the loader's laptops list asks it whether each paired
-  laptop is online: joining the room as a phone would close another tab's phone socket with code
-  4000. Its 405 response carries the same `Access-Control-Allow-Origin` header.
+  laptop socket and `{"laptop":false}` otherwise, with `Content-Type: application/json` and
+  `Cache-Control: no-store`. The room ID rule is the same. It opens no socket and displaces no one,
+  so the loader's laptops list asks it whether each paired laptop is online: joining the room as a
+  phone would close another tab's phone socket with code 4000.
 - **HTTP status codes.** A path that is not `/`, `/v1/info`, `/v1/rooms/<roomID>` or
   `/v1/rooms/<roomID>/presence` gets 404, and a malformed room ID is checked first, whatever the
   method. A method other than GET gets 405 with `Allow: GET`. A room URL without exactly one `role`

@@ -54,15 +54,15 @@ Wrangler opens a browser so you can log in to Cloudflare.
 
 This contract is stable. TBD supports it for good.
 
+- **Any origin can read every HTTP response.** Each one carries `access-control-allow-origin: *`, refusals included, so a page on another origin, like the phone loader, sees the real status. The relay sets no cookies and reads no credentials, so this exposes nothing. CORS does not apply to the WebSocket upgrade.
 - **`GET /`** – answers 200 with a one-line text page. It is not part of the API.
 - **`GET /v1/info`** – answers `{"name":"tbd-relay","version":"1.0.0","api":[1]}` with `content-type: application/json` and `cache-control: no-store`.
 - **`GET /v1/rooms/<roomID>?role=laptop|phone`** – opens a WebSocket.
   - A room ID is 43 base64url characters (`A-Z a-z 0-9 - _`), which is 32 bytes without padding.
   - A room has two roles, `laptop` and `phone`. Each role has one socket. A new socket for a role closes the old one with code 4000 and reason `replaced`.
 - **`GET /v1/rooms/<roomID>/presence`** – answers `{"laptop":true}` while the room has an open laptop socket, and `{"laptop":false}` otherwise.
-  - It sends `content-type: application/json`, `cache-control: no-store` and `access-control-allow-origin: *`.
+  - It sends `content-type: application/json` and `cache-control: no-store`.
   - It opens no socket and displaces no one. The role and `Upgrade` header play no part.
-  - A method other than GET gets 405 with `Allow: GET`, also with `access-control-allow-origin: *`.
 - **Status codes**
   - 404 – the path is not one of the routes above, or the room ID is malformed. This is checked first, whatever the method.
   - 405 – the method is not GET. The response carries `Allow: GET`.
