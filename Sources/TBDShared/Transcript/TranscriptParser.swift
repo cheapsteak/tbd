@@ -1076,7 +1076,7 @@ public enum TranscriptParser {
 /// log line naming the error, so a scan cut short by an I/O failure is not
 /// silent.
 struct ForwardLineReader {
-    private static let log = Logger(subsystem: "com.tbd.shared", category: "transcript")
+    private static let log = Logger(subsystem: "com.tbd.daemon", category: "transcript")
 
     private let handle: FileHandle
     private let chunkSize: Int
