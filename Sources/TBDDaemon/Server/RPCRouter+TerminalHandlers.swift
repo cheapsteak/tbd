@@ -5749,6 +5749,16 @@ extension RPCRouter {
             .appendingPathComponent("projects", isDirectory: true)
     }
 
+    /// The transcript file both `terminal.transcript` handlers read for a
+    /// terminal: `ClaudeTranscriptLocator`'s stored-path-wins rule, with the
+    /// terminal's profile `projects/` root searched before the host store's
+    /// when the row names a profile.
+    func claudeTranscriptFilePath(terminal: Terminal, worktreePath: String) -> String? {
+        ClaudeTranscriptLocator.filePath(
+            terminal: terminal, worktreePath: worktreePath,
+            profileProjectsBase: terminal.profileID.map { claudeProjectsRoot(forProfileID: $0) })
+    }
+
     /// Worktree-ownership guard shared by every hook bridge that routes on
     /// `TBD_TERMINAL_ID`.
     ///
@@ -6236,8 +6246,9 @@ extension RPCRouter {
         }
 
         // The locator prefers the absolute path captured by the SessionStart
-        // hook and falls back to the legacy projectDir+sessionID resolution.
-        guard let filePath = ClaudeTranscriptLocator.filePath(terminal: terminal, worktreePath: worktree.path) else {
+        // hook and falls back to the legacy projectDir+sessionID resolution,
+        // under the terminal's profile root first.
+        guard let filePath = claudeTranscriptFilePath(terminal: terminal, worktreePath: worktree.path) else {
             let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
             response = try RPCResponse(result: result)
             responseBytes = response.result?.utf8.count ?? 0
@@ -6299,7 +6310,7 @@ extension RPCRouter {
         // The transcript renders parent-file items only (Task/Agent tool calls
         // and their results live in the parent JSONL), so the full-body lookup
         // scans only the primary session file — subagent JSONLs are never opened.
-        guard let primaryPath = ClaudeTranscriptLocator.filePath(terminal: terminal, worktreePath: worktree.path) else {
+        guard let primaryPath = claudeTranscriptFilePath(terminal: terminal, worktreePath: worktree.path) else {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
         let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
