@@ -39,12 +39,26 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Its own group, distinct from test.yml's `test-` group, so a push to a branch
-# cancels only this workflow's older run and never the Swift suite's, or the
-# reverse.
+# Its own group, distinct from test.yml's `test-` group, so a newer push to a
+# PR cancels only this workflow's older run and never the Swift suite's, or
+# the reverse.
+#
+# Keyed differently from test.yml, which uses the head branch's name. A fork
+# PR whose head branch is called `main` would share `main`'s group with
+# pushes to main, and two forks' PRs from same-named branches would share one
+# group and cancel each other. The PR number is unique to its PR, and every
+# other event keys on its full ref.
+#
+# And only a pull request's newer push cancels its older run. A cancelled run
+# still runs `Phone checks`, which fails it by design, so cancelling on main
+# would leave a red check on the older main commit for every push that
+# followed it closely. A run on any other ref waits for the one in progress
+# to finish. (GitHub keeps one waiting run per group, so a burst of pushes can
+# still replace a waiting run, but that run has started no job, so no
+# `Phone checks` of its fails.)
 concurrency:
-  group: phone-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: phone-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

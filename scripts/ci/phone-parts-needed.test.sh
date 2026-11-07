@@ -850,11 +850,18 @@ test_phone_workflow_runs_on_every_pr() {
 }
 
 # Its own group: sharing test.yml's would let a push cancel the other
-# workflow's run, and with it a required check.
+# workflow's run, and with it a required check. Keyed on the PR number, so a
+# fork's PR from a branch named `main`, or two forks' PRs from same-named
+# branches, never share a group; and only a PR's newer push cancels, since a
+# cancelled run fails `Phone checks` and a cancel on main would leave the older
+# main commit red.
 test_phone_workflow_concurrency() {
   # shellcheck disable=SC2016 # a GitHub expression, matched literally
-  local want='  group: phone-${{ github.head_ref || github.ref_name }}'
-  assert_line "phone.yml has its own concurrency group" "$(top_lines "$PHONE_YML" concurrency)" "$want"
+  local want='  group: phone-${{ github.event.pull_request.number || github.ref }}'
+  # shellcheck disable=SC2016 # a GitHub expression, matched literally
+  assert_eq "phone.yml has its own concurrency group, one per PR or ref, and cancels only within a PR" \
+    "$want
+  cancel-in-progress: \${{ github.event_name == 'pull_request' }}" "$(top_lines "$PHONE_YML" concurrency)"
   if has_line "$(top_lines "$WORKFLOWS/test.yml" concurrency)" "$want"; then
     echo "FAIL - phone.yml's concurrency group is test.yml's"
     FAIL=1
