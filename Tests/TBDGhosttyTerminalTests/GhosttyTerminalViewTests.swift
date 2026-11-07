@@ -48,6 +48,21 @@ private func makeOffscreenWindow() -> NSWindow {
     return window
 }
 
+/// A mouse event at `location`, in window coordinates, addressed to `window`.
+@MainActor
+private func mouseEvent(
+    _ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow, flags: NSEvent.ModifierFlags = []
+) throws -> NSEvent {
+    try #require(NSEvent.mouseEvent(
+        with: type, location: location, modifierFlags: flags, timestamp: 0,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+}
+
+/// True when `bytes` is one SGR mouse report for `button`: `ESC [ < button ; … final`.
+private func isSGRReport(_ bytes: [UInt8], button: Int, final: Character) -> Bool {
+    bytes.starts(with: Array("\u{1b}[<\(button);".utf8)) && bytes.last == final.asciiValue
+}
+
 @Suite(.fastPassBounded)
 @MainActor
 struct GhosttyTerminalViewTests {
@@ -112,6 +127,62 @@ struct GhosttyTerminalViewTests {
         view.isHidden = false
         view.renderTick()
         #expect(view.framesBuilt >= 1, "a view shown again built no frame")
+    }
+
+    /// A button's route is fixed when it goes down. A Shift-click that starts a selection in
+    /// between must not stop the reported right button's release, and neither must the program
+    /// turning reporting off before the button comes up.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func reportedPressIsReleasedWhateverHappensInBetween() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        view.windowVisibility = { _ in true }
+        view.setFrameSize(NSSize(width: 400, height: 200))
+        content.addSubview(view)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+        let point = NSPoint(x: 20, y: 100)
+
+        view.rightMouseDown(with: try mouseEvent(.rightMouseDown, at: point, in: window))
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window, flags: .shift))
+        fixture.terminal.feed(text: "\u{1b}[?1000l")
+        view.rightMouseUp(with: try mouseEvent(.rightMouseUp, at: point, in: window))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: point, in: window, flags: .shift))
+
+        #expect(recorder.sent.count == 2, "sent \(recorder.sent.count) reports, not a press and its release")
+        #expect(recorder.sent.first.map { isSGRReport($0, button: 2, final: "M") } == true,
+                "the first report was \(String(describing: recorder.sent.first)), not a right press")
+        #expect(recorder.sent.last.map { isSGRReport($0, button: 2, final: "m") } == true,
+                "the last report was \(String(describing: recorder.sent.last)), not a right release")
+        #expect(view.mouseController.pendingReportReleases.isEmpty,
+                "\(view.mouseController.pendingReportReleases) still wait for a release")
+    }
+
+    /// The tracking area and the responder chain each deliver the same move. Under any-event
+    /// tracking a move is a report, so a repeat would reach the program twice.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func moveDeliveredOnBothPathsIsReportedOnce() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        view.windowVisibility = { _ in true }
+        view.setFrameSize(NSSize(width: 400, height: 200))
+        content.addSubview(view)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+
+        let move = try mouseEvent(.mouseMoved, at: NSPoint(x: 20, y: 100), in: window)
+        view.mouseMoved(with: move)
+        view.mouseController.mouseMoved(with: move)
+
+        #expect(recorder.sent.count == 1, "one move was reported \(recorder.sent.count) times")
     }
 
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

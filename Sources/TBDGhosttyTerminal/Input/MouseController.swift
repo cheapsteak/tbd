@@ -102,12 +102,12 @@ final class MouseController: NSObject {
 
     // MARK: Observable state (diagnostics + tests)
 
-    /// The route the last handled press took. `nil` before the first press.
+    /// The route the last handled press took. `nil` before the first press. Diagnostics only:
+    /// each button's own route is recorded at its press, in `pendingReportReleases`.
     private(set) var lastRoute: MouseRoute?
-    /// The button currently held for reporting, if any. A motion event must carry it or drags are
-    /// silent under mode 1002.
-    private(set) var reportingButton: MouseButton?
-    /// Buttons pressed while reporting, so a `mouseUp` that lands outside the view still releases.
+    /// Buttons whose press was reported and whose release has not been. A button's route is
+    /// fixed at its press: its drags and its release are reported if and only if it is in here,
+    /// whatever later presses did, and whether or not the program still asks for reports.
     private(set) var pendingReportReleases: Set<MouseButton> = []
     /// True between a selection `mouseDown` and its `mouseUp`.
     private(set) var isSelecting = false
@@ -124,7 +124,9 @@ final class MouseController: NSObject {
     private var accumulator = ScrollAccumulator()
     private var autoscrollTask: Task<Void, Never>?
     private var autoscrollPosition = SurfacePoint(x: 0, y: 0)
-    private var lastMovedEvent: NSEvent?
+    /// The last move handled, and whether it was consumed. The tracking area and the responder
+    /// chain both deliver a move, as the same `NSEvent`; whichever comes second is a repeat.
+    private var lastMoved: (event: NSEvent, consumed: Bool)?
     private var linkOverlay: CALayer?
 
     init(clock: any Clock<Duration> = ContinuousClock()) {
@@ -229,7 +231,10 @@ final class MouseController: NSObject {
         case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             return mouseDragged(event, in: view)
         case .mouseMoved:
-            return mouseMovedInside(event, in: view)
+            if let lastMoved, lastMoved.event === event { return lastMoved.consumed }
+            let consumed = mouseMovedInside(event, in: view)
+            lastMoved = (event, consumed)
+            return consumed
         case .scrollWheel:
             return scrollWheel(event, in: view)
         case .mouseEntered:
@@ -267,7 +272,6 @@ final class MouseController: NSObject {
 
         switch route {
         case .report:
-            reportingButton = button
             pendingReportReleases.insert(button)
             send(terminal.encodeMouse(
                 MousePress(action: .press, button: button, mods: mods, position: position)))
@@ -293,7 +297,8 @@ final class MouseController: NSObject {
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
-        if lastRoute == .report, let button = reportingButton {
+        if let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber),
+           pendingReportReleases.contains(button) {
             // Motion must carry the *held* button: button-event tracking (1002) encodes it into
             // the drag report, and a nil button there makes the whole drag silent.
             send(terminal.encodeMouse(
@@ -317,22 +322,18 @@ final class MouseController: NSObject {
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
-        if lastRoute == .report {
-            // Every press needs a matching release, including a mouseUp outside the view: the
+        let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber)
+        if let button, pendingReportReleases.remove(button) != nil {
+            // Every reported press needs a matching release, including a mouseUp outside the
+            // view, one with Shift now held, and one after the program turned reporting off: the
             // held-button set is embedder-tracked, so a missed release leaves 1002 drags on
             // forever. AppKit routes the release to the mouseDown view, so this always runs.
-            let button = terminalMouseButton(nsEventButtonNumber: event.buttonNumber)
-            let releases = button.map { [$0] } ?? Array(pendingReportReleases)
-            for released in releases {
-                pendingReportReleases.remove(released)
-                send(terminal.encodeMouse(
-                    MousePress(action: .release, button: released, mods: mods, position: position)))
-            }
-            reportingButton = nil
+            send(terminal.encodeMouse(
+                MousePress(action: .release, button: button, mods: mods, position: position)))
             return true
         }
 
-        guard isSelecting else { return false }
+        guard isSelecting, button == .left else { return false }
         isSelecting = false
         view.isDragging = false
         stopAutoscroll()
@@ -437,12 +438,11 @@ final class MouseController: NSObject {
     /// The tracking area's `.mouseMoved` delivery. The explicit `@objc(...)` selectors matter:
     /// this is an `NSObject`, not an `NSResponder`, so Swift would otherwise export
     /// `mouseMovedWith:` and AppKit would find nothing to call on the tracking area's owner.
-    /// The view also forwards `mouseMoved(with:)` through the input controller, so this
-    /// de-duplicates by event identity and exists so the hover path still works when the view is
-    /// not first responder.
+    /// The view also forwards `mouseMoved(with:)` through the input controller; `handle` drops
+    /// whichever of the two deliveries comes second. This one exists so the hover path still works
+    /// when the view is not first responder.
     @objc(mouseMoved:) func mouseMoved(with event: NSEvent) {
-        guard view != nil, event !== lastMovedEvent else { return }
-        lastMovedEvent = event
+        guard view != nil else { return }
         _ = handle(event)
     }
 
@@ -463,7 +463,6 @@ final class MouseController: NSObject {
     func focusDidChange(_ isFocused: Bool) {
         guard !isFocused else { return }
         view?.terminal.resetMouseEncoder()
-        reportingButton = nil
         pendingReportReleases.removeAll()
         accumulator.reset()
         if isSelecting {

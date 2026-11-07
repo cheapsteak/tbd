@@ -194,6 +194,16 @@ final class MouseEncoder {
     /// `OPT_ANY_BUTTON_PRESSED`, so the encoder has to keep this itself and push it on every
     /// encode. Internal rather than private so tests can assert it never leaks a wheel "press".
     private(set) var heldButtons: Set<MouseButton> = []
+    /// The encoding each reported, still-held button was pressed under. A program can turn
+    /// reporting off while a button is down; the press already went out, so its release must go
+    /// out too, encoded as the press was.
+    private(set) var pressEncodings: [MouseButton: ReportEncoding] = [:]
+
+    /// The tracking mode and report format an event is encoded under.
+    struct ReportEncoding: Equatable {
+        var tracking: GhosttyMouseTrackingMode
+        var format: GhosttyMouseFormat
+    }
 
     /// Rendered geometry. Assign on every resize; it is pushed to `OPT_SIZE` immediately.
     var geometry: TerminalPixelGeometry {
@@ -223,6 +233,7 @@ final class MouseEncoder {
     /// the terminal is reset.
     func reset() {
         heldButtons.removeAll()
+        pressEncodings.removeAll()
         _ = ghostty_mouse_encoder_reset(handle.raw)
     }
 
@@ -237,18 +248,74 @@ final class MouseEncoder {
         return tracking
     }
 
+    /// The tracking mode and report format the terminal's mode bits imply.
+    ///
+    /// `set_from_terminal` reads the same state but libghostty has no getter for the result, so
+    /// this asks for the modes. When a program has set several tracking modes, the widest wins,
+    /// as programs enable them narrowest first; likewise for the formats. Caller holds the lock.
+    static func reportEncoding(of terminal: VtTerminal) -> ReportEncoding {
+        func isSet(_ mode: UInt16) -> Bool {
+            var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(mode, false), value: false)
+            return ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS
+                && config.value
+        }
+        var encoding = ReportEncoding(tracking: GHOSTTY_MOUSE_TRACKING_NONE, format: GHOSTTY_MOUSE_FORMAT_X10)
+        if isSet(1003) {
+            encoding.tracking = GHOSTTY_MOUSE_TRACKING_ANY
+        } else if isSet(1002) {
+            encoding.tracking = GHOSTTY_MOUSE_TRACKING_BUTTON
+        } else if isSet(1000) {
+            encoding.tracking = GHOSTTY_MOUSE_TRACKING_NORMAL
+        } else if isSet(9) {
+            encoding.tracking = GHOSTTY_MOUSE_TRACKING_X10
+        }
+        if isSet(1016) {
+            encoding.format = GHOSTTY_MOUSE_FORMAT_SGR_PIXELS
+        } else if isSet(1006) {
+            encoding.format = GHOSTTY_MOUSE_FORMAT_SGR
+        } else if isSet(1015) {
+            encoding.format = GHOSTTY_MOUSE_FORMAT_URXVT
+        } else if isSet(1005) {
+            encoding.format = GHOSTTY_MOUSE_FORMAT_UTF8
+        }
+        return encoding
+    }
+
+    private func apply(_ encoding: ReportEncoding) {
+        var tracking = encoding.tracking
+        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking)
+        var format = encoding.format
+        _ = ghostty_mouse_encoder_set(handle.raw, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format)
+    }
+
     /// Encode one pointer event using the terminal's current tracking mode and report format.
     ///
     /// Returns `nil` when the terminal wants no report at all — tracking off, a motion event in a
-    /// mode that only reports buttons, or a motion that stayed inside the same cell.
+    /// mode that only reports buttons, or a motion that stayed inside the same cell. The one
+    /// exception is the release of a press that was reported: that goes out even if the program
+    /// has since turned tracking off, in the encoding the press had.
     /// Caller holds the terminal lock.
     func encode(_ press: MousePress, terminal: VtTerminal) throws -> [UInt8]? {
         // Options (tracking mode + format) come from the terminal; size and any-button do not.
         _ = ghostty_mouse_encoder_set_from_terminal(handle.raw, terminal)
 
         switch press.action {
-        case .press: if let button = press.button { heldButtons.insert(button) }
-        case .release: if let button = press.button { heldButtons.remove(button) }
+        case .press:
+            if let button = press.button {
+                heldButtons.insert(button)
+                if Self.isTrackingEnabled(terminal) {
+                    pressEncodings[button] = Self.reportEncoding(of: terminal)
+                } else {
+                    pressEncodings[button] = nil
+                }
+            }
+        case .release:
+            if let button = press.button {
+                heldButtons.remove(button)
+                if let pressed = pressEncodings.removeValue(forKey: button), !Self.isTrackingEnabled(terminal) {
+                    apply(pressed)
+                }
+            }
         case .motion: break
         }
         var anyPressed = !heldButtons.isEmpty
@@ -315,11 +382,14 @@ final class MouseEncoder {
         var bytes: [UInt8] = []
         for _ in 0..<abs(rows) {
             // A wheel "click" is a press with no matching release; do not let it leak into
-            // `heldButtons`, or button-event motion tracking would think a button is held.
+            // `heldButtons`, or button-event motion tracking would think a button is held, nor
+            // into `pressEncodings`.
             let press = MousePress(action: .press, button: button, mods: mods, position: position)
             let held = heldButtons
+            let encodings = pressEncodings
             if let encoded = try encode(press, terminal: terminal) { bytes += encoded }
             heldButtons = held
+            pressEncodings = encodings
         }
         return bytes.isEmpty ? .none : .report(bytes)
     }
