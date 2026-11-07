@@ -3635,11 +3635,14 @@ extension RPCRouter {
     /// hand every caller the ability to type as a human, which is precisely the
     /// property the envelope exists to provide. So suppression is reachable
     /// only from inside this file's own send core, by internal rails that are
-    /// relaying the operator's own words verbatim — and the act is still
-    /// written to the actuation log either way, so the record of who typed what
-    /// stays complete.
+    /// relaying the operator's own words verbatim, and by the app, which asks
+    /// for it through `params.envelope` and gets it only on a connection
+    /// `authenticatesEnvelopeSuppression` verifies as the app's — and the act
+    /// is still written to the actuation log either way, so the record of who
+    /// typed what stays complete.
     enum DispatchEnvelopeDisposition {
-        /// The default and the only disposition any RPC can ask for.
+        /// The default, and the rail disposition every RPC send carries. An
+        /// RPC's own request for suppression travels in `params.envelope`.
         case attached
         /// Deliver the caller's bytes with nothing prepended. Reserved for the
         /// two internal rails in `sendOnInternalRail`: the queued prompt taken
@@ -3826,14 +3829,27 @@ extension RPCRouter {
     ///
     /// For the phone bridge only, which calls it after the phone's channel has
     /// verified its pairing, with the device ID from that verified peer. It
-    /// adds no check of its own (see `sendOnInternalRail`). The caller sets
-    /// `params.gateOnAwaitingInput` to refuse a send into an open prompt, and
-    /// the send core's existing gate does the refusing. The actuation row
-    /// records `.phone(deviceID:)`.
+    /// adds no authority check of its own (see `sendOnInternalRail`). The
+    /// actuation row records `.phone(deviceID:)`.
+    ///
+    /// **Always gated on awaiting input, and never verified, whatever the
+    /// caller passes.** Every phone send is gated on awaiting input (spec
+    /// section 5): an ungated send into an open dialog would commit one of its
+    /// options, bypassing the `prompt.answer` core and the setting it obeys. So
+    /// `gateOnAwaitingInput` is forced to true, and the send core's existing
+    /// gate does the refusing. `verify` is stripped to nil rather than forced:
+    /// a suppressed send carries no dispatch id, so delivery verification could
+    /// never confirm it, and the shape check refuses `verify` with parts.
+    /// Every other field passes through unchanged.
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
-        try await sendOnInternalRail(params, actor: .phone(deviceID: deviceID))
+        let phoneParams = TerminalSendParams(
+            terminalID: params.terminalID, text: params.text, keys: params.keys,
+            submit: params.submit, verify: nil,
+            parts: params.parts, envelope: params.envelope,
+            gateOnAwaitingInput: true)
+        return try await sendOnInternalRail(phoneParams, actor: .phone(deviceID: deviceID))
     }
 
     private func performTerminalSend(
