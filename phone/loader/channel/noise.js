@@ -370,11 +370,12 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
  * field. Save and restore the pair only while no operation is in flight,
  * because a running operation writes `nonce + 1n` when it finishes.
  *
- * Exported for the tests only. Phone code gets cipher states through
- * `createTransport` and `createInitiator`, never directly: a state built
- * with a null key passes data through unencrypted.
+ * Not exported: a state built with a null key passes data through
+ * unencrypted. The retry after a failed key import is defensive:
+ * `createTransport` imports both keys before it returns, and each handshake
+ * step builds a fresh state, so no public path keeps a failed import.
  */
-export class CipherState {
+class CipherState {
   /** @type {Uint8Array<ArrayBuffer> | null} 32 raw bytes, or null for no key */
   #key = null;
   /** @type {bigint} the counter the next operation uses */
