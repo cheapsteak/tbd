@@ -7,7 +7,7 @@ import { NoiseError, phonePrologue } from '../../channel/noise.js';
 import { base64urlDecode, base64urlEncode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, PAIRING_EXPIRY_GRACE_MS, SIGNAL_TIMEOUT_MS,
+  HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, PAIRING_EXPIRY_GRACE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { isWrapKey, unwrapPhoneKeyPair } from '../../keys.js';
 import { isRoomID, readPairingLink, relaySocketURL } from '../../links.js';
@@ -26,6 +26,8 @@ const START = 1_700_000_000_000;
 const LOADER_URL = 'https://loader.acme.test/';
 const LOCAL_RELAY = 'http://127.0.0.1';
 const HELLO = { type: 'hello', loaderVersion: LOADER_VERSION, protocols: [1] };
+// The longest timeout a browser runs as asked.
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const utf8 = new TextEncoder();
 /** @param {unknown} value */
@@ -187,6 +189,60 @@ function hangingSockets() {
       };
       sockets.push(ws);
       return ws;
+    },
+  };
+}
+
+/**
+ * The relay ends the phone's open socket with `code`, as a browser reports it.
+ * @param {any} ws
+ * @param {number} code
+ */
+function relayCloses(ws, code) {
+  ws.readyState = 3;
+  ws.onclose?.({ type: 'close', code, reason: '', wasClean: false });
+}
+
+/**
+ * A clock whose timers run only when the test fires them. It records the delay of every timer
+ * set on it.
+ * @param {number} start
+ */
+function manualClock(start) {
+  let now = start;
+  let nextID = 1;
+  /** @type {Map<number, { fn: () => void, ms: number, due: number }>} */
+  const timers = new Map();
+  /** @type {number[]} */
+  const delays = [];
+  return {
+    timers,
+    delays,
+    now: () => now,
+    /**
+     * @param {() => void} fn
+     * @param {number} ms
+     */
+    setTimeout(fn, ms) {
+      const id = nextID++;
+      timers.set(id, { fn, ms, due: now + ms });
+      delays.push(ms);
+      return id;
+    },
+    /** @param {unknown} id */
+    clearTimeout(id) {
+      timers.delete(/** @type {number} */ (id));
+    },
+    /**
+     * Moves time to the latest timer's due time and runs that timer alone.
+     * @returns {number} the delay it was set with
+     */
+    fireLatest() {
+      const [id, timer] = [...timers].reduce((a, b) => (b[1].due > a[1].due ? b : a));
+      timers.delete(id);
+      now = timer.due;
+      timer.fn();
+      return timer.ms;
     },
   };
 }
@@ -432,6 +488,45 @@ test('a key that cannot be made rejects invalid and opens no socket', async () =
   assert.deepEqual(p.codes, []);
 });
 
+test('a link the loader cannot use rejects invalid instead of throwing, and opens nothing', async () => {
+  const env = await setup();
+  /** @type {Array<[string, any, Function]>} */
+  const cases = [
+    ['a relay relaySocketURL refuses', { ...env.link, fields: { ...env.link.fields, relay: 'ftp://relay.acme.test' } }, RangeError],
+    ['a room that is not 32 bytes', { ...env.link, room: new Uint8Array(31) }, NoiseError],
+    ['a laptop key that is not 32 bytes', { ...env.link, laptopKey: new Uint8Array(31) }, TypeError],
+  ];
+  /** @type {unknown[]} */
+  const unhandled = [];
+  const onUnhandled = (/** @type {unknown} */ reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    for (const [name, link, type] of cases) {
+      /** @type {string[]} */
+      const codes = [];
+      /** @type {any} */
+      let run;
+      assert.doesNotThrow(() => {
+        run = startPairing({ link, deviceName: 'iPhone', openSocket: env.net.factory, onCode: (code) => codes.push(code), clock: env.clock });
+      }, name);
+      run.cancel();
+      run.probe();
+      // Long enough for Node to report a rejection nobody handled.
+      await quiet();
+      const error = await run.result.then(() => assert.fail(`${name}: resolved`), (/** @type {unknown} */ e) => e);
+      assert.ok(error instanceof PairingError, `${name}: ${error}`);
+      assert.equal(error.reason, 'invalid', name);
+      assert.ok(error.cause instanceof type, `${name}: ${error.cause}`);
+      assert.deepEqual(codes, [], name);
+    }
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.deepEqual(unhandled, [], 'every rejection was marked handled');
+  assert.equal(env.net.sockets.length, 0);
+  assert.equal(env.clock.pending, 0);
+});
+
 test('message 1 is sent only after peer-joined', async () => {
   const env = await setup();
   env.net.hooks.holdText = true;
@@ -494,30 +589,77 @@ test('no answer after the code until exp plus 120 s rejects expired', async () =
   assertEnded(env);
 });
 
-test('the expiry deadline applies only once the code is shown', async () => {
-  // A link whose deadline is 5 s away when pairing starts.
+test('the expiry deadline bounds pairing from the start, before message 2 too', async () => {
+  // A link whose deadline is 5 s away when pairing starts, and a laptop that has message 1
+  // but has not answered: the deadline comes before the handshake timeout.
   const env = await manualSetup({ exp: (START + 5_000 - PAIRING_EXPIRY_GRACE_MS) / 1000 });
   const laptop = laptopSocket(env);
   const p = pair(env);
   await until(() => laptop.frames.length === 1, 'message 1');
-  await env.clock.advance(6_000);
+  await env.clock.advance(4_999);
   await quiet();
-  assert.equal(p.settled(), null, 'past the deadline, but no code yet');
-
-  // Message 2 inside the handshake timeout: the code shows, and the deadline has passed.
-  await laptop.answer();
-  await until(() => p.codes.length === 1, 'the code');
-  await env.clock.advance(0);
+  assert.equal(p.settled(), null, 'still waiting 1 ms before the deadline');
+  await env.clock.advance(1);
   await failsWith(p, 'expired');
+  assert.deepEqual(p.codes, []);
   assertEnded(env);
+});
 
-  // Without message 2, the handshake timeout ends it as invalid, never as expired.
-  const second = await manualSetup({ exp: (START + 5_000 - PAIRING_EXPIRY_GRACE_MS) / 1000 });
-  const silent = laptopSocket(second);
-  const q = pair(second);
-  await until(() => silent.frames.length === 1, 'message 1');
-  await second.clock.advance(HANDSHAKE_TIMEOUT_MS);
-  await failsWith(q, 'invalid');
+test('a laptop socket that keeps rejoining cannot keep pairing alive past exp plus the grace', async () => {
+  const env = await manualSetup();
+  const deadline = env.offer.exp * 1000 + PAIRING_EXPIRY_GRACE_MS;
+  let message1s = 0;
+  const join = () => env.relay.connect(`/v1/rooms/${env.offer.room}?role=laptop`, {
+    binary: () => {
+      message1s += 1;
+    },
+    text: () => {},
+    close: () => {},
+  });
+  join();
+  const p = pair(env);
+  await until(() => message1s === 1, 'message 1');
+  // Every 9 s, inside the handshake timeout, a new laptop socket replaces the last one (no
+  // answer, no peer-left), and the phone sends it a fresh message 1.
+  while (env.clock.now() + 9_000 < deadline) {
+    const sent = message1s;
+    await env.clock.advance(9_000);
+    join();
+    await until(() => message1s === sent + 1, `message 1 number ${sent + 1}`);
+  }
+  assert.equal(message1s, 47);
+  await env.clock.advance(deadline - env.clock.now() - 1);
+  await quiet();
+  assert.equal(p.settled(), null, 'still waiting 1 ms before the deadline');
+  await env.clock.advance(1);
+  await failsWith(p, 'expired');
+  assert.deepEqual(p.codes, []);
+  assertEnded(env);
+});
+
+test('a far-off deadline is waited for in steps of at most 2^31 - 1 ms', async () => {
+  // Sixty days away. A browser runs a longer timeout at once.
+  const env = await manualSetup({ exp: START / 1000 + 60 * 86_400 });
+  const deadline = env.offer.exp * 1000 + PAIRING_EXPIRY_GRACE_MS;
+  const clock = manualClock(START);
+  const hanging = hangingSockets();
+  // The socket stays connecting and its signal timer is never fired, so only the deadline
+  // can end pairing.
+  const p = pair({ ...env, clock: /** @type {any} */ (clock) }, { openSocket: hanging.factory });
+  await until(() => hanging.sockets.length === 1, 'the socket');
+  /** @type {number[]} */
+  const steps = [];
+  for (let i = 0; i < 5 && p.settled() === null; i += 1) {
+    steps.push(clock.fireLatest());
+    await quiet();
+    if (clock.now() < deadline) assert.equal(p.settled(), null, `still waiting after step ${i + 1}`);
+  }
+  assert.deepEqual(steps, [MAX_TIMER_MS, MAX_TIMER_MS, deadline - START - 2 * MAX_TIMER_MS]);
+  assert.equal(clock.now(), deadline);
+  await failsWith(p, 'expired');
+  assert.ok(clock.delays.every((ms) => ms <= MAX_TIMER_MS), `delays: ${clock.delays.join(', ')}`);
+  assert.deepEqual(hanging.sockets[0].closes, [1000]);
+  assert.equal(clock.timers.size, 0, 'no timer left');
 });
 
 // --- the laptop not answering ---------------------------------------------------------------
@@ -612,6 +754,116 @@ test('no signal within 10 s rejects offline; a socket that never opens rejects r
   await failsWith(q, 'relayUnreachable');
   assert.deepEqual(hanging.sockets[0].closes, [1000]);
   assert.equal(second.clock.pending, 0);
+});
+
+// --- the pairing socket ---------------------------------------------------------------------
+
+test('another phone socket taking the pairing room rejects invalid, before message 2 and after the code', async () => {
+  /**
+   * A second phone socket joins the pairing room: someone else who saw the QR code, or a
+   * second tab. The relay closes the first one with 4000.
+   * @param {{ relay: any, offer: any }} env
+   */
+  const otherPhone = (env) => env.relay.connect(`/v1/rooms/${env.offer.room}?role=phone`, { binary: () => {}, text: () => {}, close: () => {} });
+  /** @param {{ relay: any, offer: any }} env */
+  const phoneJoins = (env) => env.relay.stats.phoneJoins.get(env.offer.room) ?? 0;
+
+  // Before any signal, and once message 1 is out: before message 2 either way.
+  for (const when of ['before any signal', 'after message 1']) {
+    const env = await manualSetup();
+    const laptop = laptopSocket(env);
+    env.net.hooks.holdText = when === 'before any signal';
+    const p = pair(env);
+    if (when === 'before any signal') {
+      await until(() => env.net.held.length === 1, 'the held peer-joined');
+    } else {
+      await until(() => laptop.frames.length === 1, 'message 1');
+    }
+    otherPhone(env);
+    await failsWith(p, 'invalid');
+    assert.deepEqual(p.codes, [], when);
+    assertEnded(env);
+    await quiet();
+    assert.equal(env.net.sockets.length, 1, `${when}: no new socket`);
+    assert.equal(phoneJoins(env), 2, `${when}: the other socket stays`);
+  }
+
+  // After the code, while waiting for Allow.
+  const env = await setup({ offer: { decision: 'silent' } });
+  const p = pair(env);
+  await until(() => env.laptop.counts.hello === 1, 'hello at the laptop');
+  otherPhone(env);
+  await failsWith(p, 'invalid');
+  assert.equal(p.codes.length, 1);
+  assertEnded(env);
+  await quiet();
+  assert.equal(env.net.sockets.length, 1, 'no new socket');
+  assert.equal(phoneJoins(env), 2, 'the other socket stays');
+});
+
+test('before message 2, the relay closing the socket or a dead socket rejects relayUnreachable', async () => {
+  // The relay drops the open socket with an ordinary close code.
+  for (const when of ['before any signal', 'after message 1']) {
+    const env = await manualSetup();
+    const laptop = laptopSocket(env);
+    env.net.hooks.holdText = when === 'before any signal';
+    const p = pair(env);
+    if (when === 'before any signal') {
+      await until(() => env.net.held.length === 1, 'the held peer-joined');
+    } else {
+      await until(() => laptop.frames.length === 1, 'message 1');
+    }
+    relayCloses(env.net.sockets[0], 1011);
+    await failsWith(p, 'relayUnreachable');
+    assert.deepEqual(p.codes, [], when);
+    assertEnded(env);
+  }
+
+  // A liveness probe whose pong never comes, once message 1 is out.
+  const env = await manualSetup();
+  const laptop = laptopSocket(env);
+  const p = pair(env);
+  await until(() => laptop.frames.length === 1, 'message 1');
+  env.relay.blackHole(env.offer.room, true);
+  p.run.probe();
+  await env.clock.advance(RESUME_PONG_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(p.settled(), null);
+  await env.clock.advance(1);
+  await failsWith(p, 'relayUnreachable');
+  assert.deepEqual(p.codes, []);
+  assertEnded(env);
+});
+
+test('probe() checks the socket: a pong keeps pairing going, and a dead socket after the code rejects invalid', async () => {
+  const env = await setup({ offer: { decision: 'silent' } });
+  const pings = () => env.relay.stats.pings.get(env.offer.room) ?? 0;
+  const p = pair(env);
+  p.run.probe(); // the key is still being made: no socket yet
+  await until(() => env.laptop.counts.hello === 1, 'hello at the laptop');
+  assert.equal(pings(), 0);
+
+  p.run.probe();
+  await until(() => pings() === 1, 'the probe ping');
+  await quiet();
+  await env.clock.advance(RESUME_PONG_TIMEOUT_MS);
+  await quiet();
+  assert.equal(p.settled(), null, 'the pong came: still waiting for Allow');
+
+  env.relay.blackHole(env.offer.room, true);
+  p.run.probe();
+  await env.clock.advance(RESUME_PONG_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(p.settled(), null);
+  await env.clock.advance(1);
+  await failsWith(p, 'invalid');
+  assert.equal(p.codes.length, 1);
+  assertEnded(env);
+
+  env.relay.blackHole(env.offer.room, false);
+  p.run.probe(); // after the outcome: nothing
+  await quiet();
+  assert.equal(pings(), 1);
 });
 
 // --- cancel ---------------------------------------------------------------------------------
@@ -730,6 +982,39 @@ test('a second peer-joined before message 2 restarts the handshake with a fresh 
   const room = newRoom();
   await answered.send({ type: 'paired', room });
   assert.equal((await succeeds(p)).room, room);
+});
+
+test('a message 2 answering an earlier message 1, arriving after a restart, is dropped and the real one wins', async () => {
+  const env = await manualSetup();
+  const first = laptopSocket(env);
+  const p = pair(env);
+  // The first laptop socket answers message 1, but its message 2 has not reached the phone.
+  const old = await createResponder({ pattern: 'IKpsk2', localStatic: env.laptopPair, psk: env.secret, prologue: env.prologue });
+  await old.readMessage1(await first.next());
+  const stale = await old.writeMessage2(encode({ laptopName: 'acme-stale' }));
+  const staleCode = await confirmationCode(stale.handshakeHash);
+
+  // The laptop's socket is replaced; the phone restarts with a fresh message 1.
+  const second = laptopSocket(env);
+  await until(() => second.frames.length === 1, 'the fresh message 1');
+  // Only now does the relay hand the phone the old message 2: well-formed, for the old one.
+  second.handle.send(stale.message);
+  await until(() => env.net.inFrames().length === 1, 'the old message 2 at the phone');
+  await quiet();
+  assert.deepEqual(p.codes, [], 'no code from the old message 2');
+  assert.equal(p.settled(), null);
+
+  const answered = await second.answer();
+  await until(() => p.codes.length === 1, 'the code');
+  assert.deepEqual(p.codes, [answered.code]);
+  assert.notEqual(answered.code, staleCode);
+  assert.deepEqual(await answered.read1(), HELLO, 'hello is for the new handshake');
+  const room = newRoom();
+  await answered.send({ type: 'paired', room });
+  const result = await succeeds(p);
+  assert.equal(result.room, room);
+  assert.equal(result.laptopName, 'acme-mbp');
+  assertEnded(env);
 });
 
 test('a peer-left right behind the paired frame does not win', async () => {

@@ -47,7 +47,8 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 export class ProtocolError extends Error {
   /**
    * @param {string} reason what failed: `utf8`, `json`, `notObject`, `type`, or
-   *   `<type>.<field>` for a known message with a bad field
+   *   `<type>.<field>` for a known message with a bad field; for message 2's payload,
+   *   `message2` (not UTF-8 JSON) or `message2.laptopName`
    */
   constructor(reason) {
     super(`loader protocol: ${reason}`);
@@ -163,6 +164,26 @@ export function parseLaptopMessage(obj) {
     default:
       return { type: 'unknown' };
   }
+}
+
+/**
+ * Reads the payload of a handshake's message 2, pairing (`IKpsk2`) or reconnecting (`IK`):
+ * `{"laptopName": <string>}`. Other fields are ignored.
+ * @param {Uint8Array} payload
+ * @returns {string} the laptop's name
+ * @throws {ProtocolError}
+ */
+export function readLaptopName(payload) {
+  let value;
+  try {
+    value = JSON.parse(utf8Decoder.decode(payload));
+  } catch {
+    throw new ProtocolError('message2');
+  }
+  if (!isPlainObject(value) || typeof value.laptopName !== 'string') {
+    throw new ProtocolError('message2.laptopName');
+  }
+  return value.laptopName;
 }
 
 /**

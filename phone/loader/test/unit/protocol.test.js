@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { base64urlEncode } from '../../channel/pairingLink.js';
 import { LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from '../../constants.js';
 import {
-  ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage,
+  ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
 } from '../../protocol.js';
 
 const HASH = 'ab'.repeat(32);
@@ -165,6 +165,31 @@ test('paired carries a room ID', () => {
   ];
   for (const room of bad) rejects({ type: 'paired', room }, 'paired.room');
   rejects({ type: 'paired' }, 'paired.room');
+});
+
+test('readLaptopName reads message 2\'s payload and refuses anything else', () => {
+  assert.equal(readLaptopName(bytes({ laptopName: 'acme-mbp' })), 'acme-mbp');
+  assert.equal(readLaptopName(bytes({ laptopName: 'Ada’s MacBook 😀', extra: [1] })), 'Ada’s MacBook 😀');
+  assert.equal(readLaptopName(bytes({ laptopName: '' })), '');
+  /** @type {Array<[Uint8Array, string]>} */
+  const cases = [
+    [Uint8Array.of(0xff), 'message2'],
+    [Uint8Array.of(0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d), 'message2'], // {"<bad 2-byte>"}
+    [bytes(''), 'message2'],
+    [bytes('{"laptopName":"acme"'), 'message2'],
+    [bytes('null'), 'message2.laptopName'],
+    [bytes('7'), 'message2.laptopName'],
+    [bytes('"acme-mbp"'), 'message2.laptopName'],
+    [bytes([{ laptopName: 'acme-mbp' }]), 'message2.laptopName'],
+    [bytes({}), 'message2.laptopName'],
+    [bytes({ laptopName: 5 }), 'message2.laptopName'],
+    [bytes({ laptopName: null }), 'message2.laptopName'],
+    [bytes({ laptopName: ['acme-mbp'] }), 'message2.laptopName'],
+    [bytes({ name: 'acme-mbp' }), 'message2.laptopName'],
+  ];
+  for (const [input, reason] of cases) {
+    assert.throws(() => readLaptopName(input), { name: 'ProtocolError', reason }, new TextDecoder().decode(input));
+  }
 });
 
 test('compatibility', () => {

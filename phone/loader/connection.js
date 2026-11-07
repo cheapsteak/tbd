@@ -19,7 +19,7 @@ import { systemClock } from './clock.js';
 import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relaySocketURL } from './links.js';
 import {
-  ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage,
+  ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
 } from './protocol.js';
 import { RelaySocket, reconnectDelay } from './relay.js';
 
@@ -107,7 +107,6 @@ const REPLACED = 4000;
 const MAX_ATTEMPT = 32;
 // IK message 1's payload. The laptop ignores it (plan 3 change 7).
 const IK_PAYLOAD = encodeMessage({});
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const utf8Encoder = new TextEncoder();
 
 export class LaptopConnection {
@@ -663,25 +662,6 @@ export class LaptopConnection {
       });
     }
   }
-}
-
-/**
- * Message 2's payload: `{"laptopName": <string>}`.
- * @param {Uint8Array} payload
- * @returns {string}
- * @throws {ProtocolError}
- */
-function readLaptopName(payload) {
-  let value;
-  try {
-    value = JSON.parse(utf8Decoder.decode(payload));
-  } catch {
-    throw new ProtocolError('message2');
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof value.laptopName !== 'string') {
-    throw new ProtocolError('message2.laptopName');
-  }
-  return value.laptopName;
 }
 
 /**

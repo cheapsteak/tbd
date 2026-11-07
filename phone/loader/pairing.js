@@ -21,7 +21,9 @@ import { systemClock } from './clock.js';
 import { HANDSHAKE_TIMEOUT_MS, PAIRING_EXPIRY_GRACE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { createWrappedPhoneKey } from './keys.js';
 import { relaySocketURL } from './links.js';
-import { ProtocolError, decodeMessage, encodeMessage, makeHello, parseLaptopMessage } from './protocol.js';
+import {
+  ProtocolError, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
+} from './protocol.js';
 import { RelaySocket } from './relay.js';
 import { laptopIDFromKey } from './store.js';
 
@@ -37,13 +39,14 @@ import { laptopIDFromKey } from './store.js';
  * Why pairing ended without a device:
  * - `denied`: the user chose Deny on the laptop.
  * - `expired`: the laptop said the offer expired, or the link's `exp` plus
- *   PAIRING_EXPIRY_GRACE_MS passed on this phone's clock while it waited for an answer.
- * - `invalid`: the laptop never answered message 1 (a used or unknown offer, or a wrong
- *   secret), its answers broke the protocol, or it left or changed its socket after message 2.
+ *   PAIRING_EXPIRY_GRACE_MS passed on this phone's clock before pairing ended.
+ * - `invalid`: the link could not be used, the laptop never answered message 1 (a used or
+ *   unknown offer, or a wrong secret), its answers broke the protocol, it left or changed its
+ *   socket after message 2, or another phone socket took the pairing room.
  * - `offline`: the laptop is not in the pairing room, left it before answering, or no relay
  *   signal came.
  * - `relayUnreachable`: the socket never opened, or the relay connection ended before
- *   message 2.
+ *   message 2 for any reason other than another phone socket taking the room.
  * - `cancelled`: `cancel()`.
  * @typedef {'denied' | 'expired' | 'invalid' | 'offline' | 'relayUnreachable' | 'cancelled'} PairingFailure
  */
@@ -75,6 +78,13 @@ import { laptopIDFromKey } from './store.js';
  */
 
 /**
+ * A pairing under way. `probe()` checks the socket when the page returns from the background,
+ * as RelaySocket's `probe()` does; it does nothing while no socket is open, and a socket
+ * found dead ends pairing as any lost connection does.
+ * @typedef {{ result: Promise<PairingResult>, cancel(): void, probe(): void }} PairingRun
+ */
+
+/**
  * One timer, armed through the clock. When it fires, its work is queued on the chain, and
  * `cancelled` stops work that was queued but has not run yet.
  * @typedef {{ id: unknown, cancelled: boolean }} Timer
@@ -84,7 +94,8 @@ import { laptopIDFromKey } from './store.js';
 
 // Browsers run a longer timeout at once, so a far-off deadline is waited for in steps.
 const MAX_TIMER_MS = 2_147_483_647;
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+// The relay's close code for a socket another socket of the same role displaced.
+const REPLACED = 4000;
 
 export class PairingError extends Error {
   /**
@@ -102,21 +113,29 @@ export class PairingError extends Error {
 /**
  * Pairs this phone with the laptop that made `link`.
  *
- * `result` resolves once the laptop sends `paired`, and rejects with a PairingError otherwise;
- * anything unexpected (Web Crypto refusing to make a key, say) rejects `invalid` with the error
- * as its `cause`. On every outcome the socket closes with 1000 and every timer stops; after
- * `paired` nothing more is sent (plan 3 change 4). `cancel()` rejects `cancelled`, and does
- * nothing once there is an outcome.
+ * `result` resolves once the laptop sends `paired`, and rejects with a PairingError otherwise.
+ * Anything unexpected rejects `invalid` with the error as its `cause`: a link the loader cannot
+ * use (a relay or room `relaySocketURL` refuses, a room or laptop key that is not 32 bytes),
+ * which is reported this way rather than thrown, or Web Crypto refusing to make a key. On every
+ * outcome the socket closes with 1000 and every timer stops; after `paired` nothing more is
+ * sent (plan 3 change 4). `cancel()` rejects `cancelled`, and does nothing once there is an
+ * outcome.
  * @param {PairingOptions} options
- * @returns {{ result: Promise<PairingResult>, cancel(): void }}
- * @throws {RangeError} for a relay or room `relaySocketURL` refuses
- * @throws {TypeError} for a laptop key that is not 32 bytes
- * @throws {NoiseError} `invalidRoomID` for a room that is not 32 bytes
+ * @returns {PairingRun}
  */
 export function startPairing(options) {
-  const pairing = new Pairing(options);
+  /** @type {Pairing} */
+  let pairing;
+  try {
+    pairing = new Pairing(options);
+  } catch (error) {
+    const result = Promise.reject(new PairingError('invalid', error));
+    // Marked handled, so it is not reported as unhandled before the caller attaches its own.
+    result.catch(() => {});
+    return { result, cancel() {}, probe() {} };
+  }
   pairing.start();
-  return { result: pairing.result, cancel: () => pairing.cancel() };
+  return { result: pairing.result, cancel: () => pairing.cancel(), probe: () => pairing.probe() };
 }
 
 class Pairing {
@@ -129,7 +148,7 @@ class Pairing {
   #url;
   #prologue;
   #laptopID;
-  /** When this phone stops waiting for Allow: `exp`, plus the clock grace, in milliseconds. */
+  /** When this phone stops pairing: `exp`, plus the clock grace, in milliseconds. */
   #deadline;
 
   /** @type {Promise<PairingResult>} */
@@ -180,6 +199,9 @@ class Pairing {
   }
 
   start() {
+    // The whole pairing, not only the wait for Allow: a laptop socket that keeps rejoining
+    // restarts the handshake each time, and must not keep pairing alive past the offer.
+    this.#armExpiry();
     this.#enqueue(async () => {
       // Before the socket opens: the extractable private key exists only inside this call,
       // and the pair used for the handshake is rebuilt from the wrap that will be stored.
@@ -192,6 +214,10 @@ class Pairing {
 
   cancel() {
     this.#fail('cancelled');
+  }
+
+  probe() {
+    if (!this.#ended) this.#socket?.probe();
   }
 
   #connect() {
@@ -224,6 +250,13 @@ class Pairing {
         return;
       case 'closed':
       case 'dead':
+        if (event.kind === 'closed' && event.code === REPLACED) {
+          // Another phone socket joined the pairing room: someone else who saw the QR code,
+          // or this page in a second tab. The relay is reachable, but this attempt is over,
+          // and joining again would knock the other socket off in turn.
+          this.#fail('invalid');
+          return;
+        }
         // Before message 2 the relay connection failed. After it, either the laptop's offer
         // ended or its answer can no longer arrive.
         this.#fail(this.#transport === null ? 'relayUnreachable' : 'invalid');
@@ -296,7 +329,6 @@ class Pairing {
     this.#laptopName = readLaptopName(handshake.payload);
     const code = await confirmationCode(handshake.handshakeHash);
     if (this.#ended) return;
-    this.#armExpiry();
     this.#showCode(code);
     // The laptop shows its Allow prompt once this first transport message decrypts.
     await this.#send(handshake.transport, makeHello());
@@ -441,23 +473,4 @@ class Pairing {
     }
     return null;
   }
-}
-
-/**
- * Message 2's payload: `{"laptopName": <string>}`.
- * @param {Uint8Array} payload
- * @returns {string}
- * @throws {ProtocolError}
- */
-function readLaptopName(payload) {
-  let value;
-  try {
-    value = JSON.parse(utf8Decoder.decode(payload));
-  } catch {
-    throw new ProtocolError('message2');
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value) || typeof value.laptopName !== 'string') {
-    throw new ProtocolError('message2.laptopName');
-  }
-  return value.laptopName;
 }
