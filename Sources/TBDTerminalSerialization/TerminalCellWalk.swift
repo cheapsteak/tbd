@@ -160,8 +160,8 @@ public enum TerminalCellWalk {
     /// character that still carry the colour. A receiver that is not sent
     /// them shows the default background there.
     ///
-    /// When a line's coloured blanks run to the last column, the receiver is
-    /// left in pending wrap, as it is after a line of text that long. Nothing
+    /// When what a line prints reaches the last column, the receiver is left
+    /// in pending wrap, as it is after any line of text that long. Nothing
     /// that follows prints before the cursor moves: `join` sends `\r\n` next,
     /// whose CR clears the pending wrap before the LF moves down, and after
     /// the last line the writer sends only mode escapes and cursor moves
@@ -220,6 +220,42 @@ public enum TerminalCellWalk {
             && attribute.underlineStyle == .none && attribute.underlineColor == nil
     }
 
+    /// An unwritten or erased cell: code 0, one column wide. The trailing
+    /// half of a wide character also has code 0, but no width.
+    private static func isBlank(_ cell: CharData) -> Bool {
+        cell.width == 1 && cell.getCharacter() == Character(Unicode.Scalar(0))
+    }
+
+    /// The column just past the run of blanks from `start` that `render`
+    /// erases with ECH, at most `end`, or `start` itself when the blank at
+    /// `start` goes as a space instead.
+    ///
+    /// ECH leaves a cell with no character, as the source's blank is, so a
+    /// receiver's row comes out no longer than the source's. That length is
+    /// what reflow wraps by, so a row of coloured spaces wraps on a narrower
+    /// screen where the source's row of coloured blanks does not, and
+    /// pushes rows into history the source never had. Two kinds of blank go
+    /// this way: one past the line's last character (`trimmed`), whatever its
+    /// background, and one under a background colour anywhere. A default
+    /// blank before the last character changes neither the row's length nor
+    /// its look, so it stays a space.
+    ///
+    /// Only a blank ECH can reproduce goes this way (`erasesExactly`), and a
+    /// run holds one attribute, because ECH erases under the SGR that is open
+    /// when it is sent.
+    private static func erasedRunEnd(
+        of line: BufferLine, from start: Int, before end: Int, trimmed: Int
+    ) -> Int {
+        let attribute = line[start].attribute
+        guard erasesExactly(attribute), start >= trimmed || isVisibleWhenBlank(attribute)
+        else { return start }
+        var column = start
+        while column < end, isBlank(line[column]), line[column].attribute == attribute {
+            column += 1
+        }
+        return column
+    }
+
     private static func render(
         line: BufferLine, cols: Int, fullWidth: Bool, continuation: Bool
     ) -> String {
@@ -251,38 +287,63 @@ public enum TerminalCellWalk {
         if continuation { limit = max(limit, min(1, line.count)) }
         guard limit > 0 else { return "" }
 
+        // On a row the next one continues, ECH runs stop one cell short of
+        // the end, so the last cell prints whatever it holds, a blank as a
+        // space. Only printing in the last column leaves the receiver in
+        // pending wrap, which is what carries the continuation's first cell
+        // onto the next row.
+        let eraseLimit = fullWidth ? limit - 1 : limit
+        let trimmed = line.getTrimmedLength()
+
         var out = ""
         var openAttribute: Attribute?
-        for column in 0..<limit {
+        var column = 0
+        while column < limit {
             let cell = line[column]
             // The trailing half of a wide character. Emitting it would double
             // every CJK glyph and every emoji.
-            if cell.width == 0 { continue }
+            if cell.width == 0 {
+                column += 1
+                continue
+            }
             if openAttribute != cell.attribute {
                 out += SGREncoder.sequence(for: cell.attribute)
                 openAttribute = cell.attribute
             }
             // An unwritten or erased cell carries code 0, and
             // `CharData.getCharacter()` renders that literally as
-            // `Character(Unicode.Scalar(0))`. On the receiving terminal 0x00
-            // is an `.execute` code with no case in ground-state dispatch —
-            // it logs an unknown code and advances nothing, so the column
-            // collapses instead of holding a position: `ESC[10Chello` comes
-            // back as `hello` at column 0, and any background colour on the
-            // blank cell is lost with it. A space cell moves the cursor
-            // forward exactly one column, under whatever SGR run is already
-            // open, so a coloured blank still paints its background.
+            // `Character(Unicode.Scalar(0))`, which must not reach the wire.
+            // On the receiving terminal 0x00 is an `.execute` code with no
+            // case in ground-state dispatch — it logs an unknown code and
+            // advances nothing, so the column collapses instead of holding a
+            // position: `ESC[10Chello` comes back as `hello` at column 0.
             let character = cell.getCharacter()
-            let isBlank = character == Character(Unicode.Scalar(0))
-            out.append(isBlank ? " " : character)
-            // The space that made the receiver wrap onto a continuation is
-            // erased back to a blank under the same SGR (BS, then ECH), so the
-            // receiver's cell holds no character, as the source's does, and
-            // CUF steps past it when more of the row follows.
-            if continuation && column == 0 && isBlank && erasesExactly(cell.attribute) {
-                out += "\u{8}\u{1b}[X"
-                if limit > 1 { out += "\u{1b}[C" }
+            guard character == Character(Unicode.Scalar(0)) else {
+                out.append(character)
+                column += 1
+                continue
             }
+            // A blank goes one of two ways. A run `erasedRunEnd` accepts is
+            // erased with ECH under the run's SGR, which paints the
+            // background and moves nothing, then stepped over with CUF. The
+            // CUF is left off when the run ends the row, because a line
+            // ending or the end of the walk comes next. Any other blank goes
+            // as a space, which moves the cursor one column under the open
+            // SGR, so a styled blank still shows.
+            let runEnd = erasedRunEnd(of: line, from: column, before: eraseLimit, trimmed: trimmed)
+            guard runEnd > column else {
+                out.append(" ")
+                column += 1
+                continue
+            }
+            // A continuation's first cell is printed all the same, because
+            // printing is what wraps the receiver onto the row (see above).
+            // BS then backs over it, so the run erases it with the rest.
+            if continuation && column == 0 { out += " \u{8}" }
+            let count = runEnd - column
+            out += "\u{1b}[\(count)X"
+            if runEnd < limit { out += "\u{1b}[\(count)C" }
+            column = runEnd
         }
         // Never leave an attribute open across a line boundary.
         if openAttribute != nil { out += "\u{1b}[0m" }

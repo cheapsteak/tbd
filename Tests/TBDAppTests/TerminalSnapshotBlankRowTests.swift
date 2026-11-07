@@ -74,6 +74,12 @@ struct TerminalSnapshotBlankRowTests {
                 "the cursor row differs", sourceLocation: sourceLocation)
     }
 
+    /// Every viewport row's length through its last character, which is
+    /// what reflow wraps a row by.
+    private static func trimmedLengths(of terminal: Terminal) -> [Int] {
+        (0..<terminal.rows).map { terminal.getLine(row: $0)?.getTrimmedLength() ?? 0 }
+    }
+
     /// Every viewport cell's attribute, row by row.
     private static func attributes(of terminal: Terminal) -> [[Attribute?]] {
         (0..<terminal.rows).map { row in
@@ -195,10 +201,11 @@ struct TerminalSnapshotBlankRowTests {
     // MARK: - Blank cells with a background colour
 
     @Test("Erasing under a background colour keeps the colour", arguments: [
-        // EL, EL 2 and ED under three colours. Rows 0 and 1 are coloured to
-        // the last column, so each ends in pending wrap ahead of its line
-        // ending. Row 2 is coloured from column 4 and every row below it in
-        // full, so the screen's last row holds nothing but coloured blanks.
+        // EL, EL 2 and ED under three colours. Rows 0 and 1 are coloured out
+        // to the last column, so a walk that printed them would end each in
+        // pending wrap ahead of its line ending. Row 2 is coloured from
+        // column 4 and every row below it in full, so the screen's last row
+        // holds nothing but coloured blanks.
         "\u{1b}[41m\u{1b}[K\u{1b}[2;1H\u{1b}[42m\u{1b}[2K\u{1b}[3;5H\u{1b}[43m\u{1b}[J\u{1b}[0m",
         // ECH in the middle of a row: coloured blanks with plain ones after
         // them, so the last cell of the row says nothing about the rest.
@@ -244,8 +251,8 @@ struct TerminalSnapshotBlankRowTests {
         let pair = SnapshotPair(cols: 20, rows: 5)
         // Ten lines scroll six into history and leave the cursor on the last
         // row, which `ESC[2K` then colours out to the last column. That row
-        // is the last one the walk sends, so the receiver ends it in pending
-        // wrap with only mode escapes and the cursor address to follow.
+        // is the last one the walk sends, with only mode escapes and the
+        // cursor address to follow it.
         pair.source.feed(text: Self.numberedLines(10) + "\u{1b}[44m\u{1b}[2K\u{1b}[0m")
         let expected = Self.attributes(of: pair.source)
         #expect(Self.colouredCells(expected) == 20, "the fixture must colour the last row")
@@ -254,6 +261,33 @@ struct TerminalSnapshotBlankRowTests {
         #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
         Self.expectSameScreen(pair)
         #expect(Self.history(of: pair.fresh).count == 6)
+    }
+
+    @Test("Coloured blanks arrive with no character, so a narrower screen reflows both sides alike")
+    func colouredBlanksArriveWithoutACharacter() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // A screen erased under a background colour, then a prompt written
+        // under SGR 0: every cell past the prompt's two is a blank with no
+        // character that carries the colour.
+        pair.source.feed(text: "\u{1b}[44m\u{1b}[2J\u{1b}[H\u{1b}[0m$ ")
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) == 80 * 24 - 2,
+                "the fixture must colour every cell past the prompt")
+
+        pair.transfer("")
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
+        // Every row ends at its last character on both sides, so the
+        // coloured cells past it hold no character on the receiver either.
+        #expect(Self.trimmedLengths(of: pair.fresh) == Self.trimmedLengths(of: pair.source),
+                "the receiver's rows run past their last character")
+        Self.expectSameScreen(pair)
+
+        // A receiver row of 80 coloured spaces wraps on a 70-column screen,
+        // where the source's row of coloured blanks does not, and the extra
+        // rows push the screen up into history.
+        pair.source.resize(cols: 70, rows: 24)
+        pair.fresh.resize(cols: 70, rows: 24)
+        Self.expectSameScreen(pair)
     }
 
     @Test("Coloured blanks past the last column do not stretch the row they sit in")
