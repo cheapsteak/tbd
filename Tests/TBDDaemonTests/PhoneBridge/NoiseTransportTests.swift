@@ -110,9 +110,7 @@ struct NoiseTransportTests {
     @Test(arguments: [0, 20, -1]) func tamperedByteFails(offset: Int) throws {
         var (a, b) = Self.pair()
         let m = try a.encrypt(Self.p)
-        var bytes = Array(m)
-        bytes[offset < 0 ? bytes.count + offset : offset] ^= 0x01
-        let tampered = Data(bytes)
+        let tampered = PhoneTestVectors.flipping(m, at: offset)
         #expect(throws: NoiseError.decryptFailed) { try b.decrypt(tampered) }
         let opened = try b.decrypt(m)
         #expect(opened == Self.p)

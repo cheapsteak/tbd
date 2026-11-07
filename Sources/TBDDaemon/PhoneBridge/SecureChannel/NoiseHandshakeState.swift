@@ -271,10 +271,7 @@ struct NoiseHandshakeState: Sendable {
             localEphemeral = ephemeral
             let ephemeralBytes = ephemeral.publicKey.rawRepresentation
             bytes += ephemeralBytes
-            symmetric.mixHash(ephemeralBytes)
-            if pattern.usesPSK {
-                symmetric.mixKey(ephemeralBytes)
-            }
+            mixEphemeral(ephemeralBytes)
         case .s:
             bytes += try symmetric.encryptAndHash(localStatic.publicKey.rawRepresentation)
         case .psk:
@@ -291,10 +288,7 @@ struct NoiseHandshakeState: Sendable {
             let ephemeralBytes = rest.prefix(Self.publicKeyLength)
             rest = rest.dropFirst(Self.publicKeyLength)
             remoteEphemeral = try Self.publicKey(ephemeralBytes)
-            symmetric.mixHash(ephemeralBytes)
-            if pattern.usesPSK {
-                symmetric.mixKey(ephemeralBytes)
-            }
+            mixEphemeral(ephemeralBytes)
         case .s:
             // The cipher always has a key by the `s` token (after `es`), so
             // the key comes encrypted with a tag.
@@ -306,6 +300,15 @@ struct NoiseHandshakeState: Sendable {
             try mixPSK()
         case .dh(let dh):
             try symmetric.mixKey(secret(dh))
+        }
+    }
+
+    /// The `e` token mixes the ephemeral public key into `h`, and in a PSK
+    /// pattern into the chaining key too.
+    private mutating func mixEphemeral(_ publicKey: Data) {
+        symmetric.mixHash(publicKey)
+        if pattern.usesPSK {
+            symmetric.mixKey(publicKey)
         }
     }
 
@@ -323,35 +326,22 @@ struct NoiseHandshakeState: Sendable {
     private func secret(_ dh: DiffieHellman) throws -> Data {
         switch (dh, role) {
         case (.ee, _):
-            return try NoiseSymmetricState.dh(ownEphemeral(), peerEphemeral())
+            return try NoiseSymmetricState.dh(Self.required(localEphemeral), Self.required(remoteEphemeral))
         case (.es, .initiator), (.se, .responder):
-            return try NoiseSymmetricState.dh(ownEphemeral(), peerStatic())
+            return try NoiseSymmetricState.dh(Self.required(localEphemeral), Self.required(remoteStatic))
         case (.es, .responder), (.se, .initiator):
-            return try NoiseSymmetricState.dh(localStatic, peerEphemeral())
+            return try NoiseSymmetricState.dh(localStatic, Self.required(remoteEphemeral))
         case (.ss, _):
-            return try NoiseSymmetricState.dh(localStatic, peerStatic())
+            return try NoiseSymmetricState.dh(localStatic, Self.required(remoteStatic))
         }
     }
 
-    private func ownEphemeral() throws -> Curve25519.KeyAgreement.PrivateKey {
-        guard let localEphemeral else {
+    /// A key the handshake has not reached yet is `invalidState`.
+    private static func required<Key>(_ key: Key?) throws -> Key {
+        guard let key else {
             throw NoiseError.invalidState
         }
-        return localEphemeral
-    }
-
-    private func peerEphemeral() throws -> Curve25519.KeyAgreement.PublicKey {
-        guard let remoteEphemeral else {
-            throw NoiseError.invalidState
-        }
-        return remoteEphemeral
-    }
-
-    private func peerStatic() throws -> Curve25519.KeyAgreement.PublicKey {
-        guard let remoteStatic else {
-            throw NoiseError.invalidState
-        }
-        return remoteStatic
+        return key
     }
 
     private static func publicKey(_ bytes: Data) throws -> Curve25519.KeyAgreement.PublicKey {

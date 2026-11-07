@@ -71,23 +71,11 @@ struct PairingLink: Codable, Equatable, Sendable {
             throw PairingLinkError.badBase64
         }
         let json = try jsonText(payload)
-        let decoder = JSONDecoder()
-        let probe: VersionProbe
-        do {
-            probe = try decoder.decode(VersionProbe.self, from: json)
-        } catch {
-            throw PairingLinkError.badJSON
-        }
-        let version = try wholeNumber(probe.v)
+        let version = try wholeNumber(decodeJSON(VersionProbe.self, from: json).v)
         guard version == currentVersion else {
             throw PairingLinkError.unsupportedVersion(version)
         }
-        let wire: Wire
-        do {
-            wire = try decoder.decode(Wire.self, from: json)
-        } catch {
-            throw PairingLinkError.badJSON
-        }
+        let wire = try decodeJSON(Wire.self, from: json)
         let exp = try wholeNumber(wire.exp)
         let link = PairingLink(
             v: version,
@@ -139,6 +127,14 @@ struct PairingLink: Codable, Equatable, Sendable {
             throw PairingLinkError.badJSON
         }
         return Data(text)
+    }
+
+    private static func decodeJSON<T: Decodable>(_ type: T.Type, from json: Data) throws -> T {
+        do {
+            return try JSONDecoder().decode(type, from: json)
+        } catch {
+            throw PairingLinkError.badJSON
+        }
     }
 
     /// The loader reads every JSON number as a double, so `v` and `exp` are

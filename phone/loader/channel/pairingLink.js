@@ -20,7 +20,6 @@
 //   `1.`), because JSONDecoder checks only the values it reads;
 // - link text with surrounding whitespace, or a tab or line break inside it,
 //   which this parser drops and the daemon's `URL(string:)` percent-encodes.
-//   to in ways only one side observes.
 
 /**
  * @typedef {{ v: number, relay: string, room: string, secret: string, key: string, name: string, exp: number }} PairingLink
@@ -118,10 +117,7 @@ export function base64urlDecode(str) {
   } catch {
     return null;
   }
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   // atob ignores non-zero spare bits, so re-encoding is what rejects them.
   return base64urlEncode(bytes) === str ? bytes : null;
 }
@@ -213,10 +209,7 @@ function decodeJSONObject(bytes) {
   } catch {
     throw new PairingLinkError('badJSON');
   }
-  if (!isWellFormedValue(value, 1)) {
-    throw new PairingLinkError('badJSON');
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  if (!isWellFormedValue(value, 1) || value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new PairingLinkError('badJSON');
   }
   return value;

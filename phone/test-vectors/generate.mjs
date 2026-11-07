@@ -131,18 +131,20 @@ function pairingLinkVectors() {
   const { room: _room, ...linkWithoutRoom } = mainLink;
   if (!mainLink.room.endsWith('8')) throw new Error('the room no longer ends in 8; revisit the spare-bits case');
 
-  const v2Link = { ...mainLink, relay: 'http://localhost:8787', name: 'a', exp: now + 1 };
-  const v4Link = { ...mainLink, name: `${'’'.repeat(85)}x` };
-  const v5Link = { ...mainLink, relay: 'http://127.0.0.1:8787' };
-  const v6Link = { ...mainLink, exp: Number.MAX_SAFE_INTEGER };
-  const v8Link = { ...mainLink, relay: 'https://acme-relay.acme.workers.dev:8443' };
-  /** The main link with another relay, which fails. @param {string} description @param {string} relay */
-  const relayCase = (description, relay) => ({
+  /** A valid link that encodes back to its url. @param {string} description @param {Record<string, unknown>} link */
+  const canonicalCase = (description, link) => ({ description, link, url: linkURL(linkPayload(link)), canonical: true });
+  /**
+   * The main link with one field replaced, which fails as badField.
+   * @param {string} description @param {string} field @param {unknown} value
+   */
+  const badFieldCase = (description, field, value) => ({
     description,
-    url: changedLinkURL({ relay }),
+    url: changedLinkURL({ [field]: value }),
     error: 'badField',
-    field: 'relay',
+    field,
   });
+  /** @param {string} description @param {string} relay */
+  const relayCase = (description, relay) => badFieldCase(description, 'relay', relay);
 
   const invalid = [
     { description: 'no fragment', url: loaderURL, error: 'missingFragment' },
@@ -167,57 +169,21 @@ function pairingLinkVectors() {
     },
     { description: 'v is the string "1", not a number', url: changedLinkURL({ v: '1' }), error: 'badJSON' },
     { description: 'the room key is missing', url: linkURL(linkPayload(linkWithoutRoom)), error: 'badJSON' },
-    {
-      description: 'the relay is plain http on a host that is not loopback',
-      url: changedLinkURL({ relay: 'http://acme-relay.acme.workers.dev' }),
-      error: 'badField',
-      field: 'relay',
-    },
-    {
-      description: 'the relay scheme is ftp',
-      url: changedLinkURL({ relay: 'ftp://acme-relay.acme.workers.dev' }),
-      error: 'badField',
-      field: 'relay',
-    },
-    {
-      description: 'the room is cut to 42 characters',
-      url: changedLinkURL({ room: mainLink.room.slice(0, 42) }),
-      error: 'badField',
-      field: 'room',
-    },
-    {
-      description: 'the room ends in 9, not 8, so its spare bits are non-zero',
-      url: changedLinkURL({ room: `${mainLink.room.slice(0, -1)}9` }),
-      error: 'badField',
-      field: 'room',
-    },
-    {
-      description: 'the secret carries = padding',
-      url: changedLinkURL({ secret: `${mainLink.secret}=` }),
-      error: 'badField',
-      field: 'secret',
-    },
-    {
-      description: 'the key decodes to 31 bytes',
-      url: changedLinkURL({ key: base64url(new Uint8Array(31).fill(0x01)) }),
-      error: 'badField',
-      field: 'key',
-    },
-    { description: 'the name is empty', url: changedLinkURL({ name: '' }), error: 'badField', field: 'name' },
-    {
-      description: 'the name is 257 UTF-8 bytes',
-      url: changedLinkURL({ name: 'x'.repeat(257) }),
-      error: 'badField',
-      field: 'name',
-    },
-    { description: 'exp is 0', url: changedLinkURL({ exp: 0 }), error: 'badField', field: 'exp' },
+    relayCase('the relay is plain http on a host that is not loopback', 'http://acme-relay.acme.workers.dev'),
+    relayCase('the relay scheme is ftp', 'ftp://acme-relay.acme.workers.dev'),
+    badFieldCase('the room is cut to 42 characters', 'room', mainLink.room.slice(0, 42)),
+    badFieldCase('the room ends in 9, not 8, so its spare bits are non-zero', 'room', `${mainLink.room.slice(0, -1)}9`),
+    badFieldCase('the secret carries = padding', 'secret', `${mainLink.secret}=`),
+    badFieldCase('the key decodes to 31 bytes', 'key', base64url(new Uint8Array(31).fill(0x01))),
+    badFieldCase('the name is empty', 'name', ''),
+    badFieldCase('the name is 257 UTF-8 bytes', 'name', 'x'.repeat(257)),
+    badFieldCase('exp is 0', 'exp', 0),
     { description: 'exp equals now', url: changedLinkURL({ exp: now }), error: 'expired' },
-    {
-      description: 'the name is U+2019 repeated 86 times: 258 UTF-8 bytes, though only 86 UTF-16 units',
-      url: changedLinkURL({ name: '’'.repeat(86) }),
-      error: 'badField',
-      field: 'name',
-    },
+    badFieldCase(
+      'the name is U+2019 repeated 86 times: 258 UTF-8 bytes, though only 86 UTF-16 units',
+      'name',
+      '’'.repeat(86),
+    ),
     {
       description: 'the payload is the main JSON text encoded as UTF-16LE with no byte order mark (built from bytes)',
       url: bytesLinkURL(new Uint8Array(Buffer.from(mainJSON, 'utf16le'))),
@@ -256,12 +222,11 @@ function pairingLinkVectors() {
       error: 'badField',
       field: 'exp',
     },
-    {
-      description: 'exp is 9007199254740992, one above the largest exact integer a double holds',
-      url: changedLinkURL({ exp: Number.MAX_SAFE_INTEGER + 1 }),
-      error: 'badField',
-      field: 'exp',
-    },
+    badFieldCase(
+      'exp is 9007199254740992, one above the largest exact integer a double holds',
+      'exp',
+      Number.MAX_SAFE_INTEGER + 1,
+    ),
     {
       description: 'exp is written as 1800000300.5, not a whole number (the main JSON text respelled)',
       url: respelledLinkURL(mainExp, `${mainExp}.5`),
@@ -291,49 +256,38 @@ function pairingLinkVectors() {
       invalid: ['A', 'AA==', 'AAE=', '+/8', 'AB', ' AA', 'AA\n'],
     },
     valid: [
-      { description: 'V1: the main link', link: mainLink, url: linkURL(mainPayload), canonical: true },
-      {
-        description: 'V2: a loopback http relay, a one-character name, and exp one second after now',
-        link: v2Link,
-        url: linkURL(linkPayload(v2Link)),
-        canonical: true,
-      },
+      canonicalCase('V1: the main link', mainLink),
+      canonicalCase('V2: a loopback http relay, a one-character name, and exp one second after now', {
+        ...mainLink,
+        relay: 'http://localhost:8787',
+        name: 'a',
+        exp: now + 1,
+      }),
       {
         description: 'V3: an unknown field is ignored',
         link: mainLink,
         url: changedLinkURL({ future: true }),
         canonical: false,
       },
-      {
-        description: 'V4: a name of U+2019 repeated 85 times and x, exactly 256 UTF-8 bytes',
-        link: v4Link,
-        url: linkURL(linkPayload(v4Link)),
-        canonical: true,
-      },
-      {
-        description: 'V5: a loopback http relay spelled 127.0.0.1, with a port',
-        link: v5Link,
-        url: linkURL(linkPayload(v5Link)),
-        canonical: true,
-      },
-      {
-        description: 'V6: exp is 9007199254740991, the largest exact integer a double holds',
-        link: v6Link,
-        url: linkURL(linkPayload(v6Link)),
-        canonical: true,
-      },
+      canonicalCase('V4: a name of U+2019 repeated 85 times and x, exactly 256 UTF-8 bytes', {
+        ...mainLink,
+        name: `${'’'.repeat(85)}x`,
+      }),
+      canonicalCase('V5: a loopback http relay spelled 127.0.0.1, with a port', {
+        ...mainLink,
+        relay: 'http://127.0.0.1:8787',
+      }),
+      canonicalCase('V6: exp is 9007199254740991, the largest exact integer a double holds', {
+        ...mainLink,
+        exp: Number.MAX_SAFE_INTEGER,
+      }),
       {
         description: 'V7: the payload is a UTF-8 byte order mark (ef bb bf) followed by the main JSON bytes (built from bytes)',
         link: mainLink,
         url: bytesLinkURL(Uint8Array.from([0xef, 0xbb, 0xbf, ...mainBytes])),
         canonical: false,
       },
-      {
-        description: 'V8: an https relay with a port',
-        link: v8Link,
-        url: linkURL(linkPayload(v8Link)),
-        canonical: true,
-      },
+      canonicalCase('V8: an https relay with a port', { ...mainLink, relay: 'https://acme-relay.acme.workers.dev:8443' }),
       {
         description: 'V9: exp is written as 1800000300.0, a whole number (the main JSON text respelled)',
         link: mainLink,

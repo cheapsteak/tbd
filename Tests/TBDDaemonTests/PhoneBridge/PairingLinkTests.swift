@@ -137,6 +137,6 @@ struct PairingLinkTests {
     }
 
     private static func randomKey() -> String {
-        Base64URL.encode(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+        Base64URL.encode(PhoneTestVectors.randomBytes(32))
     }
 }

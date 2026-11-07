@@ -107,18 +107,19 @@ struct NoiseCacophonyVectorTests {
         return try #require(match, "no vector for \(pattern.protocolName)")
     }
 
-    private static func randomBytes(_ count: Int) -> Data {
-        Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-    }
-
-    /// `message` with the low bit of its last byte flipped. The last byte is
-    /// the payload's tag, so a read gets through every token, changing the
-    /// whole symmetric state, before it fails: the hardest case for a read
-    /// that must leave the state as it was.
-    private static func flippingLastBit(_ message: Data) -> Data {
-        var bytes = Array(message)
-        bytes[bytes.count - 1] ^= 0x01
-        return Data(bytes)
+    /// Frames meant for a replaced peer, each with the error that refuses it,
+    /// to send before `real`. Flipping `real`'s last bit alters the payload's
+    /// tag, so a read gets through every token, changing the whole symmetric
+    /// state, before it fails: the hardest case for a read that must leave
+    /// the state as it was. One frame has an all-zero ephemeral key.
+    private static func staleFrames(before real: Data, randomLength: Int) -> [(frame: Data, expected: NoiseError)] {
+        [
+            (PhoneTestVectors.randomBytes(randomLength), .decryptFailed),
+            (Data(count: 10), .messageTooShort),
+            (Data(count: 65_536), .messageTooLong),
+            (PhoneTestVectors.flipping(real, at: -1), .decryptFailed),
+            (Data(count: 32) + real.dropFirst(32), .invalidPublicKey),
+        ]
     }
 
     @Test func fileHoldsBothProtocols() throws {
@@ -183,14 +184,7 @@ struct NoiseCacophonyVectorTests {
         for v in try Self.vectors() {
             var responder = try v.makeResponder()
             let real = v.ciphertext(0)
-            let stale: [(frame: Data, expected: NoiseError)] = [
-                (Self.randomBytes(120), .decryptFailed),
-                (Data(count: 10), .messageTooShort),
-                (Data(count: 65_536), .messageTooLong),
-                (Self.flippingLastBit(real), .decryptFailed),
-                (Data(count: 32) + real.dropFirst(32), .invalidPublicKey),
-            ]
-            for (frame, expected) in stale {
+            for (frame, expected) in Self.staleFrames(before: real, randomLength: 120) {
                 #expect(throws: expected, "\(v.protocolName), \(frame.count) bytes") {
                     try responder.readMessage1(frame)
                 }
@@ -212,14 +206,7 @@ struct NoiseCacophonyVectorTests {
             let first = try initiator.writeMessage1(payload: v.payload(0))
             #expect(first == v.ciphertext(0), "\(v.protocolName)")
             let real = v.ciphertext(1)
-            let stale: [(frame: Data, expected: NoiseError)] = [
-                (Self.randomBytes(64), .decryptFailed),
-                (Data(count: 10), .messageTooShort),
-                (Data(count: 65_536), .messageTooLong),
-                (Self.flippingLastBit(real), .decryptFailed),
-                (Data(count: 32) + real.dropFirst(32), .invalidPublicKey),
-            ]
-            for (frame, expected) in stale {
+            for (frame, expected) in Self.staleFrames(before: real, randomLength: 64) {
                 #expect(throws: expected, "\(v.protocolName), \(frame.count) bytes") {
                     try initiator.readMessage2(frame)
                 }

@@ -48,20 +48,8 @@ struct NoiseHandshakeTests {
         let laptopHash: Data
     }
 
-    private static func randomBytes(_ count: Int) -> Data {
-        Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-    }
-
     private static func randomPrologue() throws -> Data {
-        try PhoneChannelPrologue.make(roomID: randomBytes(32))
-    }
-
-    /// `message` with the low bit of one byte flipped; a negative offset
-    /// counts from the end.
-    private static func flipping(_ message: Data, at offset: Int) -> Data {
-        var bytes = Array(message)
-        bytes[offset < 0 ? bytes.count + offset : offset] ^= 0x01
-        return Data(bytes)
+        try PhoneChannelPrologue.make(roomID: PhoneTestVectors.randomBytes(32))
     }
 
     private static func handshake(_ setup: Setup) throws -> Finished {
@@ -158,7 +146,7 @@ struct NoiseHandshakeTests {
         var responder = try setup.responder()
         let first = try initiator.writeMessage1(payload: Self.devicePayload)
         #expect(first.count == 96 + Self.devicePayload.count)
-        let tampered = Self.flipping(first, at: offset)
+        let tampered = PhoneTestVectors.flipping(first, at: offset)
         #expect(throws: NoiseError.decryptFailed) { try responder.readMessage1(tampered) }
     }
 
@@ -170,7 +158,7 @@ struct NoiseHandshakeTests {
         let first = try initiator.writeMessage1(payload: Self.devicePayload)
         _ = try responder.readMessage1(first)
         let second = try responder.writeMessage2(payload: Self.laptopPayload)
-        let tampered = Self.flipping(second.message, at: offset)
+        let tampered = PhoneTestVectors.flipping(second.message, at: offset)
         #expect(throws: NoiseError.decryptFailed) { try initiator.readMessage2(tampered) }
     }
 

@@ -1,7 +1,8 @@
 import Foundation
 
 /// Loads the phone channel's shared vectors from `phone/test-vectors/`, the
-/// files the loader's Node tests read too.
+/// files the loader's Node tests read too, and makes the bytes the phone
+/// channel's tests feed it.
 enum PhoneTestVectors {
     static func load<T: Decodable>(_ fileName: String, as type: T.Type) throws -> T {
         // This file sits in Tests/TBDDaemonTests/PhoneBridge, four levels
@@ -32,5 +33,17 @@ enum PhoneTestVectors {
             rest = rest.dropFirst(2)
         }
         return data
+    }
+
+    static func randomBytes(_ count: Int) -> Data {
+        Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
+    }
+
+    /// `message` with the low bit of one byte flipped; a negative offset
+    /// counts from the end.
+    static func flipping(_ message: Data, at offset: Int) -> Data {
+        var bytes = Array(message)
+        bytes[offset < 0 ? bytes.count + offset : offset] ^= 0x01
+        return Data(bytes)
     }
 }

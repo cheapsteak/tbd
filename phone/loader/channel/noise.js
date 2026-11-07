@@ -102,11 +102,7 @@ export function phonePrologue(roomID) {
   if (roomID.length !== ROOM_ID_BYTES) {
     throw new NoiseError('invalidRoomID');
   }
-  const label = utf8Encoder.encode(PROLOGUE_LABEL);
-  const prologue = new Uint8Array(label.length + roomID.length);
-  prologue.set(label);
-  prologue.set(roomID, label.length);
-  return prologue;
+  return concatBytes(utf8Encoder.encode(PROLOGUE_LABEL), roomID);
 }
 
 /**
@@ -778,9 +774,7 @@ async function importRemoteStatic(key) {
  */
 async function importKeyPair(key, name) {
   if (key instanceof Uint8Array) {
-    const der = new Uint8Array(X25519_PKCS8_PREFIX.length + DH_BYTES);
-    der.set(X25519_PKCS8_PREFIX);
-    der.set(key, X25519_PKCS8_PREFIX.length);
+    const der = concatBytes(X25519_PKCS8_PREFIX, key);
     const privateKey = await subtle.importKey('pkcs8', der, { name: 'X25519' }, true, ['deriveBits']);
     const { x } = await subtle.exportKey('jwk', privateKey);
     const publicKey = x === undefined ? null : base64urlDecode(x);

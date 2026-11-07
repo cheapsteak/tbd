@@ -21,6 +21,9 @@ const vectors = file.vectors;
 const fromHex = (hex) => new Uint8Array(Buffer.from(hex, 'hex'));
 /** @param {number} length */
 const randomBytes = (length) => crypto.getRandomValues(new Uint8Array(length));
+/** A fresh X25519 key pair. @param {boolean} extractable @param {KeyUsage[]} usages */
+const generateX25519 = async (extractable, usages) =>
+  /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, extractable, usages));
 
 /** @param {Vector} vector @returns {'IKpsk2' | 'IK'} */
 function patternOf(vector) {
@@ -357,7 +360,7 @@ test('handshake: refuses malformed keys, prologue and pattern', async () => {
   await assert.rejects(vectorInitiator(vectorIK, { ephemeral: new Uint8Array(33) }), RangeError);
   await assert.rejects(vectorInitiator(vectorIK, { pattern: 'XX' }), RangeError);
   await assert.rejects(vectorInitiator(vectorIK, { prologue: undefined }), TypeError);
-  const pair = /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']));
+  const pair = await generateX25519(false, ['deriveBits']);
   await assert.rejects(vectorInitiator(vectorIK, { localStatic: pair.privateKey }), TypeError);
   await assert.rejects(vectorInitiator(vectorIK, { remoteStatic: pair.privateKey }), TypeError);
 });
@@ -403,24 +406,22 @@ test('handshake: writeMessage1 and readMessage2 refuse a non-Uint8Array, and the
 });
 
 test('handshake: createInitiator refuses keys it could not use', async () => {
-  const generate = async (/** @type {KeyUsage[]} */ usages) =>
-    /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, false, usages));
   /** The same public key, imported so it cannot be exported. @param {CryptoKey} publicKey */
   const hidden = async (publicKey) =>
     subtle.importKey('raw', await subtle.exportKey('raw', publicKey), { name: 'X25519' }, false, []);
-  const phone = await generate(['deriveBits']);
-  const laptop = await generate(['deriveBits']);
+  const phone = await generateX25519(false, ['deriveBits']);
+  const laptop = await generateX25519(false, ['deriveBits']);
   const options = {
     pattern: /** @type {'IK'} */ ('IK'),
     localStatic: phone,
     remoteStatic: laptop.publicKey,
     prologue: randomBytes(43),
-    ephemeral: await generate(['deriveBits']),
+    ephemeral: await generateX25519(false, ['deriveBits']),
   };
   // The usable keys are accepted.
   await createInitiator(options);
 
-  const noDeriveBits = await generate(['deriveKey']);
+  const noDeriveBits = await generateX25519(false, ['deriveKey']);
   const hiddenPublic = { privateKey: phone.privateKey, publicKey: await hidden(phone.publicKey) };
   /** @type {[string, object][]} */
   const cases = [
@@ -462,11 +463,9 @@ test('handshake: message 1 payload size limit', async () => {
 });
 
 test('handshake: CryptoKeyPair inputs', async () => {
-  const generate = async () =>
-    /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']));
-  const localStatic = await generate();
-  const ephemeral = await generate();
-  const laptop = await generate();
+  const localStatic = await generateX25519(false, ['deriveBits']);
+  const ephemeral = await generateX25519(false, ['deriveBits']);
+  const laptop = await generateX25519(false, ['deriveBits']);
   const initiator = await createInitiator({
     pattern: 'IKpsk2',
     localStatic,
@@ -481,13 +480,11 @@ test('handshake: CryptoKeyPair inputs', async () => {
 });
 
 test('handshake: a key pair and its raw private key give the same message 1', async () => {
-  const generate = async () =>
-    /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, true, ['deriveBits']));
   /** @param {CryptoKeyPair} pair the 32 raw private-key bytes, the end of the PKCS#8 export */
   const rawPrivate = async (pair) => new Uint8Array(await subtle.exportKey('pkcs8', pair.privateKey)).slice(-32);
-  const localStatic = await generate();
-  const ephemeral = await generate();
-  const laptop = await generate();
+  const localStatic = await generateX25519(true, ['deriveBits']);
+  const ephemeral = await generateX25519(true, ['deriveBits']);
+  const laptop = await generateX25519(true, ['deriveBits']);
   const psk = randomBytes(32);
   const prologue = randomBytes(43);
   const payload = randomBytes(22);
