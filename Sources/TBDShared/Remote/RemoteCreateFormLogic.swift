@@ -331,7 +331,7 @@ public enum RemoteCreateFormLogic {
             .filter { $0.required && $0.type != "bool" }
             .filter { (strings[$0.name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map(\.name)
-        public let repoUnanswered = fields.contains { $0.name == repoFieldName }
+        let repoUnanswered = fields.contains { $0.name == repoFieldName }
             && (strings[repoFieldName] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return Plan(
             stringValues: strings, boolValues: bools, missingRequired: missing,
