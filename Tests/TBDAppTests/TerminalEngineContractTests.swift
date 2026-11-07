@@ -312,7 +312,171 @@ struct TerminalEngineContractTests {
         #expect(after.width > before.width, "cell width \(before.width) -> \(after.width)")
     }
 
+    // MARK: - What the engine swallows
+
+    @Test("The handback's mode-probe replies never reach send",
+          arguments: TerminalEngineFactory.availableKinds)
+    func handbackRepliesNeverReachSend(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        feed("hello\r\n$ ", into: fixture.engine)
+        await settle()
+        fixture.recorder.reset()
+
+        let preamble = await fixture.engine.handbackPreamble(maxScrollbackLines: 100)
+        await settle()
+        #expect(!preamble.isEmpty)
+        #expect(!fixture.engine.isCollectingHandbackReplies)
+        #expect(fixture.recorder.sent.isEmpty, "the handback's replies reached send: \(fixture.recorder.sent)")
+
+        // Positive control: the same probe fed live is answered through send,
+        // so the empty `sent` above means the replies were kept, not that the
+        // probe provoked none.
+        feed(HolderHandback.modeProbe, into: fixture.engine)
+        let answered = await waitUntil { !fixture.recorder.sent.isEmpty }
+        #expect(answered, "the mode probe must be answered when fed live")
+    }
+
+    /// DECCOLM needs `CSI ? 40 h` first: that is what enables it in this
+    /// emulator (xterm's `allowC132`), as `QuietIngestTests` records.
+    @Test("A snapshot's BEL, OSC 52 copy and DECCOLM ring nothing, copy nothing and report no size",
+          arguments: TerminalEngineFactory.availableKinds)
+    func ingestSnapshotMutesBellClipboardAndResize(kind: TerminalEngineKind) async {
+        let muted = await makeFixture(kind: kind)
+        let live = await makeFixture(kind: kind)
+        defer {
+            muted.tearDown()
+            live.tearDown()
+        }
+        let marker = "tbd-engine-contract-\(UUID().uuidString)"
+        let bytes = "\u{07}"
+            + "\u{1b}]52;c;\(Data(marker.utf8).base64EncodedString())\u{07}"
+            + "\u{1b}[?40h\u{1b}[?3h"
+
+        muted.engine.ingestSnapshot(Data(bytes.utf8))
+        await settle()
+        #expect(muted.recorder.bells == 0, "a replayed BEL rang")
+        #expect(muted.recorder.clipboardCopies.isEmpty, "a replayed OSC 52 reached clipboardCopy")
+        #expect(muted.recorder.sizeChanges.isEmpty, "a replayed DECCOLM reported a size change")
+
+        // Positive control: the same bytes fed live, into a second engine. Not
+        // the first one: SwiftTerm coalesces bells 100 ms apart and counts the
+        // muted BEL, and a settle lasts about that long, so a live BEL there
+        // could be coalesced away and read as a muted one.
+        feed(bytes, into: live.engine)
+        let delivered = await waitUntil {
+            live.recorder.bells >= 1
+                && !live.recorder.clipboardCopies.isEmpty
+                && !live.recorder.sizeChanges.isEmpty
+        }
+        #expect(delivered, "the fixture bytes must ring, copy and resize when fed live; observed \(live.recorder.calls)")
+        #expect(live.recorder.clipboardCopies.first == Data(marker.utf8))
+    }
+
+    @Test("With program status reporting off, an OSC 7501 report is not delivered; on, it is",
+          arguments: TerminalEngineFactory.availableKinds)
+    func programStatusReportingOffDeliversNoPayload(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+
+        fixture.engine.setProgramStatusReporting(enabled: false)
+        feed(Self.report, into: fixture.engine)
+        await settle()
+        #expect(fixture.recorder.programStatusPayloads.isEmpty, "a report was delivered with reporting off")
+
+        // Positive control: reporting on, the same bytes are delivered.
+        fixture.engine.setProgramStatusReporting(enabled: true)
+        feed(Self.report, into: fixture.engine)
+        let delivered = await waitUntil { !fixture.recorder.programStatusPayloads.isEmpty }
+        #expect(delivered, "the report must be delivered with reporting on")
+        await settle()
+        #expect(fixture.recorder.programStatusPayloads == [Array(Self.reportData.utf8)])
+    }
+
+    // MARK: - Routing
+
+    /// A click is a left mouse-down and its release; a focus change is the view
+    /// becoming first responder and giving it up; a control-mode paste is a
+    /// drop, which asks the same paste hook a pasteboard paste does. The drop
+    /// stands in for a paste because a paste reads the general pasteboard,
+    /// which a test must not write.
+    @Test("With click routing and paste interception off, no click, focus change or paste reaches the delegate; on, each does",
+          arguments: TerminalEngineFactory.availableKinds)
+    func routingOffReportsNoClickFocusOrPaste(kind: TerminalEngineKind) async throws {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let window = Self.mount(fixture.engine.view)
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        await settle()
+        fixture.recorder.reset()
+
+        fixture.engine.setClickRouting(enabled: false)
+        fixture.engine.setControlModePasteInterception(enabled: false)
+        try await clickFocusAndDrop(on: fixture.engine, in: window)
+        let routedWhileOff = fixture.recorder.calls.filter { Self.routedCalls.contains($0) }
+        #expect(routedWhileOff.isEmpty, "routing is off, yet the delegate was asked: \(routedWhileOff)")
+
+        // Positive control: on, the same gestures reach the delegate.
+        fixture.recorder.reset()
+        fixture.engine.setClickRouting(enabled: true)
+        fixture.engine.setControlModePasteInterception(enabled: true)
+        try await clickFocusAndDrop(on: fixture.engine, in: window)
+        let calls = fixture.recorder.calls
+        #expect(calls.contains("mouseDownClaimsFocus"), "a click with routing on must ask the delegate; observed \(calls)")
+        #expect(calls.contains("focusChanged"), "a focus change with routing on must be reported; observed \(calls)")
+        #expect(calls.contains("controlModePaste"), "a paste with interception on must be offered; observed \(calls)")
+    }
+
     // MARK: - Helpers
+
+    /// The delegate methods only click routing and paste interception reach.
+    private static let routedCalls: Set<String> = ["mouseDownClaimsFocus", "focusChanged", "controlModePaste"]
+
+    /// Puts `view` in a borderless window far off every display, never ordered
+    /// front: the window exists so the view has one, not so anything is seen.
+    private static func mount(_ view: NSView) -> NSWindow {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: -20_000, y: -20_000, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let ground = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        ground.addSubview(view)
+        window.contentView = ground
+        return window
+    }
+
+    /// One click, one focus change each way, and one dropped path, then a
+    /// settle. Events go straight to the view's overrides: nothing dispatches
+    /// events to a window that is never key.
+    private func clickFocusAndDrop(on engine: any TerminalEngine, in window: NSWindow) async throws {
+        let view = engine.view
+        let location = view.convert(CGPoint(x: 10, y: 10), to: nil)
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: location, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: location, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        view.mouseDown(with: down)
+        view.mouseUp(with: up)
+
+        window.makeFirstResponder(nil)
+        window.makeFirstResponder(view)
+        window.makeFirstResponder(nil)
+
+        // The drop's headless entry is `TBDTerminalView.deliverDroppedText`. An
+        // engine whose view is not a `TBDTerminalView` needs one of its own here.
+        let terminalView = try #require(
+            view as? TBDTerminalView, "this engine's view has no headless drop entry for the contract to drive")
+        terminalView.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
+        await settle()
+    }
 
     /// `line N`, exactly: what one whole feed leaves on row 0.
     private static func isWholeLine(_ text: String) -> Bool {
