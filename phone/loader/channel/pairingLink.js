@@ -4,13 +4,22 @@
 // their order match the daemon's `PairingLink.parse`, so both sides give the
 // same error code for every link in `phone/test-vectors/pairing-link.json`.
 //
-// Parity contract: for every input except those below, `parsePairingLink` and
-// the daemon's `PairingLink.parse` return the same link or fail with the same
-// error code. Outside the contract, either side's answer is acceptable,
+// Parity contract: for every link text except those below, `parsePairingLink`
+// and the daemon's `PairingLink.parse` return the same link or fail with the
+// same error code. Outside the contract, either side's answer is acceptable,
 // because the daemon never builds such a link:
 // - duplicate object keys (the daemon keeps the first, `JSON.parse` the last);
 // - nesting depth within a few levels of 512;
 // - numbers whose decimal text differs from the IEEE-754 double they round
+//   to in ways only one side observes, such as a nonzero number too small
+//   for a double, which `JSON.parse` reads as 0 and the daemon refuses;
+// - JSON that `JSON.parse` refuses and the daemon's JSONDecoder accepts: one
+//   trailing comma before a `}` or `]`, and anything malformed inside the
+//   value of a key the link does not define (a lone surrogate, an unknown
+//   escape, a raw control character, or a misspelled number such as `01` or
+//   `1.`), because JSONDecoder checks only the values it reads;
+// - link text with surrounding whitespace, or a tab or line break inside it,
+//   which this parser drops and the daemon's `URL(string:)` percent-encodes.
 //   to in ways only one side observes.
 
 /**

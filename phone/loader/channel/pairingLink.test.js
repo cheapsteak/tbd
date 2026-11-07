@@ -52,7 +52,7 @@ test('pairing link: shared valid vectors parse', () => {
 });
 
 test('pairing link: shared invalid vectors fail with their code and field', () => {
-  assert.equal(file.invalid.length, 38);
+  assert.equal(file.invalid.length, 41);
   for (const c of file.invalid) {
     // c.field is undefined unless the code is badField, so this also checks
     // that other errors carry no field.
